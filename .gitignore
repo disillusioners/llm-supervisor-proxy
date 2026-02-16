@@ -1,0 +1,12 @@
+# Binaries
+bin/
+supervisor-proxy
+proxy
+mock
+
+# macOS
+.DS_Store
+
+# Go
+go.sum
+vendor/

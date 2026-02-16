@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Supervisor Proxy</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .log-entry { font-family: monospace; }
+        .log-info { color: #3b82f6; }
+        .log-error { color: #ef4444; }
+        .log-warn { color: #f59e0b; }
+        .log-retry { color: #8b5cf6; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans min-h-screen p-6">
+    <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        <!-- Header -->
+        <div class="col-span-1 lg:col-span-3 flex justify-between items-center mb-4">
+            <h1 class="text-2xl font-bold tracking-tight">🔎 LLM Supervisor Proxy</h1>
+            <div class="flex items-center space-x-2">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-900 text-green-100">
+                    Active
+                </span>
+            </div>
+        </div>
+
+        <!-- Logs Panel -->
+        <div class="col-span-1 lg:col-span-2 bg-gray-800 rounded-lg shadow border border-gray-700 flex flex-col h-[600px]">
+            <div class="p-4 border-b border-gray-700 flex justify-between items-center">
+                <h2 class="font-semibold">Live Event Log</h2>
+                <button onclick="clearLogs()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Clear</button>
+            </div>
+            <div id="logs" class="flex-1 overflow-y-auto p-4 space-y-2 text-sm bg-gray-900 m-2 rounded">
+                <!-- Logs will appear here -->
+                <div class="text-gray-500 italic">Waiting for events...</div>
+            </div>
+        </div>
+
+        <!-- Config Panel -->
+        <div class="col-span-1 bg-gray-800 rounded-lg shadow border border-gray-700 h-fit">
+            <div class="p-4 border-b border-gray-700">
+                <h2 class="font-semibold">Configuration</h2>
+            </div>
+            <div class="p-4 space-y-4">
+                <form id="configForm" onsubmit="updateConfig(event)">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400">Upstream URL</label>
+                        <input type="text" id="upstreamUrl" name="UpstreamURL" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400">Idle Timeout (ns/ms/s)</label>
+                            <input type="text" id="idleTimeout" name="IdleTimeout" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400">Max Retries</label>
+                            <input type="number" id="maxRetries" name="MaxRetries" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
+                        </div>
+                    </div>
+
+                    <div>
+                         <label class="block text-sm font-medium text-gray-400">Max Gen Time (ns/ms/s)</label>
+                        <input type="text" id="maxGenTime" name="MaxGenerationTime" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
+                    </div>
+
+                    <div class="pt-2">
+                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition">
+                            Apply Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Init
+        document.addEventListener('DOMContentLoaded', () => {
+             fetchConfig();
+             connectSSE();
+        });
+
+        // Config actions
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const config = await res.json();
+                
+                // Helper to convert Go duration nanos to readable string if needed, 
+                // but json encoding of time.Duration is nanos by default in Go's encoding/json?
+                // Actually Go's json encoder encodes Duration as int64 (nanoseconds).
+                // We should handle that.
+                
+                document.getElementById('upstreamUrl').value = config.UpstreamURL;
+                document.getElementById('idleTimeout').value = formatDuration(config.IdleTimeout);
+                document.getElementById('maxGenTime').value = formatDuration(config.MaxGenerationTime);
+                document.getElementById('maxRetries').value = config.MaxRetries;
+            } catch (e) {
+                console.error("Failed to fetch config", e);
+            }
+        }
+
+        async function updateConfig(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            
+            // Convert durations back to nanos
+            const config = {
+                UpstreamURL: formData.get('UpstreamURL'),
+                IdleTimeout: parseDuration(formData.get('IdleTimeout')),
+                MaxGenerationTime: parseDuration(formData.get('MaxGenerationTime')),
+                MaxRetries: parseInt(formData.get('MaxRetries'))
+            };
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                if (res.ok) {
+                    alert("Config updated!");
+                } else {
+                    alert("Failed to update config");
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // Event Stream
+        function connectSSE() {
+            const evtSource = new EventSource("/api/events");
+            
+            evtSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                addLog(data);
+            };
+            
+            evtSource.onerror = function(err) {
+                console.error("EventSource failed:", err);
+            };
+        }
+
+        function addLog(evt) {
+            const container = document.getElementById('logs');
+            const el = document.createElement('div');
+            el.className = "log-entry border-l-2 pl-2 py-1 " + getBorderColor(evt.type);
+            
+            const time = new Date(evt.timestamp * 1000).toLocaleTimeString();
+            
+            let content = `[${time}] <span class="uppercase font-bold text-xs ${getTextColor(evt.type)}">${evt.type}</span> `;
+            
+            if (typeof evt.data === 'object') {
+                content += `<pre class="text-xs text-gray-400 mt-1">${JSON.stringify(evt.data, null, 2)}</pre>`;
+            } else {
+                content += `<span class="text-gray-300">${evt.data}</span>`;
+            }
+
+            el.innerHTML = content;
+            container.appendChild(el);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function clearLogs() {
+             document.getElementById('logs').innerHTML = '';
+        }
+
+        function getBorderColor(type) {
+            if (type.includes('error') || type.includes('timeout')) return 'border-red-500';
+            if (type.includes('retry')) return 'border-purple-500';
+            if (type.includes('config')) return 'border-green-500';
+            return 'border-blue-500';
+        }
+        
+        function getTextColor(type) {
+             if (type.includes('error') || type.includes('timeout')) return 'text-red-400';
+            if (type.includes('retry')) return 'text-purple-400';
+            if (type.includes('config')) return 'text-green-400';
+            return 'text-blue-400';
+        }
+
+        // Simple duration helpers (naive)
+        function formatDuration(nanos) {
+            return (nanos / 1000000000) + "s";
+        }
+        
+        function parseDuration(str) {
+            // Assume seconds if ends with s, or parse float and multiply
+            // For simplicity, just implementation support for 's' suffix
+            if (str.endsWith('s')) {
+                return parseFloat(str) * 1000000000;
+            }
+            if (str.endsWith('ms')) {
+                 return parseFloat(str) * 1000000;
+            }
+            return parseFloat(str);
+        }
+
+    </script>
+</body>
+</html>
