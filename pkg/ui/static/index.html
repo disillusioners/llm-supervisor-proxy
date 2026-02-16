@@ -1,205 +1,467 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Supervisor Proxy</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            900: '#111827',
+                            800: '#1f2937',
+                            700: '#374151',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
     <style>
-        .log-entry { font-family: monospace; }
-        .log-info { color: #3b82f6; }
-        .log-error { color: #ef4444; }
-        .log-warn { color: #f59e0b; }
-        .log-retry { color: #8b5cf6; }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1f2937; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280; 
+        }
+        .monitor-font {
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+        }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 font-sans min-h-screen p-6">
-    <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        <!-- Header -->
-        <div class="col-span-1 lg:col-span-3 flex justify-between items-center mb-4">
-            <h1 class="text-2xl font-bold tracking-tight">🔎 LLM Supervisor Proxy</h1>
-            <div class="flex items-center space-x-2">
-                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-900 text-green-100">
-                    Active
-                </span>
-            </div>
-        </div>
+<body class="bg-gray-900 text-gray-100 h-screen flex flex-col overflow-hidden">
 
-        <!-- Logs Panel -->
-        <div class="col-span-1 lg:col-span-2 bg-gray-800 rounded-lg shadow border border-gray-700 flex flex-col h-[600px]">
-            <div class="p-4 border-b border-gray-700 flex justify-between items-center">
-                <h2 class="font-semibold">Live Event Log</h2>
-                <button onclick="clearLogs()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Clear</button>
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shadow-md z-10">
+        <div class="flex items-center space-x-3">
+            <div class="p-2 bg-blue-600 rounded-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                </svg>
             </div>
-            <div id="logs" class="flex-1 overflow-y-auto p-4 space-y-2 text-sm bg-gray-900 m-2 rounded">
-                <!-- Logs will appear here -->
+            <h1 class="text-xl font-bold tracking-wide">LLM Supervisor Proxy</h1>
+        </div>
+        <div class="text-sm text-gray-400 flex items-center space-x-2">
+            <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+            <span>System Active</span>
+        </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="flex-1 grid grid-cols-12 gap-0 overflow-hidden">
+        
+        <!-- Left Panel: Event Log (Cols 4) -->
+        <section class="col-span-4 bg-gray-900 flex flex-col border-r border-gray-700 min-w-0">
+            <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+                <h2 class="text-sm font-semibold text-gray-300 flex items-center">
+                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    Live Event Log
+                </h2>
+                <div class="flex space-x-2">
+                    <button id="clear-logs" class="p-1 hover:bg-gray-700 rounded text-gray-400 transition-colors" title="Clear Logs">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                    <button id="toggle-scroll" class="p-1 hover:bg-gray-700 rounded text-green-400 transition-colors" title="Auto-scroll On">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 13l-7 7-7-7m14-8l-7 7-7-7"></path></svg>
+                    </button>
+                </div>
+            </div>
+            <div id="log-container" class="flex-1 overflow-y-auto p-4 space-y-2 monitor-font text-xs bg-[#0d1117]">
                 <div class="text-gray-500 italic">Waiting for events...</div>
             </div>
-        </div>
+        </section>
 
-        <!-- Config Panel -->
-        <div class="col-span-1 bg-gray-800 rounded-lg shadow border border-gray-700 h-fit">
-            <div class="p-4 border-b border-gray-700">
-                <h2 class="font-semibold">Configuration</h2>
+        <!-- Middle Panel: Request List (Cols 3) -->
+        <section class="col-span-3 bg-gray-900 flex flex-col border-r border-gray-700 min-w-0">
+             <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+                <h2 class="text-sm font-semibold text-gray-300 flex items-center">
+                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                    Requests
+                </h2>
+                <button id="refresh-requests" class="p-1 hover:bg-gray-700 rounded text-gray-400 transition-colors" title="Refresh">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                </button>
             </div>
-            <div class="p-4 space-y-4">
-                <form id="configForm" onsubmit="updateConfig(event)">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-400">Upstream URL</label>
-                        <input type="text" id="upstreamUrl" name="UpstreamURL" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-400">Idle Timeout (ns/ms/s)</label>
-                            <input type="text" id="idleTimeout" name="IdleTimeout" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-400">Max Retries</label>
-                            <input type="number" id="maxRetries" name="MaxRetries" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
-                        </div>
-                    </div>
-
-                    <div>
-                         <label class="block text-sm font-medium text-gray-400">Max Gen Time (ns/ms/s)</label>
-                        <input type="text" id="maxGenTime" name="MaxGenerationTime" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md text-sm px-3 py-2 text-white">
-                    </div>
-
-                    <div class="pt-2">
-                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition">
-                            Apply Changes
-                        </button>
-                    </div>
-                </form>
+            <div id="request-list" class="flex-1 overflow-y-auto p-0 space-y-0 text-sm">
+                <!-- Request items will go here -->
+                <div class="p-4 text-gray-500 text-center text-xs">No requests yet</div>
             </div>
-        </div>
-    </div>
+        </section>
+
+        <!-- Right Panel: Config & Details (Cols 5) -->
+        <section class="col-span-5 bg-gray-800 flex flex-col min-w-0">
+            <!-- Details Pane (Hidden by default, overlays Config if active or shared space) -->
+            <!-- Let's use tabs or just stack them. A request detail view is usually more important when selected. -->
+            
+            <div class="flex-1 flex flex-col min-h-0">
+                <!-- Tabs -->
+                <div class="flex border-b border-gray-700">
+                     <button id="tab-config" class="px-4 py-2 text-sm font-medium text-blue-400 border-b-2 border-blue-500 focus:outline-none">Configuration</button>
+                     <button id="tab-details" class="px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200 focus:outline-none">Request Details</button>
+                </div>
+
+                <!-- Config View -->
+                <div id="view-config" class="p-6 space-y-6 overflow-y-auto">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Upstream URL</label>
+                            <div class="flex items-center bg-gray-900 rounded-md border border-gray-700 px-3 py-2">
+                                <svg class="w-4 h-4 text-gray-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                                <input type="text" id="upstream-url" class="bg-transparent border-none text-gray-200 text-sm w-full focus:ring-0 placeholder-gray-600" placeholder="http://localhost:4000">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Idle Timeout</label>
+                                <div class="flex items-center bg-gray-900 rounded-md border border-gray-700 px-3 py-2">
+                                    <svg class="w-4 h-4 text-gray-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                    <input type="text" id="idle-timeout" class="bg-transparent border-none text-gray-200 text-sm w-full focus:ring-0 placeholder-gray-600" placeholder="10s">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Max Retries</label>
+                                <div class="flex items-center bg-gray-900 rounded-md border border-gray-700 px-3 py-2">
+                                    <input type="number" id="max-retries" class="bg-transparent border-none text-gray-200 text-sm w-full focus:ring-0 placeholder-gray-600" placeholder="1">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Max Gen Time</label>
+                             <div class="flex items-center bg-gray-900 rounded-md border border-gray-700 px-3 py-2">
+                                <input type="text" id="max-gen-time" class="bg-transparent border-none text-gray-200 text-sm w-full focus:ring-0 placeholder-gray-600" placeholder="3m">
+                            </div>
+                        </div>
+
+                        <div class="pt-4">
+                            <button id="apply-config" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors shadow-lg shadow-blue-900/50 flex justify-center items-center">
+                                <span>Apply Changes</span>
+                            </button>
+                        </div>
+                         <div id="config-status" class="text-xs text-center min-h-[1.5em] transition-opacity duration-500 opacity-0"></div>
+                    </div>
+                </div>
+
+                <!-- Detail View (Initially hidden) -->
+                <div id="view-details" class="hidden flex-1 flex flex-col overflow-hidden bg-gray-850">
+                    <div id="detail-empty" class="p-6 text-center text-gray-500 text-sm mt-10">Select a request to view details</div>
+                    <div id="detail-content" class="hidden flex-1 flex flex-col overflow-y-auto p-4 space-y-4 monitor-font text-sm">
+                        <!-- Messages go here -->
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
 
     <script>
-        // Init
-        document.addEventListener('DOMContentLoaded', () => {
-             fetchConfig();
-             connectSSE();
-        });
+        // --- State ---
+        let autoScroll = true;
+        const logContainer = document.getElementById('log-container');
+        const clearBtn = document.getElementById('clear-logs');
+        const scrollBtn = document.getElementById('toggle-scroll');
+        const refreshReqBtn = document.getElementById('refresh-requests');
+        const requestListEl = document.getElementById('request-list');
+        const detailContentEl = document.getElementById('detail-content');
+        const detailEmptyEl = document.getElementById('detail-empty');
+        
+        let selectedRequestId = null;
 
-        // Config actions
-        async function fetchConfig() {
+        // --- Tabs ---
+        const tabConfig = document.getElementById('tab-config');
+        const tabDetails = document.getElementById('tab-details');
+        const viewConfig = document.getElementById('view-config');
+        const viewDetails = document.getElementById('view-details');
+
+        function switchTab(tab) {
+            if (tab === 'config') {
+                viewConfig.classList.remove('hidden');
+                viewDetails.classList.add('hidden');
+                tabConfig.classList.replace('text-gray-400', 'text-blue-400');
+                tabConfig.classList.add('border-b-2', 'border-blue-500');
+                tabDetails.classList.replace('text-blue-400', 'text-gray-400');
+                tabDetails.classList.remove('border-b-2', 'border-blue-500');
+            } else {
+                viewConfig.classList.add('hidden');
+                viewDetails.classList.remove('hidden');
+                viewDetails.classList.add('flex');
+                tabDetails.classList.replace('text-gray-400', 'text-blue-400');
+                tabDetails.classList.add('border-b-2', 'border-blue-500');
+                tabConfig.classList.replace('text-blue-400', 'text-gray-400');
+                tabConfig.classList.remove('border-b-2', 'border-blue-500');
+            }
+        }
+
+        tabConfig.onclick = () => switchTab('config');
+        tabDetails.onclick = () => switchTab('details');
+
+        // --- Log Logic ---
+        function addLogEntry(data) {
+            const entry = document.createElement('div');
+            entry.className = "flex space-x-2 border-b border-gray-800 pb-1 mb-1 last:border-0";
+            
+            const ts = new Date(data.timestamp * 1000).toISOString().split('T')[1].split('.')[0];
+            let typeColor = "text-gray-400";
+            let msg = JSON.stringify(data.data);
+
+            // Format message based on type
+            if (data.type === 'request_started') {
+                 typeColor = "text-blue-400";
+                 msg = `Processing new request ${data.data.id ? '['+data.data.id.substring(0,8)+']' : ''}...`;
+            } else if (data.type === 'timeout_idle') {
+                typeColor = "text-red-400";
+                msg = `Idle timeout detected (${data.data.timeout})`;
+            } else if (data.type === 'retry_attempt') {
+                typeColor = "text-purple-400";
+                msg = `Retrying request (Attempt ${data.data.attempt})`;
+            } else if (data.type.includes('error')) {
+                typeColor = "text-red-500";
+                msg = `Error: ${data.data}`;
+            } else if (data.type === 'request_completed') {
+                typeColor = "text-green-400";
+                msg = "Request completed successfully.";
+            } else if (data.type === 'config_updated') {
+                typeColor = "text-yellow-400";
+                msg = "Configuration updated.";
+            }
+
+            // Clean up empty wait message
+            if (logContainer.children.length === 1 && logContainer.children[0].innerText === "Waiting for events...") {
+                logContainer.innerHTML = "";
+            }
+
+            entry.innerHTML = `
+                <span class="text-gray-600 font-mono w-20 shrink-0">[${ts}]</span>
+                <span class="${typeColor} font-bold w-40 shrink-0">[${data.type.toUpperCase()}]</span>
+                <span class="text-gray-300 break-all">${msg}</span>
+            `;
+            
+            logContainer.appendChild(entry);
+            if (autoScroll) logContainer.scrollTop = logContainer.scrollHeight;
+            
+            // Refresh request list on significant events
+            if (['request_started', 'request_completed', 'retry_attempt', 'error_max_retries', 'timeout_idle'].includes(data.type)) {
+                fetchRequests();
+            }
+        }
+
+        const evtSource = new EventSource("/api/events");
+        evtSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            addLogEntry(data);
+        };
+
+        clearBtn.onclick = () => {
+            logContainer.innerHTML = '<div class="text-gray-500 italic">Logs cleared.</div>';
+        };
+
+        scrollBtn.onclick = () => {
+            autoScroll = !autoScroll;
+            scrollBtn.className = autoScroll ? "p-1 hover:bg-gray-700 rounded text-green-400" : "p-1 hover:bg-gray-700 rounded text-gray-400";
+        };
+
+        // --- Config Logic ---
+        async function loadConfig() {
             try {
                 const res = await fetch('/api/config');
-                const config = await res.json();
-                
-                // Helper to convert Go duration nanos to readable string if needed, 
-                // but json encoding of time.Duration is nanos by default in Go's encoding/json?
-                // Actually Go's json encoder encodes Duration as int64 (nanoseconds).
-                // We should handle that.
-                
-                document.getElementById('upstreamUrl').value = config.UpstreamURL;
-                document.getElementById('idleTimeout').value = formatDuration(config.IdleTimeout);
-                document.getElementById('maxGenTime').value = formatDuration(config.MaxGenerationTime);
-                document.getElementById('maxRetries').value = config.MaxRetries;
+                const cfg = await res.json();
+                document.getElementById('upstream-url').value = cfg.UpstreamURL;
+                document.getElementById('idle-timeout').value = (cfg.IdleTimeout / 1e9) + "s";
+                document.getElementById('max-gen-time').value = (cfg.MaxGenerationTime / 1e9) + "s";
+                document.getElementById('max-retries').value = cfg.MaxRetries;
             } catch (e) {
-                console.error("Failed to fetch config", e);
+                console.error("Failed to load config", e);
             }
         }
 
-        async function updateConfig(e) {
-            e.preventDefault();
-            const formData = new FormData(e.target);
-            
-            // Convert durations back to nanos
-            const config = {
-                UpstreamURL: formData.get('UpstreamURL'),
-                IdleTimeout: parseDuration(formData.get('IdleTimeout')),
-                MaxGenerationTime: parseDuration(formData.get('MaxGenerationTime')),
-                MaxRetries: parseInt(formData.get('MaxRetries'))
+        document.getElementById('apply-config').onclick = async () => {
+             const payload = {
+                UpstreamURL: document.getElementById('upstream-url').value,
+                IdleTimeout: parseDuration(document.getElementById('idle-timeout').value),
+                MaxGenerationTime: parseDuration(document.getElementById('max-gen-time').value),
+                MaxRetries: parseInt(document.getElementById('max-retries').value)
             };
 
             try {
-                const res = await fetch('/api/config', {
+                await fetch('/api/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(config)
+                    body: JSON.stringify(payload)
                 });
-                if (res.ok) {
-                    alert("Config updated!");
-                } else {
-                    alert("Failed to update config");
-                }
+                const status = document.getElementById('config-status');
+                status.innerText = "Configuration applied successfully!";
+                status.classList.replace('text-red-500', 'text-green-500');
+                status.classList.remove('opacity-0');
+                setTimeout(() => status.classList.add('opacity-0'), 3000);
             } catch (e) {
-                console.error(e);
+                const status = document.getElementById('config-status');
+                status.innerText = "Failed to update config.";
+                status.classList.add('text-red-500');
+                status.classList.remove('opacity-0');
+            }
+        };
+
+        function parseDuration(s) {
+            // Very simple parser for s/m/h. Defaults to ns.
+            // Go expects ns in int64 if passing raw, or we can pass a string logic if the API supported it.
+            // The go server side uses json.Unmarshal which might fail on string -> int64.
+            // Wait, the Go struct has time.Duration. encoding/json treats time.Duration as int64 (ns).
+            // So we need to send nanoseconds.
+            let mult = 1e9; // s
+            if (s.endsWith('ms')) { mult = 1e6; s = s.slice(0,-2); }
+            else if (s.endsWith('s')) { mult = 1e9; s = s.slice(0,-1); }
+            else if (s.endsWith('m')) { mult = 60 * 1e9; s = s.slice(0,-1); }
+            return Math.floor(parseFloat(s) * mult);
+        }
+
+        // --- Request Logic ---
+        async function fetchRequests() {
+            try {
+                const res = await fetch('/api/requests');
+                const reqs = await res.json();
+                renderRequestList(reqs);
+            } catch (e) {
+                console.error("Failed to fetch requests", e);
             }
         }
 
-        // Event Stream
-        function connectSSE() {
-            const evtSource = new EventSource("/api/events");
-            
-            evtSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                addLog(data);
-            };
-            
-            evtSource.onerror = function(err) {
-                console.error("EventSource failed:", err);
-            };
-        }
-
-        function addLog(evt) {
-            const container = document.getElementById('logs');
-            const el = document.createElement('div');
-            el.className = "log-entry border-l-2 pl-2 py-1 " + getBorderColor(evt.type);
-            
-            const time = new Date(evt.timestamp * 1000).toLocaleTimeString();
-            
-            let content = `[${time}] <span class="uppercase font-bold text-xs ${getTextColor(evt.type)}">${evt.type}</span> `;
-            
-            if (typeof evt.data === 'object') {
-                content += `<pre class="text-xs text-gray-400 mt-1">${JSON.stringify(evt.data, null, 2)}</pre>`;
-            } else {
-                content += `<span class="text-gray-300">${evt.data}</span>`;
+        function renderRequestList(reqs) {
+            requestListEl.innerHTML = "";
+            if (!reqs || reqs.length === 0) {
+                 requestListEl.innerHTML = '<div class="p-4 text-gray-500 text-center text-xs">No requests yet</div>';
+                 return;
             }
 
-            el.innerHTML = content;
-            container.appendChild(el);
-            container.scrollTop = container.scrollHeight;
+            reqs.forEach(req => {
+                const el = document.createElement('div');
+                el.className = `p-3 border-b border-gray-800 hover:bg-gray-800 cursor-pointer transition-colors ${selectedRequestId === req.id ? 'bg-gray-800 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`;
+                
+                let statusColor = "bg-gray-500";
+                if (req.status === 'completed') statusColor = "bg-green-500";
+                else if (req.status === 'failed') statusColor = "bg-red-500";
+                else if (req.status === 'running') statusColor = "bg-blue-500 animate-pulse";
+                else if (req.status === 'retrying') statusColor = "bg-purple-500 animate-pulse";
+
+                const ts = new Date(req.startTime).toLocaleTimeString();
+
+                el.innerHTML = `
+                    <div class="flex justify-between items-start mb-1">
+                        <div class="flex items-center space-x-2">
+                             <span class="w-2 h-2 rounded-full ${statusColor}"></span>
+                             <span class="font-bold text-gray-200">${req.model || 'Unknown'}</span>
+                        </div>
+                        <span class="text-xs text-gray-500">${ts}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-xs text-gray-400">
+                        <span>${req.id.substring(0,8)}...</span>
+                        <span>${req.duration}</span>
+                    </div>
+                    ${req.retries > 0 ? `<div class="mt-1"><span class="text-[10px] bg-purple-900 text-purple-200 px-1 rounded">Retries: ${req.retries}</span></div>` : ''}
+                `;
+                el.onclick = () => selectRequest(req.id);
+                requestListEl.appendChild(el);
+            });
         }
 
-        function clearLogs() {
-             document.getElementById('logs').innerHTML = '';
-        }
-
-        function getBorderColor(type) {
-            if (type.includes('error') || type.includes('timeout')) return 'border-red-500';
-            if (type.includes('retry')) return 'border-purple-500';
-            if (type.includes('config')) return 'border-green-500';
-            return 'border-blue-500';
-        }
-        
-        function getTextColor(type) {
-             if (type.includes('error') || type.includes('timeout')) return 'text-red-400';
-            if (type.includes('retry')) return 'text-purple-400';
-            if (type.includes('config')) return 'text-green-400';
-            return 'text-blue-400';
-        }
-
-        // Simple duration helpers (naive)
-        function formatDuration(nanos) {
-            return (nanos / 1000000000) + "s";
-        }
-        
-        function parseDuration(str) {
-            // Assume seconds if ends with s, or parse float and multiply
-            // For simplicity, just implementation support for 's' suffix
-            if (str.endsWith('s')) {
-                return parseFloat(str) * 1000000000;
+        async function selectRequest(id) {
+            selectedRequestId = id;
+            fetchRequests(); // Re-render to update selection style
+            switchTab('details'); // Switch to details tab
+            
+            try {
+                const res = await fetch(`/api/requests/${id}`);
+                const fullReq = await res.json();
+                renderRequestDetail(fullReq);
+            } catch (e) {
+                console.error("Failed to fetch request detail", e);
             }
-            if (str.endsWith('ms')) {
-                 return parseFloat(str) * 1000000;
-            }
-            return parseFloat(str);
         }
 
+        function renderRequestDetail(req) {
+            detailEmptyEl.classList.add('hidden');
+            detailContentEl.classList.remove('hidden');
+            detailContentEl.innerHTML = "";
+            
+            // Header
+            const header = document.createElement('div');
+            header.className = "mb-4 border-b border-gray-700 pb-2";
+            header.innerHTML = `
+                <h3 class="text-lg font-bold text-gray-200 mb-1">Request Details</h3>
+                <div class="grid grid-cols-2 gap-2 text-xs text-gray-400">
+                    <div>ID: <span class="text-gray-200 font-mono">${req.id}</span></div>
+                    <div>Status: <span class="text-gray-200">${req.status}</span></div>
+                    <div>Model: <span class="text-gray-200">${req.model}</span></div>
+                    <div>Duration: <span class="text-gray-200">${req.duration}</span></div>
+                </div>
+                ${req.error ? `<div class="mt-2 p-2 bg-red-900/30 border border-red-500/50 rounded text-red-200 text-xs">${req.error}</div>` : ''}
+            `;
+            detailContentEl.appendChild(header);
+
+            // Messages
+            req.messages.forEach(msg => {
+                const bubble = document.createElement('div');
+                let alignment = "bg-gray-700 ml-0 mr-8";
+                let label = "User";
+                
+                if (msg.role === 'assistant') {
+                    alignment = "bg-blue-900/40 ml-8 mr-0 border border-blue-500/30";
+                    label = "Assistant";
+                } else if (msg.role === 'system') {
+                    alignment = "bg-gray-800 mx-4 border border-gray-600 border-dashed text-gray-400 italic";
+                    label = "System";
+                }
+
+                bubble.className = `p-3 rounded-lg mb-3 last:mb-0 ${alignment}`;
+                bubble.innerHTML = `
+                    <div class="text-[10px] uppercase font-bold text-gray-400 mb-1">${label}</div>
+                    <div class="whitespace-pre-wrap">${escapeHtml(msg.content)}</div>
+                `;
+                detailContentEl.appendChild(bubble);
+            });
+
+            // Final Response (if present and not already in messages list as an assistant response)
+            // But usually the final response IS the last assistant message if completed.
+            // Our proxy accumulates response but might not append it to req.Messages unless retrying.
+            // Let's show the final accumulated response separately if status is completed.
+            if (req.response && req.status === 'completed') {
+                 const bubble = document.createElement('div');
+                 bubble.className = "p-3 rounded-lg mb-3 bg-green-900/20 ml-8 mr-0 border border-green-500/30";
+                 bubble.innerHTML = `
+                    <div class="text-[10px] uppercase font-bold text-green-400 mb-1">Final Response</div>
+                    <div class="whitespace-pre-wrap">${escapeHtml(req.response)}</div>
+                `;
+                detailContentEl.appendChild(bubble);
+            }
+        }
+
+        function escapeHtml(text) {
+            if (!text) return "";
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        refreshReqBtn.onclick = fetchRequests;
+
+        // Init
+        loadConfig();
+        fetchRequests();
     </script>
 </body>
 </html>

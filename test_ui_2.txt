@@ -1,0 +1,41 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying [::1]:8089...
+* Connected to localhost (::1) port 8089
+> POST /v1/chat/completions HTTP/1.1
+> Host: localhost:8089
+> User-Agent: curl/8.4.0
+> Accept: */*
+> Content-Type: application/json
+> Content-Length: 97
+> 
+} [97 bytes data]
+< HTTP/1.1 200 OK
+< Cache-Control: no-cache
+< Connection: keep-alive
+< Content-Type: text/event-stream
+< Date: Mon, 16 Feb 2026 14:45:59 GMT
+< Transfer-Encoding: chunked
+< 
+{ [56 bytes data]
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: {"choices":[{"delta":{"content":" world"}}]}
+data: {"choices":[{"delta":{"content":"!"}}]}
+data: {"choices":[{"delta":{"content":" I"}}]}
+data: {"choices":[{"delta":{"content":" am"}}]}
+data: {"choices":[{"delta":{"content":" a"}}]}
+100   386    0   289  100    97    179     60  0:00:01  0:00:01 --:--:--   239100   386    0   289  100    97    110     37  0:00:02  0:00:02 --:--:--   147100   386    0   289  100    97     79     26  0:00:03  0:00:03 --:--:--   106100   386    0   289  100    97     62     20  0:00:04  0:00:04 --:--:--    83100   386    0   289  100    97     51     17  0:00:05  0:00:05 --:--:--    68100   386    0   289  100    97     43     14  0:00:06  0:00:06 --:--:--     0100   386    0   289  100    97     37     12  0:00:08  0:00:07  0:00:01     0100   386    0   289  100    97     33     11  0:00:08  0:00:08 --:--:--     0100   386    0   289  100    97     29     10  0:00:09  0:00:09 --:--:--     0100   386    0   289  100    97     27      9  0:00:10  0:00:10 --:--:--     0data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: {"choices":[{"delta":{"content":" world"}}]}
+100   487    0   390  100    97     36      9  0:00:10  0:00:10 --:--:--    24data: {"choices":[{"delta":{"content":"!"}}]}
+data: {"choices":[{"delta":{"content":" I"}}]}
+data: {"choices":[{"delta":{"content":" am"}}]}
+data: {"choices":[{"delta":{"content":" a"}}]}
+data: {"choices":[{"delta":{"content":" skipped"}}]}
+data: {"choices":[{"delta":{"content":" token"}}]}
+data: {"choices":[{"delta":{"content":" and"}}]}
+data: {"choices":[{"delta":{"content":" now"}}]}
+data: {"choices":[{"delta":{"content":" useful"}}]}
+data: {"choices":[{"delta":{"content":" tokens."}}]}
+data: [DONE]
+100   995    0   898  100    97     80      8  0:00:12  0:00:11  0:00:01   169
+* Connection #0 to host localhost left intact

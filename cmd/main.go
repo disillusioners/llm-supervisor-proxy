@@ -12,6 +12,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
 )
 
@@ -47,6 +48,7 @@ func main() {
 
 	// Initialize Shared Components
 	bus := events.NewBus()
+	store := store.NewRequestStore(100) // Keep last 100 requests
 	config := &proxy.Config{
 		UpstreamURL:       upstreamURL,
 		IdleTimeout:       idleTimeout,
@@ -55,10 +57,10 @@ func main() {
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, config)
+	uiServer := ui.NewServer(bus, config, store)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(config, bus)
+	proxyHandler := proxy.NewHandler(config, bus, store)
 
 	// Setup Server
 	mux := http.NewServeMux()

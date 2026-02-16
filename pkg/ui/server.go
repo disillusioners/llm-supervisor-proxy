@@ -11,6 +11,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
 //go:embed static/*
@@ -19,13 +20,15 @@ var staticFiles embed.FS
 type Server struct {
 	bus    *events.Bus
 	config *proxy.Config // Pointer to live config
-	mu     sync.Mutex    // To protect config updates if needed
+	store  *store.RequestStore
+	mu     sync.Mutex
 }
 
-func NewServer(bus *events.Bus, config *proxy.Config) *Server {
+func NewServer(bus *events.Bus, config *proxy.Config, store *store.RequestStore) *Server {
 	return &Server{
 		bus:    bus,
 		config: config,
+		store:  store,
 	}
 }
 
@@ -38,6 +41,37 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// API
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/requests", s.handleRequests)
+	mux.HandleFunc("/api/requests/", s.handleRequestDetail)
+}
+
+func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	requests := s.store.List()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(requests)
+}
+
+func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
+	// /api/requests/{id}
+	id := r.URL.Path[len("/api/requests/"):]
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	req := s.store.Get(id)
+	if req == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(req)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
