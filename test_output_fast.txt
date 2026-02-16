@@ -1,0 +1,41 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying [::1]:8089...
+* Connected to localhost (::1) port 8089
+> POST /v1/chat/completions HTTP/1.1
+> Host: localhost:8089
+> User-Agent: curl/8.4.0
+> Accept: */*
+> Content-Type: application/json
+> Content-Length: 91
+> 
+} [91 bytes data]
+< HTTP/1.1 200 OK
+< Cache-Control: no-cache
+< Connection: keep-alive
+< Content-Type: text/event-stream
+< Date: Mon, 16 Feb 2026 14:15:00 GMT
+< Transfer-Encoding: chunked
+< 
+{ [56 bytes data]
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: {"choices":[{"delta":{"content":" world"}}]}
+data: {"choices":[{"delta":{"content":"!"}}]}
+100   238    0   147  100    91    481    298 --:--:-- --:--:-- --:--:--   777data: {"choices":[{"delta":{"content":" I"}}]}
+data: {"choices":[{"delta":{"content":" am"}}]}
+data: {"choices":[{"delta":{"content":" a"}}]}
+100   380    0   289  100    91    179     56  0:00:01  0:00:01 --:--:--   235100   380    0   289  100    91    110     34  0:00:02  0:00:02 --:--:--   145data: {"choices":[{"delta":{"content":"Hello"}}]}
+data: {"choices":[{"delta":{"content":" world"}}]}
+data: {"choices":[{"delta":{"content":"!"}}]}
+data: {"choices":[{"delta":{"content":" I"}}]}
+data: {"choices":[{"delta":{"content":" am"}}]}
+data: {"choices":[{"delta":{"content":" a"}}]}
+data: {"choices":[{"delta":{"content":" skipped"}}]}
+data: {"choices":[{"delta":{"content":" token"}}]}
+data: {"choices":[{"delta":{"content":" and"}}]}
+data: {"choices":[{"delta":{"content":" now"}}]}
+data: {"choices":[{"delta":{"content":" useful"}}]}
+data: {"choices":[{"delta":{"content":" tokens."}}]}
+data: [DONE]
+100   989    0   898  100    91    278     28  0:00:03  0:00:03 --:--:--   306
+* Connection #0 to host localhost left intact
