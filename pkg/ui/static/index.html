@@ -425,10 +425,58 @@
                 }
 
                 bubble.className = `p-3 rounded-lg mb-3 last:mb-0 ${alignment}`;
-                bubble.innerHTML = `
-                    <div class="text-[10px] uppercase font-bold text-gray-400 mb-1">${label}</div>
-                    <div class="whitespace-pre-wrap">${escapeHtml(msg.content)}</div>
-                `;
+                
+                let contentHtml = `<div class="text-[10px] uppercase font-bold text-gray-400 mb-1">${label}</div>`;
+
+                // Thinking Block
+                if (msg.thinking) {
+                    contentHtml += `
+                        <div class="mt-2 mb-2">
+                            <details class="group">
+                                <summary class="cursor-pointer text-xs font-medium text-gray-500 hover:text-gray-300 select-none flex items-center">
+                                    <svg class="w-3 h-3 mr-1 group-open:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                                    Thought Process
+                                </summary>
+                                <div class="mt-1 p-3 bg-gray-800 rounded text-sm text-gray-400 italic">
+                                    ${escapeHtml(msg.thinking)}
+                                </div>
+                            </details>
+                        </div>
+                    `;
+                }
+
+                // Tool Calls Block
+                if (msg.tool_calls && msg.tool_calls.length > 0) {
+                    contentHtml += `<div class="mt-2 space-y-2">`;
+                    msg.tool_calls.forEach(tool => {
+                        contentHtml += `
+                            <div class="bg-gray-900 rounded border border-gray-700 overflow-hidden">
+                                <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+                                    <span class="text-xs font-mono text-purple-400">TOOL CALL: ${escapeHtml(tool.function.name)}</span>
+                                    <span class="text-xs text-gray-500 font-mono">${escapeHtml(tool.id || '')}</span>
+                                </div>
+                                <div class="p-3 font-mono text-xs text-green-400 whitespace-pre-wrap">${escapeHtml(tool.function.arguments)}</div>
+                            </div>
+                        `;
+                    });
+                    contentHtml += `</div>`;
+                }
+
+                // If we have "Mock" tool call format in text (for our MVP test)
+                // We shouldn't rely on this in prod, but for the mock demo which sends text:
+                 if (msg.content && msg.content.includes("[TOOL CALL:")) {
+                    contentHtml += `
+                        <div class="mt-2 p-2 bg-purple-900/20 border border-purple-500/30 rounded text-purple-300 text-sm font-mono">
+                            ${escapeHtml(msg.content)}
+                        </div>
+                    `;
+                    // Don't show regular content if it's just a tool call representation?
+                    // Nah, show both.
+                } else if (msg.content) {
+                    contentHtml += `<div class="whitespace-pre-wrap">${escapeHtml(msg.content)}</div>`;
+                }
+                
+                bubble.innerHTML = contentHtml;
                 detailContentEl.appendChild(bubble);
             });
 

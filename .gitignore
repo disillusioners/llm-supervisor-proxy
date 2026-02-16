@@ -11,3 +11,5 @@ mock
 go.sum
 vendor/
 test_output.txt
+
+*.txt
