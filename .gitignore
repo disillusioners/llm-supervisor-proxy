@@ -1,7 +1,7 @@
 # Binaries
 bin/
 supervisor-proxy
-proxy
+/proxy
 mock
 
 # macOS

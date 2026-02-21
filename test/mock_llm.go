@@ -38,6 +38,35 @@ func main() {
 			log.Println("Mock: Detected retry request!")
 		}
 
+		isStream := true
+		if s, ok := reqBody["stream"].(bool); ok && !s {
+			isStream = false
+		}
+
+		if !isStream {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+
+			response := map[string]interface{}{
+				"id":      "chatcmpl-123",
+				"object":  "chat.completion",
+				"created": time.Now().Unix(),
+				"model":   "mock-model",
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"message": map[string]string{
+							"role":    "assistant",
+							"content": "Hello world! I am a useful token stream.",
+						},
+						"finish_reason": "stop",
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -159,8 +188,8 @@ func main() {
 		log.Println("Mock: Done")
 	})
 
-	log.Println("Mock LLM Server listening on :4000")
-	if err := http.ListenAndServe(":4000", nil); err != nil {
+	log.Println("Mock LLM Server listening on :4001")
+	if err := http.ListenAndServe(":4001", nil); err != nil {
 		log.Fatal(err)
 	}
 }
