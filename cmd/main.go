@@ -51,7 +51,10 @@ func main() {
 	bus := events.NewBus()
 	store := store.NewRequestStore(100) // Keep last 100 requests
 	modelsConfig := models.NewModelsConfig()
-	_ = modelsConfig.Load("config/models.json") // Ignore error if file doesn't exist
+
+	// Load models from user config directory: ~/.config/llm-supervisor-proxy/models.json
+	modelsConfigPath := models.GetConfigPath()
+	_ = modelsConfig.Load(modelsConfigPath) // Ignore error if file doesn't exist
 
 	config := &proxy.Config{
 		UpstreamURL:       upstreamURL,

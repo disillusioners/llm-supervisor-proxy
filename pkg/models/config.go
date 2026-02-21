@@ -3,13 +3,28 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 )
 
+// AppName is the application name used for config directory
+const AppName = "llm-supervisor-proxy"
+
 // MaxFallbackDepth is the maximum depth allowed for fallback chains (primary + 2 fallbacks).
 const MaxFallbackDepth = 3
+
+// GetConfigPath returns the path to the models config file.
+// Uses XDG standard: ~/.config/llm-supervisor-proxy/models.json
+func GetConfigPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		// Fallback to current directory
+		return "models.json"
+	}
+	return filepath.Join(configDir, AppName, "models.json")
+}
 
 // ModelConfig represents the configuration for a single model.
 type ModelConfig struct {
@@ -60,6 +75,19 @@ func (mc *ModelsConfig) Load(filePath string) error {
 		// File doesn't exist, initialize with empty config
 		mc.Models = make([]ModelConfig, 0)
 		mc.filePath = filePath
+
+		// Ensure directory exists and create empty file
+		dir := filepath.Dir(filePath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create config directory: %w", err)
+		}
+
+		// Create empty models.json file
+		emptyData := []byte(`{"models":[]}`)
+		if err := os.WriteFile(filePath, emptyData, 0644); err != nil {
+			return fmt.Errorf("failed to create models.json: %w", err)
+		}
+
 		return nil
 	}
 
@@ -109,6 +137,11 @@ func (mc *ModelsConfig) Save() error {
 	// Get directory and filename
 	dir := filepath.Dir(filePath)
 	filename := filepath.Base(filePath)
+
+	// Ensure directory exists
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
 
 	// Write to temporary file
 	tmpFile, err := os.CreateTemp(dir, filename+".tmp.*")
