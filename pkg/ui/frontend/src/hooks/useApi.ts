@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, ProxyConfig, Model, ModelsResponse, Event } from '../types';
+import type { Request, RequestDetail, ProxyConfig, Model, ModelsResponse } from '../types';
 
 const API_BASE = '/api';
 

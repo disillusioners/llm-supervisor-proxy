@@ -1,7 +1,7 @@
-import { useState, useCallback, useRef } from 'preact/hooks';
+import { useState, useCallback } from 'preact/hooks';
 import { Header, RequestList, RequestDetail, EventLog, ConfigModal } from './components';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh } from './hooks';
-import type { Event } from './types';
+
 
 export function App() {
   // UI State
@@ -15,9 +15,6 @@ export function App() {
   const { config, updateConfig, refetch: refetchConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel, refetch: refetchModels } = useModels();
   const { displayedEvents, containerRef, clearEvents } = useEvents(selectedRequestId, autoScroll);
-
-  // Events map for tracking
-  const eventsMapRef = useRef<Record<string, Event[]>>({});
 
   // Event refresh callback
   const handleEventRefresh = useCallback(() => {

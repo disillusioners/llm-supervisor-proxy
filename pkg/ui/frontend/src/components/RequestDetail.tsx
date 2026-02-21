@@ -2,9 +2,22 @@ import { useState } from 'preact/hooks';
 import type { RequestDetail as RequestDetailType } from '../types';
 import { escapeHtml } from '../utils/helpers';
 
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
 interface RequestDetailProps {
   detail: RequestDetailType | null;
   loading: boolean;
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
+  return (
+    <div
+      class="prose prose-invert prose-sm max-w-none"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 function CollapsibleText({ text, role }: { text: string; role?: string }) {
@@ -12,13 +25,13 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
   const lines = text ? text.split('\n') : [];
 
   if (lines.length <= 40) {
-    return <div class="whitespace-pre-wrap">{escapeHtml(text)}</div>;
+    return <MarkdownContent text={text} />;
   }
 
   if (isExpanded) {
     return (
       <div class="flex flex-col">
-        <div class="whitespace-pre-wrap">{escapeHtml(text)}</div>
+        <MarkdownContent text={text} />
         <button
           onClick={() => setIsExpanded(false)}
           class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
@@ -38,13 +51,15 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
 
   return (
     <div class="flex flex-col">
-      <div class="whitespace-pre-wrap">{escapeHtml(firstHalf)}</div>
+      <div class="relative overflow-hidden">
+        <MarkdownContent text={firstHalf} />
+      </div>
 
       <div class="flex items-center justify-center my-3 opacity-80 hover:opacity-100 transition-opacity">
         <div class={`h-px flex-1 ${role === 'user' ? 'bg-gray-600' : 'bg-blue-800/50'}`}></div>
         <button
           onClick={() => setIsExpanded(true)}
-          class={`mx-3 text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
+          class={`mx-3 text-xs px-3 py-1 rounded border transition-colors flex-shrink-0 ${role === 'user'
               ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
               : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
             }`}
@@ -54,7 +69,9 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
         <div class={`h-px flex-1 ${role === 'user' ? 'bg-gray-600' : 'bg-blue-800/50'}`}></div>
       </div>
 
-      <div class="whitespace-pre-wrap opacity-75">{escapeHtml(secondHalf)}</div>
+      <div class="relative overflow-hidden opacity-75">
+        <MarkdownContent text={secondHalf} />
+      </div>
     </div>
   );
 }
