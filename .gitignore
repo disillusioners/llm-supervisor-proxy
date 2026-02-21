@@ -13,4 +13,11 @@ vendor/
 test_output.txt
 
 *.txt
+# Frontend
+/pkg/ui/frontend/node_modules/
+/pkg/ui/frontend/dist/
+
+# Built static files (uncomment to ignore built files)
+# /pkg/ui/static/
+
 cmd/__debug_bin*

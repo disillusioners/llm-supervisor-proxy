@@ -14,11 +14,17 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
 
 ### Prerequisites
 -   Go 1.20+
+-   Node.js 18+ (for frontend development only)
 
 ### Build
 ```bash
 git clone https://github.com/disillusioners/llm-supervisor-proxy.git
 cd llm-supervisor-proxy
+
+# Build frontend (optional if static/ already populated)
+cd pkg/ui/frontend && npm install && npm run build && cd ../../..
+
+# Build binary (includes embedded frontend)
 go build -o supervisor-proxy cmd/main.go
 ```
 
@@ -64,6 +70,34 @@ The proxy is configured entirely via environment variables:
     -   It initiates a new request to the upstream.
 5.  **Streaming**: The client receives a continuous stream of tokens, unaware of the interruption and recovery (mostly).
 
+## 🖥️ Web UI
+
+The proxy includes a built-in monitoring dashboard built with **Preact + Vite + Tailwind CSS** (~16KB gzipped).
+
+### Features
+- **Real-time Request Monitoring**: View all requests as they flow through the proxy
+- **Live Event Stream**: Server-Sent Events (SSE) for instant updates
+- **Request Details**: Inspect messages, tool calls, and thinking process
+- **Configuration Management**: Adjust proxy settings and model fallback chains via UI
+
+### Access
+Once the proxy is running, open http://localhost:8080 in your browser.
+
+### Frontend Development
+
+```bash
+# Install dependencies
+cd pkg/ui/frontend && npm install
+
+# Development server (hot reload + API proxy to :8080)
+npm run dev
+
+# Production build (outputs to pkg/ui/static/)
+npm run build
+```
+
+The frontend is embedded in the Go binary via `//go:embed static/*`, so no separate deployment needed.
+
 ## 🧪 Verification
 
 To verify the proxy's resilience against hangs, you can use the included mock server:
@@ -74,3 +108,26 @@ To verify the proxy's resilience against hangs, you can use the included mock se
 ```
 
 This script builds a custom mock server that intentionally hangs on specific tokens, starts the proxy, and asserts that the final output is complete despite the hang.
+
+## 📁 Project Structure
+
+```
+.
+├── cmd/main.go              # Entry point
+├── pkg/
+│   ├── ui/
+│   │   ├── server.go        # UI server + API handlers
+│   │   ├── static/          # Built frontend (embedded)
+│   │   └── frontend/        # Preact frontend source
+│   ├── proxy/               # Core proxy logic
+│   ├── events/              # Event bus for SSE
+│   ├── models/              # Model configuration
+│   └── store/               # Request storage
+└── config/                  # Configuration files
+```
+
+## 🔧 Tech Stack
+
+- **Backend**: Go 1.20+
+- **Frontend**: Preact, Vite, Tailwind CSS, TypeScript
+- **Real-time**: Server-Sent Events (SSE)
