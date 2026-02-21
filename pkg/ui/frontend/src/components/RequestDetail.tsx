@@ -7,6 +7,58 @@ interface RequestDetailProps {
   loading: boolean;
 }
 
+function CollapsibleText({ text, role }: { text: string; role?: string }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const lines = text ? text.split('\n') : [];
+
+  if (lines.length <= 40) {
+    return <div class="whitespace-pre-wrap">{escapeHtml(text)}</div>;
+  }
+
+  if (isExpanded) {
+    return (
+      <div class="flex flex-col">
+        <div class="whitespace-pre-wrap">{escapeHtml(text)}</div>
+        <button
+          onClick={() => setIsExpanded(false)}
+          class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
+              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+            }`}
+        >
+          Collapse
+        </button>
+      </div>
+    );
+  }
+
+  const firstHalf = lines.slice(0, 20).join('\n');
+  const secondHalf = lines.slice(-20).join('\n');
+  const hiddenCount = lines.length - 40;
+
+  return (
+    <div class="flex flex-col">
+      <div class="whitespace-pre-wrap">{escapeHtml(firstHalf)}</div>
+
+      <div class="flex items-center justify-center my-3 opacity-80 hover:opacity-100 transition-opacity">
+        <div class={`h-px flex-1 ${role === 'user' ? 'bg-gray-600' : 'bg-blue-800/50'}`}></div>
+        <button
+          onClick={() => setIsExpanded(true)}
+          class={`mx-3 text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
+              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+            }`}
+        >
+          ... Show {hiddenCount} hidden lines ...
+        </button>
+        <div class={`h-px flex-1 ${role === 'user' ? 'bg-gray-600' : 'bg-blue-800/50'}`}></div>
+      </div>
+
+      <div class="whitespace-pre-wrap opacity-75">{escapeHtml(secondHalf)}</div>
+    </div>
+  );
+}
+
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
 
@@ -90,17 +142,17 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
               {/* Message Bubble */}
               <div
                 class={`p-3 rounded-lg ${message.role === 'user'
-                    ? 'bg-gray-700 ml-0 mr-8'
-                    : message.role === 'assistant'
-                      ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
-                      : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
+                  ? 'bg-gray-700 ml-0 mr-8'
+                  : message.role === 'assistant'
+                    ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
+                    : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
                   }`}
               >
                 <div class="text-xs text-gray-500 mb-1 uppercase">
                   {message.role}
                 </div>
-                <div class="text-gray-200 whitespace-pre-wrap">
-                  {escapeHtml(message.content)}
+                <div class="text-gray-200">
+                  <CollapsibleText text={message.content} role={message.role} />
                 </div>
               </div>
 
@@ -120,8 +172,8 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
                     Thinking
                   </summary>
                   {expandedThoughts.has(index) && (
-                    <div class="mt-2 p-3 bg-purple-900/20 border border-purple-500/30 rounded text-purple-200 text-xs whitespace-pre-wrap">
-                      {escapeHtml(message.thinking)}
+                    <div class="mt-2 p-3 bg-purple-900/20 border border-purple-500/30 rounded text-purple-200 text-xs">
+                      <CollapsibleText text={message.thinking} role="assistant" />
                     </div>
                   )}
                 </details>
@@ -153,8 +205,8 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
           {detail.status === 'completed' && detail.response && (
             <div class="mt-4 p-3 bg-green-900/20 border border-green-500/30 rounded-lg ml-8 mr-0">
               <div class="text-xs text-green-500 mb-1 uppercase">Response</div>
-              <div class="text-green-200 whitespace-pre-wrap">
-                {escapeHtml(detail.response)}
+              <div class="text-green-200">
+                <CollapsibleText text={detail.response} role="assistant" />
               </div>
             </div>
           )}
