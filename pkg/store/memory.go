@@ -67,15 +67,7 @@ func (s *RequestStore) Add(req *RequestLog) {
 	// Let's assume Add is for NEW or UPDATE.
 
 	if existing, exists := s.ByID[req.ID]; exists {
-		// Update existing
-		// Find index? O(N) scan or just update fields in place?
-		// Since we store pointers, updating the struct pointed to by 'existing' would work IF req was a pointer to it.
-		// But here 'req' is a passed pointer.
-		// Simpler: Just update the map and the slice slot.
-		// O(N) to find slot is annoying.
-		// Let's just assume we don't update via Add, but via Get() -> modify.
-		// So Add is only for new.
-		_ = existing
+		*existing = *req
 		return
 	}
 

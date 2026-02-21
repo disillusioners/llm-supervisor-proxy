@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"sync"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -21,10 +22,31 @@ import (
 )
 
 type Config struct {
-	UpstreamURL       string
-	IdleTimeout       time.Duration
-	MaxGenerationTime time.Duration
-	MaxRetries        int
+	mu                sync.RWMutex
+	UpstreamURL       string        `json:"upstream_url"`
+	IdleTimeout       time.Duration `json:"idle_timeout"`
+	MaxGenerationTime time.Duration `json:"max_generation_time"`
+	MaxRetries        int           `json:"max_retries"`
+}
+
+func (c *Config) Clone() Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return Config{
+		UpstreamURL:       c.UpstreamURL,
+		IdleTimeout:       c.IdleTimeout,
+		MaxGenerationTime: c.MaxGenerationTime,
+		MaxRetries:        c.MaxRetries,
+	}
+}
+
+func (c *Config) CopyFrom(other Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UpstreamURL = other.UpstreamURL
+	c.IdleTimeout = other.IdleTimeout
+	c.MaxGenerationTime = other.MaxGenerationTime
+	c.MaxRetries = other.MaxRetries
 }
 
 type Handler struct {
@@ -59,10 +81,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	targetURL, _ := url.JoinPath(h.config.UpstreamURL, "/v1/chat/completions")
+	conf := h.config.Clone()
+	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
+	if err != nil {
+		http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
+		return
+	}
 
-	// Read original body
-	bodyBytes, err := io.ReadAll(r.Body)
+	// Read original body with 10MB limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusInternalServerError)
 		return
@@ -80,7 +107,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Or should it be per attempt?
 	// The requirement says "Hard Generation Deadline: Enforce a maximum duration".
 	// Usually this means for the	// Enforce hard deadline
-	ctx, cancel := context.WithTimeout(r.Context(), h.config.MaxGenerationTime)
+	ctx, cancel := context.WithTimeout(r.Context(), conf.MaxGenerationTime)
 	defer cancel()
 
 	// Create Request Log
@@ -134,7 +161,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		isStream = true
 	}
 
-	for attempt <= h.config.MaxRetries {
+	for attempt <= conf.MaxRetries {
 		if attempt > 0 {
 			log.Printf("Retrying request (attempt %d)...", attempt)
 			reqLog.Retries = attempt
@@ -244,7 +271,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		monitor := supervisor.NewMonitoredReader(resp.Body, h.config.IdleTimeout)
+		monitor := supervisor.NewMonitoredReader(resp.Body, conf.IdleTimeout)
 
 		if !headersSent {
 			for k, v := range resp.Header {
@@ -261,12 +288,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				if errors.Is(err, supervisor.ErrIdleTimeout) {
 					log.Println("Stream idle timeout detected!")
-					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String(), "id": reqID})
+					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
 					attempt++
 					continue
 				}
 				log.Printf("Stream error: %v", err)
 				h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
+				monitor.Close()
 				attempt++
 				continue
 			}
@@ -304,12 +332,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			reqLog.EndTime = time.Now()
 			reqLog.Duration = time.Since(startTime).String()
 			h.store.Add(reqLog)
+			monitor.Close()
 			return
 		}
 
 		// Stream
 		scanner := bufio.NewScanner(monitor)
 		// Default scanner buffer might be small for very long lines, but SSE lines are usually okay.
+		buffer := make([]byte, 0, 1024*1024)
+		scanner.Buffer(buffer, 1024*1024) // 1MB limit
 
 		streamEndedSuccesfully := false
 
@@ -383,7 +414,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		err = scanner.Err()
 		if errors.Is(err, supervisor.ErrIdleTimeout) {
 			log.Println("Stream idle timeout detected!")
-			h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String(), "id": reqID})
+			h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
 			// monitor closed the body.
 			attempt++
 			continue
@@ -392,6 +423,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			log.Printf("Stream error: %v", err)
 			h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
+			monitor.Close()
 			attempt++
 			continue
 		}
@@ -406,6 +438,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			reqLog.EndTime = time.Now()
 			reqLog.Duration = time.Since(startTime).String() // Approximate
 			h.store.Add(reqLog)
+			monitor.Close()
 			return
 		}
 
@@ -413,6 +446,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Could be unexpected EOF.
 		log.Println("Stream ended unexpectedly without [DONE]")
 		h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": reqID})
+		monitor.Close()
 		attempt++
 	}
 

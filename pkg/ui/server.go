@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +37,16 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.FileServer(http.FS(staticFS))
-	mux.Handle("/", fileServer)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
+		if err == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	})
 
 	// API
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -89,11 +99,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Update live config (simplified)
-		// Note: concurrency safety for Config access in Handler needs to be ensured.
-		// For now, we assume simple atomic-like struct copy or acceptable race for demo.
-		// In prod, use atomic.Value or mutex.
-		*s.config = newConfig
+		// Update live config safely
+		s.config.CopyFrom(newConfig)
 
 		s.bus.Publish(events.Event{
 			Type:      "config_updated",
