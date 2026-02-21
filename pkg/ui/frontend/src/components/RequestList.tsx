@@ -25,7 +25,7 @@ const RequestList: FunctionComponent<RequestListProps> = ({
   loading,
 }) => {
   return (
-    <div class="col-span-3 bg-gray-900 border-r border-gray-700 flex flex-col">
+    <div class="col-span-3 bg-gray-900 border-r border-gray-700 flex flex-col min-h-0">
       {/* Header */}
       <div class="bg-gray-800 border-b border-gray-700 h-[52px] flex justify-between items-center px-4">
         <div class="flex items-center gap-2">
@@ -77,19 +77,17 @@ const RequestList: FunctionComponent<RequestListProps> = ({
               <button
                 key={request.id}
                 onClick={() => onSelect(request.id)}
-                class={`w-full text-left px-4 py-3 hover:bg-gray-800 transition-colors relative ${
-                  selectedId === request.id
+                class={`w-full text-left px-4 py-3 hover:bg-gray-800 transition-colors relative ${selectedId === request.id
                     ? 'bg-gray-800 border-l-4 border-l-blue-500'
                     : 'border-l-4 border-l-transparent'
-                }`}
+                  }`}
               >
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2 min-w-0">
                     {/* Status indicator */}
                     <span
-                      class={`w-2 h-2 rounded-full flex-shrink-0 ${
-                        statusColors[request.status]
-                      }`}
+                      class={`w-2 h-2 rounded-full flex-shrink-0 ${statusColors[request.status]
+                        }`}
                     />
                     {/* Model name */}
                     <span class="text-gray-200 font-medium truncate">

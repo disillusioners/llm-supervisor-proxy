@@ -1,4 +1,4 @@
-import { h, FunctionComponent } from 'preact';
+import { FunctionComponent } from 'preact';
 import { Event, EventType } from '../types';
 import { formatTime } from '../utils/helpers';
 
@@ -61,7 +61,7 @@ const getEventTypeLabel = (type: EventType): string => {
     case 'error':
       return 'ERROR';
     default:
-      return type.toUpperCase();
+      return String(type).toUpperCase();
   }
 };
 
@@ -75,7 +75,7 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
   return (
     <div class="col-span-4 bg-[#0d1117] flex flex-col min-h-0">
       {/* Header */}
-      <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700 shrink-0">
         <div class="flex items-center gap-2">
           <svg
             class="w-4 h-4 text-green-400"
@@ -96,11 +96,10 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
           {/* Auto-scroll toggle */}
           <button
             onClick={onToggleAutoScroll}
-            class={`px-2 py-1 text-xs rounded transition-colors ${
-              autoScroll
-                ? 'bg-green-600 text-white'
-                : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-            }`}
+            class={`px-2 py-1 text-xs rounded transition-colors ${autoScroll
+              ? 'bg-green-600 text-white'
+              : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+              }`}
             title={autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
           >
             Auto-scroll

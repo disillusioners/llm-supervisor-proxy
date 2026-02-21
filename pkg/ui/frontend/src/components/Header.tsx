@@ -6,7 +6,7 @@ interface HeaderProps {
 
 const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
   return (
-    <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shadow-md z-10">
+    <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shadow-md z-10 shrink-0">
       {/* Left side: Logo + Title */}
       <div class="flex items-center space-x-3">
         <div class="p-2 bg-blue-600 rounded-lg">
