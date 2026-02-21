@@ -1,4 +1,4 @@
-import { FunctionComponent } from 'preact';
+import { FunctionComponent, Ref } from 'preact';
 import { Event, EventType } from '../types';
 import { formatTime } from '../utils/helpers';
 
@@ -7,7 +7,7 @@ interface EventLogProps {
   autoScroll: boolean;
   onToggleAutoScroll: () => void;
   onClear: () => void;
-  containerRef: (el: HTMLDivElement | null) => void;
+  containerRef: Ref<HTMLDivElement>;
 }
 
 const getEventMessage = (event: Event): string => {
@@ -73,7 +73,7 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
   containerRef,
 }) => {
   return (
-    <div class="col-span-4 bg-[#0d1117] flex flex-col min-h-0">
+    <div class="flex-1 bg-[#0d1117] flex flex-col min-h-0">
       {/* Header */}
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700 shrink-0">
         <div class="flex items-center gap-2">

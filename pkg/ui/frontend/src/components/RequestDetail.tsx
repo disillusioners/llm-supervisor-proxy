@@ -24,7 +24,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
   if (loading) {
     return (
-      <div class="col-span-5 bg-gray-800 border-r border-gray-700 flex flex-col">
+      <div class="flex-[3] bg-gray-800 border-b border-gray-700 flex flex-col">
         <div class="flex-1 flex items-center justify-center text-gray-400">
           Loading...
         </div>
@@ -34,7 +34,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
   if (!detail) {
     return (
-      <div class="col-span-5 bg-gray-800 border-r border-gray-700 flex flex-col">
+      <div class="flex-[3] bg-gray-800 border-b border-gray-700 flex flex-col">
         <div class="flex-1 flex items-center justify-center text-gray-400">
           Select a request to view details
         </div>
@@ -43,7 +43,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
   }
 
   return (
-    <div class="col-span-5 bg-gray-800 border-r border-gray-700 flex flex-col min-h-0">
+    <div class="flex-[3] bg-gray-800 border-b border-gray-700 flex flex-col min-h-0">
       {/* Header - Fixed, doesn't scroll */}
       <div class="shrink-0 monitor-font text-sm p-4 border-b border-gray-700">
         {/* Header Grid */}
@@ -56,9 +56,9 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
             <span class="text-gray-400">Status:</span>{' '}
             <span class={
               detail.status === 'completed' ? 'text-green-400' :
-              detail.status === 'failed' ? 'text-red-400' :
-              detail.status === 'running' ? 'text-yellow-400' :
-              'text-gray-200'
+                detail.status === 'failed' ? 'text-red-400' :
+                  detail.status === 'running' ? 'text-yellow-400' :
+                    'text-gray-200'
             }>
               {escapeHtml(detail.status)}
             </span>
@@ -89,13 +89,12 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
             <div key={index}>
               {/* Message Bubble */}
               <div
-                class={`p-3 rounded-lg ${
-                  message.role === 'user'
+                class={`p-3 rounded-lg ${message.role === 'user'
                     ? 'bg-gray-700 ml-0 mr-8'
                     : message.role === 'assistant'
-                    ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
-                    : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
-                }`}
+                      ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
+                      : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
+                  }`}
               >
                 <div class="text-xs text-gray-500 mb-1 uppercase">
                   {message.role}

@@ -65,17 +65,18 @@ export function App() {
           loading={requestsLoading}
         />
 
-        {/* Middle Panel: Request Details */}
-        <RequestDetail detail={detail} loading={detailLoading} />
+        {/* Right Panel: Stacked Request Details and Event Log */}
+        <div class="col-span-9 flex flex-col min-h-0">
+          <RequestDetail detail={detail} loading={detailLoading} />
 
-        {/* Right Panel: Event Log */}
-        <EventLog
-          events={displayedEvents}
-          autoScroll={autoScroll}
-          onToggleAutoScroll={handleToggleAutoScroll}
-          onClear={handleClearEvents}
-          containerRef={containerRef}
-        />
+          <EventLog
+            events={displayedEvents}
+            autoScroll={autoScroll}
+            onToggleAutoScroll={handleToggleAutoScroll}
+            onClear={handleClearEvents}
+            containerRef={containerRef}
+          />
+        </div>
       </main>
 
       {/* Config Modal */}

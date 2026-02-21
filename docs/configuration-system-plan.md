@@ -13,13 +13,18 @@ Implement a unified configuration system for `llm-supervisor-proxy` that:
 ## Configuration Precedence (Priority: High → Low)
 
 ```
-config.json (if exists) > Environment Variables > Hardcoded Defaults
+Environment Variables > config.json > Hardcoded Defaults
 ```
 
-**Rationale**: 
-- File-based config allows persistent user changes
-- Env vars are for container/deployment scenarios
-- Defaults ensure the app always has valid config
+**Rationale** (12-Factor App methodology):
+- **Env vars always win** - Required for Docker/K8s deployments where runtime overrides are needed
+- **File provides persistence** - Desktop users can save preferences without shell profiles
+- **Defaults ensure boot** - App always has valid config even with no file or env vars
+
+**Why NOT file > env:**
+- If config.json is baked into a Docker image, env vars become useless
+- GitOps/Helm/K8s ConfigMaps rely on env var injection
+- Immutable infrastructure patterns require runtime overrides
 
 ---
 
@@ -85,25 +90,63 @@ import (
     "encoding/json"
     "os"
     "path/filepath"
+    "strconv"
+    "strings"
     "sync"
     "time"
 )
 
 const (
-    AppName          = "llm-supervisor-proxy"
-    ConfigFileName   = "config.json"
-    ConfigVersion    = "1.0"
+    AppName        = "llm-supervisor-proxy"
+    ConfigFileName = "config.json"
+    ConfigVersion  = "1.0"
 )
+
+// Duration is a custom type that serializes to human-readable format (e.g., "10s")
+// instead of nanoseconds. Required because time.Duration marshals to int64.
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+    return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(data []byte) error {
+    var v interface{}
+    if err := json.Unmarshal(data, &v); err != nil {
+        return err
+    }
+    switch value := v.(type) {
+    case string:
+        parsed, err := time.ParseDuration(value)
+        if err != nil {
+            return err
+        }
+        *d = Duration(parsed)
+    case float64:
+        *d = Duration(time.Duration(value))
+    default:
+        return errors.New("invalid duration format")
+    }
+    return nil
+}
+
+func (d Duration) String() string {
+    return time.Duration(d).String()
+}
+
+func (d Duration) Duration() time.Duration {
+    return time.Duration(d)
+}
 
 // Config holds all application configuration
 type Config struct {
-    Version           string        `json:"version"`
-    UpstreamURL       string        `json:"upstream_url"`
-    Port              int           `json:"port"`
-    IdleTimeout       time.Duration `json:"idle_timeout"`
-    MaxGenerationTime time.Duration `json:"max_generation_time"`
-    MaxRetries        int           `json:"max_retries"`
-    UpdatedAt         time.Time     `json:"updated_at"`
+    Version           string   `json:"version"`
+    UpstreamURL       string   `json:"upstream_url"`
+    Port              int      `json:"port"`
+    IdleTimeout       Duration `json:"idle_timeout"`
+    MaxGenerationTime Duration `json:"max_generation_time"`
+    MaxRetries        int      `json:"max_retries"`
+    UpdatedAt         string   `json:"updated_at"` // ISO8601 string for readability
 }
 
 // Defaults - used when env not set and file doesn't exist
@@ -111,23 +154,69 @@ var Defaults = Config{
     Version:           ConfigVersion,
     UpstreamURL:       "http://localhost:4001",
     Port:              8089,
-    IdleTimeout:       10 * time.Second,
-    MaxGenerationTime: 180 * time.Second,
+    IdleTimeout:       Duration(10 * time.Second),
+    MaxGenerationTime: Duration(180 * time.Second),
     MaxRetries:        1,
+}
+
+// Validate ensures config values are valid before saving
+func (c *Config) Validate() error {
+    if c.UpstreamURL == "" {
+        return errors.New("upstream_url is required")
+    }
+    if !strings.HasPrefix(c.UpstreamURL, "http://") && !strings.HasPrefix(c.UpstreamURL, "https://") {
+        return errors.New("upstream_url must start with http:// or https://")
+    }
+    if c.Port < 1 || c.Port > 65535 {
+        return errors.New("port must be between 1 and 65535")
+    }
+    if c.IdleTimeout < Duration(time.Second) {
+        return errors.New("idle_timeout must be at least 1s")
+    }
+    if c.MaxGenerationTime < Duration(time.Second) {
+        return errors.New("max_generation_time must be at least 1s")
+    }
+    if c.MaxRetries < 0 {
+        return errors.New("max_retries cannot be negative")
+    }
+    return nil
 }
 
 // Manager handles configuration lifecycle
 type Manager struct {
-    mu       sync.RWMutex
-    config   Config
-    filePath string
+    mu        sync.RWMutex
+    config    Config
+    filePath  string
+    readOnly  bool     // true if file write fails (permission denied, etc.)
+    eventBus  *events.Bus // optional: for publishing config updates
+}
+
+// SaveResult contains metadata about a save operation
+type SaveResult struct {
+    RestartRequired bool     `json:"restart_required"`
+    ChangedFields   []string `json:"changed_fields,omitempty"`
 }
 ```
 
-#### 2. Load Logic (Precedence Chain)
+#### 2. Load Logic (Precedence Chain: env > file > defaults)
 
 ```go
-// Load initializes configuration with proper precedence
+// NewManager creates a new configuration manager
+func NewManager() (*Manager, error) {
+    configDir, err := os.UserConfigDir()
+    if err != nil {
+        return nil, err
+    }
+    filePath := filepath.Join(configDir, AppName, ConfigFileName)
+    
+    m := &Manager{filePath: filePath}
+    if err := m.Load(); err != nil {
+        return nil, err
+    }
+    return m, nil
+}
+
+// Load initializes configuration with proper precedence: env > file > defaults
 func (m *Manager) Load() error {
     m.mu.Lock()
     defer m.mu.Unlock()
@@ -135,32 +224,31 @@ func (m *Manager) Load() error {
     // Step 1: Start with defaults
     cfg := Defaults
 
-    // Step 2: Check if config file exists
-    if _, err := os.Stat(m.filePath); err == nil {
-        // File exists - load from file (ignore env)
-        data, err := os.ReadFile(m.filePath)
-        if err != nil {
-            return err
-        }
+    // Step 2: Load from file if exists (file > defaults)
+    if data, err := os.ReadFile(m.filePath); err == nil {
         if err := json.Unmarshal(data, &cfg); err != nil {
-            return err
+            // Corrupted file - backup and use defaults
+            m.backupCorruptedFile()
+            cfg = Defaults
         }
-    } else if os.IsNotExist(err) {
-        // File doesn't exist - use env vars, then create file
-        cfg = m.applyEnvOverrides(cfg)
-        cfg.UpdatedAt = time.Now()
+    }
+
+    // Step 3: Apply env overrides (env > file > defaults)
+    cfg = m.applyEnvOverrides(cfg)
+
+    // Step 4: If no file exists, create one for user convenience
+    if _, err := os.Stat(m.filePath); os.IsNotExist(err) {
         if err := m.saveToFile(cfg); err != nil {
-            return err
+            // Can't write file - continue in read-only mode
+            m.readOnly = true
         }
-    } else {
-        return err
     }
 
     m.config = cfg
     return nil
 }
 
-// applyEnvOverrides applies env vars on top of defaults
+// applyEnvOverrides applies env vars on top of config (env wins always)
 func (m *Manager) applyEnvOverrides(cfg Config) Config {
     if v := os.Getenv("UPSTREAM_URL"); v != "" {
         cfg.UpstreamURL = v
@@ -172,12 +260,12 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
     }
     if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
         if d, err := time.ParseDuration(v); err == nil {
-            cfg.IdleTimeout = d
+            cfg.IdleTimeout = Duration(d)
         }
     }
     if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
         if d, err := time.ParseDuration(v); err == nil {
-            cfg.MaxGenerationTime = d
+            cfg.MaxGenerationTime = Duration(d)
         }
     }
     if v := os.Getenv("MAX_RETRIES"); v != "" {
@@ -187,25 +275,66 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
     }
     return cfg
 }
+
+// backupCorruptedFile renames corrupted config for recovery
+func (m *Manager) backupCorruptedFile() {
+    backupPath := m.filePath + ".corrupted." + time.Now().Format("20060102-150405")
+    os.Rename(m.filePath, backupPath)
+}
 ```
 
-#### 3. Save Logic (with in-memory sync)
+#### 3. Save Logic (with validation, backup, and in-memory sync)
 
 ```go
 // Save persists configuration to file and updates in-memory state
-func (m *Manager) Save(cfg Config) error {
+func (m *Manager) Save(cfg Config) (*SaveResult, error) {
+    // Validate before any changes
+    if err := cfg.Validate(); err != nil {
+        return nil, fmt.Errorf("validation failed: %w", err)
+    }
+
     m.mu.Lock()
     defer m.mu.Unlock()
 
-    cfg.Version = ConfigVersion
-    cfg.UpdatedAt = time.Now()
-
-    if err := m.saveToFile(cfg); err != nil {
-        return err
+    if m.readOnly {
+        return nil, errors.New("config file is read-only (permission denied)")
     }
 
-    m.config = cfg
-    return nil
+    // Detect changes that require restart
+    result := &SaveResult{}
+    if m.config.Port != cfg.Port {
+        result.RestartRequired = true
+        result.ChangedFields = append(result.ChangedFields, "port")
+    }
+
+    // Set metadata
+    cfg.Version = ConfigVersion
+    cfg.UpdatedAt = time.Now().Format(time.RFC3339)
+
+    // Backup existing file before overwrite
+    if _, err := os.Stat(m.filePath); err == nil {
+        backupPath := m.filePath + ".bak"
+        if err := os.Rename(m.filePath, backupPath); err != nil {
+            // Non-fatal: log warning but continue
+        }
+    }
+
+    if err := m.saveToFile(cfg); err != nil {
+        return nil, err
+    }
+
+    // Re-apply env overrides to in-memory config (env always wins)
+    m.config = m.applyEnvOverrides(cfg)
+    
+    // Publish config update event if event bus is wired
+    if m.eventBus != nil {
+        m.eventBus.Publish(events.Event{
+            Type: "config.updated",
+            Data: m.config,
+        })
+    }
+    
+    return result, nil
 }
 
 // saveToFile writes config to disk atomically
@@ -221,12 +350,27 @@ func (m *Manager) saveToFile(cfg Config) error {
         return err
     }
 
-    // Atomic write: write to temp file, then rename
-    tmpPath := m.filePath + ".tmp"
-    if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+    // Atomic write using temp file (avoids partial writes)
+    tmpFile, err := os.CreateTemp(dir, "config-*.tmp")
+    if err != nil {
         return err
     }
+    tmpPath := tmpFile.Name()
 
+    // Write and sync to disk
+    if _, err := tmpFile.Write(data); err != nil {
+        tmpFile.Close()
+        os.Remove(tmpPath)
+        return err
+    }
+    if err := tmpFile.Sync(); err != nil {
+        tmpFile.Close()
+        os.Remove(tmpPath)
+        return err
+    }
+    tmpFile.Close()
+
+    // Atomic rename
     return os.Rename(tmpPath, m.filePath)
 }
 ```
@@ -285,26 +429,43 @@ handler := &proxy.Handler{
 
 ### 2. `pkg/proxy/handler.go` Changes
 
+**Important**: Consolidate to single config source. Remove the existing `Config` struct in handler and use `*config.Manager` directly.
+
+**Before (current state with dual config structs):**
 ```go
 type Config struct {
+    mu                sync.RWMutex  // ❌ Duplicate mutex
     UpstreamURL       string
-    Port              int
     IdleTimeout       time.Duration
-    MaxGenerationTime time.Duration
-    MaxRetries        int
+    ...
 }
+```
+
+**After (single source of truth):**
+```go
+import "github.com/yourorg/llm-supervisor-proxy/pkg/config"
 
 type Handler struct {
-    config       Config
-    configMgr    *config.Manager  // NEW: for dynamic updates
-    // ... existing fields
+    configMgr *config.Manager  // Single source of truth
+    // ... existing fields (store, events, models, etc.)
 }
 
-// GetCurrentConfig returns the latest config (for hot reload)
+// GetCurrentConfig returns the latest config (for each request)
 func (h *Handler) GetCurrentConfig() config.Config {
     return h.configMgr.Get()
 }
+
+// Convenience methods that delegate to manager
+func (h *Handler) GetUpstreamURL() string {
+    return h.configMgr.Get().UpstreamURL
+}
+
+func (h *Handler) GetIdleTimeout() time.Duration {
+    return h.configMgr.Get().IdleTimeout.Duration()
+}
 ```
+
+**Migration Note**: Remove `Clone()`, `CopyFrom()`, and the internal mutex from handler's old Config struct. All config access goes through `config.Manager`.
 
 ### 3. Web UI API Endpoints (`pkg/ui/server.go`)
 
@@ -319,6 +480,7 @@ Add endpoints for config management:
 // GET /api/config
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
     cfg := s.configMgr.Get()
+    w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(cfg)
 }
 
@@ -326,16 +488,43 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
     var cfg config.Config
     if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
+        http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
         return
     }
-    if err := s.configMgr.Save(cfg); err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
+    
+    // Clear read-only fields (prevent client manipulation)
+    cfg.Version = ""  // Will be set by Save()
+    cfg.UpdatedAt = "" // Will be set by Save()
+    
+    result, err := s.configMgr.Save(cfg)
+    if err != nil {
+        if strings.Contains(err.Error(), "validation failed") {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+        } else if strings.Contains(err.Error(), "read-only") {
+            http.Error(w, "Config file is read-only", http.StatusForbidden)
+        } else {
+            http.Error(w, fmt.Sprintf("Failed to save: %v", err), http.StatusInternalServerError)
+        }
         return
     }
-    json.NewEncoder(w).Encode(cfg)
+    
+    // Include restart hint in response
+    response := struct {
+        config.Config
+        RestartRequired bool     `json:"restart_required"`
+        ChangedFields   []string `json:"changed_fields,omitempty"`
+    }{
+        Config:          s.configMgr.Get(),
+        RestartRequired: result.RestartRequired,
+        ChangedFields:   result.ChangedFields,
+    }
+    
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(response)
 }
 ```
+
+**Security Note**: These endpoints should be protected in production. Consider adding authentication or restricting to localhost only.
 
 ---
 
@@ -382,15 +571,17 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 
 ### For Existing Users
 
-1. **No config.json exists**: App creates one from env/defaults
-2. **Using env vars only**: First run creates config.json, subsequent runs use file
-3. **Want to switch back to env**: Delete config.json
+1. **No config.json exists**: App creates one from defaults, env vars still override
+2. **Using env vars only**: Config file created, but env vars continue to work (env wins)
+3. **Docker/K8s deployment**: Set env vars to override file config at runtime
+4. **Desktop users**: Edit config.json directly, changes persist across restarts
 
 ### Backward Compatibility
 
-- All existing env vars continue to work on first run
+- All existing env vars continue to work and **take precedence** over file
 - No breaking changes to existing behavior
 - Config file is auto-generated, no manual setup needed
+- Env vars can always override file settings (12-factor app compliant)
 
 ---
 
@@ -398,10 +589,12 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 
 | Scenario | Behavior |
 |----------|----------|
-| Config file corrupted | Log error, use defaults, rewrite file |
-| Permission denied | Log error, use env/defaults, continue in-memory only |
-| Invalid JSON | Log error with details, use defaults |
-| Invalid duration format | Use default value for that field |
+| Config file corrupted | Backup as `.corrupted.<timestamp>`, use defaults + env |
+| Permission denied | Set `readOnly=true`, continue in-memory only, API returns 403 on save |
+| Invalid JSON | Treat as corrupted file, backup and use defaults |
+| Invalid duration format | Use default value for that field, log warning |
+| Validation failed | Reject save, return 400 with specific error message |
+| Save fails mid-write | Temp file cleaned up, original file unchanged |
 
 ---
 
@@ -413,11 +606,181 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 - Save and reload consistency
 - Thread-safety under concurrent access
 - Invalid input handling
+- **Empty env var handling**: `UPSTREAM_URL=""` should not override
+- **Restart detection**: Port change returns `restart_required: true`
+- **Event publishing**: Save publishes event when bus is wired
 
 ### Integration Tests
 - Full app startup with config
 - Hot config reload (if implemented)
 - API endpoint functionality
+- **Request isolation**: In-flight requests see original config after API update
+
+---
+
+## Key Design Decisions (Oracle Review)
+
+### 🔴 Critical Fixes Applied
+
+| Issue | Original | Fixed |
+|-------|----------|-------|
+| **Precedence** | `file > env > defaults` | `env > file > defaults` |
+| **Duration JSON** | `time.Duration` (breaks) | Custom `Duration` type with Marshal/Unmarshal |
+| **Dual Config** | `pkg/config.Config` + `pkg/proxy.Config` | Single `config.Manager` only |
+| **No Validation** | Accept any values | `Validate() error` method |
+
+### 🟠 High Priority Fixes
+
+| Issue | Solution |
+|-------|----------|
+| No backup on overwrite | Keep `.bak` file before save |
+| No read-only handling | `readOnly` flag, API returns 403 |
+| No validation on save | `Validate() error` with specific messages |
+| API no error details | Return validation errors in response |
+
+---
+
+## Edge Cases & Implementation Details
+
+### 1. Port Changes Require Server Restart
+
+**Problem**: HTTP server can't rebind to a new port at runtime. Updating `port` via API succeeds but has no effect until restart.
+
+**Solution**: Track which fields require restart and communicate to UI.
+
+```go
+// In config.go
+var RestartRequiredFields = []string{"port"}
+
+func (m *Manager) Save(cfg Config) (*SaveResult, error) {
+    // ... validation and save logic
+    
+    // Detect restart-requiring changes
+    restartRequired := m.config.Port != cfg.Port
+    
+    // ... save to file
+    
+    return &SaveResult{RestartRequired: restartRequired}, nil
+}
+
+type SaveResult struct {
+    RestartRequired bool     `json:"restart_required"`
+    ChangedFields   []string `json:"changed_fields,omitempty"`
+}
+```
+
+**API Response**:
+```json
+{
+  "version": "1.0",
+  "upstream_url": "http://localhost:4001",
+  "port": 8090,
+  "restart_required": true,
+  "changed_fields": ["port"]
+}
+```
+
+### 2. In-Flight Request Consistency
+
+**Problem**: Config changes mid-request could cause inconsistent behavior (e.g., switching `upstream_url` mid-stream).
+
+**Solution**: Capture config at request start, pass by value through request lifecycle.
+
+```go
+// In pkg/proxy/handler.go
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    // Snapshot config at request start (by value, not pointer)
+    cfg := h.configMgr.Get()
+    
+    // Pass cfg through the entire request lifecycle
+    h.handleRequest(w, r, cfg)
+}
+
+func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request, cfg config.Config) {
+    // All downstream code uses the captured cfg, never reads from manager again
+    // This guarantees consistency for the duration of this request
+}
+```
+
+**Note**: This is already naturally afforded by Go's value semantics. No special handling needed if implemented correctly.
+
+### 3. Config Update Events
+
+**Problem**: Other subsystems (WebSocket clients, background workers) need to know when config changes.
+
+**Solution**: Publish `ConfigUpdated` event via existing event bus.
+
+```go
+// In config.go
+type ConfigUpdatedEvent struct {
+    Config      Config   `json:"config"`
+    ChangedBy   string   `json:"changed_by"` // "api", "file", "env"
+}
+
+// Wire into Save()
+func (m *Manager) Save(cfg Config) (*SaveResult, error) {
+    // ... save logic
+    
+    // Publish event if eventBus is wired
+    if m.eventBus != nil {
+        m.eventBus.Publish(events.Event{
+            Type: "config.updated",
+            Data: ConfigUpdatedEvent{
+                Config:    m.config,
+                ChangedBy: "api",
+            },
+        })
+    }
+    
+    return &SaveResult{...}, nil
+}
+```
+
+**UI Integration**: WebSocket clients can subscribe to `config.updated` events for real-time updates.
+
+### 4. Empty Env Vars Should Not Override
+
+**Problem**: `UPSTREAM_URL=""` returns empty string, which would override valid file/default values.
+
+**Solution**: Check for non-empty strings before applying.
+
+```go
+func (m *Manager) applyEnvOverrides(cfg Config) Config {
+    // Only apply if env var exists AND is non-empty
+    if v := os.Getenv("UPSTREAM_URL"); v != "" {
+        cfg.UpstreamURL = v
+    }
+    if v := os.Getenv("PORT"); v != "" {
+        if port, err := strconv.Atoi(v); err == nil && port > 0 {
+            cfg.Port = port
+        }
+    }
+    if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
+        if d, err := time.ParseDuration(v); err == nil && d > 0 {
+            cfg.IdleTimeout = Duration(d)
+        }
+    }
+    if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
+        if d, err := time.ParseDuration(v); err == nil && d > 0 {
+            cfg.MaxGenerationTime = Duration(d)
+        }
+    }
+    if v := os.Getenv("MAX_RETRIES"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r >= 0 {
+            cfg.MaxRetries = r
+        }
+    }
+    return cfg
+}
+```
+
+**Alternative**: Use `os.LookupEnv()` to distinguish between "not set" and "set to empty":
+
+```go
+if v, exists := os.LookupEnv("UPSTREAM_URL"); exists && v != "" {
+    cfg.UpstreamURL = v
+}
+```
 
 ---
 
@@ -443,20 +806,28 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 | File | Action | Description |
 |------|--------|-------------|
 | `pkg/config/config.go` | CREATE | Core configuration package |
-| `pkg/config/config_test.go` | CREATE | Unit tests |
+| `pkg/config/config_test.go` | CREATE | Unit tests (incl. edge cases) |
 | `cmd/main.go` | MODIFY | Use config manager |
-| `pkg/proxy/handler.go` | MODIFY | Accept config manager |
-| `pkg/ui/server.go` | MODIFY | Add config API endpoints |
+| `pkg/proxy/handler.go` | MODIFY | Accept config manager, snapshot config at request start |
+| `pkg/ui/server.go` | MODIFY | Add config API endpoints with restart hints |
+| `pkg/events/bus.go` | MODIFY (optional) | Add `config.updated` event type |
 
 ---
 
 ## Summary
 
 This design provides:
-- ✅ Single source of truth (config.json when exists)
-- ✅ Graceful migration from env-only setup
-- ✅ Thread-safe in-memory updates
-- ✅ Atomic file writes
-- ✅ Clear precedence chain
-- ✅ API for runtime configuration
-- ✅ Backward compatible
+- ✅ **12-Factor App compliant**: Env vars always override file config
+- ✅ **Custom Duration type**: Proper JSON serialization (`"10s"` not nanoseconds)
+- ✅ **Single source of truth**: Consolidated config.Manager, no dual structs
+- ✅ **Validation on save**: Invalid values rejected before persisting
+- ✅ **Backup before overwrite**: `.bak` file preserved
+- ✅ **Graceful degradation**: Works in read-only mode if permission denied
+- ✅ **Thread-safe**: sync.RWMutex for concurrent access
+- ✅ **Atomic writes**: Temp file + rename pattern
+- ✅ **API for runtime config**: GET/PUT endpoints with validation
+- ✅ **Backward compatible**: Existing env vars continue to work
+- ✅ **Restart hints**: API returns `restart_required` flag for port changes
+- ✅ **Request consistency**: Config snapshot at request start prevents mid-stream changes
+- ✅ **Event publishing**: Config updates published to event bus for subscribers
+- ✅ **Empty env handling**: Empty env vars don't override valid values
