@@ -13,6 +13,7 @@ import (
 const AppName = "llm-supervisor-proxy"
 
 // MaxFallbackDepth is the maximum depth allowed for fallback chains (primary + 2 fallbacks).
+// Deprecated: This constant is no longer used as fallback is now single-level (max 1 item).
 const MaxFallbackDepth = 3
 
 // GetConfigPath returns the path to the models config file.
@@ -287,72 +288,34 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 	return nil
 }
 
-// Validate validates the model configuration for cycles and max depth.
-// Uses DFS for cycle detection.
+// Validate validates the model configuration.
+// Since fallback is now single-level (max 1 item), we only perform basic validation:
+// - Model IDs must be non-empty
+// - Fallback references must reference existing models
 func (mc *ModelsConfig) Validate() error {
-	// Build adjacency map for cycle detection
-	adj := make(map[string][]string)
+	// Build set of valid model IDs
 	modelIDs := make(map[string]bool)
-
 	for _, model := range mc.Models {
 		modelIDs[model.ID] = true
-		adj[model.ID] = model.FallbackChain
 	}
 
-	// Check for cycles using DFS
-	visited := make(map[string]bool)
-	recStack := make(map[string]bool)
-
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
-		visited[node] = true
-		recStack[node] = true
-
-		for _, neighbor := range adj[node] {
-			if !modelIDs[neighbor] {
-				// Unknown model reference - warn but allow for forward compatibility
-				continue
-			}
-			if !visited[neighbor] {
-				if dfs(neighbor) {
-					return true
-				}
-			} else if recStack[neighbor] {
-				return true
-			}
-		}
-
-		recStack[node] = false
-		return false
-	}
-
-	for modelID := range modelIDs {
-		if !visited[modelID] {
-			if dfs(modelID) {
-				return ErrCycleDetected
-			}
-		}
-	}
-
-	// Check max depth for each model's fallback chain
+	// Basic validation: check for empty IDs and valid fallback references
 	for _, model := range mc.Models {
-		depth := 1 // Count the primary model
-		current := model.ID
+		if model.ID == "" {
+			return ErrInvalidModelID
+		}
 
-		visitedForDepth := make(map[string]bool)
-		visitedForDepth[current] = true
+		// Enforce max 1 fallback model
+		if len(model.FallbackChain) > 1 {
+			return fmt.Errorf("fallback chain is limited to maximum 1 fallback model")
+		}
 
+		// Fallback chain is now limited to max 1 item, so just validate references
 		for _, fallbackID := range model.FallbackChain {
-			if visitedForDepth[fallbackID] {
-				// Self-reference or cycle in fallback chain
-				return ErrCycleDetected
+			if fallbackID != "" && !modelIDs[fallbackID] {
+				// Unknown model reference - warn but allow for forward compatibility
+				// This enables adding new models without updating all configs
 			}
-			depth++
-			if depth > MaxFallbackDepth {
-				return ErrMaxDepthExceeded
-			}
-			visitedForDepth[fallbackID] = true
-			current = fallbackID
 		}
 	}
 
@@ -422,8 +385,6 @@ var (
 	ErrDuplicateModelID    = &ConfigError{"duplicate model ID"}
 	ErrModelNotFound       = &ConfigError{"model not found"}
 	ErrCannotChangeModelID = &ConfigError{"cannot change model ID"}
-	ErrCycleDetected       = &ConfigError{"cycle detected in fallback chain"}
-	ErrMaxDepthExceeded    = &ConfigError{"fallback chain exceeds maximum depth of 3"}
 )
 
 // ConfigError represents a configuration error.
