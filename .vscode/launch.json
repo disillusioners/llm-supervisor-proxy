@@ -12,7 +12,7 @@
                 "PORT": "4321",
                 "IDLE_TIMEOUT": "60s",
                 "MAX_GENERATION_TIME": "600s",
-                "MAX_RETRIES": "2"
+                "MAX_RETRIES": "3"
             }
         }
     ]
