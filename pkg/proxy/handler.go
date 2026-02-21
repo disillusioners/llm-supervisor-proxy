@@ -141,7 +141,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			reqLog.Status = "retrying"
 			h.store.Add(reqLog) // Update store
 
-			h.publishEvent("retry_attempt", map[string]int{"attempt": attempt})
+			h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": reqID})
 
 			if isStream {
 				// Modify request body for retry
@@ -191,7 +191,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				log.Println("Global deadline exceeded")
-				h.publishEvent("error_deadline_exceeded", nil)
+				h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
 				reqLog.Status = "failed"
 				reqLog.Error = "Global deadline exceeded"
 				reqLog.EndTime = time.Now()
@@ -200,7 +200,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			log.Printf("Upstream request failed: %v", err)
-			h.publishEvent("upstream_error", err.Error())
+			h.publishEvent("upstream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 			attempt++
 			time.Sleep(500 * time.Millisecond) // Slight backoff
 			continue
@@ -219,7 +219,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				if resp.StatusCode >= 500 || resp.StatusCode == 429 {
 					resp.Body.Close()
 					log.Printf("Upstream returned %d", resp.StatusCode)
-					h.publishEvent("upstream_error_status", resp.StatusCode)
+					h.publishEvent("upstream_error_status", map[string]interface{}{"status": resp.StatusCode, "id": reqID})
 					attempt++
 					time.Sleep(1 * time.Second)
 					continue
@@ -261,12 +261,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				if errors.Is(err, supervisor.ErrIdleTimeout) {
 					log.Println("Stream idle timeout detected!")
-					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String()})
+					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String(), "id": reqID})
 					attempt++
 					continue
 				}
 				log.Printf("Stream error: %v", err)
-				h.publishEvent("stream_error", err.Error())
+				h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 				attempt++
 				continue
 			}
@@ -297,7 +297,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 
-			h.publishEvent("request_completed", nil)
+			h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
 			reqLog.Status = "completed"
 			reqLog.Response = accumulatedResponse.String()
 			reqLog.Thinking = accumulatedThinking.String()
@@ -380,7 +380,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		err = scanner.Err()
 		if errors.Is(err, supervisor.ErrIdleTimeout) {
 			log.Println("Stream idle timeout detected!")
-			h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String()})
+			h.publishEvent("timeout_idle", map[string]interface{}{"timeout": h.config.IdleTimeout.String(), "id": reqID})
 			// monitor closed the body.
 			attempt++
 			continue
@@ -388,14 +388,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		if err != nil {
 			log.Printf("Stream error: %v", err)
-			h.publishEvent("stream_error", err.Error())
+			h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 			attempt++
 			continue
 		}
 
 		// If scanner finished without error, we are likely done.
 		if streamEndedSuccesfully {
-			h.publishEvent("request_completed", nil)
+			h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
 
 			reqLog.Status = "completed"
 			reqLog.Response = accumulatedResponse.String()
@@ -409,12 +409,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// If stream ended but no [DONE] and no error?
 		// Could be unexpected EOF.
 		log.Println("Stream ended unexpectedly without [DONE]")
-		h.publishEvent("stream_ended_unexpectedly", nil)
+		h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": reqID})
 		attempt++
 	}
 
 	log.Println("Max retries exceeded")
-	h.publishEvent("error_max_retries", nil)
+	h.publishEvent("error_max_retries", map[string]interface{}{"id": reqID})
 
 	reqLog.Status = "failed"
 	reqLog.Error = "Max retries exceeded"

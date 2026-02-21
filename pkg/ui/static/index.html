@@ -54,39 +54,26 @@
             </div>
             <h1 class="text-xl font-bold tracking-wide">LLM Supervisor Proxy</h1>
         </div>
-        <div class="text-sm text-gray-400 flex items-center space-x-2">
-            <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-            <span>System Active</span>
+        <div class="text-sm text-gray-400 flex items-center space-x-4">
+            <div class="flex items-center space-x-2">
+                <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                <span>System Active</span>
+            </div>
+            <button id="btn-config" class="text-gray-400 hover:text-white transition-colors" title="Configuration">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+            </button>
         </div>
     </header>
 
     <!-- Main Content Grid -->
     <main class="flex-1 grid grid-cols-12 gap-0 overflow-hidden">
         
-        <!-- Left Panel: Event Log (Cols 4) -->
-        <section class="col-span-4 bg-gray-900 flex flex-col border-r border-gray-700 min-w-0 min-h-0">
-            <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
-                <h2 class="text-sm font-semibold text-gray-300 flex items-center">
-                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                    Live Event Log
-                </h2>
-                <div class="flex space-x-2">
-                    <button id="clear-logs" class="p-1 hover:bg-gray-700 rounded text-gray-400 transition-colors" title="Clear Logs">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    </button>
-                    <button id="toggle-scroll" class="p-1 hover:bg-gray-700 rounded text-green-400 transition-colors" title="Auto-scroll On">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 13l-7 7-7-7m14-8l-7 7-7-7"></path></svg>
-                    </button>
-                </div>
-            </div>
-            <div id="log-container" class="flex-1 overflow-y-auto p-4 space-y-2 monitor-font text-xs bg-[#0d1117]">
-                <div class="text-gray-500 italic">Waiting for events...</div>
-            </div>
-        </section>
-
-        <!-- Middle Panel: Request List (Cols 3) -->
+        <!-- Left Panel: Request List (Cols 3) -->
         <section class="col-span-3 bg-gray-900 flex flex-col border-r border-gray-700 min-w-0 min-h-0">
-             <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+             <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center h-[52px]">
                 <h2 class="text-sm font-semibold text-gray-300 flex items-center">
                     <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
                     Requests
@@ -101,20 +88,47 @@
             </div>
         </section>
 
-        <!-- Right Panel: Config & Details (Cols 5) -->
-        <section class="col-span-5 bg-gray-800 flex flex-col min-w-0 min-h-0">
-            <!-- Details Pane (Hidden by default, overlays Config if active or shared space) -->
-            <!-- Let's use tabs or just stack them. A request detail view is usually more important when selected. -->
-            
-            <div class="flex-1 flex flex-col min-h-0">
-                <!-- Tabs -->
-                <div class="flex border-b border-gray-700">
-                     <button id="tab-config" class="px-4 py-2 text-sm font-medium text-blue-400 border-b-2 border-blue-500 focus:outline-none">Configuration</button>
-                     <button id="tab-details" class="px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200 focus:outline-none">Request Details</button>
-                </div>
+        <!-- Middle Panel: Details (Cols 5) -->
+        <section class="col-span-5 bg-gray-800 flex flex-col border-r border-gray-700 min-w-0 min-h-0">
+             <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center h-[52px]">
+                <h2 class="text-sm font-semibold text-gray-300 flex items-center">Request Details</h2>
+            </div>
+            <div id="detail-empty" class="p-6 text-center text-gray-500 text-sm mt-10">Select a request to view details</div>
+            <div id="detail-content" class="hidden flex-1 flex flex-col overflow-y-auto p-4 space-y-4 monitor-font text-sm">
+                <!-- Messages go here -->
+            </div>
+        </section>
 
+        <!-- Right Panel: Logs (Cols 4) -->
+        <section class="col-span-4 bg-[#0d1117] flex flex-col min-w-0 min-h-0">
+            <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center h-[52px]">
+                <h2 class="text-sm font-semibold text-gray-300 flex items-center">
+                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    Event Log
+                </h2>
+                <div class="flex space-x-2">
+                    <button id="clear-logs" class="p-1 hover:bg-gray-700 rounded text-gray-400 transition-colors" title="Clear Logs">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                    <button id="toggle-scroll" class="p-1 hover:bg-gray-700 rounded text-green-400 transition-colors" title="Auto-scroll On">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 13l-7 7-7-7m14-8l-7 7-7-7"></path></svg>
+                    </button>
+                </div>
+            </div>
+            <div id="log-container" class="flex-1 overflow-y-auto p-4 space-y-2 monitor-font text-xs">
+                <div class="text-gray-500 italic">Select a request to view logs...</div>
+            </div>
+        </section>
+        
+        <!-- Config Modal -->
+        <div id="modal-config" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex justify-center items-center">
+            <div class="bg-gray-800 border border-gray-700 rounded-lg shadow-xl w-full max-w-lg flex flex-col mb-[10vh]">
+                <div class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-lg">
+                    <h2 class="text-white font-bold text-lg">Configuration</h2>
+                    <button id="close-config" class="text-gray-400 hover:text-white transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                </div>
                 <!-- Config View -->
-                <div id="view-config" class="p-6 space-y-6 overflow-y-auto">
+                <div class="p-6 space-y-6 overflow-y-auto">
                     <div class="space-y-4">
                         <div>
                             <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Upstream URL</label>
@@ -155,21 +169,17 @@
                          <div id="config-status" class="text-xs text-center min-h-[1.5em] transition-opacity duration-500 opacity-0"></div>
                     </div>
                 </div>
-
-                <!-- Detail View (Initially hidden) -->
-                <div id="view-details" class="hidden flex-1 flex flex-col overflow-hidden bg-gray-850">
-                    <div id="detail-empty" class="p-6 text-center text-gray-500 text-sm mt-10">Select a request to view details</div>
-                    <div id="detail-content" class="hidden flex-1 flex flex-col overflow-y-auto p-4 space-y-4 monitor-font text-sm">
-                        <!-- Messages go here -->
-                    </div>
-                </div>
             </div>
-        </section>
+        </div>
     </main>
 
     <script>
         // --- State ---
         let autoScroll = true;
+        let selectedRequestId = null;
+        const globalLogsMap = {}; // RequestID -> Array of Log Entries
+        
+        // Element Refs
         const logContainer = document.getElementById('log-container');
         const clearBtn = document.getElementById('clear-logs');
         const scrollBtn = document.getElementById('toggle-scroll');
@@ -177,39 +187,24 @@
         const requestListEl = document.getElementById('request-list');
         const detailContentEl = document.getElementById('detail-content');
         const detailEmptyEl = document.getElementById('detail-empty');
-        
-        let selectedRequestId = null;
+        const btnConfig = document.getElementById('btn-config');
+        const modalConfig = document.getElementById('modal-config');
+        const closeConfigBtn = document.getElementById('close-config');
 
-        // --- Tabs ---
-        const tabConfig = document.getElementById('tab-config');
-        const tabDetails = document.getElementById('tab-details');
-        const viewConfig = document.getElementById('view-config');
-        const viewDetails = document.getElementById('view-details');
-
-        function switchTab(tab) {
-            if (tab === 'config') {
-                viewConfig.classList.remove('hidden');
-                viewDetails.classList.add('hidden');
-                tabConfig.classList.replace('text-gray-400', 'text-blue-400');
-                tabConfig.classList.add('border-b-2', 'border-blue-500');
-                tabDetails.classList.replace('text-blue-400', 'text-gray-400');
-                tabDetails.classList.remove('border-b-2', 'border-blue-500');
-            } else {
-                viewConfig.classList.add('hidden');
-                viewDetails.classList.remove('hidden');
-                viewDetails.classList.add('flex');
-                tabDetails.classList.replace('text-gray-400', 'text-blue-400');
-                tabDetails.classList.add('border-b-2', 'border-blue-500');
-                tabConfig.classList.replace('text-blue-400', 'text-gray-400');
-                tabConfig.classList.remove('border-b-2', 'border-blue-500');
-            }
+        // --- Config Modal logic ---
+        btnConfig.onclick = () => {
+            modalConfig.classList.remove('hidden');
+            loadConfig(); // Reload latest
+        };
+        closeConfigBtn.onclick = () => {
+            modalConfig.classList.add('hidden');
+        };
+        modalConfig.onclick = (e) => {
+            if (e.target === modalConfig) modalConfig.classList.add('hidden');
         }
 
-        tabConfig.onclick = () => switchTab('config');
-        tabDetails.onclick = () => switchTab('details');
-
         // --- Log Logic ---
-        function addLogEntry(data) {
+        function renderSingleLog(data) {
             const entry = document.createElement('div');
             entry.className = "flex space-x-2 border-b border-gray-800 pb-1 mb-1 last:border-0";
             
@@ -220,26 +215,23 @@
             // Format message based on type
             if (data.type === 'request_started') {
                  typeColor = "text-blue-400";
-                 msg = `Processing new request ${data.data.id ? '['+data.data.id.substring(0,8)+']' : ''}...`;
+                 msg = `Processing new request...`;
             } else if (data.type === 'timeout_idle') {
                 typeColor = "text-red-400";
-                msg = `Idle timeout detected (${data.data.timeout})`;
+                msg = `Idle timeout detected (${data.data ? data.data.timeout : '?'})`;
             } else if (data.type === 'retry_attempt') {
                 typeColor = "text-purple-400";
-                msg = `Retrying request (Attempt ${data.data.attempt})`;
+                msg = `Retrying request (Attempt ${data.data ? data.data.attempt : '?'})`;
             } else if (data.type.includes('error')) {
                 typeColor = "text-red-500";
-                msg = `Error: ${data.data}`;
+                msg = `Error: ${data.data && data.data.error ? data.data.error : JSON.stringify(data.data)}`;
             } else if (data.type === 'request_completed') {
                 typeColor = "text-green-400";
                 msg = "Request completed successfully.";
-            } else if (data.type === 'config_updated') {
-                typeColor = "text-yellow-400";
-                msg = "Configuration updated.";
             }
 
-            // Clean up empty wait message
-            if (logContainer.children.length === 1 && logContainer.children[0].innerText === "Waiting for events...") {
+            // Remove placeholder text if it's there
+            if (logContainer.children.length === 1 && logContainer.children[0].innerText.includes("view logs")) {
                 logContainer.innerHTML = "";
             }
 
@@ -251,21 +243,36 @@
             
             logContainer.appendChild(entry);
             if (autoScroll) logContainer.scrollTop = logContainer.scrollHeight;
-            
-            // Refresh request list on significant events
-            if (['request_started', 'request_completed', 'retry_attempt', 'error_max_retries', 'timeout_idle'].includes(data.type)) {
-                fetchRequests();
-            }
         }
 
         const evtSource = new EventSource("/api/events");
         evtSource.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            addLogEntry(data);
+            
+            const reqId = (data.data && typeof data.data === 'object' && data.data.id) ? data.data.id : null;
+            if (reqId) {
+                if (!globalLogsMap[reqId]) {
+                    globalLogsMap[reqId] = [];
+                }
+                globalLogsMap[reqId].push(data);
+                
+                // Real-time render if this is the selected request
+                if (selectedRequestId === reqId) {
+                    renderSingleLog(data);
+                }
+            }
+
+            // Refresh request list automatically on some events
+            if (['request_started', 'request_completed', 'retry_attempt', 'error_max_retries', 'timeout_idle'].includes(data.type)) {
+                fetchRequests();
+            }
         };
 
         clearBtn.onclick = () => {
-            logContainer.innerHTML = '<div class="text-gray-500 italic">Logs cleared.</div>';
+            if (selectedRequestId && globalLogsMap[selectedRequestId]) {
+                globalLogsMap[selectedRequestId] = [];
+            }
+            logContainer.innerHTML = '<div class="text-gray-500 italic">Logs cleared for this request.</div>';
         };
 
         scrollBtn.onclick = () => {
@@ -315,12 +322,7 @@
         };
 
         function parseDuration(s) {
-            // Very simple parser for s/m/h. Defaults to ns.
-            // Go expects ns in int64 if passing raw, or we can pass a string logic if the API supported it.
-            // The go server side uses json.Unmarshal which might fail on string -> int64.
-            // Wait, the Go struct has time.Duration. encoding/json treats time.Duration as int64 (ns).
-            // So we need to send nanoseconds.
-            let mult = 1e9; // s
+            let mult = 1e9;
             if (s.endsWith('ms')) { mult = 1e6; s = s.slice(0,-2); }
             else if (s.endsWith('s')) { mult = 1e9; s = s.slice(0,-1); }
             else if (s.endsWith('m')) { mult = 60 * 1e9; s = s.slice(0,-1); }
@@ -347,7 +349,7 @@
 
             reqs.forEach(req => {
                 const el = document.createElement('div');
-                el.className = `p-3 border-b border-gray-800 hover:bg-gray-800 cursor-pointer transition-colors ${selectedRequestId === req.id ? 'bg-gray-800 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`;
+                el.className = `p-3 border-b border-gray-800 hover:bg-gray-800 flex flex-col cursor-pointer transition-colors ${selectedRequestId === req.id ? 'bg-gray-800 border-l-4 border-l-blue-500' : 'border-l-4 border-l-transparent'}`;
                 
                 let statusColor = "bg-gray-500";
                 if (req.status === 'completed') statusColor = "bg-green-500";
@@ -378,9 +380,17 @@
 
         async function selectRequest(id) {
             selectedRequestId = id;
-            fetchRequests(); // Re-render to update selection style
-            switchTab('details'); // Switch to details tab
+            fetchRequests(); // Re-render logic
+
+            // Repopulate Event Logs
+            logContainer.innerHTML = '';
+            if (globalLogsMap[id] && globalLogsMap[id].length > 0) {
+                globalLogsMap[id].forEach(renderSingleLog);
+            } else {
+                logContainer.innerHTML = '<div class="text-gray-500 italic text-center mt-4">No events found for this request.</div>';
+            }
             
+            // Repopulate Request Detail
             try {
                 const res = await fetch(`/api/requests/${id}`);
                 const fullReq = await res.json();
@@ -397,9 +407,8 @@
             
             // Header
             const header = document.createElement('div');
-            header.className = "mb-4 border-b border-gray-700 pb-2";
+            header.className = "mb-4 border-b border-gray-700 pb-2 shrink-0";
             header.innerHTML = `
-                <h3 class="text-lg font-bold text-gray-200 mb-1">Request Details</h3>
                 <div class="grid grid-cols-2 gap-2 text-xs text-gray-400">
                     <div>ID: <span class="text-gray-200 font-mono">${req.id}</span></div>
                     <div>Status: <span class="text-gray-200">${req.status}</span></div>
@@ -424,11 +433,10 @@
                     label = "System";
                 }
 
-                bubble.className = `p-3 rounded-lg mb-3 last:mb-0 ${alignment}`;
+                bubble.className = `p-3 rounded-lg mb-3 shrink-0 last:mb-0 ${alignment}`;
                 
                 let contentHtml = `<div class="text-[10px] uppercase font-bold text-gray-400 mb-1">${label}</div>`;
 
-                // Thinking Block
                 if (msg.thinking) {
                     contentHtml += `
                         <div class="mt-2 mb-2">
@@ -445,7 +453,6 @@
                     `;
                 }
 
-                // Tool Calls Block
                 if (msg.tool_calls && msg.tool_calls.length > 0) {
                     contentHtml += `<div class="mt-2 space-y-2">`;
                     msg.tool_calls.forEach(tool => {
@@ -462,16 +469,12 @@
                     contentHtml += `</div>`;
                 }
 
-                // If we have "Mock" tool call format in text (for our MVP test)
-                // We shouldn't rely on this in prod, but for the mock demo which sends text:
                  if (msg.content && msg.content.includes("[TOOL CALL:")) {
                     contentHtml += `
                         <div class="mt-2 p-2 bg-purple-900/20 border border-purple-500/30 rounded text-purple-300 text-sm font-mono">
                             ${escapeHtml(msg.content)}
                         </div>
                     `;
-                    // Don't show regular content if it's just a tool call representation?
-                    // Nah, show both.
                 } else if (msg.content) {
                     contentHtml += `<div class="whitespace-pre-wrap">${escapeHtml(msg.content)}</div>`;
                 }
@@ -480,13 +483,9 @@
                 detailContentEl.appendChild(bubble);
             });
 
-            // Final Response (if present and not already in messages list as an assistant response)
-            // But usually the final response IS the last assistant message if completed.
-            // Our proxy accumulates response but might not append it to req.Messages unless retrying.
-            // Let's show the final accumulated response separately if status is completed.
             if (req.response && req.status === 'completed') {
                  const bubble = document.createElement('div');
-                 bubble.className = "p-3 rounded-lg mb-3 bg-green-900/20 ml-8 mr-0 border border-green-500/30";
+                 bubble.className = "shrink-0 p-3 rounded-lg mb-3 bg-green-900/20 ml-8 mr-0 border border-green-500/30";
                  bubble.innerHTML = `
                     <div class="text-[10px] uppercase font-bold text-green-400 mb-1">Final Response</div>
                     <div class="whitespace-pre-wrap">${escapeHtml(req.response)}</div>
