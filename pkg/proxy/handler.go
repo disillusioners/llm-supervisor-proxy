@@ -325,12 +325,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// So the client receives: [Part 1] [Connection Break] [Part 2].
 			// This works perfectly for concatenating text.
 
-			if len(line) > 0 {
-				w.Write(line)
-				w.Write([]byte("\n"))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
+			w.Write(line)
+			w.Write([]byte("\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
 
 			// Accumulate logic
@@ -338,6 +336,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				data := bytes.TrimPrefix(line, []byte("data: "))
 				if string(data) == "[DONE]" {
 					streamEndedSuccesfully = true
+					// Make sure to write the final empty line that ends the `data: [DONE]` event
+					w.Write([]byte("\n"))
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
 					break
 				}
 
