@@ -13,3 +13,4 @@ vendor/
 test_output.txt
 
 *.txt
+cmd/__debug_bin*
