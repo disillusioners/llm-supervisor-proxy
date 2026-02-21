@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useState, useRef, useEffect } from 'preact/hooks';
 import type { RequestDetail as RequestDetailType } from '../types';
 import { escapeHtml } from '../utils/helpers';
 
@@ -35,8 +35,8 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
         <button
           onClick={() => setIsExpanded(false)}
           class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
-              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
-              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+            ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+            : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
             }`}
         >
           Collapse
@@ -60,8 +60,8 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
         <button
           onClick={() => setIsExpanded(true)}
           class={`mx-3 text-xs px-3 py-1 rounded border transition-colors flex-shrink-0 ${role === 'user'
-              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
-              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+            ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+            : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
             }`}
         >
           ... Show {hiddenCount} hidden lines ...
@@ -78,6 +78,13 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
 
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+  }, [detail]);
 
   const toggleThought = (index: number) => {
     setExpandedThoughts(prev => {
@@ -152,7 +159,10 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
       </div>
 
       {/* Messages - Scrollable */}
-      <div class="flex-1 overflow-y-auto min-h-0 p-4 monitor-font text-sm">
+      <div
+        ref={messagesContainerRef}
+        class="flex-1 overflow-y-auto min-h-0 p-4 monitor-font text-sm"
+      >
         <div class="space-y-3">
           {detail.messages.map((message, index) => (
             <div key={index}>
