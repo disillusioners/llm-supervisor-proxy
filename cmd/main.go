@@ -20,7 +20,7 @@ func main() {
 	// Configuration
 	upstreamURL := os.Getenv("UPSTREAM_URL")
 	if upstreamURL == "" {
-		upstreamURL = "http://localhost:4000"
+		upstreamURL = "http://localhost:4001"
 	}
 
 	port := os.Getenv("PORT")
