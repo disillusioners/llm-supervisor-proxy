@@ -40,6 +40,11 @@ type RequestLog struct {
 	// OR we should construct a proper Assistant Message at the end.
 	Retries int    `json:"retries"`
 	Error   string `json:"error,omitempty"`
+
+	// Fallback tracking
+	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model
+	FallbackUsed    []string `json:"fallback_used,omitempty"`    // List of fallback models that were attempted
+	CurrentFallback string   `json:"current_fallback,omitempty"` // Currently active fallback model (if any)
 }
 
 type RequestStore struct {

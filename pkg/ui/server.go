@@ -11,25 +11,36 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
+
+// Model represents a model with its fallback chain
+type Model struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Enabled       bool     `json:"enabled"`
+	FallbackChain []string `json:"fallback_chain"`
+}
 
 //go:embed static/*
 var staticFiles embed.FS
 
 type Server struct {
-	bus    *events.Bus
-	config *proxy.Config // Pointer to live config
-	store  *store.RequestStore
-	mu     sync.Mutex
+	bus          *events.Bus
+	config       *proxy.Config        // Pointer to live config
+	modelsConfig *models.ModelsConfig // Pointer to models config
+	store        *store.RequestStore
+	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, config *proxy.Config, store *store.RequestStore) *Server {
+func NewServer(bus *events.Bus, config *proxy.Config, modelsConfig *models.ModelsConfig, store *store.RequestStore) *Server {
 	return &Server{
-		bus:    bus,
-		config: config,
-		store:  store,
+		bus:          bus,
+		config:       config,
+		modelsConfig: modelsConfig,
+		store:        store,
 	}
 }
 
@@ -50,6 +61,9 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 	// API
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/models", s.handleModels)
+	mux.HandleFunc("/api/models/", s.handleModelDetail)
+	mux.HandleFunc("/api/models/validate", s.handleValidateModel)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/requests", s.handleRequests)
 	mux.HandleFunc("/api/requests/", s.handleRequestDetail)
@@ -143,4 +157,211 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// handleModels handles GET and POST /api/models
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		modelConfigs := s.modelsConfig.GetModels()
+		models := make([]Model, len(modelConfigs))
+		for i, mc := range modelConfigs {
+			models[i] = Model{
+				ID:            mc.ID,
+				Name:          mc.Name,
+				Enabled:       mc.Enabled,
+				FallbackChain: mc.FallbackChain,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models)
+
+	case http.MethodPost:
+		var newModel Model
+		if err := json.NewDecoder(r.Body).Decode(&newModel); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Validate model
+		if newModel.Name == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "model name is required"})
+			return
+		}
+
+		// Generate ID if not provided
+		if newModel.ID == "" {
+			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
+		}
+
+		// Convert to models.ModelConfig
+		modelConfig := models.ModelConfig{
+			ID:            newModel.ID,
+			Name:          newModel.Name,
+			Enabled:       newModel.Enabled,
+			FallbackChain: newModel.FallbackChain,
+		}
+
+		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(newModel)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleModelDetail handles PUT and DELETE /api/models/{id}
+func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
+	// /api/models/{id}
+	id := r.URL.Path[len("/api/models/"):]
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		var updatedModel Model
+		if err := json.NewDecoder(r.Body).Decode(&updatedModel); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Validate model
+		if updatedModel.Name == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "model name is required"})
+			return
+		}
+
+		// Keep the same ID
+		updatedModel.ID = id
+
+		// Convert to models.ModelConfig and update
+		modelConfig := models.ModelConfig{
+			ID:            updatedModel.ID,
+			Name:          updatedModel.Name,
+			Enabled:       updatedModel.Enabled,
+			FallbackChain: updatedModel.FallbackChain,
+		}
+
+		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(updatedModel)
+
+	case http.MethodDelete:
+		if err := s.modelsConfig.RemoveModel(id); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleValidateModel handles POST /api/models/validate
+func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var model Model
+	if err := json.NewDecoder(r.Body).Decode(&model); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Validate model name
+	if model.Name == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "model name is required"})
+		return
+	}
+
+	// Validate fallback chain - check that all models in the chain exist
+	modelConfigs := s.modelsConfig.GetModels()
+
+	existingModels := make(map[string]bool)
+	for _, m := range modelConfigs {
+		existingModels[m.Name] = true
+	}
+
+	// Add the current model being validated to the check
+	existingModels[model.Name] = true
+
+	var validationErrors []string
+	for _, fallback := range model.FallbackChain {
+		if !existingModels[fallback] {
+			validationErrors = append(validationErrors, fmt.Sprintf("fallback model '%s' not found", fallback))
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(validationErrors) > 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"valid":  false,
+			"errors": validationErrors,
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"valid": true,
+	})
 }

@@ -10,6 +10,13 @@ type Event struct {
 	Data      interface{} `json:"data"`
 }
 
+// FallbackEvent represents a fallback model transition
+type FallbackEvent struct {
+	FromModel string `json:"from_model"`
+	ToModel   string `json:"to_model"`
+	Reason    string `json:"reason"` // "max_retries" | "deadline_exceeded" | "upstream_error"
+}
+
 type Bus struct {
 	mu          sync.RWMutex
 	subscribers []chan Event

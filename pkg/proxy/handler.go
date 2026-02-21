@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"sync"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 	"github.com/google/uuid"
@@ -23,10 +24,11 @@ import (
 
 type Config struct {
 	mu                sync.RWMutex
-	UpstreamURL       string        `json:"upstream_url"`
-	IdleTimeout       time.Duration `json:"idle_timeout"`
-	MaxGenerationTime time.Duration `json:"max_generation_time"`
-	MaxRetries        int           `json:"max_retries"`
+	UpstreamURL       string               `json:"upstream_url"`
+	IdleTimeout       time.Duration        `json:"idle_timeout"`
+	MaxGenerationTime time.Duration        `json:"max_generation_time"`
+	MaxRetries        int                  `json:"max_retries"`
+	ModelsConfig      *models.ModelsConfig `json:"-"`
 }
 
 func (c *Config) Clone() Config {
@@ -37,6 +39,7 @@ func (c *Config) Clone() Config {
 		IdleTimeout:       c.IdleTimeout,
 		MaxGenerationTime: c.MaxGenerationTime,
 		MaxRetries:        c.MaxRetries,
+		ModelsConfig:      c.ModelsConfig,
 	}
 }
 
@@ -47,6 +50,7 @@ func (c *Config) CopyFrom(other Config) {
 	c.IdleTimeout = other.IdleTimeout
 	c.MaxGenerationTime = other.MaxGenerationTime
 	c.MaxRetries = other.MaxRetries
+	c.ModelsConfig = other.ModelsConfig
 }
 
 type Handler struct {
@@ -127,16 +131,30 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	model, _ := requestBody["model"].(string)
+	originalModel := model
 
 	reqLog := &store.RequestLog{
-		ID:        reqID,
-		Status:    "running",
-		Model:     model,
-		StartTime: startTime,
-		Messages:  storeMessages,
-		Retries:   0,
+		ID:            reqID,
+		Status:        "running",
+		Model:         model,
+		OriginalModel: originalModel,
+		StartTime:     startTime,
+		Messages:      storeMessages,
+		Retries:       0,
+		FallbackUsed:  []string{},
 	}
 	h.store.Add(reqLog)
+
+	// Set up fallback models
+	var allModels []string
+	if conf.ModelsConfig != nil {
+		fallbackChain := conf.ModelsConfig.GetFallbackChain(originalModel)
+		// GetFallbackChain returns [original, fallback1, fallback2, ...]
+		// We only want the fallbacks, not the original
+		if len(fallbackChain) > 0 {
+			allModels = fallbackChain[1:] // Skip the first one (original)
+		}
+	}
 
 	attempt := 0
 	var accumulatedResponse strings.Builder
@@ -161,137 +179,291 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		isStream = true
 	}
 
-	for attempt <= conf.MaxRetries {
-		if attempt > 0 {
-			log.Printf("Retrying request (attempt %d)...", attempt)
-			reqLog.Retries = attempt
-			reqLog.Status = "retrying"
-			h.store.Add(reqLog) // Update store
+	// Build the complete model list: original + fallbacks
+	modelList := []string{originalModel}
+	modelList = append(modelList, allModels...)
 
-			h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": reqID})
+	// Minimum threshold for fallback - don't attempt fallback if less than 10 seconds remain
+	minFallbackThreshold := 10 * time.Second
 
-			if isStream {
-				// Modify request body for retry
-				messages, ok := requestBody["messages"].([]interface{})
-				if !ok {
-					log.Println("Could not find messages, aborting retry")
-					return
-				}
+	// Outer loop: iterate through models (original + fallbacks)
+	for modelIndex, currentModel := range modelList {
+		// Check remaining timeout budget before attempting this model
+		remainingTime := GetRemainingTimeout(ctx)
+		if remainingTime < minFallbackThreshold && modelIndex > 0 {
+			// Not enough time for fallback, break out
+			log.Println("Insufficient time for fallback, failing request")
+			break
+		}
 
-				// If we have content, append it
-				if accumulatedResponse.Len() > 0 {
+		// Update model in request body
+		requestBody["model"] = currentModel
+
+		// Reset attempt counter for each new model
+		attempt = 0
+		headersSent = false
+
+		// Inner loop: retry logic for current model
+		for attempt <= conf.MaxRetries {
+			if attempt > 0 {
+				log.Printf("Retrying request (attempt %d)...", attempt)
+				reqLog.Retries = attempt
+				reqLog.Status = "retrying"
+				h.store.Add(reqLog) // Update store
+
+				h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": reqID})
+
+				if isStream {
+					// Modify request body for retry
+					messages, ok := requestBody["messages"].([]interface{})
+					if !ok {
+						log.Println("Could not find messages, aborting retry")
+						return
+					}
+
+					// If we have content, append it
+					if accumulatedResponse.Len() > 0 {
+						messages = append(messages, map[string]string{
+							"role":    "assistant",
+							"content": accumulatedResponse.String(),
+						})
+					}
+
 					messages = append(messages, map[string]string{
-						"role":    "assistant",
-						"content": accumulatedResponse.String(),
+						"role":    "user",
+						"content": "The previous response was interrupted. Continue exactly where you stopped.",
 					})
+
+					requestBody["messages"] = messages
 				}
-
-				messages = append(messages, map[string]string{
-					"role":    "user",
-					"content": "The previous response was interrupted. Continue exactly where you stopped.",
-				})
-
-				requestBody["messages"] = messages
 			}
-		}
 
-		newBodyBytes, _ := json.Marshal(requestBody)
+			newBodyBytes, _ := json.Marshal(requestBody)
 
-		// Create request with the deadline context
-		proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewBuffer(newBodyBytes))
-		if err != nil {
-			log.Printf("Failed to create request: %v", err)
-			return
-		}
-
-		// Copy headers
-		for name, values := range r.Header {
-			if name == "Content-Length" {
-				continue
-			}
-			for _, value := range values {
-				proxyReq.Header.Add(name, value)
-			}
-		}
-
-		resp, err := h.client.Do(proxyReq)
-		if err != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				log.Println("Global deadline exceeded")
-				h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
-				reqLog.Status = "failed"
-				reqLog.Error = "Global deadline exceeded"
-				reqLog.EndTime = time.Now()
-				reqLog.Duration = time.Since(startTime).String()
-				h.store.Add(reqLog)
+			// Create request with the deadline context
+			proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewBuffer(newBodyBytes))
+			if err != nil {
+				log.Printf("Failed to create request: %v", err)
 				return
 			}
-			log.Printf("Upstream request failed: %v", err)
-			h.publishEvent("upstream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
-			attempt++
-			time.Sleep(500 * time.Millisecond) // Slight backoff
-			continue
-		}
 
-		// Cleanup response body if we don't finish loop
-		// We defer close inside the loop but we need to be careful not to close it too early if we wrap it.
-		// The MonitoredReader takes ownership.
-
-		if resp.StatusCode != http.StatusOK {
-			// If not 200, assume error and maybe retry?
-			// If 5xx or 429, retry.
-			// But first, if we haven't sent headers, we can pass through error.
-			if !headersSent {
-				// Only retry on 5xx or 429
-				if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-					resp.Body.Close()
-					log.Printf("Upstream returned %d", resp.StatusCode)
-					h.publishEvent("upstream_error_status", map[string]interface{}{"status": resp.StatusCode, "id": reqID})
-					attempt++
-					time.Sleep(1 * time.Second)
+			// Copy headers
+			for name, values := range r.Header {
+				if name == "Content-Length" {
 					continue
 				}
+				for _, value := range values {
+					proxyReq.Header.Add(name, value)
+				}
+			}
 
-				// Otherwise pass through
+			resp, err := h.client.Do(proxyReq)
+			if err != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					log.Println("Global deadline exceeded")
+					h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
+					reqLog.Status = "failed"
+					reqLog.Error = "Global deadline exceeded"
+					reqLog.EndTime = time.Now()
+					reqLog.Duration = time.Since(startTime).String()
+					h.store.Add(reqLog)
+					return
+				}
+				log.Printf("Upstream request failed: %v", err)
+				h.publishEvent("upstream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
+				attempt++
+				time.Sleep(500 * time.Millisecond) // Slight backoff
+				continue
+			}
+
+			// Cleanup response body if we don't finish loop
+			// We defer close inside the loop but we need to be careful not to close it too early if we wrap it.
+			// The MonitoredReader takes ownership.
+
+			if resp.StatusCode != http.StatusOK {
+				// If not 200, assume error and maybe retry?
+				// If 5xx or 429, retry.
+				// But first, if we haven't sent headers, we can pass through error.
+				if !headersSent {
+					// Only retry on 5xx or 429
+					if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+						resp.Body.Close()
+						log.Printf("Upstream returned %d", resp.StatusCode)
+						h.publishEvent("upstream_error_status", map[string]interface{}{"status": resp.StatusCode, "id": reqID})
+						attempt++
+						time.Sleep(1 * time.Second)
+						continue
+					}
+
+					// Otherwise pass through
+					for k, v := range resp.Header {
+						w.Header()[k] = v
+					}
+					w.WriteHeader(resp.StatusCode)
+					io.Copy(w, resp.Body)
+					resp.Body.Close()
+
+					reqLog.Status = "failed"
+					reqLog.Error = fmt.Sprintf("Upstream returned %d", resp.StatusCode)
+					reqLog.EndTime = time.Now()
+					reqLog.Duration = time.Since(startTime).String()
+					h.store.Add(reqLog)
+					return
+				}
+				resp.Body.Close()
+				return
+			}
+
+			monitor := supervisor.NewMonitoredReader(resp.Body, conf.IdleTimeout)
+
+			if !headersSent {
 				for k, v := range resp.Header {
 					w.Header()[k] = v
 				}
-				w.WriteHeader(resp.StatusCode)
-				io.Copy(w, resp.Body)
-				resp.Body.Close()
-
-				reqLog.Status = "failed"
-				reqLog.Error = fmt.Sprintf("Upstream returned %d", resp.StatusCode)
-				reqLog.EndTime = time.Now()
-				reqLog.Duration = time.Since(startTime).String()
-				h.store.Add(reqLog)
-				return
+				w.WriteHeader(http.StatusOK)
+				// Force flush headers?
+				// if f, ok := w.(http.Flusher); ok { f.Flush() }
+				headersSent = true
 			}
-			resp.Body.Close()
-			return
-		}
 
-		monitor := supervisor.NewMonitoredReader(resp.Body, conf.IdleTimeout)
-
-		if !headersSent {
-			for k, v := range resp.Header {
-				w.Header()[k] = v
-			}
-			w.WriteHeader(http.StatusOK)
-			// Force flush headers?
-			// if f, ok := w.(http.Flusher); ok { f.Flush() }
-			headersSent = true
-		}
-
-		if !isStream {
-			bodyBytes, err := io.ReadAll(monitor)
-			if err != nil {
-				if errors.Is(err, supervisor.ErrIdleTimeout) {
-					log.Println("Stream idle timeout detected!")
-					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
+			if !isStream {
+				bodyBytes, err := io.ReadAll(monitor)
+				if err != nil {
+					if errors.Is(err, supervisor.ErrIdleTimeout) {
+						log.Println("Stream idle timeout detected!")
+						h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
+						attempt++
+						continue
+					}
+					log.Printf("Stream error: %v", err)
+					h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
+					monitor.Close()
 					attempt++
 					continue
 				}
+
+				w.Write(bodyBytes)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+
+				var respMap map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &respMap); err == nil {
+					if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+						if choice, ok := choices[0].(map[string]interface{}); ok {
+							if msg, ok := choice["message"].(map[string]interface{}); ok {
+								if content, ok := msg["content"].(string); ok {
+									accumulatedResponse.WriteString(content)
+								}
+								if rc, ok := msg["reasoning_content"].(string); ok {
+									accumulatedThinking.WriteString(rc)
+								}
+								if psf, ok := msg["provider_specific_fields"].(map[string]interface{}); ok {
+									if rc, ok := psf["reasoning_content"].(string); ok {
+										accumulatedThinking.WriteString(rc)
+									}
+								}
+							}
+						}
+					}
+				}
+
+				h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
+				reqLog.Status = "completed"
+				reqLog.Response = accumulatedResponse.String()
+				reqLog.Thinking = accumulatedThinking.String()
+				reqLog.EndTime = time.Now()
+				reqLog.Duration = time.Since(startTime).String()
+				h.store.Add(reqLog)
+				monitor.Close()
+				return
+			}
+
+			// Stream
+			scanner := bufio.NewScanner(monitor)
+			// Default scanner buffer might be small for very long lines, but SSE lines are usually okay.
+			buffer := make([]byte, 0, 1024*1024)
+			scanner.Buffer(buffer, 1024*1024) // 1MB limit
+
+			streamEndedSuccesfully := false
+
+			for scanner.Scan() {
+				line := scanner.Bytes()
+
+				// Passthrough
+				// Note: We might be sending duplicate "role": "assistant" chunks if we retry?
+				// The client handles SSE events. Repeated events usually just append.
+				// If we retry, we are starting a NEW stream.
+				// Ideally, we shouldn't send previous content again if we use "Continue".
+				// But "Continue" makes the LLM allow generating the *rest*.
+				// So the client receives: [Part 1] [Connection Break] [Part 2].
+				// This works perfectly for concatenating text.
+
+				w.Write(line)
+				w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+
+				// Accumulate logic
+				if bytes.HasPrefix(line, []byte("data: ")) {
+					data := bytes.TrimPrefix(line, []byte("data: "))
+					if string(data) == "[DONE]" {
+						streamEndedSuccesfully = true
+						// Make sure to write the final empty line that ends the `data: [DONE]` event
+						w.Write([]byte("\n"))
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+						break
+					}
+
+					var chunk map[string]interface{}
+					// Use a quick unmarshal to avoid overhead? No, safety first.
+					if err := json.Unmarshal(data, &chunk); err == nil {
+						if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+							if choice, ok := choices[0].(map[string]interface{}); ok {
+								if delta, ok := choice["delta"].(map[string]interface{}); ok {
+									// Content
+									if content, ok := delta["content"].(string); ok {
+										accumulatedResponse.WriteString(content)
+										// Live update response in store? Maybe too frequent.
+										// Update at end is safer for perf.
+									}
+									// Thinking (DeepSeek style or reasoning_content)
+									// Check for different keys
+									if thinking, ok := delta["reasoning_content"].(string); ok {
+										accumulatedThinking.WriteString(thinking)
+									} else if thinking, ok := delta["thinking"].(string); ok { // Some models use 'thinking'
+										accumulatedThinking.WriteString(thinking)
+									}
+
+									// Tool Calls
+									// Tool calls come in chunks too.
+									// We need to accumulate them.
+									// This is getting complex for a simple proxy.
+									// For the MVP visualization, we might just want to store the FINAL accumulated result?
+									// But we are streaming.
+									// Actually, the Store updates happen at the END (or on retry).
+									// So we just need to accumulate everything.
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// If we got here, scanner stopped.
+			err = scanner.Err()
+			if errors.Is(err, supervisor.ErrIdleTimeout) {
+				log.Println("Stream idle timeout detected!")
+				h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
+				// monitor closed the body.
+				attempt++
+				continue
+			}
+
+			if err != nil {
 				log.Printf("Stream error: %v", err)
 				h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 				monitor.Close()
@@ -299,163 +471,77 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 
-			w.Write(bodyBytes)
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+			// If scanner finished without error, we are likely done.
+			if streamEndedSuccesfully {
+				h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
+
+				reqLog.Status = "completed"
+				reqLog.Response = accumulatedResponse.String()
+				reqLog.Thinking = accumulatedThinking.String() // Save thinking
+				reqLog.EndTime = time.Now()
+				reqLog.Duration = time.Since(startTime).String() // Approximate
+				h.store.Add(reqLog)
+				monitor.Close()
+				return
 			}
 
-			var respMap map[string]interface{}
-			if err := json.Unmarshal(bodyBytes, &respMap); err == nil {
-				if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
-					if choice, ok := choices[0].(map[string]interface{}); ok {
-						if msg, ok := choice["message"].(map[string]interface{}); ok {
-							if content, ok := msg["content"].(string); ok {
-								accumulatedResponse.WriteString(content)
-							}
-							if rc, ok := msg["reasoning_content"].(string); ok {
-								accumulatedThinking.WriteString(rc)
-							}
-							if psf, ok := msg["provider_specific_fields"].(map[string]interface{}); ok {
-								if rc, ok := psf["reasoning_content"].(string); ok {
-									accumulatedThinking.WriteString(rc)
-								}
-							}
-						}
-					}
-				}
-			}
-
-			h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
-			reqLog.Status = "completed"
-			reqLog.Response = accumulatedResponse.String()
-			reqLog.Thinking = accumulatedThinking.String()
-			reqLog.EndTime = time.Now()
-			reqLog.Duration = time.Since(startTime).String()
-			h.store.Add(reqLog)
-			monitor.Close()
-			return
-		}
-
-		// Stream
-		scanner := bufio.NewScanner(monitor)
-		// Default scanner buffer might be small for very long lines, but SSE lines are usually okay.
-		buffer := make([]byte, 0, 1024*1024)
-		scanner.Buffer(buffer, 1024*1024) // 1MB limit
-
-		streamEndedSuccesfully := false
-
-		for scanner.Scan() {
-			line := scanner.Bytes()
-
-			// Passthrough
-			// Note: We might be sending duplicate "role": "assistant" chunks if we retry?
-			// The client handles SSE events. Repeated events usually just append.
-			// If we retry, we are starting a NEW stream.
-			// Ideally, we shouldn't send previous content again if we use "Continue".
-			// But "Continue" makes the LLM allow generating the *rest*.
-			// So the client receives: [Part 1] [Connection Break] [Part 2].
-			// This works perfectly for concatenating text.
-
-			w.Write(line)
-			w.Write([]byte("\n"))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-
-			// Accumulate logic
-			if bytes.HasPrefix(line, []byte("data: ")) {
-				data := bytes.TrimPrefix(line, []byte("data: "))
-				if string(data) == "[DONE]" {
-					streamEndedSuccesfully = true
-					// Make sure to write the final empty line that ends the `data: [DONE]` event
-					w.Write([]byte("\n"))
-					if f, ok := w.(http.Flusher); ok {
-						f.Flush()
-					}
-					break
-				}
-
-				var chunk map[string]interface{}
-				// Use a quick unmarshal to avoid overhead? No, safety first.
-				if err := json.Unmarshal(data, &chunk); err == nil {
-					if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
-						if choice, ok := choices[0].(map[string]interface{}); ok {
-							if delta, ok := choice["delta"].(map[string]interface{}); ok {
-								// Content
-								if content, ok := delta["content"].(string); ok {
-									accumulatedResponse.WriteString(content)
-									// Live update response in store? Maybe too frequent.
-									// Update at end is safer for perf.
-								}
-								// Thinking (DeepSeek style or reasoning_content)
-								// Check for different keys
-								if thinking, ok := delta["reasoning_content"].(string); ok {
-									accumulatedThinking.WriteString(thinking)
-								} else if thinking, ok := delta["thinking"].(string); ok { // Some models use 'thinking'
-									accumulatedThinking.WriteString(thinking)
-								}
-
-								// Tool Calls
-								// Tool calls come in chunks too.
-								// We need to accumulate them.
-								// This is getting complex for a simple proxy.
-								// For the MVP visualization, we might just want to store the FINAL accumulated result?
-								// But we are streaming.
-								// Actually, the Store updates happen at the END (or on retry).
-								// So we just need to accumulate everything.
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// If we got here, scanner stopped.
-		err = scanner.Err()
-		if errors.Is(err, supervisor.ErrIdleTimeout) {
-			log.Println("Stream idle timeout detected!")
-			h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
-			// monitor closed the body.
-			attempt++
-			continue
-		}
-
-		if err != nil {
-			log.Printf("Stream error: %v", err)
-			h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
+			// If stream ended but no [DONE] and no error?
+			// Could be unexpected EOF.
+			log.Println("Stream ended unexpectedly without [DONE]")
+			h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": reqID})
 			monitor.Close()
 			attempt++
-			continue
 		}
 
-		// If scanner finished without error, we are likely done.
-		if streamEndedSuccesfully {
-			h.publishEvent("request_completed", map[string]interface{}{"id": reqID})
+		log.Println("Max retries exceeded")
+		h.publishEvent("error_max_retries", map[string]interface{}{"id": reqID})
 
-			reqLog.Status = "completed"
-			reqLog.Response = accumulatedResponse.String()
-			reqLog.Thinking = accumulatedThinking.String() // Save thinking
-			reqLog.EndTime = time.Now()
-			reqLog.Duration = time.Since(startTime).String() // Approximate
-			h.store.Add(reqLog)
-			monitor.Close()
-			return
+		reqLog.Status = "failed"
+		reqLog.Error = "Max retries exceeded"
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = time.Since(startTime).String()
+		h.store.Add(reqLog)
+
+		// Check if there's a next model to fall back to
+		if modelIndex+1 < len(modelList) {
+			nextModel := modelList[modelIndex+1]
+			reqLog.CurrentFallback = nextModel
+
+			// Publish fallback triggered event for ALL transitions (including primary -> first fallback)
+			h.publishEvent("fallback_triggered", events.FallbackEvent{
+				FromModel: currentModel,
+				ToModel:   nextModel,
+				Reason:    determineFailureReason(ctx, attempt, conf.MaxRetries),
+			})
 		}
 
-		// If stream ended but no [DONE] and no error?
-		// Could be unexpected EOF.
-		log.Println("Stream ended unexpectedly without [DONE]")
-		h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": reqID})
-		monitor.Close()
-		attempt++
+		// Only track in "FallbackUsed" if the model that *just failed* was actually a fallback (not the primary)
+		if modelIndex > 0 {
+			reqLog.FallbackUsed = append(reqLog.FallbackUsed, currentModel)
+		}
+	} // End of outer model loop
+}
+
+// determineFailureReason determines the reason for failure based on context and attempt count
+func determineFailureReason(ctx context.Context, attempt int, maxRetries int) string {
+	if attempt > maxRetries {
+		return "max_retries"
 	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	return "upstream_error"
+}
 
-	log.Println("Max retries exceeded")
-	h.publishEvent("error_max_retries", map[string]interface{}{"id": reqID})
-
-	reqLog.Status = "failed"
-	reqLog.Error = "Max retries exceeded"
-	reqLog.EndTime = time.Now()
-	reqLog.Duration = time.Since(startTime).String()
-	h.store.Add(reqLog)
+// GetRemainingTimeout returns the remaining timeout for the context
+func GetRemainingTimeout(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }

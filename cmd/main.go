@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
@@ -49,15 +50,19 @@ func main() {
 	// Initialize Shared Components
 	bus := events.NewBus()
 	store := store.NewRequestStore(100) // Keep last 100 requests
+	modelsConfig := models.NewModelsConfig()
+	_ = modelsConfig.Load("config/models.json") // Ignore error if file doesn't exist
+
 	config := &proxy.Config{
 		UpstreamURL:       upstreamURL,
 		IdleTimeout:       idleTimeout,
 		MaxGenerationTime: maxGenTime,
 		MaxRetries:        maxRetries,
+		ModelsConfig:      modelsConfig,
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, config, store)
+	uiServer := ui.NewServer(bus, config, modelsConfig, store)
 
 	// Initialize Proxy Handler
 	proxyHandler := proxy.NewHandler(config, bus, store)

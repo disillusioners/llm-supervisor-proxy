@@ -10,7 +10,7 @@
             "env": {
                 "UPSTREAM_URL": "http://litellm-service.litellm.svc.cluster.local:4000",
                 "PORT": "4321",
-                "IDLE_TIMEOUT": "60s",
+                "IDLE_TIMEOUT": "120s",
                 "MAX_GENERATION_TIME": "600s",
                 "MAX_RETRIES": "3"
             }
