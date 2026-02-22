@@ -171,14 +171,22 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// We need to know when client disconnects
 	ctx := r.Context()
 
+	// Add heartbeat ticker to keep connection alive
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case evt := <-sub:
 			data, _ := json.Marshal(evt)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+		case <-ticker.C:
+			// Send comment heartbeat
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			flusher.Flush()
 		case <-ctx.Done():
-			s.bus.Unsubscribe(sub) // We need to expose Unsubscribe or handle it
+			s.bus.Unsubscribe(sub)
 			return
 		}
 	}

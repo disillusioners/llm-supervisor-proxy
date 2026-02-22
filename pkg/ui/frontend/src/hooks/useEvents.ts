@@ -1,20 +1,55 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import type { Event } from '../types';
 
+// Shared EventSource management to avoid redundant connections
+let sharedEventSource: EventSource | null = null;
+const subscribers = new Set<(data: Event) => void>();
+
+function getSharedEventSource() {
+  if (!sharedEventSource) {
+    sharedEventSource = new EventSource('/api/events');
+    
+    sharedEventSource.onmessage = (event) => {
+      try {
+        const data: Event = JSON.parse(event.data);
+        subscribers.forEach((callback) => callback(data));
+      } catch (e) {
+        console.error('Failed to parse SSE event:', e);
+      }
+    };
+
+    sharedEventSource.onerror = (err) => {
+      // EventSource automatically reconnects. 
+      // Only log if it's in a closed state to avoid noise during normal reconnection.
+      if (sharedEventSource?.readyState === EventSource.CLOSED) {
+        console.error('EventSource connection closed, attempting to reconnect...', err);
+      }
+    };
+  }
+  return sharedEventSource;
+}
+
+function subscribe(callback: (data: Event) => void) {
+  subscribers.add(callback);
+  getSharedEventSource();
+  
+  return () => {
+    subscribers.delete(callback);
+    if (subscribers.size === 0 && sharedEventSource) {
+      sharedEventSource.close();
+      sharedEventSource = null;
+    }
+  };
+}
+
 export function useEvents(selectedRequestId: string | null, autoScroll: boolean) {
   const [eventsMap, setEventsMap] = useState<Record<string, Event[]>>({});
   const [displayedEvents, setDisplayedEvents] = useState<Event[]>([]);
-  const eventSourceRef = useRef<EventSource | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // Initialize EventSource connection
   useEffect(() => {
-    eventSourceRef.current = new EventSource('/api/events');
-
-    eventSourceRef.current.onmessage = (event) => {
-      const data: Event = JSON.parse(event.data);
+    const handleEvent = (data: Event) => {
       const reqId = data.data?.id;
-
       if (reqId) {
         setEventsMap((prev) => ({
           ...prev,
@@ -23,13 +58,7 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
       }
     };
 
-    eventSourceRef.current.onerror = (err) => {
-      console.error('EventSource error:', err);
-    };
-
-    return () => {
-      eventSourceRef.current?.close();
-    };
+    return subscribe(handleEvent);
   }, []);
 
   // Update displayed events when selection changes
@@ -69,10 +98,7 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
 // Hook to detect events that should trigger request list refresh
 export function useEventRefresh(onRefresh: () => void) {
   useEffect(() => {
-    const es = new EventSource('/api/events');
-
-    es.onmessage = (event) => {
-      const data: Event = JSON.parse(event.data);
+    const handleEvent = (data: Event) => {
       const refreshTypes = [
         'request_started',
         'request_completed',
@@ -85,6 +111,6 @@ export function useEventRefresh(onRefresh: () => void) {
       }
     };
 
-    return () => es.close();
+    return subscribe(handleEvent);
   }, [onRefresh]);
 }
