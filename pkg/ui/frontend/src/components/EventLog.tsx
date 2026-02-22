@@ -19,7 +19,21 @@ const getEventMessage = (event: Event): string => {
     case 'retry_attempt':
       return `Retrying request (Attempt ${event.data?.attempt || '?'})`;
     case 'error_max_upstream_error_retries':
-      return `Error: Max retries exceeded${event.data?.error ? ` - ${event.data.error}` : ''}`;
+      return `Max retries exceeded${event.data?.error ? ` - ${event.data.error}` : ''}`;
+    case 'upstream_error':
+      return `Upstream request failed: ${event.data?.error || 'Unknown error'}`;
+    case 'upstream_error_status':
+      return `Upstream returned HTTP ${event.data?.status || '?'}`;
+    case 'stream_error':
+      return `Stream error: ${event.data?.error || 'Unknown error'}`;
+    case 'error_deadline_exceeded':
+      return 'Generation deadline exceeded';
+    case 'stream_ended_unexpectedly':
+      return 'Stream ended unexpectedly without [DONE]';
+    case 'fallback_triggered':
+      return `Fallback: ${event.data?.from_model || '?'} -> ${event.data?.to_model || '?'}`;
+    case 'all_models_failed':
+      return 'All models failed after retries';
     case 'error':
       return `Error: ${event.data?.error || 'Unknown error'}`;
     case 'request_completed':
@@ -27,14 +41,14 @@ const getEventMessage = (event: Event): string => {
     case 'loop_detected': {
       const d = event.data;
       const mode = d?.shadow_mode ? ' [shadow]' : '';
-      return `Loop detected${mode}: ${d?.strategy || '?'} (${d?.severity || '?'}) — ${d?.evidence || 'No details'}`;
+      return `Loop detected${mode}: ${d?.strategy || '?'} (${d?.severity || '?'}) - ${d?.evidence || 'No details'}`;
     }
     case 'loop_interrupted': {
       const d = event.data;
-      return `⚡ Loop interrupted: ${d?.strategy || '?'} — ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
+      return `Loop interrupted: ${d?.strategy || '?'} - ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
     }
     default:
-      return '';
+      return `Event: ${event.type}`;
   }
 };
 
@@ -46,10 +60,19 @@ const getEventColor = (type: EventType): string => {
       return 'text-green-400';
     case 'retry_attempt':
       return 'text-purple-400';
+    case 'fallback_triggered':
+      return 'text-orange-400';
     case 'error_max_upstream_error_retries':
+    case 'all_models_failed':
     case 'error':
-    case 'timeout_idle':
       return 'text-red-400';
+    case 'timeout_idle':
+    case 'error_deadline_exceeded':
+    case 'upstream_error':
+    case 'upstream_error_status':
+    case 'stream_error':
+    case 'stream_ended_unexpectedly':
+      return 'text-yellow-400';
     case 'loop_detected':
       return 'text-amber-400';
     case 'loop_interrupted':
@@ -68,7 +91,21 @@ const getEventTypeLabel = (type: EventType): string => {
     case 'retry_attempt':
       return 'RETRY_ATTEMPT';
     case 'error_max_upstream_error_retries':
-      return 'ERROR_MAX_RETRIES';
+      return 'MAX_RETRIES_EXCEEDED';
+    case 'upstream_error':
+      return 'UPSTREAM_ERROR';
+    case 'upstream_error_status':
+      return 'UPSTREAM_STATUS';
+    case 'stream_error':
+      return 'STREAM_ERROR';
+    case 'error_deadline_exceeded':
+      return 'DEADLINE_EXCEEDED';
+    case 'stream_ended_unexpectedly':
+      return 'UNEXPECTED_EOF';
+    case 'fallback_triggered':
+      return 'FALLBACK';
+    case 'all_models_failed':
+      return 'ALL_MODELS_FAILED';
     case 'timeout_idle':
       return 'TIMEOUT_IDLE';
     case 'error':

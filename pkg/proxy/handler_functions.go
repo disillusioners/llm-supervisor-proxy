@@ -560,10 +560,11 @@ func (h *Handler) handleModelFailure(rc *requestContext, modelIndex int, current
 		nextModel := rc.modelList[modelIndex+1]
 		rc.reqLog.CurrentFallback = nextModel
 
-		h.publishEvent("fallback_triggered", events.FallbackEvent{
-			FromModel: currentModel,
-			ToModel:   nextModel,
-			Reason:    "upstream_error", // simplified; the specific events were already published
+		h.publishEvent("fallback_triggered", map[string]interface{}{
+			"id":         rc.reqID,
+			"from_model": currentModel,
+			"to_model":   nextModel,
+			"reason":     "upstream_error",
 		})
 	}
 

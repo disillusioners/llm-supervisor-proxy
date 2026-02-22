@@ -107,6 +107,8 @@ export function useEventRefresh(onRefresh: () => void) {
         'error_max_upstream_error_retries',
         'timeout_idle',
         'loop_interrupted',
+        'fallback_triggered',
+        'all_models_failed',
       ];
       if (refreshTypes.includes(data.type)) {
         onRefresh();

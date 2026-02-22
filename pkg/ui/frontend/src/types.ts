@@ -86,6 +86,13 @@ export type EventType =
   | 'error_max_upstream_error_retries'
   | 'timeout_idle'
   | 'error'
+  | 'upstream_error'
+  | 'upstream_error_status'
+  | 'stream_error'
+  | 'error_deadline_exceeded'
+  | 'stream_ended_unexpectedly'
+  | 'fallback_triggered'
+  | 'all_models_failed'
   | 'loop_detected'
   | 'loop_interrupted';
 
@@ -94,6 +101,11 @@ export interface EventData {
   timeout?: string;
   attempt?: number;
   error?: string;
+  status?: number;
+  // Fallback fields
+  from_model?: string;
+  to_model?: string;
+  reason?: string;
   // Loop detection fields
   request_id?: string;
   strategy?: string;
