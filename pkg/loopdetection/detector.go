@@ -2,6 +2,7 @@ package loopdetection
 
 import (
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -106,19 +107,24 @@ func (d *Detector) AnalyzeActions(actions []Action) *DetectionResult {
 		return nil
 	}
 
-	strategy := NewActionPatternStrategy(d.config.ActionRepeatCount, d.config.OscillationCount)
-	window := []MessageContext{{Actions: actions}}
-	result := strategy.Analyze(window)
-	if result != nil && result.LoopDetected {
-		if d.config.ShadowMode {
-			log.Printf("[LOOP-DETECTION][SHADOW] Strategy=%s Evidence=%q",
-				result.Strategy, result.Evidence)
-		} else {
-			log.Printf("[LOOP-DETECTION] Strategy=%s Evidence=%q",
-				result.Strategy, result.Evidence)
+	// Reuse existing ActionPatternStrategy from d.strategies
+	for _, s := range d.strategies {
+		if ap, ok := s.(*ActionPatternStrategy); ok {
+			window := []MessageContext{{Actions: actions}}
+			result := ap.Analyze(window)
+			if result != nil && result.LoopDetected {
+				if d.config.ShadowMode {
+					log.Printf("[LOOP-DETECTION][SHADOW] Strategy=%s Evidence=%q",
+						result.Strategy, result.Evidence)
+				} else {
+					log.Printf("[LOOP-DETECTION] Strategy=%s Evidence=%q",
+						result.Strategy, result.Evidence)
+				}
+			}
+			return result
 		}
 	}
-	return result
+	return nil
 }
 
 // IsShadowMode returns whether the detector is in shadow mode (log only).
@@ -149,26 +155,5 @@ func (d *Detector) WindowSize() int {
 
 // generateMsgID creates a simple message ID.
 func generateMsgID(counter int) string {
-	return "msg-" + itoa(counter)
-}
-
-// itoa is a simple integer to ASCII string converter (avoids strconv import for this tiny use).
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	result := ""
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	for i > 0 {
-		result = string(rune('0'+i%10)) + result
-		i /= 10
-	}
-	if neg {
-		result = "-" + result
-	}
-	return result
+	return "msg-" + strconv.Itoa(counter)
 }

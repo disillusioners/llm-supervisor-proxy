@@ -333,9 +333,11 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	streamEndedSuccessfully := false
 
-	// Initialize loop detection (shadow mode by default — logs only, no interruption)
-	loopCfg := loopdetection.DefaultConfig()
-	detector := loopdetection.NewDetector(loopCfg)
+	// Use per-request detector (persists across retries within this request)
+	if rc.loopDetector == nil {
+		rc.loopDetector = loopdetection.NewDetector(loopdetection.DefaultConfig())
+	}
+	detector := rc.loopDetector
 	streamBuf := detector.NewStreamBuffer()
 
 	for scanner.Scan() {
@@ -374,8 +376,18 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			newContent := rc.accumulatedResponse.String()[prevLen:]
 
 			// Feed content to loop detection buffer
-			if detector.IsEnabled() && len(newContent) > 0 {
-				streamBuf.AddText(newContent)
+			if detector.IsEnabled() {
+				// Add text content
+				if len(newContent) > 0 {
+					streamBuf.AddText(newContent)
+				}
+
+				// Extract and add tool call actions from chunk
+				if toolActions := extractToolCallActions(data); len(toolActions) > 0 {
+					for _, action := range toolActions {
+						streamBuf.AddAction(action)
+					}
+				}
 
 				// Run analysis when buffer threshold is met
 				if streamBuf.ShouldAnalyze(false) {

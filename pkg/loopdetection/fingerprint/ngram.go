@@ -2,6 +2,10 @@ package fingerprint
 
 import "strings"
 
+// TODO(Phase 3): GenerateTrigrams and TrigramRepetitionRatio are prepared for
+// the ThinkingStrategy (Phase 3 — Thinking/Reasoning Loop Detection).
+// They will be used to detect repetitive reasoning patterns in models like o1, o3-mini.
+
 // GenerateTrigrams produces a map of trigram → count from the input text.
 func GenerateTrigrams(text string) map[string]int {
 	words := strings.Fields(text)
