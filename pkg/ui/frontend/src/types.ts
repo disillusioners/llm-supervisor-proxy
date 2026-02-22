@@ -1,5 +1,18 @@
 // API Types - matching Go backend structures
 
+export interface LoopDetectionConfig {
+  enabled: boolean;
+  shadow_mode: boolean;
+  message_window: number;
+  action_window: number;
+  exact_match_count: number;
+  similarity_threshold: number;
+  min_tokens_for_simhash: number;
+  action_repeat_count: number;
+  oscillation_count: number;
+  min_tokens_for_analysis: number;
+}
+
 export interface AppConfig {
   version: string;
   upstream_url: string;
@@ -9,6 +22,7 @@ export interface AppConfig {
   max_upstream_error_retries: number;
   max_idle_retries: number;
   max_generation_retries: number;
+  loop_detection: LoopDetectionConfig;
   updated_at: string;
 }
 

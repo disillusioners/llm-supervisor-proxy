@@ -80,7 +80,7 @@ type LoopDetectionConfig struct {
 	ShadowMode           bool    `json:"shadow_mode"`             // true = log only, false = can interrupt
 	MessageWindow        int     `json:"message_window"`          // Sliding window size (default: 10)
 	ActionWindow         int     `json:"action_window"`           // Action window size (default: 15)
-	ExactMatchCount      int     `json:"exact_match_count"`       // Identical messages to trigger (default: 2)
+	ExactMatchCount      int     `json:"exact_match_count"`       // Identical messages to trigger (default: 3)
 	SimilarityThreshold  float64 `json:"similarity_threshold"`    // SimHash similarity threshold (default: 0.85)
 	MinTokensForSimHash  int     `json:"min_tokens_for_simhash"`  // Min tokens before SimHash applies (default: 15)
 	ActionRepeatCount    int     `json:"action_repeat_count"`     // Consecutive identical actions to trigger (default: 3)
@@ -103,7 +103,7 @@ var Defaults = Config{
 		ShadowMode:           true,
 		MessageWindow:        10,
 		ActionWindow:         15,
-		ExactMatchCount:      2,
+		ExactMatchCount:      3,
 		SimilarityThreshold:  0.85,
 		MinTokensForSimHash:  15,
 		ActionRepeatCount:    3,

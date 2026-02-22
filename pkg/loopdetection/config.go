@@ -9,7 +9,7 @@ type Config struct {
 	ActionWindow  int `json:"action_window"`  // Default: 15
 
 	// Exact matching
-	ExactMatchCount int `json:"exact_match_count"` // Default: 2
+	ExactMatchCount int `json:"exact_match_count"` // Default: 3
 
 	// Similarity detection
 	SimilarityThreshold float64 `json:"similarity_threshold"`   // Default: 0.85
@@ -34,7 +34,7 @@ func DefaultConfig() Config {
 		Enabled:              true,
 		MessageWindow:        10,
 		ActionWindow:         15,
-		ExactMatchCount:      2,
+		ExactMatchCount:      3,
 		SimilarityThreshold:  0.85,
 		MinTokensForSimHash:  15,
 		ActionRepeatCount:    3,

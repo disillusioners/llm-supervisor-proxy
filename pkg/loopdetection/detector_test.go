@@ -98,20 +98,27 @@ func TestDetector_ExactMatch_Detected(t *testing.T) {
 	cfg := loopdetection.DefaultConfig()
 	detector := loopdetection.NewDetector(cfg)
 
-	// Feed the same message twice
+	// Feed the same message three times (new default threshold)
 	msg := "Let me check that file for you. I will read the configuration and examine the settings."
 
 	result1 := detector.Analyze(msg, nil)
-	if result1 != nil && result1.LoopDetected {
-		t.Error("Should not detect loop on first message")
+	if result1 != nil && result1.LoopDetected && result1.Strategy == "exact_match" {
+		t.Error("Should not detect exact_match loop on first message")
 	}
 
 	result2 := detector.Analyze(msg, nil)
-	if result2 == nil || !result2.LoopDetected {
-		t.Error("Should detect loop on second identical message")
+	// Note: similarity strategy may detect after 2 messages (that's OK)
+	// We're testing exact_match which needs 3
+	if result2 != nil && result2.LoopDetected && result2.Strategy == "exact_match" {
+		t.Error("Should not detect exact_match loop on second message with new default (threshold=3)")
 	}
-	if result2 != nil && result2.Strategy != "exact_match" {
-		t.Errorf("Expected exact_match strategy, got %s", result2.Strategy)
+
+	result3 := detector.Analyze(msg, nil)
+	if result3 == nil || !result3.LoopDetected {
+		t.Error("Should detect loop on third identical message")
+	}
+	if result3 != nil && result3.Strategy != "exact_match" {
+		t.Errorf("Expected exact_match strategy, got %s", result3.Strategy)
 	}
 }
 
@@ -284,8 +291,9 @@ func TestDetector_ShadowMode(t *testing.T) {
 		t.Error("Detector should be in shadow mode")
 	}
 
-	// Feed identical messages
+	// Feed identical messages (3 times for new default threshold)
 	msg := "This is a test message for shadow mode detection with enough tokens to be meaningful"
+	detector.Analyze(msg, nil)
 	detector.Analyze(msg, nil)
 	result := detector.Analyze(msg, nil)
 
