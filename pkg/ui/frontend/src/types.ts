@@ -25,10 +25,6 @@ export interface Model {
   fallback_chain: string[];
 }
 
-export interface ModelsResponse {
-  models: Model[];
-}
-
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;

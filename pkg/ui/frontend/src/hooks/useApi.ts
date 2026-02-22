@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ModelsResponse } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model } from '../types';
 
 const API_BASE = '/api';
 
@@ -116,8 +116,8 @@ export function useModels() {
   const fetchModels = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await apiFetch<ModelsResponse>('/models');
-      setModels(data.models || []);
+      const data = await apiFetch<Model[]>('/models');
+      setModels(data || []);
     } catch (e) {
       console.error('Failed to fetch models:', e);
     } finally {

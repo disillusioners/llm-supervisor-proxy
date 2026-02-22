@@ -32,7 +32,7 @@ type ModelConfig struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	Enabled       bool     `json:"enabled"`
-	FallbackChain []string `json:"fallbackChain,omitempty"`
+	FallbackChain []string `json:"fallback_chain,omitempty"`
 }
 
 // ModelsConfig manages the collection of model configurations.
