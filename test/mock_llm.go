@@ -83,11 +83,13 @@ func main() {
 
 		// Check for simulation triggers in the prompt
 		var prompt string
-		// Extract last user message
-		if msgs, ok := reqBody["messages"].([]interface{}); ok && len(msgs) > 0 {
-			if lastMsg, ok := msgs[len(msgs)-1].(map[string]interface{}); ok {
-				if content, ok := lastMsg["content"].(string); ok {
-					prompt = content
+		// Extract user message from ANY message so retries don't reset triggers
+		if msgs, ok := reqBody["messages"].([]interface{}); ok {
+			for _, mb := range msgs {
+				if msg, ok := mb.(map[string]interface{}); ok {
+					if content, ok := msg["content"].(string); ok {
+						prompt += content + " "
+					}
 				}
 			}
 		}
@@ -140,6 +142,20 @@ func main() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
+
+		} else if strings.Contains(prompt, "mock-500") {
+			log.Println("Mock: Simulating 500 Internal Server Error...")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "data: %s\n\n", createChunk("Internal Server Error"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+
+		} else if strings.Contains(prompt, "mock-timeout") {
+			log.Println("Mock: Simulating generation timeout (sleeping for 10 minutes)...")
+			time.Sleep(10 * time.Minute)
+			return
 
 		} else if strings.Contains(prompt, "mock-think") {
 			// Simulate thinking
