@@ -11,7 +11,9 @@
 //   "loop-similar"     → Responds with near-identical messages (minor word swaps)
 //   "loop-action"      → Emits the same tool call repeatedly
 //   "loop-oscillate"   → Alternates between two tool calls (read/write pattern)
+//   "loop-cycle"       → Emits a circular pattern of tool calls (A→B→C→A→B→C)
 //   "loop-thinking"    → Repeats the same reasoning/thinking content
+//   "loop-stagnate"    → Outputs text that is highly repetitive overall (SimHash on cumulative text)
 //   (default)          → Normal, non-looping response
 //
 // Runs on port :4002 by default (different from the main mock on :4001).
@@ -39,7 +41,7 @@ func main() {
 	http.HandleFunc("/v1/chat/completions", handleCompletion)
 
 	log.Printf("🔁 Mock Loop LLM Server listening on %s", loopPort)
-	log.Println("Trigger keywords: loop-exact, loop-similar, loop-action, loop-oscillate, loop-thinking")
+	log.Println("Trigger keywords: loop-exact, loop-similar, loop-action, loop-oscillate, loop-cycle, loop-thinking, loop-stagnate")
 	if err := http.ListenAndServe(loopPort, nil); err != nil {
 		log.Fatal(err)
 	}
@@ -85,10 +87,20 @@ func handleCompletion(w http.ResponseWriter, r *http.Request) {
 		if isStream {
 			streamOscillationLoop(w, r, callNum)
 		}
+	case strings.Contains(prompt, "loop-cycle"):
+		log.Printf("[#%d] Simulating ACTION CYCLE loop", callNum)
+		if isStream {
+			streamCycleLoop(w, r, callNum)
+		}
 	case strings.Contains(prompt, "loop-thinking"):
 		log.Printf("[#%d] Simulating THINKING loop", callNum)
 		if isStream {
 			streamThinkingLoop(w, r)
+		}
+	case strings.Contains(prompt, "loop-stagnate"):
+		log.Printf("[#%d] Simulating STAGNATION loop", callNum)
+		if isStream {
+			streamStagnationLoop(w, r, callNum)
 		}
 	default:
 		log.Printf("[#%d] Normal response", callNum)
@@ -265,6 +277,63 @@ func streamOscillationLoop(w http.ResponseWriter, r *http.Request, callNum int) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Scenario 4.5: Cycle Loop
+// The LLM goes through a 3-step cycle: A -> B -> C -> A -> B -> C
+// Should trigger: CycleStrategy
+// ─────────────────────────────────────────────────────────────────────────────
+
+func streamCycleLoop(w http.ResponseWriter, r *http.Request, callNum int) {
+	setupSSE(w)
+	flusher := w.(http.Flusher)
+
+	var actionName, actionArgs string
+	switch callNum % 3 {
+	case 1:
+		actionName = "ls_dir"
+		actionArgs = `{"path": "./"}`
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk("Let me list the directory to see what is there. "))
+	case 2:
+		actionName = "read_file"
+		actionArgs = `{"path": "./main.go"}`
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk("I will read the main file to find the entry point. "))
+	case 0:
+		actionName = "grep_search"
+		actionArgs = `{"pattern": "func main"}`
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk("Let me search for the main function. "))
+	}
+	flusher.Flush()
+	time.Sleep(100 * time.Millisecond)
+
+	toolCallChunk := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"delta": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"index": 0,
+							"id":    fmt.Sprintf("call_%d", callNum),
+							"type":  "function",
+							"function": map[string]interface{}{
+								"name":      actionName,
+								"arguments": actionArgs,
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		},
+	}
+	b, _ := json.Marshal(toolCallChunk)
+	fmt.Fprintf(w, "data: %s\n\n", string(b))
+	flusher.Flush()
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	log.Printf("  → Sent cycle-loop response (%s)", actionName)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Scenario 5: Thinking Loop
 // The LLM's reasoning/thinking content is highly repetitive.
 // Should trigger: Trigram analysis (future Phase 3), but the repeated
@@ -300,6 +369,39 @@ func streamThinkingLoop(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	log.Println("  → Sent thinking-loop response")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario 6: Stagnation Loop
+// The LLM produces many messages that have high average similarity, showing
+// no meaningful progress (even if not strictly identical).
+// Should trigger: StagnationStrategy
+// ─────────────────────────────────────────────────────────────────────────────
+
+func streamStagnationLoop(w http.ResponseWriter, r *http.Request, callNum int) {
+	setupSSE(w)
+	flusher := w.(http.Flusher)
+
+	// We generate text that is highly similar overall, with just a tiny bit of
+	// new content added at the end, so the average similarity stays very high.
+
+	baseContent := "I am analyzing the problem. We need to look at the authentication flow. The JWT token validation might be failing. I will check the middleware configuration and the token signing process. "
+
+	// Add some minor unique jitter to prevent ExactMatch from triggering
+	jitter := fmt.Sprintf(" This is attempt number %d to understand it.", callNum)
+
+	text := baseContent + jitter
+	tokens := strings.Fields(text)
+
+	for _, token := range tokens {
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk(token+" "))
+		flusher.Flush()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	log.Printf("  → Sent stagnation-loop response (attempt %d)", callNum)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
