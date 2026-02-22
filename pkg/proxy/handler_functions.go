@@ -217,6 +217,12 @@ func (h *Handler) handleUpstreamRequestError(rc *requestContext, err error, atte
 // handleNonOKStatus handles HTTP responses with non-200 status codes.
 func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, resp *http.Response, modelIndex int, counters *retryCounters) attemptResult {
 	if !rc.headersSent {
+		if resp.StatusCode == http.StatusBadRequest {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			log.Printf("Upstream returned 400 (Bad Request). Error body: %s", string(bodyBytes))
+			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+
 		// Retry on 5xx or 429
 		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
 			resp.Body.Close()
