@@ -458,7 +458,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	_, err = m.store.DB.ExecContext(context.Background(), insertQuery,
 		model.ID,
 		model.Name,
-		BooleanToInt(model.Enabled),
+		m.qb.BooleanLiteral(model.Enabled),
 		string(fallbackJSON),
 		string(truncateJSON),
 	)
@@ -495,7 +495,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	updateQuery := m.qb.UpdateModel()
 	_, err = m.store.DB.ExecContext(context.Background(), updateQuery,
 		model.Name,
-		BooleanToInt(model.Enabled),
+		m.qb.BooleanLiteral(model.Enabled),
 		string(fallbackJSON),
 		string(truncateJSON),
 		modelID,

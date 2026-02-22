@@ -158,7 +158,7 @@ func (s *Store) migrateModelsJSON(ctx context.Context, path string, qb *QueryBui
 		_, err := s.DB.ExecContext(ctx, query,
 			model.ID,
 			model.Name,
-			BooleanToInt(model.Enabled),
+			qb.BooleanLiteral(model.Enabled),
 			string(fallbackJSON),
 			string(truncateJSON),
 		)
