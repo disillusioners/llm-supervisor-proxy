@@ -23,3 +23,6 @@ test_output.txt
 /pkg/ui/static/index.html
 
 cmd/__debug_bin*
+proxy.log
+proxy.pid
+mock.log

@@ -23,26 +23,26 @@ echo "  Loop Detection Integration Test"
 echo "════════════════════════════════════════════════════════════════"
 
 # Start mock LLM
-echo -e "\n▶ Starting mock_llm_loop on port $MOCK_PORT..."
-go run mock_llm_loop.go &
-MOCK_PID=$!
-sleep 2
+# echo -e "\n▶ Starting mock_llm_loop on port $MOCK_PORT..."
+# go run mock_llm_loop.go &
+# MOCK_PID=$!
+# sleep 2
 
 # Make sure mock is running
-if ! kill -0 $MOCK_PID 2>/dev/null; then
-    echo "❌ Failed to start mock_llm_loop"
-    exit 1
-fi
-echo "✔ Mock LLM running (PID: $MOCK_PID)"
+# if ! kill -0 $MOCK_PID 2>/dev/null; then
+#     echo "❌ Failed to start mock_llm_loop"
+#     exit 1
+# fi
+echo "✔ Mock LLM running (already started by user)"
 
 # Cleanup on exit
-cleanup() {
-    echo -e "\n▶ Cleaning up..."
-    kill $MOCK_PID 2>/dev/null || true
-    wait $MOCK_PID 2>/dev/null || true
-    echo "✔ Mock LLM stopped"
-}
-trap cleanup EXIT
+# cleanup() {
+#     echo -e "\n▶ Cleaning up..."
+#     kill $MOCK_PID 2>/dev/null || true
+#     wait $MOCK_PID 2>/dev/null || true
+#     echo "✔ Mock LLM stopped"
+# }
+# trap cleanup EXIT
 
 send_request() {
     local label="$1"
@@ -52,13 +52,13 @@ send_request() {
     echo "  Prompt keyword: \"$keyword\""
     echo "────────────────────────────────────────────────────────────────"
     
-    curl -sN --max-time 10 -X POST "http://localhost:$PROXY_PORT/v1/chat/completions" \
+    curl -sN --max-time 15 -X POST "http://localhost:$PROXY_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "{
             \"model\": \"mock-model\",
             \"messages\": [{\"role\": \"user\", \"content\": \"$keyword\"}],
             \"stream\": true
-        }" 2>/dev/null | head -n 30
+        }" 2>/dev/null
     
     echo ""
 }

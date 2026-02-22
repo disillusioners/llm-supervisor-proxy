@@ -184,43 +184,46 @@ func streamActionLoop(w http.ResponseWriter, r *http.Request) {
 	setupSSE(w)
 	flusher := w.(http.Flusher)
 
-	// Send some content then a tool call — always the same tool call
-	fmt.Fprintf(w, "data: %s\n\n", createContentChunk("Let me read that file again to check. "))
-	flusher.Flush()
-	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 4; i++ {
+		// Send some content then a tool call — always the same tool call
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk("Let me read that file again to check. "))
+		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
 
-	fmt.Fprintf(w, "data: %s\n\n", createContentChunk("I need to verify the configuration. "))
-	flusher.Flush()
-	time.Sleep(100 * time.Millisecond)
+		fmt.Fprintf(w, "data: %s\n\n", createContentChunk("I need to verify the configuration. "))
+		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
 
-	// Simulate tool call chunk (the same one every time)
-	toolCallChunk := map[string]interface{}{
-		"choices": []interface{}{
-			map[string]interface{}{
-				"delta": map[string]interface{}{
-					"tool_calls": []interface{}{
-						map[string]interface{}{
-							"index": 0,
-							"id":    "call_abc123",
-							"type":  "function",
-							"function": map[string]interface{}{
-								"name":      "read_file",
-								"arguments": `{"path": "config.go"}`,
+		// Simulate tool call chunk (the same one every time)
+		toolCallChunk := map[string]interface{}{
+			"choices": []interface{}{
+				map[string]interface{}{
+					"delta": map[string]interface{}{
+						"tool_calls": []interface{}{
+							map[string]interface{}{
+								"index": i,
+								"id":    fmt.Sprintf("call_abc%d", i),
+								"type":  "function",
+								"function": map[string]interface{}{
+									"name":      "read_file",
+									"arguments": `{"path": "config.go"}`,
+								},
 							},
 						},
 					},
+					"finish_reason": "tool_calls",
 				},
-				"finish_reason": "tool_calls",
 			},
-		},
+		}
+		b, _ := json.Marshal(toolCallChunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(b))
+		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
 	}
-	b, _ := json.Marshal(toolCallChunk)
-	fmt.Fprintf(w, "data: %s\n\n", string(b))
-	flusher.Flush()
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
-	log.Println("  → Sent action-loop response (read_file config.go)")
+	log.Println("  → Sent action-loop response (read_file config.go 4 times)")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
