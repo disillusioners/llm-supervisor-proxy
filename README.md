@@ -9,6 +9,7 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
     -   **Idle Reset**: Retries when a stream hangs mid-generation.
     -   **Upstream Recovery**: Retries on 5xx errors or connectivity issues from the provider.
     -   **Generation Guard**: Ensures requests eventually finish within `MAX_GENERATION_TIME`.
+-   **Loop Detection**: Detects when LLMs enter repetitive patterns (identical responses, similar content, repeated tool calls, circular action workflows, stagnating progress). Optionally interrupts the stream and retries with sanitized context.
 -   **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
 -   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
 -   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
@@ -60,6 +61,8 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors. |
 | `MAX_IDLE_RETRIES` | `2` | Retries for hung streams. |
 | `MAX_GENERATION_RETRIES` | `1` | Retries for time-limit exceeded. |
+| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
+| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
 
 ### Configuration Files
 Settings are persisted in:
@@ -95,6 +98,34 @@ The proxy includes a built-in monitoring dashboard accessible at `http://localho
 - **Inspect Payloads**: View full message history, tool calls, and model responses.
 - **Live Configuration**: Change timeouts and retry limits on the fly without restarting.
 - **Fallback Management**: Configure model-to-model fallback chains.
+- **Loop Detection Config**: Tune detection thresholds and toggle shadow mode.
+
+## 🔄 Loop Detection
+
+The proxy monitors LLM responses for repetitive patterns using 6 heuristic strategies (no additional LLM required):
+
+| Strategy | Detects |
+|----------|---------|
+| **Exact Match** | Identical consecutive messages |
+| **Similarity** | Near-identical messages via SimHash fingerprints |
+| **Action Pattern** | Repeated tool calls or A↔B oscillations |
+| **Cycle** | Circular action workflows (A→B→C→A→B→C) |
+| **Thinking** | Repetitive reasoning patterns via trigram analysis |
+| **Stagnation** | No meaningful progress despite continued output |
+
+### Shadow Mode (Default)
+
+By default, loop detection runs in **shadow mode** — loops are logged but the stream is not interrupted. This lets you observe and tune thresholds before enabling active intervention.
+
+### Active Interruption
+
+When `shadow_mode` is `false`, critical-severity loops will:
+1. Stop the streaming response
+2. Sanitize the context window (remove repetitive messages)
+3. Inject a strategy-specific system prompt to break the loop
+4. Retry with sanitized context (or fallback to the next model)
+
+For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detection-implementation.md).
 
 ## 📁 Project Structure
 
@@ -107,10 +138,12 @@ The proxy includes a built-in monitoring dashboard accessible at `http://localho
 │   │   ├── static/          # Built frontend (embedded)
 │   │   └── frontend/        # Preact frontend source
 │   ├── proxy/               # Core proxy logic & retry handling
+│   ├── loopdetection/       # Loop detection strategies & recovery
 │   ├── events/              # Event bus for SSE updates
 │   ├── models/              # Model & fallback configuration
 │   ├── store/               # In-memory storage for request history
 │   └── config/              # App-wide configuration management
+├── docs/                    # Design docs & implementation details
 └── LICENSE                  # MIT License
 ```
 

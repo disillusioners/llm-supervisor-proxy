@@ -17,6 +17,18 @@ type FallbackEvent struct {
 	Reason    string `json:"reason"` // "max_retries" | "deadline_exceeded" | "upstream_error"
 }
 
+// LoopDetectionEvent represents a loop detection result published by the proxy
+type LoopDetectionEvent struct {
+	RequestID   string   `json:"request_id"`
+	Strategy    string   `json:"strategy"`     // "exact_match" | "similarity" | "action_pattern"
+	Severity    string   `json:"severity"`     // "info" | "warning" | "critical"
+	Evidence    string   `json:"evidence"`     // Human-readable description
+	Confidence  float64  `json:"confidence"`   // 0.0 - 1.0
+	Pattern     []string `json:"pattern"`      // Matched patterns
+	RepeatCount int      `json:"repeat_count"` // Number of repeats detected
+	ShadowMode  bool     `json:"shadow_mode"`  // Whether detection was in shadow mode
+}
+
 type Bus struct {
 	mu          sync.RWMutex
 	subscribers []chan Event

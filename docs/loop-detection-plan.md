@@ -496,35 +496,35 @@ type LoopDetectedEvent struct {
 ## Implementation Phases
 
 ### Phase 1: Core Detection (Shadow Mode)
-- [ ] Implement exact matching strategy
-- [ ] Implement SimHash similarity with min-token guard
-- [ ] Basic action pattern detection
-- [ ] Stream buffering logic (sentence/token thresholds)
-- [ ] Detector orchestration
-- [ ] Unit tests
-- [ ] **Shadow mode logging** (detect but don't interrupt)
+- [x] Implement exact matching strategy
+- [x] Implement SimHash similarity with min-token guard
+- [x] Basic action pattern detection
+- [x] Stream buffering logic (sentence/token thresholds)
+- [x] Detector orchestration
+- [x] Unit tests
+- [x] **Shadow mode logging** (detect but don't interrupt)
 
 ### Phase 2: Integration & Tuning
-- [ ] Integrate into handler.go
-- [ ] Add event types
-- [ ] Configuration support
-- [ ] Multi-turn context persistence
-- [ ] Integration tests
+- [x] Integrate into handler.go
+- [x] Add event types
+- [x] Configuration support
+- [x] Multi-turn context persistence
+- [x] Integration tests
 - [ ] **Collect shadow mode logs to tune thresholds**
 
 ### Phase 3: Advanced Detection
-- [ ] Thinking/reasoning analysis
-- [ ] Reasoning model special handling
-- [ ] Cycle detection in graphs
-- [ ] Progress stagnation
-- [ ] Context window sanitization
+- [x] Thinking/reasoning analysis
+- [x] Reasoning model special handling
+- [x] Cycle detection in graphs
+- [x] Progress stagnation
+- [x] Context window sanitization
 
 ### Phase 4: Recovery & UI
-- [ ] Enable Hard Interruption (after confidence in thresholds)
-- [ ] Fallback integration
-- [ ] UI dashboard updates
-- [ ] User notification system
-- [ ] Production monitoring
+- [x] Enable Hard Interruption (after confidence in thresholds)
+- [x] Fallback integration
+- [x] UI dashboard updates
+- [x] User notification system
+- [x] Production monitoring
 
 ---
 

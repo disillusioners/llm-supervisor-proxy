@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 	"github.com/google/uuid"
@@ -332,6 +333,31 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	streamEndedSuccessfully := false
 
+	// Use per-request detector (persists across retries within this request)
+	if rc.loopDetector == nil {
+		ldCfg := loopdetection.Config{
+			Enabled:              rc.conf.LoopDetection.Enabled,
+			ShadowMode:           rc.conf.LoopDetection.ShadowMode,
+			MessageWindow:        rc.conf.LoopDetection.MessageWindow,
+			ActionWindow:         rc.conf.LoopDetection.ActionWindow,
+			ExactMatchCount:      rc.conf.LoopDetection.ExactMatchCount,
+			SimilarityThreshold:  rc.conf.LoopDetection.SimilarityThreshold,
+			MinTokensForSimHash:  rc.conf.LoopDetection.MinTokensForSimHash,
+			ActionRepeatCount:    rc.conf.LoopDetection.ActionRepeatCount,
+			OscillationCount:     rc.conf.LoopDetection.OscillationCount,
+			MinTokensForAnalysis: rc.conf.LoopDetection.MinTokensForAnalysis,
+			// Phase 3: Advanced detection
+			ThinkingMinTokens:         rc.conf.LoopDetection.ThinkingMinTokens,
+			TrigramThreshold:          rc.conf.LoopDetection.TrigramThreshold,
+			MaxCycleLength:            rc.conf.LoopDetection.MaxCycleLength,
+			ReasoningModelPatterns:    rc.conf.LoopDetection.ReasoningModelPatterns,
+			ReasoningTrigramThreshold: rc.conf.LoopDetection.ReasoningTrigramThreshold,
+		}
+		rc.loopDetector = loopdetection.NewDetector(ldCfg)
+	}
+	detector := rc.loopDetector
+	streamBuf := detector.NewStreamBuffer()
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -349,10 +375,74 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
+
+				// Flush remaining buffer for final analysis
+				if detector.IsEnabled() {
+					if text, actions := streamBuf.Flush(); len(text) > 0 || len(actions) > 0 {
+						if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
+							h.publishLoopEvent(rc.reqID, result, detector.IsShadowMode())
+						}
+					}
+				}
+
 				break
 			}
 
+			// Track chunk content for both existing accumulation and loop detection
+			prevLen := rc.accumulatedResponse.Len()
+			prevThinkLen := rc.accumulatedThinking.Len()
 			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking)
+			newContent := rc.accumulatedResponse.String()[prevLen:]
+			newThinking := rc.accumulatedThinking.String()[prevThinkLen:]
+
+			// Feed content to loop detection buffer
+			if detector.IsEnabled() {
+				// Add text content
+				if len(newContent) > 0 {
+					streamBuf.AddText(newContent)
+				}
+
+				// Feed thinking content to ThinkingStrategy for trigram analysis
+				if len(newThinking) > 0 {
+					detector.AddThinkingContent(newThinking)
+				}
+
+				// Extract and add tool call actions from chunk
+				if toolActions := extractToolCallActions(data); len(toolActions) > 0 {
+					for _, action := range toolActions {
+						streamBuf.AddAction(action)
+					}
+				}
+
+				// Run analysis when buffer threshold is met
+				if streamBuf.ShouldAnalyze(false) {
+					text, actions := streamBuf.Flush()
+					if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
+						h.publishLoopEvent(rc.reqID, result, detector.IsShadowMode())
+
+						// Phase 4: Hard interruption (when NOT in shadow mode)
+						if !detector.IsShadowMode() && result.Severity == loopdetection.SeverityCritical {
+							log.Printf("[LOOP-DETECTION][INTERRUPT] Stopping stream — %s: %s", result.Strategy, result.Evidence)
+							h.publishEvent("loop_interrupted", events.LoopDetectionEvent{
+								RequestID:   rc.reqID,
+								Strategy:    result.Strategy,
+								Severity:    result.Severity.String(),
+								Evidence:    result.Evidence,
+								Confidence:  result.Confidence,
+								Pattern:     result.Pattern,
+								RepeatCount: result.RepeatCount,
+								ShadowMode:  false,
+							})
+
+							// Sanitize context window and trigger retry/fallback
+							h.sanitizeAndRetry(rc, result)
+							monitor.Close()
+							counters.errorRetries++
+							return attemptContinueRetry
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -375,6 +465,68 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	monitor.Close()
 	counters.errorRetries++
 	return attemptContinueRetry
+}
+
+// publishLoopEvent emits a typed loop detection event to the event bus.
+func (h *Handler) publishLoopEvent(reqID string, result *loopdetection.DetectionResult, shadowMode bool) {
+	h.publishEvent("loop_detected", events.LoopDetectionEvent{
+		RequestID:   reqID,
+		Strategy:    result.Strategy,
+		Severity:    result.Severity.String(),
+		Evidence:    result.Evidence,
+		Confidence:  result.Confidence,
+		Pattern:     result.Pattern,
+		RepeatCount: result.RepeatCount,
+		ShadowMode:  shadowMode,
+	})
+}
+
+// sanitizeAndRetry modifies the request context's message history to break the
+// loop pattern. It removes repetitive messages and injects a system prompt
+// telling the model to take a different approach.
+func (h *Handler) sanitizeAndRetry(rc *requestContext, result *loopdetection.DetectionResult) {
+	messages, ok := rc.requestBody["messages"].([]interface{})
+	if !ok {
+		return
+	}
+
+	// Convert to the format expected by SanitizeLoopHistory
+	msgMaps := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		if mm, ok := m.(map[string]interface{}); ok {
+			msgMaps = append(msgMaps, mm)
+		} else if mm, ok := m.(map[string]string); ok {
+			// Convert string map to interface map
+			converted := make(map[string]interface{}, len(mm))
+			for k, v := range mm {
+				converted[k] = v
+			}
+			msgMaps = append(msgMaps, converted)
+		}
+	}
+
+	// Also append the accumulated partial response as an assistant message
+	if rc.accumulatedResponse.Len() > 0 {
+		msgMaps = append(msgMaps, map[string]interface{}{
+			"role":    "assistant",
+			"content": rc.accumulatedResponse.String(),
+		})
+	}
+
+	sanitized := loopdetection.SanitizeLoopHistory(msgMaps, result)
+
+	// Convert back to []interface{}
+	newMessages := make([]interface{}, len(sanitized))
+	for i, m := range sanitized {
+		newMessages[i] = m
+	}
+	rc.requestBody["messages"] = newMessages
+
+	// Reset accumulated response since we're starting fresh
+	rc.accumulatedResponse.Reset()
+	rc.accumulatedThinking.Reset()
+
+	log.Printf("[LOOP-DETECTION] Context sanitized: %d → %d messages", len(messages), len(sanitized))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

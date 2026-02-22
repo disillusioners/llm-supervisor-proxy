@@ -62,15 +62,37 @@ func (d Duration) Duration() time.Duration {
 
 // Config holds all application configuration
 type Config struct {
-	Version                 string   `json:"version"`
-	UpstreamURL             string   `json:"upstream_url"`
-	Port                    int      `json:"port"`
-	IdleTimeout             Duration `json:"idle_timeout"`
-	MaxGenerationTime       Duration `json:"max_generation_time"`
-	MaxUpstreamErrorRetries int      `json:"max_upstream_error_retries"`
-	MaxIdleRetries          int      `json:"max_idle_retries"`
-	MaxGenerationRetries    int      `json:"max_generation_retries"`
-	UpdatedAt               string   `json:"updated_at"` // ISO8601 string for readability
+	Version                 string              `json:"version"`
+	UpstreamURL             string              `json:"upstream_url"`
+	Port                    int                 `json:"port"`
+	IdleTimeout             Duration            `json:"idle_timeout"`
+	MaxGenerationTime       Duration            `json:"max_generation_time"`
+	MaxUpstreamErrorRetries int                 `json:"max_upstream_error_retries"`
+	MaxIdleRetries          int                 `json:"max_idle_retries"`
+	MaxGenerationRetries    int                 `json:"max_generation_retries"`
+	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
+	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
+}
+
+// LoopDetectionConfig holds configuration for LLM loop detection.
+type LoopDetectionConfig struct {
+	Enabled              bool    `json:"enabled"`
+	ShadowMode           bool    `json:"shadow_mode"`             // true = log only, false = can interrupt
+	MessageWindow        int     `json:"message_window"`          // Sliding window size (default: 10)
+	ActionWindow         int     `json:"action_window"`           // Action window size (default: 15)
+	ExactMatchCount      int     `json:"exact_match_count"`       // Identical messages to trigger (default: 3)
+	SimilarityThreshold  float64 `json:"similarity_threshold"`    // SimHash similarity threshold (default: 0.85)
+	MinTokensForSimHash  int     `json:"min_tokens_for_simhash"`  // Min tokens before SimHash applies (default: 15)
+	ActionRepeatCount    int     `json:"action_repeat_count"`     // Consecutive identical actions to trigger (default: 3)
+	OscillationCount     int     `json:"oscillation_count"`       // A→B→A→B cycles to trigger (default: 4)
+	MinTokensForAnalysis int     `json:"min_tokens_for_analysis"` // Min tokens before stream analysis (default: 20)
+
+	// Phase 3: Advanced detection
+	ThinkingMinTokens         int      `json:"thinking_min_tokens"`         // Min thinking tokens before analysis (default: 100)
+	TrigramThreshold          float64  `json:"trigram_threshold"`           // Trigram repetition ratio threshold (default: 0.3)
+	MaxCycleLength            int      `json:"max_cycle_length"`            // Max action cycle length to check (default: 5)
+	ReasoningModelPatterns    []string `json:"reasoning_model_patterns"`    // Regex patterns for reasoning models
+	ReasoningTrigramThreshold float64  `json:"reasoning_trigram_threshold"` // More forgiving threshold for reasoning models (default: 0.15)
 }
 
 // Defaults - used when env not set and file doesn't exist
@@ -83,6 +105,23 @@ var Defaults = Config{
 	MaxUpstreamErrorRetries: 1,
 	MaxIdleRetries:          2,
 	MaxGenerationRetries:    1,
+	LoopDetection: LoopDetectionConfig{
+		Enabled:                   true,
+		ShadowMode:                true,
+		MessageWindow:             10,
+		ActionWindow:              15,
+		ExactMatchCount:           3,
+		SimilarityThreshold:       0.85,
+		MinTokensForSimHash:       15,
+		ActionRepeatCount:         3,
+		OscillationCount:          4,
+		MinTokensForAnalysis:      20,
+		ThinkingMinTokens:         100,
+		TrigramThreshold:          0.3,
+		MaxCycleLength:            5,
+		ReasoningModelPatterns:    []string{"o1", "o3", "deepseek-r1"},
+		ReasoningTrigramThreshold: 0.15,
+	},
 }
 
 // Validate ensures config values are valid before saving
@@ -229,6 +268,12 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
 			cfg.MaxGenerationRetries = r
 		}
+	}
+	if v := os.Getenv("LOOP_DETECTION_ENABLED"); v != "" {
+		cfg.LoopDetection.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LOOP_DETECTION_SHADOW_MODE"); v != "" {
+		cfg.LoopDetection.ShadowMode = v == "true" || v == "1"
 	}
 	return cfg
 }
@@ -389,6 +434,13 @@ func (m *Manager) GetMaxGenerationRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxGenerationRetries
+}
+
+// GetLoopDetection returns the loop detection configuration
+func (m *Manager) GetLoopDetection() LoopDetectionConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.LoopDetection
 }
 
 // IsReadOnly returns true if the config file cannot be written

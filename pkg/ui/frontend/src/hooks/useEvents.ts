@@ -49,7 +49,8 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
 
   useEffect(() => {
     const handleEvent = (data: Event) => {
-      const reqId = data.data?.id;
+      // Most events use 'id', but loop detection events use 'request_id'
+      const reqId = data.data?.id || data.data?.request_id;
       if (reqId) {
         setEventsMap((prev) => ({
           ...prev,
@@ -105,6 +106,7 @@ export function useEventRefresh(onRefresh: () => void) {
         'retry_attempt',
         'error_max_upstream_error_retries',
         'timeout_idle',
+        'loop_interrupted',
       ];
       if (refreshTypes.includes(data.type)) {
         onRefresh();

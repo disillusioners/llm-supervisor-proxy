@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
@@ -41,6 +42,9 @@ type requestContext struct {
 
 	// State
 	headersSent bool
+
+	// Loop detection (persists across retries within this request)
+	loopDetector *loopdetection.Detector
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -195,4 +199,71 @@ func determineFailureReason(err error, errorRetries, maxUpstreamErrorRetries, id
 		return "max_upstream_error_retries"
 	}
 	return "upstream_error"
+}
+
+// extractToolCallActions extracts tool call actions from an SSE chunk's raw JSON.
+// Returns nil if no tool_calls are present in the chunk.
+func extractToolCallActions(data []byte) []loopdetection.Action {
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return nil
+	}
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	delta, ok := choice["delta"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	toolCalls, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(toolCalls) == 0 {
+		return nil
+	}
+
+	var actions []loopdetection.Action
+	for _, tc := range toolCalls {
+		tcMap, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tcMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		args, _ := fn["arguments"].(string)
+		if name != "" {
+			// Use function name as Type, extract target from arguments if possible
+			target := extractTargetFromArgs(args)
+			actions = append(actions, loopdetection.Action{
+				Type:   name,
+				Target: target,
+			})
+		}
+	}
+	return actions
+}
+
+// extractTargetFromArgs tries to extract a "path" or "file" field from
+// tool call arguments JSON. Returns the raw args string as fallback.
+func extractTargetFromArgs(args string) string {
+	if args == "" {
+		return ""
+	}
+	var argsMap map[string]interface{}
+	if err := json.Unmarshal([]byte(args), &argsMap); err != nil {
+		return args // Return raw args if not valid JSON
+	}
+	// Common field names for file/path targets
+	for _, key := range []string{"path", "file", "filename", "target", "query"} {
+		if val, ok := argsMap[key].(string); ok {
+			return val
+		}
+	}
+	return args
 }

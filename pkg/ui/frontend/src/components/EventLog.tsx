@@ -24,6 +24,15 @@ const getEventMessage = (event: Event): string => {
       return `Error: ${event.data?.error || 'Unknown error'}`;
     case 'request_completed':
       return 'Request completed successfully.';
+    case 'loop_detected': {
+      const d = event.data;
+      const mode = d?.shadow_mode ? ' [shadow]' : '';
+      return `Loop detected${mode}: ${d?.strategy || '?'} (${d?.severity || '?'}) — ${d?.evidence || 'No details'}`;
+    }
+    case 'loop_interrupted': {
+      const d = event.data;
+      return `⚡ Loop interrupted: ${d?.strategy || '?'} — ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
+    }
     default:
       return '';
   }
@@ -41,6 +50,10 @@ const getEventColor = (type: EventType): string => {
     case 'error':
     case 'timeout_idle':
       return 'text-red-400';
+    case 'loop_detected':
+      return 'text-amber-400';
+    case 'loop_interrupted':
+      return 'text-red-300';
     default:
       return 'text-gray-400';
   }
@@ -60,6 +73,10 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'TIMEOUT_IDLE';
     case 'error':
       return 'ERROR';
+    case 'loop_detected':
+      return 'LOOP_DETECTED';
+    case 'loop_interrupted':
+      return 'LOOP_INTERRUPTED';
     default:
       return String(type).toUpperCase();
   }

@@ -1,5 +1,24 @@
 // API Types - matching Go backend structures
 
+export interface LoopDetectionConfig {
+  enabled: boolean;
+  shadow_mode: boolean;
+  message_window: number;
+  action_window: number;
+  exact_match_count: number;
+  similarity_threshold: number;
+  min_tokens_for_simhash: number;
+  action_repeat_count: number;
+  oscillation_count: number;
+  min_tokens_for_analysis: number;
+  // Phase 3
+  thinking_min_tokens: number;
+  trigram_threshold: number;
+  max_cycle_length: number;
+  reasoning_model_patterns: string[];
+  reasoning_trigram_threshold: number;
+}
+
 export interface AppConfig {
   version: string;
   upstream_url: string;
@@ -9,6 +28,7 @@ export interface AppConfig {
   max_upstream_error_retries: number;
   max_idle_retries: number;
   max_generation_retries: number;
+  loop_detection: LoopDetectionConfig;
   updated_at: string;
 }
 
@@ -64,13 +84,24 @@ export type EventType =
   | 'retry_attempt'
   | 'error_max_upstream_error_retries'
   | 'timeout_idle'
-  | 'error';
+  | 'error'
+  | 'loop_detected'
+  | 'loop_interrupted';
 
 export interface EventData {
   id?: string;
   timeout?: string;
   attempt?: number;
   error?: string;
+  // Loop detection fields
+  request_id?: string;
+  strategy?: string;
+  severity?: string;
+  evidence?: string;
+  confidence?: number;
+  pattern?: string[];
+  repeat_count?: number;
+  shadow_mode?: boolean;
 }
 
 export interface Event {
