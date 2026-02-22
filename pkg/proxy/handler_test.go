@@ -214,7 +214,7 @@ func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*co
 	return mgr
 }
 
-func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig *models.ModelsConfig, configOpts ...func(*config.Config)) (*Handler, *httptest.Server) {
+func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig models.ModelsConfigInterface, configOpts ...func(*config.Config)) (*Handler, *httptest.Server) {
 	t.Helper()
 
 	upstream := httptest.NewServer(upstreamHandler)
@@ -282,7 +282,7 @@ func bodyWithPrompt(model string, stream bool, prompt string) map[string]interfa
 type testCase struct {
 	name         string
 	fn           func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server)
-	modelsConfig *models.ModelsConfig
+	modelsConfig models.ModelsConfigInterface
 	configOpts   []func(*config.Config)
 	upstreamFn   func(t *testing.T) http.HandlerFunc
 }

@@ -95,13 +95,16 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 }
 
 // buildModelList constructs [originalModel, fallback1, fallback2, ...] from config.
-func buildModelList(originalModel string, modelsConfig *models.ModelsConfig) []string {
+func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterface) []string {
 	var allModels []string
 	if modelsConfig != nil {
 		fallbackChain := modelsConfig.GetFallbackChain(originalModel)
 		if len(fallbackChain) > 0 {
 			allModels = fallbackChain[1:]
 		}
+	}
+	if allModels == nil {
+		allModels = []string{}
 	}
 	modelList := []string{originalModel}
 	modelList = append(modelList, allModels...)

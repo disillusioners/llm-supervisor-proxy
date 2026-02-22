@@ -15,6 +15,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
 )
 
@@ -22,20 +23,33 @@ import (
 var Version = "dev"
 
 func main() {
+	ctx := context.Background()
+
 	// Initialize Shared Components
 	bus := events.NewBus()
-	store := store.NewRequestStore(100) // Keep last 100 requests
-	modelsConfig := models.NewModelsConfig()
+	reqStore := store.NewRequestStore(100) // Keep last 100 requests
 
-	// Load models from user config directory: ~/.config/llm-supervisor-proxy/models.json
-	modelsConfigPath := models.GetConfigPath()
-	_ = modelsConfig.Load(modelsConfigPath) // Ignore error if file doesn't exist
+	var configMgr config.ManagerInterface
+	var modelsConfig models.ModelsConfigInterface
+	var dbStore *database.Store
 
-	// Initialize Config Manager
-	configMgr, err := config.NewManagerWithEventBus(bus)
+	// Always use database storage
+	// - If DATABASE_URL is set with postgres://, uses PostgreSQL
+	// - Otherwise uses SQLite at ~/.config/llm-supervisor-proxy/config.db
+	var err error
+	dbStore, configMgr, modelsConfig, err = database.InitializeAll(ctx, bus)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
+	defer dbStore.Close()
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL != "" {
+		log.Printf("Using PostgreSQL database (DATABASE_URL is set)")
+	} else {
+		log.Printf("Using SQLite database for local development")
+	}
+
 	cfg := configMgr.Get()
 
 	// Initialize Proxy Config
@@ -45,10 +59,10 @@ func main() {
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, store)
+	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, store)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore)
 
 	// Setup Server
 	mux := http.NewServeMux()

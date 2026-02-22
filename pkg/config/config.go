@@ -74,6 +74,22 @@ type Config struct {
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
 }
 
+// ManagerInterface defines the interface for config management
+// Both JSON and database-backed implementations must satisfy this interface
+type ManagerInterface interface {
+	Get() Config
+	GetUpstreamURL() string
+	GetPort() int
+	GetIdleTimeout() time.Duration
+	GetMaxGenerationTime() time.Duration
+	GetMaxUpstreamErrorRetries() int
+	GetMaxIdleRetries() int
+	GetMaxGenerationRetries() int
+	GetLoopDetection() LoopDetectionConfig
+	Save(Config) (*SaveResult, error)
+	IsReadOnly() bool
+}
+
 // LoopDetectionConfig holds configuration for LLM loop detection.
 type LoopDetectionConfig struct {
 	Enabled              bool    `json:"enabled"`

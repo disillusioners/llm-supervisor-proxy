@@ -13,8 +13,8 @@ import (
 
 // Config holds runtime configuration for the proxy handler
 type Config struct {
-	ConfigMgr    *config.Manager      // Config manager for dynamic updates
-	ModelsConfig *models.ModelsConfig `json:"-"`
+	ConfigMgr    config.ManagerInterface      // Config manager for dynamic updates
+	ModelsConfig models.ModelsConfigInterface // Models config for fallback chains
 }
 
 // Clone returns a snapshot of the current config values
@@ -40,7 +40,7 @@ type ConfigSnapshot struct {
 	MaxUpstreamErrorRetries int
 	MaxIdleRetries          int
 	MaxGenerationRetries    int
-	ModelsConfig            *models.ModelsConfig
+	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
 }
 

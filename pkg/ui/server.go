@@ -31,14 +31,14 @@ var staticFiles embed.FS
 
 type Server struct {
 	bus          *events.Bus
-	configMgr    *config.Manager // NEW: config manager
-	proxyConfig  *proxy.Config   // Keep for models config access
-	modelsConfig *models.ModelsConfig
+	configMgr    config.ManagerInterface      // Config manager
+	proxyConfig  *proxy.Config                // Keep for models config access
+	modelsConfig models.ModelsConfigInterface // Models config
 	store        *store.RequestStore
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, configMgr *config.Manager, proxyConfig *proxy.Config, modelsConfig *models.ModelsConfig, store *store.RequestStore) *Server {
+func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore) *Server {
 	return &Server{
 		bus:          bus,
 		configMgr:    configMgr,

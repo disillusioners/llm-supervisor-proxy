@@ -36,6 +36,20 @@ type ModelConfig struct {
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 }
 
+// ModelsConfigInterface defines the interface for models configuration
+// Both JSON and database-backed implementations must satisfy this interface
+type ModelsConfigInterface interface {
+	GetModels() []ModelConfig
+	GetEnabledModels() []ModelConfig
+	GetTruncateParams(modelID string) []string
+	GetFallbackChain(modelID string) []string
+	AddModel(model ModelConfig) error
+	UpdateModel(modelID string, model ModelConfig) error
+	RemoveModel(modelID string) error
+	Save() error
+	Validate() error
+}
+
 // ModelsConfig manages the collection of model configurations.
 type ModelsConfig struct {
 	mu       sync.RWMutex
