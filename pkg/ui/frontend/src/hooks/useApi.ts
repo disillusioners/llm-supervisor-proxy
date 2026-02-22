@@ -134,12 +134,16 @@ export function useModels() {
   }, [fetchModels]);
 
   const updateModel = useCallback(async (id: string, updates: Partial<Model>) => {
+    // Merge with the current model to ensure all required fields (e.g. `name`) are always present,
+    // even for partial updates like toggling `enabled`.
+    const current = models.find(m => m.id === id);
+    const merged = { ...current, ...updates, id };
     await apiFetch<Model>(`/models/${id}`, {
       method: 'PUT',
-      body: JSON.stringify(updates),
+      body: JSON.stringify(merged),
     });
     await fetchModels();
-  }, [fetchModels]);
+  }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });

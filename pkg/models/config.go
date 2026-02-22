@@ -29,10 +29,11 @@ func GetConfigPath() string {
 
 // ModelConfig represents the configuration for a single model.
 type ModelConfig struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Enabled       bool     `json:"enabled"`
-	FallbackChain []string `json:"fallback_chain,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Enabled        bool     `json:"enabled"`
+	FallbackChain  []string `json:"fallback_chain,omitempty"`
+	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 }
 
 // ModelsConfig manages the collection of model configurations.
@@ -47,6 +48,26 @@ func NewModelsConfig() *ModelsConfig {
 	return &ModelsConfig{
 		Models: make([]ModelConfig, 0),
 	}
+}
+
+// GetTruncateParams returns the list of request-body parameters that should be
+// removed before forwarding to the upstream for the given model ID.
+// Returns nil if the model is not found or has no truncate_params configured.
+func (mc *ModelsConfig) GetTruncateParams(modelID string) []string {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	for _, model := range mc.Models {
+		if model.ID == modelID {
+			if len(model.TruncateParams) == 0 {
+				return nil
+			}
+			result := make([]string, len(model.TruncateParams))
+			copy(result, model.TruncateParams)
+			return result
+		}
+	}
+	return nil
 }
 
 // GetFallbackChain returns the fallback chain for a given model ID.

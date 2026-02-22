@@ -43,7 +43,7 @@ export function ConfigModal({
   // Model Form State
   const [showModelForm, setShowModelForm] = useState(false);
   const [modelFormMode, setModelFormMode] = useState<'add' | 'edit'>('add');
-  const [modelFormData, setModelFormData] = useState<{ id: string; name: string; fallback_chain: string }>({ id: '', name: '', fallback_chain: '' });
+  const [modelFormData, setModelFormData] = useState<{ id: string; name: string; fallback_chain: string; truncate_params: string }>({ id: '', name: '', fallback_chain: '', truncate_params: '' });
 
   // Model delete confirmation state
   const [modelToDelete, setModelToDelete] = useState<Model | null>(null);
@@ -137,7 +137,7 @@ export function ConfigModal({
 
   // Model Handlers
   const handleOpenAddModel = () => {
-    setModelFormData({ id: '', name: '', fallback_chain: '' });
+    setModelFormData({ id: '', name: '', fallback_chain: '', truncate_params: '' });
     setModelFormMode('add');
     setShowModelForm(true);
     setStatus(null);
@@ -147,7 +147,8 @@ export function ConfigModal({
     setModelFormData({
       id: model.id,
       name: model.name,
-      fallback_chain: model.fallback_chain.join(', ')
+      fallback_chain: model.fallback_chain.join(', '),
+      truncate_params: (model.truncate_params ?? []).join(', '),
     });
     setModelFormMode('edit');
     setShowModelForm(true);
@@ -158,6 +159,7 @@ export function ConfigModal({
     try {
       setStatus(null);
       const fallback = modelFormData.fallback_chain.split(',').map(s => s.trim()).filter(Boolean);
+      const truncate = modelFormData.truncate_params.split(',').map(s => s.trim()).filter(Boolean);
 
       if (modelFormMode === 'add') {
         if (!modelFormData.id || !modelFormData.name) {
@@ -168,6 +170,7 @@ export function ConfigModal({
           name: modelFormData.name,
           enabled: true,
           fallback_chain: fallback,
+          truncate_params: truncate,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
       } else {
@@ -177,6 +180,7 @@ export function ConfigModal({
         await onUpdateModel(modelFormData.id, {
           name: modelFormData.name,
           fallback_chain: fallback,
+          truncate_params: truncate,
         });
         setStatus({ type: 'success', message: 'Model updated successfully' });
       }
@@ -510,6 +514,16 @@ export function ConfigModal({
                                   ))}
                                 </div>
                               )}
+                              {(model.truncate_params ?? []).length > 0 && (
+                                <div class="mt-1 flex items-center gap-1.5 flex-wrap">
+                                  <span class="text-xs text-gray-500 font-medium">STRIP PARAMS:</span>
+                                  {(model.truncate_params ?? []).map(p => (
+                                    <span class="text-xs bg-orange-900/50 text-orange-300 border border-orange-800/40 px-1.5 py-0.5 rounded font-mono">
+                                      {escapeHtml(p)}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </div>
                           <div class="flex items-center gap-1 flex-shrink-0 ml-4">
@@ -575,6 +589,17 @@ export function ConfigModal({
                         placeholder="e.g., gpt-3.5-turbo, claude-2"
                       />
                       <p class="text-xs text-gray-400 mt-1">Leave empty for no fallbacks.</p>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-300 mb-1">Strip Parameters (comma-separated)</label>
+                      <input
+                        type="text"
+                        value={modelFormData.truncate_params}
+                        onInput={(e) => setModelFormData({ ...modelFormData, truncate_params: (e.target as HTMLInputElement).value })}
+                        class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-shadow"
+                        placeholder="e.g., max_completion_tokens, store"
+                      />
+                      <p class="text-xs text-gray-400 mt-1">Parameters to remove before forwarding to this model (e.g. unsupported OpenAI params).</p>
                     </div>
 
                     <div class="flex justify-end gap-3 pt-2">

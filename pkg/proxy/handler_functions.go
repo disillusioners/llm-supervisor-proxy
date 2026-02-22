@@ -156,7 +156,24 @@ func (h *Handler) prepareRetry(rc *requestContext, attempt int, counters *retryC
 
 // doSingleAttempt performs a single upstream HTTP request and handles the response.
 func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, modelIndex, attempt int, counters *retryCounters) attemptResult {
-	newBodyBytes, _ := json.Marshal(rc.requestBody)
+	// Build the body to send, optionally truncating unsupported params for this model.
+	bodyToSend := rc.requestBody
+	currentModel, _ := rc.requestBody["model"].(string)
+	if rc.conf.ModelsConfig != nil {
+		if toStrip := rc.conf.ModelsConfig.GetTruncateParams(currentModel); len(toStrip) > 0 {
+			// Shallow-clone the map so we don't mutate rc.requestBody
+			cloned := make(map[string]interface{}, len(rc.requestBody))
+			for k, v := range rc.requestBody {
+				cloned[k] = v
+			}
+			for _, param := range toStrip {
+				delete(cloned, param)
+			}
+			bodyToSend = cloned
+			log.Printf("[truncate_params] Stripped %v from request for model %s", toStrip, currentModel)
+		}
+	}
+	newBodyBytes, _ := json.Marshal(bodyToSend)
 
 	attemptCtx, attemptCancel := context.WithTimeout(rc.baseCtx, rc.conf.MaxGenerationTime)
 	defer attemptCancel()

@@ -19,10 +19,11 @@ import (
 
 // Model represents a model with its fallback chain
 type Model struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Enabled       bool     `json:"enabled"`
-	FallbackChain []string `json:"fallback_chain"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Enabled        bool     `json:"enabled"`
+	FallbackChain  []string `json:"fallback_chain"`
+	TruncateParams []string `json:"truncate_params,omitempty"`
 }
 
 //go:embed static/*
@@ -200,10 +201,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		models := make([]Model, len(modelConfigs))
 		for i, mc := range modelConfigs {
 			models[i] = Model{
-				ID:            mc.ID,
-				Name:          mc.Name,
-				Enabled:       mc.Enabled,
-				FallbackChain: mc.FallbackChain,
+				ID:             mc.ID,
+				Name:           mc.Name,
+				Enabled:        mc.Enabled,
+				FallbackChain:  mc.FallbackChain,
+				TruncateParams: mc.TruncateParams,
 			}
 		}
 
@@ -237,10 +239,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig
 		modelConfig := models.ModelConfig{
-			ID:            newModel.ID,
-			Name:          newModel.Name,
-			Enabled:       newModel.Enabled,
-			FallbackChain: newModel.FallbackChain,
+			ID:             newModel.ID,
+			Name:           newModel.Name,
+			Enabled:        newModel.Enabled,
+			FallbackChain:  newModel.FallbackChain,
+			TruncateParams: newModel.TruncateParams,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -302,10 +305,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig and update
 		modelConfig := models.ModelConfig{
-			ID:            updatedModel.ID,
-			Name:          updatedModel.Name,
-			Enabled:       updatedModel.Enabled,
-			FallbackChain: updatedModel.FallbackChain,
+			ID:             updatedModel.ID,
+			Name:           updatedModel.Name,
+			Enabled:        updatedModel.Enabled,
+			FallbackChain:  updatedModel.FallbackChain,
+			TruncateParams: updatedModel.TruncateParams,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {

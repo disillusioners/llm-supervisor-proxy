@@ -45,6 +45,7 @@ export interface Model {
   name: string;
   enabled: boolean;
   fallback_chain: string[];
+  truncate_params?: string[]; // Parameters to strip from the request before forwarding (e.g. ["max_completion_tokens", "store"])
 }
 
 export interface Message {
