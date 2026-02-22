@@ -1,6 +1,7 @@
 # Binaries
 bin/
 supervisor-proxy
+llm-supervisor-proxy
 /proxy
 mock
 

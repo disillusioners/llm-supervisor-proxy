@@ -16,17 +16,26 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
 -   Go 1.20+
 -   Node.js 18+ (for frontend development only)
 
-### Build
+### Build & Install
+
 ```bash
 git clone https://github.com/disillusioners/llm-supervisor-proxy.git
 cd llm-supervisor-proxy
 
-# Build frontend (optional if static/ already populated)
-cd pkg/ui/frontend && npm install && npm run build && cd ../../..
+# Build both frontend and backend
+make
 
-# Build binary (includes embedded frontend)
-go build -o supervisor-proxy cmd/main.go
+# Install globally to your system path (optional)
+sudo make install
 ```
+
+### Makefile Targets
+- `make`: Build both frontend and backend.
+- `make build`: Build only the Go backend.
+- `make build-frontend`: Build only the frontend UI.
+- `make install`: Install the binary to `/usr/local/bin` (requires sudo).
+- `make clean`: Remove build artifacts.
+- `make test`: Run Go tests.
 
 ## ⚙️ Configuration
 
@@ -46,7 +55,7 @@ The proxy is configured entirely via environment variables:
 2.  **Start the Supervisor Proxy**:
     ```bash
     export UPSTREAM_URL="http://localhost:4000"
-    ./supervisor-proxy
+    llm-supervisor-proxy
     ```
 3.  **Point your Agent/Client** to the Proxy (port 8080):
     ```bash
