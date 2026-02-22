@@ -29,10 +29,7 @@ func (s *Store) MigrateFromJSON(ctx context.Context) error {
 	configExists := fileExists(configPath)
 	modelsExists := fileExists(modelsPath)
 
-	// If neither file exists, nothing to migrate
-	if !configExists && !modelsExists {
-		return nil
-	}
+	// First run: no existing user configs. We can still try to seed defaults later.
 
 	qb := NewQueryBuilder(s.Dialect)
 
@@ -43,15 +40,28 @@ func (s *Store) MigrateFromJSON(ctx context.Context) error {
 		if err != nil {
 			log.Printf("Warning: failed to check config migration status: %v", err)
 		} else if needsMigration {
-			if err := s.migrateConfigJSON(ctx, configPath, qb); err != nil {
-				log.Printf("Warning: failed to migrate config.json: %v", err)
-			} else {
-				backupPath := configPath + ".migrated"
-				if err := os.Rename(configPath, backupPath); err != nil {
-					log.Printf("Warning: failed to rename migrated config.json: %v", err)
+			data, err := os.ReadFile(configPath)
+			if err == nil {
+				if err := s.migrateConfigJSON(ctx, data, qb); err != nil {
+					log.Printf("Warning: failed to migrate config.json: %v", err)
 				} else {
-					log.Printf("Migrated config.json to database, backup at %s", backupPath)
+					backupPath := configPath + ".migrated"
+					if err := os.Rename(configPath, backupPath); err != nil {
+						log.Printf("Warning: failed to rename migrated config.json: %v", err)
+					} else {
+						log.Printf("Migrated config.json to database, backup at %s", backupPath)
+					}
 				}
+			}
+		}
+	} else {
+		// Fresh start. Seed default config using embedded JSON template.
+		needsMigration, err := s.configNeedsMigration(ctx)
+		if err == nil && needsMigration {
+			if err := s.migrateConfigJSON(ctx, []byte(defaultConfigJSON), qb); err != nil {
+				log.Printf("Warning: failed to seed default config: %v", err)
+			} else {
+				log.Printf("Seeded default config from embedded template")
 			}
 		}
 	}
@@ -63,15 +73,28 @@ func (s *Store) MigrateFromJSON(ctx context.Context) error {
 		if err != nil {
 			log.Printf("Warning: failed to check models: %v", err)
 		} else if !hasModels {
-			if err := s.migrateModelsJSON(ctx, modelsPath, qb); err != nil {
-				log.Printf("Warning: failed to migrate models.json: %v", err)
-			} else {
-				backupPath := modelsPath + ".migrated"
-				if err := os.Rename(modelsPath, backupPath); err != nil {
-					log.Printf("Warning: failed to rename migrated models.json: %v", err)
+			data, err := os.ReadFile(modelsPath)
+			if err == nil {
+				if err := s.migrateModelsJSON(ctx, data, qb); err != nil {
+					log.Printf("Warning: failed to migrate models.json: %v", err)
 				} else {
-					log.Printf("Migrated models.json to database, backup at %s", backupPath)
+					backupPath := modelsPath + ".migrated"
+					if err := os.Rename(modelsPath, backupPath); err != nil {
+						log.Printf("Warning: failed to rename migrated models.json: %v", err)
+					} else {
+						log.Printf("Migrated models.json to database, backup at %s", backupPath)
+					}
 				}
+			}
+		}
+	} else {
+		// Fresh start without previous models.json. Try seeding from embedded models JSON template.
+		hasModels, err := s.HasModels(ctx)
+		if err == nil && !hasModels {
+			if err := s.migrateModelsJSON(ctx, []byte(defaultModelsJSON), qb); err != nil {
+				log.Printf("Warning: failed to seed default models: %v", err)
+			} else {
+				log.Printf("Seeded default models from embedded template")
 			}
 		}
 	}
@@ -102,12 +125,7 @@ func (s *Store) configNeedsMigration(ctx context.Context) (bool, error) {
 	return upstreamURL == defaults.UpstreamURL && port == int64(defaults.Port), nil
 }
 
-func (s *Store) migrateConfigJSON(ctx context.Context, path string, qb *QueryBuilder) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-
+func (s *Store) migrateConfigJSON(ctx context.Context, data []byte, qb *QueryBuilder) error {
 	var cfg config.Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("failed to parse config file: %w", err)
@@ -137,12 +155,7 @@ func (s *Store) migrateConfigJSON(ctx context.Context, path string, qb *QueryBui
 	return err
 }
 
-func (s *Store) migrateModelsJSON(ctx context.Context, path string, qb *QueryBuilder) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read models file: %w", err)
-	}
-
+func (s *Store) migrateModelsJSON(ctx context.Context, data []byte, qb *QueryBuilder) error {
 	var file struct {
 		Models []models.ModelConfig `json:"models"`
 	}

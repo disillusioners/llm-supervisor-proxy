@@ -47,7 +47,7 @@ sudo make install
 
 The proxy uses a three-tier configuration system with the following precedence:
 1.  **Environment Variables** (Highest)
-2.  **Configuration Files** (`config.json` and `models.json`)
+2.  **Database Storage** (SQLite / PostgreSQL)
 3.  **Defaults** (Lowest)
 
 ### Environment Variables
@@ -63,13 +63,18 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `MAX_GENERATION_RETRIES` | `1` | Retries for time-limit exceeded. |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
+| `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
 
-### Configuration Files
-Settings are persisted in:
--   **General Config**: `~/.config/llm-supervisor-proxy/config.json`
--   **Model Fallbacks**: `~/.config/llm-supervisor-proxy/models.json`
+### Database Storage
 
-You can modify these directly or via the **Web UI**.
+The application uses a database for persisting configurations and fallback models:
+
+*   **Local Development (SQLite)**: Used automatically by default. The database is created at `~/.config/llm-supervisor-proxy/config.db`.
+*   **Production (PostgreSQL)**: Enabled by setting the `DATABASE_URL` environment variable.
+
+*Note: If you are upgrading from an older version, your existing `config.json` and `models.json` files will be automatically migrated to the database.*
+
+For full database details and rollback procedures, see [`docs/database-migration.md`](docs/database-migration.md).
 
 ## 🏃 Usage
 
@@ -141,7 +146,8 @@ For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detect
 │   ├── loopdetection/       # Loop detection strategies & recovery
 │   ├── events/              # Event bus for SSE updates
 │   ├── models/              # Model & fallback configuration
-│   ├── store/               # In-memory storage for request history
+│   ├── store/               # In-memory storage & SQLite/PostgreSQL Database
+│   │   ├── database/        # DB Connection, migrations, sqlc queries
 │   └── config/              # App-wide configuration management
 ├── docs/                    # Design docs & implementation details
 └── LICENSE                  # MIT License

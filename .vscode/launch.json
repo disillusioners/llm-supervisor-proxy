@@ -8,14 +8,14 @@
             "mode": "auto",
             "program": "${workspaceFolder}/cmd/main.go",
             "env": {
-                "UPSTREAM_URL": "http://litellm-service.litellm.svc.cluster.local:4000",
+                // "UPSTREAM_URL": "http://litellm-service.litellm.svc.cluster.local:4000",
                 // "UPSTREAM_URL": "http://localhost:4001",
-                "PORT": "4321",
-                "IDLE_TIMEOUT": "90s",
-                "MAX_GENERATION_TIME": "300s",
-                "MAX_UPSTREAM_ERROR_RETRIES": "1",
-                "MAX_IDLE_RETRIES": "2",
-                "MAX_GENERATION_RETRIES": "1"
+                // "PORT": "4321",
+                // "IDLE_TIMEOUT": "90s",
+                // "MAX_GENERATION_TIME": "300s",
+                // "MAX_UPSTREAM_ERROR_RETRIES": "1",
+                // "MAX_IDLE_RETRIES": "2",
+                // "MAX_GENERATION_RETRIES": "1"
             }
         }
     ]
