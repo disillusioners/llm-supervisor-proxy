@@ -513,11 +513,11 @@ type LoopDetectedEvent struct {
 - [ ] **Collect shadow mode logs to tune thresholds**
 
 ### Phase 3: Advanced Detection
-- [ ] Thinking/reasoning analysis
-- [ ] Reasoning model special handling
-- [ ] Cycle detection in graphs
-- [ ] Progress stagnation
-- [ ] Context window sanitization
+- [x] Thinking/reasoning analysis
+- [x] Reasoning model special handling
+- [x] Cycle detection in graphs
+- [x] Progress stagnation
+- [x] Context window sanitization
 
 ### Phase 4: Recovery & UI
 - [ ] Enable Hard Interruption (after confidence in thresholds)

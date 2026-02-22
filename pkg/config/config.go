@@ -86,6 +86,13 @@ type LoopDetectionConfig struct {
 	ActionRepeatCount    int     `json:"action_repeat_count"`     // Consecutive identical actions to trigger (default: 3)
 	OscillationCount     int     `json:"oscillation_count"`       // A→B→A→B cycles to trigger (default: 4)
 	MinTokensForAnalysis int     `json:"min_tokens_for_analysis"` // Min tokens before stream analysis (default: 20)
+
+	// Phase 3: Advanced detection
+	ThinkingMinTokens         int      `json:"thinking_min_tokens"`         // Min thinking tokens before analysis (default: 100)
+	TrigramThreshold          float64  `json:"trigram_threshold"`           // Trigram repetition ratio threshold (default: 0.3)
+	MaxCycleLength            int      `json:"max_cycle_length"`            // Max action cycle length to check (default: 5)
+	ReasoningModelPatterns    []string `json:"reasoning_model_patterns"`    // Regex patterns for reasoning models
+	ReasoningTrigramThreshold float64  `json:"reasoning_trigram_threshold"` // More forgiving threshold for reasoning models (default: 0.15)
 }
 
 // Defaults - used when env not set and file doesn't exist
@@ -99,16 +106,21 @@ var Defaults = Config{
 	MaxIdleRetries:          2,
 	MaxGenerationRetries:    1,
 	LoopDetection: LoopDetectionConfig{
-		Enabled:              true,
-		ShadowMode:           true,
-		MessageWindow:        10,
-		ActionWindow:         15,
-		ExactMatchCount:      3,
-		SimilarityThreshold:  0.85,
-		MinTokensForSimHash:  15,
-		ActionRepeatCount:    3,
-		OscillationCount:     4,
-		MinTokensForAnalysis: 20,
+		Enabled:                   true,
+		ShadowMode:                true,
+		MessageWindow:             10,
+		ActionWindow:              15,
+		ExactMatchCount:           3,
+		SimilarityThreshold:       0.85,
+		MinTokensForSimHash:       15,
+		ActionRepeatCount:         3,
+		OscillationCount:          4,
+		MinTokensForAnalysis:      20,
+		ThinkingMinTokens:         100,
+		TrigramThreshold:          0.3,
+		MaxCycleLength:            5,
+		ReasoningModelPatterns:    []string{"o1", "o3", "deepseek-r1"},
+		ReasoningTrigramThreshold: 0.15,
 	},
 }
 

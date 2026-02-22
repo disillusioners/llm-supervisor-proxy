@@ -21,7 +21,9 @@ type Detector struct {
 }
 
 // NewDetector creates a new Detector with the specified configuration.
-// It initializes the Phase 1 strategies: exact match, similarity, and action pattern.
+// It initializes all detection strategies:
+// - Phase 1: exact match, similarity, action pattern
+// - Phase 3: thinking/reasoning, cycle detection, stagnation
 func NewDetector(config Config) *Detector {
 	d := &Detector{
 		config: config,
@@ -30,9 +32,15 @@ func NewDetector(config Config) *Detector {
 
 	if config.Enabled {
 		d.strategies = []Strategy{
+			// Phase 1: Core detection
 			NewExactMatchStrategy(config.ExactMatchCount),
 			NewSimilarityStrategy(config.SimilarityThreshold, config.MinTokensForSimHash, config.MessageWindow),
 			NewActionPatternStrategy(config.ActionRepeatCount, config.OscillationCount),
+			// Phase 3: Advanced detection
+			NewThinkingStrategy(config.TrigramThreshold, config.ThinkingMinTokens,
+				config.ReasoningModelPatterns, config.ReasoningTrigramThreshold),
+			NewCycleStrategy(config.MaxCycleLength, 2),
+			NewStagnationStrategy(config.MessageWindow, 0.3, 5),
 		}
 	}
 
@@ -42,6 +50,19 @@ func NewDetector(config Config) *Detector {
 // NewStreamBuffer creates a StreamBuffer configured with this detector's settings.
 func (d *Detector) NewStreamBuffer() *StreamBuffer {
 	return NewStreamBuffer(d.config.MinTokensForAnalysis)
+}
+
+// AddThinkingContent feeds thinking/reasoning content to the ThinkingStrategy.
+// Call this for each chunk of thinking content received from the stream.
+func (d *Detector) AddThinkingContent(text string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, s := range d.strategies {
+		if ts, ok := s.(*ThinkingStrategy); ok {
+			ts.AddThinkingContent(text)
+			return
+		}
+	}
 }
 
 // Analyze processes a completed text chunk and runs all strategies.

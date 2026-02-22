@@ -346,6 +346,12 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			ActionRepeatCount:    rc.conf.LoopDetection.ActionRepeatCount,
 			OscillationCount:     rc.conf.LoopDetection.OscillationCount,
 			MinTokensForAnalysis: rc.conf.LoopDetection.MinTokensForAnalysis,
+			// Phase 3: Advanced detection
+			ThinkingMinTokens:         rc.conf.LoopDetection.ThinkingMinTokens,
+			TrigramThreshold:          rc.conf.LoopDetection.TrigramThreshold,
+			MaxCycleLength:            rc.conf.LoopDetection.MaxCycleLength,
+			ReasoningModelPatterns:    rc.conf.LoopDetection.ReasoningModelPatterns,
+			ReasoningTrigramThreshold: rc.conf.LoopDetection.ReasoningTrigramThreshold,
 		}
 		rc.loopDetector = loopdetection.NewDetector(ldCfg)
 	}
@@ -384,14 +390,21 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 			// Track chunk content for both existing accumulation and loop detection
 			prevLen := rc.accumulatedResponse.Len()
+			prevThinkLen := rc.accumulatedThinking.Len()
 			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking)
 			newContent := rc.accumulatedResponse.String()[prevLen:]
+			newThinking := rc.accumulatedThinking.String()[prevThinkLen:]
 
 			// Feed content to loop detection buffer
 			if detector.IsEnabled() {
 				// Add text content
 				if len(newContent) > 0 {
 					streamBuf.AddText(newContent)
+				}
+
+				// Feed thinking content to ThinkingStrategy for trigram analysis
+				if len(newThinking) > 0 {
+					detector.AddThinkingContent(newThinking)
 				}
 
 				// Extract and add tool call actions from chunk

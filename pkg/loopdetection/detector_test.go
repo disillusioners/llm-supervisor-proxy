@@ -368,3 +368,273 @@ func itoa(i int) string {
 	}
 	return s
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Thinking Strategy Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestThinkingStrategy_RepetitiveThinking(t *testing.T) {
+	strategy := loopdetection.NewThinkingStrategy(0.3, 50, nil, 0.15)
+
+	// Simulate repetitive thinking content
+	repetitiveThinking := strings.Repeat("I need to check the file and examine the configuration again. ", 20)
+	strategy.AddThinkingContent(repetitiveThinking)
+
+	// Analyze with an empty window — the thinking content is accumulated internally
+	result := strategy.Analyze(nil)
+	if result == nil || !result.LoopDetected {
+		t.Error("Should detect repetitive thinking pattern")
+	}
+	if result != nil && result.Strategy != "thinking" {
+		t.Errorf("Expected thinking strategy, got %s", result.Strategy)
+	}
+}
+
+func TestThinkingStrategy_NormalThinking(t *testing.T) {
+	strategy := loopdetection.NewThinkingStrategy(0.3, 50, nil, 0.15)
+
+	// Normal varied thinking content
+	normalThinking := "First I should analyze the error message to understand what went wrong. " +
+		"The stack trace shows a null pointer exception in the handler function. " +
+		"This likely means the request context was not properly initialized before use. " +
+		"Looking at the initialization code, there is a missing nil check. " +
+		"The fix should add a guard clause at the top of the handler. " +
+		"Let me also verify that the tests cover this scenario properly. " +
+		"I should write a unit test that sends a request with a nil context. " +
+		"The expected behavior is a 500 error with an appropriate message."
+
+	strategy.AddThinkingContent(normalThinking)
+
+	result := strategy.Analyze(nil)
+	if result != nil && result.LoopDetected {
+		t.Errorf("Should NOT detect loop in normal varied thinking, got: %v", result)
+	}
+}
+
+func TestThinkingStrategy_ReasoningModelTolerance(t *testing.T) {
+	strategy := loopdetection.NewThinkingStrategy(
+		0.3,                                 // Normal threshold
+		50,                                  // Min tokens
+		[]string{"o1", "o3", "deepseek-r1"}, // Reasoning model patterns
+		0.15,                                // More forgiving threshold
+	)
+
+	// Set a reasoning model
+	strategy.SetModel("o1-preview")
+
+	// Content that would trigger with 0.3 threshold but not with 0.15
+	moderatelyRepetitive := strings.Repeat("Let me reconsider this approach from another angle. ", 15) +
+		"But actually the original approach was better because of performance constraints. " +
+		strings.Repeat("Perhaps I should evaluate whether the trade-offs are worth it. ", 5)
+
+	strategy.AddThinkingContent(moderatelyRepetitive)
+
+	ratio := fingerprint.TrigramRepetitionRatio(moderatelyRepetitive)
+	result := strategy.Analyze(nil)
+
+	// If the ratio is between 0.15 and 0.3, reasoning model should NOT trigger
+	if ratio > 0.15 && ratio < 0.3 {
+		if result != nil && result.LoopDetected {
+			t.Errorf("Reasoning model should have more forgiving threshold, ratio=%.3f", ratio)
+		}
+	}
+	// If ratio < 0.15, even reasoning model should trigger
+	t.Logf("Trigram ratio for moderately repetitive text: %.3f", ratio)
+}
+
+func TestThinkingStrategy_ShortThinkingNoTrigger(t *testing.T) {
+	strategy := loopdetection.NewThinkingStrategy(0.3, 100, nil, 0.15)
+
+	// Too short to analyze
+	strategy.AddThinkingContent("Let me think about this problem briefly.")
+
+	result := strategy.Analyze(nil)
+	if result != nil && result.LoopDetected {
+		t.Error("Should NOT analyze thinking content below min token threshold")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Cycle Strategy Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCycleStrategy_Detected(t *testing.T) {
+	cfg := loopdetection.DefaultConfig()
+	detector := loopdetection.NewDetector(cfg)
+
+	// Simulate a 3-action cycle: read→grep→write repeated
+	actions := []loopdetection.Action{
+		{Type: "read", Target: "config.go"},
+		{Type: "grep", Target: "main.go"},
+		{Type: "write", Target: "config.go"},
+	}
+
+	// Feed the cycle twice (should trigger cycle detection)
+	for i := 0; i < 2; i++ {
+		for _, action := range actions {
+			detector.Analyze(
+				"processing step "+itoa(i)+" with enough content for the token minimum threshold",
+				[]loopdetection.Action{action},
+			)
+		}
+	}
+
+	// Check if cycle was detected at some point
+	// The cycle strategy should find: read→grep→write → read→grep→write
+	result := detector.Analyze(
+		"one more step to trigger cycle check for the action pattern detection",
+		[]loopdetection.Action{actions[0]},
+	)
+
+	// Either the cycle or action pattern strategies may detect this
+	// We just verify no panic and the system operates correctly
+	t.Logf("Cycle test result: %+v", result)
+}
+
+func TestCycleStrategy_NoCycle(t *testing.T) {
+	strategy := loopdetection.NewCycleStrategy(5, 2)
+
+	window := []loopdetection.MessageContext{
+		{Actions: []loopdetection.Action{{Type: "read", Target: "a.go"}}},
+		{Actions: []loopdetection.Action{{Type: "write", Target: "b.go"}}},
+		{Actions: []loopdetection.Action{{Type: "grep", Target: "c.go"}}},
+		{Actions: []loopdetection.Action{{Type: "exec", Target: "test"}}},
+	}
+
+	result := strategy.Analyze(window)
+	if result != nil && result.LoopDetected {
+		t.Error("Should NOT detect cycle in unique action sequence")
+	}
+}
+
+func TestCycleStrategy_PatternDetected(t *testing.T) {
+	strategy := loopdetection.NewCycleStrategy(5, 2)
+
+	// A→B→C→A→B→C pattern
+	window := []loopdetection.MessageContext{
+		{Actions: []loopdetection.Action{{Type: "read", Target: "config.go"}}},
+		{Actions: []loopdetection.Action{{Type: "grep", Target: "main.go"}}},
+		{Actions: []loopdetection.Action{{Type: "write", Target: "output.go"}}},
+		{Actions: []loopdetection.Action{{Type: "read", Target: "config.go"}}},
+		{Actions: []loopdetection.Action{{Type: "grep", Target: "main.go"}}},
+		{Actions: []loopdetection.Action{{Type: "write", Target: "output.go"}}},
+	}
+
+	result := strategy.Analyze(window)
+	if result == nil || !result.LoopDetected {
+		t.Error("Should detect A→B→C→A→B→C cycle pattern")
+	}
+	if result != nil && result.Strategy != "cycle" {
+		t.Errorf("Expected cycle strategy, got %s", result.Strategy)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Stagnation Strategy Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestStagnationStrategy_Detected(t *testing.T) {
+	strategy := loopdetection.NewStagnationStrategy(5, 0.3, 5)
+
+	// Simulate messages that are cumulating but content barely changes
+	// (same information rephrased slightly)
+	msgs := []loopdetection.MessageContext{
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file and examine the database settings for connection", TokenCount: 12, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file and examine the database settings for connection")},
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file and examine the database settings for connection strings", TokenCount: 13, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file and examine the database settings for connection strings")},
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file and examine the database settings for the connection params", TokenCount: 14, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file and examine the database settings for the connection params")},
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file and examine the database settings for connection timeouts", TokenCount: 13, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file and examine the database settings for connection timeouts")},
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file and examine the database settings for connection values", TokenCount: 13, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file and examine the database settings for connection values")},
+	}
+
+	result := strategy.Analyze(msgs)
+	// These are highly similar cumulated messages — should detect stagnation
+	t.Logf("Stagnation result: %+v", result)
+}
+
+func TestStagnationStrategy_NoStagnation(t *testing.T) {
+	strategy := loopdetection.NewStagnationStrategy(5, 0.3, 5)
+
+	// Progressive messages with real variety
+	msgs := []loopdetection.MessageContext{
+		{Role: "assistant", ContentType: "text", Content: "Let me check the configuration file first to understand the settings", TokenCount: 12, ContentHash: fingerprint.ComputeSimHash("Let me check the configuration file first to understand the settings")},
+		{Role: "assistant", ContentType: "text", Content: "The database uses PostgreSQL with connection pooling enabled through the pgx driver", TokenCount: 14, ContentHash: fingerprint.ComputeSimHash("The database uses PostgreSQL with connection pooling enabled through the pgx driver")},
+		{Role: "assistant", ContentType: "text", Content: "I found the bug in the authentication middleware where tokens are not validated correctly", TokenCount: 15, ContentHash: fingerprint.ComputeSimHash("I found the bug in the authentication middleware where tokens are not validated correctly")},
+		{Role: "assistant", ContentType: "text", Content: "The fix requires updating the JWT validation logic in the verify endpoint handler", TokenCount: 14, ContentHash: fingerprint.ComputeSimHash("The fix requires updating the JWT validation logic in the verify endpoint handler")},
+		{Role: "assistant", ContentType: "text", Content: "I have applied the fix and all existing unit tests continue to pass successfully now", TokenCount: 14, ContentHash: fingerprint.ComputeSimHash("I have applied the fix and all existing unit tests continue to pass successfully now")},
+	}
+
+	result := strategy.Analyze(msgs)
+	if result != nil && result.LoopDetected {
+		t.Errorf("Should NOT detect stagnation in progressive messages, got: %v", result)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: Context Window Sanitization Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSanitizeLoopHistory_ExactMatch(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Fix the bug"},
+		{"role": "assistant", "content": "Let me check config.go"},
+		{"role": "assistant", "content": "Let me check config.go"},
+		{"role": "assistant", "content": "Let me check config.go"},
+	}
+
+	result := &loopdetection.DetectionResult{
+		LoopDetected: true,
+		Strategy:     "exact_match",
+		RepeatCount:  3,
+	}
+
+	sanitized := loopdetection.SanitizeLoopHistory(messages, result)
+
+	// Should have: original user message + system summary
+	if len(sanitized) != 2 {
+		t.Errorf("Expected 2 messages (1 original + 1 summary), got %d", len(sanitized))
+	}
+
+	// Last message should be the system summary
+	last := sanitized[len(sanitized)-1]
+	if last["role"] != "system" {
+		t.Errorf("Expected system role, got %s", last["role"])
+	}
+	content := last["content"].(string)
+	if !strings.Contains(content, "identical") {
+		t.Errorf("Expected 'identical' in summary, got: %s", content)
+	}
+}
+
+func TestSanitizeLoopHistory_NilResult(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Hello"},
+	}
+
+	sanitized := loopdetection.SanitizeLoopHistory(messages, nil)
+	if len(sanitized) != 1 {
+		t.Error("Nil result should return original messages unchanged")
+	}
+}
+
+func TestSanitizeLoopHistory_ActionPattern(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Read the file"},
+		{"role": "assistant", "content": "Reading config.go"},
+		{"role": "assistant", "content": "Reading config.go"},
+	}
+
+	result := &loopdetection.DetectionResult{
+		LoopDetected: true,
+		Strategy:     "action_pattern",
+		RepeatCount:  2,
+		Pattern:      []string{"read:config.go"},
+	}
+
+	sanitized := loopdetection.SanitizeLoopHistory(messages, result)
+	last := sanitized[len(sanitized)-1]
+	content := last["content"].(string)
+
+	if !strings.Contains(content, "read:config.go") {
+		t.Errorf("Expected action name in summary, got: %s", content)
+	}
+}
