@@ -26,3 +26,4 @@ cmd/__debug_bin*
 proxy.log
 proxy.pid
 mock.log
+/main

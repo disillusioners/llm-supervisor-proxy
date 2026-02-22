@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -81,8 +82,13 @@ func main() {
 	// Graceful Shutdown
 	go func() {
 		log.Printf("LLM Supervisor Proxy (build %s) starting on port %d", Version, cfg.Port)
-		log.Printf("Config: Upstream=%s, IdleTimeout=%s, MaxGenTime=%s, MaxUpstreamErrorRetries=%d",
-			cfg.UpstreamURL, cfg.IdleTimeout, cfg.MaxGenerationTime, cfg.MaxUpstreamErrorRetries)
+		configJSON, _ := json.MarshalIndent(cfg, "", "  ")
+		log.Printf("Current Configuration:\n%s", string(configJSON))
+
+		allModels := modelsConfig.GetModels()
+		modelsJSON, _ := json.MarshalIndent(allModels, "", "  ")
+		log.Printf("Loaded Models:\n%s", string(modelsJSON))
+
 		log.Printf("Dashboard available at http://localhost:%d", cfg.Port)
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
