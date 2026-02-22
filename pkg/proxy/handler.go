@@ -156,13 +156,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	modelList := []string{originalModel}
 	modelList = append(modelList, allModels...)
 
-	// Log fallback configuration
-	if len(allModels) > 0 {
-		log.Printf("Model '%s' has %d fallback(s) configured: %v", originalModel, len(allModels), allModels)
-	} else {
-		log.Printf("Model '%s' has no fallbacks configured", originalModel)
-	}
-
 	var accumulatedResponse strings.Builder
 	var accumulatedThinking strings.Builder
 
