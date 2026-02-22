@@ -144,11 +144,16 @@ export function ConfigModal({
   };
 
   const handleOpenEditModel = (model: Model) => {
+    let truncateParams = (model.truncate_params ?? []).join(', ');
+    if (truncateParams.trim() === '' && model.id.toLowerCase().includes('glm')) {
+      truncateParams = 'max_completion_tokens, store';
+    }
+
     setModelFormData({
       id: model.id,
       name: model.name,
       fallback_chain: model.fallback_chain.join(', '),
-      truncate_params: (model.truncate_params ?? []).join(', '),
+      truncate_params: truncateParams,
     });
     setModelFormMode('edit');
     setShowModelForm(true);
@@ -563,7 +568,16 @@ export function ConfigModal({
                         <input
                           type="text"
                           value={modelFormData.id}
-                          onInput={(e) => setModelFormData({ ...modelFormData, id: (e.target as HTMLInputElement).value })}
+                          onInput={(e) => {
+                            const val = (e.target as HTMLInputElement).value;
+                            setModelFormData(prev => ({
+                              ...prev,
+                              id: val,
+                              truncate_params: (val.toLowerCase().includes('glm') && prev.truncate_params.trim() === '')
+                                ? 'max_completion_tokens, store'
+                                : prev.truncate_params
+                            }));
+                          }}
                           class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                           placeholder="e.g., gpt-4"
                         />
@@ -574,7 +588,16 @@ export function ConfigModal({
                       <input
                         type="text"
                         value={modelFormData.name}
-                        onInput={(e) => setModelFormData({ ...modelFormData, name: (e.target as HTMLInputElement).value })}
+                        onInput={(e) => {
+                          const val = (e.target as HTMLInputElement).value;
+                          setModelFormData(prev => ({
+                            ...prev,
+                            name: val,
+                            truncate_params: (val.toLowerCase().includes('glm') && prev.truncate_params.trim() === '')
+                              ? 'max_completion_tokens, store'
+                              : prev.truncate_params
+                          }));
+                        }}
                         class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                         placeholder="e.g., GPT-4"
                       />

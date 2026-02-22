@@ -170,7 +170,6 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 				delete(cloned, param)
 			}
 			bodyToSend = cloned
-			log.Printf("[truncate_params] Stripped %v from request for model %s", toStrip, currentModel)
 		}
 	}
 	newBodyBytes, _ := json.Marshal(bodyToSend)
