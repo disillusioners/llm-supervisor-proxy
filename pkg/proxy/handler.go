@@ -152,6 +152,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Build the complete model list: original + fallbacks
+	modelList := []string{originalModel}
+	modelList = append(modelList, allModels...)
+
+	// Log fallback configuration
+	if len(allModels) > 0 {
+		log.Printf("Model '%s' has %d fallback(s) configured: %v", originalModel, len(allModels), allModels)
+	} else {
+		log.Printf("Model '%s' has no fallbacks configured", originalModel)
+	}
+
 	attempt := 0
 	var accumulatedResponse strings.Builder
 	var accumulatedThinking strings.Builder
@@ -175,20 +186,21 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		isStream = true
 	}
 
-	// Build the complete model list: original + fallbacks
-	modelList := []string{originalModel}
-	modelList = append(modelList, allModels...)
-
 	// Minimum threshold for fallback - don't attempt fallback if less than 10 seconds remain
 	minFallbackThreshold := 10 * time.Second
 
 	// Outer loop: iterate through models (original + fallbacks)
 	for modelIndex, currentModel := range modelList {
+		// Log if this is a fallback attempt
+		if modelIndex > 0 {
+			log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
+		}
+
 		// Check remaining timeout budget before attempting this model
 		remainingTime := GetRemainingTimeout(ctx)
 		if remainingTime < minFallbackThreshold && modelIndex > 0 {
 			// Not enough time for fallback, break out
-			log.Println("Insufficient time for fallback, failing request")
+			log.Printf("Insufficient time for fallback (%v remaining), failing request", remainingTime)
 			break
 		}
 
@@ -517,6 +529,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			reqLog.FallbackUsed = append(reqLog.FallbackUsed, currentModel)
 		}
 	} // End of outer model loop
+
+	// If we reach here, all models have failed and we haven't sent any response to the client
+	// Send an error response if headers haven't been sent yet
+	if !headersSent {
+		log.Printf("All models failed, sending error response to client")
+		h.publishEvent("all_models_failed", map[string]interface{}{"id": reqID})
+		http.Error(w, "All models failed after retries", http.StatusBadGateway)
+	}
 }
 
 // determineFailureReason determines the reason for failure based on context and attempt count
