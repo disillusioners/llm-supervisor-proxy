@@ -335,7 +335,19 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	// Use per-request detector (persists across retries within this request)
 	if rc.loopDetector == nil {
-		rc.loopDetector = loopdetection.NewDetector(loopdetection.DefaultConfig())
+		ldCfg := loopdetection.Config{
+			Enabled:              rc.conf.LoopDetection.Enabled,
+			ShadowMode:           rc.conf.LoopDetection.ShadowMode,
+			MessageWindow:        rc.conf.LoopDetection.MessageWindow,
+			ActionWindow:         rc.conf.LoopDetection.ActionWindow,
+			ExactMatchCount:      rc.conf.LoopDetection.ExactMatchCount,
+			SimilarityThreshold:  rc.conf.LoopDetection.SimilarityThreshold,
+			MinTokensForSimHash:  rc.conf.LoopDetection.MinTokensForSimHash,
+			ActionRepeatCount:    rc.conf.LoopDetection.ActionRepeatCount,
+			OscillationCount:     rc.conf.LoopDetection.OscillationCount,
+			MinTokensForAnalysis: rc.conf.LoopDetection.MinTokensForAnalysis,
+		}
+		rc.loopDetector = loopdetection.NewDetector(ldCfg)
 	}
 	detector := rc.loopDetector
 	streamBuf := detector.NewStreamBuffer()
@@ -362,7 +374,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				if detector.IsEnabled() {
 					if text, actions := streamBuf.Flush(); len(text) > 0 || len(actions) > 0 {
 						if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
-							h.publishLoopEvent(rc.reqID, result)
+							h.publishLoopEvent(rc.reqID, result, detector.IsShadowMode())
 						}
 					}
 				}
@@ -393,7 +405,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				if streamBuf.ShouldAnalyze(false) {
 					text, actions := streamBuf.Flush()
 					if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
-						h.publishLoopEvent(rc.reqID, result)
+						h.publishLoopEvent(rc.reqID, result, detector.IsShadowMode())
 					}
 				}
 			}
@@ -421,16 +433,17 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	return attemptContinueRetry
 }
 
-// publishLoopEvent emits a loop detection event to the event bus.
-func (h *Handler) publishLoopEvent(reqID string, result *loopdetection.DetectionResult) {
-	h.publishEvent("loop_detected", map[string]interface{}{
-		"id":           reqID,
-		"strategy":     result.Strategy,
-		"severity":     result.Severity.String(),
-		"evidence":     result.Evidence,
-		"confidence":   result.Confidence,
-		"pattern":      result.Pattern,
-		"repeat_count": result.RepeatCount,
+// publishLoopEvent emits a typed loop detection event to the event bus.
+func (h *Handler) publishLoopEvent(reqID string, result *loopdetection.DetectionResult, shadowMode bool) {
+	h.publishEvent("loop_detected", events.LoopDetectionEvent{
+		RequestID:   reqID,
+		Strategy:    result.Strategy,
+		Severity:    result.Severity.String(),
+		Evidence:    result.Evidence,
+		Confidence:  result.Confidence,
+		Pattern:     result.Pattern,
+		RepeatCount: result.RepeatCount,
+		ShadowMode:  shadowMode,
 	})
 }
 

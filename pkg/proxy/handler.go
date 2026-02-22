@@ -28,6 +28,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		MaxIdleRetries:          cfg.MaxIdleRetries,
 		MaxGenerationRetries:    cfg.MaxGenerationRetries,
 		ModelsConfig:            c.ModelsConfig,
+		LoopDetection:           cfg.LoopDetection,
 	}
 }
 
@@ -40,6 +41,7 @@ type ConfigSnapshot struct {
 	MaxIdleRetries          int
 	MaxGenerationRetries    int
 	ModelsConfig            *models.ModelsConfig
+	LoopDetection           config.LoopDetectionConfig
 }
 
 type Handler struct {

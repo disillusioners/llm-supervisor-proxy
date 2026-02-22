@@ -505,11 +505,11 @@ type LoopDetectedEvent struct {
 - [x] **Shadow mode logging** (detect but don't interrupt)
 
 ### Phase 2: Integration & Tuning
-- [ ] Integrate into handler.go
-- [ ] Add event types
-- [ ] Configuration support
-- [ ] Multi-turn context persistence
-- [ ] Integration tests
+- [x] Integrate into handler.go
+- [x] Add event types
+- [x] Configuration support
+- [x] Multi-turn context persistence
+- [x] Integration tests
 - [ ] **Collect shadow mode logs to tune thresholds**
 
 ### Phase 3: Advanced Detection

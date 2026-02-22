@@ -1037,3 +1037,210 @@ func TestFallback4xxTriggered(t *testing.T) {
 		},
 	})
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Loop detection integration tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// mockLoopExactHandler returns a handler that always sends the exact same response.
+// When called multiple times (via retries), the proxy's loop detector should flag
+// identical messages in its sliding window.
+func mockLoopExactHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqBodyBytes, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+
+		var reqBody map[string]interface{}
+		json.Unmarshal(reqBodyBytes, &reqBody)
+
+		isStream := true
+		if s, ok := reqBody["stream"].(bool); ok && !s {
+			isStream = false
+		}
+
+		if !isStream {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, mockNonStreamResponse("Hello world! I am a useful token stream."))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Always send the SAME exact response — this simulates an LLM stuck in a loop.
+		// The entire chunk is sent as one large piece so token count is sufficient.
+		loopMsg := "Let me check the configuration file and read the database settings for the connection strings and timeout values again"
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(loopMsg))
+		flusher.Flush()
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+}
+
+// mockLoopSimilarHandler returns a handler that sends slightly different responses each time.
+func mockLoopSimilarHandler() http.HandlerFunc {
+	callCount := 0
+	variations := []string{
+		"Let me check the configuration file and read the database settings for the connection strings and timeout values",
+		"Let me check the configuration file and read the database settings for the connection values and timeout limits",
+		"Let me check the configuration file and read the database settings for the connection setup and timeout params",
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		r.Body.Close()
+
+		callCount++
+		msg := variations[(callCount-1)%len(variations)]
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(msg))
+		flusher.Flush()
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+}
+
+func TestLoopDetection_ExactMatch(t *testing.T) {
+	// This test only works with the refactored handler (loop detection is only there)
+	h, upstream := newTestHandler(t, mockLoopExactHandler(), nil)
+	defer upstream.Close()
+
+	// Subscribe to events to capture loop_detected
+	eventCh := h.bus.Subscribe()
+	defer h.bus.Unsubscribe(eventCh)
+
+	// Send 3 identical requests — each gets the same response from mock.
+	// Within each stream, only 1 message is added to the detector window.
+	// After 2+ identical messages in the window, exact match should trigger.
+	for i := 0; i < 3; i++ {
+		body := simpleBody("mock-model", true)
+		req := makeRequest(t, body)
+		rr := httptest.NewRecorder()
+		h.HandleChatCompletions(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: expected status 200, got %d", i+1, rr.Code)
+		}
+	}
+
+	// All 3 requests should complete successfully (shadow mode — no interruption)
+	reqs := h.store.List()
+	if len(reqs) != 3 {
+		t.Fatalf("expected 3 requests in store, got %d", len(reqs))
+	}
+	for i, req := range reqs {
+		if req.Status != "completed" {
+			t.Errorf("request %d: expected status 'completed', got '%s'", i+1, req.Status)
+		}
+	}
+}
+
+func TestLoopDetection_NormalNoTrigger(t *testing.T) {
+	// Normal varied responses should NOT trigger loop detection
+	h, upstream := newTestHandler(t, mockLLMHandler(t), nil)
+	defer upstream.Close()
+
+	eventCh := h.bus.Subscribe()
+	defer h.bus.Unsubscribe(eventCh)
+
+	// Send different types of requests — each is a separate request with its own detector
+	prompts := []string{"Hello there", "mock-think please", "mock-tool call"}
+	for _, prompt := range prompts {
+		body := bodyWithPrompt("mock-model", true, prompt)
+		req := makeRequest(t, body)
+		rr := httptest.NewRecorder()
+		h.HandleChatCompletions(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rr.Code)
+		}
+	}
+
+	// Drain events — should NOT find any loop_detected events
+	drainTimeout := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case evt := <-eventCh:
+			if evt.Type == "loop_detected" {
+				t.Errorf("unexpected loop_detected event for normal varied responses: %+v", evt.Data)
+			}
+		case <-drainTimeout:
+			return // Done draining, no loop detected — correct
+		}
+	}
+}
+
+func TestLoopDetection_ToolCallExtraction(t *testing.T) {
+	// Test that tool calls in SSE chunks are extracted and fed to the detector
+	toolCallHandler := func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		r.Body.Close()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send some content
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Let me read that file for you to check the settings and configuration. "))
+		flusher.Flush()
+
+		// Send a tool call chunk
+		toolChunk := map[string]interface{}{
+			"choices": []interface{}{
+				map[string]interface{}{
+					"delta": map[string]interface{}{
+						"tool_calls": []interface{}{
+							map[string]interface{}{
+								"index": 0,
+								"id":    "call_abc",
+								"type":  "function",
+								"function": map[string]interface{}{
+									"name":      "read_file",
+									"arguments": `{"path": "config.go"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		b, _ := json.Marshal(toolChunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(b))
+		flusher.Flush()
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+
+	h, upstream := newTestHandler(t, toolCallHandler, nil)
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify request completed (tool call extraction shouldn't break anything)
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}
