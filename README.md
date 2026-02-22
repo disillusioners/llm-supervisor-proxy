@@ -5,6 +5,7 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
 ## 🚀 Features
 
 -   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
+-   **Auto-Fallback Model**: Automatically switches to a secondary "safeguard" model if the primary model fails or times out.
 -   **Multi-Strategy Auto-Retry**:
     -   **Idle Reset**: Retries when a stream hangs mid-generation.
     -   **Upstream Recovery**: Retries on 5xx errors or connectivity issues from the provider.
