@@ -12,9 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -22,35 +22,31 @@ import (
 	"github.com/google/uuid"
 )
 
+// Config holds runtime configuration for the proxy handler
 type Config struct {
-	mu                sync.RWMutex
-	UpstreamURL       string               `json:"upstream_url"`
-	IdleTimeout       time.Duration        `json:"idle_timeout"`
-	MaxGenerationTime time.Duration        `json:"max_generation_time"`
-	MaxRetries        int                  `json:"max_retries"`
-	ModelsConfig      *models.ModelsConfig `json:"-"`
+	ConfigMgr    *config.Manager      // Config manager for dynamic updates
+	ModelsConfig *models.ModelsConfig `json:"-"`
 }
 
-func (c *Config) Clone() Config {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return Config{
-		UpstreamURL:       c.UpstreamURL,
-		IdleTimeout:       c.IdleTimeout,
-		MaxGenerationTime: c.MaxGenerationTime,
-		MaxRetries:        c.MaxRetries,
+// Clone returns a snapshot of the current config values
+func (c *Config) Clone() ConfigSnapshot {
+	cfg := c.ConfigMgr.Get()
+	return ConfigSnapshot{
+		UpstreamURL:       cfg.UpstreamURL,
+		IdleTimeout:       cfg.IdleTimeout.Duration(),
+		MaxGenerationTime: cfg.MaxGenerationTime.Duration(),
+		MaxRetries:        cfg.MaxRetries,
 		ModelsConfig:      c.ModelsConfig,
 	}
 }
 
-func (c *Config) CopyFrom(other Config) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.UpstreamURL = other.UpstreamURL
-	c.IdleTimeout = other.IdleTimeout
-	c.MaxGenerationTime = other.MaxGenerationTime
-	c.MaxRetries = other.MaxRetries
-	c.ModelsConfig = other.ModelsConfig
+// ConfigSnapshot is an immutable snapshot of config values for a single request
+type ConfigSnapshot struct {
+	UpstreamURL       string
+	IdleTimeout       time.Duration
+	MaxGenerationTime time.Duration
+	MaxRetries        int
+	ModelsConfig      *models.ModelsConfig
 }
 
 type Handler struct {
@@ -218,6 +214,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					messages, ok := requestBody["messages"].([]interface{})
 					if !ok {
 						log.Println("Could not find messages, aborting retry")
+						http.Error(w, "Invalid request: messages not found", http.StatusBadRequest)
 						return
 					}
 

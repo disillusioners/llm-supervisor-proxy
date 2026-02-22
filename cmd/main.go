@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -18,35 +19,6 @@ import (
 )
 
 func main() {
-	// Configuration
-	upstreamURL := os.Getenv("UPSTREAM_URL")
-	if upstreamURL == "" {
-		upstreamURL = "http://localhost:4001"
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8089"
-	}
-
-	idleTimeoutStr := os.Getenv("IDLE_TIMEOUT")
-	idleTimeout := 10 * time.Second
-	if val, err := time.ParseDuration(idleTimeoutStr); err == nil {
-		idleTimeout = val
-	}
-
-	maxGenTimeStr := os.Getenv("MAX_GENERATION_TIME")
-	maxGenTime := 180 * time.Second
-	if val, err := time.ParseDuration(maxGenTimeStr); err == nil {
-		maxGenTime = val
-	}
-
-	maxRetriesStr := os.Getenv("MAX_RETRIES")
-	maxRetries := 1
-	if val, err := strconv.Atoi(maxRetriesStr); err == nil {
-		maxRetries = val
-	}
-
 	// Initialize Shared Components
 	bus := events.NewBus()
 	store := store.NewRequestStore(100) // Keep last 100 requests
@@ -56,19 +28,24 @@ func main() {
 	modelsConfigPath := models.GetConfigPath()
 	_ = modelsConfig.Load(modelsConfigPath) // Ignore error if file doesn't exist
 
-	config := &proxy.Config{
-		UpstreamURL:       upstreamURL,
-		IdleTimeout:       idleTimeout,
-		MaxGenerationTime: maxGenTime,
-		MaxRetries:        maxRetries,
-		ModelsConfig:      modelsConfig,
+	// Initialize Config Manager
+	configMgr, err := config.NewManagerWithEventBus(bus)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	cfg := configMgr.Get()
+
+	// Initialize Proxy Config
+	proxyConfig := &proxy.Config{
+		ConfigMgr:    configMgr,
+		ModelsConfig: modelsConfig,
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, config, modelsConfig, store)
+	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, store)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(config, bus, store)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, store)
 
 	// Setup Server
 	mux := http.NewServeMux()
@@ -80,16 +57,16 @@ func main() {
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChatCompletions)
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + strconv.Itoa(cfg.Port),
 		Handler: mux,
 	}
 
 	// Graceful Shutdown
 	go func() {
-		log.Printf("Starting LLM Supervisor Proxy on port %s", port)
+		log.Printf("Starting LLM Supervisor Proxy on port %d", cfg.Port)
 		log.Printf("Config: Upstream=%s, IdleTimeout=%s, MaxGenTime=%s, MaxRetries=%d",
-			upstreamURL, idleTimeout, maxGenTime, maxRetries)
-		log.Printf("Dashboard available at http://localhost:%s", port)
+			cfg.UpstreamURL, cfg.IdleTimeout, cfg.MaxGenerationTime, cfg.MaxRetries)
+		log.Printf("Dashboard available at http://localhost:%d", cfg.Port)
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)

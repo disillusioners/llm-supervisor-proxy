@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -29,16 +30,18 @@ var staticFiles embed.FS
 
 type Server struct {
 	bus          *events.Bus
-	config       *proxy.Config        // Pointer to live config
-	modelsConfig *models.ModelsConfig // Pointer to models config
+	configMgr    *config.Manager // NEW: config manager
+	proxyConfig  *proxy.Config   // Keep for models config access
+	modelsConfig *models.ModelsConfig
 	store        *store.RequestStore
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, config *proxy.Config, modelsConfig *models.ModelsConfig, store *store.RequestStore) *Server {
+func NewServer(bus *events.Bus, configMgr *config.Manager, proxyConfig *proxy.Config, modelsConfig *models.ModelsConfig, store *store.RequestStore) *Server {
 	return &Server{
 		bus:          bus,
-		config:       config,
+		configMgr:    configMgr,
+		proxyConfig:  proxyConfig,
 		modelsConfig: modelsConfig,
 		store:        store,
 	}
@@ -99,34 +102,56 @@ func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.config)
+		json.NewEncoder(w).Encode(s.configMgr.Get())
 		return
-	}
 
-	if r.Method == http.MethodPost {
-		// Parse update
-		var newConfig proxy.Config
-		if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	case http.MethodPut: // Changed from POST to RESTful convention
+		// Limit request body to 64KB to prevent memory exhaustion attacks
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+		var cfg config.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		// Update live config safely
-		s.config.CopyFrom(newConfig)
+		// Clear read-only fields (prevent client manipulation)
+		cfg.Version = ""   // Will be set by Save()
+		cfg.UpdatedAt = "" // Will be set by Save()
 
-		s.bus.Publish(events.Event{
-			Type:      "config_updated",
-			Timestamp: time.Now().Unix(),
-			Data:      newConfig,
-		})
+		result, err := s.configMgr.Save(cfg)
+		if err != nil {
+			if strings.Contains(err.Error(), "validation failed") {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			} else if strings.Contains(err.Error(), "read-only") {
+				http.Error(w, "Config file is read-only", http.StatusForbidden)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to save: %v", err), http.StatusInternalServerError)
+			}
+			return
+		}
 
-		w.WriteHeader(http.StatusOK)
+		// Include restart hint in response
+		response := struct {
+			config.Config
+			RestartRequired bool     `json:"restart_required"`
+			ChangedFields   []string `json:"changed_fields,omitempty"`
+		}{
+			Config:          s.configMgr.Get(),
+			RestartRequired: result.RestartRequired,
+			ChangedFields:   result.ChangedFields,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 		return
-	}
 
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +203,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(models)
 
 	case http.MethodPost:
+		// Limit request body to 64KB to prevent memory exhaustion attacks
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 		var newModel Model
 		if err := json.NewDecoder(r.Body).Decode(&newModel); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -242,6 +270,9 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut:
+		// Limit request body to 64KB to prevent memory exhaustion attacks
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 		var updatedModel Model
 		if err := json.NewDecoder(r.Body).Decode(&updatedModel); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -316,6 +347,9 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 	var model Model
 	if err := json.NewDecoder(r.Body).Decode(&model); err != nil {
