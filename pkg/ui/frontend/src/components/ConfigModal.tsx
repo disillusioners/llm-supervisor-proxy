@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import type { AppConfig, ConfigUpdateResponse, Model } from '../types';
 import { escapeHtml } from '../utils/helpers';
 
@@ -48,19 +48,19 @@ export function ConfigModal({
   // Model delete confirmation state
   const [modelToDelete, setModelToDelete] = useState<Model | null>(null);
 
-  // Sync state when modal opens
-  const handleOpen = () => {
-    if (config) {
-      setUpstreamUrl(config.upstream_url);
-      setPort(config.port);
-      setOriginalPort(config.port);
-      setIdleTimeout(config.idle_timeout);
-      setMaxUpstreamErrorRetries(config.max_upstream_error_retries);
-      setMaxIdleRetries(config.max_idle_retries);
-      setMaxGenerationRetries(config.max_generation_retries);
-      setMaxGenTime(config.max_generation_time);
+  // Sync state when modal opens or config changes
+  useEffect(() => {
+    if (isOpen && config) {
+      setUpstreamUrl(config.upstream_url || '');
+      setPort(config.port || 8089);
+      setOriginalPort(config.port || 8089);
+      setIdleTimeout(config.idle_timeout || '');
+      setMaxUpstreamErrorRetries(config.max_upstream_error_retries || 0);
+      setMaxIdleRetries(config.max_idle_retries || 0);
+      setMaxGenerationRetries(config.max_generation_retries || 0);
+      setMaxGenTime(config.max_generation_time || '');
     }
-  };
+  }, [isOpen, config]);
 
   // Close modal and reset specific state
   const handleClose = () => {
@@ -185,7 +185,6 @@ export function ConfigModal({
     <div
       class="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={handleBackdropClick}
-      onMouseEnter={handleOpen}
     >
       <div class="bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
         {/* Header */}

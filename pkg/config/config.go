@@ -82,7 +82,7 @@ var Defaults = Config{
 	MaxGenerationTime:       Duration(300 * time.Second),
 	MaxUpstreamErrorRetries: 1,
 	MaxIdleRetries:          2,
-	MaxGenerationRetries:    2,
+	MaxGenerationRetries:    1,
 }
 
 // Validate ensures config values are valid before saving
