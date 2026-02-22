@@ -33,6 +33,7 @@ export function ConfigModal({
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
   const [maxRetries, setMaxRetries] = useState(0);
+  const [maxTimeoutRetries, setMaxTimeoutRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
 
   // Store original port to detect changes
@@ -54,6 +55,7 @@ export function ConfigModal({
       setOriginalPort(config.port);
       setIdleTimeout(config.idle_timeout);
       setMaxRetries(config.max_retries);
+      setMaxTimeoutRetries(config.max_timeout_retries);
       setMaxGenTime(config.max_generation_time);
     }
   };
@@ -84,6 +86,7 @@ export function ConfigModal({
         port,
         idle_timeout: idleTimeout,
         max_retries: maxRetries,
+        max_timeout_retries: maxTimeoutRetries,
         max_generation_time: maxGenTime,
       });
 
@@ -199,8 +202,8 @@ export function ConfigModal({
         <div class="flex border-b border-gray-700">
           <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'proxy'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-white'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
               }`}
             onClick={() => setActiveTab('proxy')}
           >
@@ -208,8 +211,8 @@ export function ConfigModal({
           </button>
           <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'models'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-white'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
               }`}
             onClick={() => setActiveTab('models')}
           >
@@ -285,7 +288,7 @@ export function ConfigModal({
 
               {/* Max Retries */}
               <div>
-                <label class="block text-sm font-medium text-gray-300 mb-1">Max Retries</label>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Max Error Retries</label>
                 <div class="relative">
                   <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -298,6 +301,25 @@ export function ConfigModal({
                     onInput={(e) => setMaxRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
                     class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                     placeholder="3"
+                  />
+                </div>
+              </div>
+
+              {/* Max Timeout Retries */}
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Max Timeout Retries</label>
+                <div class="relative">
+                  <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </span>
+                  <input
+                    type="number"
+                    value={maxTimeoutRetries}
+                    onInput={(e) => setMaxTimeoutRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
+                    class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+                    placeholder="2"
                   />
                 </div>
               </div>
@@ -484,8 +506,8 @@ export function ConfigModal({
           {status && (
             <div
               class={`mt-6 p-4 rounded-md shadow-sm border ${status.type === 'success'
-                  ? 'bg-green-900/30 text-green-300 border-green-800/50'
-                  : 'bg-red-900/30 text-red-300 border-red-800/50'
+                ? 'bg-green-900/30 text-green-300 border-green-800/50'
+                : 'bg-red-900/30 text-red-300 border-red-800/50'
                 }`}
             >
               <div class="flex items-start gap-2">

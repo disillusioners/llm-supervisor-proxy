@@ -7,6 +7,7 @@ export interface AppConfig {
   idle_timeout: string;
   max_generation_time: string;
   max_retries: number;
+  max_timeout_retries: number;
   updated_at: string;
 }
 

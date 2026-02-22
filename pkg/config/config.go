@@ -68,6 +68,7 @@ type Config struct {
 	IdleTimeout       Duration `json:"idle_timeout"`
 	MaxGenerationTime Duration `json:"max_generation_time"`
 	MaxRetries        int      `json:"max_retries"`
+	MaxTimeoutRetries int      `json:"max_timeout_retries"`
 	UpdatedAt         string   `json:"updated_at"` // ISO8601 string for readability
 }
 
@@ -79,6 +80,7 @@ var Defaults = Config{
 	IdleTimeout:       Duration(10 * time.Second),
 	MaxGenerationTime: Duration(180 * time.Second),
 	MaxRetries:        1,
+	MaxTimeoutRetries: 2,
 }
 
 // Validate ensures config values are valid before saving
@@ -107,6 +109,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxRetries < 0 {
 		return errors.New("max_retries cannot be negative")
+	}
+	if c.MaxTimeoutRetries < 0 {
+		return errors.New("max_timeout_retries cannot be negative")
 	}
 	return nil
 }
@@ -208,6 +213,11 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("MAX_RETRIES"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
 			cfg.MaxRetries = r
+		}
+	}
+	if v := os.Getenv("MAX_TIMEOUT_RETRIES"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
+			cfg.MaxTimeoutRetries = r
 		}
 	}
 	return cfg
@@ -355,6 +365,13 @@ func (m *Manager) GetMaxRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxRetries
+}
+
+// GetMaxTimeoutRetries returns the max timeout retries
+func (m *Manager) GetMaxTimeoutRetries() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.MaxTimeoutRetries
 }
 
 // IsReadOnly returns true if the config file cannot be written

@@ -36,6 +36,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		IdleTimeout:       cfg.IdleTimeout.Duration(),
 		MaxGenerationTime: cfg.MaxGenerationTime.Duration(),
 		MaxRetries:        cfg.MaxRetries,
+		MaxTimeoutRetries: cfg.MaxTimeoutRetries,
 		ModelsConfig:      c.ModelsConfig,
 	}
 }
@@ -46,6 +47,7 @@ type ConfigSnapshot struct {
 	IdleTimeout       time.Duration
 	MaxGenerationTime time.Duration
 	MaxRetries        int
+	MaxTimeoutRetries int
 	ModelsConfig      *models.ModelsConfig
 }
 
@@ -103,12 +105,8 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Enforce hard deadline for the entire interaction (including retries)
-	// Or should it be per attempt?
-	// The requirement says "Hard Generation Deadline: Enforce a maximum duration".
-	// Usually this means for the	// Enforce hard deadline
-	ctx, cancel := context.WithTimeout(r.Context(), conf.MaxGenerationTime)
-	defer cancel()
+	// Use base context, handle generation deadlines per-attempt natively inside
+	baseCtx := r.Context()
 
 	// Create Request Log
 	reqID := uuid.New().String()
@@ -163,13 +161,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("Model '%s' has no fallbacks configured", originalModel)
 	}
 
-	attempt := 0
 	var accumulatedResponse strings.Builder
 	var accumulatedThinking strings.Builder
-	// Simple accumulator for tool calls - we might just capture them raw or try to parse
-	// Parsing tool call chunks is tricky. Ideally we rely on the upstream to send valid JSON eventually.
-	// But here we are just proxying.
-	// For visualization, we can just accumulate the whole response object if we wanted, but we are streaming.
+
 	// Let's keep it simple: We just accumulate the text for thinking.
 	// For tool calls, we'll try to reconstruct them if possible, or just store the raw JSON of the last chunk if it contains the full tool call?
 	// No, tool calls are streamed.
@@ -186,9 +180,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		isStream = true
 	}
 
-	// Minimum threshold for fallback - don't attempt fallback if less than 10 seconds remain
-	minFallbackThreshold := 10 * time.Second
-
 	// Outer loop: iterate through models (original + fallbacks)
 	for modelIndex, currentModel := range modelList {
 		// Log if this is a fallback attempt
@@ -196,22 +187,26 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
 		}
 
-		// Check remaining timeout budget before attempting this model
-		remainingTime := GetRemainingTimeout(ctx)
-		if remainingTime < minFallbackThreshold && modelIndex > 0 {
-			// Not enough time for fallback, break out
-			log.Printf("Insufficient time for fallback (%v remaining), failing request", remainingTime)
+		// Check if client disconnected before attempting this model
+		if baseCtx.Err() != nil {
+			log.Printf("Client disconnected, failing request")
 			break
 		}
 
 		// Update model in request body
 		requestBody["model"] = currentModel
 
-		// Reset attempt counter for each new model
-		attempt = 0
+		// Reset attempt counters for each new model
+		errorRetries := 0
+		timeoutRetries := 0
+		var lastErr error
 
 		// Inner loop: retry logic for current model
-		for attempt <= conf.MaxRetries {
+		for {
+			attempt := errorRetries + timeoutRetries
+			if errorRetries > conf.MaxRetries || timeoutRetries > conf.MaxTimeoutRetries {
+				break
+			}
 			if attempt > 0 {
 				log.Printf("Retrying request (attempt %d)...", attempt)
 				reqLog.Retries = attempt
@@ -248,8 +243,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 			newBodyBytes, _ := json.Marshal(requestBody)
 
-			// Create request with the deadline context
-			proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewBuffer(newBodyBytes))
+			// Create request with the per-attempt deadline context
+			attemptCtx, attemptCancel := context.WithTimeout(baseCtx, conf.MaxGenerationTime)
+			defer attemptCancel()
+
+			proxyReq, err := http.NewRequestWithContext(attemptCtx, r.Method, targetURL, bytes.NewBuffer(newBodyBytes))
 			if err != nil {
 				log.Printf("Failed to create request: %v", err)
 				return
@@ -267,11 +265,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 			resp, err := h.client.Do(proxyReq)
 			if err != nil {
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					log.Println("Global deadline exceeded")
+				lastErr = err
+				if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+					log.Printf("Attempt %d generation deadline exceeded", attempt)
 					h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
+					timeoutRetries++
+					continue
+				}
+				if errors.Is(baseCtx.Err(), context.Canceled) {
+					log.Println("Client disconnected")
 					reqLog.Status = "failed"
-					reqLog.Error = "Global deadline exceeded"
+					reqLog.Error = "Client disconnected"
 					reqLog.EndTime = time.Now()
 					reqLog.Duration = time.Since(startTime).String()
 					h.store.Add(reqLog)
@@ -279,7 +283,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				}
 				log.Printf("Upstream request failed: %v", err)
 				h.publishEvent("upstream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
-				attempt++
+				errorRetries++
 				time.Sleep(500 * time.Millisecond) // Slight backoff
 				continue
 			}
@@ -298,7 +302,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						resp.Body.Close()
 						log.Printf("Upstream returned %d", resp.StatusCode)
 						h.publishEvent("upstream_error_status", map[string]interface{}{"status": resp.StatusCode, "id": reqID})
-						attempt++
+						errorRetries++
 						time.Sleep(1 * time.Second)
 						continue
 					}
@@ -344,16 +348,24 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			if !isStream {
 				bodyBytes, err := io.ReadAll(monitor)
 				if err != nil {
+					lastErr = err
 					if errors.Is(err, supervisor.ErrIdleTimeout) {
 						log.Println("Stream idle timeout detected!")
 						h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
-						attempt++
+						timeoutRetries++
+						continue
+					}
+					if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+						log.Printf("Attempt %d generation deadline exceeded", attempt)
+						h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
+						monitor.Close()
+						timeoutRetries++
 						continue
 					}
 					log.Printf("Stream error: %v", err)
 					h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 					monitor.Close()
-					attempt++
+					errorRetries++
 					continue
 				}
 
@@ -470,19 +482,25 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 			// If we got here, scanner stopped.
 			err = scanner.Err()
-			if errors.Is(err, supervisor.ErrIdleTimeout) {
-				log.Println("Stream idle timeout detected!")
-				h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
-				// monitor closed the body.
-				attempt++
-				continue
-			}
-
 			if err != nil {
+				lastErr = err
+				if errors.Is(err, supervisor.ErrIdleTimeout) {
+					log.Println("Stream idle timeout detected!")
+					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
+					timeoutRetries++
+					continue
+				}
+				if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+					log.Printf("Attempt %d generation deadline exceeded", attempt)
+					h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
+					monitor.Close()
+					timeoutRetries++
+					continue
+				}
 				log.Printf("Stream error: %v", err)
 				h.publishEvent("stream_error", map[string]interface{}{"error": err.Error(), "id": reqID})
 				monitor.Close()
-				attempt++
+				errorRetries++
 				continue
 			}
 
@@ -505,7 +523,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			log.Println("Stream ended unexpectedly without [DONE]")
 			h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": reqID})
 			monitor.Close()
-			attempt++
+			errorRetries++
 		}
 
 		log.Printf("Model %s failed (retries exhausted or unrecoverable error)", currentModel)
@@ -526,7 +544,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.publishEvent("fallback_triggered", events.FallbackEvent{
 				FromModel: currentModel,
 				ToModel:   nextModel,
-				Reason:    determineFailureReason(ctx, attempt, conf.MaxRetries),
+				Reason:    determineFailureReason(lastErr, errorRetries, conf.MaxRetries, timeoutRetries, conf.MaxTimeoutRetries),
 			})
 		}
 
@@ -545,26 +563,16 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// determineFailureReason determines the reason for failure based on context and attempt count
-func determineFailureReason(ctx context.Context, attempt int, maxRetries int) string {
-	if attempt > maxRetries {
-		return "max_retries"
-	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+// determineFailureReason determines the reason for failure based on the last error and attempt count
+func determineFailureReason(err error, errorRetries int, maxRetries int, timeoutRetries int, maxTimeoutRetries int) string {
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, supervisor.ErrIdleTimeout)) {
 		return "deadline_exceeded"
 	}
+	if timeoutRetries > maxTimeoutRetries {
+		return "max_timeout_retries"
+	}
+	if errorRetries > maxRetries {
+		return "max_retries"
+	}
 	return "upstream_error"
-}
-
-// GetRemainingTimeout returns the remaining timeout for the context
-func GetRemainingTimeout(ctx context.Context) time.Duration {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return 0
-	}
-	remaining := time.Until(deadline)
-	if remaining < 0 {
-		return 0
-	}
-	return remaining
 }
