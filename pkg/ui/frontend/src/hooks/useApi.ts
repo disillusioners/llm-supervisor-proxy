@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, ProxyConfig, Model, ModelsResponse } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ModelsResponse } from '../types';
 
 const API_BASE = '/api';
 
@@ -77,13 +77,13 @@ export function useRequestDetail(id: string | null) {
 
 // Config API
 export function useConfig() {
-  const [config, setConfig] = useState<ProxyConfig | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchConfig = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await apiFetch<ProxyConfig>('/config');
+      const data = await apiFetch<AppConfig>('/config');
       setConfig(data);
     } catch (e) {
       console.error('Failed to fetch config:', e);
@@ -92,12 +92,13 @@ export function useConfig() {
     }
   }, []);
 
-  const updateConfig = useCallback(async (updates: Partial<ProxyConfig>) => {
-    await apiFetch<ProxyConfig>('/config', {
-      method: 'POST',
+  const updateConfig = useCallback(async (updates: Partial<AppConfig>): Promise<ConfigUpdateResponse> => {
+    const response = await apiFetch<ConfigUpdateResponse>('/config', {
+      method: 'PUT',
       body: JSON.stringify(updates),
     });
     await fetchConfig();
+    return response;
   }, [fetchConfig]);
 
   useEffect(() => {
@@ -152,23 +153,15 @@ export function useModels() {
   return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels };
 }
 
-// Duration parsing utility
-export function parseDuration(s: string): number {
-  let mult = 1e9;
-  let val = s;
-  if (val.endsWith('ms')) {
-    mult = 1e6;
-    val = val.slice(0, -2);
-  } else if (val.endsWith('s')) {
-    mult = 1e9;
-    val = val.slice(0, -1);
-  } else if (val.endsWith('m')) {
-    mult = 60 * 1e9;
-    val = val.slice(0, -1);
+// Duration formatting utility - backend now accepts string durations directly
+export function formatDuration(value: string | number): string {
+  if (typeof value === 'number') {
+    // Convert nanoseconds to seconds if numeric
+    return (value / 1e9) + 's';
   }
-  return Math.floor(parseFloat(val) * mult);
-}
-
-export function formatDuration(ns: number): string {
-  return ns / 1e9 + 's';
+  // Add 's' suffix if missing
+  if (value && !value.endsWith('s') && !value.endsWith('m') && !value.endsWith('ms')) {
+    return value + 's';
+  }
+  return value;
 }

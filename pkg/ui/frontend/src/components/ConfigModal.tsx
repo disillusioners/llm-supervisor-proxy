@@ -1,13 +1,13 @@
 import { useState } from 'preact/hooks';
-import type { ProxyConfig, Model } from '../types';
-import { parseDuration, formatDuration } from '../hooks';
+import type { AppConfig, ConfigUpdateResponse, Model } from '../types';
+import { formatDuration } from '../hooks';
 import { escapeHtml } from '../utils/helpers';
 
 interface ConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
-  config: ProxyConfig | null;
-  onUpdateConfig: (config: Partial<ProxyConfig>) => Promise<void>;
+  config: AppConfig | null;
+  onUpdateConfig: (config: Partial<AppConfig>) => Promise<ConfigUpdateResponse>;
   models: Model[];
   onAddModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
@@ -27,21 +27,27 @@ export function ConfigModal({
   onDeleteModel,
 }: ConfigModalProps) {
   const [activeTab, setActiveTab] = useState<TabType>('proxy');
-  const [status, setStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [status, setStatus] = useState<{ type: 'success' | 'error'; message: string; restartRequired?: boolean } | null>(null);
 
   // Proxy Settings state
   const [upstreamUrl, setUpstreamUrl] = useState('');
+  const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
   const [maxRetries, setMaxRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
 
+  // Store original port to detect changes
+  const [originalPort, setOriginalPort] = useState<number>(8089);
+
   // Sync state when modal opens
   const handleOpen = () => {
     if (config) {
-      setUpstreamUrl(config.UpstreamURL);
-      setIdleTimeout(formatDuration(config.IdleTimeout));
-      setMaxRetries(config.MaxRetries);
-      setMaxGenTime(formatDuration(config.MaxGenerationTime));
+      setUpstreamUrl(config.upstream_url);
+      setPort(config.port);
+      setOriginalPort(config.port);
+      setIdleTimeout(config.idle_timeout);
+      setMaxRetries(config.max_retries);
+      setMaxGenTime(config.max_generation_time);
     }
     setStatus(null);
   };
@@ -59,13 +65,24 @@ export function ConfigModal({
   const handleApplyProxy = async () => {
     try {
       setStatus(null);
-      await onUpdateConfig({
-        UpstreamURL: upstreamUrl,
-        IdleTimeout: parseDuration(idleTimeout),
-        MaxRetries: maxRetries,
-        MaxGenerationTime: parseDuration(maxGenTime),
+      const response = await onUpdateConfig({
+        upstream_url: upstreamUrl,
+        port,
+        idle_timeout: idleTimeout,
+        max_retries: maxRetries,
+        max_generation_time: maxGenTime,
       });
-      setStatus({ type: 'success', message: 'Configuration updated successfully' });
+      
+      // Show success message, and also show restart warning if required
+      if (response.restart_required) {
+        setStatus({ 
+          type: 'success', 
+          message: 'Configuration updated successfully. Server restart required for changes to take effect.',
+          restartRequired: true
+        });
+      } else {
+        setStatus({ type: 'success', message: 'Configuration updated successfully' });
+      }
     } catch (e) {
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update config' });
     }
@@ -204,6 +221,20 @@ export function ConfigModal({
                 </div>
               </div>
 
+              {/* Port */}
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">
+                  Port <span class="text-yellow-500 text-xs">⚠️ Requires server restart</span>
+                </label>
+                <input
+                  type="number"
+                  value={port}
+                  onInput={(e) => setPort(parseInt((e.target as HTMLInputElement).value) || 8089)}
+                  class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="8089"
+                />
+              </div>
+
               {/* Idle Timeout */}
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-1">Idle Timeout</label>
@@ -339,6 +370,11 @@ export function ConfigModal({
               }`}
             >
               {status.message}
+              {status.restartRequired && (
+                <div class="mt-2 pt-2 border-t border-green-600 text-yellow-300 font-medium">
+                  ⚠️ Server restart required for changes to take effect
+                </div>
+              )}
             </div>
           )}
         </div>

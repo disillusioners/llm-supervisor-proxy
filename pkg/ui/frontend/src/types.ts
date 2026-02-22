@@ -1,11 +1,22 @@
 // API Types - matching Go backend structures
 
-export interface ProxyConfig {
-  UpstreamURL: string;
-  IdleTimeout: number; // nanoseconds
-  MaxGenerationTime: number; // nanoseconds
-  MaxRetries: number;
+export interface AppConfig {
+  version: string;
+  upstream_url: string;
+  port: number;
+  idle_timeout: string;
+  max_generation_time: string;
+  max_retries: number;
+  updated_at: string;
 }
+
+export interface ConfigUpdateResponse extends AppConfig {
+  restart_required: boolean;
+  changed_fields?: string[];
+}
+
+// Legacy alias for backward compatibility
+export type ProxyConfig = AppConfig;
 
 export interface Model {
   id: string;
