@@ -24,6 +24,7 @@ const (
 type Store struct {
 	DB      *sql.DB
 	Dialect Dialect
+	dbPath  string // For SQLite, the path to the database file
 }
 
 // NewConnection creates a database connection based on DATABASE_URL env var
@@ -77,7 +78,7 @@ func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
-	return &Store{DB: db, Dialect: SQLite}, nil
+	return &Store{DB: db, Dialect: SQLite, dbPath: dbPath}, nil
 }
 
 func newPostgreSQLConnection(ctx context.Context, dsn string) (*Store, error) {
@@ -95,7 +96,7 @@ func newPostgreSQLConnection(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
 
-	return &Store{DB: db, Dialect: PostgreSQL}, nil
+	return &Store{DB: db, Dialect: PostgreSQL, dbPath: "[postgresql]"}, nil
 }
 
 // importPgxDriver ensures the pgx driver is registered
