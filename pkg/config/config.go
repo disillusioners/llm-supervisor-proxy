@@ -62,25 +62,27 @@ func (d Duration) Duration() time.Duration {
 
 // Config holds all application configuration
 type Config struct {
-	Version           string   `json:"version"`
-	UpstreamURL       string   `json:"upstream_url"`
-	Port              int      `json:"port"`
-	IdleTimeout       Duration `json:"idle_timeout"`
-	MaxGenerationTime Duration `json:"max_generation_time"`
-	MaxRetries        int      `json:"max_retries"`
-	MaxTimeoutRetries int      `json:"max_timeout_retries"`
-	UpdatedAt         string   `json:"updated_at"` // ISO8601 string for readability
+	Version                 string   `json:"version"`
+	UpstreamURL             string   `json:"upstream_url"`
+	Port                    int      `json:"port"`
+	IdleTimeout             Duration `json:"idle_timeout"`
+	MaxGenerationTime       Duration `json:"max_generation_time"`
+	MaxUpstreamErrorRetries int      `json:"max_upstream_error_retries"`
+	MaxIdleRetries          int      `json:"max_idle_retries"`
+	MaxGenerationRetries    int      `json:"max_generation_retries"`
+	UpdatedAt               string   `json:"updated_at"` // ISO8601 string for readability
 }
 
 // Defaults - used when env not set and file doesn't exist
 var Defaults = Config{
-	Version:           ConfigVersion,
-	UpstreamURL:       "http://localhost:4001",
-	Port:              8089,
-	IdleTimeout:       Duration(10 * time.Second),
-	MaxGenerationTime: Duration(180 * time.Second),
-	MaxRetries:        1,
-	MaxTimeoutRetries: 2,
+	Version:                 ConfigVersion,
+	UpstreamURL:             "http://localhost:4001",
+	Port:                    4321,
+	IdleTimeout:             Duration(60 * time.Second),
+	MaxGenerationTime:       Duration(300 * time.Second),
+	MaxUpstreamErrorRetries: 1,
+	MaxIdleRetries:          2,
+	MaxGenerationRetries:    2,
 }
 
 // Validate ensures config values are valid before saving
@@ -107,11 +109,14 @@ func (c *Config) Validate() error {
 	if c.MaxGenerationTime < Duration(time.Second) {
 		return errors.New("max_generation_time must be at least 1s")
 	}
-	if c.MaxRetries < 0 {
-		return errors.New("max_retries cannot be negative")
+	if c.MaxUpstreamErrorRetries < 0 {
+		return errors.New("max_upstream_error_retries cannot be negative")
 	}
-	if c.MaxTimeoutRetries < 0 {
-		return errors.New("max_timeout_retries cannot be negative")
+	if c.MaxIdleRetries < 0 {
+		return errors.New("max_idle_retries cannot be negative")
+	}
+	if c.MaxGenerationRetries < 0 {
+		return errors.New("max_generation_retries cannot be negative")
 	}
 	return nil
 }
@@ -210,14 +215,19 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 			cfg.MaxGenerationTime = Duration(d)
 		}
 	}
-	if v := os.Getenv("MAX_RETRIES"); v != "" {
+	if v := os.Getenv("MAX_UPSTREAM_ERROR_RETRIES"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.MaxRetries = r
+			cfg.MaxUpstreamErrorRetries = r
 		}
 	}
-	if v := os.Getenv("MAX_TIMEOUT_RETRIES"); v != "" {
+	if v := os.Getenv("MAX_IDLE_RETRIES"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.MaxTimeoutRetries = r
+			cfg.MaxIdleRetries = r
+		}
+	}
+	if v := os.Getenv("MAX_GENERATION_RETRIES"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
+			cfg.MaxGenerationRetries = r
 		}
 	}
 	return cfg
@@ -360,18 +370,25 @@ func (m *Manager) GetMaxGenerationTime() time.Duration {
 	return m.config.MaxGenerationTime.Duration()
 }
 
-// GetMaxRetries returns the max retries
-func (m *Manager) GetMaxRetries() int {
+// GetMaxUpstreamErrorRetries returns the max upstream error retries
+func (m *Manager) GetMaxUpstreamErrorRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.config.MaxRetries
+	return m.config.MaxUpstreamErrorRetries
 }
 
-// GetMaxTimeoutRetries returns the max timeout retries
-func (m *Manager) GetMaxTimeoutRetries() int {
+// GetMaxIdleRetries returns the max retries for idle timeouts
+func (m *Manager) GetMaxIdleRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.config.MaxTimeoutRetries
+	return m.config.MaxIdleRetries
+}
+
+// GetMaxGenerationRetries returns the max retries for generation timeouts
+func (m *Manager) GetMaxGenerationRetries() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.MaxGenerationRetries
 }
 
 // IsReadOnly returns true if the config file cannot be written

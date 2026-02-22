@@ -229,7 +229,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: false,
 		},
@@ -240,7 +240,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              443,
 				IdleTimeout:       Duration(30 * time.Second),
 				MaxGenerationTime: Duration(300 * time.Second),
-				MaxRetries:        3,
+				MaxUpstreamErrorRetries:        3,
 			},
 			wantError: false,
 		},
@@ -251,7 +251,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "upstream_url is required",
@@ -263,7 +263,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "upstream_url must use http or https scheme",
@@ -275,7 +275,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "upstream_url must use http or https scheme",
@@ -287,7 +287,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              0,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "port must be between 1 and 65535",
@@ -299,7 +299,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              65536,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "port must be between 1 and 65535",
@@ -311,7 +311,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              1,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: false,
 		},
@@ -322,7 +322,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              65535,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: false,
 		},
@@ -333,7 +333,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(500 * time.Millisecond),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "idle_timeout must be at least 1s",
@@ -345,7 +345,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(1 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: false,
 		},
@@ -356,7 +356,7 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(500 * time.Millisecond),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: true,
 			errorMsg:  "max_generation_time must be at least 1s",
@@ -368,30 +368,30 @@ func TestConfig_Validate(t *testing.T) {
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(1 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			},
 			wantError: false,
 		},
 		{
-			name: "negative max_retries",
+			name: "negative max_upstream_error_retries",
 			cfg: Config{
 				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        -1,
+				MaxUpstreamErrorRetries:        -1,
 			},
 			wantError: true,
-			errorMsg:  "max_retries cannot be negative",
+			errorMsg:  "max_upstream_error_retries cannot be negative",
 		},
 		{
-			name: "zero max_retries",
+			name: "zero max_upstream_error_retries",
 			cfg: Config{
 				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        0,
+				MaxUpstreamErrorRetries:        0,
 			},
 			wantError: false,
 		},
@@ -423,7 +423,7 @@ func TestDefaults(t *testing.T) {
 	wantPort := 8089
 	wantIdleTimeout := Duration(10 * time.Second)
 	wantMaxGenerationTime := Duration(180 * time.Second)
-	wantMaxRetries := 1
+	wantMaxUpstreamErrorRetries := 1
 
 	if Defaults.Version != wantVersion {
 		t.Errorf("Defaults.Version = %s, want %s", Defaults.Version, wantVersion)
@@ -440,8 +440,8 @@ func TestDefaults(t *testing.T) {
 	if Defaults.MaxGenerationTime != wantMaxGenerationTime {
 		t.Errorf("Defaults.MaxGenerationTime = %v, want %v", Defaults.MaxGenerationTime, wantMaxGenerationTime)
 	}
-	if Defaults.MaxRetries != wantMaxRetries {
-		t.Errorf("Defaults.MaxRetries = %d, want %d", Defaults.MaxRetries, wantMaxRetries)
+	if Defaults.MaxUpstreamErrorRetries != wantMaxUpstreamErrorRetries {
+		t.Errorf("Defaults.MaxUpstreamErrorRetries = %d, want %d", Defaults.MaxUpstreamErrorRetries, wantMaxUpstreamErrorRetries)
 	}
 }
 
@@ -492,7 +492,7 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 		Port:              9999,
 		IdleTimeout:       Duration(20 * time.Second),
 		MaxGenerationTime: Duration(300 * time.Second),
-		MaxRetries:        5,
+		MaxUpstreamErrorRetries:        5,
 	}
 	data, err := json.Marshal(customCfg)
 	if err != nil {
@@ -523,8 +523,8 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 	if cfg.MaxGenerationTime != customCfg.MaxGenerationTime {
 		t.Errorf("MaxGenerationTime = %v, want %v", cfg.MaxGenerationTime, customCfg.MaxGenerationTime)
 	}
-	if cfg.MaxRetries != customCfg.MaxRetries {
-		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, customCfg.MaxRetries)
+	if cfg.MaxUpstreamErrorRetries != customCfg.MaxUpstreamErrorRetries {
+		t.Errorf("MaxUpstreamErrorRetries = %d, want %d", cfg.MaxUpstreamErrorRetries, customCfg.MaxUpstreamErrorRetries)
 	}
 }
 
@@ -600,8 +600,8 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	if cfg.MaxGenerationTime != Duration(600*time.Second) {
 		t.Errorf("MaxGenerationTime = %v, want 600s", cfg.MaxGenerationTime)
 	}
-	if cfg.MaxRetries != 10 {
-		t.Errorf("MaxRetries = %d, want 10", cfg.MaxRetries)
+	if cfg.MaxUpstreamErrorRetries != 10 {
+		t.Errorf("MaxUpstreamErrorRetries = %d, want 10", cfg.MaxUpstreamErrorRetries)
 	}
 }
 
@@ -668,7 +668,7 @@ func TestManager_Save(t *testing.T) {
 		Port:              9001,
 		IdleTimeout:       Duration(25 * time.Second),
 		MaxGenerationTime: Duration(240 * time.Second),
-		MaxRetries:        3,
+		MaxUpstreamErrorRetries:        3,
 	}
 
 	result, err := m.Save(newCfg)
@@ -756,7 +756,7 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 		Port:              9001,
 		IdleTimeout:       Duration(25 * time.Second),
 		MaxGenerationTime: Duration(240 * time.Second),
-		MaxRetries:        3,
+		MaxUpstreamErrorRetries:        3,
 	}
 
 	_, err := m.Save(newCfg)
@@ -824,7 +824,7 @@ func TestManager_ReadOnly(t *testing.T) {
 		Port:              8089,
 		IdleTimeout:       Duration(10 * time.Second),
 		MaxGenerationTime: Duration(180 * time.Second),
-		MaxRetries:        1,
+		MaxUpstreamErrorRetries:        1,
 	})
 
 	if err == nil {
@@ -888,7 +888,7 @@ func TestManager_ConcurrentGet(t *testing.T) {
 				_ = m.GetPort()
 				_ = m.GetIdleTimeout()
 				_ = m.GetMaxGenerationTime()
-				_ = m.GetMaxRetries()
+				_ = m.GetMaxUpstreamErrorRetries()
 			}
 		}()
 	}
@@ -939,7 +939,7 @@ func TestManager_ConcurrentGetWhileSave(t *testing.T) {
 					Port:              8089 + j,
 					IdleTimeout:       Duration(10 * time.Second),
 					MaxGenerationTime: Duration(180 * time.Second),
-					MaxRetries:        1,
+					MaxUpstreamErrorRetries:        1,
 				}
 				_, _ = m.Save(cfg)
 			}
@@ -984,7 +984,7 @@ func TestManager_ConcurrentSave(t *testing.T) {
 				Port:              port,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
-				MaxRetries:        1,
+				MaxUpstreamErrorRetries:        1,
 			}
 			_, err := m.Save(cfg)
 			if err != nil {
@@ -1018,7 +1018,7 @@ func TestConfig_JSONRoundtrip(t *testing.T) {
 		Port:              9999,
 		IdleTimeout:       Duration(45 * time.Second),
 		MaxGenerationTime: Duration(120 * time.Second),
-		MaxRetries:        7,
+		MaxUpstreamErrorRetries:        7,
 	}
 
 	data, err := json.Marshal(original)
@@ -1046,7 +1046,7 @@ func TestConfig_JSONRoundtrip(t *testing.T) {
 	if loaded.MaxGenerationTime != original.MaxGenerationTime {
 		t.Errorf("MaxGenerationTime = %v, want %v", loaded.MaxGenerationTime, original.MaxGenerationTime)
 	}
-	if loaded.MaxRetries != original.MaxRetries {
-		t.Errorf("MaxRetries = %d, want %d", loaded.MaxRetries, original.MaxRetries)
+	if loaded.MaxUpstreamErrorRetries != original.MaxUpstreamErrorRetries {
+		t.Errorf("MaxUpstreamErrorRetries = %d, want %d", loaded.MaxUpstreamErrorRetries, original.MaxUpstreamErrorRetries)
 	}
 }

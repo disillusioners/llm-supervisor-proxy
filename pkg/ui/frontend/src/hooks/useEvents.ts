@@ -103,7 +103,7 @@ export function useEventRefresh(onRefresh: () => void) {
         'request_started',
         'request_completed',
         'retry_attempt',
-        'error_max_retries',
+        'error_max_upstream_error_retries',
         'timeout_idle',
       ];
       if (refreshTypes.includes(data.type)) {

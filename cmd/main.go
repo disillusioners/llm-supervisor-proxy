@@ -64,8 +64,8 @@ func main() {
 	// Graceful Shutdown
 	go func() {
 		log.Printf("Starting LLM Supervisor Proxy on port %d", cfg.Port)
-		log.Printf("Config: Upstream=%s, IdleTimeout=%s, MaxGenTime=%s, MaxRetries=%d",
-			cfg.UpstreamURL, cfg.IdleTimeout, cfg.MaxGenerationTime, cfg.MaxRetries)
+		log.Printf("Config: Upstream=%s, IdleTimeout=%s, MaxGenTime=%s, MaxUpstreamErrorRetries=%d",
+			cfg.UpstreamURL, cfg.IdleTimeout, cfg.MaxGenerationTime, cfg.MaxUpstreamErrorRetries)
 		log.Printf("Dashboard available at http://localhost:%d", cfg.Port)
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

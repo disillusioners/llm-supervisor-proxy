@@ -6,8 +6,9 @@ export interface AppConfig {
   port: number;
   idle_timeout: string;
   max_generation_time: string;
-  max_retries: number;
-  max_timeout_retries: number;
+  max_upstream_error_retries: number;
+  max_idle_retries: number;
+  max_generation_retries: number;
   updated_at: string;
 }
 
@@ -61,7 +62,7 @@ export type EventType =
   | 'request_started'
   | 'request_completed'
   | 'retry_attempt'
-  | 'error_max_retries'
+  | 'error_max_upstream_error_retries'
   | 'timeout_idle'
   | 'error';
 

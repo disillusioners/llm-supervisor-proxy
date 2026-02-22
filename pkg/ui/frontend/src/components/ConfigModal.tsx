@@ -32,8 +32,9 @@ export function ConfigModal({
   const [upstreamUrl, setUpstreamUrl] = useState('');
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
-  const [maxRetries, setMaxRetries] = useState(0);
-  const [maxTimeoutRetries, setMaxTimeoutRetries] = useState(0);
+  const [maxUpstreamErrorRetries, setMaxUpstreamErrorRetries] = useState(0);
+  const [maxIdleRetries, setMaxIdleRetries] = useState(0);
+  const [maxGenerationRetries, setMaxGenerationRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
 
   // Store original port to detect changes
@@ -54,8 +55,9 @@ export function ConfigModal({
       setPort(config.port);
       setOriginalPort(config.port);
       setIdleTimeout(config.idle_timeout);
-      setMaxRetries(config.max_retries);
-      setMaxTimeoutRetries(config.max_timeout_retries);
+      setMaxUpstreamErrorRetries(config.max_upstream_error_retries);
+      setMaxIdleRetries(config.max_idle_retries);
+      setMaxGenerationRetries(config.max_generation_retries);
       setMaxGenTime(config.max_generation_time);
     }
   };
@@ -85,8 +87,9 @@ export function ConfigModal({
         upstream_url: upstreamUrl,
         port,
         idle_timeout: idleTimeout,
-        max_retries: maxRetries,
-        max_timeout_retries: maxTimeoutRetries,
+        max_upstream_error_retries: maxUpstreamErrorRetries,
+        max_idle_retries: maxIdleRetries,
+        max_generation_retries: maxGenerationRetries,
         max_generation_time: maxGenTime,
       });
 
@@ -297,17 +300,17 @@ export function ConfigModal({
                   </span>
                   <input
                     type="number"
-                    value={maxRetries}
-                    onInput={(e) => setMaxRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
+                    value={maxUpstreamErrorRetries}
+                    onInput={(e) => setMaxUpstreamErrorRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
                     class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                     placeholder="3"
                   />
                 </div>
               </div>
 
-              {/* Max Timeout Retries */}
+              {/* Max Idle Retries */}
               <div>
-                <label class="block text-sm font-medium text-gray-300 mb-1">Max Timeout Retries</label>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Max Idle Retries</label>
                 <div class="relative">
                   <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -316,8 +319,27 @@ export function ConfigModal({
                   </span>
                   <input
                     type="number"
-                    value={maxTimeoutRetries}
-                    onInput={(e) => setMaxTimeoutRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
+                    value={maxIdleRetries}
+                    onInput={(e) => setMaxIdleRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
+                    class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+                    placeholder="2"
+                  />
+                </div>
+              </div>
+
+              {/* Max Generation Retries */}
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Max Generation Retries</label>
+                <div class="relative">
+                  <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </span>
+                  <input
+                    type="number"
+                    value={maxGenerationRetries}
+                    onInput={(e) => setMaxGenerationRetries(parseInt((e.target as HTMLInputElement).value) || 0)}
                     class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                     placeholder="2"
                   />

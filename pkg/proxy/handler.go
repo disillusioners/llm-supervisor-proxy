@@ -32,23 +32,25 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		UpstreamURL:       cfg.UpstreamURL,
-		IdleTimeout:       cfg.IdleTimeout.Duration(),
-		MaxGenerationTime: cfg.MaxGenerationTime.Duration(),
-		MaxRetries:        cfg.MaxRetries,
-		MaxTimeoutRetries: cfg.MaxTimeoutRetries,
-		ModelsConfig:      c.ModelsConfig,
+		UpstreamURL:             cfg.UpstreamURL,
+		IdleTimeout:             cfg.IdleTimeout.Duration(),
+		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
+		MaxUpstreamErrorRetries: cfg.MaxUpstreamErrorRetries,
+		MaxIdleRetries:          cfg.MaxIdleRetries,
+		MaxGenerationRetries:    cfg.MaxGenerationRetries,
+		ModelsConfig:            c.ModelsConfig,
 	}
 }
 
 // ConfigSnapshot is an immutable snapshot of config values for a single request
 type ConfigSnapshot struct {
-	UpstreamURL       string
-	IdleTimeout       time.Duration
-	MaxGenerationTime time.Duration
-	MaxRetries        int
-	MaxTimeoutRetries int
-	ModelsConfig      *models.ModelsConfig
+	UpstreamURL             string
+	IdleTimeout             time.Duration
+	MaxGenerationTime       time.Duration
+	MaxUpstreamErrorRetries int
+	MaxIdleRetries          int
+	MaxGenerationRetries    int
+	ModelsConfig            *models.ModelsConfig
 }
 
 type Handler struct {
@@ -198,13 +200,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		// Reset attempt counters for each new model
 		errorRetries := 0
-		timeoutRetries := 0
+		idleRetries := 0
+		genRetries := 0
 		var lastErr error
 
 		// Inner loop: retry logic for current model
 		for {
-			attempt := errorRetries + timeoutRetries
-			if errorRetries > conf.MaxRetries || timeoutRetries > conf.MaxTimeoutRetries {
+			attempt := errorRetries + idleRetries + genRetries
+			if errorRetries > conf.MaxUpstreamErrorRetries || idleRetries > conf.MaxIdleRetries || genRetries > conf.MaxGenerationRetries {
 				break
 			}
 			if attempt > 0 {
@@ -269,7 +272,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 					log.Printf("Attempt %d generation deadline exceeded", attempt)
 					h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
-					timeoutRetries++
+					genRetries++
 					continue
 				}
 				if errors.Is(baseCtx.Err(), context.Canceled) {
@@ -352,14 +355,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					if errors.Is(err, supervisor.ErrIdleTimeout) {
 						log.Println("Stream idle timeout detected!")
 						h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
-						timeoutRetries++
+						idleRetries++
 						continue
 					}
 					if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 						log.Printf("Attempt %d generation deadline exceeded", attempt)
 						h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
 						monitor.Close()
-						timeoutRetries++
+						genRetries++
 						continue
 					}
 					log.Printf("Stream error: %v", err)
@@ -487,14 +490,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				if errors.Is(err, supervisor.ErrIdleTimeout) {
 					log.Println("Stream idle timeout detected!")
 					h.publishEvent("timeout_idle", map[string]interface{}{"timeout": conf.IdleTimeout.String(), "id": reqID})
-					timeoutRetries++
+					idleRetries++
 					continue
 				}
 				if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
 					log.Printf("Attempt %d generation deadline exceeded", attempt)
 					h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": reqID})
 					monitor.Close()
-					timeoutRetries++
+					genRetries++
 					continue
 				}
 				log.Printf("Stream error: %v", err)
@@ -527,7 +530,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 
 		log.Printf("Model %s failed (retries exhausted or unrecoverable error)", currentModel)
-		h.publishEvent("error_max_retries", map[string]interface{}{"id": reqID})
+		h.publishEvent("error_max_upstream_error_retries", map[string]interface{}{"id": reqID})
 
 		reqLog.Status = "failed"
 		reqLog.Error = "Model failed"
@@ -544,7 +547,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.publishEvent("fallback_triggered", events.FallbackEvent{
 				FromModel: currentModel,
 				ToModel:   nextModel,
-				Reason:    determineFailureReason(lastErr, errorRetries, conf.MaxRetries, timeoutRetries, conf.MaxTimeoutRetries),
+				Reason:    determineFailureReason(lastErr, errorRetries, conf.MaxUpstreamErrorRetries, idleRetries, conf.MaxIdleRetries, genRetries, conf.MaxGenerationRetries),
 			})
 		}
 
@@ -564,15 +567,21 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 }
 
 // determineFailureReason determines the reason for failure based on the last error and attempt count
-func determineFailureReason(err error, errorRetries int, maxRetries int, timeoutRetries int, maxTimeoutRetries int) string {
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, supervisor.ErrIdleTimeout)) {
+func determineFailureReason(err error, errorRetries, maxUpstreamErrorRetries, idleRetries, maxIdleRetries, genRetries, maxGenRetries int) string {
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
 		return "deadline_exceeded"
 	}
-	if timeoutRetries > maxTimeoutRetries {
-		return "max_timeout_retries"
+	if err != nil && errors.Is(err, supervisor.ErrIdleTimeout) {
+		return "idle_timeout"
 	}
-	if errorRetries > maxRetries {
-		return "max_retries"
+	if idleRetries > maxIdleRetries {
+		return "max_idle_retries"
+	}
+	if genRetries > maxGenRetries {
+		return "max_generation_retries"
+	}
+	if errorRetries > maxUpstreamErrorRetries {
+		return "max_upstream_error_retries"
 	}
 	return "upstream_error"
 }

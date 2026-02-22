@@ -18,7 +18,7 @@ const getEventMessage = (event: Event): string => {
       return `Idle timeout detected (${event.data?.timeout || 'unknown'})`;
     case 'retry_attempt':
       return `Retrying request (Attempt ${event.data?.attempt || '?'})`;
-    case 'error_max_retries':
+    case 'error_max_upstream_error_retries':
       return `Error: Max retries exceeded${event.data?.error ? ` - ${event.data.error}` : ''}`;
     case 'error':
       return `Error: ${event.data?.error || 'Unknown error'}`;
@@ -37,7 +37,7 @@ const getEventColor = (type: EventType): string => {
       return 'text-green-400';
     case 'retry_attempt':
       return 'text-purple-400';
-    case 'error_max_retries':
+    case 'error_max_upstream_error_retries':
     case 'error':
     case 'timeout_idle':
       return 'text-red-400';
@@ -54,7 +54,7 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'REQUEST_COMPLETED';
     case 'retry_attempt':
       return 'RETRY_ATTEMPT';
-    case 'error_max_retries':
+    case 'error_max_upstream_error_retries':
       return 'ERROR_MAX_RETRIES';
     case 'timeout_idle':
       return 'TIMEOUT_IDLE';
