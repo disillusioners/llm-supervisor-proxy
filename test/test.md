@@ -104,3 +104,67 @@ curl --location 'http://localhost:4321/v1/chat/completions' \
     ],
     "stream": true
 }'
+
+---
+
+# Loop Detection Testing
+
+## Start the loop mock LLM (port 4002)
+
+```bash
+cd test && go run mock_llm_loop.go
+```
+
+## Start the proxy pointing to the loop mock
+
+```bash
+UPSTREAM_URL=http://localhost:4002 go run cmd/main.go
+```
+
+## Trigger keywords (use as the prompt content)
+
+| Keyword | Scenario | Expected Detection |
+|---------|----------|--------------------|
+| `loop-exact` | Identical response every time | ExactMatchStrategy (critical) |
+| `loop-similar` | Near-identical with minor word swaps | SimilarityStrategy (warning→critical) |
+| `loop-action` | Same tool call repeated | ActionPatternStrategy (critical) |
+| `loop-oscillate` | read→write→read→write cycle | ActionPatternStrategy oscillation (warning) |
+| `loop-thinking` | Repetitive reasoning content | SimHash similarity on thinking |
+| *(any other)* | Normal response | No detection |
+
+## Example curl commands
+
+<!-- loop-exact: sends the same response every time -->
+curl -N --location 'http://localhost:4321/v1/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "mock-model",
+    "messages": [{"role": "user", "content": "loop-exact"}],
+    "stream": true
+}'
+
+<!-- loop-similar: near-identical responses -->
+curl -N --location 'http://localhost:4321/v1/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "mock-model",
+    "messages": [{"role": "user", "content": "loop-similar"}],
+    "stream": true
+}'
+
+<!-- loop-action: same tool call repeated -->
+curl -N --location 'http://localhost:4321/v1/chat/completions' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "mock-model",
+    "messages": [{"role": "user", "content": "loop-action"}],
+    "stream": true
+}'
+
+## Run the full test script
+
+```bash
+cd test && bash test_loop_detection.sh
+```
+
+Check the **proxy logs** for `[LOOP-DETECTION][SHADOW]` entries.
