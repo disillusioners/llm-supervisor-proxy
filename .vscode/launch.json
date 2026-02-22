@@ -11,8 +11,8 @@
                 // "UPSTREAM_URL": "http://litellm-service.litellm.svc.cluster.local:4000",
                 "UPSTREAM_URL": "http://localhost:4001",
                 "PORT": "4321",
-                "IDLE_TIMEOUT": "10s",
-                "MAX_GENERATION_TIME": "600s",
+                "IDLE_TIMEOUT": "100s",
+                "MAX_GENERATION_TIME": "10s",
                 "MAX_RETRIES": "2"
             }
         }

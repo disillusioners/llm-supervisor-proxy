@@ -209,7 +209,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		// Reset attempt counter for each new model
 		attempt = 0
-		headersSent = false
 
 		// Inner loop: retry logic for current model
 		for attempt <= conf.MaxRetries {

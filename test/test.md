@@ -89,3 +89,18 @@ curl --location 'http://localhost:4321/v1/chat/completions' \
     ],
     "stream": true
 }'
+
+
+curl --location 'http://localhost:4321/v1/chat/completions' \
+--header 'Content-Type: application/json' \
+--header 'Authorization: Bearer mock-test' \
+--data '{
+    "model": "glm-test",
+    "messages": [
+        {
+            "role": "user",
+            "content": "mock-timeout"
+        }
+    ],
+    "stream": true
+}'
