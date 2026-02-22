@@ -304,6 +304,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						continue
 					}
 
+					// If there is a fallback model available, don't pass the error straight to the client yet.
+					if modelIndex+1 < len(modelList) {
+						resp.Body.Close()
+						log.Printf("Upstream returned %d for model %s. Triggering fallback.", resp.StatusCode, currentModel)
+						break
+					}
+
 					// Otherwise pass through
 					for k, v := range resp.Header {
 						w.Header()[k] = v
@@ -502,11 +509,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			attempt++
 		}
 
-		log.Println("Max retries exceeded")
+		log.Printf("Model %s failed (retries exhausted or unrecoverable error)", currentModel)
 		h.publishEvent("error_max_retries", map[string]interface{}{"id": reqID})
 
 		reqLog.Status = "failed"
-		reqLog.Error = "Max retries exceeded"
+		reqLog.Error = "Model failed"
 		reqLog.EndTime = time.Now()
 		reqLog.Duration = time.Since(startTime).String()
 		h.store.Add(reqLog)
