@@ -4,17 +4,21 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
 
 ## 🚀 Features
 
--   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 10s).
--   **Auto-Retry**: Automatically retries failed or hung requests.
--   **Smart Resume**: When retrying, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
--   **Hard Deadline**: Enforces a global `MAX_GENERATION_TIME` to prevent infinite loops (default: 180s).
+-   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
+-   **Multi-Strategy Auto-Retry**:
+    -   **Idle Reset**: Retries when a stream hangs mid-generation.
+    -   **Upstream Recovery**: Retries on 5xx errors or connectivity issues from the provider.
+    -   **Generation Guard**: Ensures requests eventually finish within `MAX_GENERATION_TIME`.
+-   **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
+-   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
+-   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
 -   **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
 
 ## 🛠️ Installation
 
 ### Prerequisites
 -   Go 1.20+
--   Node.js 18+ (for frontend development only)
+-   Node.js 18+ (required for building the frontend)
 
 ### Build & Install
 
@@ -25,7 +29,7 @@ cd llm-supervisor-proxy
 # Build both frontend and backend
 make
 
-# Install globally to your system path (optional)
+# Install globally to your system path
 sudo make install
 ```
 
@@ -33,90 +37,64 @@ sudo make install
 - `make`: Build both frontend and backend.
 - `make build`: Build only the Go backend.
 - `make build-frontend`: Build only the frontend UI.
-- `make install`: Install the binary to `/usr/local/bin` (requires sudo).
+- `make install`: Install the binary to `/usr/local/bin`.
+- `make uninstall`: Remove the binary from the system.
 - `make clean`: Remove build artifacts.
 - `make test`: Run Go tests.
 
 ## ⚙️ Configuration
 
-The proxy is configured entirely via environment variables:
+The proxy uses a three-tier configuration system with the following precedence:
+1.  **Environment Variables** (Highest)
+2.  **Configuration Files** (`config.json` and `models.json`)
+3.  **Defaults** (Lowest)
+
+### Environment Variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `UPSTREAM_URL` | `http://localhost:4000` | The URL of your actual LLM provider (e.g., LiteLLM). |
-| `PORT` | `8080` | Port for the proxy to listen on. |
-| `IDLE_TIMEOUT` | `10s` | Max time to wait between tokens before considering the stream hung. |
-| `MAX_GENERATION_TIME` | `180s` | Hard limit for the entire request (including retries). |
-| `MAX_RETRIES` | `1` | Number of times to retry a failed/hung request. |
+| `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
+| `PORT` | `4321` | Port for the proxy to listen on. |
+| `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before considering the stream hung. |
+| `MAX_GENERATION_TIME` | `300s` | Hard limit for the entire request lifecycle. |
+| `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors. |
+| `MAX_IDLE_RETRIES` | `2` | Retries for hung streams. |
+| `MAX_GENERATION_RETRIES` | `1` | Retries for time-limit exceeded. |
+
+### Configuration Files
+Settings are persisted in:
+-   **General Config**: `~/.config/llm-supervisor-proxy/config.json`
+-   **Model Fallbacks**: `~/.config/llm-supervisor-proxy/models.json`
+
+You can modify these directly or via the **Web UI**.
 
 ## 🏃 Usage
 
-1.  **Start your LLM Provider** (e.g., LiteLLM) on port 4000.
+1.  **Start your LLM Provider** (e.g., LiteLLM) on port 4001.
 2.  **Start the Supervisor Proxy**:
     ```bash
-    export UPSTREAM_URL="http://localhost:4000"
     llm-supervisor-proxy
     ```
-3.  **Point your Agent/Client** to the Proxy (port 8080):
+3.  **Point your Agent** to the Proxy (port 4321):
     ```bash
-    curl -X POST http://localhost:8080/v1/chat/completions \
+    curl -X POST http://localhost:4321/v1/chat/completions \
       -H "Content-Type: application/json" \
       -d '{
-        "model": "gpt-3.5-turbo",
-        "messages": [{"role": "user", "content": "Hello!"}]
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Write a long story about a space pirate."}],
+        "stream": true
       }'
     ```
 
-## 🧠 How it Works
-
-1.  **Interception**: The proxy accepts standard OpenAI-compatible `/v1/chat/completions` requests.
-2.  **Forwarding**: It forwards the request to the `UPSTREAM_URL`.
-3.  **Monitoring**: It monitors the response stream. If no token is received for `IDLE_TIMEOUT`, it kills the upstream connection.
-4.  **Recovery**:
-    -   It takes the tokens generated *before* the hang.
-    -   It appends them to the messages with an `assistant` role.
-    -   It adds a system/user instruction to "Continue exactly where you stopped".
-    -   It initiates a new request to the upstream.
-5.  **Streaming**: The client receives a continuous stream of tokens, unaware of the interruption and recovery (mostly).
-
 ## 🖥️ Web UI
 
-The proxy includes a built-in monitoring dashboard built with **Preact + Vite + Tailwind CSS** (~16KB gzipped).
+The proxy includes a built-in monitoring dashboard accessible at `http://localhost:4321`.
 
 ### Features
-- **Real-time Request Monitoring**: View all requests as they flow through the proxy
-- **Live Event Stream**: Server-Sent Events (SSE) for instant updates
-- **Request Details**: Inspect messages, tool calls, and thinking process
-- **Configuration Management**: Adjust proxy settings and model fallback chains via UI
-
-### Access
-Once the proxy is running, open http://localhost:8080 in your browser.
-
-### Frontend Development
-
-```bash
-# Install dependencies
-cd pkg/ui/frontend && npm install
-
-# Development server (hot reload + API proxy to :8080)
-npm run dev
-
-# Production build (outputs to pkg/ui/static/)
-npm run build
-```
-
-The frontend is embedded in the Go binary via `//go:embed static/*`, so no separate deployment needed.
-
-## 🧪 Verification
-
-To verify the proxy's resilience against hangs, you can use the included mock server:
-
-```bash
-# Terminal 1: Run the verification script
-./verify.sh
-```
-
-This script builds a custom mock server that intentionally hangs on specific tokens, starts the proxy, and asserts that the final output is complete despite the hang.
+- **Per-Request Logging**: All events (retries, fallbacks, token counts) are grouped by request.
+- **Inspect Payloads**: View full message history, tool calls, and model responses.
+- **Live Configuration**: Change timeouts and retry limits on the fly without restarting.
+- **Fallback Management**: Configure model-to-model fallback chains.
 
 ## 📁 Project Structure
 
@@ -128,15 +106,14 @@ This script builds a custom mock server that intentionally hangs on specific tok
 │   │   ├── server.go        # UI server + API handlers
 │   │   ├── static/          # Built frontend (embedded)
 │   │   └── frontend/        # Preact frontend source
-│   ├── proxy/               # Core proxy logic
-│   ├── events/              # Event bus for SSE
-│   ├── models/              # Model configuration
-│   └── store/               # Request storage
-└── config/                  # Configuration files
+│   ├── proxy/               # Core proxy logic & retry handling
+│   ├── events/              # Event bus for SSE updates
+│   ├── models/              # Model & fallback configuration
+│   ├── store/               # In-memory storage for request history
+│   └── config/              # App-wide configuration management
+└── LICENSE                  # MIT License
 ```
 
-## 🔧 Tech Stack
+## ⚖️ License
 
-- **Backend**: Go 1.20+
-- **Frontend**: Preact, Vite, Tailwind CSS, TypeScript
-- **Real-time**: Server-Sent Events (SSE)
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
