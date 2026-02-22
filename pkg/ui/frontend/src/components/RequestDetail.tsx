@@ -199,7 +199,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
                     Thinking
                   </summary>
                   {expandedThoughts.has(index) && (
-                    <div class="mt-2 p-3 bg-purple-900/20 border border-purple-500/30 rounded text-purple-200 text-xs">
+                    <div class="mt-2 p-3 bg-amber-950/40 border border-amber-500/30 rounded text-amber-200/90 text-xs">
                       <CollapsibleText text={message.thinking} role="assistant" />
                     </div>
                   )}
@@ -232,6 +232,18 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
           {detail.status === 'completed' && detail.response && (
             <div class="mt-4 p-3 bg-green-900/20 border border-green-500/30 rounded-lg ml-8 mr-0">
               <div class="text-xs text-green-500 mb-1 uppercase">Response</div>
+
+              {/* Thinking block - smaller text with distinguishing border */}
+              {detail.thinking && (
+                <div class="mb-3 pl-3 py-2 pr-2 border-l-2 border-amber-500/50 bg-amber-950/40 rounded-r">
+                  <div class="text-[0.65rem] text-amber-400/70 uppercase mb-1 tracking-wider">Thinking</div>
+                  <div class="text-amber-200/80 text-[0.7rem] leading-relaxed">
+                    <CollapsibleText text={detail.thinking} role="assistant" />
+                  </div>
+                </div>
+              )}
+
+              {/* Actual response content */}
               <div class="text-green-200">
                 <CollapsibleText text={detail.response} role="assistant" />
               </div>

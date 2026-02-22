@@ -18,6 +18,9 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
 )
 
+// Version is set at build time via -ldflags
+var Version = "dev"
+
 func main() {
 	// Initialize Shared Components
 	bus := events.NewBus()
@@ -63,7 +66,7 @@ func main() {
 
 	// Graceful Shutdown
 	go func() {
-		log.Printf("Starting LLM Supervisor Proxy on port %d", cfg.Port)
+		log.Printf("LLM Supervisor Proxy (build %s) starting on port %d", Version, cfg.Port)
 		log.Printf("Config: Upstream=%s, IdleTimeout=%s, MaxGenTime=%s, MaxUpstreamErrorRetries=%d",
 			cfg.UpstreamURL, cfg.IdleTimeout, cfg.MaxGenerationTime, cfg.MaxUpstreamErrorRetries)
 		log.Printf("Dashboard available at http://localhost:%d", cfg.Port)

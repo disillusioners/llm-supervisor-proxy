@@ -76,6 +76,7 @@ export interface Request {
 export interface RequestDetail extends Request {
   messages: Message[];
   response?: string;
+  thinking?: string;
 }
 
 export type EventType =
