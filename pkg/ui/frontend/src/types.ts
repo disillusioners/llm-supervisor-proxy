@@ -11,6 +11,12 @@ export interface LoopDetectionConfig {
   action_repeat_count: number;
   oscillation_count: number;
   min_tokens_for_analysis: number;
+  // Phase 3
+  thinking_min_tokens: number;
+  trigram_threshold: number;
+  max_cycle_length: number;
+  reasoning_model_patterns: string[];
+  reasoning_trigram_threshold: number;
 }
 
 export interface AppConfig {
@@ -78,13 +84,24 @@ export type EventType =
   | 'retry_attempt'
   | 'error_max_upstream_error_retries'
   | 'timeout_idle'
-  | 'error';
+  | 'error'
+  | 'loop_detected'
+  | 'loop_interrupted';
 
 export interface EventData {
   id?: string;
   timeout?: string;
   attempt?: number;
   error?: string;
+  // Loop detection fields
+  request_id?: string;
+  strategy?: string;
+  severity?: string;
+  evidence?: string;
+  confidence?: number;
+  pattern?: string[];
+  repeat_count?: number;
+  shadow_mode?: boolean;
 }
 
 export interface Event {

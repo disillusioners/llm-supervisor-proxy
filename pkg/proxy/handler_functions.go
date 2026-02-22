@@ -419,6 +419,27 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 					text, actions := streamBuf.Flush()
 					if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
 						h.publishLoopEvent(rc.reqID, result, detector.IsShadowMode())
+
+						// Phase 4: Hard interruption (when NOT in shadow mode)
+						if !detector.IsShadowMode() && result.Severity == loopdetection.SeverityCritical {
+							log.Printf("[LOOP-DETECTION][INTERRUPT] Stopping stream — %s: %s", result.Strategy, result.Evidence)
+							h.publishEvent("loop_interrupted", events.LoopDetectionEvent{
+								RequestID:   rc.reqID,
+								Strategy:    result.Strategy,
+								Severity:    result.Severity.String(),
+								Evidence:    result.Evidence,
+								Confidence:  result.Confidence,
+								Pattern:     result.Pattern,
+								RepeatCount: result.RepeatCount,
+								ShadowMode:  false,
+							})
+
+							// Sanitize context window and trigger retry/fallback
+							h.sanitizeAndRetry(rc, result)
+							monitor.Close()
+							counters.errorRetries++
+							return attemptContinueRetry
+						}
 					}
 				}
 			}
@@ -458,6 +479,54 @@ func (h *Handler) publishLoopEvent(reqID string, result *loopdetection.Detection
 		RepeatCount: result.RepeatCount,
 		ShadowMode:  shadowMode,
 	})
+}
+
+// sanitizeAndRetry modifies the request context's message history to break the
+// loop pattern. It removes repetitive messages and injects a system prompt
+// telling the model to take a different approach.
+func (h *Handler) sanitizeAndRetry(rc *requestContext, result *loopdetection.DetectionResult) {
+	messages, ok := rc.requestBody["messages"].([]interface{})
+	if !ok {
+		return
+	}
+
+	// Convert to the format expected by SanitizeLoopHistory
+	msgMaps := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		if mm, ok := m.(map[string]interface{}); ok {
+			msgMaps = append(msgMaps, mm)
+		} else if mm, ok := m.(map[string]string); ok {
+			// Convert string map to interface map
+			converted := make(map[string]interface{}, len(mm))
+			for k, v := range mm {
+				converted[k] = v
+			}
+			msgMaps = append(msgMaps, converted)
+		}
+	}
+
+	// Also append the accumulated partial response as an assistant message
+	if rc.accumulatedResponse.Len() > 0 {
+		msgMaps = append(msgMaps, map[string]interface{}{
+			"role":    "assistant",
+			"content": rc.accumulatedResponse.String(),
+		})
+	}
+
+	sanitized := loopdetection.SanitizeLoopHistory(msgMaps, result)
+
+	// Convert back to []interface{}
+	newMessages := make([]interface{}, len(sanitized))
+	for i, m := range sanitized {
+		newMessages[i] = m
+	}
+	rc.requestBody["messages"] = newMessages
+
+	// Reset accumulated response since we're starting fresh
+	rc.accumulatedResponse.Reset()
+	rc.accumulatedThinking.Reset()
+
+	log.Printf("[LOOP-DETECTION] Context sanitized: %d → %d messages", len(messages), len(sanitized))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -71,7 +71,7 @@ export function ConfigModal({
       setMaxIdleRetries(config.max_idle_retries || 0);
       setMaxGenerationRetries(config.max_generation_retries || 0);
       setMaxGenTime(config.max_generation_time || '');
-      
+
       // Sync loop detection config
       const ld = config.loop_detection;
       if (ld) {
@@ -224,9 +224,15 @@ export function ConfigModal({
           action_repeat_count: loopActionRepeatCount,
           oscillation_count: loopOscillationCount,
           min_tokens_for_analysis: loopMinTokensAnalysis,
+          // Phase 3 advanced detection (use current values from config)
+          thinking_min_tokens: config?.loop_detection?.thinking_min_tokens ?? 100,
+          trigram_threshold: config?.loop_detection?.trigram_threshold ?? 0.3,
+          max_cycle_length: config?.loop_detection?.max_cycle_length ?? 5,
+          reasoning_model_patterns: config?.loop_detection?.reasoning_model_patterns ?? ['o1', 'o3', 'deepseek-r1'],
+          reasoning_trigram_threshold: config?.loop_detection?.reasoning_trigram_threshold ?? 0.15,
         },
       });
-      
+
       if (response.restart_required) {
         setStatus({
           type: 'success',
@@ -620,7 +626,7 @@ export function ConfigModal({
               {/* Info Box */}
               <div class="bg-blue-900/20 border border-blue-800/30 rounded-md p-3">
                 <p class="text-sm text-blue-300">
-                  <strong>Loop Detection</strong> monitors LLM responses for repetitive patterns (identical messages, similar content, repeated tool calls). 
+                  <strong>Loop Detection</strong> monitors LLM responses for repetitive patterns (identical messages, similar content, repeated tool calls).
                   {loopShadowMode ? ' Currently in shadow mode - loops are logged but not interrupted.' : ' Will interrupt streams when loops are detected.'}
                 </p>
               </div>
