@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 	"github.com/google/uuid"
@@ -332,6 +333,11 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	streamEndedSuccessfully := false
 
+	// Initialize loop detection (shadow mode by default — logs only, no interruption)
+	loopCfg := loopdetection.DefaultConfig()
+	detector := loopdetection.NewDetector(loopCfg)
+	streamBuf := detector.NewStreamBuffer()
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -349,10 +355,36 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
+
+				// Flush remaining buffer for final analysis
+				if detector.IsEnabled() {
+					if text, actions := streamBuf.Flush(); len(text) > 0 || len(actions) > 0 {
+						if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
+							h.publishLoopEvent(rc.reqID, result)
+						}
+					}
+				}
+
 				break
 			}
 
+			// Track chunk content for both existing accumulation and loop detection
+			prevLen := rc.accumulatedResponse.Len()
 			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking)
+			newContent := rc.accumulatedResponse.String()[prevLen:]
+
+			// Feed content to loop detection buffer
+			if detector.IsEnabled() && len(newContent) > 0 {
+				streamBuf.AddText(newContent)
+
+				// Run analysis when buffer threshold is met
+				if streamBuf.ShouldAnalyze(false) {
+					text, actions := streamBuf.Flush()
+					if result := detector.Analyze(text, actions); result != nil && result.LoopDetected {
+						h.publishLoopEvent(rc.reqID, result)
+					}
+				}
+			}
 		}
 	}
 
@@ -375,6 +407,19 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	monitor.Close()
 	counters.errorRetries++
 	return attemptContinueRetry
+}
+
+// publishLoopEvent emits a loop detection event to the event bus.
+func (h *Handler) publishLoopEvent(reqID string, result *loopdetection.DetectionResult) {
+	h.publishEvent("loop_detected", map[string]interface{}{
+		"id":           reqID,
+		"strategy":     result.Strategy,
+		"severity":     result.Severity.String(),
+		"evidence":     result.Evidence,
+		"confidence":   result.Confidence,
+		"pattern":      result.Pattern,
+		"repeat_count": result.RepeatCount,
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

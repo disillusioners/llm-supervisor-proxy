@@ -496,13 +496,13 @@ type LoopDetectedEvent struct {
 ## Implementation Phases
 
 ### Phase 1: Core Detection (Shadow Mode)
-- [ ] Implement exact matching strategy
-- [ ] Implement SimHash similarity with min-token guard
-- [ ] Basic action pattern detection
-- [ ] Stream buffering logic (sentence/token thresholds)
-- [ ] Detector orchestration
-- [ ] Unit tests
-- [ ] **Shadow mode logging** (detect but don't interrupt)
+- [x] Implement exact matching strategy
+- [x] Implement SimHash similarity with min-token guard
+- [x] Basic action pattern detection
+- [x] Stream buffering logic (sentence/token thresholds)
+- [x] Detector orchestration
+- [x] Unit tests
+- [x] **Shadow mode logging** (detect but don't interrupt)
 
 ### Phase 2: Integration & Tuning
 - [ ] Integrate into handler.go
