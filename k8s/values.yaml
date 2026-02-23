@@ -1,0 +1,99 @@
+# Default values for llm-supervisor-proxy chart
+
+replicaCount: 1
+
+image:
+  registry: docker.io
+  repository: llm-supervisor-proxy
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 4321
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: llm-supervisor-proxy.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: llm-supervisor-proxy-tls
+  #    hosts:
+  #      - llm-supervisor-proxy.local
+
+# PostgreSQL database configuration (required)
+database:
+  host: ""
+  port: 5432
+  database: llm_supervisor
+  username: ""
+  # Secret containing the password key
+  passwordSecret: ""
+  passwordKey: password
+  # Or use a full connection URL (overrides above settings)
+  url: ""
+  # Or use existing secret with full URL
+  urlSecret: ""
+  urlSecretKey: url
+
+# Environment variables (non-secret)
+env:
+  LOG_LEVEL: "info"
+
+# Resources
+resources: {}
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 50m
+  #   memory: 64Mi
+
+# Liveness and readiness probes
+livenessProbe:
+  httpGet:
+    path: /
+    port: 4321
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 4321
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Pod security context
+podSecurityContext: {}
+  # fsGroup: 1000
+  # runAsUser: 1000
+
+# Container security context
+containerSecurityContext: {}
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}

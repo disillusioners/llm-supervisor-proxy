@@ -1,0 +1,13 @@
+apiVersion: v2
+name: llm-supervisor-proxy
+description: A Helm chart for llm-supervisor-proxy application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - llm
+  - proxy
+  - supervisor
+maintainers:
+  - name: Maintainer
+    email: maintainer@example.com
