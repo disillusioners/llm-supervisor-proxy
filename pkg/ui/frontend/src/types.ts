@@ -102,7 +102,8 @@ export type EventType =
   | 'fallback_triggered'
   | 'all_models_failed'
   | 'loop_detected'
-  | 'loop_interrupted';
+  | 'loop_interrupted'
+  | 'client_disconnected_during_retry';
 
 export interface EventData {
   id?: string;

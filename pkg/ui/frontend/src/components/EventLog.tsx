@@ -51,6 +51,8 @@ const getEventMessage = (event: Event): string => {
       const d = event.data;
       return `Loop interrupted: ${d?.strategy || '?'} - ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
     }
+    case 'client_disconnected_during_retry':
+      return `Client disconnected during retry (Attempt ${event.data?.attempt || '?'})`;
     default:
       return `Event: ${event.type}`;
   }
@@ -78,6 +80,7 @@ const getEventColor = (type: EventType): string => {
     case 'stream_error':
     case 'stream_error_chunk':
     case 'stream_ended_unexpectedly':
+    case 'client_disconnected_during_retry':
       return 'text-yellow-400';
     case 'loop_detected':
       return 'text-amber-400';
@@ -124,6 +127,8 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'LOOP_DETECTED';
     case 'loop_interrupted':
       return 'LOOP_INTERRUPTED';
+    case 'client_disconnected_during_retry':
+      return 'CLIENT_DISCONNECTED';
     default:
       return String(type).toUpperCase();
   }

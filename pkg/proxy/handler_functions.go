@@ -115,6 +115,21 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 			break
 		}
 
+		// Check if client disconnected before attempting retry
+		// This prevents unnecessary retry work when the client is already gone
+		if attempt > 0 && rc.baseCtx.Err() != nil {
+			if errors.Is(rc.baseCtx.Err(), context.Canceled) {
+				log.Println("Client disconnected, aborting retry")
+				h.publishEvent("client_disconnected_during_retry", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
+				rc.reqLog.Status = "failed"
+				rc.reqLog.Error = "Client disconnected"
+				rc.reqLog.EndTime = time.Now()
+				rc.reqLog.Duration = time.Since(rc.startTime).String()
+				h.store.Add(rc.reqLog)
+			}
+			return true // Don't try fallback - client is gone
+		}
+
 		if attempt > 0 {
 			h.prepareRetry(w, rc, attempt, counters)
 		}
