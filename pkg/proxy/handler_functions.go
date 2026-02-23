@@ -51,6 +51,13 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	model, _ := requestBody["model"].(string)
 	originalModel := model
 
+	// Deep-copy original messages for retry reconstruction
+	var originalMessages []interface{}
+	if msgs, ok := requestBody["messages"].([]interface{}); ok {
+		originalMessages = make([]interface{}, len(msgs))
+		copy(originalMessages, msgs)
+	}
+
 	reqLog := &store.RequestLog{
 		ID:            reqID,
 		Status:        "running",
@@ -71,17 +78,18 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	}
 
 	return &requestContext{
-		conf:            conf,
-		targetURL:       targetURL,
-		reqID:           reqID,
-		startTime:       startTime,
-		reqLog:          reqLog,
-		modelList:       modelList,
-		requestBody:     requestBody,
-		isStream:        isStream,
-		originalHeaders: r.Header,
-		method:          r.Method,
-		baseCtx:         r.Context(),
+		conf:             conf,
+		targetURL:        targetURL,
+		reqID:            reqID,
+		startTime:        startTime,
+		reqLog:           reqLog,
+		modelList:        modelList,
+		requestBody:      requestBody,
+		isStream:         isStream,
+		originalHeaders:  r.Header,
+		method:           r.Method,
+		baseCtx:          r.Context(),
+		originalMessages: originalMessages,
 	}, nil
 }
 
@@ -123,6 +131,8 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 }
 
 // prepareRetry updates request log and modifies the request body for retry.
+// It rebuilds the messages array from originalMessages to prevent duplication
+// across multiple retry attempts.
 func (h *Handler) prepareRetry(rc *requestContext, attempt int, counters *retryCounters) {
 	log.Printf("Retrying request (attempt %d)...", attempt)
 	rc.reqLog.Retries = attempt
@@ -132,11 +142,10 @@ func (h *Handler) prepareRetry(rc *requestContext, attempt int, counters *retryC
 	h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
 
 	if rc.isStream {
-		messages, ok := rc.requestBody["messages"].([]interface{})
-		if !ok {
-			log.Println("Could not find messages, aborting retry")
-			return
-		}
+		// Rebuild messages from the immutable originalMessages snapshot
+		// This prevents duplication when multiple retries occur
+		messages := make([]interface{}, len(rc.originalMessages))
+		copy(messages, rc.originalMessages)
 
 		if rc.accumulatedResponse.Len() > 0 {
 			messages = append(messages, map[string]string{
@@ -272,8 +281,29 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 		return attemptReturnImmediately
 	}
 
-	// Headers already sent, can't send a different status
+	// Headers already sent (stream retry scenario)
+	// The original stream started successfully but failed mid-way, triggering a retry.
+	// If the retry attempt also fails, prioritize fallback over retrying the same model.
 	resp.Body.Close()
+
+	// If there's a fallback model available, try it immediately
+	// This is preferred over retrying the same model when headers are already sent
+	if modelIndex+1 < len(rc.modelList) {
+		log.Printf("Upstream returned %d for model %s during stream retry. Triggering fallback.", resp.StatusCode, rc.requestBody["model"])
+		return attemptBreakToFallback
+	}
+
+	// No fallback available - retry on 5xx or 429 within same model
+	if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+		log.Printf("Upstream returned %d during stream retry (headers already sent, no fallback)", resp.StatusCode)
+		h.publishEvent("upstream_error_status_retry", map[string]interface{}{"status": resp.StatusCode, "id": rc.reqID})
+		counters.errorRetries++
+		time.Sleep(1 * time.Second)
+		return attemptContinueRetry
+	}
+
+	// No fallback available, give up
+	log.Printf("No fallback available after stream error with status %d", resp.StatusCode)
 	return attemptReturnImmediately
 }
 
@@ -382,6 +412,16 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+
+		// Check if this line is an error response dumped into the stream
+		// (happens when upstream crashes mid-stream and dumps raw error JSON)
+		if errorMsg := isStreamErrorChunk(line); errorMsg != "" {
+			log.Printf("Stream error chunk detected: %s", errorMsg)
+			h.publishEvent("stream_error_chunk", map[string]interface{}{"error": errorMsg, "id": rc.reqID})
+			monitor.Close()
+			counters.errorRetries++
+			return attemptContinueRetry
+		}
 
 		w.Write(line)
 		w.Write([]byte("\n"))

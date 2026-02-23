@@ -1244,3 +1244,308 @@ func TestLoopDetection_ToolCallExtraction(t *testing.T) {
 		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Stream error chunk detection tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func TestIsStreamErrorChunk(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string // non-empty means error should be detected
+	}{
+		{
+			name:     "valid SSE data line",
+			input:    `data: {"choices":[{"delta":{"content":"Hello"}}]}`,
+			expected: "",
+		},
+		{
+			name:     "valid SSE done",
+			input:    `data: [DONE]`,
+			expected: "",
+		},
+		{
+			name:     "LiteLLM error object",
+			input:    `{"error":{"message":"litellm.APIError: Error building chunks","type":"APIError"}}`,
+			expected: "litellm.APIError: Error building chunks",
+		},
+		{
+			name:     "simple error string",
+			input:    `{"error":"Internal Server Error"}`,
+			expected: "Internal Server Error",
+		},
+		{
+			name:     "detail error format",
+			input:    `{"detail":"Service unavailable"}`,
+			expected: "Service unavailable",
+		},
+		{
+			name:     "plain text (not JSON)",
+			input:    `Some plain text`,
+			expected: "",
+		},
+		{
+			name:     "empty string",
+			input:    ``,
+			expected: "",
+		},
+		{
+			name:     "JSON without error",
+			input:    `{"status":"ok","data":"something"}`,
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isStreamErrorChunk([]byte(tc.input))
+			if tc.expected == "" {
+				if result != "" {
+					t.Errorf("expected no error detected, got: %s", result)
+				}
+			} else {
+				if result == "" {
+					t.Errorf("expected error '%s' to be detected, but got empty string", tc.expected)
+				} else if !strings.Contains(result, tc.expected) {
+					t.Errorf("expected result to contain '%s', got: %s", tc.expected, result)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamErrorChunkDetectionInStream(t *testing.T) {
+	// Simulate a stream that starts successfully, then crashes and dumps an error JSON
+	callCount := 0
+	runBothVersions(t, testCase{
+		name: "StreamErrorChunkDetection",
+		configOpts: []func(*config.Config){
+			func(c *config.Config) {
+				c.MaxUpstreamErrorRetries = 2
+			},
+		},
+		upstreamFn: func(t *testing.T) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.WriteHeader(http.StatusOK)
+				flusher := w.(http.Flusher)
+
+				if callCount == 1 {
+					// First call: send some tokens, then dump error JSON (no [DONE])
+					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Hello"))
+					flusher.Flush()
+					// Simulate LiteLLM crash - dump raw error instead of proper SSE
+					fmt.Fprintf(w, `{"error":{"message":"litellm.APIError: Error building chunks for logging/streaming usage calculation","type":"APIError"}}`)
+					flusher.Flush()
+					// Connection closes - no [DONE]
+					return
+				}
+
+				// Retry: success
+				for _, token := range []string{"Hello", " world", "!"} {
+					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(token))
+					flusher.Flush()
+				}
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+			}
+		},
+		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
+			body := simpleBody("mock-model", true)
+			req := makeRequest(t, body)
+			rr := httptest.NewRecorder()
+			handle(rr, req)
+
+			// Should succeed after retry
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", rr.Code)
+			}
+
+			// Should contain [DONE] from successful retry
+			if !strings.Contains(rr.Body.String(), "[DONE]") {
+				t.Error("expected [DONE] in stream response after retry")
+			}
+
+			// Should NOT contain the error JSON (it should have been intercepted)
+			if strings.Contains(rr.Body.String(), "litellm.APIError") {
+				t.Error("error JSON should not have been passed to client")
+			}
+
+			reqs := h.store.List()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			}
+			if reqs[0].Status != "completed" {
+				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			}
+		},
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fallback with headersSent tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func TestFallbackAfterStreamErrorWithHeadersSent(t *testing.T) {
+	// Test the scenario from stream_error_fallback_issue.md:
+	// 1. First attempt starts stream (headers sent)
+	// 2. Stream fails mid-way, triggers retry
+	// 3. Retry gets 500 error
+	// 4. Should fallback to next model (not give up)
+	callCount := 0
+	runBothVersions(t, testCase{
+		name: "FallbackAfterStreamErrorWithHeadersSent",
+		modelsConfig: func() *models.ModelsConfig {
+			mc := models.NewModelsConfig()
+			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "Primary", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "Fallback", Enabled: true})
+			return mc
+		}(),
+		configOpts: []func(*config.Config){
+			func(c *config.Config) {
+				c.MaxUpstreamErrorRetries = 1
+			},
+		},
+		upstreamFn: func(t *testing.T) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				reqBodyBytes, _ := io.ReadAll(r.Body)
+				r.Body.Close()
+
+				var reqBody map[string]interface{}
+				json.Unmarshal(reqBodyBytes, &reqBody)
+				model, _ := reqBody["model"].(string)
+
+				callCount++
+
+				if model == "primary-mock" {
+					if callCount <= 2 {
+						// First two calls to primary: start stream, send some tokens, then fail
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.Header().Set("Cache-Control", "no-cache")
+						w.WriteHeader(http.StatusOK)
+						flusher := w.(http.Flusher)
+						fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Partial"))
+						flusher.Flush()
+						// Connection closes without [DONE]
+						return
+					}
+					// Third call (retry after stream error): return 500
+					w.WriteHeader(http.StatusInternalServerError)
+					fmt.Fprint(w, `{"error":"primary still down"}`)
+					return
+				}
+
+				// Fallback model: success
+				r.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+				mockLLMHandler(t)(w, r)
+			}
+		},
+		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
+			body := simpleBody("primary-mock", true)
+			req := makeRequest(t, body)
+			rr := httptest.NewRecorder()
+			handle(rr, req)
+
+			// Should succeed with fallback
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", rr.Code)
+			}
+
+			// Should contain [DONE] from fallback
+			if !strings.Contains(rr.Body.String(), "[DONE]") {
+				t.Error("expected [DONE] in fallback stream response")
+			}
+
+			reqs := h.store.List()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			}
+			if reqs[0].Status != "completed" {
+				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			}
+		},
+	})
+}
+
+func TestFallbackDuringStreamRetry500Error(t *testing.T) {
+	// Test that when headersSent is true and retry returns 500, fallback is triggered
+	// Scenario:
+	// 1. Primary model: start stream (headers sent), then close without [DONE]
+	// 2. Retry on primary: return 500 (simulating broken upstream)
+	// 3. Should fallback to model-b
+	var lastModel string
+	callCount := 0
+	runBothVersions(t, testCase{
+		name: "FallbackDuringStreamRetry500Error",
+		modelsConfig: func() *models.ModelsConfig {
+			mc := models.NewModelsConfig()
+			mc.AddModel(models.ModelConfig{ID: "model-a", Name: "Model A", Enabled: true, FallbackChain: []string{"model-b"}})
+			mc.AddModel(models.ModelConfig{ID: "model-b", Name: "Model B", Enabled: true})
+			return mc
+		}(),
+		configOpts: []func(*config.Config){
+			func(c *config.Config) {
+				c.MaxUpstreamErrorRetries = 2 // Allow retry
+			},
+		},
+		upstreamFn: func(t *testing.T) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				reqBodyBytes, _ := io.ReadAll(r.Body)
+				r.Body.Close()
+
+				var reqBody map[string]interface{}
+				json.Unmarshal(reqBodyBytes, &reqBody)
+				model, _ := reqBody["model"].(string)
+				lastModel = model
+				callCount++
+
+				if model == "model-a" {
+					if callCount == 1 {
+						// First call: start stream then close without [DONE]
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.WriteHeader(http.StatusOK)
+						flusher := w.(http.Flusher)
+						fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Start"))
+						flusher.Flush()
+						return // No [DONE] - triggers retry
+					}
+					// Retry attempt: return 500 (simulating broken upstream after stream started)
+					w.WriteHeader(http.StatusInternalServerError)
+					fmt.Fprint(w, `{"error":"upstream broken"}`)
+					return
+				}
+
+				// Fallback (model-b): success
+				r.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+				mockLLMHandler(t)(w, r)
+			}
+		},
+		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
+			body := simpleBody("model-a", true)
+			req := makeRequest(t, body)
+			rr := httptest.NewRecorder()
+			handle(rr, req)
+
+			// Should succeed with fallback
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", rr.Code)
+			}
+
+			// Verify fallback was used
+			if lastModel != "model-b" {
+				t.Errorf("expected fallback model 'model-b' to be used, last model was '%s'", lastModel)
+			}
+
+			reqs := h.store.List()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			}
+			if reqs[0].Status != "completed" {
+				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			}
+		},
+	})
+}

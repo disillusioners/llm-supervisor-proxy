@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,9 @@ type requestContext struct {
 	originalHeaders http.Header
 	method          string
 	baseCtx         context.Context
+
+	// Original messages (immutable snapshot for retry reconstruction)
+	originalMessages []interface{}
 
 	// Accumulated response buffers
 	accumulatedResponse strings.Builder
@@ -269,4 +273,65 @@ func extractTargetFromArgs(args string) string {
 		}
 	}
 	return args
+}
+
+// isStreamErrorChunk detects if a line is an error response dumped into the stream.
+// This happens when upstream crashes mid-stream and dumps raw error JSON instead of
+// proper SSE format. Returns the error message if detected, empty string otherwise.
+func isStreamErrorChunk(line []byte) string {
+	// Valid SSE data lines start with "data: "
+	if bytes.HasPrefix(line, []byte("data: ")) {
+		return ""
+	}
+
+	// Check if this looks like a JSON error response
+	lineStr := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(lineStr, "{") || !strings.HasSuffix(lineStr, "}") {
+		return ""
+	}
+
+	var errorResp map[string]interface{}
+	if err := json.Unmarshal(line, &errorResp); err != nil {
+		return ""
+	}
+
+	// Check for common error structures
+	// LiteLLM format: {"error": {"message": "...", "type": "..."}}
+	if errMsg := extractNestedError(errorResp); errMsg != "" {
+		return errMsg
+	}
+
+	return ""
+}
+
+// extractNestedError extracts error message from various error response formats.
+func extractNestedError(errorResp map[string]interface{}) string {
+	// LiteLLM/API format: {"error": {"message": "..."}}
+	if errObj, ok := errorResp["error"].(map[string]interface{}); ok {
+		if msg, ok := errObj["message"].(string); ok {
+			return msg
+		}
+		if msg, ok := errObj["type"].(string); ok {
+			return msg
+		}
+	}
+
+	// OpenAI format: {"error": {"message": "...", "type": "..."}}
+	if errStr, ok := errorResp["error"].(string); ok {
+		return errStr
+	}
+
+	// Some APIs return: {"detail": "..."}
+	if detail, ok := errorResp["detail"].(string); ok {
+		return detail
+	}
+
+	// Check for error indicators
+	if _, hasError := errorResp["error"]; hasError {
+		if bytes, err := json.Marshal(errorResp); err == nil {
+			return string(bytes)
+		}
+	}
+
+	return ""
 }
