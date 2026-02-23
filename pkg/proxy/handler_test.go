@@ -849,9 +849,11 @@ func TestMockLLM_StreamSSEFormat(t *testing.T) {
 // Edge case tests using simple upstream
 // ═══════════════════════════════════════════════════════════════════════════════
 
-func TestUpstream4xxPassthrough(t *testing.T) {
+func TestUpstream4xxNoPassthrough_RetriesExhausted(t *testing.T) {
+	// 4xx errors should NOT pass through - they trigger retry/fallback instead.
+	// When all retries are exhausted, the proxy returns 502 Bad Gateway.
 	runBothVersions(t, testCase{
-		name: "Upstream4xxPassthrough",
+		name: "Upstream4xxNoPassthrough_RetriesExhausted",
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -865,8 +867,10 @@ func TestUpstream4xxPassthrough(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			if rr.Code != http.StatusNotFound {
-				t.Errorf("expected status %d, got %d", http.StatusNotFound, rr.Code)
+			// 4xx errors now trigger retry, not passthrough
+			// When retries are exhausted, proxy returns 502 Bad Gateway
+			if rr.Code != http.StatusBadGateway {
+				t.Errorf("expected status %d (Bad Gateway), got %d", http.StatusBadGateway, rr.Code)
 			}
 
 			reqs := h.store.List()

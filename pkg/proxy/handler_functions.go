@@ -292,71 +292,48 @@ func (h *Handler) handleUpstreamRequestError(rc *requestContext, err error, atte
 }
 
 // handleNonOKStatus handles HTTP responses with non-200 status codes.
+// All upstream errors are retried (not passed through to client).
+// 4xx errors are logged for debugging but still trigger retry/fallback.
 func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, resp *http.Response, modelIndex int, counters *retryCounters) attemptResult {
+	statusCode := resp.StatusCode
+
+	// Log all error responses for debugging
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	log.Printf("Upstream returned %d. Error body: %s", statusCode, string(bodyBytes))
+	h.publishEvent("upstream_error_status", map[string]interface{}{"status": statusCode, "body": string(bodyBytes), "id": rc.reqID})
+
 	if !rc.headersSent {
-		if resp.StatusCode == http.StatusBadRequest {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("Upstream returned 400 (Bad Request). Error body: %s", string(bodyBytes))
-			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		}
-
-		// Retry on 5xx or 429
-		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-			resp.Body.Close()
-			log.Printf("Upstream returned %d", resp.StatusCode)
-			h.publishEvent("upstream_error_status", map[string]interface{}{"status": resp.StatusCode, "id": rc.reqID})
-			counters.errorRetries++
-			time.Sleep(1 * time.Second)
-			return attemptContinueRetry
-		}
-
-		// If there's a fallback model available, break to try it
+		// If there's a fallback model available, try it first
 		if modelIndex+1 < len(rc.modelList) {
-			resp.Body.Close()
-			log.Printf("Upstream returned %d for model %s. Triggering fallback.", resp.StatusCode, rc.requestBody["model"])
+			log.Printf("Upstream returned %d for model %s. Triggering fallback.", statusCode, rc.requestBody["model"])
 			return attemptBreakToFallback
 		}
 
-		// Pass through error to client
-		for k, v := range resp.Header {
-			w.Header()[k] = v
-		}
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-		resp.Body.Close()
-
-		rc.reqLog.Status = "failed"
-		rc.reqLog.Error = fmt.Sprintf("Upstream returned %d", resp.StatusCode)
-		rc.reqLog.EndTime = time.Now()
-		rc.reqLog.Duration = time.Since(rc.startTime).String()
-		h.store.Add(rc.reqLog)
-		return attemptReturnImmediately
-	}
-
-	// Headers already sent (stream retry scenario)
-	// The original stream started successfully but failed mid-way, triggering a retry.
-	// If the retry attempt also fails, prioritize fallback over retrying the same model.
-	resp.Body.Close()
-
-	// If there's a fallback model available, try it immediately
-	// This is preferred over retrying the same model when headers are already sent
-	if modelIndex+1 < len(rc.modelList) {
-		log.Printf("Upstream returned %d for model %s during stream retry. Triggering fallback.", resp.StatusCode, rc.requestBody["model"])
-		return attemptBreakToFallback
-	}
-
-	// No fallback available - retry on 5xx or 429 within same model
-	if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-		log.Printf("Upstream returned %d during stream retry (headers already sent, no fallback)", resp.StatusCode)
-		h.publishEvent("upstream_error_status_retry", map[string]interface{}{"status": resp.StatusCode, "id": rc.reqID})
+		// No fallback available - retry within same model
+		// All error codes (4xx, 5xx, 429) trigger retry
+		log.Printf("Upstream returned %d (no fallback). Retrying within same model.", statusCode)
 		counters.errorRetries++
 		time.Sleep(1 * time.Second)
 		return attemptContinueRetry
 	}
 
-	// No fallback available, give up
-	log.Printf("No fallback available after stream error with status %d", resp.StatusCode)
-	return attemptReturnImmediately
+	// Headers already sent (stream retry scenario)
+	// The original stream started successfully but failed mid-way, triggering a retry.
+	// If the retry attempt also fails, prioritize fallback over retrying the same model.
+
+	// If there's a fallback model available, try it immediately
+	if modelIndex+1 < len(rc.modelList) {
+		log.Printf("Upstream returned %d for model %s during stream retry. Triggering fallback.", statusCode, rc.requestBody["model"])
+		return attemptBreakToFallback
+	}
+
+	// No fallback available - retry within same model
+	log.Printf("Upstream returned %d during stream retry (headers already sent, no fallback). Retrying.", statusCode)
+	h.publishEvent("upstream_error_status_retry", map[string]interface{}{"status": statusCode, "id": rc.reqID})
+	counters.errorRetries++
+	time.Sleep(1 * time.Second)
+	return attemptContinueRetry
 }
 
 // handleReadError categorizes a read error (idle timeout, deadline exceeded,
