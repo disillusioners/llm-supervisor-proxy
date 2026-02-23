@@ -279,13 +279,62 @@ func extractTargetFromArgs(args string) string {
 // This happens when upstream crashes mid-stream and dumps raw error JSON instead of
 // proper SSE format. Returns the error message if detected, empty string otherwise.
 func isStreamErrorChunk(line []byte) string {
-	// Valid SSE data lines start with "data: "
-	if bytes.HasPrefix(line, []byte("data: ")) {
+	// Skip empty lines and whitespace-only lines
+	lineStr := strings.TrimSpace(string(line))
+	if lineStr == "" {
 		return ""
 	}
 
+	// Valid SSE data lines start with "data: "
+	if bytes.HasPrefix(line, []byte("data: ")) {
+		// Check if the data payload itself contains an error
+		data := bytes.TrimPrefix(line, []byte("data: "))
+		dataStr := strings.TrimSpace(string(data))
+
+		// Check for [DONE] marker - this is valid, not an error
+		if dataStr == "[DONE]" {
+			return ""
+		}
+
+		// Try to parse as JSON and check for error structure
+		if strings.HasPrefix(dataStr, "{") && strings.HasSuffix(dataStr, "}") {
+			var errorResp map[string]interface{}
+			if err := json.Unmarshal(data, &errorResp); err == nil {
+				if errMsg := extractNestedError(errorResp); errMsg != "" {
+					return errMsg
+				}
+			}
+		}
+
+		// Not an error, valid SSE data
+		return ""
+	}
+
+	// Check for plain text error patterns (non-JSON lines that indicate errors)
+	// These are common when upstream crashes mid-stream
+	lowerLine := strings.ToLower(lineStr)
+	errorIndicators := []string{
+		"error:",
+		"exception:",
+		"apierror:",
+		"litellm.",
+		"runtimeerror:",
+		"valueerror:",
+		"typeerror:",
+		"connectionerror:",
+		"timeouterror:",
+		"internal server error",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+	}
+	for _, indicator := range errorIndicators {
+		if strings.Contains(lowerLine, indicator) {
+			return lineStr
+		}
+	}
+
 	// Check if this looks like a JSON error response
-	lineStr := strings.TrimSpace(string(line))
 	if !strings.HasPrefix(lineStr, "{") || !strings.HasSuffix(lineStr, "}") {
 		return ""
 	}

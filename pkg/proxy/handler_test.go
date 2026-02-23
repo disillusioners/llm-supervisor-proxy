@@ -1295,6 +1295,32 @@ func TestIsStreamErrorChunk(t *testing.T) {
 			input:    `{"status":"ok","data":"something"}`,
 			expected: "",
 		},
+		// Plain text error patterns (new detection)
+		{
+			name:     "plain text litellm error",
+			input:    `litellm.APIError: Error building chunks for logging/streaming usage calculation`,
+			expected: "litellm.APIError",
+		},
+		{
+			name:     "plain text Error: prefix",
+			input:    `Error: something went wrong`,
+			expected: "Error:",
+		},
+		{
+			name:     "plain text exception",
+			input:    `Exception: runtime panic occurred`,
+			expected: "Exception:",
+		},
+		{
+			name:     "Internal Server Error text",
+			input:    `Internal Server Error - upstream crashed`,
+			expected: "Internal Server Error",
+		},
+		{
+			name:     "error wrapped in SSE data",
+			input:    `data: {"error":{"message":"stream failed"}}`,
+			expected: "stream failed",
+		},
 	}
 
 	for _, tc := range tests {
