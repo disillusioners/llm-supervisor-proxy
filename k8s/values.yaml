@@ -4,13 +4,14 @@ replicaCount: 1
 
 image:
   registry: docker.io
-  repository: llm-supervisor-proxy
-  pullPolicy: IfNotPresent
-  tag: ""
+  repository: disillusioners/llm-supervisor-proxy
+  pullPolicy: Always
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
+namespace: llmproxy
 
 service:
   type: ClusterIP
@@ -19,18 +20,17 @@ service:
 ingress:
   enabled: true
   className: ""
-  annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
   hosts:
-    - host: llm-supervisor-proxy.local
+    - host: llm.daoduc.org
       paths:
         - path: /
           pathType: Prefix
-  tls: []
-  #  - secretName: llm-supervisor-proxy-tls
-  #    hosts:
-  #      - llm-supervisor-proxy.local
+  tls:
+    - secretName: llm-supervisor-proxy-tls
+      hosts:
+        - llm.daoduc.org
 
 # PostgreSQL database configuration (required)
 database:
@@ -39,7 +39,7 @@ database:
   database: llm_supervisor
   username: ""
   # Secret containing the password key
-  passwordSecret: ""
+  passwordSecret: "llm-proxy-db-secret"
   passwordKey: password
   # Or use a full connection URL (overrides above settings)
   url: ""

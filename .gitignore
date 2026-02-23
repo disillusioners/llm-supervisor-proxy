@@ -26,3 +26,4 @@ proxy.log
 proxy.pid
 mock.log
 /main
+k8s/secrets/
