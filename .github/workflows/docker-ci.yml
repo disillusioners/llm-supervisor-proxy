@@ -60,8 +60,8 @@ jobs:
       - name: Build API server (verify compilation)
         run: |
           echo "Building API server to verify compilation..."
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/cia-server ./cmd/cia-server
-          ls -lh /tmp/cia-server
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/llm-supervisor-proxy ./cmd
+          ls -lh /tmp/llm-supervisor-proxy
 
       - name: Run Go tests (if any exist)
         run: |
