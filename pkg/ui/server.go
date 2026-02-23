@@ -52,25 +52,35 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.FileServer(http.FS(staticFS))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
-		if err == nil {
-			f.Close()
+
+	// UI at /ui
+	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/ui/")
+		if path == "" || path == "index.html" {
+			r.URL.Path = "/"
 			fileServer.ServeHTTP(w, r)
 			return
 		}
+		// Try static file first
+		f, err := staticFS.Open(path)
+		if err == nil {
+			f.Close()
+			http.StripPrefix("/ui/", fileServer).ServeHTTP(w, r)
+			return
+		}
+		// Fallback to index.html for SPA client-side routing
 		r.URL.Path = "/"
 		fileServer.ServeHTTP(w, r)
 	})
 
-	// API
-	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/models", s.handleModels)
-	mux.HandleFunc("/api/models/", s.handleModelDetail)
-	mux.HandleFunc("/api/models/validate", s.handleValidateModel)
-	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/api/requests", s.handleRequests)
-	mux.HandleFunc("/api/requests/", s.handleRequestDetail)
+	// API at /fe/api
+	mux.HandleFunc("/fe/api/config", s.handleConfig)
+	mux.HandleFunc("/fe/api/models", s.handleModels)
+	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
+	mux.HandleFunc("/fe/api/models/validate", s.handleValidateModel)
+	mux.HandleFunc("/fe/api/events", s.handleEvents)
+	mux.HandleFunc("/fe/api/requests", s.handleRequests)
+	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +95,8 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
-	// /api/requests/{id}
-	id := r.URL.Path[len("/api/requests/"):]
+	// /fe/api/requests/{id}
+	id := r.URL.Path[len("/fe/api/requests/"):]
 	if id == "" {
 		http.Error(w, "Missing ID", http.StatusBadRequest)
 		return
@@ -193,7 +203,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleModels handles GET and POST /api/models
+// handleModels handles GET and POST /fe/api/models
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -270,10 +280,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleModelDetail handles PUT and DELETE /api/models/{id}
+// handleModelDetail handles PUT and DELETE /fe/api/models/{id}
 func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
-	// /api/models/{id}
-	id := r.URL.Path[len("/api/models/"):]
+	// /fe/api/models/{id}
+	id := r.URL.Path[len("/fe/api/models/"):]
 	if id == "" {
 		http.Error(w, "Missing ID", http.StatusBadRequest)
 		return
@@ -353,7 +363,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleValidateModel handles POST /api/models/validate
+// handleValidateModel handles POST /fe/api/models/validate
 func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

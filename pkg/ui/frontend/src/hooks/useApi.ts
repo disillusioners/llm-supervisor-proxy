@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model } from '../types';
 
-const API_BASE = '/api';
+const API_BASE = '/fe/api';
 
 // Generic fetch helper
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

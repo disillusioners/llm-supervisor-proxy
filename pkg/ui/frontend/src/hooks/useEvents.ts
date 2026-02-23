@@ -7,7 +7,7 @@ const subscribers = new Set<(data: Event) => void>();
 
 function getSharedEventSource() {
   if (!sharedEventSource) {
-    sharedEventSource = new EventSource('/api/events');
+    sharedEventSource = new EventSource('/fe/api/events');
     
     sharedEventSource.onmessage = (event) => {
       try {
