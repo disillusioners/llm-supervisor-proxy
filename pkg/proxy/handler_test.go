@@ -1549,3 +1549,103 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 		},
 	})
 }
+
+// TestPrepareRetryNoMessageDuplication verifies that multiple retries don't cause
+// message duplication. The messages array should be rebuilt from originalMessages
+// on each retry, not mutated in-place.
+func TestPrepareRetryNoMessageDuplication(t *testing.T) {
+	callCount := 0
+	var lastMessages []interface{}
+
+	// Only test the Refactored version since BeforeRefactor doesn't have this fix
+	// and the deduplication logic is new functionality
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		reqBodyBytes, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+
+		var reqBody map[string]interface{}
+		json.Unmarshal(reqBodyBytes, &reqBody)
+
+		callCount++
+
+		// Capture the messages sent to upstream
+		lastMessages, _ = reqBody["messages"].([]interface{})
+
+		if callCount < 3 {
+			// First two calls: start stream then close without [DONE]
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", callCount)))
+			flusher.Flush()
+			return // No [DONE] - triggers retry
+		}
+
+		// Third call: success
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Final"))
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil, func(c *config.Config) {
+		c.MaxUpstreamErrorRetries = 3 // Allow multiple retries
+	})
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify message count - should be original (1) + assistant (1) + user (1) = 3
+	// NOT duplicated with each retry
+	if len(lastMessages) != 3 {
+		t.Errorf("expected 3 messages (original + assistant + user prompt), got %d", len(lastMessages))
+		for i, msg := range lastMessages {
+			t.Logf("Message %d: %+v", i, msg)
+		}
+		return
+	}
+
+	// Verify the structure
+	// Message 0: original user message
+	if msg, ok := lastMessages[0].(map[string]interface{}); ok {
+		if msg["role"] != "user" {
+			t.Errorf("expected message 0 role 'user', got '%v'", msg["role"])
+		}
+	} else {
+		t.Error("message 0 is not a map")
+	}
+
+	// Message 1: accumulated assistant response
+	if msg, ok := lastMessages[1].(map[string]interface{}); ok {
+		if msg["role"] != "assistant" {
+			t.Errorf("expected message 1 role 'assistant', got '%v'", msg["role"])
+		}
+		// Should contain accumulated content from previous attempts
+		content, _ := msg["content"].(string)
+		if content == "" {
+			t.Error("expected message 1 to have content")
+		}
+	} else {
+		t.Error("message 1 is not a map")
+	}
+
+	// Message 2: continue prompt
+	if msg, ok := lastMessages[2].(map[string]interface{}); ok {
+		if msg["role"] != "user" {
+			t.Errorf("expected message 2 role 'user', got '%v'", msg["role"])
+		}
+		if !strings.Contains(fmt.Sprintf("%v", msg["content"]), "interrupted") {
+			t.Error("expected message 2 to contain 'interrupted'")
+		}
+	} else {
+		t.Error("message 2 is not a map")
+	}
+}

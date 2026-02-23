@@ -24,8 +24,12 @@ const getEventMessage = (event: Event): string => {
       return `Upstream request failed: ${event.data?.error || 'Unknown error'}`;
     case 'upstream_error_status':
       return `Upstream returned HTTP ${event.data?.status || '?'}`;
+    case 'upstream_error_status_retry':
+      return `Retry failed with HTTP ${event.data?.status || '?'} (headers already sent)`;
     case 'stream_error':
       return `Stream error: ${event.data?.error || 'Unknown error'}`;
+    case 'stream_error_chunk':
+      return `Stream error chunk detected: ${event.data?.error || 'Unknown error'}`;
     case 'error_deadline_exceeded':
       return 'Generation deadline exceeded';
     case 'stream_ended_unexpectedly':
@@ -70,7 +74,9 @@ const getEventColor = (type: EventType): string => {
     case 'error_deadline_exceeded':
     case 'upstream_error':
     case 'upstream_error_status':
+    case 'upstream_error_status_retry':
     case 'stream_error':
+    case 'stream_error_chunk':
     case 'stream_ended_unexpectedly':
       return 'text-yellow-400';
     case 'loop_detected':
@@ -96,8 +102,12 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'UPSTREAM_ERROR';
     case 'upstream_error_status':
       return 'UPSTREAM_STATUS';
+    case 'upstream_error_status_retry':
+      return 'RETRY_STATUS_ERROR';
     case 'stream_error':
       return 'STREAM_ERROR';
+    case 'stream_error_chunk':
+      return 'STREAM_ERROR_CHUNK';
     case 'error_deadline_exceeded':
       return 'DEADLINE_EXCEEDED';
     case 'stream_ended_unexpectedly':
