@@ -45,6 +45,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: pkg/ui/frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd pkg/ui/frontend
+          npm ci
+          npm run build
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -57,9 +70,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Build API server (verify compilation)
+      - name: Build server (verify compilation)
         run: |
-          echo "Building API server to verify compilation..."
+          echo "Building server to verify compilation..."
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/llm-supervisor-proxy ./cmd
           ls -lh /tmp/llm-supervisor-proxy
 

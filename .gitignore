@@ -9,7 +9,6 @@ mock
 .DS_Store
 
 # Go
-go.sum
 vendor/
 test_output.txt
 
