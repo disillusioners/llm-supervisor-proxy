@@ -49,6 +49,15 @@ type requestContext struct {
 
 	// Loop detection (persists across retries within this request)
 	loopDetector *loopdetection.Detector
+
+	// Stream metadata normalization (for transparent fallbacks)
+	// Cached from first chunk to maintain consistency across retries/fallbacks
+	streamID    string
+	streamIDSet bool
+
+	// Keep-alive management for continuous heartbeats during retries
+	keepAliveCancel context.CancelFunc
+	keepAliveDone   chan struct{}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,6 +218,111 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder)
 		thinking.WriteString(t)
 	} else if t, ok := delta["thinking"].(string); ok {
 		thinking.WriteString(t)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream chunk validation and normalization (for transparent fallbacks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// isValidStreamChunk checks if a data payload is valid JSON.
+// This prevents corrupted/incomplete chunks from being sent to clients
+// when upstream crashes mid-generation.
+func isValidStreamChunk(data []byte) bool {
+	// [DONE] marker is valid
+	if string(data) == "[DONE]" {
+		return true
+	}
+	return json.Valid(data)
+}
+
+// normalizeStreamChunk rewrites a stream chunk to maintain consistency across
+// retries and fallbacks. It:
+// 1. Caches the original stream ID from the first chunk
+// 2. Replaces the ID in all subsequent chunks with the cached original
+// 3. Strips "role" from delta (should only appear in first chunk)
+//
+// This prevents strict clients (SDKs) from disconnecting due to:
+// - Message ID changing mid-stream
+// - Role being re-announced mid-stream
+func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
+	// Don't process [DONE] marker
+	if string(data) == "[DONE]" {
+		return data
+	}
+
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return data // Return as-is if not valid JSON
+	}
+
+	// Cache stream ID from first chunk
+	isFirstChunk := !rc.streamIDSet
+	if !rc.streamIDSet {
+		if id, ok := chunk["id"].(string); ok && id != "" {
+			rc.streamID = id
+			rc.streamIDSet = true
+		}
+	} else if rc.streamID != "" {
+		// Replace ID with cached original
+		if _, hasID := chunk["id"]; hasID {
+			chunk["id"] = rc.streamID
+		}
+	}
+
+	// Strip role from delta (should only appear in the very first overall chunk)
+	if !isFirstChunk {
+		if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]interface{}); ok {
+				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+					delete(delta, "role")
+				}
+			}
+		}
+	}
+
+	normalized, err := json.Marshal(chunk)
+	if err != nil {
+		return data // Return original on error
+	}
+	return normalized
+}
+
+// startKeepAlive starts a goroutine that sends SSE keep-alive comments
+// every 3 seconds to prevent strict HTTP clients from timing out during
+// fallback Time-To-First-Token delays.
+func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
+	ctx, cancel := context.WithCancel(rc.baseCtx)
+	rc.keepAliveCancel = cancel
+	rc.keepAliveDone = make(chan struct{})
+
+	go func() {
+		defer close(rc.keepAliveDone)
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Send SSE keep-alive comment
+				w.Write([]byte(":\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		}
+	}()
+}
+
+// stopKeepAlive stops the continuous keep-alive goroutine and waits
+// until it fully exits to prevent concurrent writes to the stream.
+func stopKeepAlive(rc *requestContext) {
+	if rc.keepAliveCancel != nil {
+		rc.keepAliveCancel()
+		<-rc.keepAliveDone
+		rc.keepAliveCancel = nil
 	}
 }
 

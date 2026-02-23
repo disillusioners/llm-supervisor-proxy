@@ -163,14 +163,19 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 
 	h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
 
-	// For streams where headers are already sent, send keep-alive comment
-	// to prevent client timeout while we retry
+	// For streams where headers are already sent, start continuous keep-alive
+	// to prevent client timeout during fallback Time-To-First-Token delays.
+	// This sends SSE comments every 3 seconds until the new stream starts.
 	if rc.isStream && rc.headersSent {
+		// Send immediate retry notification
 		keepAliveMsg := fmt.Sprintf(": retrying-attempt-%d\n", attempt)
 		w.Write([]byte(keepAliveMsg))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
+
+		// Start continuous keep-alive goroutine
+		startKeepAlive(w, rc)
 	}
 
 	if rc.isStream {
@@ -227,6 +232,11 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 	copyHeaders(proxyReq, rc.originalHeaders)
 
 	resp, err := h.client.Do(proxyReq)
+
+	// Stop keep-alive as soon as upstream responds (or fails)
+	// We do this before accessing w to prevent concurrent writes
+	stopKeepAlive(rc)
+
 	if err != nil {
 		return h.handleUpstreamRequestError(rc, err, attemptCtx, attempt, counters)
 	}
@@ -376,7 +386,15 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 	monitor := supervisor.NewMonitoredReader(resp.Body, rc.conf.IdleTimeout)
 
 	if !rc.headersSent {
+		// Copy response headers, but filter out headers that can cause issues
+		// with streaming responses (especially during retry scenarios)
 		for k, v := range resp.Header {
+			// Skip Content-Length for streaming responses - the content length
+			// can change during retries, and SSE streams don't need it.
+			// Strict HTTP clients may disconnect if byte count doesn't match.
+			if rc.isStream && k == "Content-Length" {
+				continue
+			}
 			w.Header()[k] = v
 		}
 		w.WriteHeader(http.StatusOK)
@@ -455,14 +473,31 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			return attemptContinueRetry
 		}
 
-		w.Write(line)
-		w.Write([]byte("\n"))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
+		// Process data lines - validate and normalize before writing
 		if bytes.HasPrefix(line, []byte("data: ")) {
 			data := bytes.TrimPrefix(line, []byte("data: "))
+
+			// Validate JSON - skip corrupted/incomplete chunks
+			// This prevents strict clients from disconnecting on malformed JSON
+			if !isValidStreamChunk(data) {
+				log.Printf("Skipping invalid/incomplete JSON chunk: %s", string(data)[:min(100, len(data))])
+				continue
+			}
+
+			// Normalize chunk - rewrite ID and strip role for transparent fallbacks
+			normalizedData := normalizeStreamChunk(data, rc)
+
+			// Write the normalized chunk
+			w.Write([]byte("data: "))
+			w.Write(normalizedData)
+			w.Write([]byte("\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+
+			// Continue processing for [DONE] check and content extraction
+			data = normalizedData
+
 			if string(data) == "[DONE]" {
 				streamEndedSuccessfully = true
 				w.Write([]byte("\n"))
