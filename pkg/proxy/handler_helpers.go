@@ -83,6 +83,30 @@ func (rc *retryCounters) totalAttempts() int {
 // Pure helper functions (no Handler receiver)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// extractParameters extracts request parameters from the request body,
+// excluding standard fields that are displayed separately.
+func extractParameters(requestBody map[string]interface{}) map[string]interface{} {
+	// Fields to exclude (shown separately in UI)
+	excludeFields := map[string]bool{
+		"messages": true,
+		"model":    true,
+		"stream":   true,
+	}
+
+	params := make(map[string]interface{})
+	for key, value := range requestBody {
+		if !excludeFields[key] {
+			params[key] = value
+		}
+	}
+
+	// Return nil if no parameters to avoid empty object in JSON
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
 // parseMessages converts the raw JSON "messages" array to store.Message slice.
 func parseMessages(requestBody map[string]interface{}) []store.Message {
 	var storeMessages []store.Message

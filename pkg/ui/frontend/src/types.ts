@@ -72,12 +72,17 @@ export interface Request {
   duration: string;
   retries: number;
   error?: string;
+  // Original request metadata
+  original_model?: string;
+  is_stream?: boolean;
+  fallback_used?: string[];
 }
 
 export interface RequestDetail extends Request {
   messages: Message[];
   response?: string;
   thinking?: string;
+  parameters?: Record<string, unknown>;
 }
 
 export type EventType =

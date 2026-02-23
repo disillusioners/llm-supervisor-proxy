@@ -58,6 +58,14 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		copy(originalMessages, msgs)
 	}
 
+	isStream := false
+	if s, ok := requestBody["stream"].(bool); ok && s {
+		isStream = true
+	}
+
+	// Extract parameters (exclude standard fields that are shown separately)
+	parameters := extractParameters(requestBody)
+
 	reqLog := &store.RequestLog{
 		ID:            reqID,
 		Status:        "running",
@@ -67,15 +75,12 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		Messages:      storeMessages,
 		Retries:       0,
 		FallbackUsed:  []string{},
+		IsStream:      isStream,
+		Parameters:    parameters,
 	}
 	h.store.Add(reqLog)
 
 	modelList := buildModelList(originalModel, conf.ModelsConfig)
-
-	isStream := false
-	if s, ok := requestBody["stream"].(bool); ok && s {
-		isStream = true
-	}
 
 	return &requestContext{
 		conf:             conf,

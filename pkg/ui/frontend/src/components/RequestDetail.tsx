@@ -10,6 +10,225 @@ interface RequestDetailProps {
   loading: boolean;
 }
 
+// Collapsible JSON viewer component
+function JsonViewer({ 
+  data, 
+  depth = 0, 
+  defaultExpanded = true 
+}: { 
+  data: unknown; 
+  depth?: number; 
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded || depth < 2);
+
+  if (data === null) {
+    return <span class="text-gray-500">null</span>;
+  }
+
+  if (typeof data === 'boolean') {
+    return <span class="text-purple-400">{data.toString()}</span>;
+  }
+
+  if (typeof data === 'number') {
+    return <span class="text-orange-400">{data}</span>;
+  }
+
+  if (typeof data === 'string') {
+    return <span class="text-green-400">"{escapeHtml(data)}"</span>;
+  }
+
+  if (Array.isArray(data)) {
+    if (data.length === 0) {
+      return <span class="text-gray-400">[]</span>;
+    }
+
+    return (
+      <span>
+        <button 
+          onClick={() => setExpanded(!expanded)}
+          class="text-gray-400 hover:text-gray-200 mr-1 text-xs"
+        >
+          {expanded ? '▼' : '▶'}[{data.length}]
+        </button>
+        {expanded && (
+          <div class="ml-4 border-l border-gray-600 pl-2">
+            {data.map((item, i) => (
+              <div key={i}>
+                <span class="text-gray-500 text-xs">{i}: </span>
+                <JsonViewer data={item} depth={depth + 1} defaultExpanded={false} />
+              </div>
+            ))}
+          </div>
+        )}
+      </span>
+    );
+  }
+
+  if (typeof data === 'object') {
+    const entries = Object.entries(data as Record<string, unknown>);
+    if (entries.length === 0) {
+      return <span class="text-gray-400">{}</span>;
+    }
+
+    return (
+      <span>
+        <button 
+          onClick={() => setExpanded(!expanded)}
+          class="text-gray-400 hover:text-gray-200 mr-1 text-xs"
+        >
+          {expanded ? '▼' : '▶'}{'{'}
+        </button>
+        {!expanded && <span class="text-gray-400">{entries.length} keys{'}'}</span>}
+        {expanded && (
+          <div class="ml-4 border-l border-gray-600 pl-2">
+            {entries.map(([key, value]) => (
+              <div key={key}>
+                <span class="text-cyan-400">{escapeHtml(key)}: </span>
+                <JsonViewer data={value} depth={depth + 1} defaultExpanded={false} />
+              </div>
+            ))}
+            <span class="text-gray-400">{'}'}</span>
+          </div>
+        )}
+      </span>
+    );
+  }
+
+  return <span class="text-gray-400">{String(data)}</span>;
+}
+
+// Modal for displaying advanced request info
+function AdvancedInfoModal({ 
+  detail, 
+  onClose 
+}: { 
+  detail: RequestDetailType; 
+  onClose: () => void;
+}) {
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Close on escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  // Close on backdrop click
+  const handleBackdropClick = (e: MouseEvent) => {
+    if (e.target === modalRef.current) onClose();
+  };
+
+  return (
+    <div 
+      ref={modalRef}
+      class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+      onClick={handleBackdropClick}
+    >
+      <div class="bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[80vh] flex flex-col border border-gray-600">
+        {/* Header */}
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
+          <h3 class="text-lg font-semibold text-gray-100">Request Details</h3>
+          <button 
+            onClick={onClose}
+            class="text-gray-400 hover:text-white transition-colors p-1"
+          >
+            ✕
+          </button>
+        </div>
+        
+        {/* Content - Scrollable */}
+        <div class="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+          {/* Basic Info */}
+          <div class="space-y-2">
+            <div class="flex justify-between">
+              <span class="text-gray-400">ID:</span>
+              <span class="text-gray-200 font-mono text-xs">{escapeHtml(detail.id)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Status:</span>
+              <span class={
+                detail.status === 'completed' ? 'text-green-400' :
+                  detail.status === 'failed' ? 'text-red-400' :
+                    detail.status === 'running' ? 'text-yellow-400' :
+                      'text-gray-200'
+              }>
+                {escapeHtml(detail.status)}
+              </span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Duration:</span>
+              <span class="text-gray-200">{escapeHtml(detail.duration)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Streaming:</span>
+              <span class={detail.is_stream ? 'text-blue-400' : 'text-gray-400'}>
+                {detail.is_stream ? 'true' : 'false'}
+              </span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Retries:</span>
+              <span class={detail.retries > 0 ? 'text-yellow-400' : 'text-gray-200'}>
+                {detail.retries}
+              </span>
+            </div>
+          </div>
+
+          {/* Model Info */}
+          <div class="border-t border-gray-700 pt-4 space-y-2">
+            <h4 class="text-gray-300 font-medium">Model</h4>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Requested:</span>
+              <span class="text-gray-200">{escapeHtml(detail.model)}</span>
+            </div>
+            {detail.original_model && detail.original_model !== detail.model && (
+              <div class="flex justify-between">
+                <span class="text-gray-400">Original:</span>
+                <span class="text-gray-300">{escapeHtml(detail.original_model)}</span>
+              </div>
+            )}
+            {detail.fallback_used && detail.fallback_used.length > 0 && (
+              <div>
+                <span class="text-gray-400">Fallback Chain:</span>
+                <div class="mt-1 flex flex-wrap gap-1">
+                  {detail.fallback_used.map((m, i) => (
+                    <span key={i} class="text-gray-300 bg-gray-700 px-2 py-0.5 rounded text-xs">
+                      {escapeHtml(m)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Parameters */}
+          {detail.parameters && Object.keys(detail.parameters).length > 0 && (
+            <div class="border-t border-gray-700 pt-4">
+              <h4 class="text-gray-300 font-medium mb-2">Parameters</h4>
+              <div class="text-gray-300 bg-gray-900 p-3 rounded text-xs overflow-x-auto border border-gray-700 font-mono">
+                <JsonViewer data={detail.parameters} />
+              </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {detail.error && (
+            <div class="border-t border-gray-700 pt-4">
+              <h4 class="text-red-400 font-medium mb-2">Error</h4>
+              <pre class="text-red-300 bg-red-900/20 p-3 rounded text-xs overflow-x-auto border border-red-500/30">
+                {escapeHtml(detail.error)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MarkdownContent({ text }: { text: string }) {
   const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
   return (
@@ -78,6 +297,7 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
 
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
+  const [showModal, setShowModal] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -122,41 +342,57 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
     <div class="flex-[3] bg-gray-800 border-b border-gray-700 flex flex-col min-h-0">
       {/* Header - Fixed, doesn't scroll */}
       <div class="shrink-0 monitor-font text-sm p-4 border-b border-gray-700">
-        {/* Header Grid */}
-        <div class="grid grid-cols-2 gap-4 mb-4">
-          <div>
-            <span class="text-gray-400">ID:</span>{' '}
-            <span class="text-gray-200">{escapeHtml(detail.id)}</span>
+        {/* Header Grid - Primary Fields */}
+        <div class="flex items-start justify-between gap-4">
+          <div class="grid grid-cols-2 gap-x-4 gap-y-2 flex-1">
+            <div>
+              <span class="text-gray-400">ID:</span>{' '}
+              <span class="text-gray-200 font-mono text-xs">{escapeHtml(detail.id.slice(0, 8))}...</span>
+            </div>
+            <div>
+              <span class="text-gray-400">Status:</span>{' '}
+              <span class={
+                detail.status === 'completed' ? 'text-green-400' :
+                  detail.status === 'failed' ? 'text-red-400' :
+                    detail.status === 'running' ? 'text-yellow-400' :
+                      'text-gray-200'
+              }>
+                {escapeHtml(detail.status)}
+              </span>
+            </div>
+            <div>
+              <span class="text-gray-400">Model:</span>{' '}
+              <span class="text-gray-200">{escapeHtml(detail.model)}</span>
+              {detail.original_model && detail.original_model !== detail.model && (
+                <span class="text-yellow-500 text-xs ml-1">(fallback)</span>
+              )}
+            </div>
+            <div>
+              <span class="text-gray-400">Duration:</span>{' '}
+              <span class="text-gray-200">{escapeHtml(detail.duration)}</span>
+            </div>
           </div>
-          <div>
-            <span class="text-gray-400">Status:</span>{' '}
-            <span class={
-              detail.status === 'completed' ? 'text-green-400' :
-                detail.status === 'failed' ? 'text-red-400' :
-                  detail.status === 'running' ? 'text-yellow-400' :
-                    'text-gray-200'
-            }>
-              {escapeHtml(detail.status)}
-            </span>
-          </div>
-          <div>
-            <span class="text-gray-400">Model:</span>{' '}
-            <span class="text-gray-200">{escapeHtml(detail.model)}</span>
-          </div>
-          <div>
-            <span class="text-gray-400">Duration:</span>{' '}
-            <span class="text-gray-200">{escapeHtml(detail.duration)}</span>
-          </div>
+          {/* Info Button */}
+          <button
+            onClick={() => setShowModal(true)}
+            class="text-gray-400 hover:text-white transition-colors p-2 hover:bg-gray-700 rounded"
+            title="View details"
+          >
+            ℹ️
+          </button>
         </div>
 
         {/* Error Box */}
         {detail.error && (
-          <div class="bg-red-900/30 border border-red-500/50 rounded p-3">
+          <div class="mt-3 bg-red-900/30 border border-red-500/50 rounded p-3">
             <span class="text-red-400 font-semibold">Error: </span>
             <span class="text-red-300">{escapeHtml(detail.error)}</span>
           </div>
         )}
       </div>
+
+      {/* Modal */}
+      {showModal && <AdvancedInfoModal detail={detail} onClose={() => setShowModal(false)} />}
 
       {/* Messages - Scrollable */}
       <div

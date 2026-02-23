@@ -45,6 +45,10 @@ type RequestLog struct {
 	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model
 	FallbackUsed    []string `json:"fallback_used,omitempty"`    // List of fallback models that were attempted
 	CurrentFallback string   `json:"current_fallback,omitempty"` // Currently active fallback model (if any)
+
+	// Request metadata
+	IsStream   bool                   `json:"is_stream"`            // Whether this was a streaming request
+	Parameters map[string]interface{} `json:"parameters,omitempty"` // Request parameters (temperature, max_tokens, etc.)
 }
 
 type RequestStore struct {
