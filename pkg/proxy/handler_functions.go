@@ -111,7 +111,7 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 		}
 
 		if attempt > 0 {
-			h.prepareRetry(rc, attempt, counters)
+			h.prepareRetry(w, rc, attempt, counters)
 		}
 
 		result := h.doSingleAttempt(w, rc, modelIndex, attempt, counters)
@@ -133,13 +133,25 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 // prepareRetry updates request log and modifies the request body for retry.
 // It rebuilds the messages array from originalMessages to prevent duplication
 // across multiple retry attempts.
-func (h *Handler) prepareRetry(rc *requestContext, attempt int, counters *retryCounters) {
+// For streaming responses where headers are already sent, it sends SSE keep-alive
+// comments to prevent client timeout during the retry.
+func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attempt int, counters *retryCounters) {
 	log.Printf("Retrying request (attempt %d)...", attempt)
 	rc.reqLog.Retries = attempt
 	rc.reqLog.Status = "retrying"
 	h.store.Add(rc.reqLog)
 
 	h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
+
+	// For streams where headers are already sent, send keep-alive comment
+	// to prevent client timeout while we retry
+	if rc.isStream && rc.headersSent {
+		keepAliveMsg := fmt.Sprintf(": retrying-attempt-%d\n", attempt)
+		w.Write([]byte(keepAliveMsg))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
 
 	if rc.isStream {
 		// Rebuild messages from the immutable originalMessages snapshot
