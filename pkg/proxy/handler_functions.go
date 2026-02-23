@@ -473,12 +473,11 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			return attemptContinueRetry
 		}
 
-		// Process data lines - validate and normalize before writing
+		// Check if this is a data line
 		if bytes.HasPrefix(line, []byte("data: ")) {
 			data := bytes.TrimPrefix(line, []byte("data: "))
 
 			// Validate JSON - skip corrupted/incomplete chunks
-			// This prevents strict clients from disconnecting on malformed JSON
 			if !isValidStreamChunk(data) {
 				log.Printf("Skipping invalid/incomplete JSON chunk: %s", string(data)[:min(100, len(data))])
 				continue
@@ -496,9 +495,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			}
 
 			// Continue processing for [DONE] check and content extraction
-			data = normalizedData
-
-			if string(data) == "[DONE]" {
+			if string(normalizedData) == "[DONE]" {
 				streamEndedSuccessfully = true
 				w.Write([]byte("\n"))
 				if f, ok := w.(http.Flusher); ok {
@@ -513,9 +510,11 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 						}
 					}
 				}
-
 				break
 			}
+
+			// Carry for content/loop extraction
+			data = normalizedData
 
 			// Track chunk content for both existing accumulation and loop detection
 			prevLen := rc.accumulatedResponse.Len()
@@ -571,6 +570,13 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 						}
 					}
 				}
+			}
+		} else {
+			// PASS THROUGH any other content (empty lines, SSE comments, etc.)
+			w.Write(line)
+			w.Write([]byte("\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
 		}
 	}
