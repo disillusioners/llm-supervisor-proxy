@@ -23,9 +23,11 @@ spec:
         - --client-secret=$(CLIENT_SECRET)
         - --cookie-secret=$(COOKIE_SECRET)
         - --upstream=file:///dev/null
-        - --email-domain=daoduc.org
+        - --email-domain=*
         - --cookie-expire=24h
         - --skip-provider-button=true
+        - --http-address=0.0.0.0:4180
+        - --session-cookie-minimal=true
         envFrom:
         - secretRef:
             name: oauth2-proxy-secret
