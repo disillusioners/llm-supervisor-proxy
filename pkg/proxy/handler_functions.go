@@ -170,9 +170,10 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 	// This sends SSE comments every 3 seconds until the new stream starts.
 	if rc.isStream && rc.headersSent {
 		log.Printf("[KEEPALIVE-DEBUG] Starting keep-alive for attempt=%d", attempt)
-		// Send immediate retry notification
-		keepAliveMsg := fmt.Sprintf(": retrying-attempt-%d\n", attempt)
-		w.Write([]byte(keepAliveMsg))
+		// Send immediate retry notification as a proper SSE comment
+		// Using just ":" followed by newline is the cleanest SSE comment format
+		keepAliveMsg := []byte(": \n")
+		w.Write(keepAliveMsg)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -234,9 +235,13 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 		return attemptReturnImmediately
 	}
 
+	log.Printf("[DO-ATTEMPT] Starting attempt %d for request %s, baseCtx.Err()=%v", attempt, rc.reqID, rc.baseCtx.Err())
+
 	copyHeaders(proxyReq, rc.originalHeaders)
 
 	resp, err := h.client.Do(proxyReq)
+
+	log.Printf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())
 
 	// Stop keep-alive as soon as upstream responds (or fails)
 	// We do this before accessing w to prevent concurrent writes

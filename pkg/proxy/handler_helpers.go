@@ -294,7 +294,11 @@ func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 // fallback Time-To-First-Token delays.
 func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
 	log.Printf("[KEEPALIVE] Starting keep-alive goroutine for request %s", rc.reqID)
-	ctx, cancel := context.WithCancel(rc.baseCtx)
+	// Create a NEW context that is NOT derived from rc.baseCtx.
+	// This is critical: when the client aborts, rc.baseCtx gets canceled,
+	// but we want the keep-alive goroutine to continue until WE explicitly stop it.
+	// Otherwise the goroutine exits immediately when the client disconnects.
+	ctx, cancel := context.WithCancel(context.Background())
 	rc.keepAliveCancel = cancel
 	rc.keepAliveDone = make(chan struct{})
 
@@ -306,7 +310,7 @@ func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("[KEEPALIVE] Stopping keep-alive for request %s (context cancelled)", rc.reqID)
+				log.Printf("[KEEPALIVE] Stopping keep-alive for request %s (explicitly cancelled)", rc.reqID)
 				return
 			case <-ticker.C:
 				// Send SSE keep-alive comment
