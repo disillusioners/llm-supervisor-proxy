@@ -117,6 +117,8 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 
 		// Check if client disconnected before attempting retry
 		// This prevents unnecessary retry work when the client is already gone
+		log.Printf("[RETRY-DEBUG] attempt=%d, baseCtx.Err()=%v, headersSent=%v, isStream=%v",
+			attempt, rc.baseCtx.Err(), rc.headersSent, rc.isStream)
 		if attempt > 0 && rc.baseCtx.Err() != nil {
 			if errors.Is(rc.baseCtx.Err(), context.Canceled) {
 				log.Println("Client disconnected, aborting retry")
@@ -167,6 +169,7 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 	// to prevent client timeout during fallback Time-To-First-Token delays.
 	// This sends SSE comments every 3 seconds until the new stream starts.
 	if rc.isStream && rc.headersSent {
+		log.Printf("[KEEPALIVE-DEBUG] Starting keep-alive for attempt=%d", attempt)
 		// Send immediate retry notification
 		keepAliveMsg := fmt.Sprintf(": retrying-attempt-%d\n", attempt)
 		w.Write([]byte(keepAliveMsg))
@@ -176,6 +179,8 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 
 		// Start continuous keep-alive goroutine
 		startKeepAlive(w, rc)
+	} else {
+		log.Printf("[KEEPALIVE-DEBUG] NOT starting keep-alive: isStream=%v, headersSent=%v", rc.isStream, rc.headersSent)
 	}
 
 	if rc.isStream {

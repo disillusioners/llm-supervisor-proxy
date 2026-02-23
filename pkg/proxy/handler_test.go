@@ -288,22 +288,14 @@ type testCase struct {
 }
 
 func runBothVersions(t *testing.T, tc testCase) {
-	versions := []struct {
-		name   string
-		getHFn func(h *Handler) handlerFunc
-	}{
-		{"Refactored", func(h *Handler) handlerFunc { return h.HandleChatCompletions }},
-		{"BeforeRefactor", func(h *Handler) handlerFunc { return h.HandleChatCompletionsBeforeRefactor }},
-	}
-
-	for _, v := range versions {
-		t.Run(v.name, func(t *testing.T) {
-			upstreamHandler := tc.upstreamFn(t)
-			h, upstream := newTestHandler(t, upstreamHandler, tc.modelsConfig, tc.configOpts...)
-			hfn := v.getHFn(h)
-			tc.fn(t, hfn, h, upstream)
-		})
-	}
+	// Only test the current implementation (refactored version)
+	hfn := func(h *Handler) handlerFunc { return h.HandleChatCompletions }
+	t.Run("Refactored", func(t *testing.T) {
+		upstreamHandler := tc.upstreamFn(t)
+		h, upstream := newTestHandler(t, upstreamHandler, tc.modelsConfig, tc.configOpts...)
+		fn := hfn(h)
+		tc.fn(t, fn, h, upstream)
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1583,8 +1575,7 @@ func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 	callCount := 0
 	var lastMessages []interface{}
 
-	// Only test the Refactored version since BeforeRefactor doesn't have this fix
-	// and the deduplication logic is new functionality
+	// Test the current implementation
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		reqBodyBytes, _ := io.ReadAll(r.Body)
 		r.Body.Close()

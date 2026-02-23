@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -292,6 +293,7 @@ func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 // every 3 seconds to prevent strict HTTP clients from timing out during
 // fallback Time-To-First-Token delays.
 func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
+	log.Printf("[KEEPALIVE] Starting keep-alive goroutine for request %s", rc.reqID)
 	ctx, cancel := context.WithCancel(rc.baseCtx)
 	rc.keepAliveCancel = cancel
 	rc.keepAliveDone = make(chan struct{})
@@ -304,13 +306,19 @@ func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
 		for {
 			select {
 			case <-ctx.Done():
+				log.Printf("[KEEPALIVE] Stopping keep-alive for request %s (context cancelled)", rc.reqID)
 				return
 			case <-ticker.C:
 				// Send SSE keep-alive comment
-				w.Write([]byte(":\n"))
+				n, err := w.Write([]byte(":\n"))
+				if err != nil {
+					log.Printf("[KEEPALIVE] Error writing to client for request %s: %v", rc.reqID, err)
+					return
+				}
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
+				log.Printf("[KEEPALIVE] Sent keep-alive comment (%d bytes) for request %s", n, rc.reqID)
 			}
 		}
 	}()
