@@ -1,0 +1,28 @@
+# Build artifacts
+llm-supervisor-proxy
+/pkg/ui/static/
+/pkg/ui/frontend/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Misc
+README.md
+LICENSE
+Makefile
+*.log
