@@ -74,6 +74,12 @@ func main() {
 	// Register Proxy handler
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChatCompletions)
 
+	// Health check endpoint
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
 	srv := &http.Server{
 		Addr:    ":" + strconv.Itoa(cfg.Port),
 		Handler: mux,

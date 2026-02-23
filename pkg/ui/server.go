@@ -73,6 +73,15 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 		fileServer.ServeHTTP(w, r)
 	})
 
+	// Redirect root to UI
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
 	// API at /fe/api
 	mux.HandleFunc("/fe/api/config", s.handleConfig)
 	mux.HandleFunc("/fe/api/models", s.handleModels)
