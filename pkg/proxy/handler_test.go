@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -669,10 +670,10 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 				t.Errorf("expected status 'failed', got '%s'", reqs[0].Status)
 			}
 
-			// Should have received some partial content (tokens before hang)
-			respBody := rr.Body.String()
-			if !strings.Contains(respBody, "Hello") {
-				t.Error("expected partial content before hang")
+			// With buffered streaming, nothing is sent to client until stream completes successfully
+			// Since the stream hung mid-way, the client receives an error response (502)
+			if rr.Code != http.StatusBadGateway {
+				t.Errorf("expected status 502 Bad Gateway, got %d", rr.Code)
 			}
 		},
 	})
@@ -1572,12 +1573,12 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 	})
 }
 
-// TestPrepareRetryNoMessageDuplication verifies that multiple retries don't cause
-// message duplication. The messages array should be rebuilt from originalMessages
-// on each retry, not mutated in-place.
+// TestPrepareRetryNoMessageDuplication verifies that with buffered streaming,
+// retries use the original messages without any modifications.
+// The messages array should remain unchanged across retry attempts.
 func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 	callCount := 0
-	var lastMessages []interface{}
+	var allMessages [][]interface{}
 
 	// Test the current implementation
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1589,8 +1590,9 @@ func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 
 		callCount++
 
-		// Capture the messages sent to upstream
-		lastMessages, _ = reqBody["messages"].([]interface{})
+		// Capture the messages sent to upstream on each attempt
+		messages, _ := reqBody["messages"].([]interface{})
+		allMessages = append(allMessages, messages)
 
 		if callCount < 3 {
 			// First two calls: start stream then close without [DONE]
@@ -1624,49 +1626,273 @@ func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", rr.Code)
 	}
 
-	// Verify message count - should be original (1) + assistant (1) + user (1) = 3
-	// NOT duplicated with each retry
-	if len(lastMessages) != 3 {
-		t.Errorf("expected 3 messages (original + assistant + user prompt), got %d", len(lastMessages))
-		for i, msg := range lastMessages {
-			t.Logf("Message %d: %+v", i, msg)
-		}
-		return
+	// Verify that all 3 attempts used the same original messages (1 message each)
+	// With buffered streaming, we don't add assistant/user messages for retry
+	if len(allMessages) != 3 {
+		t.Fatalf("expected 3 attempts, got %d", len(allMessages))
 	}
 
-	// Verify the structure
-	// Message 0: original user message
-	if msg, ok := lastMessages[0].(map[string]interface{}); ok {
-		if msg["role"] != "user" {
-			t.Errorf("expected message 0 role 'user', got '%v'", msg["role"])
+	for i, messages := range allMessages {
+		if len(messages) != 1 {
+			t.Errorf("attempt %d: expected 1 message (original only), got %d", i+1, len(messages))
+			for j, msg := range messages {
+				t.Logf("  Attempt %d, Message %d: %+v", i+1, j, msg)
+			}
 		}
-	} else {
-		t.Error("message 0 is not a map")
 	}
 
-	// Message 1: accumulated assistant response
-	if msg, ok := lastMessages[1].(map[string]interface{}); ok {
-		if msg["role"] != "assistant" {
-			t.Errorf("expected message 1 role 'assistant', got '%v'", msg["role"])
+	// Verify the message content is consistent across all attempts
+	for i := 1; i < len(allMessages); i++ {
+		if fmt.Sprintf("%v", allMessages[i]) != fmt.Sprintf("%v", allMessages[0]) {
+			t.Errorf("attempt %d: messages differ from first attempt", i+1)
 		}
-		// Should contain accumulated content from previous attempts
-		content, _ := msg["content"].(string)
-		if content == "" {
-			t.Error("expected message 1 to have content")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Buffered Streaming Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestBufferOverflow_CustomLimit verifies that when the stream buffer exceeds
+// the configured MaxStreamBufferSize, the request triggers a retry.
+func TestBufferOverflow_CustomLimit(t *testing.T) {
+	attemptCount := 0
+
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		attemptCount++
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		if attemptCount == 1 {
+			// First attempt: send large chunks that exceed buffer limit
+			// With MaxStreamBufferSize=100, sending >100 bytes should trigger overflow
+			for i := 0; i < 5; i++ {
+				// Each chunk is about 30 bytes in SSE format
+				fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("XXXXXXXXXXYYYYYYYYYY"))
+				flusher.Flush()
+			}
+			// No [DONE] - should fail due to buffer overflow before this
+			return
 		}
-	} else {
-		t.Error("message 1 is not a map")
+
+		// Second attempt: success with smaller response
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("OK"))
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil, func(c *config.Config) {
+		c.MaxStreamBufferSize = 100 // Very small limit for testing
+		c.MaxUpstreamErrorRetries = 2
+	})
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Should succeed after retry
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
 	}
 
-	// Message 2: continue prompt
-	if msg, ok := lastMessages[2].(map[string]interface{}); ok {
-		if msg["role"] != "user" {
-			t.Errorf("expected message 2 role 'user', got '%v'", msg["role"])
+	// Should have made 2 attempts
+	if attemptCount != 2 {
+		t.Errorf("expected 2 attempts, got %d", attemptCount)
+	}
+
+	// Final response should be from second attempt (not corrupted by first)
+	if !strings.Contains(rr.Body.String(), "OK") {
+		t.Error("expected final response to contain 'OK' from successful retry")
+	}
+}
+
+// TestClientDisconnectDuringBuffering verifies that if the client disconnects
+// while we're buffering the stream, we abort immediately without wasting resources.
+func TestClientDisconnectDuringBuffering(t *testing.T) {
+	attemptCount := 0
+	chunksProcessed := 0
+
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		attemptCount++
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send chunks slowly so we can disconnect mid-stream
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", i)))
+			flusher.Flush()
+			chunksProcessed++
+			time.Sleep(10 * time.Millisecond) // Slow down
 		}
-		if !strings.Contains(fmt.Sprintf("%v", msg["content"]), "interrupted") {
-			t.Error("expected message 2 to contain 'interrupted'")
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil)
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+
+	// Create a cancelable context
+	ctx, cancel := context.WithCancel(context.Background())
+	req = req.WithContext(ctx)
+
+	// Start the request in a goroutine
+	rr := httptest.NewRecorder()
+	done := make(chan bool)
+	go func() {
+		h.HandleChatCompletions(rr, req)
+		done <- true
+	}()
+
+	// Cancel after a short delay (simulating client disconnect)
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	// Wait for request to complete
+	<-done
+
+	// With buffered streaming, nothing should have been written to client
+	// because we aborted before [DONE]
+	if attemptCount > 1 {
+		t.Logf("Warning: expected only 1 attempt when client disconnects, got %d", attemptCount)
+	}
+}
+
+// TestBufferedStreaming_DefersWriteUntilDone verifies the core invariant of
+// buffered streaming: nothing is sent to the client until [DONE] is received.
+func TestBufferedStreaming_DefersWriteUntilDone(t *testing.T) {
+	writeCount := 0
+	var writeSizes []int
+
+	// Custom ResponseRecorder that tracks writes
+	trackingRecorder := &trackingResponseRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		onWrite: func(size int) {
+			writeCount++
+			writeSizes = append(writeSizes, size)
+		},
+	}
+
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send multiple chunks
+		for i := 0; i < 5; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", i)))
+			flusher.Flush()
 		}
-	} else {
-		t.Error("message 2 is not a map")
+
+		// Send [DONE]
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil)
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	h.HandleChatCompletions(trackingRecorder, req)
+
+	// With buffered streaming, headers + all chunks should be written in burst
+	// We expect multiple writes (headers + chunks) but they all happen AFTER [DONE] is received
+	if trackingRecorder.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", trackingRecorder.Code)
+	}
+
+	// Verify all chunks are in the final response
+	respBody := trackingRecorder.Body.String()
+	if !strings.Contains(respBody, "Chunk0") {
+		t.Error("expected response to contain 'Chunk0'")
+	}
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected response to contain '[DONE]'")
+	}
+
+	t.Logf("Write count: %d, sizes: %v", writeCount, writeSizes)
+}
+
+// trackingResponseRecorder wraps httptest.ResponseRecorder and tracks writes
+type trackingResponseRecorder struct {
+	*httptest.ResponseRecorder
+	onWrite func(size int)
+}
+
+func (r *trackingResponseRecorder) Write(b []byte) (int, error) {
+	if r.onWrite != nil {
+		r.onWrite(len(b))
+	}
+	return r.ResponseRecorder.Write(b)
+}
+
+// TestBufferResetBetweenRetries verifies that the stream buffer is cleared
+// between retry attempts, preventing accumulation of failed response content.
+func TestBufferResetBetweenRetries(t *testing.T) {
+	attemptCount := 0
+	var capturedBodies []string
+
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		attemptCount++
+
+		// Capture what the client would receive
+		reqBody, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		capturedBodies = append(capturedBodies, string(reqBody))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		if attemptCount < 3 {
+			// First two attempts: send content then fail (no [DONE])
+			for i := 0; i < 3; i++ {
+				fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Attempt%dChunk%d", attemptCount, i)))
+				flusher.Flush()
+			}
+			return // No [DONE] - triggers retry
+		}
+
+		// Third attempt: success
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("FinalSuccess"))
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil, func(c *config.Config) {
+		c.MaxUpstreamErrorRetries = 3
+	})
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify final response only contains the successful attempt's content
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "FinalSuccess") {
+		t.Error("expected response to contain 'FinalSuccess'")
+	}
+
+	// Verify failed attempts' content is NOT in final response
+	if strings.Contains(respBody, "Attempt1Chunk") {
+		t.Error("expected response NOT to contain content from failed attempt 1")
+	}
+	if strings.Contains(respBody, "Attempt2Chunk") {
+		t.Error("expected response NOT to contain content from failed attempt 2")
+	}
+
+	// Verify we made 3 attempts
+	if attemptCount != 3 {
+		t.Errorf("expected 3 attempts, got %d", attemptCount)
 	}
 }

@@ -100,8 +100,9 @@ func (q *QueryBuilder) UpdateConfig() string {
 			max_upstream_error_retries = $6,
 			max_idle_retries = $7,
 			max_generation_retries = $8,
-			loop_detection_json = $9,
-			updated_at = $10
+			max_stream_buffer_size = $9,
+			loop_detection_json = $10,
+			updated_at = $11
 		WHERE id = 1`
 	}
 	return `UPDATE configs SET
@@ -113,6 +114,7 @@ func (q *QueryBuilder) UpdateConfig() string {
 			max_upstream_error_retries = ?,
 			max_idle_retries = ?,
 			max_generation_retries = ?,
+			max_stream_buffer_size = ?,
 			loop_detection_json = ?,
 			updated_at = ?
 		WHERE id = 1`
@@ -191,6 +193,6 @@ func (q *QueryBuilder) GetEnabledModels() string {
 // GetConfig returns the appropriate SELECT query for config
 func (q *QueryBuilder) GetConfig() string {
 	return `SELECT version, upstream_url, port, idle_timeout_ms, max_generation_time_ms,
-		max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at
+		max_upstream_error_retries, max_idle_retries, max_generation_retries, max_stream_buffer_size, loop_detection_json, updated_at
 		FROM configs WHERE id = 1`
 }

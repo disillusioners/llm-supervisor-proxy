@@ -150,6 +150,27 @@ func (s *Store) runSQLiteMigrations(ctx context.Context) error {
 		}
 	}
 
+	// Migration 002: Add max_stream_buffer_size column
+	const migration002 = "002"
+	applied, err = s.isMigrationApplied(ctx, migration002)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration002, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE configs ADD COLUMN max_stream_buffer_size INTEGER NOT NULL DEFAULT 10485760
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add max_stream_buffer_size column: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration002); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -220,6 +241,27 @@ func (s *Store) runPostgreSQLMigrations(ctx context.Context) error {
 
 		// Record the migration
 		if err := s.recordMigration(ctx, migration001); err != nil {
+			return err
+		}
+	}
+
+	// Migration 002: Add max_stream_buffer_size column
+	const migration002 = "002"
+	applied, err = s.isMigrationApplied(ctx, migration002)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration002, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE configs ADD COLUMN IF NOT EXISTS max_stream_buffer_size BIGINT NOT NULL DEFAULT 10485760
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add max_stream_buffer_size column: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration002); err != nil {
 			return err
 		}
 	}

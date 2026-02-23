@@ -70,6 +70,7 @@ type Config struct {
 	MaxUpstreamErrorRetries int                 `json:"max_upstream_error_retries"`
 	MaxIdleRetries          int                 `json:"max_idle_retries"`
 	MaxGenerationRetries    int                 `json:"max_generation_retries"`
+	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
 }
@@ -85,6 +86,7 @@ type ManagerInterface interface {
 	GetMaxUpstreamErrorRetries() int
 	GetMaxIdleRetries() int
 	GetMaxGenerationRetries() int
+	GetMaxStreamBufferSize() int
 	GetLoopDetection() LoopDetectionConfig
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
@@ -121,6 +123,7 @@ var Defaults = Config{
 	MaxUpstreamErrorRetries: 1,
 	MaxIdleRetries:          2,
 	MaxGenerationRetries:    1,
+	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -172,6 +175,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxGenerationRetries < 0 {
 		return errors.New("max_generation_retries cannot be negative")
+	}
+	if c.MaxStreamBufferSize < 0 {
+		return errors.New("max_stream_buffer_size cannot be negative")
 	}
 	return nil
 }
@@ -450,6 +456,13 @@ func (m *Manager) GetMaxGenerationRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxGenerationRetries
+}
+
+// GetMaxStreamBufferSize returns the max stream buffer size in bytes
+func (m *Manager) GetMaxStreamBufferSize() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.MaxStreamBufferSize
 }
 
 // GetLoopDetection returns the loop detection configuration

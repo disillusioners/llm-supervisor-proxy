@@ -46,6 +46,7 @@ type dbConfigRow struct {
 	MaxUpstreamErrorRetries int64
 	MaxIdleRetries          int64
 	MaxGenerationRetries    int64
+	MaxStreamBufferSize     int64
 	LoopDetectionJSON       string
 	UpdatedAt               string
 }
@@ -72,6 +73,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.MaxUpstreamErrorRetries,
 		&dbCfg.MaxIdleRetries,
 		&dbCfg.MaxGenerationRetries,
+		&dbCfg.MaxStreamBufferSize,
 		&dbCfg.LoopDetectionJSON,
 		&dbCfg.UpdatedAt,
 	)
@@ -92,6 +94,7 @@ func (m *ConfigManager) Load() error {
 	cfg.MaxUpstreamErrorRetries = int(dbCfg.MaxUpstreamErrorRetries)
 	cfg.MaxIdleRetries = int(dbCfg.MaxIdleRetries)
 	cfg.MaxGenerationRetries = int(dbCfg.MaxGenerationRetries)
+	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
 	cfg.UpdatedAt = dbCfg.UpdatedAt
 
 	// Parse loop detection JSON
@@ -144,6 +147,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		cfg.MaxUpstreamErrorRetries,
 		cfg.MaxIdleRetries,
 		cfg.MaxGenerationRetries,
+		cfg.MaxStreamBufferSize,
 		string(loopDetectionJSON),
 		cfg.UpdatedAt,
 	)
@@ -219,6 +223,13 @@ func (m *ConfigManager) GetMaxGenerationRetries() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.MaxGenerationRetries
+}
+
+// GetMaxStreamBufferSize returns the max stream buffer size in bytes
+func (m *ConfigManager) GetMaxStreamBufferSize() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.MaxStreamBufferSize
 }
 
 // GetLoopDetection returns the loop detection configuration

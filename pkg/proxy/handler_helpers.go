@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -45,6 +44,11 @@ type requestContext struct {
 	accumulatedResponse strings.Builder
 	accumulatedThinking strings.Builder
 
+	// Stream buffer for retry-safe streaming
+	// Chunks are buffered until stream completes successfully, then flushed to client
+	// This enables safe retry mid-stream since nothing is sent until [DONE]
+	streamBuffer bytes.Buffer
+
 	// State
 	headersSent bool
 
@@ -55,10 +59,6 @@ type requestContext struct {
 	// Cached from first chunk to maintain consistency across retries/fallbacks
 	streamID    string
 	streamIDSet bool
-
-	// Keep-alive management for continuous heartbeats during retries
-	keepAliveCancel context.CancelFunc
-	keepAliveDone   chan struct{}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,55 +287,6 @@ func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 		return data // Return original on error
 	}
 	return normalized
-}
-
-// startKeepAlive starts a goroutine that sends SSE keep-alive comments
-// every 3 seconds to prevent strict HTTP clients from timing out during
-// fallback Time-To-First-Token delays.
-func startKeepAlive(w http.ResponseWriter, rc *requestContext) {
-	log.Printf("[KEEPALIVE] Starting keep-alive goroutine for request %s", rc.reqID)
-	// Create a NEW context that is NOT derived from rc.baseCtx.
-	// This is critical: when the client aborts, rc.baseCtx gets canceled,
-	// but we want the keep-alive goroutine to continue until WE explicitly stop it.
-	// Otherwise the goroutine exits immediately when the client disconnects.
-	ctx, cancel := context.WithCancel(context.Background())
-	rc.keepAliveCancel = cancel
-	rc.keepAliveDone = make(chan struct{})
-
-	go func() {
-		defer close(rc.keepAliveDone)
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Printf("[KEEPALIVE] Stopping keep-alive for request %s (explicitly cancelled)", rc.reqID)
-				return
-			case <-ticker.C:
-				// Send SSE keep-alive comment
-				n, err := w.Write([]byte(":\n"))
-				if err != nil {
-					log.Printf("[KEEPALIVE] Error writing to client for request %s: %v", rc.reqID, err)
-					return
-				}
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
-				log.Printf("[KEEPALIVE] Sent keep-alive comment (%d bytes) for request %s", n, rc.reqID)
-			}
-		}
-	}()
-}
-
-// stopKeepAlive stops the continuous keep-alive goroutine and waits
-// until it fully exits to prevent concurrent writes to the stream.
-func stopKeepAlive(rc *requestContext) {
-	if rc.keepAliveCancel != nil {
-		rc.keepAliveCancel()
-		<-rc.keepAliveDone
-		rc.keepAliveCancel = nil
-	}
 }
 
 // determineFailureReason determines the reason for failure based on the last error and attempt count.

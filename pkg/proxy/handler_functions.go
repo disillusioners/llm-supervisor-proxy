@@ -152,11 +152,9 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 	return false
 }
 
-// prepareRetry updates request log and modifies the request body for retry.
-// It rebuilds the messages array from originalMessages to prevent duplication
-// across multiple retry attempts.
-// For streaming responses where headers are already sent, it sends SSE keep-alive
-// comments to prevent client timeout during the retry.
+// prepareRetry updates request log for retry.
+// With buffered streaming, headers are never sent until stream completes successfully,
+// so we don't need keep-alive or "continue where you stopped" logic.
 func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attempt int, counters *retryCounters) {
 	log.Printf("Retrying request (attempt %d)...", attempt)
 	rc.reqLog.Retries = attempt
@@ -165,45 +163,8 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 
 	h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
 
-	// For streams where headers are already sent, start continuous keep-alive
-	// to prevent client timeout during fallback Time-To-First-Token delays.
-	// This sends SSE comments every 3 seconds until the new stream starts.
-	if rc.isStream && rc.headersSent {
-		log.Printf("[KEEPALIVE-DEBUG] Starting keep-alive for attempt=%d", attempt)
-		// Send immediate retry notification as a proper SSE comment
-		// Using just ":" followed by newline is the cleanest SSE comment format
-		keepAliveMsg := []byte(": \n")
-		w.Write(keepAliveMsg)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		// Start continuous keep-alive goroutine
-		startKeepAlive(w, rc)
-	} else {
-		log.Printf("[KEEPALIVE-DEBUG] NOT starting keep-alive: isStream=%v, headersSent=%v", rc.isStream, rc.headersSent)
-	}
-
-	if rc.isStream {
-		// Rebuild messages from the immutable originalMessages snapshot
-		// This prevents duplication when multiple retries occur
-		messages := make([]interface{}, len(rc.originalMessages))
-		copy(messages, rc.originalMessages)
-
-		if rc.accumulatedResponse.Len() > 0 {
-			messages = append(messages, map[string]string{
-				"role":    "assistant",
-				"content": rc.accumulatedResponse.String(),
-			})
-		}
-
-		messages = append(messages, map[string]string{
-			"role":    "user",
-			"content": "The previous response was interrupted. Continue exactly where you stopped.",
-		})
-
-		rc.requestBody["messages"] = messages
-	}
+	// Note: With buffered streaming, headersSent is always false for streaming retries,
+	// so no keep-alive is needed. The client hasn't received anything yet.
 }
 
 // doSingleAttempt performs a single upstream HTTP request and handles the response.
@@ -242,10 +203,6 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 	resp, err := h.client.Do(proxyReq)
 
 	log.Printf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())
-
-	// Stop keep-alive as soon as upstream responds (or fails)
-	// We do this before accessing w to prevent concurrent writes
-	stopKeepAlive(rc)
 
 	if err != nil {
 		return h.handleUpstreamRequestError(rc, err, attemptCtx, attempt, counters)
@@ -369,19 +326,16 @@ func (h *Handler) handleReadError(rc *requestContext, monitor *supervisor.Monito
 
 // handleOKResponse handles a 200 OK upstream response, dispatching to either
 // non-streaming or streaming processing.
+// For streaming: headers are NOT sent immediately - we buffer until stream completes
+// to enable safe retry mid-stream.
 func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	monitor := supervisor.NewMonitoredReader(resp.Body, rc.conf.IdleTimeout)
 
-	if !rc.headersSent {
-		// Copy response headers, but filter out headers that can cause issues
-		// with streaming responses (especially during retry scenarios)
+	// For non-streaming: send headers immediately (no retry risk since full body is read)
+	// For streaming: delay headers until stream completes successfully
+	if !rc.isStream && !rc.headersSent {
+		// Copy response headers
 		for k, v := range resp.Header {
-			// Skip Content-Length for streaming responses - the content length
-			// can change during retries, and SSE streams don't need it.
-			// Strict HTTP clients may disconnect if byte count doesn't match.
-			if rc.isStream && k == "Content-Length" {
-				continue
-			}
 			w.Header()[k] = v
 		}
 		w.WriteHeader(http.StatusOK)
@@ -391,7 +345,7 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 	if !rc.isStream {
 		return h.handleNonStreamResponse(w, rc, monitor, attemptCtx, attempt, counters)
 	}
-	return h.handleStreamResponse(w, rc, monitor, attemptCtx, attempt, counters)
+	return h.handleStreamResponse(w, rc, resp, monitor, attemptCtx, attempt, counters)
 }
 
 // handleNonStreamResponse reads the entire response body and writes it to the client.
@@ -414,13 +368,21 @@ func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, rc *requestCont
 	return attemptSuccess
 }
 
-// handleStreamResponse processes a Server-Sent Events stream.
-func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
+// handleStreamResponse processes a Server-Sent Events stream with buffering.
+// All chunks are buffered in memory until the stream completes successfully.
+// This enables safe retry mid-stream since nothing is sent to client until [DONE].
+func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	scanner := bufio.NewScanner(monitor)
 	buffer := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buffer, 1024*1024)
 
 	streamEndedSuccessfully := false
+
+	// Clear any previous buffer content from failed attempts
+	rc.streamBuffer.Reset()
+
+	// Store upstream headers for later (we'll send them when stream completes)
+	upstreamHeaders := resp.Header
 
 	// Use per-request detector (persists across retries within this request)
 	if rc.loopDetector == nil {
@@ -450,6 +412,15 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
+		// Check if client disconnected while we're buffering
+		// This prevents wasting upstream resources on abandoned requests
+		if rc.baseCtx.Err() != nil {
+			log.Printf("Client disconnected during streaming, aborting")
+			h.publishEvent("client_disconnected_during_buffering", map[string]interface{}{"id": rc.reqID, "bufferSize": rc.streamBuffer.Len()})
+			monitor.Close()
+			return attemptReturnImmediately
+		}
+
 		// Check if this line is an error response dumped into the stream
 		// (happens when upstream crashes mid-stream and dumps raw error JSON)
 		if errorMsg := isStreamErrorChunk(line); errorMsg != "" {
@@ -473,21 +444,29 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// Normalize chunk - rewrite ID and strip role for transparent fallbacks
 			normalizedData := normalizeStreamChunk(data, rc)
 
-			// Write the normalized chunk
-			w.Write([]byte("data: "))
-			w.Write(normalizedData)
-			w.Write([]byte("\n"))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+			// Buffer the normalized chunk (don't send to client yet)
+			rc.streamBuffer.Write([]byte("data: "))
+			rc.streamBuffer.Write(normalizedData)
+			rc.streamBuffer.Write([]byte("\n"))
+
+			// Check buffer size limit
+			// If MaxStreamBufferSize is configured, use that; otherwise use 100MB hard cap
+			bufferLimit := rc.conf.MaxStreamBufferSize
+			if bufferLimit <= 0 {
+				bufferLimit = 100 * 1024 * 1024 // 100MB hard cap when unlimited
+			}
+			if rc.streamBuffer.Len() > bufferLimit {
+				log.Printf("Stream buffer exceeded limit (%d > %d bytes)", rc.streamBuffer.Len(), bufferLimit)
+				h.publishEvent("stream_buffer_overflow", map[string]interface{}{"size": rc.streamBuffer.Len(), "limit": bufferLimit, "id": rc.reqID})
+				monitor.Close()
+				counters.errorRetries++
+				return attemptContinueRetry
 			}
 
 			// Continue processing for [DONE] check and content extraction
 			if string(normalizedData) == "[DONE]" {
 				streamEndedSuccessfully = true
-				w.Write([]byte("\n"))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
+				rc.streamBuffer.Write([]byte("\n"))
 
 				// Flush remaining buffer for final analysis
 				if detector.IsEnabled() {
@@ -559,12 +538,9 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				}
 			}
 		} else {
-			// PASS THROUGH any other content (empty lines, SSE comments, etc.)
-			w.Write(line)
-			w.Write([]byte("\n"))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
+			// Buffer any other content (empty lines, SSE comments, etc.)
+			rc.streamBuffer.Write(line)
+			rc.streamBuffer.Write([]byte("\n"))
 		}
 	}
 
@@ -573,8 +549,24 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 		return h.handleReadError(rc, monitor, err, attemptCtx, attempt, counters)
 	}
 
-	// Stream completed successfully
+	// Stream completed successfully - now send to client
 	if streamEndedSuccessfully {
+		// Send headers first (filter Content-Length since size may differ)
+		for k, v := range upstreamHeaders {
+			if k == "Content-Length" {
+				continue
+			}
+			w.Header()[k] = v
+		}
+		w.WriteHeader(http.StatusOK)
+		rc.headersSent = true
+
+		// Flush entire buffer to client
+		w.Write(rc.streamBuffer.Bytes())
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
 		h.publishEvent("request_completed", map[string]interface{}{"id": rc.reqID})
 		h.finalizeSuccess(rc)
 		monitor.Close()

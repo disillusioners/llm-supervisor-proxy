@@ -27,6 +27,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		MaxUpstreamErrorRetries: cfg.MaxUpstreamErrorRetries,
 		MaxIdleRetries:          cfg.MaxIdleRetries,
 		MaxGenerationRetries:    cfg.MaxGenerationRetries,
+		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
 	}
@@ -40,6 +41,7 @@ type ConfigSnapshot struct {
 	MaxUpstreamErrorRetries int
 	MaxIdleRetries          int
 	MaxGenerationRetries    int
+	MaxStreamBufferSize     int
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
 }
