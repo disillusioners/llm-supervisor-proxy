@@ -153,8 +153,9 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 }
 
 // prepareRetry updates request log for retry.
-// With buffered streaming, headers are never sent until stream completes successfully,
-// so we don't need keep-alive or "continue where you stopped" logic.
+// Headers may have already been sent for streaming requests (to solve TTFB),
+// but the response body is buffered until [DONE]. On retry, we buffer fresh
+// content and flush on success. The client just sees a pause during retry.
 func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attempt int, counters *retryCounters) {
 	log.Printf("Retrying request (attempt %d)...", attempt)
 	rc.reqLog.Retries = attempt
@@ -163,8 +164,9 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 
 	h.publishEvent("retry_attempt", map[string]interface{}{"attempt": attempt, "id": rc.reqID})
 
-	// Note: With buffered streaming, headersSent is always false for streaming retries,
-	// so no keep-alive is needed. The client hasn't received anything yet.
+	// Note: Headers may have been sent for streaming requests (headersSent=true).
+	// The client sees only a pause during retry - no keep-alive needed since
+	// SSE is just a long-lived HTTP response.
 }
 
 // doSingleAttempt performs a single upstream HTTP request and handles the response.
@@ -295,22 +297,22 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 
 // handleReadError categorizes a read error (idle timeout, deadline exceeded,
 // or generic stream error) and increments the appropriate retry counter.
-// If headers were already sent (streaming), sends SSE error event to client.
+// Even if headers were already sent (streaming), we retry silently - the client
+// just sees a pause while we attempt fallback. Only when all models exhaust
+// their retries do we send an SSE error event (handled by the outer loop).
 func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, err error, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	counters.lastErr = err
 
-	// If headers already sent, we can't retry - must send SSE error event
+	// Log if headers already sent (for observability), but still retry
 	if rc.headersSent {
-		log.Printf("Stream error after headers sent: %v", err)
+		log.Printf("Stream error after headers sent (will retry silently): %v", err)
 		h.publishEvent("stream_error_after_headers", map[string]interface{}{"error": err.Error(), "id": rc.reqID})
-		monitor.Close()
-		h.sendSSEError(w, fmt.Sprintf("Stream error: %v", err))
-		return attemptReturnImmediately
 	}
 
 	if errors.Is(err, supervisor.ErrIdleTimeout) {
 		log.Println("Stream idle timeout detected!")
 		h.publishEvent("timeout_idle", map[string]interface{}{"timeout": rc.conf.IdleTimeout.String(), "id": rc.reqID})
+		monitor.Close()
 		counters.idleRetries++
 		return attemptContinueRetry
 	}
@@ -419,6 +421,11 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	// Clear any previous buffer content from failed attempts
 	rc.streamBuffer.Reset()
+	rc.accumulatedResponse.Reset()
+	rc.accumulatedThinking.Reset()
+	// Reset stream ID caching to get fresh ID from new upstream
+	rc.streamIDSet = false
+	rc.streamID = ""
 
 	// Use per-request detector (persists across retries within this request)
 	if rc.loopDetector == nil {
