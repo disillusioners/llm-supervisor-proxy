@@ -659,21 +659,16 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// The handler should detect idle timeout
-			// With MaxIdleRetries=0, it should fail after the first idle timeout
-
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if reqs[0].Status != "failed" {
-				t.Errorf("expected status 'failed', got '%s'", reqs[0].Status)
+			// With TTFB fix: headers sent immediately (status 200)
+			// When stream hangs mid-way, SSE error is sent instead of HTTP error
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected status 200 (headers sent immediately), got %d", rr.Code)
 			}
 
-			// With buffered streaming, nothing is sent to client until stream completes successfully
-			// Since the stream hung mid-way, the client receives an error response (502)
-			if rr.Code != http.StatusBadGateway {
-				t.Errorf("expected status 502 Bad Gateway, got %d", rr.Code)
+			// Response should contain error event since stream failed after headers sent
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "error") {
+				t.Errorf("expected response to contain error event, got: %s", respBody)
 			}
 		},
 	})
@@ -904,12 +899,16 @@ func TestStreamUnexpectedEOF(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			// With TTFB fix: headers sent immediately (status 200)
+			// Mid-stream failures send SSE error event
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected status 200 (headers sent immediately), got %d", rr.Code)
 			}
-			if reqs[0].Status != "failed" {
-				t.Errorf("expected status 'failed', got '%s'", reqs[0].Status)
+
+			// Response should contain error event
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "error") {
+				t.Errorf("expected response to contain error event, got: %s", respBody)
 			}
 		},
 	})
@@ -1340,7 +1339,7 @@ func TestIsStreamErrorChunk(t *testing.T) {
 
 func TestStreamErrorChunkDetectionInStream(t *testing.T) {
 	// Simulate a stream that starts successfully, then crashes and dumps an error JSON
-	callCount := 0
+	// With TTFB fix: headers sent immediately, mid-stream errors sent as SSE events
 	runBothVersions(t, testCase{
 		name: "StreamErrorChunkDetection",
 		configOpts: []func(*config.Config){
@@ -1350,30 +1349,18 @@ func TestStreamErrorChunkDetectionInStream(t *testing.T) {
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
-				callCount++
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				w.WriteHeader(http.StatusOK)
 				flusher := w.(http.Flusher)
 
-				if callCount == 1 {
-					// First call: send some tokens, then dump error JSON (no [DONE])
-					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Hello"))
-					flusher.Flush()
-					// Simulate LiteLLM crash - dump raw error instead of proper SSE
-					fmt.Fprintf(w, `{"error":{"message":"litellm.APIError: Error building chunks for logging/streaming usage calculation","type":"APIError"}}`)
-					flusher.Flush()
-					// Connection closes - no [DONE]
-					return
-				}
-
-				// Retry: success
-				for _, token := range []string{"Hello", " world", "!"} {
-					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(token))
-					flusher.Flush()
-				}
-				fmt.Fprintf(w, "data: [DONE]\n\n")
+				// Send some tokens, then dump error JSON (no [DONE])
+				fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Hello"))
 				flusher.Flush()
+				// Simulate LiteLLM crash - dump raw error instead of proper SSE
+				fmt.Fprintf(w, `{"error":{"message":"litellm.APIError: Error building chunks for logging/streaming usage calculation","type":"APIError"}}`)
+				flusher.Flush()
+				// Connection closes - no [DONE]
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
@@ -1382,27 +1369,15 @@ func TestStreamErrorChunkDetectionInStream(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// Should succeed after retry
+			// With TTFB fix: headers sent immediately (status 200)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("expected status 200, got %d", rr.Code)
 			}
 
-			// Should contain [DONE] from successful retry
-			if !strings.Contains(rr.Body.String(), "[DONE]") {
-				t.Error("expected [DONE] in stream response after retry")
-			}
-
-			// Should NOT contain the error JSON (it should have been intercepted)
-			if strings.Contains(rr.Body.String(), "litellm.APIError") {
-				t.Error("error JSON should not have been passed to client")
-			}
-
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if reqs[0].Status != "completed" {
-				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			// Response should contain error event (mid-stream failure)
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "error") {
+				t.Errorf("expected response to contain error event, got: %s", respBody)
 			}
 		},
 	})
@@ -1413,12 +1388,8 @@ func TestStreamErrorChunkDetectionInStream(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestFallbackAfterStreamErrorWithHeadersSent(t *testing.T) {
-	// Test the scenario from stream_error_fallback_issue.md:
-	// 1. First attempt starts stream (headers sent)
-	// 2. Stream fails mid-way, triggers retry
-	// 3. Retry gets 500 error
-	// 4. Should fallback to next model (not give up)
-	callCount := 0
+	// With TTFB fix: headers sent immediately, mid-stream failures send SSE error
+	// No retry/fallback possible after headers sent
 	runBothVersions(t, testCase{
 		name: "FallbackAfterStreamErrorWithHeadersSent",
 		modelsConfig: func() *models.ModelsConfig {
@@ -1441,27 +1412,19 @@ func TestFallbackAfterStreamErrorWithHeadersSent(t *testing.T) {
 				json.Unmarshal(reqBodyBytes, &reqBody)
 				model, _ := reqBody["model"].(string)
 
-				callCount++
-
 				if model == "primary-mock" {
-					if callCount <= 2 {
-						// First two calls to primary: start stream, send some tokens, then fail
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.Header().Set("Cache-Control", "no-cache")
-						w.WriteHeader(http.StatusOK)
-						flusher := w.(http.Flusher)
-						fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Partial"))
-						flusher.Flush()
-						// Connection closes without [DONE]
-						return
-					}
-					// Third call (retry after stream error): return 500
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprint(w, `{"error":"primary still down"}`)
+					// Primary: start stream, send some tokens, then fail
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.WriteHeader(http.StatusOK)
+					flusher := w.(http.Flusher)
+					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Partial"))
+					flusher.Flush()
+					// Connection closes without [DONE]
 					return
 				}
 
-				// Fallback model: success
+				// Fallback model (not reached with TTFB fix)
 				r.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
 				mockLLMHandler(t)(w, r)
 			}
@@ -1472,35 +1435,23 @@ func TestFallbackAfterStreamErrorWithHeadersSent(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// Should succeed with fallback
+			// With TTFB fix: headers sent immediately (status 200)
 			if rr.Code != http.StatusOK {
-				t.Fatalf("expected status 200, got %d", rr.Code)
+				t.Errorf("expected status 200 (headers sent immediately), got %d", rr.Code)
 			}
 
-			// Should contain [DONE] from fallback
-			if !strings.Contains(rr.Body.String(), "[DONE]") {
-				t.Error("expected [DONE] in fallback stream response")
-			}
-
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if reqs[0].Status != "completed" {
-				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			// Response should contain error event (mid-stream failure, no retry)
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "error") {
+				t.Errorf("expected response to contain error event, got: %s", respBody)
 			}
 		},
 	})
 }
 
 func TestFallbackDuringStreamRetry500Error(t *testing.T) {
-	// Test that when headersSent is true and retry returns 500, fallback is triggered
-	// Scenario:
-	// 1. Primary model: start stream (headers sent), then close without [DONE]
-	// 2. Retry on primary: return 500 (simulating broken upstream)
-	// 3. Should fallback to model-b
-	var lastModel string
-	callCount := 0
+	// With TTFB fix: headers sent immediately, no retry/fallback after stream starts
+	// Mid-stream failures send SSE error event
 	runBothVersions(t, testCase{
 		name: "FallbackDuringStreamRetry500Error",
 		modelsConfig: func() *models.ModelsConfig {
@@ -1511,7 +1462,7 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 		}(),
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
-				c.MaxUpstreamErrorRetries = 2 // Allow retry
+				c.MaxUpstreamErrorRetries = 2 // Would allow retry if headers not sent
 			},
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1522,26 +1473,18 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 				var reqBody map[string]interface{}
 				json.Unmarshal(reqBodyBytes, &reqBody)
 				model, _ := reqBody["model"].(string)
-				lastModel = model
-				callCount++
 
 				if model == "model-a" {
-					if callCount == 1 {
-						// First call: start stream then close without [DONE]
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.WriteHeader(http.StatusOK)
-						flusher := w.(http.Flusher)
-						fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Start"))
-						flusher.Flush()
-						return // No [DONE] - triggers retry
-					}
-					// Retry attempt: return 500 (simulating broken upstream after stream started)
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprint(w, `{"error":"upstream broken"}`)
-					return
+					// Start stream then close without [DONE]
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					flusher := w.(http.Flusher)
+					fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Start"))
+					flusher.Flush()
+					return // No [DONE] - stream fails
 				}
 
-				// Fallback (model-b): success
+				// Fallback (model-b) - not reached with TTFB fix
 				r.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
 				mockLLMHandler(t)(w, r)
 			}
@@ -1552,35 +1495,27 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// Should succeed with fallback
+			// With TTFB fix: headers sent immediately (status 200)
 			if rr.Code != http.StatusOK {
-				t.Fatalf("expected status 200, got %d", rr.Code)
+				t.Errorf("expected status 200, got %d", rr.Code)
 			}
 
-			// Verify fallback was used
-			if lastModel != "model-b" {
-				t.Errorf("expected fallback model 'model-b' to be used, last model was '%s'", lastModel)
-			}
-
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if reqs[0].Status != "completed" {
-				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			// Response should contain error event (no fallback after headers sent)
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "error") {
+				t.Errorf("expected response to contain error event, got: %s", respBody)
 			}
 		},
 	})
 }
 
-// TestPrepareRetryNoMessageDuplication verifies that with buffered streaming,
-// retries use the original messages without any modifications.
-// The messages array should remain unchanged across retry attempts.
-func TestPrepareRetryNoMessageDuplication(t *testing.T) {
+// TestStreamingNoRetry_AfterHeadersSent verifies that with TTFB fix,
+// once headers are sent (when upstream returns 200), retry won't happen.
+// Instead, an SSE error event is sent to the client.
+func TestStreamingNoRetry_AfterHeadersSent(t *testing.T) {
 	callCount := 0
-	var allMessages [][]interface{}
+	var capturedMessages []interface{}
 
-	// Test the current implementation
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		reqBodyBytes, _ := io.ReadAll(r.Body)
 		r.Body.Close()
@@ -1590,30 +1525,18 @@ func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 
 		callCount++
 
-		// Capture the messages sent to upstream on each attempt
-		messages, _ := reqBody["messages"].([]interface{})
-		allMessages = append(allMessages, messages)
+		// Capture the messages sent to upstream
+		capturedMessages, _ = reqBody["messages"].([]interface{})
 
-		if callCount < 3 {
-			// First two calls: start stream then close without [DONE]
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			flusher := w.(http.Flusher)
-			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", callCount)))
-			flusher.Flush()
-			return // No [DONE] - triggers retry
-		}
-
-		// Third call: success
+		// Return 200 + some chunks, then fail (no [DONE])
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
-		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Final"))
+		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Partial"))
 		flusher.Flush()
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		// No [DONE] - stream fails
 	}, nil, func(c *config.Config) {
-		c.MaxUpstreamErrorRetries = 3 // Allow multiple retries
+		c.MaxUpstreamErrorRetries = 3 // Would allow retries if headers not sent
 	})
 	defer upstream.Close()
 
@@ -1622,90 +1545,110 @@ func TestPrepareRetryNoMessageDuplication(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rr.Code)
-	}
-
-	// Verify that all 3 attempts used the same original messages (1 message each)
-	// With buffered streaming, we don't add assistant/user messages for retry
-	if len(allMessages) != 3 {
-		t.Fatalf("expected 3 attempts, got %d", len(allMessages))
-	}
-
-	for i, messages := range allMessages {
-		if len(messages) != 1 {
-			t.Errorf("attempt %d: expected 1 message (original only), got %d", i+1, len(messages))
-			for j, msg := range messages {
-				t.Logf("  Attempt %d, Message %d: %+v", i+1, j, msg)
-			}
-		}
-	}
-
-	// Verify the message content is consistent across all attempts
-	for i := 1; i < len(allMessages); i++ {
-		if fmt.Sprintf("%v", allMessages[i]) != fmt.Sprintf("%v", allMessages[0]) {
-			t.Errorf("attempt %d: messages differ from first attempt", i+1)
-		}
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Buffered Streaming Tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-// TestBufferOverflow_CustomLimit verifies that when the stream buffer exceeds
-// the configured MaxStreamBufferSize, the request triggers a retry.
-func TestBufferOverflow_CustomLimit(t *testing.T) {
-	attemptCount := 0
-
-	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-
-		if attemptCount == 1 {
-			// First attempt: send large chunks that exceed buffer limit
-			// With MaxStreamBufferSize=100, sending >100 bytes should trigger overflow
-			for i := 0; i < 5; i++ {
-				// Each chunk is about 30 bytes in SSE format
-				fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("XXXXXXXXXXYYYYYYYYYY"))
-				flusher.Flush()
-			}
-			// No [DONE] - should fail due to buffer overflow before this
-			return
-		}
-
-		// Second attempt: success with smaller response
-		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("OK"))
-		flusher.Flush()
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
-	}, nil, func(c *config.Config) {
-		c.MaxStreamBufferSize = 100 // Very small limit for testing
-		c.MaxUpstreamErrorRetries = 2
-	})
-	defer upstream.Close()
-
-	body := simpleBody("mock-model", true)
-	req := makeRequest(t, body)
-	rr := httptest.NewRecorder()
-	h.HandleChatCompletions(rr, req)
-
-	// Should succeed after retry
+	// Headers sent immediately (TTFB fix) - status 200
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", rr.Code)
 	}
 
-	// Should have made 2 attempts
-	if attemptCount != 2 {
-		t.Errorf("expected 2 attempts, got %d", attemptCount)
+	// Should only have 1 attempt (headers sent immediately, no retry possible)
+	if callCount != 1 {
+		t.Errorf("expected 1 attempt (no retry after headers sent), got %d", callCount)
 	}
 
-	// Final response should be from second attempt (not corrupted by first)
-	if !strings.Contains(rr.Body.String(), "OK") {
-		t.Error("expected final response to contain 'OK' from successful retry")
+	// Response should contain error event since stream failed after headers sent
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "error") {
+		t.Errorf("expected response to contain error event, got: %s", respBody)
+	}
+
+	// Messages should be unchanged (no retry modifications)
+	if len(capturedMessages) != 1 {
+		t.Errorf("expected 1 message (original only), got %d", len(capturedMessages))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Buffered Streaming Tests (TTFB Fix)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTTFB_HeadersSentImmediately verifies that headers are sent immediately when
+// upstream responds, establishing the SSE connection before buffering.
+func TestTTFB_HeadersSentImmediately(t *testing.T) {
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send chunks slowly
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", i)))
+			flusher.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}, nil)
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Headers should be sent immediately (status 200)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Content-Type should be text/event-stream
+	if ct := rr.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %s", ct)
+	}
+
+	// Response should contain all chunks + [DONE]
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "Chunk0") {
+		t.Error("expected response to contain 'Chunk0'")
+	}
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected response to contain '[DONE]'")
+	}
+}
+
+// TestBufferOverflow_SendsSSEError verifies that when stream buffer overflows after headers are sent,
+// an SSE error is sent to the client instead of retrying.
+func TestBufferOverflow_SendsSSEError(t *testing.T) {
+	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send large chunks that exceed buffer limit
+		for i := 0; i < 5; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("XXXXXXXXXXYYYYYYYYYY"))
+			flusher.Flush()
+		}
+		// No [DONE] - stream fails mid-way
+	}, nil, func(c *config.Config) {
+		c.MaxStreamBufferSize = 100 // Very small limit
+	})
+	defer upstream.Close()
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Headers should be sent (status 200) - this is immediate with TTFB fix
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Response should contain an error event (since headers were sent, we can't retry)
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "error") {
+		t.Errorf("expected response to contain error event, got: %s", respBody)
 	}
 }
 
@@ -1713,7 +1656,6 @@ func TestBufferOverflow_CustomLimit(t *testing.T) {
 // while we're buffering the stream, we abort immediately without wasting resources.
 func TestClientDisconnectDuringBuffering(t *testing.T) {
 	attemptCount := 0
-	chunksProcessed := 0
 
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		attemptCount++
@@ -1726,7 +1668,6 @@ func TestClientDisconnectDuringBuffering(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", i)))
 			flusher.Flush()
-			chunksProcessed++
 			time.Sleep(10 * time.Millisecond) // Slow down
 		}
 
@@ -1757,28 +1698,15 @@ func TestClientDisconnectDuringBuffering(t *testing.T) {
 	// Wait for request to complete
 	<-done
 
-	// With buffered streaming, nothing should have been written to client
-	// because we aborted before [DONE]
-	if attemptCount > 1 {
-		t.Logf("Warning: expected only 1 attempt when client disconnects, got %d", attemptCount)
+	// Headers are sent immediately with TTFB fix
+	if rr.Code != http.StatusOK {
+		t.Logf("Status code: %d", rr.Code)
 	}
 }
 
-// TestBufferedStreaming_DefersWriteUntilDone verifies the core invariant of
-// buffered streaming: nothing is sent to the client until [DONE] is received.
-func TestBufferedStreaming_DefersWriteUntilDone(t *testing.T) {
-	writeCount := 0
-	var writeSizes []int
-
-	// Custom ResponseRecorder that tracks writes
-	trackingRecorder := &trackingResponseRecorder{
-		ResponseRecorder: httptest.NewRecorder(),
-		onWrite: func(size int) {
-			writeCount++
-			writeSizes = append(writeSizes, size)
-		},
-	}
-
+// TestBufferedStreaming_BodyBufferedUntilDone verifies that body content is buffered
+// until [DONE] is received (headers are sent immediately with TTFB fix).
+func TestBufferedStreaming_BodyBufferedUntilDone(t *testing.T) {
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -1798,24 +1726,30 @@ func TestBufferedStreaming_DefersWriteUntilDone(t *testing.T) {
 
 	body := simpleBody("mock-model", true)
 	req := makeRequest(t, body)
-	h.HandleChatCompletions(trackingRecorder, req)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
 
-	// With buffered streaming, headers + all chunks should be written in burst
-	// We expect multiple writes (headers + chunks) but they all happen AFTER [DONE] is received
-	if trackingRecorder.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", trackingRecorder.Code)
+	// Headers sent immediately (TTFB fix)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Content-Type should be text/event-stream
+	if ct := rr.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %s", ct)
 	}
 
 	// Verify all chunks are in the final response
-	respBody := trackingRecorder.Body.String()
+	respBody := rr.Body.String()
 	if !strings.Contains(respBody, "Chunk0") {
 		t.Error("expected response to contain 'Chunk0'")
+	}
+	if !strings.Contains(respBody, "Chunk4") {
+		t.Error("expected response to contain 'Chunk4'")
 	}
 	if !strings.Contains(respBody, "[DONE]") {
 		t.Error("expected response to contain '[DONE]'")
 	}
-
-	t.Logf("Write count: %d, sizes: %v", writeCount, writeSizes)
 }
 
 // trackingResponseRecorder wraps httptest.ResponseRecorder and tracks writes
@@ -1831,41 +1765,21 @@ func (r *trackingResponseRecorder) Write(b []byte) (int, error) {
 	return r.ResponseRecorder.Write(b)
 }
 
-// TestBufferResetBetweenRetries verifies that the stream buffer is cleared
-// between retry attempts, preventing accumulation of failed response content.
-func TestBufferResetBetweenRetries(t *testing.T) {
-	attemptCount := 0
-	var capturedBodies []string
-
+// TestStreamError_SendsSSEError verifies that when stream fails after headers are sent,
+// an SSE error event is sent to the client.
+func TestStreamError_SendsSSEError(t *testing.T) {
 	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
-
-		// Capture what the client would receive
-		reqBody, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		capturedBodies = append(capturedBodies, string(reqBody))
-
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
-		if attemptCount < 3 {
-			// First two attempts: send content then fail (no [DONE])
-			for i := 0; i < 3; i++ {
-				fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Attempt%dChunk%d", attemptCount, i)))
-				flusher.Flush()
-			}
-			return // No [DONE] - triggers retry
+		// Send some chunks
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("Chunk%d", i)))
+			flusher.Flush()
 		}
-
-		// Third attempt: success
-		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("FinalSuccess"))
-		flusher.Flush()
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
-	}, nil, func(c *config.Config) {
-		c.MaxUpstreamErrorRetries = 3
-	})
+		// No [DONE] - stream fails unexpectedly
+	}, nil)
 	defer upstream.Close()
 
 	body := simpleBody("mock-model", true)
@@ -1873,26 +1787,14 @@ func TestBufferResetBetweenRetries(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
 
+	// Headers sent immediately (TTFB fix) - status 200
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", rr.Code)
 	}
 
-	// Verify final response only contains the successful attempt's content
+	// Response should contain error event since stream failed after headers sent
 	respBody := rr.Body.String()
-	if !strings.Contains(respBody, "FinalSuccess") {
-		t.Error("expected response to contain 'FinalSuccess'")
-	}
-
-	// Verify failed attempts' content is NOT in final response
-	if strings.Contains(respBody, "Attempt1Chunk") {
-		t.Error("expected response NOT to contain content from failed attempt 1")
-	}
-	if strings.Contains(respBody, "Attempt2Chunk") {
-		t.Error("expected response NOT to contain content from failed attempt 2")
-	}
-
-	// Verify we made 3 attempts
-	if attemptCount != 3 {
-		t.Errorf("expected 3 attempts, got %d", attemptCount)
+	if !strings.Contains(respBody, "error") {
+		t.Errorf("expected response to contain error event, got: %s", respBody)
 	}
 }

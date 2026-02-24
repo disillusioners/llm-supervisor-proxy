@@ -295,8 +295,18 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 
 // handleReadError categorizes a read error (idle timeout, deadline exceeded,
 // or generic stream error) and increments the appropriate retry counter.
-func (h *Handler) handleReadError(rc *requestContext, monitor *supervisor.MonitoredReader, err error, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
+// If headers were already sent (streaming), sends SSE error event to client.
+func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, err error, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	counters.lastErr = err
+
+	// If headers already sent, we can't retry - must send SSE error event
+	if rc.headersSent {
+		log.Printf("Stream error after headers sent: %v", err)
+		h.publishEvent("stream_error_after_headers", map[string]interface{}{"error": err.Error(), "id": rc.reqID})
+		monitor.Close()
+		h.sendSSEError(w, fmt.Sprintf("Stream error: %v", err))
+		return attemptReturnImmediately
+	}
 
 	if errors.Is(err, supervisor.ErrIdleTimeout) {
 		log.Println("Stream idle timeout detected!")
@@ -320,19 +330,48 @@ func (h *Handler) handleReadError(rc *requestContext, monitor *supervisor.Monito
 	return attemptContinueRetry
 }
 
+// sendSSEError sends an error as an SSE event to the client.
+// This is used when a streaming error occurs after headers have been sent,
+// so we can't send a regular HTTP error response.
+func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
+	errorEvent := fmt.Sprintf("event: error\ndata: {\"error\": %q}\n\n", message)
+	w.Write([]byte(errorEvent))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Response processing (OK status)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// handleOKResponse handles a 200 OK upstream response, dispatching to either
-// non-streaming or streaming processing.
-// For streaming: headers are NOT sent immediately - we buffer until stream completes
-// to enable safe retry mid-stream.
+// handleOKResponse handles a 200 OK upstream response,// dispatching to either non-streaming or streaming processing.
+// For streaming: headers are sent IMMEDIATELY to establish SSE connection (solves TTFB),
+// while body content is buffered until [DONE] for retry safety.
 func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	monitor := supervisor.NewMonitoredReader(resp.Body, rc.conf.IdleTimeout)
 
+	// For streaming: send headers immediately to establish SSE connection
+	// This solves TTFB/TTFT timeout issues while body remains buffered for retry safety
+	if rc.isStream && !rc.headersSent {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		// Copy relevant headers from upstream
+		if v := resp.Header.Get("X-Request-Id"); v != "" {
+			w.Header().Set("X-Request-Id", v)
+		}
+		w.WriteHeader(http.StatusOK)
+		rc.headersSent = true
+
+		// Send initial SSE comment to establish byte stream (prevents TTFB timeouts)
+		w.Write([]byte(": connected\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
 	// For non-streaming: send headers immediately (no retry risk since full body is read)
-	// For streaming: delay headers until stream completes successfully
 	if !rc.isStream && !rc.headersSent {
 		// Copy response headers
 		for k, v := range resp.Header {
@@ -352,7 +391,7 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	bodyBytes, err := io.ReadAll(monitor)
 	if err != nil {
-		return h.handleReadError(rc, monitor, err, attemptCtx, attempt, counters)
+		return h.handleReadError(w, rc, monitor, err, attemptCtx, attempt, counters)
 	}
 
 	w.Write(bodyBytes)
@@ -380,9 +419,6 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	// Clear any previous buffer content from failed attempts
 	rc.streamBuffer.Reset()
-
-	// Store upstream headers for later (we'll send them when stream completes)
-	upstreamHeaders := resp.Header
 
 	// Use per-request detector (persists across retries within this request)
 	if rc.loopDetector == nil {
@@ -546,21 +582,12 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 
 	// Handle scanner error
 	if err := scanner.Err(); err != nil {
-		return h.handleReadError(rc, monitor, err, attemptCtx, attempt, counters)
+		return h.handleReadError(w, rc, monitor, err, attemptCtx, attempt, counters)
 	}
 
-	// Stream completed successfully - now send to client
+	// Stream completed successfully - flush buffered body to client
+	// Note: Headers were already sent immediately when upstream responded (TTFB fix)
 	if streamEndedSuccessfully {
-		// Send headers first (filter Content-Length since size may differ)
-		for k, v := range upstreamHeaders {
-			if k == "Content-Length" {
-				continue
-			}
-			w.Header()[k] = v
-		}
-		w.WriteHeader(http.StatusOK)
-		rc.headersSent = true
-
 		// Flush entire buffer to client
 		w.Write(rc.streamBuffer.Bytes())
 		if f, ok := w.(http.Flusher); ok {
@@ -577,8 +604,9 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	log.Println("Stream ended unexpectedly without [DONE]")
 	h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": rc.reqID})
 	monitor.Close()
-	counters.errorRetries++
-	return attemptContinueRetry
+	// Headers already sent - send error as SSE event
+	h.sendSSEError(w, "Stream ended unexpectedly without [DONE]")
+	return attemptReturnImmediately
 }
 
 // publishLoopEvent emits a typed loop detection event to the event bus.

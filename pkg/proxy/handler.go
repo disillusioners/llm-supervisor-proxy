@@ -119,5 +119,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("All models failed, sending error response to client")
 		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})
 		http.Error(w, "All models failed after retries", http.StatusBadGateway)
+	} else {
+		// Headers already sent (streaming) - send SSE error event
+		log.Printf("All models failed after headers sent, sending SSE error event")
+		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})
+		h.sendSSEError(w, "All models failed after retries")
 	}
 }

@@ -14,6 +14,7 @@ A lightweight sidecar proxy designed to sit between your autonomous agents (e.g.
 -   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
 -   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
 -   **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
+    > ⚠️ **Note**: For streaming requests, retry only occurs before headers are sent (e.g., on 5xx errors). Once streaming begins, mid-stream failures send an SSE error event to the client instead of retrying.
 
 ## 🛠️ Installation
 
