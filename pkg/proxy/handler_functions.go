@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
@@ -117,7 +118,7 @@ func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelI
 
 		// Check if client disconnected before attempting retry
 		// This prevents unnecessary retry work when the client is already gone
-		log.Printf("[RETRY-DEBUG] attempt=%d, baseCtx.Err()=%v, headersSent=%v, isStream=%v",
+		logger.Debugf("[RETRY-DEBUG] attempt=%d, baseCtx.Err()=%v, headersSent=%v, isStream=%v",
 			attempt, rc.baseCtx.Err(), rc.headersSent, rc.isStream)
 		if attempt > 0 && rc.baseCtx.Err() != nil {
 			if errors.Is(rc.baseCtx.Err(), context.Canceled) {
@@ -198,13 +199,13 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 		return attemptReturnImmediately
 	}
 
-	log.Printf("[DO-ATTEMPT] Starting attempt %d for request %s, baseCtx.Err()=%v", attempt, rc.reqID, rc.baseCtx.Err())
+	logger.Debugf("[DO-ATTEMPT] Starting attempt %d for request %s, baseCtx.Err()=%v", attempt, rc.reqID, rc.baseCtx.Err())
 
 	copyHeaders(proxyReq, rc.originalHeaders)
 
 	resp, err := h.client.Do(proxyReq)
 
-	log.Printf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())
+	logger.Debugf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())
 
 	if err != nil {
 		return h.handleUpstreamRequestError(rc, err, attemptCtx, attempt, counters)
