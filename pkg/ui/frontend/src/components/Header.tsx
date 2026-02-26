@@ -1,10 +1,13 @@
 import { FunctionComponent } from 'preact';
+import { useVersion } from '../hooks/useApi';
 
 interface HeaderProps {
   onOpenConfig: () => void;
 }
 
 const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
+  const { version } = useVersion();
+
   return (
     <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shadow-md z-10 shrink-0">
       {/* Left side: Logo + Title */}
@@ -28,8 +31,9 @@ const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
         <h1 class="text-xl font-bold tracking-wide">LLM Supervisor Proxy</h1>
       </div>
 
-      {/* Right side: System Active indicator + Config button */}
+      {/* Right side: Version + System Active indicator + Config button */}
       <div class="text-sm text-gray-400 flex items-center space-x-4">
+        <span class="px-2 py-1 bg-gray-700 rounded text-xs font-mono text-gray-300">v{version}</span>
         <div class="flex items-center space-x-2">
           <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
           <span>System Active</span>

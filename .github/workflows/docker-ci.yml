@@ -73,7 +73,8 @@ jobs:
       - name: Build server (verify compilation)
         run: |
           echo "Building server to verify compilation..."
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /tmp/llm-supervisor-proxy ./cmd
+          VERSION=$(cat VERSION)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-X main.Version=${VERSION} -s -w" -o /tmp/llm-supervisor-proxy ./cmd
           ls -lh /tmp/llm-supervisor-proxy
 
       - name: Run Go tests (if any exist)
@@ -121,8 +122,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
-          build-args: |
-            GO_VERSION=1.24
 
   scan:
     name: Security Scan

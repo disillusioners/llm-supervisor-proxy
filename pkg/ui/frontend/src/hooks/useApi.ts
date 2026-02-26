@@ -169,3 +169,27 @@ export function formatDuration(value: string | number): string {
   }
   return value;
 }
+
+// Version API
+export function useVersion() {
+  const [version, setVersion] = useState<string>('dev');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchVersion = async () => {
+      try {
+        setLoading(true);
+        const data = await apiFetch<{ version: string }>('/version');
+        setVersion(data.version);
+      } catch (e) {
+        console.error('Failed to fetch version:', e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchVersion();
+  }, []);
+
+  return { version, loading };
+}

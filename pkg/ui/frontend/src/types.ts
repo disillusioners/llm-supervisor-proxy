@@ -97,6 +97,7 @@ export type EventType =
   | 'upstream_error_status_retry'
   | 'stream_error'
   | 'stream_error_chunk'
+  | 'stream_error_after_headers'
   | 'error_deadline_exceeded'
   | 'stream_ended_unexpectedly'
   | 'fallback_triggered'
@@ -124,6 +125,10 @@ export interface EventData {
   pattern?: string[];
   repeat_count?: number;
   shadow_mode?: boolean;
+  // Stream error debug fields
+  raw_data?: string;
+  buffer_size?: number;
+  buffer_preview?: string;
 }
 
 export interface Event {

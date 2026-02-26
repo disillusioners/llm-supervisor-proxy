@@ -25,9 +25,9 @@ COPY . .
 COPY --from=frontend-builder /app/pkg/ui/static ./pkg/ui/static
 
 # Build static binary (modernc.org/sqlite is pure Go, no CGO needed)
-ARG VERSION=1
+# Version is read from VERSION file
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags "-X main.Version=${VERSION} -s -w" \
+    -ldflags "-X main.Version=$(cat VERSION) -s -w" \
     -o llm-supervisor-proxy ./cmd/main.go
 
 # Stage 3: Minimal runtime image

@@ -28,8 +28,15 @@ const getEventMessage = (event: Event): string => {
       return `Retry failed with HTTP ${event.data?.status || '?'} (headers already sent)`;
     case 'stream_error':
       return `Stream error: ${event.data?.error || 'Unknown error'}`;
-    case 'stream_error_chunk':
-      return `Stream error chunk detected: ${event.data?.error || 'Unknown error'}`;
+    case 'stream_error_chunk': {
+      const rawPreview = event.data?.raw_data ? ` | Raw: ${event.data.raw_data.substring(0, 200)}${event.data.raw_data.length > 200 ? '...' : ''}` : '';
+      return `Stream error chunk detected: ${event.data?.error || 'Unknown error'}${rawPreview}`;
+    }
+    case 'stream_error_after_headers': {
+      const bufInfo = event.data?.buffer_size ? ` (buffer: ${event.data.buffer_size} bytes)` : '';
+      const bufPreview = event.data?.buffer_preview ? ` | Content: ${event.data.buffer_preview.substring(0, 150)}${event.data.buffer_preview.length > 150 ? '...' : ''}` : '';
+      return `Stream error after headers: ${event.data?.error || 'Unknown error'}${bufInfo}${bufPreview}`;
+    }
     case 'error_deadline_exceeded':
       return 'Generation deadline exceeded';
     case 'stream_ended_unexpectedly':
@@ -79,6 +86,7 @@ const getEventColor = (type: EventType): string => {
     case 'upstream_error_status_retry':
     case 'stream_error':
     case 'stream_error_chunk':
+    case 'stream_error_after_headers':
     case 'stream_ended_unexpectedly':
     case 'client_disconnected_during_retry':
       return 'text-yellow-400';
@@ -111,6 +119,8 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'STREAM_ERROR';
     case 'stream_error_chunk':
       return 'STREAM_ERROR_CHUNK';
+    case 'stream_error_after_headers':
+      return 'STREAM_ERROR_AFTER_HEADERS';
     case 'error_deadline_exceeded':
       return 'DEADLINE_EXCEEDED';
     case 'stream_ended_unexpectedly':

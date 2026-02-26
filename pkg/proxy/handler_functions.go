@@ -306,8 +306,19 @@ func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, mon
 
 	// Log if headers already sent (for observability), but still retry
 	if rc.headersSent {
+		// Log accumulated buffer for debugging false positive stream errors
+		bufferPreview := rc.streamBuffer.String()
+		if len(bufferPreview) > 500 {
+			bufferPreview = bufferPreview[:500] + "..."
+		}
+		log.Printf("[STREAM_ERROR_AFTER_HEADERS_DEBUG] Error: %v, Buffer so far (%d bytes): %.500s", err, rc.streamBuffer.Len(), bufferPreview)
 		log.Printf("Stream error after headers sent (will retry silently): %v", err)
-		h.publishEvent("stream_error_after_headers", map[string]interface{}{"error": err.Error(), "id": rc.reqID})
+		h.publishEvent("stream_error_after_headers", map[string]interface{}{
+			"error":          err.Error(),
+			"id":             rc.reqID,
+			"buffer_size":    rc.streamBuffer.Len(),
+			"buffer_preview": bufferPreview,
+		})
 	}
 
 	if errors.Is(err, supervisor.ErrIdleTimeout) {
@@ -468,8 +479,14 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 		// Check if this line is an error response dumped into the stream
 		// (happens when upstream crashes mid-stream and dumps raw error JSON)
 		if errorMsg := isStreamErrorChunk(line); errorMsg != "" {
+			// Log raw data at info level for debugging false positives
+			log.Printf("[STREAM_ERROR_CHUNK_DEBUG] Raw upstream data (first 500 chars): %.500s", string(line))
 			log.Printf("Stream error chunk detected: %s", errorMsg)
-			h.publishEvent("stream_error_chunk", map[string]interface{}{"error": errorMsg, "id": rc.reqID})
+			h.publishEvent("stream_error_chunk", map[string]interface{}{
+				"error":    errorMsg,
+				"id":       rc.reqID,
+				"raw_data": string(line),
+			})
 			monitor.Close()
 			counters.errorRetries++
 			return attemptContinueRetry

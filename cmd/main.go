@@ -61,6 +61,7 @@ func main() {
 
 	// Initialize UI Server
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore)
+	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler
 	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore)

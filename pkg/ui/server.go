@@ -48,6 +48,14 @@ func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *
 	}
 }
 
+// version is set at build time via -ldflags (passed from main package)
+var version = "dev"
+
+// SetVersion allows the main package to set the version at startup
+func SetVersion(v string) {
+	version = v
+}
+
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Static files
 	staticFS, _ := fs.Sub(staticFiles, "static")
@@ -83,6 +91,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	})
 
 	// API at /fe/api
+	mux.HandleFunc("/fe/api/version", s.handleVersion)
 	mux.HandleFunc("/fe/api/config", s.handleConfig)
 	mux.HandleFunc("/fe/api/models", s.handleModels)
 	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
@@ -90,6 +99,11 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
