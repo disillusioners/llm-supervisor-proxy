@@ -29,12 +29,12 @@ const getEventMessage = (event: Event): string => {
     case 'stream_error':
       return `Stream error: ${event.data?.error || 'Unknown error'}`;
     case 'stream_error_chunk': {
-      const rawPreview = event.data?.raw_data ? ` | Raw: ${event.data.raw_data.substring(0, 200)}${event.data.raw_data.length > 200 ? '...' : ''}` : '';
+      const rawPreview = event.data?.raw_data ? ` | Raw: ${event.data.raw_data}` : '';
       return `Stream error chunk detected: ${event.data?.error || 'Unknown error'}${rawPreview}`;
     }
     case 'stream_error_after_headers': {
       const bufInfo = event.data?.buffer_size ? ` (buffer: ${event.data.buffer_size} bytes)` : '';
-      const bufPreview = event.data?.buffer_preview ? ` | Content: ${event.data.buffer_preview.substring(0, 150)}${event.data.buffer_preview.length > 150 ? '...' : ''}` : '';
+      const bufPreview = event.data?.buffer_preview ? ` | Content: ${event.data.buffer_preview}` : '';
       return `Stream error after headers: ${event.data?.error || 'Unknown error'}${bufInfo}${bufPreview}`;
     }
     case 'error_deadline_exceeded':

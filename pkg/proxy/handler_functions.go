@@ -304,14 +304,24 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, err error, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	counters.lastErr = err
 
+	// Check for client disconnection FIRST - this is not an error, client just left
+	// This can manifest as "context canceled" when the base context is canceled
+	if rc.baseCtx.Err() == context.Canceled {
+		log.Println("Client disconnected during stream read")
+		rc.reqLog.Status = "failed"
+		rc.reqLog.Error = "Client disconnected"
+		rc.reqLog.EndTime = time.Now()
+		rc.reqLog.Duration = time.Since(rc.startTime).String()
+		h.store.Add(rc.reqLog)
+		monitor.Close()
+		return attemptReturnImmediately
+	}
+
 	// Log if headers already sent (for observability), but still retry
 	if rc.headersSent {
 		// Log accumulated buffer for debugging false positive stream errors
 		bufferPreview := rc.streamBuffer.String()
-		if len(bufferPreview) > 500 {
-			bufferPreview = bufferPreview[:500] + "..."
-		}
-		log.Printf("[STREAM_ERROR_AFTER_HEADERS_DEBUG] Error: %v, Buffer so far (%d bytes): %.500s", err, rc.streamBuffer.Len(), bufferPreview)
+		log.Printf("[STREAM_ERROR_AFTER_HEADERS_DEBUG] Error: %v, Buffer so far (%d bytes): %s", err, rc.streamBuffer.Len(), bufferPreview)
 		log.Printf("Stream error after headers sent (will retry silently): %v", err)
 		h.publishEvent("stream_error_after_headers", map[string]interface{}{
 			"error":          err.Error(),
