@@ -475,8 +475,6 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	streamBuf := detector.NewStreamBuffer()
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-
 		// Check if client disconnected while we're buffering
 		// This prevents wasting upstream resources on abandoned requests
 		if rc.baseCtx.Err() != nil {
@@ -485,6 +483,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			monitor.Close()
 			return attemptReturnImmediately
 		}
+
+		line := scanner.Bytes()
 
 		// Check if this line is an error response dumped into the stream
 		// (happens when upstream crashes mid-stream and dumps raw error JSON)
@@ -615,8 +615,21 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 		}
 	}
 
-	// Handle scanner error
+	// Handle scanner error - check for client disconnection first
 	if err := scanner.Err(); err != nil {
+		// Check if this is a client disconnection (context canceled)
+		// This can happen when the downstream client disconnects mid-stream
+		if rc.baseCtx.Err() == context.Canceled || errors.Is(err, context.Canceled) {
+			log.Printf("Client disconnected during stream scan, aborting (buffered %d bytes)", rc.streamBuffer.Len())
+			h.publishEvent("client_disconnected_during_scan", map[string]interface{}{"id": rc.reqID, "bufferSize": rc.streamBuffer.Len()})
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = "Client disconnected"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+			monitor.Close()
+			return attemptReturnImmediately
+		}
 		return h.handleReadError(w, rc, monitor, err, attemptCtx, attempt, counters)
 	}
 
