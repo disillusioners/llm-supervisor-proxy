@@ -60,6 +60,10 @@ const getEventMessage = (event: Event): string => {
     }
     case 'client_disconnected_during_retry':
       return `Client disconnected during retry (Attempt ${event.data?.attempt || '?'})`;
+    case 'client_disconnected_during_scan':
+      return `Client disconnected during stream scan (buffer: ${event.data?.buffer_size || 0} bytes)`;
+    case 'client_disconnected_during_buffering':
+      return `Client disconnected during buffering (buffer: ${event.data?.buffer_size || 0} bytes)`;
     default:
       return `Event: ${event.type}`;
   }
@@ -89,6 +93,8 @@ const getEventColor = (type: EventType): string => {
     case 'stream_error_after_headers':
     case 'stream_ended_unexpectedly':
     case 'client_disconnected_during_retry':
+    case 'client_disconnected_during_scan':
+    case 'client_disconnected_during_buffering':
       return 'text-yellow-400';
     case 'loop_detected':
       return 'text-amber-400';
@@ -139,6 +145,10 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'LOOP_INTERRUPTED';
     case 'client_disconnected_during_retry':
       return 'CLIENT_DISCONNECTED';
+    case 'client_disconnected_during_scan':
+      return 'CLIENT_DISCONNECTED_SCAN';
+    case 'client_disconnected_during_buffering':
+      return 'CLIENT_DISCONNECTED_BUFFERING';
     default:
       return String(type).toUpperCase();
   }

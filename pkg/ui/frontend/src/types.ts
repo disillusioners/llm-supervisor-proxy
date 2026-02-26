@@ -104,7 +104,9 @@ export type EventType =
   | 'all_models_failed'
   | 'loop_detected'
   | 'loop_interrupted'
-  | 'client_disconnected_during_retry';
+  | 'client_disconnected_during_retry'
+  | 'client_disconnected_during_scan'
+  | 'client_disconnected_during_buffering';
 
 export interface EventData {
   id?: string;
