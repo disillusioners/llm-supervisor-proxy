@@ -127,11 +127,14 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		result.ChangedFields = append(result.ChangedFields, "port")
 	}
 
-	cfg.Version = config.ConfigVersion
-	cfg.UpdatedAt = time.Now().Format(time.RFC3339)
+	// Merge incoming config with existing config to preserve fields not sent by frontend
+	merged := mergeConfig(m.cfg, cfg)
+
+	merged.Version = config.ConfigVersion
+	merged.UpdatedAt = time.Now().Format(time.RFC3339)
 
 	// Serialize loop detection
-	loopDetectionJSON, err := json.Marshal(cfg.LoopDetection)
+	loopDetectionJSON, err := json.Marshal(merged.LoopDetection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize loop detection: %w", err)
 	}
@@ -139,23 +142,23 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	// Update database using dialect-aware query
 	query := m.qb.UpdateConfig()
 	_, err = m.store.DB.ExecContext(context.Background(), query,
-		cfg.Version,
-		cfg.UpstreamURL,
-		cfg.Port,
-		time.Duration(cfg.IdleTimeout).Milliseconds(),
-		time.Duration(cfg.MaxGenerationTime).Milliseconds(),
-		cfg.MaxUpstreamErrorRetries,
-		cfg.MaxIdleRetries,
-		cfg.MaxGenerationRetries,
-		cfg.MaxStreamBufferSize,
+		merged.Version,
+		merged.UpstreamURL,
+		merged.Port,
+		time.Duration(merged.IdleTimeout).Milliseconds(),
+		time.Duration(merged.MaxGenerationTime).Milliseconds(),
+		merged.MaxUpstreamErrorRetries,
+		merged.MaxIdleRetries,
+		merged.MaxGenerationRetries,
+		merged.MaxStreamBufferSize,
 		string(loopDetectionJSON),
-		cfg.UpdatedAt,
+		merged.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save config to database: %w", err)
 	}
 
-	m.cfg = cfg
+	m.cfg = merged
 
 	// Publish event if event bus is wired
 	if m.eventBus != nil {
@@ -167,6 +170,125 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	}
 
 	return result, nil
+}
+
+// mergeConfig merges incoming config with existing config, preserving values
+// for fields that weren't sent by the frontend. The frontend sends either:
+// - Proxy settings only (no loop_detection)
+// - Loop detection settings only (no proxy settings)
+// We detect which case by checking for non-zero values.
+func mergeConfig(existing, incoming config.Config) config.Config {
+	result := existing // Start with existing config
+
+	// Proxy settings: update if incoming has non-zero values
+	// UpstreamURL is required, empty string means not sent
+	if incoming.UpstreamURL != "" {
+		result.UpstreamURL = incoming.UpstreamURL
+	}
+	// Port: 0 means not sent (0 is invalid anyway)
+	if incoming.Port != 0 {
+		result.Port = incoming.Port
+	}
+	// IdleTimeout: 0 means not sent (0 is invalid per validation)
+	if incoming.IdleTimeout != 0 {
+		result.IdleTimeout = incoming.IdleTimeout
+	}
+	// MaxGenerationTime: 0 means not sent
+	if incoming.MaxGenerationTime != 0 {
+		result.MaxGenerationTime = incoming.MaxGenerationTime
+	}
+	// For retry counts, 0 could be valid, so we check if any retry field is set
+	// If any retry field is non-zero, update all retry fields (frontend sends all or none)
+	if incoming.MaxUpstreamErrorRetries != 0 || incoming.MaxIdleRetries != 0 || incoming.MaxGenerationRetries != 0 {
+		result.MaxUpstreamErrorRetries = incoming.MaxUpstreamErrorRetries
+		result.MaxIdleRetries = incoming.MaxIdleRetries
+		result.MaxGenerationRetries = incoming.MaxGenerationRetries
+	}
+	// MaxStreamBufferSize: update if incoming differs from existing (it's always sent with proxy settings)
+	if incoming.MaxStreamBufferSize != 0 {
+		result.MaxStreamBufferSize = incoming.MaxStreamBufferSize
+	}
+
+	// Loop detection: check if any loop detection field was set
+	// We check multiple fields to detect if loop_detection was intentionally sent
+	if isLoopDetectionProvided(incoming.LoopDetection) {
+		result.LoopDetection = mergeLoopDetectionConfig(existing.LoopDetection, incoming.LoopDetection)
+	}
+
+	return result
+}
+
+// isLoopDetectionProvided checks if loop detection config was explicitly provided
+// by looking for any non-zero field values (excluding booleans which default to false)
+func isLoopDetectionProvided(ld config.LoopDetectionConfig) bool {
+	// Check if any non-boolean field has a non-zero value
+	// We don't check Enabled/ShadowMode because false is a valid value but also the zero value
+	return ld.MessageWindow != 0 ||
+		ld.ActionWindow != 0 ||
+		ld.ExactMatchCount != 0 ||
+		ld.SimilarityThreshold != 0 ||
+		ld.MinTokensForSimHash != 0 ||
+		ld.ActionRepeatCount != 0 ||
+		ld.OscillationCount != 0 ||
+		ld.MinTokensForAnalysis != 0 ||
+		ld.ThinkingMinTokens != 0 ||
+		ld.TrigramThreshold != 0 ||
+		ld.MaxCycleLength != 0 ||
+		ld.ReasoningTrigramThreshold != 0 ||
+		len(ld.ReasoningModelPatterns) > 0
+}
+
+// mergeLoopDetectionConfig merges loop detection settings
+// All fields from incoming are copied (frontend sends complete loop_detection object)
+func mergeLoopDetectionConfig(existing, incoming config.LoopDetectionConfig) config.LoopDetectionConfig {
+	result := existing
+
+	// Copy boolean fields directly
+	result.Enabled = incoming.Enabled
+	result.ShadowMode = incoming.ShadowMode
+
+	// For numeric fields, update if non-zero
+	if incoming.MessageWindow != 0 {
+		result.MessageWindow = incoming.MessageWindow
+	}
+	if incoming.ActionWindow != 0 {
+		result.ActionWindow = incoming.ActionWindow
+	}
+	if incoming.ExactMatchCount != 0 {
+		result.ExactMatchCount = incoming.ExactMatchCount
+	}
+	if incoming.SimilarityThreshold != 0 {
+		result.SimilarityThreshold = incoming.SimilarityThreshold
+	}
+	if incoming.MinTokensForSimHash != 0 {
+		result.MinTokensForSimHash = incoming.MinTokensForSimHash
+	}
+	if incoming.ActionRepeatCount != 0 {
+		result.ActionRepeatCount = incoming.ActionRepeatCount
+	}
+	if incoming.OscillationCount != 0 {
+		result.OscillationCount = incoming.OscillationCount
+	}
+	if incoming.MinTokensForAnalysis != 0 {
+		result.MinTokensForAnalysis = incoming.MinTokensForAnalysis
+	}
+	if incoming.ThinkingMinTokens != 0 {
+		result.ThinkingMinTokens = incoming.ThinkingMinTokens
+	}
+	if incoming.TrigramThreshold != 0 {
+		result.TrigramThreshold = incoming.TrigramThreshold
+	}
+	if incoming.MaxCycleLength != 0 {
+		result.MaxCycleLength = incoming.MaxCycleLength
+	}
+	if incoming.ReasoningTrigramThreshold != 0 {
+		result.ReasoningTrigramThreshold = incoming.ReasoningTrigramThreshold
+	}
+	if len(incoming.ReasoningModelPatterns) > 0 {
+		result.ReasoningModelPatterns = incoming.ReasoningModelPatterns
+	}
+
+	return result
 }
 
 // Get returns current configuration
