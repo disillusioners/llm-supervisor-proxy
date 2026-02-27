@@ -508,6 +508,7 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 
 // TestModelRequest represents the request body for testing a model
 type TestModelRequest struct {
+	ModelID          string `json:"model_id,omitempty"` // Optional: use saved config from existing model
 	InternalProvider string `json:"internal_provider"`
 	InternalAPIKey   string `json:"internal_api_key"`
 	InternalBaseURL  string `json:"internal_base_url"`
@@ -543,6 +544,32 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If model_id is provided and api_key is empty, use saved config
+	if req.ModelID != "" && req.InternalAPIKey == "" {
+		savedModel := s.modelsConfig.GetModel(req.ModelID)
+		if savedModel == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(TestModelResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Model not found: %s", req.ModelID),
+			})
+			return
+		}
+
+		// Use saved values
+		if req.InternalProvider == "" {
+			req.InternalProvider = savedModel.InternalProvider
+		}
+		if req.InternalBaseURL == "" {
+			req.InternalBaseURL = savedModel.InternalBaseURL
+		}
+		if req.InternalModel == "" {
+			req.InternalModel = savedModel.InternalModel
+		}
+		req.InternalAPIKey = savedModel.InternalAPIKey // Use saved (decrypted) API key
+	}
+
 	// Validate required fields
 	if req.InternalProvider == "" {
 		w.Header().Set("Content-Type", "application/json")
@@ -559,7 +586,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TestModelResponse{
 			Success: false,
-			Error:   "internal_api_key is required",
+			Error:   "internal_api_key is required (or provide model_id to use saved key)",
 		})
 		return
 	}

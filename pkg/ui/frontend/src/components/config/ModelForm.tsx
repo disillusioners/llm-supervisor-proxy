@@ -145,17 +145,24 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
 
       const baseUrl = formData.internal_base_url || PROVIDER_DEFAULTS[formData.internal_provider];
 
+      const payload: Record<string, string | undefined> = {
+        internal_provider: formData.internal_provider,
+        internal_api_key: formData.internal_api_key || undefined,
+        internal_base_url: baseUrl,
+        internal_model: formData.internal_model,
+      };
+
+      // In edit mode, pass model_id so backend can use saved API key if not provided
+      if (mode === 'edit' && initialData?.id) {
+        payload.model_id = initialData.id;
+      }
+
       const response = await fetch('/fe/api/models/test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          internal_provider: formData.internal_provider,
-          internal_api_key: formData.internal_api_key,
-          internal_base_url: baseUrl,
-          internal_model: formData.internal_model,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -171,7 +178,11 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
     }
   };
 
-  const canTestConnection = formData.internal_provider && formData.internal_api_key && formData.internal_model;
+  // Can test if:
+  // - In add mode: need provider, api_key, and model
+  // - In edit mode: need provider and model (api_key can use saved value)
+  const canTestConnection = formData.internal_provider && formData.internal_model && 
+    (mode === 'edit' || formData.internal_api_key);
 
   const isValid = mode === 'add' 
     ? formData.id.trim() !== '' && formData.name.trim() !== ''

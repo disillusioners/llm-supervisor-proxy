@@ -774,6 +774,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
 	// Encrypt API key before storage
+	// If API key is empty and model is internal, keep the existing one from database
 	encryptedAPIKey := ""
 	if model.InternalAPIKey != "" {
 		encrypted, err := crypto.Encrypt(model.InternalAPIKey)
@@ -781,6 +782,15 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 			return fmt.Errorf("failed to encrypt API key: %w", err)
 		}
 		encryptedAPIKey = encrypted
+	} else if model.Internal {
+		// Fetch existing encrypted API key to preserve it
+		var existingKey string
+		keyQuery := "SELECT coalesce(internal_api_key, '') FROM models WHERE id = ?"
+		if m.store.Dialect == "postgres" {
+			keyQuery = "SELECT coalesce(internal_api_key, '') FROM models WHERE id = $1"
+		}
+		m.store.DB.QueryRowContext(context.Background(), keyQuery, modelID).Scan(&existingKey)
+		encryptedAPIKey = existingKey
 	}
 
 	updateQuery := m.qb.UpdateModel()
