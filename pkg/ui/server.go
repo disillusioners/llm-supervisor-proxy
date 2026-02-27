@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -35,16 +36,18 @@ type Server struct {
 	proxyConfig  *proxy.Config                // Keep for models config access
 	modelsConfig models.ModelsConfigInterface // Models config
 	store        *store.RequestStore
+	bufferStore  *bufferstore.BufferStore
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore) *Server {
+func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore) *Server {
 	return &Server{
 		bus:          bus,
 		configMgr:    configMgr,
 		proxyConfig:  proxyConfig,
 		modelsConfig: modelsConfig,
 		store:        store,
+		bufferStore:  bufferStore,
 	}
 }
 
@@ -99,6 +102,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
+	mux.HandleFunc("/fe/api/buffers/", s.handleBufferContent)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +137,34 @@ func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(req)
+}
+
+func (s *Server) handleBufferContent(w http.ResponseWriter, r *http.Request) {
+	// /fe/api/buffers/{id}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := r.URL.Path[len("/fe/api/buffers/"):]
+	if id == "" {
+		http.Error(w, "Missing buffer ID", http.StatusBadRequest)
+		return
+	}
+
+	if s.bufferStore == nil {
+		http.Error(w, "Buffer storage not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	content, err := s.bufferStore.Get(id)
+	if err != nil {
+		http.Error(w, "Buffer not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(content)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

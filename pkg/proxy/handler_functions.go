@@ -323,12 +323,25 @@ func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, mon
 		bufferPreview := rc.streamBuffer.String()
 		log.Printf("[STREAM_ERROR_AFTER_HEADERS_DEBUG] Error: %v, Buffer so far (%d bytes): %s", err, rc.streamBuffer.Len(), bufferPreview)
 		log.Printf("Stream error after headers sent (will retry silently): %v", err)
-		h.publishEvent("stream_error_after_headers", map[string]interface{}{
-			"error":          err.Error(),
-			"id":             rc.reqID,
-			"buffer_size":    rc.streamBuffer.Len(),
-			"buffer_preview": bufferPreview,
-		})
+
+		// Save buffer content to file and publish buffer_id instead of full content
+		bufferID := fmt.Sprintf("%s_buffer", rc.reqID)
+		eventData := map[string]interface{}{
+			"error":       err.Error(),
+			"id":          rc.reqID,
+			"buffer_size": rc.streamBuffer.Len(),
+		}
+
+		// Save buffer to file if BufferStore is available
+		if h.bufferStore != nil && rc.streamBuffer.Len() > 0 {
+			if saveErr := h.bufferStore.Save(bufferID, rc.streamBuffer.Bytes()); saveErr != nil {
+				log.Printf("Warning: failed to save buffer content: %v", saveErr)
+			} else {
+				eventData["buffer_id"] = bufferID
+			}
+		}
+
+		h.publishEvent("stream_error_after_headers", eventData)
 	}
 
 	if errors.Is(err, supervisor.ErrIdleTimeout) {
@@ -384,6 +397,7 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 				if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
 					return
 				}
+				log.Printf("Sent heartbeat at %s\n", time.Now().Format(time.RFC3339))
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}

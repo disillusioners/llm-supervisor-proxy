@@ -71,6 +71,8 @@ type Config struct {
 	MaxIdleRetries          int                 `json:"max_idle_retries"`
 	MaxGenerationRetries    int                 `json:"max_generation_retries"`
 	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
+	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
+	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
 }
@@ -87,6 +89,8 @@ type ManagerInterface interface {
 	GetMaxIdleRetries() int
 	GetMaxGenerationRetries() int
 	GetMaxStreamBufferSize() int
+	GetBufferStorageDir() string
+	GetBufferMaxStorageMB() int
 	GetLoopDetection() LoopDetectionConfig
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
@@ -124,6 +128,8 @@ var Defaults = Config{
 	MaxIdleRetries:          2,
 	MaxGenerationRetries:    1,
 	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
+	BufferStorageDir:        "",               // Empty means use default data directory
+	BufferMaxStorageMB:      100,              // 100MB default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -470,6 +476,20 @@ func (m *Manager) GetLoopDetection() LoopDetectionConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.LoopDetection
+}
+
+// GetBufferStorageDir returns the buffer storage directory
+func (m *Manager) GetBufferStorageDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.BufferStorageDir
+}
+
+// GetBufferMaxStorageMB returns the max buffer storage in MB
+func (m *Manager) GetBufferMaxStorageMB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.BufferMaxStorageMB
 }
 
 // IsReadOnly returns true if the config file cannot be written

@@ -34,8 +34,7 @@ const getEventMessage = (event: Event): string => {
     }
     case 'stream_error_after_headers': {
       const bufInfo = event.data?.buffer_size ? ` (buffer: ${event.data.buffer_size} bytes)` : '';
-      const bufPreview = event.data?.buffer_preview ? ` | Content: ${event.data.buffer_preview}` : '';
-      return `Stream error after headers: ${event.data?.error || 'Unknown error'}${bufInfo}${bufPreview}`;
+      return `Stream error after headers: ${event.data?.error || 'Unknown error'}${bufInfo}`;
     }
     case 'error_deadline_exceeded':
       return 'Generation deadline exceeded';
@@ -221,7 +220,19 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
                 <span class={`shrink-0 font-semibold ${getEventColor(event.type)}`}>
                   [{getEventTypeLabel(event.type)}]
                 </span>
-                <span class="text-gray-300">{getEventMessage(event)}</span>
+                <span class="text-gray-300">
+                  {getEventMessage(event)}
+                  {event.type === 'stream_error_after_headers' && event.data?.buffer_id && (
+                    <a
+                      href={`/fe/api/buffers/${event.data.buffer_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-blue-400 hover:underline ml-1"
+                    >
+                      [View Buffer]
+                    </a>
+                  )}
+                </span>
               </div>
             ))}
           </div>

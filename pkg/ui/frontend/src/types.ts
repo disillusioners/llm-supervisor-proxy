@@ -130,7 +130,7 @@ export interface EventData {
   // Stream error debug fields
   raw_data?: string;
   buffer_size?: number;
-  buffer_preview?: string;
+  buffer_id?: string;  // Link to buffer file instead of inline preview
 }
 
 export interface Event {

@@ -361,6 +361,20 @@ func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	return m.cfg.LoopDetection
 }
 
+// GetBufferStorageDir returns the buffer storage directory
+func (m *ConfigManager) GetBufferStorageDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.BufferStorageDir
+}
+
+// GetBufferMaxStorageMB returns the max buffer storage in MB
+func (m *ConfigManager) GetBufferMaxStorageMB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.BufferMaxStorageMB
+}
+
 // IsReadOnly returns true if the config cannot be written
 func (m *ConfigManager) IsReadOnly() bool {
 	m.mu.RLock()

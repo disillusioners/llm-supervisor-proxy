@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -53,6 +55,22 @@ func main() {
 
 	cfg := configMgr.Get()
 
+	// Initialize Buffer Store for persisting stream error buffers
+	bufferStorageDir := cfg.BufferStorageDir
+	if bufferStorageDir == "" {
+		// Use default data directory
+		userConfigDir, err := os.UserConfigDir()
+		if err != nil {
+			log.Fatalf("Failed to get user config directory: %v", err)
+		}
+		bufferStorageDir = filepath.Join(userConfigDir, "llm-supervisor-proxy", "buffers")
+	}
+	bufferStore, err := bufferstore.New(bufferStorageDir, int64(cfg.BufferMaxStorageMB)*1024*1024)
+	if err != nil {
+		log.Fatalf("Failed to initialize buffer store: %v", err)
+	}
+	log.Printf("Buffer storage initialized at: %s (max %d MB)", bufferStorageDir, cfg.BufferMaxStorageMB)
+
 	// Initialize Proxy Config
 	proxyConfig := &proxy.Config{
 		ConfigMgr:    configMgr,
@@ -60,11 +78,11 @@ func main() {
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore)
+	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore)
 	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore)
 
 	// Setup Server
 	mux := http.NewServeMux()

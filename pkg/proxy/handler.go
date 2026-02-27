@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -47,18 +48,20 @@ type ConfigSnapshot struct {
 }
 
 type Handler struct {
-	config *Config
-	bus    *events.Bus
-	store  *store.RequestStore
-	client *http.Client
+	config      *Config
+	bus         *events.Bus
+	store       *store.RequestStore
+	client      *http.Client
+	bufferStore *bufferstore.BufferStore
 }
 
-func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore) *Handler {
+func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore) *Handler {
 	return &Handler{
-		config: config,
-		bus:    bus,
-		store:  store,
-		client: &http.Client{},
+		config:      config,
+		bus:         bus,
+		store:       store,
+		client:      &http.Client{},
+		bufferStore: bufferStore,
 	}
 }
 

@@ -230,7 +230,7 @@ func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(cfg, bus, reqStore)
+	h := NewHandler(cfg, bus, reqStore, nil)
 
 	t.Cleanup(func() {
 		upstream.Close()
