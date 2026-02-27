@@ -19,24 +19,24 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestStartSSEHeartbeat_SendsAtInterval(t *testing.T) {
-	// Skip in short mode since this test needs to wait for 5s interval
+	// Skip in short mode since this test needs to wait for 10s interval
 	if testing.Short() {
-		t.Skip("skipping in short mode - test waits for 5s heartbeat interval")
+		t.Skip("skipping in short mode - test waits for 10s heartbeat interval")
 	}
 
 	// Create a response recorder that tracks writes
 	recorder := httptest.NewRecorder()
 
 	// Create context with timeout (longer than heartbeat interval)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	// Create handler and start heartbeat
 	h := &Handler{}
 	heartbeatStop := h.startSSEHeartbeat(recorder, ctx)
 
-	// Wait for at least one heartbeat to be sent (5s interval)
-	time.Sleep(5500 * time.Millisecond)
+	// Wait for at least one heartbeat to be sent (10s interval)
+	time.Sleep(11000 * time.Millisecond)
 
 	// Stop heartbeat
 	heartbeatStop()
@@ -161,7 +161,7 @@ func TestHeartbeat_DuringLongStream(t *testing.T) {
 				t.Error("expected [DONE] in response")
 			}
 
-			// Note: With 5s heartbeat interval and a stream that completes in ~400ms,
+			// Note: With 10s heartbeat interval and a stream that completes in ~400ms,
 			// we won't see heartbeats in this test. That's expected behavior.
 		},
 	})

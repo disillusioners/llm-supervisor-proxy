@@ -378,14 +378,14 @@ func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
 	}
 }
 
-// startSSEHeartbeat starts a goroutine that sends SSE comments every 5 seconds
+// startSSEHeartbeat starts a goroutine that sends SSE comments every 10 seconds
 // to keep the client connection alive while buffering upstream data.
 // Returns a cancel function to stop the heartbeat.
 func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) context.CancelFunc {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -393,8 +393,8 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
-				// Send SSE comment as heartbeat - use non-blocking write to prevent
-				// blocking the select loop if the client TCP buffer is full
+				// Send SSE comment as heartbeat - use non-blocking write with timeout
+				// to prevent blocking the select loop if the client TCP buffer is full
 				heartbeatData := []byte(": heartbeat\n\n")
 				written := make(chan bool, 1)
 				go func() {
@@ -402,10 +402,14 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 					if err != nil {
 						log.Printf("[HEARTBEAT] Write error: %v", err)
 					}
-					written <- (err == nil)
+					// Use non-blocking send to prevent goroutine leak
+					select {
+					case written <- (err == nil):
+					default:
+					}
 				}()
 
-				// Wait for write to complete or context canceled, but don't block forever
+			// Wait for write to complete or context canceled, with timeout
 				select {
 				case <-heartbeatCtx.Done():
 					return
@@ -416,6 +420,9 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 							f.Flush()
 						}
 					}
+				case <-time.After(3 * time.Second):
+					// Timeout - heartbeat write took too long, log and continue
+					log.Printf("[HEARTBEAT] Write timeout, client may be slow or disconnected")
 				}
 			}
 		}
