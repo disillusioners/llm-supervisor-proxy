@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken } from '../types';
 
 const API_BASE = '/fe/api';
 
@@ -192,4 +192,42 @@ export function useVersion() {
   }, []);
 
   return { version, loading };
+}
+
+// Tokens API
+export function useTokens() {
+  const [tokens, setTokens] = useState<ApiToken[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchTokens = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await apiFetch<ApiToken[]>('/tokens');
+      setTokens(data || []);
+    } catch (e) {
+      console.error('Failed to fetch tokens:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createToken = useCallback(async (name: string, expiresAt: string | null): Promise<ApiToken> => {
+    const token = await apiFetch<ApiToken>('/tokens', {
+      method: 'POST',
+      body: JSON.stringify({ name, expires_at: expiresAt }),
+    });
+    await fetchTokens();
+    return token;
+  }, [fetchTokens]);
+
+  const deleteToken = useCallback(async (id: string) => {
+    await apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' });
+    await fetchTokens();
+  }, [fetchTokens]);
+
+  useEffect(() => {
+    fetchTokens();
+  }, [fetchTokens]);
+
+  return { tokens, loading, createToken, deleteToken, refetch: fetchTokens };
 }

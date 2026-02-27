@@ -40,12 +40,30 @@ export interface ConfigUpdateResponse extends AppConfig {
 // Legacy alias for backward compatibility
 export type ProxyConfig = AppConfig;
 
+export type InternalProvider = 'openai' | 'zhipu' | 'azure';
+
 export interface Model {
   id: string;
   name: string;
   enabled: boolean;
   fallback_chain: string[];
-  truncate_params?: string[]; // Parameters to strip from the request before forwarding (e.g. ["max_completion_tokens", "store"])
+  truncate_params?: string[];
+  // Internal upstream fields
+  internal?: boolean;
+  internal_provider?: InternalProvider;
+  internal_api_key?: string;   // Display only, write-only
+  internal_base_url?: string;
+  internal_model?: string;     // Actual model name at provider
+}
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  token?: string;         // Only returned once on creation
+  prefix: string;         // e.g., "sk-proxy-***"
+  expires_at?: string;    // ISO date or null
+  created_at: string;
+  last_used_at?: string;
 }
 
 export interface Message {

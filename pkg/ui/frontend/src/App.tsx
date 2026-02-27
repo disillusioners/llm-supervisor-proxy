@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'preact/hooks';
 import { Header, RequestList, RequestDetail, EventLog, ConfigModal } from './components';
-import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh } from './hooks';
+import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens } from './hooks';
 
 
 export function App() {
@@ -14,6 +14,7 @@ export function App() {
   const { detail, loading: detailLoading } = useRequestDetail(selectedRequestId);
   const { config, updateConfig, refetch: refetchConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel, refetch: refetchModels } = useModels();
+  const { tokens, createToken, deleteToken, refetch: refetchTokens } = useTokens();
   const { displayedEvents, containerRef, clearEvents } = useEvents(selectedRequestId, autoScroll);
 
   // Event refresh callback
@@ -40,7 +41,8 @@ export function App() {
     setShowConfig(true);
     refetchConfig();
     refetchModels();
-  }, [refetchConfig, refetchModels]);
+    refetchTokens();
+  }, [refetchConfig, refetchModels, refetchTokens]);
 
   const handleCloseConfig = useCallback(() => {
     setShowConfig(false);
@@ -86,6 +88,10 @@ export function App() {
         onAddModel={addModel}
         onUpdateModel={updateModel}
         onDeleteModel={deleteModel}
+        tokens={tokens}
+        onCreateToken={createToken}
+        onDeleteToken={deleteToken}
+        onRefetchTokens={refetchTokens}
       />
     </>
   );
