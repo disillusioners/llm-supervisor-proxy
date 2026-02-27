@@ -23,6 +23,8 @@ const PROVIDER_DEFAULTS: Record<InternalProvider, string> = {
   openai: 'https://api.openai.com/v1',
   zhipu: 'https://open.bigmodel.cn/api/paas/v4',
   azure: '',
+  zai: 'https://api.z.ai/api/coding/paas/v4',
+  minimax: 'https://api.minimax.io/v1',
 };
 
 export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: ModelFormProps) {
@@ -219,6 +221,8 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
                 <option value="openai">OpenAI</option>
                 <option value="zhipu">Zhipu (智谱)</option>
                 <option value="azure">Azure OpenAI</option>
+                <option value="zai">ZAI</option>
+                <option value="minimax">MiniMax</option>
               </select>
             </div>
 

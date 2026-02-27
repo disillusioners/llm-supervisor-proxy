@@ -13,6 +13,8 @@ const (
 	ProviderGemini    ProviderType = "gemini"
 	ProviderZhipu     ProviderType = "zhipu"
 	ProviderAzure     ProviderType = "azure"
+	ProviderZAI       ProviderType = "zai"
+	ProviderMiniMax   ProviderType = "minimax"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -32,6 +34,18 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "https://open.bigmodel.cn/api/paas/v4"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderZAI:
+		// ZAI coding plan uses OpenAI-compatible API
+		if baseURL == "" {
+			baseURL = "https://api.z.ai/api/coding/paas/v4"
+		}
+		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderMiniMax:
+		// MiniMax uses OpenAI-compatible API
+		if baseURL == "" {
+			baseURL = "https://api.minimax.io/v1"
+		}
+		return NewOpenAIProvider(apiKey, baseURL), nil
 	case ProviderAzure:
 		// Azure OpenAI uses OpenAI-compatible API with different auth
 		// For now, treat as OpenAI with custom base URL
@@ -44,7 +58,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax:
 		return true
 	default:
 		return false
@@ -59,5 +73,7 @@ func GetProviderTypes() []ProviderType {
 		ProviderGemini,
 		ProviderZhipu,
 		ProviderAzure,
+		ProviderZAI,
+		ProviderMiniMax,
 	}
 }

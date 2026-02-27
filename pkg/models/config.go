@@ -407,6 +407,8 @@ var validProviders = map[string]bool{
 	"gemini":    true,
 	"zhipu":     true,
 	"azure":     true,
+	"zai":       true,
+	"minimax":   true,
 }
 
 // isValidProvider checks if the provider is in the allowed list
