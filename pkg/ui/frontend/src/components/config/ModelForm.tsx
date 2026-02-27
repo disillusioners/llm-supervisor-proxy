@@ -40,6 +40,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
     internal_model: '',
   });
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     if (mode === 'edit' && initialData) {
@@ -136,6 +137,41 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
       setSaving(false);
     }
   };
+
+  const handleTestConnection = async () => {
+    try {
+      setTesting(true);
+      onStatus(null);
+
+      const baseUrl = formData.internal_base_url || PROVIDER_DEFAULTS[formData.internal_provider];
+
+      const response = await fetch('/fe/api/models/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          internal_provider: formData.internal_provider,
+          internal_api_key: formData.internal_api_key,
+          internal_base_url: baseUrl,
+          internal_model: formData.internal_model,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}: Connection test failed`);
+      }
+
+      onStatus({ type: 'success', message: 'Connection test successful!' });
+    } catch (e) {
+      onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Connection test failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const canTestConnection = formData.internal_provider && formData.internal_api_key && formData.internal_model;
 
   const isValid = mode === 'add' 
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
@@ -261,6 +297,16 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
                 placeholder={formData.internal_provider === 'openai' ? 'gpt-4o' : formData.internal_provider === 'zhipu' ? 'glm-4' : 'gpt-4'}
               />
               <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
+            </div>
+
+            <div class="pt-2">
+              <button
+                onClick={handleTestConnection}
+                class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-md transition-colors text-sm font-medium"
+                disabled={!canTestConnection || testing}
+              >
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
             </div>
           </div>
         )}

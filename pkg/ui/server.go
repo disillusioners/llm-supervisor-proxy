@@ -16,6 +16,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
@@ -109,6 +110,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/models", s.handleModels)
 	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
 	mux.HandleFunc("/fe/api/models/validate", s.handleValidateModel)
+	mux.HandleFunc("/fe/api/models/test", s.handleTestModel)
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
@@ -501,6 +503,118 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"valid": true,
+	})
+}
+
+// TestModelRequest represents the request body for testing a model
+type TestModelRequest struct {
+	InternalProvider string `json:"internal_provider"`
+	InternalAPIKey   string `json:"internal_api_key"`
+	InternalBaseURL  string `json:"internal_base_url"`
+	InternalModel    string `json:"internal_model"`
+}
+
+// TestModelResponse represents the response for testing a model
+type TestModelResponse struct {
+	Success  bool   `json:"success"`
+	Response string `json:"response,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// handleTestModel handles POST /fe/api/models/test
+func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req TestModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Invalid JSON: %v", err),
+		})
+		return
+	}
+
+	// Validate required fields
+	if req.InternalProvider == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   "internal_provider is required",
+		})
+		return
+	}
+
+	if req.InternalAPIKey == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   "internal_api_key is required",
+		})
+		return
+	}
+
+	// Create provider using the factory
+	provider, err := providers.NewProvider(req.InternalProvider, req.InternalAPIKey, req.InternalBaseURL)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to create provider: %v", err),
+		})
+		return
+	}
+
+	// Create a minimal chat completion request with "hi" message
+	model := req.InternalModel
+	if model == "" {
+		model = "gpt-4o" // default model
+	}
+
+	chatReq := &providers.ChatCompletionRequest{
+		Model: model,
+		Messages: []providers.ChatMessage{
+			{
+				Role:    "user",
+				Content: "hi",
+			},
+		},
+	}
+
+	// Send the request
+	resp, err := provider.ChatCompletion(r.Context(), chatReq)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Request failed: %v", err),
+		})
+		return
+	}
+
+	// Extract response content
+	var responseText string
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		responseText = resp.Choices[0].Message.Content
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(TestModelResponse{
+		Success:  true,
+		Response: responseText,
+		Model:    resp.Model,
 	})
 }
 
