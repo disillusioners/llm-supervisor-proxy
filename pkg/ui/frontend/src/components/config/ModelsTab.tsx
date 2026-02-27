@@ -176,14 +176,6 @@ export function ModelsTab({
                           ))}
                         </div>
                       )}
-                      {model.internal && model.internal_model && (
-                        <div class="mt-1 flex items-center gap-1.5 flex-wrap">
-                          <span class="text-xs text-gray-500 font-medium">INTERNAL:</span>
-                          <span class="text-xs bg-purple-900/30 text-purple-300 px-1.5 py-0.5 rounded font-mono">
-                            {escapeHtml(model.internal_provider)}: {escapeHtml(model.internal_model)}
-                          </span>
-                        </div>
-                      )}
                     </div>
                   </div>
                   <div class="flex items-center gap-1 flex-shrink-0 ml-4">

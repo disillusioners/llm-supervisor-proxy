@@ -472,7 +472,6 @@ func (m *ModelsManager) Save() error {
 }
 
 // scanModels executes a query and scans the results into model configs
-// Note: This scans only basic fields (without internal fields) for list operations
 func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.ModelConfig, error) {
 	rows, err := m.store.DB.QueryContext(context.Background(), query, args...)
 	if err != nil {
@@ -491,15 +490,27 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.TruncateParamsJSON,
 			&dbModel.CreatedAt,
 			&dbModel.UpdatedAt,
+			&dbModel.Internal,
+			&dbModel.InternalProvider,
+			&dbModel.InternalAPIKey,
+			&dbModel.InternalBaseURL,
+			&dbModel.InternalModel,
+			&dbModel.InternalKeyVersion,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		model := models.ModelConfig{
-			ID:      dbModel.ID,
-			Name:    dbModel.Name,
-			Enabled: dbModel.isEnabled(),
+			ID:                 dbModel.ID,
+			Name:               dbModel.Name,
+			Enabled:            dbModel.isEnabled(),
+			Internal:           dbModel.isInternal(),
+			InternalProvider:   dbModel.InternalProvider,
+			InternalAPIKey:     dbModel.InternalAPIKey,
+			InternalBaseURL:    dbModel.InternalBaseURL,
+			InternalModel:      dbModel.InternalModel,
+			InternalKeyVersion: dbModel.getInternalKeyVersion(),
 		}
 
 		// Parse fallback chain

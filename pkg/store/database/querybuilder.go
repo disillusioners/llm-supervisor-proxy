@@ -196,17 +196,29 @@ func (q *QueryBuilder) GetModelByID() string {
 
 // GetAllModels returns the appropriate SELECT query for all models
 func (q *QueryBuilder) GetAllModels() string {
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
+	if q.dialect == PostgreSQL {
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(internal, false), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
+			FROM models ORDER BY name`
+	}
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(internal, 0), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
 		FROM models ORDER BY name`
 }
 
 // GetEnabledModels returns the appropriate SELECT query for enabled models
 func (q *QueryBuilder) GetEnabledModels() string {
 	if q.dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(internal, false), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
 			FROM models WHERE enabled = true ORDER BY name`
 	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(internal, 0), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
 		FROM models WHERE enabled = 1 ORDER BY name`
 }
 
