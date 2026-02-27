@@ -171,6 +171,97 @@ func (s *Store) runSQLiteMigrations(ctx context.Context) error {
 		}
 	}
 
+	// Migration 003: Add internal upstream fields to models
+	const migration003 = "003"
+	applied, err = s.isMigrationApplied(ctx, migration003)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration003, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal INTEGER NOT NULL DEFAULT 0
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal_provider TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_provider column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal_api_key TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_api_key column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal_base_url TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_base_url column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal_model TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_model column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN internal_key_version INTEGER NOT NULL DEFAULT 1
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_key_version column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_models_internal ON models(internal)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create internal index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration003); err != nil {
+			return err
+		}
+	}
+
+	// Migration 004: Create auth_tokens table
+	const migration004 = "004"
+	applied, err = s.isMigrationApplied(ctx, migration004)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration004, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS auth_tokens (
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				name TEXT NOT NULL,
+				expires_at TEXT,
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				created_by TEXT NOT NULL
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create auth_tokens table: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens(token_hash)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create auth_tokens index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration004); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -262,6 +353,97 @@ func (s *Store) runPostgreSQLMigrations(ctx context.Context) error {
 
 		// Record the migration
 		if err := s.recordMigration(ctx, migration002); err != nil {
+			return err
+		}
+	}
+
+	// Migration 003: Add internal upstream fields to models
+	const migration003 = "003"
+	applied, err = s.isMigrationApplied(ctx, migration003)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration003, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal BOOLEAN NOT NULL DEFAULT false
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal_provider TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_provider column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal_api_key TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_api_key column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal_base_url TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_base_url column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal_model TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_model column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS internal_key_version INTEGER NOT NULL DEFAULT 1
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add internal_key_version column: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_models_internal ON models(internal) WHERE internal = true
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create internal index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration003); err != nil {
+			return err
+		}
+	}
+
+	// Migration 004: Create auth_tokens table
+	const migration004 = "004"
+	applied, err = s.isMigrationApplied(ctx, migration004)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration004, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS auth_tokens (
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				name TEXT NOT NULL,
+				expires_at TIMESTAMPTZ,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				created_by TEXT NOT NULL
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create auth_tokens table: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens(token_hash)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create auth_tokens index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration004); err != nil {
 			return err
 		}
 	}
