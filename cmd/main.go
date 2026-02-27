@@ -48,14 +48,14 @@ func main() {
 	}
 	defer dbStore.Close()
 
-	// Initialize encryption (optional - only required when using internal upstream)
-	if key := os.Getenv("INTERNAL_ENCRYPTION_KEY"); key != "" {
-		if err := crypto.InitEncryption(); err != nil {
-			log.Fatalf("Encryption initialization failed: %v", err)
-		}
-		log.Printf("Encryption initialized for internal upstream")
+	// Initialize encryption (required for internal upstream API key storage)
+	if err := crypto.InitEncryption(); err != nil {
+		log.Fatalf("Encryption initialization failed: %v", err)
+	}
+	if crypto.UsingDefaultKey() {
+		log.Printf("Warning: Using default encryption key. For production, set INTERNAL_ENCRYPTION_KEY env var")
 	} else {
-		log.Printf("Warning: INTERNAL_ENCRYPTION_KEY not set - internal upstream will not work")
+		log.Printf("Encryption initialized with custom key")
 	}
 
 	databaseURL := os.Getenv("DATABASE_URL")

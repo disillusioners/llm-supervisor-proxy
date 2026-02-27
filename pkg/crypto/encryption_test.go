@@ -17,6 +17,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
 	encryptionKeyErr = nil
+	usingDefaultKey = false
 
 	// Set the key
 	os.Setenv(EnvEncryptionKey, key)
@@ -54,6 +55,7 @@ func TestEncryptProducesDifferentCiphertext(t *testing.T) {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
 	encryptionKeyErr = nil
+	usingDefaultKey = false
 
 	os.Setenv(EnvEncryptionKey, key)
 	defer os.Unsetenv(EnvEncryptionKey)
@@ -89,6 +91,7 @@ func TestDecryptInvalidCiphertext(t *testing.T) {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
 	encryptionKeyErr = nil
+	usingDefaultKey = false
 
 	os.Setenv(EnvEncryptionKey, key)
 	defer os.Unsetenv(EnvEncryptionKey)
@@ -104,15 +107,16 @@ func TestInitEncryptionMissingKey(t *testing.T) {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
 	encryptionKeyErr = nil
+	usingDefaultKey = false
 
 	os.Unsetenv(EnvEncryptionKey)
 
 	err := InitEncryption()
-	if err == nil {
-		t.Error("expected error when encryption key not set")
+	if err != nil {
+		t.Errorf("expected no error when using default key, got: %v", err)
 	}
-	if err != ErrEncryptionKeyNotSet {
-		t.Errorf("expected ErrEncryptionKeyNotSet, got: %v", err)
+	if !usingDefaultKey {
+		t.Error("expected UsingDefaultKey() to return true")
 	}
 }
 
@@ -121,6 +125,7 @@ func TestInitEncryptionInvalidKeyLength(t *testing.T) {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
 	encryptionKeyErr = nil
+	usingDefaultKey = false
 
 	os.Setenv(EnvEncryptionKey, "dG9vc2hvcnQ=") // "tooshort" in base64, but less than 32 bytes
 	defer os.Unsetenv(EnvEncryptionKey)

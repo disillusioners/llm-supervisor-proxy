@@ -13,6 +13,10 @@ import (
 
 const EnvEncryptionKey = "INTERNAL_ENCRYPTION_KEY"
 
+// DefaultEncryptionKey is a hardcoded fallback key (32 bytes base64-encoded)
+// WARNING: For production, always set INTERNAL_ENCRYPTION_KEY env var
+const DefaultEncryptionKey = "zxL6bzszggELp/xZ5t5Hnd4GQW27wMgTg4e7LV874uU="
+
 var (
 	ErrEncryptionKeyNotSet = errors.New("INTERNAL_ENCRYPTION_KEY environment variable not set")
 	ErrInvalidCiphertext   = errors.New("invalid ciphertext")
@@ -23,16 +27,18 @@ var (
 	encryptionKey     []byte
 	encryptionKeyOnce sync.Once
 	encryptionKeyErr  error
+	usingDefaultKey   = false
 )
 
 // InitEncryption initializes the encryption key from environment variable
-// Must be called at startup - will fail fast if key is not set
+// Falls back to a hardcoded default key if not set
 func InitEncryption() error {
 	encryptionKeyOnce.Do(func() {
 		key := os.Getenv(EnvEncryptionKey)
 		if key == "" {
-			encryptionKeyErr = ErrEncryptionKeyNotSet
-			return
+			// Use default key
+			key = DefaultEncryptionKey
+			usingDefaultKey = true
 		}
 
 		// Decode base64 key
@@ -49,8 +55,12 @@ func InitEncryption() error {
 
 		encryptionKey = decoded
 	})
-
 	return encryptionKeyErr
+}
+
+// UsingDefaultKey returns true if the default hardcoded key is being used
+func UsingDefaultKey() bool {
+	return usingDefaultKey
 }
 
 // Encrypt encrypts plaintext using AES-256-GCM
