@@ -365,6 +365,35 @@ func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
 	}
 }
 
+// startSSEHeartbeat starts a goroutine that sends SSE comments every 5 seconds
+// to keep the client connection alive while buffering upstream data.
+// Returns a cancel function to stop the heartbeat.
+func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) context.CancelFunc {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				// Send SSE comment as heartbeat
+				if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
+					return
+				}
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		}
+	}()
+
+	return cancel
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Response processing (OK status)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,6 +424,12 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 		}
 	}
 
+	// Start heartbeat for streaming responses to keep connection alive while buffering
+	var heartbeatStop context.CancelFunc
+	if rc.isStream {
+		heartbeatStop = h.startSSEHeartbeat(w, rc.baseCtx)
+	}
+
 	// For non-streaming: send headers immediately (no retry risk since full body is read)
 	if !rc.isStream && !rc.headersSent {
 		// Copy response headers
@@ -408,7 +443,7 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 	if !rc.isStream {
 		return h.handleNonStreamResponse(w, rc, monitor, attemptCtx, attempt, counters)
 	}
-	return h.handleStreamResponse(w, rc, resp, monitor, attemptCtx, attempt, counters)
+	return h.handleStreamResponse(w, rc, resp, monitor, attemptCtx, attempt, counters, heartbeatStop)
 }
 
 // handleNonStreamResponse reads the entire response body and writes it to the client.
@@ -434,7 +469,18 @@ func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, rc *requestCont
 // handleStreamResponse processes a Server-Sent Events stream with buffering.
 // All chunks are buffered in memory until the stream completes successfully.
 // This enables safe retry mid-stream since nothing is sent to client until [DONE].
-func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
+func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters, heartbeatStop context.CancelFunc) attemptResult {
+	// Ensure heartbeat is always stopped (prevents goroutine leak)
+	// Note: We also stop it explicitly before writes to prevent race conditions
+	var heartbeatStopped bool
+	stopHeartbeat := func() {
+		if !heartbeatStopped && heartbeatStop != nil {
+			heartbeatStop()
+			heartbeatStopped = true
+		}
+	}
+	defer stopHeartbeat()
+
 	scanner := bufio.NewScanner(monitor)
 	buffer := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buffer, 1024*1024)
@@ -636,6 +682,9 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	// Stream completed successfully - flush buffered body to client
 	// Note: Headers were already sent immediately when upstream responded (TTFB fix)
 	if streamEndedSuccessfully {
+		// Stop heartbeat BEFORE writing to prevent race condition
+		stopHeartbeat()
+
 		// Flush entire buffer to client
 		w.Write(rc.streamBuffer.Bytes())
 		if f, ok := w.(http.Flusher); ok {
@@ -652,6 +701,10 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	log.Println("Stream ended unexpectedly without [DONE]")
 	h.publishEvent("stream_ended_unexpectedly", map[string]interface{}{"id": rc.reqID})
 	monitor.Close()
+
+	// Stop heartbeat BEFORE writing to prevent race condition
+	stopHeartbeat()
+
 	// Headers already sent - send error as SSE event
 	h.sendSSEError(w, "Stream ended unexpectedly without [DONE]")
 	return attemptReturnImmediately
