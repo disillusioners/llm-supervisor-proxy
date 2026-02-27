@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
@@ -30,11 +29,8 @@ func CanHandleInternal(modelConfig *models.ModelConfig) bool {
 
 // HandleRequest handles a request using internal provider
 func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool) error {
-	// Decrypt API key
-	apiKey, err := crypto.Decrypt(h.config.InternalAPIKey)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt API key: %w", err)
-	}
+	// API key is already decrypted when retrieved from database
+	apiKey := h.config.InternalAPIKey
 
 	// Create provider
 	provider, err := providers.NewProvider(h.config.InternalProvider, apiKey, h.config.InternalBaseURL)
