@@ -393,13 +393,29 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
-				// Send SSE comment as heartbeat
-				if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
+				// Send SSE comment as heartbeat - use non-blocking write to prevent
+				// blocking the select loop if the client TCP buffer is full
+				heartbeatData := []byte(": heartbeat\n\n")
+				written := make(chan bool, 1)
+				go func() {
+					_, err := w.Write(heartbeatData)
+					if err != nil {
+						log.Printf("[HEARTBEAT] Write error: %v", err)
+					}
+					written <- (err == nil)
+				}()
+
+				// Wait for write to complete or context canceled, but don't block forever
+				select {
+				case <-heartbeatCtx.Done():
 					return
-				}
-				log.Printf("Sent heartbeat at %s\n", time.Now().Format(time.RFC3339))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
+				case ok := <-written:
+					if ok {
+						log.Printf("Sent heartbeat at %s\n", time.Now().Format(time.RFC3339))
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+					}
 				}
 			}
 		}
