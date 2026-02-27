@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -25,6 +27,12 @@ type Model struct {
 	Enabled        bool     `json:"enabled"`
 	FallbackChain  []string `json:"fallback_chain"`
 	TruncateParams []string `json:"truncate_params,omitempty"`
+	// Internal upstream fields
+	Internal         bool   `json:"internal"`
+	InternalProvider string `json:"internal_provider,omitempty"`
+	InternalAPIKey   string `json:"internal_api_key,omitempty"` // Write-only: accepted in POST/PUT, never returned in GET
+	InternalBaseURL  string `json:"internal_base_url,omitempty"`
+	InternalModel    string `json:"internal_model,omitempty"`
 }
 
 //go:embed static/*
@@ -37,10 +45,11 @@ type Server struct {
 	modelsConfig models.ModelsConfigInterface // Models config
 	store        *store.RequestStore
 	bufferStore  *bufferstore.BufferStore
+	tokenStore   *auth.TokenStore
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore) *Server {
+func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Server {
 	return &Server{
 		bus:          bus,
 		configMgr:    configMgr,
@@ -48,6 +57,7 @@ func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *
 		modelsConfig: modelsConfig,
 		store:        store,
 		bufferStore:  bufferStore,
+		tokenStore:   tokenStore,
 	}
 }
 
@@ -103,6 +113,9 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
 	mux.HandleFunc("/fe/api/buffers/", s.handleBufferContent)
+	// Token management
+	mux.HandleFunc("/fe/api/tokens", s.handleTokens)
+	mux.HandleFunc("/fe/api/tokens/", s.handleTokenDetail)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -266,11 +279,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		models := make([]Model, len(modelConfigs))
 		for i, mc := range modelConfigs {
 			models[i] = Model{
-				ID:             mc.ID,
-				Name:           mc.Name,
-				Enabled:        mc.Enabled,
-				FallbackChain:  mc.FallbackChain,
-				TruncateParams: mc.TruncateParams,
+				ID:               mc.ID,
+				Name:             mc.Name,
+				Enabled:          mc.Enabled,
+				FallbackChain:    mc.FallbackChain,
+				TruncateParams:   mc.TruncateParams,
+				Internal:         mc.Internal,
+				InternalProvider: mc.InternalProvider,
+				InternalBaseURL:  mc.InternalBaseURL,
+				InternalModel:    mc.InternalModel,
 			}
 		}
 
@@ -304,11 +321,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig
 		modelConfig := models.ModelConfig{
-			ID:             newModel.ID,
-			Name:           newModel.Name,
-			Enabled:        newModel.Enabled,
-			FallbackChain:  newModel.FallbackChain,
-			TruncateParams: newModel.TruncateParams,
+			ID:               newModel.ID,
+			Name:             newModel.Name,
+			Enabled:          newModel.Enabled,
+			FallbackChain:    newModel.FallbackChain,
+			TruncateParams:   newModel.TruncateParams,
+			Internal:         newModel.Internal,
+			InternalProvider: newModel.InternalProvider,
+			InternalAPIKey:   newModel.InternalAPIKey,
+			InternalBaseURL:  newModel.InternalBaseURL,
+			InternalModel:    newModel.InternalModel,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -370,11 +392,16 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig and update
 		modelConfig := models.ModelConfig{
-			ID:             updatedModel.ID,
-			Name:           updatedModel.Name,
-			Enabled:        updatedModel.Enabled,
-			FallbackChain:  updatedModel.FallbackChain,
-			TruncateParams: updatedModel.TruncateParams,
+			ID:               updatedModel.ID,
+			Name:             updatedModel.Name,
+			Enabled:          updatedModel.Enabled,
+			FallbackChain:    updatedModel.FallbackChain,
+			TruncateParams:   updatedModel.TruncateParams,
+			Internal:         updatedModel.Internal,
+			InternalProvider: updatedModel.InternalProvider,
+			InternalAPIKey:   updatedModel.InternalAPIKey,
+			InternalBaseURL:  updatedModel.InternalBaseURL,
+			InternalModel:    updatedModel.InternalModel,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
@@ -475,4 +502,166 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"valid": true,
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token Management Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TokenResponse represents a token in API responses (without sensitive data)
+type TokenResponse struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	ExpiresAt *string `json:"expires_at,omitempty"`
+	CreatedAt string  `json:"created_at"`
+	CreatedBy string  `json:"created_by"`
+}
+
+// CreateTokenRequest represents the request body for creating a token
+type CreateTokenRequest struct {
+	Name      string  `json:"name"`
+	ExpiresAt *string `json:"expires_at,omitempty"` // ISO 8601 format, optional
+}
+
+// CreateTokenResponse includes the plaintext token (shown only once)
+type CreateTokenResponse struct {
+	TokenResponse
+	Token string `json:"token"` // Plaintext token - show only once!
+}
+
+// handleTokens handles GET (list) and POST (create) for tokens
+func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	switch r.Method {
+	case http.MethodGet:
+		s.listTokens(ctx, w, r)
+	case http.MethodPost:
+		s.createToken(ctx, w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleTokenDetail handles DELETE for a specific token
+func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	id := strings.TrimPrefix(r.URL.Path, "/fe/api/tokens/")
+	if id == "" {
+		http.Error(w, "Token ID required", http.StatusBadRequest)
+		return
+	}
+
+	if s.tokenStore == nil {
+		http.Error(w, "Token store not configured", http.StatusInternalServerError)
+		return
+	}
+
+	err := s.tokenStore.DeleteToken(ctx, id)
+	if err != nil {
+		if err == auth.ErrTokenNotFound {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to delete token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	if s.tokenStore == nil {
+		// Return empty list if token store not configured
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]TokenResponse{})
+		return
+	}
+
+	tokens, err := s.tokenStore.ListTokens(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to list tokens: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := make([]TokenResponse, len(tokens))
+	for i, t := range tokens {
+		response[i] = TokenResponse{
+			ID:        t.ID,
+			Name:      t.Name,
+			CreatedAt: t.CreatedAt.Format(time.RFC3339),
+			CreatedBy: t.CreatedBy,
+		}
+		if t.ExpiresAt != nil {
+			iso := t.ExpiresAt.Format(time.RFC3339)
+			response[i].ExpiresAt = &iso
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	if s.tokenStore == nil {
+		http.Error(w, "Token store not configured", http.StatusInternalServerError)
+		return
+	}
+
+	var req CreateTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse optional expiry
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if err != nil {
+			http.Error(w, "Invalid expires_at format (use ISO 8601)", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &t
+	}
+
+	// Get creator from request (could be from OAuth header in production)
+	createdBy := "api"
+	if user := r.Header.Get("X-User"); user != "" {
+		createdBy = user
+	}
+
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := CreateTokenResponse{
+		TokenResponse: TokenResponse{
+			ID:        token.ID,
+			Name:      token.Name,
+			CreatedAt: token.CreatedAt.Format(time.RFC3339),
+			CreatedBy: token.CreatedBy,
+		},
+		Token: plaintext, // Show once!
+	}
+	if token.ExpiresAt != nil {
+		iso := token.ExpiresAt.Format(time.RFC3339)
+		response.TokenResponse.ExpiresAt = &iso
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(response)
 }

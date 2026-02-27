@@ -123,17 +123,25 @@ func (q *QueryBuilder) UpdateConfig() string {
 // InsertModel returns the appropriate INSERT query for a model
 func (q *QueryBuilder) InsertModel() string {
 	if q.dialect == PostgreSQL {
-		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json)
-			VALUES ($1, $2, $3, $4, $5)
+		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
+			internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
 				fallback_chain_json = EXCLUDED.fallback_chain_json,
 				truncate_params_json = EXCLUDED.truncate_params_json,
+				internal = EXCLUDED.internal,
+				internal_provider = EXCLUDED.internal_provider,
+				internal_api_key = EXCLUDED.internal_api_key,
+				internal_base_url = EXCLUDED.internal_base_url,
+				internal_model = EXCLUDED.internal_model,
+				internal_key_version = EXCLUDED.internal_key_version,
 				updated_at = NOW()`
 	}
-	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json)
-		VALUES (?, ?, ?, ?, ?)`
+	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
+		internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateModel returns the appropriate UPDATE query for a model
@@ -144,14 +152,26 @@ func (q *QueryBuilder) UpdateModel() string {
 			enabled = $2,
 			fallback_chain_json = $3,
 			truncate_params_json = $4,
+			internal = $5,
+			internal_provider = $6,
+			internal_api_key = $7,
+			internal_base_url = $8,
+			internal_model = $9,
+			internal_key_version = $10,
 			updated_at = NOW()
-		WHERE id = $5`
+		WHERE id = $11`
 	}
 	return `UPDATE models SET
 			name = ?,
 			enabled = ?,
 			fallback_chain_json = ?,
 			truncate_params_json = ?,
+			internal = ?,
+			internal_provider = ?,
+			internal_api_key = ?,
+			internal_base_url = ?,
+			internal_model = ?,
+			internal_key_version = ?,
 			updated_at = datetime('now')
 		WHERE id = ?`
 }

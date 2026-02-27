@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -46,6 +48,16 @@ func main() {
 	}
 	defer dbStore.Close()
 
+	// Initialize encryption (optional - only required when using internal upstream)
+	if key := os.Getenv("INTERNAL_ENCRYPTION_KEY"); key != "" {
+		if err := crypto.InitEncryption(); err != nil {
+			log.Fatalf("Encryption initialization failed: %v", err)
+		}
+		log.Printf("Encryption initialized for internal upstream")
+	} else {
+		log.Printf("Warning: INTERNAL_ENCRYPTION_KEY not set - internal upstream will not work")
+	}
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL != "" {
 		log.Printf("Using PostgreSQL database (DATABASE_URL is set)")
@@ -77,8 +89,11 @@ func main() {
 		ModelsConfig: modelsConfig,
 	}
 
+	// Initialize Token Store
+	tokenStore := auth.NewTokenStore(dbStore.DB)
+
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore)
+	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore)
 	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler

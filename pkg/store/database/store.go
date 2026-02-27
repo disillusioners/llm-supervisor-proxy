@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
@@ -399,6 +401,13 @@ type dbModelRow struct {
 	TruncateParamsJSON string
 	CreatedAt          string
 	UpdatedAt          string
+	// Internal upstream fields
+	Internal           interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	InternalProvider   string
+	InternalAPIKey     string
+	InternalBaseURL    string
+	InternalModel      string
+	InternalKeyVersion interface{} // int64
 }
 
 // isEnabled converts the Enabled field to bool (handles both SQLite int64 and PostgreSQL bool)
@@ -410,6 +419,30 @@ func (r *dbModelRow) isEnabled() bool {
 		return v != 0
 	default:
 		return false
+	}
+}
+
+// isInternal converts the Internal field to bool
+func (r *dbModelRow) isInternal() bool {
+	switch v := r.Internal.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	default:
+		return false
+	}
+}
+
+// getInternalKeyVersion converts the InternalKeyVersion field to int
+func (r *dbModelRow) getInternalKeyVersion() int {
+	switch v := r.InternalKeyVersion.(type) {
+	case int64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 1
 	}
 }
 
@@ -439,6 +472,7 @@ func (m *ModelsManager) Save() error {
 }
 
 // scanModels executes a query and scans the results into model configs
+// Note: This scans only basic fields (without internal fields) for list operations
 func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.ModelConfig, error) {
 	rows, err := m.store.DB.QueryContext(context.Background(), query, args...)
 	if err != nil {
@@ -482,6 +516,79 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 	}
 
 	return result, rows.Err()
+}
+
+// GetModel returns a single model configuration by ID, including internal fields
+func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(internal, 0), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
+		FROM models WHERE id = ?`
+
+	if m.store.Dialect == "postgres" {
+		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(internal, false), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
+			FROM models WHERE id = $1`
+	}
+
+	var dbModel dbModelRow
+	err := m.store.DB.QueryRowContext(context.Background(), query, modelID).Scan(
+		&dbModel.ID,
+		&dbModel.Name,
+		&dbModel.Enabled,
+		&dbModel.FallbackChainJSON,
+		&dbModel.TruncateParamsJSON,
+		&dbModel.CreatedAt,
+		&dbModel.UpdatedAt,
+		&dbModel.Internal,
+		&dbModel.InternalProvider,
+		&dbModel.InternalAPIKey,
+		&dbModel.InternalBaseURL,
+		&dbModel.InternalModel,
+		&dbModel.InternalKeyVersion,
+	)
+	if err != nil {
+		return nil
+	}
+
+	model := &models.ModelConfig{
+		ID:                 dbModel.ID,
+		Name:               dbModel.Name,
+		Enabled:            dbModel.isEnabled(),
+		Internal:           dbModel.isInternal(),
+		InternalProvider:   dbModel.InternalProvider,
+		InternalAPIKey:     dbModel.InternalAPIKey,
+		InternalBaseURL:    dbModel.InternalBaseURL,
+		InternalModel:      dbModel.InternalModel,
+		InternalKeyVersion: dbModel.getInternalKeyVersion(),
+	}
+
+	// Decrypt API key
+	if dbModel.InternalAPIKey != "" {
+		decrypted, err := crypto.Decrypt(dbModel.InternalAPIKey)
+		if err != nil {
+			// Log warning but don't fail - might be unencrypted from before migration
+			log.Printf("Warning: failed to decrypt API key for model %s: %v", model.ID, err)
+		} else {
+			model.InternalAPIKey = decrypted
+		}
+	}
+
+	// Parse fallback chain
+	if dbModel.FallbackChainJSON != "" {
+		json.Unmarshal([]byte(dbModel.FallbackChainJSON), &model.FallbackChain)
+	}
+
+	// Parse truncate params
+	if dbModel.TruncateParamsJSON != "" {
+		json.Unmarshal([]byte(dbModel.TruncateParamsJSON), &model.TruncateParams)
+	}
+
+	return model
 }
 
 // GetModels returns all model configurations
@@ -601,6 +708,16 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
+	// Encrypt API key before storage
+	encryptedAPIKey := ""
+	if model.InternalAPIKey != "" {
+		encrypted, err := crypto.Encrypt(model.InternalAPIKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		encryptedAPIKey = encrypted
+	}
+
 	insertQuery := m.qb.InsertModel()
 	_, err = m.store.DB.ExecContext(context.Background(), insertQuery,
 		model.ID,
@@ -608,6 +725,12 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		m.qb.BooleanLiteral(model.Enabled),
 		string(fallbackJSON),
 		string(truncateJSON),
+		m.qb.BooleanLiteral(model.Internal),
+		model.InternalProvider,
+		encryptedAPIKey,
+		model.InternalBaseURL,
+		model.InternalModel,
+		model.InternalKeyVersion,
 	)
 	return err
 }
@@ -639,12 +762,28 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
+	// Encrypt API key before storage
+	encryptedAPIKey := ""
+	if model.InternalAPIKey != "" {
+		encrypted, err := crypto.Encrypt(model.InternalAPIKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		encryptedAPIKey = encrypted
+	}
+
 	updateQuery := m.qb.UpdateModel()
 	_, err = m.store.DB.ExecContext(context.Background(), updateQuery,
 		model.Name,
 		m.qb.BooleanLiteral(model.Enabled),
 		string(fallbackJSON),
 		string(truncateJSON),
+		m.qb.BooleanLiteral(model.Internal),
+		model.InternalProvider,
+		encryptedAPIKey,
+		model.InternalBaseURL,
+		model.InternalModel,
+		model.InternalKeyVersion,
 		modelID,
 	)
 	return err

@@ -34,6 +34,14 @@ type ModelConfig struct {
 	Enabled        bool     `json:"enabled"`
 	FallbackChain  []string `json:"fallback_chain,omitempty"`
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
+
+	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
+	Internal           bool   `json:"internal,omitempty"`
+	InternalProvider   string `json:"internal_provider,omitempty"`    // Provider: openai, anthropic, gemini, zhipu, etc.
+	InternalAPIKey     string `json:"-"`                              // Encrypted API key (never expose in JSON)
+	InternalBaseURL    string `json:"internal_base_url,omitempty"`    // Custom base URL (optional)
+	InternalModel      string `json:"internal_model,omitempty"`       // Actual model name for provider (e.g., GLM-5.0)
+	InternalKeyVersion int    `json:"internal_key_version,omitempty"` // Encryption key version
 }
 
 // ModelsConfigInterface defines the interface for models configuration
@@ -41,6 +49,7 @@ type ModelConfig struct {
 type ModelsConfigInterface interface {
 	GetModels() []ModelConfig
 	GetEnabledModels() []ModelConfig
+	GetModel(modelID string) *ModelConfig
 	GetTruncateParams(modelID string) []string
 	GetFallbackChain(modelID string) []string
 	AddModel(model ModelConfig) error
@@ -79,6 +88,22 @@ func (mc *ModelsConfig) GetTruncateParams(modelID string) []string {
 			result := make([]string, len(model.TruncateParams))
 			copy(result, model.TruncateParams)
 			return result
+		}
+	}
+	return nil
+}
+
+// GetModel returns the model configuration for a given model ID.
+// Returns nil if the model is not found.
+func (mc *ModelsConfig) GetModel(modelID string) *ModelConfig {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	for _, model := range mc.Models {
+		if model.ID == modelID {
+			// Return a copy to avoid mutations
+			copy := model
+			return &copy
 		}
 	}
 	return nil
@@ -327,6 +352,7 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 // Since fallback is now single-level (max 1 item), we only perform basic validation:
 // - Model IDs must be non-empty
 // - Fallback references must reference existing models
+// - If internal is true, require provider, api_key, and model
 func (mc *ModelsConfig) Validate() error {
 	// Build set of valid model IDs
 	modelIDs := make(map[string]bool)
@@ -352,9 +378,53 @@ func (mc *ModelsConfig) Validate() error {
 				// This enables adding new models without updating all configs
 			}
 		}
+
+		// Validate internal upstream configuration
+		if model.Internal {
+			if model.InternalProvider == "" {
+				return fmt.Errorf("model %s: internal_provider is required when internal is true", model.ID)
+			}
+			if model.InternalAPIKey == "" {
+				return fmt.Errorf("model %s: internal_api_key is required when internal is true", model.ID)
+			}
+			if model.InternalModel == "" {
+				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+			}
+			// Validate provider is in allowed list
+			if !isValidProvider(model.InternalProvider) {
+				return fmt.Errorf("model %s: invalid internal_provider: %s", model.ID, model.InternalProvider)
+			}
+		}
 	}
 
 	return nil
+}
+
+// validProviders is the list of supported internal providers
+var validProviders = map[string]bool{
+	"openai":    true,
+	"anthropic": true,
+	"gemini":    true,
+	"zhipu":     true,
+	"azure":     true,
+}
+
+// isValidProvider checks if the provider is in the allowed list
+func isValidProvider(provider string) bool {
+	return validProviders[provider]
+}
+
+// IsInternal returns true if the model uses internal upstream
+func (m *ModelConfig) IsInternal() bool {
+	return m.Internal
+}
+
+// GetInternalConfig returns the internal upstream configuration
+func (m *ModelConfig) GetInternalConfig() (provider, apiKey, baseURL, model string, ok bool) {
+	if !m.Internal {
+		return "", "", "", "", false
+	}
+	return m.InternalProvider, m.InternalAPIKey, m.InternalBaseURL, m.InternalModel, true
 }
 
 // GetEnabledModels returns only the enabled model configurations.

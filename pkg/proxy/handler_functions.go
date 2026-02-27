@@ -16,6 +16,8 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 	"github.com/google/uuid"
@@ -171,6 +173,7 @@ func (h *Handler) prepareRetry(w http.ResponseWriter, rc *requestContext, attemp
 }
 
 // doSingleAttempt performs a single upstream HTTP request and handles the response.
+// For internal models, it routes directly to the AI provider instead of upstream.
 func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, modelIndex, attempt int, counters *retryCounters) attemptResult {
 	// Build the body to send, optionally truncating unsupported params for this model.
 	bodyToSend := rc.requestBody
@@ -187,7 +190,13 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 			}
 			bodyToSend = cloned
 		}
+
+		// Check if this model uses internal upstream
+		if modelConfig := rc.conf.ModelsConfig.GetModel(currentModel); modelConfig != nil && modelConfig.Internal {
+			return h.doInternalAttempt(w, rc, modelConfig, bodyToSend, attempt, counters)
+		}
 	}
+
 	newBodyBytes, _ := json.Marshal(bodyToSend)
 
 	attemptCtx, attemptCancel := context.WithTimeout(rc.baseCtx, rc.conf.MaxGenerationTime)
@@ -216,6 +225,65 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 	}
 
 	return h.handleOKResponse(w, rc, resp, attemptCtx, attempt, counters)
+}
+
+// doInternalAttempt handles requests for internal models (direct provider calls)
+func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, modelConfig *models.ModelConfig, bodyToSend map[string]interface{}, attempt int, counters *retryCounters) attemptResult {
+	attemptCtx, attemptCancel := context.WithTimeout(rc.baseCtx, rc.conf.MaxGenerationTime)
+	defer attemptCancel()
+
+	logger.Debugf("[DO-INTERNAL] Starting internal attempt %d for request %s, model %s", attempt, rc.reqID, modelConfig.ID)
+
+	internalHandler := NewInternalHandler(modelConfig)
+	err := internalHandler.HandleRequest(attemptCtx, bodyToSend, w, rc.isStream)
+
+	if err != nil {
+		logger.Debugf("[DO-INTERNAL] Internal attempt %d failed: %v", attempt, err)
+
+		// Check for client disconnection
+		if rc.baseCtx.Err() == context.Canceled {
+			log.Println("Client disconnected during internal request")
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = "Client disconnected"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+			return attemptReturnImmediately
+		}
+
+		// Check for deadline exceeded
+		if attemptCtx.Err() == context.DeadlineExceeded {
+			log.Printf("Internal attempt %d generation deadline exceeded", attempt)
+			h.publishEvent("error_deadline_exceeded", map[string]interface{}{"id": rc.reqID})
+			counters.genRetries++
+			return attemptContinueRetry
+		}
+
+		// Other errors - check if retryable
+		log.Printf("Internal request failed: %v", err)
+		h.publishEvent("internal_error", map[string]interface{}{"error": err.Error(), "id": rc.reqID})
+
+		// Check if error is retryable
+		var providerErr *providers.ProviderError
+		if errors.As(err, &providerErr) && !providerErr.Retryable {
+			// Non-retryable error - break to fallback
+			log.Printf("Internal error is non-retryable, breaking to fallback")
+			return attemptBreakToFallback
+		}
+
+		counters.errorRetries++
+		time.Sleep(500 * time.Millisecond)
+		return attemptContinueRetry
+	}
+
+	// Success
+	logger.Debugf("[DO-INTERNAL] Internal attempt %d succeeded", attempt)
+	rc.reqLog.Status = "completed"
+	rc.reqLog.EndTime = time.Now()
+	rc.reqLog.Duration = time.Since(rc.startTime).String()
+	h.store.Add(rc.reqLog)
+	h.publishEvent("request_completed", map[string]interface{}{"id": rc.reqID})
+	return attemptSuccess
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,7 +477,7 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 					}
 				}()
 
-			// Wait for write to complete or context canceled, with timeout
+				// Wait for write to complete or context canceled, with timeout
 				select {
 				case <-heartbeatCtx.Done():
 					return

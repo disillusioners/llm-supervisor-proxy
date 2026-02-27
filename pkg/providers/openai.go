@@ -1,0 +1,268 @@
+package providers
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// OpenAIProvider implements Provider for OpenAI-compatible APIs
+type OpenAIProvider struct {
+	apiKey  string
+	baseURL string
+	client  *http.Client
+}
+
+// NewOpenAIProvider creates a new OpenAI provider
+func NewOpenAIProvider(apiKey, baseURL string) *OpenAIProvider {
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	return &OpenAIProvider{
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		client: &http.Client{
+			Timeout: 5 * time.Minute,
+		},
+	}
+}
+
+// Name returns the provider name
+func (p *OpenAIProvider) Name() string {
+	return "openai"
+}
+
+// ChatCompletion sends a non-streaming chat completion request
+func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	req.Stream = false
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	p.setHeaders(httpReq)
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, &ProviderError{
+			Provider:  p.Name(),
+			Message:   err.Error(),
+			Retryable: isNetworkError(err),
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, p.handleError(resp)
+	}
+
+	var result ChatCompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// StreamChatCompletion sends a streaming chat completion request
+func (p *OpenAIProvider) StreamChatCompletion(ctx context.Context, req *ChatCompletionRequest) (<-chan StreamEvent, error) {
+	req.Stream = true
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	p.setHeaders(httpReq)
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, &ProviderError{
+			Provider:  p.Name(),
+			Message:   err.Error(),
+			Retryable: isNetworkError(err),
+		}
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		return nil, p.handleError(resp)
+	}
+
+	eventCh := make(chan StreamEvent, 100)
+
+	go func() {
+		defer close(eventCh)
+		defer resp.Body.Close()
+
+		p.processStream(resp.Body, eventCh)
+	}()
+
+	return eventCh, nil
+}
+
+// IsRetryable checks if an error should trigger a retry
+func (p *OpenAIProvider) IsRetryable(err error) bool {
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.Retryable
+	}
+	return false
+}
+
+// setHeaders sets common headers for OpenAI requests
+func (p *OpenAIProvider) setHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+}
+
+// handleError converts HTTP error response to ProviderError
+func (p *OpenAIProvider) handleError(resp *http.Response) *ProviderError {
+	body, _ := io.ReadAll(resp.Body)
+
+	var apiErr struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	json.Unmarshal(body, &apiErr)
+
+	msg := apiErr.Error.Message
+	if msg == "" {
+		msg = string(body)
+	}
+
+	// Determine if retryable based on status code
+	retryable := false
+	switch resp.StatusCode {
+	case 429: // Rate limit
+		retryable = true
+	case 500, 502, 503, 504: // Server errors
+		retryable = true
+	}
+
+	return &ProviderError{
+		Provider:   p.Name(),
+		StatusCode: resp.StatusCode,
+		Message:    msg,
+		Retryable:  retryable,
+	}
+}
+
+// processStream processes SSE stream and sends normalized events
+func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEvent) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024) // 10MB max
+
+	var lastResponse *ChatCompletionResponse
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip empty lines
+		if line == "" {
+			continue
+		}
+
+		// Only process data lines
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+
+		// Check for stream end
+		if data == "[DONE]" {
+			if lastResponse != nil {
+				eventCh <- StreamEvent{
+					Type:     "done",
+					Response: lastResponse,
+				}
+			} else {
+				eventCh <- StreamEvent{
+					Type: "done",
+				}
+			}
+			return
+		}
+
+		var chunk ChatCompletionResponse
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			eventCh <- StreamEvent{
+				Type:  "error",
+				Error: fmt.Errorf("failed to parse chunk: %w", err),
+			}
+			continue
+		}
+
+		// Extract content delta
+		if len(chunk.Choices) > 0 {
+			choice := chunk.Choices[0]
+			if choice.Delta != nil && choice.Delta.Content != "" {
+				eventCh <- StreamEvent{
+					Type:    "content",
+					Content: choice.Delta.Content,
+				}
+			}
+			if choice.FinishReason != "" {
+				lastResponse = &chunk
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		eventCh <- StreamEvent{
+			Type:  "error",
+			Error: err,
+		}
+	}
+}
+
+// isNetworkError checks if the error is a network-level error
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Network errors are generally retryable
+	return true
+}
+
+// parseRetryAfter parses the Retry-After header
+func parseRetryAfter(header string) time.Duration {
+	if header == "" {
+		return 0
+	}
+
+	// Try parsing as seconds
+	if secs, err := strconv.Atoi(header); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+
+	// Try parsing as date
+	if t, err := time.Parse(time.RFC1123, header); err == nil {
+		return time.Until(t)
+	}
+
+	return 0
+}
