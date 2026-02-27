@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -53,15 +57,17 @@ type Handler struct {
 	store       *store.RequestStore
 	client      *http.Client
 	bufferStore *bufferstore.BufferStore
+	tokenStore  *auth.TokenStore
 }
 
-func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore) *Handler {
+func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Handler {
 	return &Handler{
 		config:      config,
 		bus:         bus,
 		store:       store,
 		client:      &http.Client{},
 		bufferStore: bufferStore,
+		tokenStore:  tokenStore,
 	}
 }
 
@@ -73,6 +79,80 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 			Data:      data,
 		})
 	}
+}
+
+// extractAPIKey extracts the API key from Authorization Bearer or X-API-Key header
+func (h *Handler) extractAPIKey(r *http.Request) string {
+	// Check Authorization: Bearer <token> header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+
+	// Check X-API-Key header
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != "" {
+		return apiKey
+	}
+
+	return ""
+}
+
+// authenticate validates the API key and returns true if valid
+func (h *Handler) authenticate(r *http.Request) bool {
+	// If tokenStore is nil, skip validation (auth disabled)
+	if h.tokenStore == nil {
+		return true
+	}
+
+	apiKey := h.extractAPIKey(r)
+	if apiKey == "" {
+		log.Printf("[AUTH] No API key provided")
+		return false
+	}
+
+	// Create a timeout context for database query
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	token, err := h.tokenStore.ValidateToken(ctx, apiKey)
+	if err != nil {
+		log.Printf("[AUTH] Token validation failed: %v", err)
+		return false
+	}
+	log.Printf("[AUTH] Token validated successfully: %s", token.Name)
+	return true
+}
+
+// requiresInternalAuth checks if any model in the request chain uses internal upstream
+// and therefore requires client API key validation
+func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
+	// If tokenStore is nil, auth is disabled
+	if h.tokenStore == nil {
+		return false
+	}
+
+	// Check all models in the chain (primary + fallbacks)
+	for _, modelID := range rc.modelList {
+		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
+		if modelConfig != nil && modelConfig.Internal {
+			log.Printf("[AUTH] Model %s uses internal upstream, auth required", modelID)
+			return true
+		}
+	}
+
+	log.Printf("[AUTH] No internal upstream models, auth not required")
+	return false
+}
+
+// sendAuthError sends a 401 Unauthorized JSON error response
+func (h *Handler) sendAuthError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(map[string]string{
+		"error":   "invalid_api_key",
+		"message": "Invalid or expired API key",
+	})
 }
 
 // HandleChatCompletions is the main entry point for proxying chat completions.
@@ -92,6 +172,18 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		}
 		return
+	}
+
+	// Only authenticate if using internal upstream
+	// For external upstream, the upstream provider handles authentication
+	if h.requiresInternalAuth(rc) {
+		log.Printf("[AUTH] Authenticating request %s", rc.reqID)
+		if !h.authenticate(r) {
+			log.Printf("[AUTH] Authentication failed for request %s, sending 401", rc.reqID)
+			h.sendAuthError(w)
+			return
+		}
+		log.Printf("[AUTH] Authentication passed for request %s", rc.reqID)
 	}
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})

@@ -97,7 +97,7 @@ func main() {
 	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore)
 
 	// Setup Server
 	mux := http.NewServeMux()
