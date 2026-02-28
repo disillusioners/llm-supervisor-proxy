@@ -58,7 +58,7 @@ func (s *Store) MigrateFromJSON(ctx context.Context) error {
 		// Fresh start. Seed default config using embedded JSON template.
 		needsMigration, err := s.configNeedsMigration(ctx)
 		if err == nil && needsMigration {
-			if err := s.migrateConfigJSON(ctx, []byte(defaultConfigJSON), qb); err != nil {
+			if err := s.migrateConfigJSON(ctx, []byte(defaultConfigJSONTemplate), qb); err != nil {
 				log.Printf("Warning: failed to seed default config: %v", err)
 			} else {
 				log.Printf("Seeded default config from embedded template")
@@ -91,7 +91,7 @@ func (s *Store) MigrateFromJSON(ctx context.Context) error {
 		// Fresh start without previous models.json. Try seeding from embedded models JSON template.
 		hasModels, err := s.HasModels(ctx)
 		if err == nil && !hasModels {
-			if err := s.migrateModelsJSON(ctx, []byte(defaultModelsJSON), qb); err != nil {
+			if err := s.migrateModelsJSON(ctx, []byte(defaultModelsJSONTemplate), qb); err != nil {
 				log.Printf("Warning: failed to seed default models: %v", err)
 			} else {
 				log.Printf("Seeded default models from embedded template")

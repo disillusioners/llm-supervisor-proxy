@@ -1,28 +1,31 @@
 package database
 
-// defaultModelsJSON contains the default models configuration
+// defaultModelsJSONTemplate contains the default models configuration
 // to seed the database on first run.
-const defaultModelsJSON = `{
+// Note: credentials must be created via UI before using internal models
+const defaultModelsJSONTemplate = `{
   "models": [
     {
       "id": "glm-5",
       "name": "GLM-5",
       "enabled": true,
       "fallback_chain": ["MiniMax-M2.5"],
-      "truncate_params": ["max_completion_tokens", "store"]
+      "truncate_params": ["max_completion_tokens", "store", "reasoning_effort"]
     },
     {
       "id": "MiniMax-M2.5",
       "name": "MiniMax M2.5",
       "enabled": true,
-      "fallback_chain": ["glm-5"]
+      "fallback_chain": ["glm-5"],
+      "truncate_params": ["reasoning_effort"]
     }
-  ]
+  ],
+  "credentials": []
 }`
 
-// defaultConfigJSON contains the default proxy configuration
+// defaultConfigJSONTemplate contains the default proxy configuration
 // to seed the database on first run.
-const defaultConfigJSON = `{
+const defaultConfigJSONTemplate = `{
   "version": "1.0",
   "upstream_url": "http://litellm-service.litellm.svc.cluster.local:4000",
   "port": 4321,
