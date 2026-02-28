@@ -89,8 +89,14 @@ func (h *Handler) extractAPIKey(r *http.Request) string {
 		return strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
-	// Check X-API-Key header
+	// Check X-API-Key header (capitalized)
 	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != "" {
+		return apiKey
+	}
+
+	// Check x-api-key header (lowercase, used by Anthropic SDK)
+	apiKey = r.Header.Get("x-api-key")
 	if apiKey != "" {
 		return apiKey
 	}
