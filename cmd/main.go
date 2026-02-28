@@ -108,6 +108,7 @@ func main() {
 	// Register Proxy handlers
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChatCompletions)
 	mux.HandleFunc("/v1/messages", proxyHandler.HandleAnthropicMessages) // Anthropic Messages API endpoint
+	mux.HandleFunc("/v1/models", proxyHandler.HandleModels)              // OpenAI-compatible models list
 
 	// Health check endpoint
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +134,7 @@ func main() {
 		log.Printf("Dashboard available at http://localhost:%d", cfg.Port)
 		log.Printf("OpenAI endpoint: http://localhost:%d/v1/chat/completions", cfg.Port)
 		log.Printf("Anthropic endpoint: http://localhost:%d/v1/messages", cfg.Port)
+		log.Printf("Models endpoint: http://localhost:%d/v1/models", cfg.Port)
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)

@@ -81,6 +81,35 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 	}
 }
 
+// HandleModels returns the list of available models in OpenAI-compatible format.
+// GET /v1/models
+func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cfg := h.config.Clone()
+	enabledModels := cfg.ModelsConfig.GetEnabledModels()
+
+	// Build OpenAI-compatible response
+	models := make([]map[string]interface{}, 0, len(enabledModels))
+	for _, m := range enabledModels {
+		models = append(models, map[string]interface{}{
+			"id":       m.ID,
+			"object":   "model",
+			"created":  1700000000, // Static timestamp
+			"owned_by": "llm-supervisor-proxy",
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "list",
+		"data":   models,
+	})
+}
+
 // extractAPIKey extracts the API key from Authorization Bearer or X-API-Key header
 func (h *Handler) extractAPIKey(r *http.Request) string {
 	// Check Authorization: Bearer <token> header
