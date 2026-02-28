@@ -59,7 +59,6 @@ export interface Model {
   // Internal upstream fields
   internal?: boolean;
   credential_id?: string; // Reference to credential
-  internal_provider?: InternalProvider; // Provider override (optional)
   internal_api_key?: string;   // Display only, write-only
   internal_base_url?: string; // Base URL override (optional)
   internal_model?: string;     // Actual model name at provider

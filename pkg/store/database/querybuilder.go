@@ -124,8 +124,8 @@ func (q *QueryBuilder) UpdateConfig() string {
 func (q *QueryBuilder) InsertModel() string {
 	if q.dialect == PostgreSQL {
 		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-			internal, credential_id, internal_provider, internal_base_url, internal_model)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			internal, credential_id, internal_base_url, internal_model)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
@@ -133,14 +133,13 @@ func (q *QueryBuilder) InsertModel() string {
 				truncate_params_json = EXCLUDED.truncate_params_json,
 				internal = EXCLUDED.internal,
 				credential_id = EXCLUDED.credential_id,
-				internal_provider = EXCLUDED.internal_provider,
 				internal_base_url = EXCLUDED.internal_base_url,
 				internal_model = EXCLUDED.internal_model,
 				updated_at = NOW()`
 	}
 	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-		internal, credential_id, internal_provider, internal_base_url, internal_model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		internal, credential_id, internal_base_url, internal_model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateModel returns the appropriate UPDATE query for a model
@@ -153,11 +152,10 @@ func (q *QueryBuilder) UpdateModel() string {
 			truncate_params_json = $4,
 			internal = $5,
 			credential_id = $6,
-			internal_provider = $7,
-			internal_base_url = $8,
-			internal_model = $9,
+			internal_base_url = $7,
+			internal_model = $8,
 			updated_at = NOW()
-		WHERE id = $10`
+		WHERE id = $9`
 	}
 	return `UPDATE models SET
 			name = ?,
@@ -166,7 +164,6 @@ func (q *QueryBuilder) UpdateModel() string {
 			truncate_params_json = ?,
 			internal = ?,
 			credential_id = ?,
-			internal_provider = ?,
 			internal_base_url = ?,
 			internal_model = ?,
 			updated_at = datetime('now')
@@ -195,12 +192,12 @@ func (q *QueryBuilder) GetModelByID() string {
 func (q *QueryBuilder) GetAllModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, '')
 			FROM models ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, '')
 		FROM models ORDER BY name`
 }
@@ -209,12 +206,12 @@ func (q *QueryBuilder) GetAllModels() string {
 func (q *QueryBuilder) GetEnabledModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, '')
 			FROM models WHERE enabled = true ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, '')
 		FROM models WHERE enabled = 1 ORDER BY name`
 }

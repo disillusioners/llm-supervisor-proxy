@@ -29,11 +29,10 @@ type Model struct {
 	FallbackChain  []string `json:"fallback_chain"`
 	TruncateParams []string `json:"truncate_params,omitempty"`
 	// Internal upstream fields
-	Internal         bool   `json:"internal"`
-	CredentialID     string `json:"credential_id,omitempty"`     // Reference to credential
-	InternalProvider string `json:"internal_provider,omitempty"` // Provider override (optional)
-	InternalBaseURL  string `json:"internal_base_url,omitempty"` // Base URL override (optional)
-	InternalModel    string `json:"internal_model,omitempty"`
+	Internal        bool   `json:"internal"`
+	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential
+	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional)
+	InternalModel   string `json:"internal_model,omitempty"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -292,15 +291,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		models := make([]Model, len(modelConfigs))
 		for i, mc := range modelConfigs {
 			models[i] = Model{
-				ID:               mc.ID,
-				Name:             mc.Name,
-				Enabled:          mc.Enabled,
-				FallbackChain:    mc.FallbackChain,
-				TruncateParams:   mc.TruncateParams,
-				Internal:         mc.Internal,
-				InternalProvider: mc.InternalProvider,
-				InternalBaseURL:  mc.InternalBaseURL,
-				InternalModel:    mc.InternalModel,
+				ID:              mc.ID,
+				Name:            mc.Name,
+				Enabled:         mc.Enabled,
+				FallbackChain:   mc.FallbackChain,
+				TruncateParams:  mc.TruncateParams,
+				Internal:        mc.Internal,
+				CredentialID:    mc.CredentialID,
+				InternalBaseURL: mc.InternalBaseURL,
+				InternalModel:   mc.InternalModel,
 			}
 		}
 
@@ -334,16 +333,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig
 		modelConfig := models.ModelConfig{
-			ID:               newModel.ID,
-			Name:             newModel.Name,
-			Enabled:          newModel.Enabled,
-			FallbackChain:    newModel.FallbackChain,
-			TruncateParams:   newModel.TruncateParams,
-			Internal:         newModel.Internal,
-			CredentialID:     newModel.CredentialID,
-			InternalProvider: newModel.InternalProvider,
-			InternalBaseURL:  newModel.InternalBaseURL,
-			InternalModel:    newModel.InternalModel,
+			ID:              newModel.ID,
+			Name:            newModel.Name,
+			Enabled:         newModel.Enabled,
+			FallbackChain:   newModel.FallbackChain,
+			TruncateParams:  newModel.TruncateParams,
+			Internal:        newModel.Internal,
+			CredentialID:    newModel.CredentialID,
+			InternalBaseURL: newModel.InternalBaseURL,
+			InternalModel:   newModel.InternalModel,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -405,16 +403,15 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig and update
 		modelConfig := models.ModelConfig{
-			ID:               updatedModel.ID,
-			Name:             updatedModel.Name,
-			Enabled:          updatedModel.Enabled,
-			FallbackChain:    updatedModel.FallbackChain,
-			TruncateParams:   updatedModel.TruncateParams,
-			Internal:         updatedModel.Internal,
-			CredentialID:     updatedModel.CredentialID,
-			InternalProvider: updatedModel.InternalProvider,
-			InternalBaseURL:  updatedModel.InternalBaseURL,
-			InternalModel:    updatedModel.InternalModel,
+			ID:              updatedModel.ID,
+			Name:            updatedModel.Name,
+			Enabled:         updatedModel.Enabled,
+			FallbackChain:   updatedModel.FallbackChain,
+			TruncateParams:  updatedModel.TruncateParams,
+			Internal:        updatedModel.Internal,
+			CredentialID:    updatedModel.CredentialID,
+			InternalBaseURL: updatedModel.InternalBaseURL,
+			InternalModel:   updatedModel.InternalModel,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
@@ -519,12 +516,11 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 
 // TestModelRequest represents the request body for testing a model
 type TestModelRequest struct {
-	ModelID          string `json:"model_id,omitempty"`      // Optional: use saved config from existing model
-	CredentialID     string `json:"credential_id,omitempty"` // Optional: use saved credential
-	InternalProvider string `json:"internal_provider"`
-	APIKey           string `json:"api_key"` // API key for testing (can be empty if credential_id provided)
-	InternalBaseURL  string `json:"internal_base_url"`
-	InternalModel    string `json:"internal_model"`
+	ModelID         string `json:"model_id,omitempty"`      // Optional: use saved config from existing model
+	CredentialID    string `json:"credential_id,omitempty"` // Optional: use saved credential
+	APIKey          string `json:"api_key"`                 // API key for testing (can be empty if credential_id provided)
+	InternalBaseURL string `json:"internal_base_url"`
+	InternalModel   string `json:"internal_model"`
 }
 
 // TestModelResponse represents the response for testing a model
@@ -579,11 +575,23 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	if req.ModelID != "" {
 		resolvedProvider, resolvedAPIKey, resolvedBaseURL, _, ok := s.modelsConfig.ResolveInternalConfig(req.ModelID)
 		if !ok {
+			// Check why it failed
+			model := s.modelsConfig.GetModel(req.ModelID)
+			var reason string
+			if model == nil {
+				reason = "model does not exist"
+			} else if !model.Internal {
+				reason = "model is not marked as internal"
+			} else if model.CredentialID == "" {
+				reason = "model has no credential_id set"
+			} else {
+				reason = "credential not found"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(TestModelResponse{
 				Success: false,
-				Error:   fmt.Sprintf("Model not found or not internal: %s", req.ModelID),
+				Error:   fmt.Sprintf("Cannot test model '%s': %s", req.ModelID, reason),
 			})
 			return
 		}
@@ -600,9 +608,6 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use request values as overrides
-	if req.InternalProvider != "" {
-		provider = req.InternalProvider
-	}
 	if req.InternalBaseURL != "" {
 		baseURL = req.InternalBaseURL
 	}

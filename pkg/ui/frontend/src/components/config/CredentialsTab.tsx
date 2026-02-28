@@ -17,8 +17,8 @@ const PROVIDER_DEFAULTS: Record<Provider, string> = {
   gemini: 'https://generativelanguage.googleapis.com',
   zhipu: 'https://open.bigmodel.cn/api/paas/v4',
   azure: '',
-  zai: 'https://api.zukizukiv1.com',
-  minimax: 'https://api.minimax.chat/v1',
+  zai: 'https://api.z.ai/api/coding/paas/v4',
+  minimax: 'https://api.minimax.io/v1',
 };
 
 const providerColors: Record<Provider, string> = {
@@ -101,8 +101,8 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
         setStatus({ type: 'success', message: 'Credential updated successfully' });
       }
       // Refresh credentials
-      const data = await getCredentials();
-      setCredentials(data || []);
+      const refreshedCredentials = await getCredentials();
+      setCredentials(refreshedCredentials || []);
       setShowForm(false);
       setCredentialToEdit(undefined);
     } catch (e) {
@@ -120,8 +120,8 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
       await deleteCredential(credentialToDelete.id);
       setStatus({ type: 'success', message: 'Credential deleted successfully' });
       // Refresh credentials
-      const data = await getCredentials();
-      setCredentials(data || []);
+      const refreshedCredentials = await getCredentials();
+      setCredentials(refreshedCredentials || []);
       setCredentialToDelete(null);
     } catch (e) {
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to delete credential' });

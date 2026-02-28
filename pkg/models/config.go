@@ -36,11 +36,10 @@ type ModelConfig struct {
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
 	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
-	Internal         bool   `json:"internal,omitempty"`
-	CredentialID     string `json:"credential_id,omitempty"`     // Reference to credential (required if internal is true)
-	InternalProvider string `json:"internal_provider,omitempty"` // Provider override (optional, uses credential's provider if empty)
-	InternalBaseURL  string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
-	InternalModel    string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
+	Internal        bool   `json:"internal,omitempty"`
+	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential (required if internal is true)
+	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
+	InternalModel   string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
 }
 
 // ModelsConfigInterface defines the interface for models configuration
@@ -422,10 +421,6 @@ func (mc *ModelsConfig) Validate() error {
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
-			// Validate provider override if specified
-			if model.InternalProvider != "" && !isValidProvider(model.InternalProvider) {
-				return fmt.Errorf("model %s: invalid internal_provider: %s", model.ID, model.InternalProvider)
-			}
 		}
 	}
 
@@ -441,22 +436,6 @@ func (mc *ModelsConfig) Validate() error {
 	return nil
 }
 
-// validProviders is the list of supported internal providers
-var validProviders = map[string]bool{
-	"openai":    true,
-	"anthropic": true,
-	"gemini":    true,
-	"zhipu":     true,
-	"azure":     true,
-	"zai":       true,
-	"minimax":   true,
-}
-
-// isValidProvider checks if the provider is in the allowed list
-func isValidProvider(provider string) bool {
-	return validProviders[provider]
-}
-
 // IsInternal returns true if the model uses internal upstream
 func (m *ModelConfig) IsInternal() bool {
 	return m.Internal
@@ -469,12 +448,12 @@ func (m *ModelConfig) GetInternalConfig() (credentialID, provider, baseURL, mode
 	if !m.Internal {
 		return "", "", "", "", false
 	}
-	return m.CredentialID, m.InternalProvider, m.InternalBaseURL, m.InternalModel, true
+	return m.CredentialID, "", m.InternalBaseURL, m.InternalModel, true
 }
 
 // ResolveInternalConfig resolves the full internal upstream configuration including
 // credentials. It returns the provider, apiKey, baseURL, and model name.
-// The provider and baseURL are taken from the model if specified, otherwise from the credential.
+// The provider comes from the credential. The baseURL is taken from the model if specified, otherwise from the credential.
 func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
@@ -502,11 +481,8 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
-	// Resolve provider: model override > credential
-	provider = modelConfig.InternalProvider
-	if provider == "" {
-		provider = cred.Provider
-	}
+	// Provider comes from credential only
+	provider = cred.Provider
 
 	// Resolve baseURL: model override > credential
 	baseURL = modelConfig.InternalBaseURL

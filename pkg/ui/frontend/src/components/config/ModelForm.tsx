@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, InternalProvider, Credential } from '../../types';
+import type { Model, Credential } from '../../types';
 import { getCredentials } from '../../hooks/useApi';
 
 interface ModelFormProps {
@@ -11,7 +11,6 @@ interface ModelFormProps {
     fallback_chain: string[];
     truncate_params: string[];
     internal?: boolean;
-    internal_provider?: InternalProvider;
     credential_id?: string;
     internal_api_key?: string;
     internal_base_url?: string;
@@ -22,12 +21,12 @@ interface ModelFormProps {
   onNavigateToCredentials?: () => void;
 }
 
-const PROVIDER_DEFAULTS: Record<InternalProvider, string> = {
-  openai: 'https://api.openai.com/v1',
-  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
-  azure: '',
-  zai: 'https://api.z.ai/api/coding/paas/v4',
-  minimax: 'https://api.minimax.io/v1',
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  openai: 'OpenAI',
+  zhipu: 'Zhipu (智谱)',
+  azure: 'Azure OpenAI',
+  zai: 'ZAI',
+  minimax: 'MiniMax',
 };
 
 export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNavigateToCredentials }: ModelFormProps) {
@@ -37,7 +36,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     fallback_chain: '',
     truncate_params: '',
     internal: false,
-    internal_provider: 'openai' as InternalProvider,
     credential_id: '',
     internal_api_key: '',
     internal_base_url: '',
@@ -77,7 +75,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         fallback_chain: initialData.fallback_chain.join(', '),
         truncate_params: truncateParams,
         internal: initialData.internal ?? false,
-        internal_provider: initialData.internal_provider ?? 'openai',
         credential_id: initialData.credential_id ?? '',
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
@@ -90,7 +87,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         fallback_chain: '',
         truncate_params: '',
         internal: false,
-        internal_provider: 'openai',
         credential_id: '',
         internal_api_key: '',
         internal_base_url: '',
@@ -117,11 +113,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         }
       }
       
-      // Auto-set base URL when provider changes (only if no credential selected)
-      if (field === 'internal_provider' && typeof value === 'string' && !prev.credential_id) {
-        updated.internal_base_url = PROVIDER_DEFAULTS[value as InternalProvider] || '';
-      }
-
       // Clear base URL override when credential changes
       if (field === 'credential_id') {
         updated.internal_base_url = '';
@@ -161,7 +152,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         fallback_chain: fallback,
         truncate_params: truncate,
         internal: formData.internal || undefined,
-        internal_provider: formData.internal ? formData.internal_provider : undefined,
         credential_id: formData.internal && formData.credential_id ? formData.credential_id : undefined,
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
@@ -179,10 +169,12 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       setTesting(true);
       onStatus(null);
 
-      const baseUrl = formData.internal_base_url || PROVIDER_DEFAULTS[formData.internal_provider];
+      // Get provider from selected credential
+      const selectedCred = credentials.find(c => c.id === formData.credential_id);
+      const provider = selectedCred?.provider;
+      const baseUrl = formData.internal_base_url || selectedCred?.base_url;
 
       const payload: Record<string, string | undefined> = {
-        internal_provider: formData.internal_provider,
         credential_id: formData.credential_id || undefined,
         api_key: formData.internal_api_key || undefined,
         internal_base_url: baseUrl,
@@ -215,26 +207,22 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     }
   };
 
-  // Can test if:
-  // - In add mode: need provider, model, and (credential OR api_key)
-  // - In edit mode: need provider and model (can use saved credential)
-  const canTestConnection = formData.internal_provider && formData.internal_model && 
+  // Can test if: need credential (or API key) and model name
+  const canTestConnection = formData.internal_model && 
     (mode === 'edit' || formData.credential_id || formData.internal_api_key);
 
   const isValid = mode === 'add' 
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
     : formData.name.trim() !== '';
 
-  // Filter credentials by provider to show relevant ones
-  const filteredCredentials = credentials.filter(
-    cred => cred.provider === formData.internal_provider || !cred.provider
-  );
-
   // Get the currently selected credential
   const selectedCredential = credentials.find(cred => cred.id === formData.credential_id);
 
-  // Compute the default base URL (from credential or provider)
-  const defaultBaseUrl = selectedCredential?.base_url || PROVIDER_DEFAULTS[formData.internal_provider] || 'Provider default';
+  // Compute the default base URL (from credential)
+  const defaultBaseUrl = selectedCredential?.base_url || 'Provider default';
+
+  // Get provider display name from selected credential
+  const selectedProvider = selectedCredential?.provider;
 
   return (
     <div class="bg-gray-700/50 rounded-lg p-5 border border-gray-600">
@@ -307,21 +295,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         {formData.internal && (
           <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
             <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Provider</label>
-              <select
-                value={formData.internal_provider}
-                onChange={(e) => handleInputChange('internal_provider', (e.target as HTMLSelectElement).value)}
-                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-              >
-                <option value="openai">OpenAI</option>
-                <option value="zhipu">Zhipu (智谱)</option>
-                <option value="azure">Azure OpenAI</option>
-                <option value="zai">ZAI</option>
-                <option value="minimax">MiniMax</option>
-              </select>
-            </div>
-
-            <div>
               <div class="flex items-center justify-between mb-1">
                 <label class="block text-sm font-medium text-gray-300">Credential</label>
                 {onNavigateToCredentials && (
@@ -345,7 +318,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                   class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                 >
                   <option value="">Select a credential</option>
-                  {filteredCredentials.map((cred) => (
+                  {credentials.map((cred) => (
                     <option key={cred.id} value={cred.id}>
                       {cred.id} ({cred.provider || 'unknown'})
                     </option>
@@ -365,6 +338,14 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                     </button>
                   )}
                 </p>
+              )}
+              {selectedProvider && (
+                <div class="mt-2 flex items-center gap-2">
+                  <span class="text-xs text-gray-400">Provider:</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
+                    {PROVIDER_DISPLAY_NAMES[selectedProvider] || selectedProvider}
+                  </span>
+                </div>
               )}
               {selectedCredential?.base_url && (
                 <p class="text-xs text-gray-500 mt-1">
@@ -402,13 +383,13 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
             </div>
 
             <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Internal Model Name <span class="text-red-400">*</span></label>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Upstream Model Name <span class="text-red-400">*</span></label>
               <input
                 type="text"
                 value={formData.internal_model}
                 onInput={(e) => handleInputChange('internal_model', (e.target as HTMLInputElement).value)}
                 class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={formData.internal_provider === 'openai' ? 'gpt-4o' : formData.internal_provider === 'zhipu' ? 'glm-4' : 'gpt-4'}
+                placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : 'gpt-4'}
               />
               <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
             </div>

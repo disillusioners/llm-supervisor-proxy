@@ -10,6 +10,22 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 )
 
+// validProviders is the list of supported providers
+var validProviders = map[string]bool{
+	"openai":    true,
+	"anthropic": true,
+	"gemini":    true,
+	"zhipu":     true,
+	"azure":     true,
+	"zai":       true,
+	"minimax":   true,
+}
+
+// isValidProvider checks if the provider is in the allowed list
+func isValidProvider(provider string) bool {
+	return validProviders[provider]
+}
+
 // CredentialConfig represents a reusable credential for internal upstream models.
 // Credentials are stored separately from models and referenced by ID.
 type CredentialConfig struct {

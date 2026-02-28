@@ -402,11 +402,10 @@ type dbModelRow struct {
 	CreatedAt          string
 	UpdatedAt          string
 	// Internal upstream fields
-	Internal         interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
-	CredentialID     string      // Reference to credential
-	InternalProvider string      // Provider override (optional)
-	InternalBaseURL  string      // Base URL override (optional)
-	InternalModel    string
+	Internal        interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	CredentialID    string      // Reference to credential
+	InternalBaseURL string      // Base URL override (optional)
+	InternalModel   string
 }
 
 // dbCredentialRow represents a row from the credentials table
@@ -489,7 +488,6 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.UpdatedAt,
 			&dbModel.Internal,
 			&dbModel.CredentialID,
-			&dbModel.InternalProvider,
 			&dbModel.InternalBaseURL,
 			&dbModel.InternalModel,
 		)
@@ -498,14 +496,13 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 		}
 
 		model := models.ModelConfig{
-			ID:               dbModel.ID,
-			Name:             dbModel.Name,
-			Enabled:          dbModel.isEnabled(),
-			Internal:         dbModel.isInternal(),
-			CredentialID:     dbModel.CredentialID,
-			InternalProvider: dbModel.InternalProvider,
-			InternalBaseURL:  dbModel.InternalBaseURL,
-			InternalModel:    dbModel.InternalModel,
+			ID:              dbModel.ID,
+			Name:            dbModel.Name,
+			Enabled:         dbModel.isEnabled(),
+			Internal:        dbModel.isInternal(),
+			CredentialID:    dbModel.CredentialID,
+			InternalBaseURL: dbModel.InternalBaseURL,
+			InternalModel:   dbModel.InternalModel,
 		}
 
 		// Parse fallback chain
@@ -530,13 +527,13 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	defer m.mu.RUnlock()
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, '')
 			FROM models WHERE id = $1`
 	}
@@ -552,7 +549,6 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.UpdatedAt,
 		&dbModel.Internal,
 		&dbModel.CredentialID,
-		&dbModel.InternalProvider,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
 	)
@@ -561,14 +557,13 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:               dbModel.ID,
-		Name:             dbModel.Name,
-		Enabled:          dbModel.isEnabled(),
-		Internal:         dbModel.isInternal(),
-		CredentialID:     dbModel.CredentialID,
-		InternalProvider: dbModel.InternalProvider,
-		InternalBaseURL:  dbModel.InternalBaseURL,
-		InternalModel:    dbModel.InternalModel,
+		ID:              dbModel.ID,
+		Name:            dbModel.Name,
+		Enabled:         dbModel.isEnabled(),
+		Internal:        dbModel.isInternal(),
+		CredentialID:    dbModel.CredentialID,
+		InternalBaseURL: dbModel.InternalBaseURL,
+		InternalModel:   dbModel.InternalModel,
 	}
 
 	// Parse fallback chain
@@ -710,7 +705,6 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
 		model.CredentialID,
-		model.InternalProvider,
 		model.InternalBaseURL,
 		model.InternalModel,
 	)
@@ -752,7 +746,6 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
 		model.CredentialID,
-		model.InternalProvider,
 		model.InternalBaseURL,
 		model.InternalModel,
 		modelID,
@@ -1038,11 +1031,8 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
-	// Resolve provider: model override > credential
-	provider = modelConfig.InternalProvider
-	if provider == "" {
-		provider = cred.Provider
-	}
+	// Resolve provider: use credential provider
+	provider = cred.Provider
 
 	// Resolve baseURL: model override > credential
 	baseURL = modelConfig.InternalBaseURL

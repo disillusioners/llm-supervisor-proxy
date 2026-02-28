@@ -138,10 +138,8 @@ func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (provider, apiK
 		return "", "", "", "", false
 	}
 
-	provider = modelConfig.InternalProvider
-	if provider == "" {
-		provider = cred.Provider
-	}
+	// Provider comes only from credential
+	provider = cred.Provider
 
 	baseURL = modelConfig.InternalBaseURL
 	if baseURL == "" {
@@ -173,8 +171,8 @@ func TestCanHandleInternal(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "internal with provider",
-			config:   &models.ModelConfig{Internal: true, InternalProvider: "openai"},
+			name:     "internal with credential",
+			config:   &models.ModelConfig{Internal: true, CredentialID: "test-cred"},
 			expected: true,
 		},
 	}
@@ -286,11 +284,11 @@ func TestInternalHandler_convertRequest(t *testing.T) {
 func TestNewInternalHandler(t *testing.T) {
 	mockResolver := &mockModelsConfig{}
 	config := &models.ModelConfig{
-		ID:               "test-model",
-		Name:             "Test Model",
-		Internal:         true,
-		InternalProvider: "openai",
-		InternalModel:    "gpt-4",
+		ID:            "test-model",
+		Name:          "Test Model",
+		Internal:      true,
+		CredentialID:  "test-cred",
+		InternalModel: "gpt-4",
 	}
 
 	handler := NewInternalHandler(config, mockResolver)
