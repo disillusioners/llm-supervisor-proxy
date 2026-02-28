@@ -157,12 +157,35 @@ func (s *Store) migrateConfigJSON(ctx context.Context, data []byte, qb *QueryBui
 
 func (s *Store) migrateModelsJSON(ctx context.Context, data []byte, qb *QueryBuilder) error {
 	var file struct {
-		Models []models.ModelConfig `json:"models"`
+		Models      []models.ModelConfig      `json:"models"`
+		Credentials []models.CredentialConfig `json:"credentials"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
 		return fmt.Errorf("failed to parse models file: %w", err)
 	}
 
+	// Migrate credentials first (models reference them)
+	for _, cred := range file.Credentials {
+		encryptedAPIKey := cred.APIKey
+		if encryptedAPIKey != "" {
+			// Note: API keys in JSON are assumed to be already encrypted or plaintext
+			// For migration, we store them as-is (will be encrypted on next save via UI)
+		}
+
+		var query string
+		if s.Dialect == PostgreSQL {
+			query = `INSERT INTO credentials (id, provider, api_key, base_url, created_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW()) ON CONFLICT (id) DO NOTHING`
+		} else {
+			query = `INSERT OR IGNORE INTO credentials (id, provider, api_key, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`
+		}
+
+		_, err := s.DB.ExecContext(ctx, query, cred.ID, cred.Provider, encryptedAPIKey, cred.BaseURL)
+		if err != nil {
+			log.Printf("Warning: failed to migrate credential %s: %v", cred.ID, err)
+		}
+	}
+
+	// Migrate models
 	for _, model := range file.Models {
 		fallbackJSON, _ := json.Marshal(model.FallbackChain)
 		truncateJSON, _ := json.Marshal(model.TruncateParams)
@@ -174,6 +197,10 @@ func (s *Store) migrateModelsJSON(ctx context.Context, data []byte, qb *QueryBui
 			qb.BooleanLiteral(model.Enabled),
 			string(fallbackJSON),
 			string(truncateJSON),
+			qb.BooleanLiteral(model.Internal),
+			model.CredentialID,
+			model.InternalBaseURL,
+			model.InternalModel,
 		)
 		if err != nil {
 			log.Printf("Warning: failed to migrate model %s: %v", model.ID, err)
