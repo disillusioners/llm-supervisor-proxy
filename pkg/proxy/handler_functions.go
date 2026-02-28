@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -85,6 +86,9 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 
 	modelList := buildModelList(originalModel, conf.ModelsConfig)
 
+	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
+	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
+
 	return &requestContext{
 		conf:             conf,
 		targetURL:        targetURL,
@@ -98,6 +102,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		method:           r.Method,
 		baseCtx:          r.Context(),
 		originalMessages: originalMessages,
+		bypassInternal:   bypassInternal,
 	}, nil
 }
 
@@ -191,8 +196,8 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 			bodyToSend = cloned
 		}
 
-		// Check if this model uses internal upstream
-		if modelConfig := rc.conf.ModelsConfig.GetModel(currentModel); modelConfig != nil && modelConfig.Internal {
+		// Check if this model uses internal upstream (unless bypass requested)
+		if modelConfig := rc.conf.ModelsConfig.GetModel(currentModel); modelConfig != nil && modelConfig.Internal && !rc.bypassInternal {
 			return h.doInternalAttempt(w, rc, modelConfig, bodyToSend, attempt, counters)
 		}
 	}

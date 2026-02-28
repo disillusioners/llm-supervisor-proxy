@@ -59,6 +59,9 @@ type requestContext struct {
 	// Cached from first chunk to maintain consistency across retries/fallbacks
 	streamID    string
 	streamIDSet bool
+
+	// Proxy-only flags (stripped before forwarding upstream)
+	bypassInternal bool // Force external upstream, skip internal provider routing
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,10 +152,16 @@ func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterf
 	return modelList
 }
 
-// copyHeaders copies request headers from src to dst, skipping Content-Length.
+// copyHeaders copies request headers from src to dst, skipping Content-Length
+// and proxy-only headers that should never be forwarded upstream.
 func copyHeaders(dst *http.Request, src http.Header) {
+	// Headers to strip (never forward upstream)
+	stripHeaders := map[string]bool{
+		"Content-Length":             true,
+		"X-Llmproxy-Bypass-Internal": true,
+	}
 	for name, values := range src {
-		if name == "Content-Length" {
+		if stripHeaders[name] {
 			continue
 		}
 		for _, value := range values {

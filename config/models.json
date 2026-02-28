@@ -5,7 +5,7 @@
       "name": "GLM-5",
       "enabled": true,
       "fallback_chain": ["MiniMax-M2.5"],
-      "truncate_params": ["max_completion_tokens", "store"]
+      "truncate_params": ["max_completion_tokens", "store", "reasoning_effort"]
     },
     {
       "id": "MiniMax-M2.5",
