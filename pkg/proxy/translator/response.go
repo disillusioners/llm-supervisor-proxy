@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // TranslateNonStreamResponse translates an OpenAI non-streaming response to Anthropic format
@@ -68,7 +69,10 @@ func generateAnthropicMessageID() string {
 	// Anthropic format: msg_ + 24 character base62 string
 	chars := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	id := make([]byte, 24)
-	rand.Read(id)
+	if _, err := rand.Read(id); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("msg_%d%016d", time.Now().UnixNano()/1000000, time.Now().Nanosecond())
+	}
 	for i := range id {
 		id[i] = chars[int(id[i])%len(chars)]
 	}

@@ -74,8 +74,11 @@ func TranslateToolUseInRequest(blocks []ContentBlock) []OpenAIToolCall {
 	var toolCalls []OpenAIToolCall
 	for _, block := range blocks {
 		if block.Type == "tool_use" {
-			arguments, err := json.Marshal(block.Input)
-			if err != nil {
+			// Input is json.RawMessage (already JSON bytes), use directly
+			var arguments []byte
+			if len(block.Input) > 0 {
+				arguments = block.Input
+			} else {
 				arguments = []byte("{}")
 			}
 			toolCalls = append(toolCalls, OpenAIToolCall{

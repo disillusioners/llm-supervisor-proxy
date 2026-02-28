@@ -103,13 +103,6 @@ func translateMessage(msg AnthropicMessage) map[string]interface{} {
 	content := translateContent(msg.Content)
 	openAIMsg["content"] = content
 
-	// If role is tool, also add tool_call_id
-	if msg.Role == "tool" {
-		if toolCallID, ok := msg.Content.(string); ok {
-			openAIMsg["tool_call_id"] = toolCallID
-		}
-	}
-
 	return openAIMsg
 }
 

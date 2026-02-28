@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -39,6 +40,7 @@ func TranslateBufferedStream(openaiBuffer []byte, originalModel string) ([]byte,
 			// Parse the chunk
 			var chunk map[string]interface{}
 			if err := json.Unmarshal(data, &chunk); err != nil {
+				log.Printf("Failed to parse stream chunk: %v (data: %.100s...)", err, string(data))
 				continue // Skip invalid chunks
 			}
 

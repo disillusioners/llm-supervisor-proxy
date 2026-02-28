@@ -31,13 +31,15 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Close body when done (including error paths)
+	defer r.Body.Close()
+
 	// Parse Anthropic request
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		h.sendAnthropicError(w, "invalid_request_error", "Failed to read request body", http.StatusBadRequest)
 		return
 	}
-	r.Body.Close()
 
 	var anthropicReq translator.AnthropicRequest
 	if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
@@ -64,7 +66,11 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// Translate to OpenAI format
 	modelMapping := getModelMappingConfig(conf.ModelsConfig)
 	openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
-	openaiBodyBytes, _ := json.Marshal(openaiReq)
+	openaiBodyBytes, err := json.Marshal(openaiReq)
+	if err != nil {
+		h.sendAnthropicError(w, "api_error", "Failed to translate request", http.StatusInternalServerError)
+		return
+	}
 
 	// Create request log
 	reqID := uuid.New().String()
@@ -72,11 +78,17 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	storeMessages := convertAnthropicMessagesToStore(anthropicReq.Messages)
 	isStream := anthropicReq.Stream
 
+	// Safely extract original model name
+	originalModel, _ := openaiReq["model"].(string)
+	if originalModel == "" {
+		originalModel = anthropicReq.Model
+	}
+
 	reqLog := &store.RequestLog{
 		ID:            reqID,
 		Status:        "running",
 		Model:         anthropicReq.Model,
-		OriginalModel: openaiReq["model"].(string),
+		OriginalModel: originalModel,
 		StartTime:     startTime,
 		Messages:      storeMessages,
 		IsStream:      isStream,
