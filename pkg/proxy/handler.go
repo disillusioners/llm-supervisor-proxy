@@ -107,7 +107,6 @@ func (h *Handler) authenticate(r *http.Request) bool {
 
 	apiKey := h.extractAPIKey(r)
 	if apiKey == "" {
-		log.Printf("[AUTH] No API key provided")
 		return false
 	}
 
@@ -115,13 +114,8 @@ func (h *Handler) authenticate(r *http.Request) bool {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	token, err := h.tokenStore.ValidateToken(ctx, apiKey)
-	if err != nil {
-		log.Printf("[AUTH] Token validation failed: %v", err)
-		return false
-	}
-	log.Printf("[AUTH] Token validated successfully: %s", token.Name)
-	return true
+	_, err := h.tokenStore.ValidateToken(ctx, apiKey)
+	return err == nil
 }
 
 // requiresInternalAuth checks if any model in the request chain uses internal upstream
@@ -136,12 +130,10 @@ func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 	for _, modelID := range rc.modelList {
 		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
 		if modelConfig != nil && modelConfig.Internal {
-			log.Printf("[AUTH] Model %s uses internal upstream, auth required", modelID)
 			return true
 		}
 	}
 
-	log.Printf("[AUTH] No internal upstream models, auth not required")
 	return false
 }
 
@@ -177,13 +169,23 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Only authenticate if using internal upstream
 	// For external upstream, the upstream provider handles authentication
 	if h.requiresInternalAuth(rc) {
-		log.Printf("[AUTH] Authenticating request %s", rc.reqID)
 		if !h.authenticate(r) {
-			log.Printf("[AUTH] Authentication failed for request %s, sending 401", rc.reqID)
+			// Update request log to failed status
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = "Authentication failed: invalid or expired API key"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+
+			// Publish event so frontend refreshes
+			h.publishEvent("auth_failed", map[string]interface{}{
+				"id":    rc.reqID,
+				"error": "invalid_api_key",
+			})
+
 			h.sendAuthError(w)
 			return
 		}
-		log.Printf("[AUTH] Authentication passed for request %s", rc.reqID)
 	}
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})

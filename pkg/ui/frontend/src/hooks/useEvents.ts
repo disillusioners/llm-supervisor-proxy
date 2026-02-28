@@ -109,6 +109,7 @@ export function useEventRefresh(onRefresh: () => void) {
         'loop_interrupted',
         'fallback_triggered',
         'all_models_failed',
+        'auth_failed',
       ];
       if (refreshTypes.includes(data.type)) {
         onRefresh();

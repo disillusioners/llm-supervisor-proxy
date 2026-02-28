@@ -65,18 +65,27 @@ func (s *TokenStore) ValidateToken(ctx context.Context, plaintext string) (*Auth
 
 	token := &AuthToken{}
 	var expiresAtStr sql.NullString
+	var createdAtStr string
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, token_hash, name, expires_at, created_at, created_by
 		FROM auth_tokens WHERE token_hash = ?`,
 		hash,
-	).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &token.CreatedAt, &token.CreatedBy)
+	).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrTokenNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Parse created_at string to time.Time
+	if createdAtStr != "" {
+		t, err := time.Parse(time.RFC3339, createdAtStr)
+		if err == nil {
+			token.CreatedAt = t
+		}
 	}
 
 	if expiresAtStr.Valid {
