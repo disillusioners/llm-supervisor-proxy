@@ -21,10 +21,15 @@ func (s *Store) RunMigrations(ctx context.Context) error {
 
 // isMigrationApplied checks if a migration version has already been applied
 func (s *Store) isMigrationApplied(ctx context.Context, version string) (bool, error) {
+	var query string
+	if s.Dialect == PostgreSQL {
+		query = `SELECT COUNT(*) FROM schema_migrations WHERE version = $1`
+	} else {
+		query = `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`
+	}
+
 	var count int64
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = $1`, version,
-	).Scan(&count)
+	err := s.DB.QueryRowContext(ctx, query, version).Scan(&count)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
@@ -46,9 +51,14 @@ func (s *Store) recordMigration(ctx context.Context, version string) error {
 		timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	_, err := s.DB.ExecContext(ctx,
-		`INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)`, version, timestamp,
-	)
+	var query string
+	if s.Dialect == PostgreSQL {
+		query = `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)`
+	} else {
+		query = `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`
+	}
+
+	_, err := s.DB.ExecContext(ctx, query, version, timestamp)
 	if err != nil {
 		return fmt.Errorf("failed to record migration %s: %w", version, err)
 	}

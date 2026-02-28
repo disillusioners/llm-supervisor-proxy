@@ -193,8 +193,8 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
                         </td>
                         <td class="py-3 px-2">
                           <span class="text-gray-400 font-mono text-sm">
-                            {cred.api_key_masked ? escapeHtml(cred.api_key_masked) : <span class="text-gray-600 italic">Not set</span>}
-                          </span>
+                             {cred.api_key ? escapeHtml(cred.api_key) : <span class="text-gray-600 italic">Not set</span>}
+                           </span>
                         </td>
                         <td class="py-3 px-2">
                           {cred.base_url ? (

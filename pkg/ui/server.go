@@ -516,11 +516,10 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 
 // TestModelRequest represents the request body for testing a model
 type TestModelRequest struct {
-	ModelID         string `json:"model_id,omitempty"`      // Optional: use saved config from existing model
-	CredentialID    string `json:"credential_id,omitempty"` // Optional: use saved credential
-	APIKey          string `json:"api_key"`                 // API key for testing (can be empty if credential_id provided)
-	InternalBaseURL string `json:"internal_base_url"`
-	InternalModel   string `json:"internal_model"`
+	CredentialID    string `json:"credential_id,omitempty"` // Credential to use
+	APIKey          string `json:"api_key,omitempty"`       // API key override (optional)
+	InternalBaseURL string `json:"internal_base_url"`       // Base URL override (optional)
+	InternalModel   string `json:"internal_model"`          // Provider's model name to test
 }
 
 // TestModelResponse represents the response for testing a model
@@ -571,42 +570,6 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		baseURL = cred.BaseURL
 	}
 
-	// If model_id is provided, resolve the internal config
-	if req.ModelID != "" {
-		resolvedProvider, resolvedAPIKey, resolvedBaseURL, _, ok := s.modelsConfig.ResolveInternalConfig(req.ModelID)
-		if !ok {
-			// Check why it failed
-			model := s.modelsConfig.GetModel(req.ModelID)
-			var reason string
-			if model == nil {
-				reason = "model does not exist"
-			} else if !model.Internal {
-				reason = "model is not marked as internal"
-			} else if model.CredentialID == "" {
-				reason = "model has no credential_id set"
-			} else {
-				reason = "credential not found"
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(TestModelResponse{
-				Success: false,
-				Error:   fmt.Sprintf("Cannot test model '%s': %s", req.ModelID, reason),
-			})
-			return
-		}
-		// Use resolved values if not already set by credential_id
-		if apiKey == "" {
-			apiKey = resolvedAPIKey
-		}
-		if provider == "" {
-			provider = resolvedProvider
-		}
-		if baseURL == "" {
-			baseURL = resolvedBaseURL
-		}
-	}
-
 	// Use request values as overrides
 	if req.InternalBaseURL != "" {
 		baseURL = req.InternalBaseURL
@@ -621,7 +584,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TestModelResponse{
 			Success: false,
-			Error:   "internal_provider is required",
+			Error:   "credential_id is required (provider is determined from credential)",
 		})
 		return
 	}
@@ -631,7 +594,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TestModelResponse{
 			Success: false,
-			Error:   "api_key is required (or provide credential_id/model_id to use saved key)",
+			Error:   "credential has no API key (decryption may have failed - try re-saving the credential)",
 		})
 		return
 	}

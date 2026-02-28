@@ -3,8 +3,7 @@
 export interface Credential {
   id: string;
   provider: string;
-  api_key_masked?: string; // Masked key from server (e.g., "sk-abc123***")
-  api_key?: string; // Only used when creating/updating
+  api_key?: string; // Masked key from server (e.g., "sk-abc123***") or actual key when creating/updating
   base_url?: string;
 }
 

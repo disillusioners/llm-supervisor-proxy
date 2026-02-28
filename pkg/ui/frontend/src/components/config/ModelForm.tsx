@@ -171,7 +171,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
 
       // Get provider from selected credential
       const selectedCred = credentials.find(c => c.id === formData.credential_id);
-      const provider = selectedCred?.provider;
       const baseUrl = formData.internal_base_url || selectedCred?.base_url;
 
       const payload: Record<string, string | undefined> = {
@@ -181,10 +180,9 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_model: formData.internal_model,
       };
 
-      // In edit mode, pass model_id so backend can use saved API key if not provided
-      if (mode === 'edit' && initialData?.id) {
-        payload.model_id = initialData.id;
-      }
+      // Note: We don't pass model_id anymore because we want to test with the
+      // current form data, not the saved model data. This allows testing
+      // internal config before saving the model.
 
       const response = await fetch('/fe/api/models/test', {
         method: 'POST',
