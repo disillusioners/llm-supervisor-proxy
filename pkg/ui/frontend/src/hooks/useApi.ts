@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential } from '../types';
 
 const API_BASE = '/fe/api';
 
@@ -230,4 +230,45 @@ export function useTokens() {
   }, [fetchTokens]);
 
   return { tokens, loading, createToken, deleteToken, refetch: fetchTokens };
+}
+
+// Credentials API
+export async function getCredentials(): Promise<Credential[]> {
+  const res = await fetch('/fe/api/credentials');
+  if (!res.ok) throw new Error('Failed to fetch credentials');
+  return res.json();
+}
+
+export async function createCredential(cred: Credential): Promise<Credential> {
+  const res = await fetch('/fe/api/credentials', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cred),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to create credential');
+  }
+  return res.json();
+}
+
+export async function updateCredential(id: string, cred: Credential): Promise<Credential> {
+  const res = await fetch(`/fe/api/credentials/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cred),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to update credential');
+  }
+  return res.json();
+}
+
+export async function deleteCredential(id: string): Promise<void> {
+  const res = await fetch(`/fe/api/credentials/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'Failed to delete credential');
+  }
 }

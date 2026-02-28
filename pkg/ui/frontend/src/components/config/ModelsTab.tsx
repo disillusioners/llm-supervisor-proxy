@@ -11,6 +11,7 @@ interface ModelsTabProps {
   onToggleModel: (model: Model) => Promise<void>;
   status: { type: 'success' | 'error'; message: string } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
+  onNavigateToCredentials?: () => void;
 }
 
 export function ModelsTab({
@@ -21,6 +22,7 @@ export function ModelsTab({
   onToggleModel,
   status,
   setStatus,
+  onNavigateToCredentials,
 }: ModelsTabProps) {
   const [showModelForm, setShowModelForm] = useState(false);
   const [modelFormMode, setModelFormMode] = useState<'add' | 'edit'>('add');
@@ -213,6 +215,7 @@ export function ModelsTab({
             setModelToEdit(undefined);
           }}
           onStatus={setStatus}
+          onNavigateToCredentials={onNavigateToCredentials}
         />
       )}
     </div>

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'preact/hooks';
 import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig } from '../types';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
+import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
@@ -21,7 +22,7 @@ interface ConfigModalProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'loop_detection' | 'tokens';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tokens';
 
 export function ConfigModal({
   isOpen,
@@ -224,6 +225,18 @@ export function ConfigModal({
             Models
           </button>
           <button
+            class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 ${activeTab === 'credentials'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('credentials')}
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            Credentials
+          </button>
+          <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'loop_detection'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -275,6 +288,14 @@ export function ConfigModal({
               onUpdateModel={onUpdateModel}
               onDeleteModel={onDeleteModel}
               onToggleModel={handleToggleModel}
+              status={status}
+              setStatus={setStatus}
+              onNavigateToCredentials={() => setActiveTab('credentials')}
+            />
+          )}
+
+          {activeTab === 'credentials' && (
+            <CredentialsTab
               status={status}
               setStatus={setStatus}
             />

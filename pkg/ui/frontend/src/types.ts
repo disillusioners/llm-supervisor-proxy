@@ -1,5 +1,13 @@
 // API Types - matching Go backend structures
 
+export interface Credential {
+  id: string;
+  provider: string;
+  api_key_masked?: string; // Masked key from server (e.g., "sk-abc123***")
+  api_key?: string; // Only used when creating/updating
+  base_url?: string;
+}
+
 export interface LoopDetectionConfig {
   enabled: boolean;
   shadow_mode: boolean;
@@ -50,9 +58,10 @@ export interface Model {
   truncate_params?: string[];
   // Internal upstream fields
   internal?: boolean;
-  internal_provider?: InternalProvider;
+  credential_id?: string; // Reference to credential
+  internal_provider?: InternalProvider; // Provider override (optional)
   internal_api_key?: string;   // Display only, write-only
-  internal_base_url?: string;
+  internal_base_url?: string; // Base URL override (optional)
   internal_model?: string;     // Actual model name at provider
 }
 

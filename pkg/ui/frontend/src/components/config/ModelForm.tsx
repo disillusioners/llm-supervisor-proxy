@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, InternalProvider } from '../../types';
+import type { Model, InternalProvider, Credential } from '../../types';
+import { getCredentials } from '../../hooks/useApi';
 
 interface ModelFormProps {
   mode: 'add' | 'edit';
@@ -11,12 +12,14 @@ interface ModelFormProps {
     truncate_params: string[];
     internal?: boolean;
     internal_provider?: InternalProvider;
+    credential_id?: string;
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
   }) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
+  onNavigateToCredentials?: () => void;
 }
 
 const PROVIDER_DEFAULTS: Record<InternalProvider, string> = {
@@ -27,7 +30,7 @@ const PROVIDER_DEFAULTS: Record<InternalProvider, string> = {
   minimax: 'https://api.minimax.io/v1',
 };
 
-export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: ModelFormProps) {
+export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNavigateToCredentials }: ModelFormProps) {
   const [formData, setFormData] = useState({
     id: '',
     name: '',
@@ -35,12 +38,31 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
     truncate_params: '',
     internal: false,
     internal_provider: 'openai' as InternalProvider,
+    credential_id: '',
     internal_api_key: '',
     internal_base_url: '',
     internal_model: '',
   });
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [loadingCredentials, setLoadingCredentials] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+
+  // Fetch credentials on mount
+  useEffect(() => {
+    const fetchCredentials = async () => {
+      setLoadingCredentials(true);
+      try {
+        const data = await getCredentials();
+        setCredentials(data || []);
+      } catch (e) {
+        console.error('Failed to fetch credentials:', e);
+      } finally {
+        setLoadingCredentials(false);
+      }
+    };
+    fetchCredentials();
+  }, []);
 
   useEffect(() => {
     if (mode === 'edit' && initialData) {
@@ -56,8 +78,9 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
         truncate_params: truncateParams,
         internal: initialData.internal ?? false,
         internal_provider: initialData.internal_provider ?? 'openai',
+        credential_id: initialData.credential_id ?? '',
         internal_api_key: '',
-        internal_base_url: initialData.internal_base_url ?? '',
+        internal_base_url: initialData.internal_base_url || '',
         internal_model: initialData.internal_model ?? '',
       });
     } else if (mode === 'add') {
@@ -68,6 +91,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
         truncate_params: '',
         internal: false,
         internal_provider: 'openai',
+        credential_id: '',
         internal_api_key: '',
         internal_base_url: '',
         internal_model: '',
@@ -93,9 +117,20 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
         }
       }
       
-      // Auto-set base URL when provider changes
-      if (field === 'internal_provider' && typeof value === 'string') {
+      // Auto-set base URL when provider changes (only if no credential selected)
+      if (field === 'internal_provider' && typeof value === 'string' && !prev.credential_id) {
         updated.internal_base_url = PROVIDER_DEFAULTS[value as InternalProvider] || '';
+      }
+
+      // Clear base URL override when credential changes
+      if (field === 'credential_id') {
+        updated.internal_base_url = '';
+      }
+
+      // Clear credential when toggling internal off
+      if (field === 'internal' && value === false) {
+        updated.credential_id = '';
+        updated.internal_api_key = '';
       }
       
       return updated;
@@ -127,6 +162,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
         truncate_params: truncate,
         internal: formData.internal || undefined,
         internal_provider: formData.internal ? formData.internal_provider : undefined,
+        credential_id: formData.internal && formData.credential_id ? formData.credential_id : undefined,
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
         internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
@@ -147,7 +183,8 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
 
       const payload: Record<string, string | undefined> = {
         internal_provider: formData.internal_provider,
-        internal_api_key: formData.internal_api_key || undefined,
+        credential_id: formData.credential_id || undefined,
+        api_key: formData.internal_api_key || undefined,
         internal_base_url: baseUrl,
         internal_model: formData.internal_model,
       };
@@ -179,14 +216,25 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
   };
 
   // Can test if:
-  // - In add mode: need provider, api_key, and model
-  // - In edit mode: need provider and model (api_key can use saved value)
+  // - In add mode: need provider, model, and (credential OR api_key)
+  // - In edit mode: need provider and model (can use saved credential)
   const canTestConnection = formData.internal_provider && formData.internal_model && 
-    (mode === 'edit' || formData.internal_api_key);
+    (mode === 'edit' || formData.credential_id || formData.internal_api_key);
 
   const isValid = mode === 'add' 
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
     : formData.name.trim() !== '';
+
+  // Filter credentials by provider to show relevant ones
+  const filteredCredentials = credentials.filter(
+    cred => cred.provider === formData.internal_provider || !cred.provider
+  );
+
+  // Get the currently selected credential
+  const selectedCredential = credentials.find(cred => cred.id === formData.credential_id);
+
+  // Compute the default base URL (from credential or provider)
+  const defaultBaseUrl = selectedCredential?.base_url || PROVIDER_DEFAULTS[formData.internal_provider] || 'Provider default';
 
   return (
     <div class="bg-gray-700/50 rounded-lg p-5 border border-gray-600">
@@ -274,28 +322,83 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus }: Mod
             </div>
 
             <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">
-                API Key {mode === 'edit' && <span class="text-gray-500 text-xs">(leave empty to keep existing)</span>}
-              </label>
-              <input
-                type="password"
-                value={formData.internal_api_key}
-                onInput={(e) => handleInputChange('internal_api_key', (e.target as HTMLInputElement).value)}
-                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={mode === 'edit' ? '••••••••' : 'sk-...'}
-              />
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-sm font-medium text-gray-300">Credential</label>
+                {onNavigateToCredentials && (
+                  <button
+                    type="button"
+                    onClick={onNavigateToCredentials}
+                    class="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    Manage Credentials
+                  </button>
+                )}
+              </div>
+              {loadingCredentials ? (
+                <div class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-gray-400 text-sm">
+                  Loading credentials...
+                </div>
+              ) : (
+                <select
+                  value={formData.credential_id}
+                  onChange={(e) => handleInputChange('credential_id', (e.target as HTMLSelectElement).value)}
+                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+                >
+                  <option value="">Select a credential</option>
+                  {filteredCredentials.map((cred) => (
+                    <option key={cred.id} value={cred.id}>
+                      {cred.id} ({cred.provider || 'unknown'})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {credentials.length === 0 && !loadingCredentials && (
+                <p class="text-xs text-gray-400 mt-1">
+                  No credentials found. 
+                  {onNavigateToCredentials && (
+                    <button
+                      type="button"
+                      onClick={onNavigateToCredentials}
+                      class="text-blue-400 hover:text-blue-300 ml-1"
+                    >
+                      Add a credential
+                    </button>
+                  )}
+                </p>
+              )}
+              {selectedCredential?.base_url && (
+                <p class="text-xs text-gray-500 mt-1">
+                  Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
+                </p>
+              )}
             </div>
 
+            {formData.credential_id && (
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-1">
+                  API Key Override <span class="text-gray-500">(optional)</span>
+                </label>
+                <input
+                  type="password"
+                  value={formData.internal_api_key}
+                  onInput={(e) => handleInputChange('internal_api_key', (e.target as HTMLInputElement).value)}
+                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+                  placeholder="Overrides the credential's API key if set"
+                />
+                <p class="text-xs text-gray-400 mt-1">Overrides the credential's API key if set</p>
+              </div>
+            )}
+
             <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Base URL <span class="text-gray-500">(optional)</span></label>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Base URL Override <span class="text-gray-500">(optional)</span></label>
               <input
                 type="text"
                 value={formData.internal_base_url}
                 onInput={(e) => handleInputChange('internal_base_url', (e.target as HTMLInputElement).value)}
                 class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={PROVIDER_DEFAULTS[formData.internal_provider]}
+                placeholder={defaultBaseUrl}
               />
-              <p class="text-xs text-gray-400 mt-1">Defaults to: {PROVIDER_DEFAULTS[formData.internal_provider]}</p>
+              <p class="text-xs text-gray-400 mt-1">Default: {defaultBaseUrl}</p>
             </div>
 
             <div>

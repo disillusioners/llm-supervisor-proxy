@@ -36,6 +36,14 @@ type Model struct {
 	InternalModel    string `json:"internal_model,omitempty"`
 }
 
+// Credential represents a credential for API authentication (with masked API key)
+type Credential struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	APIKey   string `json:"api_key"` // Masked API key (e.g., "sk-abcde***")
+	BaseURL  string `json:"base_url,omitempty"`
+}
+
 //go:embed static/*
 var staticFiles embed.FS
 
@@ -118,6 +126,9 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Token management
 	mux.HandleFunc("/fe/api/tokens", s.handleTokens)
 	mux.HandleFunc("/fe/api/tokens/", s.handleTokenDetail)
+	// Credential management
+	mux.HandleFunc("/fe/api/credentials", s.handleCredentials)
+	mux.HandleFunc("/fe/api/credentials/", s.handleCredentialDetail)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -844,4 +855,221 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(response)
+}
+
+// maskAPIKey masks the API key for display, showing first 8 chars + "***"
+// if the key is longer than 8 characters, otherwise just "***"
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) > 8 {
+		return apiKey[:8] + "***"
+	}
+	return "***"
+}
+
+// handleCredentials handles GET and POST /fe/api/credentials
+func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		credConfigs := s.modelsConfig.GetCredentials()
+		credentials := make([]Credential, len(credConfigs))
+		for i, cc := range credConfigs {
+			credentials[i] = Credential{
+				ID:       cc.ID,
+				Provider: cc.Provider,
+				APIKey:   maskAPIKey(cc.APIKey),
+				BaseURL:  cc.BaseURL,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(credentials)
+
+	case http.MethodPost:
+		// Limit request body to 64KB to prevent memory exhaustion attacks
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+		var newCred Credential
+		if err := json.NewDecoder(r.Body).Decode(&newCred); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Validate credential
+		if newCred.ID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "credential id is required"})
+			return
+		}
+		if newCred.Provider == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "provider is required"})
+			return
+		}
+		if newCred.APIKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "api_key is required"})
+			return
+		}
+
+		// Convert to models.CredentialConfig
+		credConfig := models.CredentialConfig{
+			ID:       newCred.ID,
+			Provider: newCred.Provider,
+			APIKey:   newCred.APIKey,
+			BaseURL:  newCred.BaseURL,
+		}
+
+		if err := s.modelsConfig.AddCredential(credConfig); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Return with masked API key
+		response := Credential{
+			ID:       newCred.ID,
+			Provider: newCred.Provider,
+			APIKey:   maskAPIKey(newCred.APIKey),
+			BaseURL:  newCred.BaseURL,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(response)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCredentialDetail handles GET, PUT, and DELETE /fe/api/credentials/{id}
+func (s *Server) handleCredentialDetail(w http.ResponseWriter, r *http.Request) {
+	// /fe/api/credentials/{id}
+	id := r.URL.Path[len("/fe/api/credentials/"):]
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		cred := s.modelsConfig.GetCredential(id)
+		if cred == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "credential not found"})
+			return
+		}
+
+		credential := Credential{
+			ID:       cred.ID,
+			Provider: cred.Provider,
+			APIKey:   maskAPIKey(cred.APIKey),
+			BaseURL:  cred.BaseURL,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(credential)
+
+	case http.MethodPut:
+		// Limit request body to 64KB to prevent memory exhaustion attacks
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+		var updatedCred Credential
+		if err := json.NewDecoder(r.Body).Decode(&updatedCred); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Validate credential
+		if updatedCred.Provider == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "provider is required"})
+			return
+		}
+		if updatedCred.APIKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "api_key is required"})
+			return
+		}
+
+		// Keep the same ID
+		updatedCred.ID = id
+
+		// Convert to models.CredentialConfig
+		credConfig := models.CredentialConfig{
+			ID:       updatedCred.ID,
+			Provider: updatedCred.Provider,
+			APIKey:   updatedCred.APIKey,
+			BaseURL:  updatedCred.BaseURL,
+		}
+
+		if err := s.modelsConfig.UpdateCredential(id, credConfig); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Return with masked API key
+		response := Credential{
+			ID:       updatedCred.ID,
+			Provider: updatedCred.Provider,
+			APIKey:   maskAPIKey(updatedCred.APIKey),
+			BaseURL:  updatedCred.BaseURL,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+
+	case http.MethodDelete:
+		if err := s.modelsConfig.RemoveCredential(id); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			// Check if error is due to credential being in use
+			if strings.Contains(err.Error(), "in use") {
+				w.WriteHeader(http.StatusConflict)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Persist changes to disk
+		if err := s.modelsConfig.Save(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
