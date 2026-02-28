@@ -30,9 +30,9 @@ type Model struct {
 	TruncateParams []string `json:"truncate_params,omitempty"`
 	// Internal upstream fields
 	Internal         bool   `json:"internal"`
-	InternalProvider string `json:"internal_provider,omitempty"`
-	InternalAPIKey   string `json:"internal_api_key,omitempty"` // Write-only: accepted in POST/PUT, never returned in GET
-	InternalBaseURL  string `json:"internal_base_url,omitempty"`
+	CredentialID     string `json:"credential_id,omitempty"`     // Reference to credential
+	InternalProvider string `json:"internal_provider,omitempty"` // Provider override (optional)
+	InternalBaseURL  string `json:"internal_base_url,omitempty"` // Base URL override (optional)
 	InternalModel    string `json:"internal_model,omitempty"`
 }
 
@@ -329,8 +329,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			FallbackChain:    newModel.FallbackChain,
 			TruncateParams:   newModel.TruncateParams,
 			Internal:         newModel.Internal,
+			CredentialID:     newModel.CredentialID,
 			InternalProvider: newModel.InternalProvider,
-			InternalAPIKey:   newModel.InternalAPIKey,
 			InternalBaseURL:  newModel.InternalBaseURL,
 			InternalModel:    newModel.InternalModel,
 		}
@@ -400,8 +400,8 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			FallbackChain:    updatedModel.FallbackChain,
 			TruncateParams:   updatedModel.TruncateParams,
 			Internal:         updatedModel.Internal,
+			CredentialID:     updatedModel.CredentialID,
 			InternalProvider: updatedModel.InternalProvider,
-			InternalAPIKey:   updatedModel.InternalAPIKey,
 			InternalBaseURL:  updatedModel.InternalBaseURL,
 			InternalModel:    updatedModel.InternalModel,
 		}
@@ -508,9 +508,10 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 
 // TestModelRequest represents the request body for testing a model
 type TestModelRequest struct {
-	ModelID          string `json:"model_id,omitempty"` // Optional: use saved config from existing model
+	ModelID          string `json:"model_id,omitempty"`      // Optional: use saved config from existing model
+	CredentialID     string `json:"credential_id,omitempty"` // Optional: use saved credential
 	InternalProvider string `json:"internal_provider"`
-	InternalAPIKey   string `json:"internal_api_key"`
+	APIKey           string `json:"api_key"` // API key for testing (can be empty if credential_id provided)
 	InternalBaseURL  string `json:"internal_base_url"`
 	InternalModel    string `json:"internal_model"`
 }
@@ -544,34 +545,62 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If model_id is provided and api_key is empty, use saved config
-	if req.ModelID != "" && req.InternalAPIKey == "" {
-		savedModel := s.modelsConfig.GetModel(req.ModelID)
-		if savedModel == nil {
+	var apiKey, provider, baseURL string
+
+	// If credential_id is provided, look up the credential
+	if req.CredentialID != "" {
+		cred := s.modelsConfig.GetCredential(req.CredentialID)
+		if cred == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(TestModelResponse{
 				Success: false,
-				Error:   fmt.Sprintf("Model not found: %s", req.ModelID),
+				Error:   fmt.Sprintf("Credential not found: %s", req.CredentialID),
 			})
 			return
 		}
+		apiKey = cred.APIKey
+		provider = cred.Provider
+		baseURL = cred.BaseURL
+	}
 
-		// Use saved values
-		if req.InternalProvider == "" {
-			req.InternalProvider = savedModel.InternalProvider
+	// If model_id is provided, resolve the internal config
+	if req.ModelID != "" {
+		resolvedProvider, resolvedAPIKey, resolvedBaseURL, _, ok := s.modelsConfig.ResolveInternalConfig(req.ModelID)
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(TestModelResponse{
+				Success: false,
+				Error:   fmt.Sprintf("Model not found or not internal: %s", req.ModelID),
+			})
+			return
 		}
-		if req.InternalBaseURL == "" {
-			req.InternalBaseURL = savedModel.InternalBaseURL
+		// Use resolved values if not already set by credential_id
+		if apiKey == "" {
+			apiKey = resolvedAPIKey
 		}
-		if req.InternalModel == "" {
-			req.InternalModel = savedModel.InternalModel
+		if provider == "" {
+			provider = resolvedProvider
 		}
-		req.InternalAPIKey = savedModel.InternalAPIKey // Use saved (decrypted) API key
+		if baseURL == "" {
+			baseURL = resolvedBaseURL
+		}
+	}
+
+	// Use request values as overrides
+	if req.InternalProvider != "" {
+		provider = req.InternalProvider
+	}
+	if req.InternalBaseURL != "" {
+		baseURL = req.InternalBaseURL
+	}
+	if req.APIKey != "" {
+		apiKey = req.APIKey
 	}
 
 	// Validate required fields
-	if req.InternalProvider == "" {
+	if provider == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TestModelResponse{
@@ -581,18 +610,28 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.InternalAPIKey == "" {
+	if apiKey == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(TestModelResponse{
 			Success: false,
-			Error:   "internal_api_key is required (or provide model_id to use saved key)",
+			Error:   "api_key is required (or provide credential_id/model_id to use saved key)",
+		})
+		return
+	}
+
+	if req.InternalModel == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(TestModelResponse{
+			Success: false,
+			Error:   "internal_model is required",
 		})
 		return
 	}
 
 	// Create provider using the factory
-	provider, err := providers.NewProvider(req.InternalProvider, req.InternalAPIKey, req.InternalBaseURL)
+	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -620,7 +659,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send the request
-	resp, err := provider.ChatCompletion(r.Context(), chatReq)
+	resp, err := providerClient.ChatCompletion(r.Context(), chatReq)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

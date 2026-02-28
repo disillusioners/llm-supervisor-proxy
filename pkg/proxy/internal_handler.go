@@ -14,12 +14,14 @@ import (
 
 // InternalHandler handles requests to internal providers (bypassing upstream)
 type InternalHandler struct {
-	config *models.ModelConfig
+	config   *models.ModelConfig
+	resolver models.ModelsConfigInterface // Resolver for credentials
 }
 
 // NewInternalHandler creates a new internal handler for a model
-func NewInternalHandler(config *models.ModelConfig) *InternalHandler {
-	return &InternalHandler{config: config}
+// The resolver is used to resolve credentials from the model's credential_id
+func NewInternalHandler(config *models.ModelConfig, resolver models.ModelsConfigInterface) *InternalHandler {
+	return &InternalHandler{config: config, resolver: resolver}
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -29,11 +31,14 @@ func CanHandleInternal(modelConfig *models.ModelConfig) bool {
 
 // HandleRequest handles a request using internal provider
 func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool) error {
-	// API key is already decrypted when retrieved from database
-	apiKey := h.config.InternalAPIKey
+	// Resolve internal config (including credential lookup)
+	provider, apiKey, baseURL, internalModel, ok := h.resolver.ResolveInternalConfig(h.config.ID)
+	if !ok {
+		return fmt.Errorf("failed to resolve internal config for model %s", h.config.ID)
+	}
 
 	// Create provider
-	provider, err := providers.NewProvider(h.config.InternalProvider, apiKey, h.config.InternalBaseURL)
+	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
@@ -45,16 +50,16 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	}
 
 	// Override model with internal model name
-	req.Model = h.config.InternalModel
+	req.Model = internalModel
 
 	if isStream {
-		return h.handleStream(ctx, provider, req, w)
+		return h.handleStream(ctx, providerClient, req, w, internalModel)
 	}
-	return h.handleNonStream(ctx, provider, req, w)
+	return h.handleNonStream(ctx, providerClient, req, w, internalModel)
 }
 
 // handleNonStream handles non-streaming requests
-func (h *InternalHandler) handleNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter) error {
+func (h *InternalHandler) handleNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		return err
@@ -65,7 +70,7 @@ func (h *InternalHandler) handleNonStream(ctx context.Context, provider provider
 }
 
 // handleStream handles streaming requests
-func (h *InternalHandler) handleStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter) error {
+func (h *InternalHandler) handleStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return err
@@ -90,7 +95,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				Object:  "chat.completion.chunk",
 				Created: time.Now().Unix(),
-				Model:   h.config.InternalModel,
+				Model:   internalModel,
 				Choices: []providers.Choice{
 					{
 						Index: 0,
@@ -115,7 +120,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				Object:  "chat.completion.chunk",
 				Created: time.Now().Unix(),
-				Model:   h.config.InternalModel,
+				Model:   internalModel,
 				Choices: []providers.Choice{
 					{
 						Index:        0,

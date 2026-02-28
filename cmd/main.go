@@ -52,11 +52,7 @@ func main() {
 	if err := crypto.InitEncryption(); err != nil {
 		log.Fatalf("Encryption initialization failed: %v", err)
 	}
-	if crypto.UsingDefaultKey() {
-		log.Printf("Warning: Using default encryption key. For production, set INTERNAL_ENCRYPTION_KEY env var")
-	} else {
-		log.Printf("Encryption initialized with custom key")
-	}
+	log.Printf("Encryption initialized")
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL != "" {

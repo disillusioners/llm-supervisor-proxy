@@ -262,6 +262,57 @@ func (s *Store) runSQLiteMigrations(ctx context.Context) error {
 		}
 	}
 
+	// Migration 005: Add credentials table and credential_id to models
+	const migration005 = "005"
+	applied, err = s.isMigrationApplied(ctx, migration005)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration005, err)
+	}
+
+	if !applied {
+		// Create credentials table
+		_, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS credentials (
+				id TEXT PRIMARY KEY,
+				provider TEXT NOT NULL,
+				api_key TEXT NOT NULL,
+				base_url TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credentials table: %w", err)
+		}
+
+		// Add credential_id column to models
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN credential_id TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add credential_id column: %w", err)
+		}
+
+		// Create indexes
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_models_credential_id ON models(credential_id)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credential_id index: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_credentials_provider ON credentials(provider)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credentials provider index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration005); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -444,6 +495,57 @@ func (s *Store) runPostgreSQLMigrations(ctx context.Context) error {
 
 		// Record the migration
 		if err := s.recordMigration(ctx, migration004); err != nil {
+			return err
+		}
+	}
+
+	// Migration 005: Add credentials table and credential_id to models
+	const migration005 = "005"
+	applied, err = s.isMigrationApplied(ctx, migration005)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration005, err)
+	}
+
+	if !applied {
+		// Create credentials table
+		_, err := s.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS credentials (
+				id TEXT PRIMARY KEY,
+				provider TEXT NOT NULL,
+				api_key TEXT NOT NULL,
+				base_url TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credentials table: %w", err)
+		}
+
+		// Add credential_id column to models
+		_, err = s.DB.ExecContext(ctx, `
+			ALTER TABLE models ADD COLUMN IF NOT EXISTS credential_id TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add credential_id column: %w", err)
+		}
+
+		// Create indexes
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_models_credential_id ON models(credential_id)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credential_id index: %w", err)
+		}
+		_, err = s.DB.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_credentials_provider ON credentials(provider)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create credentials provider index: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration005); err != nil {
 			return err
 		}
 	}

@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+// resetEncryptionState resets the encryption state for testing
+func resetEncryptionState() {
+	encryptionKey = nil
+	encryptionKeyOnce = sync.Once{}
+	encryptionKeyErr = nil
+}
+
 func TestEncryptDecrypt(t *testing.T) {
 	// Generate a test key
 	key, err := GenerateKey()
@@ -14,10 +21,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	}
 
 	// Reset encryption state for test
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
-	usingDefaultKey = false
+	resetEncryptionState()
 
 	// Set the key
 	os.Setenv(EnvEncryptionKey, key)
@@ -52,10 +56,7 @@ func TestEncryptProducesDifferentCiphertext(t *testing.T) {
 	key, _ := GenerateKey()
 
 	// Reset encryption state
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
-	usingDefaultKey = false
+	resetEncryptionState()
 
 	os.Setenv(EnvEncryptionKey, key)
 	defer os.Unsetenv(EnvEncryptionKey)
@@ -65,8 +66,7 @@ func TestEncryptProducesDifferentCiphertext(t *testing.T) {
 	ciphertext1, _ := Encrypt(plaintext)
 
 	// Reset to allow re-initialization
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
+	resetEncryptionState()
 
 	ciphertext2, _ := Encrypt(plaintext)
 
@@ -88,10 +88,7 @@ func TestDecryptInvalidCiphertext(t *testing.T) {
 	key, _ := GenerateKey()
 
 	// Reset encryption state
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
-	usingDefaultKey = false
+	resetEncryptionState()
 
 	os.Setenv(EnvEncryptionKey, key)
 	defer os.Unsetenv(EnvEncryptionKey)
@@ -102,30 +99,54 @@ func TestDecryptInvalidCiphertext(t *testing.T) {
 	}
 }
 
-func TestInitEncryptionMissingKey(t *testing.T) {
-	// Reset encryption state
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
-	usingDefaultKey = false
+func TestInitEncryptionWithEnvVar(t *testing.T) {
+	key, _ := GenerateKey()
 
-	os.Unsetenv(EnvEncryptionKey)
+	// Reset encryption state
+	resetEncryptionState()
+
+	os.Setenv(EnvEncryptionKey, key)
+	defer os.Unsetenv(EnvEncryptionKey)
 
 	err := InitEncryption()
 	if err != nil {
-		t.Errorf("expected no error when using default key, got: %v", err)
+		t.Errorf("expected no error with valid env var, got: %v", err)
 	}
-	if !usingDefaultKey {
-		t.Error("expected UsingDefaultKey() to return true")
+}
+
+func TestInitEncryptionGeneratesKeyFile(t *testing.T) {
+	// Reset encryption state
+	resetEncryptionState()
+
+	// Ensure no env var is set
+	os.Unsetenv(EnvEncryptionKey)
+
+	// Get the expected key file path
+	keyPath, err := getKeyFilePath()
+	if err != nil {
+		t.Fatalf("failed to get key file path: %v", err)
 	}
+
+	// Remove existing key file if present
+	os.Remove(keyPath)
+
+	err = InitEncryption()
+	if err != nil {
+		t.Errorf("expected no error when generating key file, got: %v", err)
+	}
+
+	// Check that key file was created
+	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
+		t.Errorf("expected key file to be created at %s", keyPath)
+	}
+
+	// Cleanup
+	os.Remove(keyPath)
 }
 
 func TestInitEncryptionInvalidKeyLength(t *testing.T) {
 	// Reset encryption state
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
-	usingDefaultKey = false
+	resetEncryptionState()
 
 	os.Setenv(EnvEncryptionKey, "dG9vc2hvcnQ=") // "tooshort" in base64, but less than 32 bytes
 	defer os.Unsetenv(EnvEncryptionKey)

@@ -36,12 +36,11 @@ type ModelConfig struct {
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
 	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
-	Internal           bool   `json:"internal,omitempty"`
-	InternalProvider   string `json:"internal_provider,omitempty"`    // Provider: openai, anthropic, gemini, zhipu, etc.
-	InternalAPIKey     string `json:"-"`                              // Encrypted API key (never expose in JSON)
-	InternalBaseURL    string `json:"internal_base_url,omitempty"`    // Custom base URL (optional)
-	InternalModel      string `json:"internal_model,omitempty"`       // Actual model name for provider (e.g., GLM-5.0)
-	InternalKeyVersion int    `json:"internal_key_version,omitempty"` // Encryption key version
+	Internal         bool   `json:"internal,omitempty"`
+	CredentialID     string `json:"credential_id,omitempty"`     // Reference to credential (required if internal is true)
+	InternalProvider string `json:"internal_provider,omitempty"` // Provider override (optional, uses credential's provider if empty)
+	InternalBaseURL  string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
+	InternalModel    string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
 }
 
 // ModelsConfigInterface defines the interface for models configuration
@@ -57,19 +56,31 @@ type ModelsConfigInterface interface {
 	RemoveModel(modelID string) error
 	Save() error
 	Validate() error
+
+	// Credential management
+	GetCredential(id string) *CredentialConfig
+	GetCredentials() []CredentialConfig
+	AddCredential(cred CredentialConfig) error
+	UpdateCredential(id string, cred CredentialConfig) error
+	RemoveCredential(id string) error
+
+	// Internal config resolution
+	ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool)
 }
 
 // ModelsConfig manages the collection of model configurations.
 type ModelsConfig struct {
-	mu       sync.RWMutex
-	Models   []ModelConfig `json:"models"`
-	filePath string
+	mu          sync.RWMutex
+	Models      []ModelConfig      `json:"models"`
+	Credentials *CredentialsConfig `json:"-"` // Credentials are managed separately
+	filePath    string
 }
 
 // NewModelsConfig creates a new empty ModelsConfig.
 func NewModelsConfig() *ModelsConfig {
 	return &ModelsConfig{
-		Models: make([]ModelConfig, 0),
+		Models:      make([]ModelConfig, 0),
+		Credentials: NewCredentialsConfig(),
 	}
 }
 
@@ -135,6 +146,7 @@ func (mc *ModelsConfig) Load(filePath string) error {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		// File doesn't exist, initialize with empty config
 		mc.Models = make([]ModelConfig, 0)
+		mc.Credentials = NewCredentialsConfig()
 		mc.filePath = filePath
 
 		// Ensure directory exists and create empty file
@@ -144,7 +156,7 @@ func (mc *ModelsConfig) Load(filePath string) error {
 		}
 
 		// Create empty models.json file
-		emptyData := []byte(`{"models":[]}`)
+		emptyData := []byte(`{"models":[],"credentials":[]}`)
 		if err := os.WriteFile(filePath, emptyData, 0644); err != nil {
 			return fmt.Errorf("failed to create models.json: %w", err)
 		}
@@ -159,13 +171,16 @@ func (mc *ModelsConfig) Load(filePath string) error {
 	}
 
 	var config struct {
-		Models []ModelConfig `json:"models"`
+		Models      []ModelConfig      `json:"models"`
+		Credentials []CredentialConfig `json:"credentials"`
 	}
 	if err := json.Unmarshal(data, &config); err != nil {
 		return err
 	}
 
 	mc.Models = config.Models
+	mc.Credentials = NewCredentialsConfig()
+	mc.Credentials.SetCredentials(config.Credentials)
 	mc.filePath = filePath
 
 	return nil
@@ -177,20 +192,29 @@ func (mc *ModelsConfig) Save() error {
 	mc.mu.RLock()
 	filePath := mc.filePath
 	models := mc.Models
+	credentials := mc.Credentials
 	mc.mu.RUnlock()
 
 	// Validate before saving
 	tempConfig := &ModelsConfig{
-		Models: models,
+		Models:      models,
+		Credentials: credentials,
 	}
 	if err := tempConfig.Validate(); err != nil {
 		return err
 	}
 
+	// Get credentials slice for serialization
+	var credsSlice []CredentialConfig
+	if credentials != nil {
+		credsSlice = credentials.ToSlice()
+	}
+
 	// Marshal to JSON with indentation
 	data, err := json.MarshalIndent(struct {
-		Models []ModelConfig `json:"models"`
-	}{Models: models}, "", "  ")
+		Models      []ModelConfig      `json:"models"`
+		Credentials []CredentialConfig `json:"credentials"`
+	}{Models: models, Credentials: credsSlice}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -352,12 +376,20 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 // Since fallback is now single-level (max 1 item), we only perform basic validation:
 // - Model IDs must be non-empty
 // - Fallback references must reference existing models
-// - If internal is true, require provider, api_key, and model
+// - If internal is true, credential_id must reference an existing credential
 func (mc *ModelsConfig) Validate() error {
 	// Build set of valid model IDs
 	modelIDs := make(map[string]bool)
 	for _, model := range mc.Models {
 		modelIDs[model.ID] = true
+	}
+
+	// Build set of valid credential IDs
+	credentialIDs := make(map[string]bool)
+	if mc.Credentials != nil {
+		for _, cred := range mc.Credentials.GetCredentials() {
+			credentialIDs[cred.ID] = true
+		}
 	}
 
 	// Basic validation: check for empty IDs and valid fallback references
@@ -381,18 +413,27 @@ func (mc *ModelsConfig) Validate() error {
 
 		// Validate internal upstream configuration
 		if model.Internal {
-			if model.InternalProvider == "" {
-				return fmt.Errorf("model %s: internal_provider is required when internal is true", model.ID)
+			if model.CredentialID == "" {
+				return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
 			}
-			if model.InternalAPIKey == "" {
-				return fmt.Errorf("model %s: internal_api_key is required when internal is true", model.ID)
+			if !credentialIDs[model.CredentialID] {
+				return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, model.CredentialID)
 			}
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
-			// Validate provider is in allowed list
-			if !isValidProvider(model.InternalProvider) {
+			// Validate provider override if specified
+			if model.InternalProvider != "" && !isValidProvider(model.InternalProvider) {
 				return fmt.Errorf("model %s: invalid internal_provider: %s", model.ID, model.InternalProvider)
+			}
+		}
+	}
+
+	// Validate all credentials
+	if mc.Credentials != nil {
+		for _, cred := range mc.Credentials.GetCredentials() {
+			if err := cred.Validate(); err != nil {
+				return err
 			}
 		}
 	}
@@ -421,12 +462,59 @@ func (m *ModelConfig) IsInternal() bool {
 	return m.Internal
 }
 
-// GetInternalConfig returns the internal upstream configuration
-func (m *ModelConfig) GetInternalConfig() (provider, apiKey, baseURL, model string, ok bool) {
+// GetInternalConfig returns the internal upstream configuration.
+// Note: This returns only the model-level config. Use ModelsConfig.ResolveInternalConfig()
+// to get the full config including resolved credential.
+func (m *ModelConfig) GetInternalConfig() (credentialID, provider, baseURL, model string, ok bool) {
 	if !m.Internal {
 		return "", "", "", "", false
 	}
-	return m.InternalProvider, m.InternalAPIKey, m.InternalBaseURL, m.InternalModel, true
+	return m.CredentialID, m.InternalProvider, m.InternalBaseURL, m.InternalModel, true
+}
+
+// ResolveInternalConfig resolves the full internal upstream configuration including
+// credentials. It returns the provider, apiKey, baseURL, and model name.
+// The provider and baseURL are taken from the model if specified, otherwise from the credential.
+func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	var modelConfig *ModelConfig
+	for _, m := range mc.Models {
+		if m.ID == modelID {
+			copy := m
+			modelConfig = &copy
+			break
+		}
+	}
+
+	if modelConfig == nil || !modelConfig.Internal {
+		return "", "", "", "", false
+	}
+
+	// Get credential
+	if mc.Credentials == nil {
+		return "", "", "", "", false
+	}
+
+	cred := mc.Credentials.GetCredential(modelConfig.CredentialID)
+	if cred == nil {
+		return "", "", "", "", false
+	}
+
+	// Resolve provider: model override > credential
+	provider = modelConfig.InternalProvider
+	if provider == "" {
+		provider = cred.Provider
+	}
+
+	// Resolve baseURL: model override > credential
+	baseURL = modelConfig.InternalBaseURL
+	if baseURL == "" {
+		baseURL = cred.BaseURL
+	}
+
+	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
 }
 
 // GetEnabledModels returns only the enabled model configurations.
@@ -501,4 +589,69 @@ type ConfigError struct {
 
 func (e *ConfigError) Error() string {
 	return e.msg
+}
+
+// GetCredential returns the credential configuration for a given ID.
+// Returns nil if the credential is not found.
+func (mc *ModelsConfig) GetCredential(id string) *CredentialConfig {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.Credentials == nil {
+		return nil
+	}
+	return mc.Credentials.GetCredential(id)
+}
+
+// GetCredentials returns all credential configurations.
+func (mc *ModelsConfig) GetCredentials() []CredentialConfig {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if mc.Credentials == nil {
+		return []CredentialConfig{}
+	}
+	return mc.Credentials.GetCredentials()
+}
+
+// AddCredential adds a new credential configuration after validation.
+func (mc *ModelsConfig) AddCredential(cred CredentialConfig) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if mc.Credentials == nil {
+		mc.Credentials = NewCredentialsConfig()
+	}
+	return mc.Credentials.AddCredential(cred)
+}
+
+// UpdateCredential updates an existing credential configuration after validation.
+func (mc *ModelsConfig) UpdateCredential(id string, cred CredentialConfig) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if mc.Credentials == nil {
+		return ErrCredentialNotFound
+	}
+	return mc.Credentials.UpdateCredential(id, cred)
+}
+
+// RemoveCredential removes a credential configuration by ID.
+// Returns an error if the credential is in use by any model.
+func (mc *ModelsConfig) RemoveCredential(id string) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if mc.Credentials == nil {
+		return ErrCredentialNotFound
+	}
+
+	// Check if credential is in use
+	for _, model := range mc.Models {
+		if model.CredentialID == id {
+			return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, ErrCredentialInUse)
+		}
+	}
+
+	return mc.Credentials.RemoveCredential(id)
 }

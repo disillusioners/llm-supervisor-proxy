@@ -239,7 +239,7 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 
 	logger.Debugf("[DO-INTERNAL] Starting internal attempt %d for request %s, model %s", attempt, rc.reqID, modelConfig.ID)
 
-	internalHandler := NewInternalHandler(modelConfig)
+	internalHandler := NewInternalHandler(modelConfig, h.config.ModelsConfig)
 	err := internalHandler.HandleRequest(attemptCtx, bodyToSend, w, rc.isStream)
 
 	if err != nil {

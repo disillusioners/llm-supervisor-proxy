@@ -402,12 +402,21 @@ type dbModelRow struct {
 	CreatedAt          string
 	UpdatedAt          string
 	// Internal upstream fields
-	Internal           interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
-	InternalProvider   string
-	InternalAPIKey     string
-	InternalBaseURL    string
-	InternalModel      string
-	InternalKeyVersion interface{} // int64
+	Internal         interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	CredentialID     string      // Reference to credential
+	InternalProvider string      // Provider override (optional)
+	InternalBaseURL  string      // Base URL override (optional)
+	InternalModel    string
+}
+
+// dbCredentialRow represents a row from the credentials table
+type dbCredentialRow struct {
+	ID        string
+	Provider  string
+	APIKey    string
+	BaseURL   string
+	CreatedAt string
+	UpdatedAt string
 }
 
 // isEnabled converts the Enabled field to bool (handles both SQLite int64 and PostgreSQL bool)
@@ -431,18 +440,6 @@ func (r *dbModelRow) isInternal() bool {
 		return v != 0
 	default:
 		return false
-	}
-}
-
-// getInternalKeyVersion converts the InternalKeyVersion field to int
-func (r *dbModelRow) getInternalKeyVersion() int {
-	switch v := r.InternalKeyVersion.(type) {
-	case int64:
-		return int(v)
-	case int:
-		return v
-	default:
-		return 1
 	}
 }
 
@@ -491,26 +488,24 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.CreatedAt,
 			&dbModel.UpdatedAt,
 			&dbModel.Internal,
+			&dbModel.CredentialID,
 			&dbModel.InternalProvider,
-			&dbModel.InternalAPIKey,
 			&dbModel.InternalBaseURL,
 			&dbModel.InternalModel,
-			&dbModel.InternalKeyVersion,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		model := models.ModelConfig{
-			ID:                 dbModel.ID,
-			Name:               dbModel.Name,
-			Enabled:            dbModel.isEnabled(),
-			Internal:           dbModel.isInternal(),
-			InternalProvider:   dbModel.InternalProvider,
-			InternalAPIKey:     dbModel.InternalAPIKey,
-			InternalBaseURL:    dbModel.InternalBaseURL,
-			InternalModel:      dbModel.InternalModel,
-			InternalKeyVersion: dbModel.getInternalKeyVersion(),
+			ID:               dbModel.ID,
+			Name:             dbModel.Name,
+			Enabled:          dbModel.isEnabled(),
+			Internal:         dbModel.isInternal(),
+			CredentialID:     dbModel.CredentialID,
+			InternalProvider: dbModel.InternalProvider,
+			InternalBaseURL:  dbModel.InternalBaseURL,
+			InternalModel:    dbModel.InternalModel,
 		}
 
 		// Parse fallback chain
@@ -535,14 +530,14 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	defer m.mu.RUnlock()
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
-		coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
+		coalesce(internal, 0), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(internal_provider, ''), coalesce(internal_api_key, ''),
-			coalesce(internal_base_url, ''), coalesce(internal_model, ''), coalesce(internal_key_version, 1)
+			coalesce(internal, false), coalesce(credential_id, ''), coalesce(internal_provider, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -556,37 +551,24 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.CreatedAt,
 		&dbModel.UpdatedAt,
 		&dbModel.Internal,
+		&dbModel.CredentialID,
 		&dbModel.InternalProvider,
-		&dbModel.InternalAPIKey,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
-		&dbModel.InternalKeyVersion,
 	)
 	if err != nil {
 		return nil
 	}
 
 	model := &models.ModelConfig{
-		ID:                 dbModel.ID,
-		Name:               dbModel.Name,
-		Enabled:            dbModel.isEnabled(),
-		Internal:           dbModel.isInternal(),
-		InternalProvider:   dbModel.InternalProvider,
-		InternalAPIKey:     dbModel.InternalAPIKey,
-		InternalBaseURL:    dbModel.InternalBaseURL,
-		InternalModel:      dbModel.InternalModel,
-		InternalKeyVersion: dbModel.getInternalKeyVersion(),
-	}
-
-	// Decrypt API key
-	if dbModel.InternalAPIKey != "" {
-		decrypted, err := crypto.Decrypt(dbModel.InternalAPIKey)
-		if err != nil {
-			// Log warning but don't fail - might be unencrypted from before migration
-			log.Printf("Warning: failed to decrypt API key for model %s: %v", model.ID, err)
-		} else {
-			model.InternalAPIKey = decrypted
-		}
+		ID:               dbModel.ID,
+		Name:             dbModel.Name,
+		Enabled:          dbModel.isEnabled(),
+		Internal:         dbModel.isInternal(),
+		CredentialID:     dbModel.CredentialID,
+		InternalProvider: dbModel.InternalProvider,
+		InternalBaseURL:  dbModel.InternalBaseURL,
+		InternalModel:    dbModel.InternalModel,
 	}
 
 	// Parse fallback chain
@@ -719,16 +701,6 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
-	// Encrypt API key before storage
-	encryptedAPIKey := ""
-	if model.InternalAPIKey != "" {
-		encrypted, err := crypto.Encrypt(model.InternalAPIKey)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt API key: %w", err)
-		}
-		encryptedAPIKey = encrypted
-	}
-
 	insertQuery := m.qb.InsertModel()
 	_, err = m.store.DB.ExecContext(context.Background(), insertQuery,
 		model.ID,
@@ -737,11 +709,10 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		string(fallbackJSON),
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
+		model.CredentialID,
 		model.InternalProvider,
-		encryptedAPIKey,
 		model.InternalBaseURL,
 		model.InternalModel,
-		model.InternalKeyVersion,
 	)
 	return err
 }
@@ -773,26 +744,6 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
-	// Encrypt API key before storage
-	// If API key is empty and model is internal, keep the existing one from database
-	encryptedAPIKey := ""
-	if model.InternalAPIKey != "" {
-		encrypted, err := crypto.Encrypt(model.InternalAPIKey)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt API key: %w", err)
-		}
-		encryptedAPIKey = encrypted
-	} else if model.Internal {
-		// Fetch existing encrypted API key to preserve it
-		var existingKey string
-		keyQuery := "SELECT coalesce(internal_api_key, '') FROM models WHERE id = ?"
-		if m.store.Dialect == "postgres" {
-			keyQuery = "SELECT coalesce(internal_api_key, '') FROM models WHERE id = $1"
-		}
-		m.store.DB.QueryRowContext(context.Background(), keyQuery, modelID).Scan(&existingKey)
-		encryptedAPIKey = existingKey
-	}
-
 	updateQuery := m.qb.UpdateModel()
 	_, err = m.store.DB.ExecContext(context.Background(), updateQuery,
 		model.Name,
@@ -800,11 +751,10 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		string(fallbackJSON),
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
+		model.CredentialID,
 		model.InternalProvider,
-		encryptedAPIKey,
 		model.InternalBaseURL,
 		model.InternalModel,
-		model.InternalKeyVersion,
 		modelID,
 	)
 	return err
@@ -838,6 +788,12 @@ func (m *ModelsManager) Validate() error {
 		modelIDs[model.ID] = true
 	}
 
+	// Build set of valid credential IDs
+	credentialIDs := make(map[string]bool)
+	for _, cred := range m.GetCredentials() {
+		credentialIDs[cred.ID] = true
+	}
+
 	for _, model := range modelList {
 		if model.ID == "" {
 			return models.ErrInvalidModelID
@@ -852,7 +808,247 @@ func (m *ModelsManager) Validate() error {
 				// Unknown model reference - warn but allow for forward compatibility
 			}
 		}
+
+		// Validate internal upstream configuration
+		if model.Internal {
+			if model.CredentialID == "" {
+				return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
+			}
+			if !credentialIDs[model.CredentialID] {
+				return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, model.CredentialID)
+			}
+			if model.InternalModel == "" {
+				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+			}
+		}
+	}
+
+	// Validate all credentials
+	for _, cred := range m.GetCredentials() {
+		if err := cred.Validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// Credential management methods
+
+// GetCredential returns the credential configuration for a given ID
+func (m *ModelsManager) GetCredential(id string) *models.CredentialConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials WHERE id = ?`
+	if m.store.Dialect == PostgreSQL {
+		query = `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials WHERE id = $1`
+	}
+
+	var dbCred dbCredentialRow
+	err := m.store.DB.QueryRowContext(context.Background(), query, id).Scan(
+		&dbCred.ID,
+		&dbCred.Provider,
+		&dbCred.APIKey,
+		&dbCred.BaseURL,
+		&dbCred.CreatedAt,
+		&dbCred.UpdatedAt,
+	)
+	if err != nil {
+		return nil
+	}
+
+	cred := &models.CredentialConfig{
+		ID:       dbCred.ID,
+		Provider: dbCred.Provider,
+		APIKey:   dbCred.APIKey,
+		BaseURL:  dbCred.BaseURL,
+	}
+
+	// Decrypt API key
+	if dbCred.APIKey != "" {
+		decrypted, err := crypto.Decrypt(dbCred.APIKey)
+		if err != nil {
+			log.Printf("Warning: failed to decrypt API key for credential %s: %v", dbCred.ID, err)
+		} else {
+			cred.APIKey = decrypted
+		}
+	}
+
+	return cred
+}
+
+// GetCredentials returns all credential configurations
+func (m *ModelsManager) GetCredentials() []models.CredentialConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials ORDER BY id`
+	rows, err := m.store.DB.QueryContext(context.Background(), query)
+	if err != nil {
+		return []models.CredentialConfig{}
+	}
+	defer rows.Close()
+
+	var result []models.CredentialConfig
+	for rows.Next() {
+		var dbCred dbCredentialRow
+		if err := rows.Scan(&dbCred.ID, &dbCred.Provider, &dbCred.APIKey, &dbCred.BaseURL, &dbCred.CreatedAt, &dbCred.UpdatedAt); err != nil {
+			continue
+		}
+
+		cred := models.CredentialConfig{
+			ID:       dbCred.ID,
+			Provider: dbCred.Provider,
+			APIKey:   dbCred.APIKey,
+			BaseURL:  dbCred.BaseURL,
+		}
+
+		// Decrypt API key
+		if cred.APIKey != "" {
+			decrypted, err := crypto.Decrypt(cred.APIKey)
+			if err != nil {
+				log.Printf("Warning: failed to decrypt API key for credential %s: %v", cred.ID, err)
+			} else {
+				cred.APIKey = decrypted
+			}
+		}
+
+		result = append(result, cred)
+	}
+	return result
+}
+
+// AddCredential adds a new credential configuration
+func (m *ModelsManager) AddCredential(cred models.CredentialConfig) error {
+	if err := cred.Validate(); err != nil {
+		return err
+	}
+
+	// Encrypt API key before storing
+	encryptedAPIKey := cred.APIKey
+	if encryptedAPIKey != "" {
+		encrypted, err := crypto.Encrypt(cred.APIKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		encryptedAPIKey = encrypted
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var query string
+	if m.store.Dialect == PostgreSQL {
+		query = `INSERT INTO credentials (id, provider, api_key, base_url, created_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW())`
+	} else {
+		query = `INSERT INTO credentials (id, provider, api_key, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`
+	}
+
+	_, err := m.store.DB.ExecContext(context.Background(), query, cred.ID, cred.Provider, encryptedAPIKey, cred.BaseURL)
+	return err
+}
+
+// UpdateCredential updates an existing credential configuration
+func (m *ModelsManager) UpdateCredential(id string, cred models.CredentialConfig) error {
+	if err := cred.Validate(); err != nil {
+		return err
+	}
+	if cred.ID != id {
+		return models.ErrCannotChangeCredentialID
+	}
+
+	// Encrypt API key before storing
+	encryptedAPIKey := cred.APIKey
+	if encryptedAPIKey != "" {
+		encrypted, err := crypto.Encrypt(cred.APIKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt API key: %w", err)
+		}
+		encryptedAPIKey = encrypted
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var query string
+	if m.store.Dialect == PostgreSQL {
+		query = `UPDATE credentials SET provider = $1, api_key = $2, base_url = $3, updated_at = NOW() WHERE id = $4`
+	} else {
+		query = `UPDATE credentials SET provider = ?, api_key = ?, base_url = ?, updated_at = datetime('now') WHERE id = ?`
+	}
+
+	result, err := m.store.DB.ExecContext(context.Background(), query, cred.Provider, encryptedAPIKey, cred.BaseURL, id)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return models.ErrCredentialNotFound
+	}
+	return nil
+}
+
+// RemoveCredential removes a credential configuration
+func (m *ModelsManager) RemoveCredential(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if credential is in use
+	modelList, _ := m.scanModels(m.qb.GetAllModels())
+	for _, model := range modelList {
+		if model.CredentialID == id {
+			return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, models.ErrCredentialInUse)
+		}
+	}
+
+	var query string
+	if m.store.Dialect == PostgreSQL {
+		query = `DELETE FROM credentials WHERE id = $1`
+	} else {
+		query = `DELETE FROM credentials WHERE id = ?`
+	}
+
+	result, err := m.store.DB.ExecContext(context.Background(), query, id)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return models.ErrCredentialNotFound
+	}
+	return nil
+}
+
+// ResolveInternalConfig resolves the full internal upstream configuration
+func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
+	modelConfig := m.GetModel(modelID)
+	if modelConfig == nil || !modelConfig.Internal {
+		return "", "", "", "", false
+	}
+
+	if modelConfig.CredentialID == "" {
+		return "", "", "", "", false
+	}
+
+	cred := m.GetCredential(modelConfig.CredentialID)
+	if cred == nil {
+		return "", "", "", "", false
+	}
+
+	// Resolve provider: model override > credential
+	provider = modelConfig.InternalProvider
+	if provider == "" {
+		provider = cred.Provider
+	}
+
+	// Resolve baseURL: model override > credential
+	baseURL = modelConfig.InternalBaseURL
+	if baseURL == "" {
+		baseURL = cred.BaseURL
+	}
+
+	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
 }

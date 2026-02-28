@@ -6,19 +6,20 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
 const EnvEncryptionKey = "INTERNAL_ENCRYPTION_KEY"
 
-// DefaultEncryptionKey is a hardcoded fallback key (32 bytes base64-encoded)
-// WARNING: For production, always set INTERNAL_ENCRYPTION_KEY env var
-const DefaultEncryptionKey = "zxL6bzszggELp/xZ5t5Hnd4GQW27wMgTg4e7LV874uU="
+const keyFileName = ".encryption_key"
 
 var (
-	ErrEncryptionKeyNotSet = errors.New("INTERNAL_ENCRYPTION_KEY environment variable not set")
+	ErrEncryptionKeyNotSet = errors.New("INTERNAL_ENCRYPTION_KEY environment variable not set and no key file found")
 	ErrInvalidCiphertext   = errors.New("invalid ciphertext")
 	ErrKeyInvalidLength    = errors.New("encryption key must be 32 bytes")
 )
@@ -27,18 +28,78 @@ var (
 	encryptionKey     []byte
 	encryptionKeyOnce sync.Once
 	encryptionKeyErr  error
-	usingDefaultKey   = false
 )
 
-// InitEncryption initializes the encryption key from environment variable
-// Falls back to a hardcoded default key if not set
+// getKeyFilePath returns the path to the encryption key file
+func getKeyFilePath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user config directory: %w", err)
+	}
+	return filepath.Join(configDir, "llm-supervisor-proxy", keyFileName), nil
+}
+
+// loadKeyFromFile reads the encryption key from the specified file
+func loadKeyFromFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// saveKeyToFile saves the encryption key to the specified file with restrictive permissions
+func saveKeyToFile(path, key string) error {
+	// Ensure directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Write key with restrictive permissions (0600 = read/write for owner only)
+	return os.WriteFile(path, []byte(key), 0600)
+}
+
+// InitEncryption initializes the encryption key from environment variable or key file
+// If neither exists, generates a new key and saves it to the key file
 func InitEncryption() error {
 	encryptionKeyOnce.Do(func() {
-		key := os.Getenv(EnvEncryptionKey)
+		var key string
+
+		// 1. Check environment variable first
+		key = os.Getenv(EnvEncryptionKey)
+
+		// 2. If not set, try key file
 		if key == "" {
-			// Use default key
-			key = DefaultEncryptionKey
-			usingDefaultKey = true
+			keyFilePath, err := getKeyFilePath()
+			if err != nil {
+				encryptionKeyErr = err
+				return
+			}
+
+			keyFromFile, err := loadKeyFromFile(keyFilePath)
+			if err == nil {
+				key = keyFromFile
+			} else if os.IsNotExist(err) {
+				// 3. No key file exists, generate a new one
+				log.Printf("No encryption key found, generating new key at: %s", keyFilePath)
+				newKey, err := GenerateKey()
+				if err != nil {
+					encryptionKeyErr = fmt.Errorf("failed to generate encryption key: %w", err)
+					return
+				}
+
+				if err := saveKeyToFile(keyFilePath, newKey); err != nil {
+					encryptionKeyErr = fmt.Errorf("failed to save encryption key: %w", err)
+					return
+				}
+
+				key = newKey
+				log.Printf("Generated and saved new encryption key")
+			} else {
+				encryptionKeyErr = fmt.Errorf("failed to read encryption key file: %w", err)
+				return
+			}
 		}
 
 		// Decode base64 key
@@ -56,11 +117,6 @@ func InitEncryption() error {
 		encryptionKey = decoded
 	})
 	return encryptionKeyErr
-}
-
-// UsingDefaultKey returns true if the default hardcoded key is being used
-func UsingDefaultKey() bool {
-	return usingDefaultKey
 }
 
 // Encrypt encrypts plaintext using AES-256-GCM

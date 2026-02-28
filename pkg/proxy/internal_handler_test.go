@@ -7,6 +7,150 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
+// mockModelsConfig implements models.ModelsConfigInterface for testing
+type mockModelsConfig struct {
+	models      []models.ModelConfig
+	credentials []models.CredentialConfig
+}
+
+func (m *mockModelsConfig) GetModels() []models.ModelConfig {
+	return m.models
+}
+
+func (m *mockModelsConfig) GetEnabledModels() []models.ModelConfig {
+	var result []models.ModelConfig
+	for _, model := range m.models {
+		if model.Enabled {
+			result = append(result, model)
+		}
+	}
+	return result
+}
+
+func (m *mockModelsConfig) GetModel(modelID string) *models.ModelConfig {
+	for _, model := range m.models {
+		if model.ID == modelID {
+			copy := model
+			return &copy
+		}
+	}
+	return nil
+}
+
+func (m *mockModelsConfig) GetTruncateParams(modelID string) []string {
+	if model := m.GetModel(modelID); model != nil {
+		return model.TruncateParams
+	}
+	return nil
+}
+
+func (m *mockModelsConfig) GetFallbackChain(modelID string) []string {
+	if model := m.GetModel(modelID); model != nil {
+		return model.FallbackChain
+	}
+	return nil
+}
+
+func (m *mockModelsConfig) AddModel(model models.ModelConfig) error {
+	m.models = append(m.models, model)
+	return nil
+}
+
+func (m *mockModelsConfig) UpdateModel(modelID string, model models.ModelConfig) error {
+	for i, existing := range m.models {
+		if existing.ID == modelID {
+			m.models[i] = model
+			return nil
+		}
+	}
+	return models.ErrModelNotFound
+}
+
+func (m *mockModelsConfig) RemoveModel(modelID string) error {
+	for i, model := range m.models {
+		if model.ID == modelID {
+			m.models = append(m.models[:i], m.models[i+1:]...)
+			return nil
+		}
+	}
+	return models.ErrModelNotFound
+}
+
+func (m *mockModelsConfig) Save() error {
+	return nil
+}
+
+func (m *mockModelsConfig) Validate() error {
+	return nil
+}
+
+func (m *mockModelsConfig) GetCredential(id string) *models.CredentialConfig {
+	for _, cred := range m.credentials {
+		if cred.ID == id {
+			copy := cred
+			return &copy
+		}
+	}
+	return nil
+}
+
+func (m *mockModelsConfig) GetCredentials() []models.CredentialConfig {
+	return m.credentials
+}
+
+func (m *mockModelsConfig) AddCredential(cred models.CredentialConfig) error {
+	m.credentials = append(m.credentials, cred)
+	return nil
+}
+
+func (m *mockModelsConfig) UpdateCredential(id string, cred models.CredentialConfig) error {
+	for i, existing := range m.credentials {
+		if existing.ID == id {
+			m.credentials[i] = cred
+			return nil
+		}
+	}
+	return models.ErrCredentialNotFound
+}
+
+func (m *mockModelsConfig) RemoveCredential(id string) error {
+	for i, cred := range m.credentials {
+		if cred.ID == id {
+			m.credentials = append(m.credentials[:i], m.credentials[i+1:]...)
+			return nil
+		}
+	}
+	return models.ErrCredentialNotFound
+}
+
+func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
+	modelConfig := m.GetModel(modelID)
+	if modelConfig == nil || !modelConfig.Internal {
+		return "", "", "", "", false
+	}
+
+	if modelConfig.CredentialID == "" {
+		return "", "", "", "", false
+	}
+
+	cred := m.GetCredential(modelConfig.CredentialID)
+	if cred == nil {
+		return "", "", "", "", false
+	}
+
+	provider = modelConfig.InternalProvider
+	if provider == "" {
+		provider = cred.Provider
+	}
+
+	baseURL = modelConfig.InternalBaseURL
+	if baseURL == "" {
+		baseURL = cred.BaseURL
+	}
+
+	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
+}
+
 func TestCanHandleInternal(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -46,11 +190,10 @@ func TestCanHandleInternal(t *testing.T) {
 }
 
 func TestInternalHandler_convertRequest(t *testing.T) {
+	mockResolver := &mockModelsConfig{}
 	handler := &InternalHandler{
-		config: &models.ModelConfig{
-			ID:            "test-model",
-			InternalModel: "gpt-4",
-		},
+		config:   &models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		resolver: mockResolver,
 	}
 
 	tests := []struct {
@@ -141,6 +284,7 @@ func TestInternalHandler_convertRequest(t *testing.T) {
 }
 
 func TestNewInternalHandler(t *testing.T) {
+	mockResolver := &mockModelsConfig{}
 	config := &models.ModelConfig{
 		ID:               "test-model",
 		Name:             "Test Model",
@@ -149,11 +293,14 @@ func TestNewInternalHandler(t *testing.T) {
 		InternalModel:    "gpt-4",
 	}
 
-	handler := NewInternalHandler(config)
+	handler := NewInternalHandler(config, mockResolver)
 	if handler == nil {
 		t.Fatal("expected handler, got nil")
 	}
 	if handler.config != config {
 		t.Error("handler config mismatch")
+	}
+	if handler.resolver != mockResolver {
+		t.Error("handler resolver mismatch")
 	}
 }

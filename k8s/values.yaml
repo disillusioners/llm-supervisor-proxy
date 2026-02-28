@@ -52,13 +52,13 @@ env:
   LOG_LEVEL: "info"
 
 # Resources
-resources: {}
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 50m
-  #   memory: 64Mi
+resources:
+  limits:
+    cpu: "1"
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 128Mi
 
 # Liveness and readiness probes
 livenessProbe:
