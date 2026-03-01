@@ -237,6 +237,15 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	return h.handleAnthropicNonStreamResponse(w, resp, arc)
 }
 
+// flushingResponseRecorder wraps httptest.ResponseRecorder to implement http.Flusher
+type flushingResponseRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (f *flushingResponseRecorder) Flush() {
+	// No-op: the ResponseRecorder already captures all written data
+}
+
 // doAnthropicInternalRequest handles requests for internal models (direct provider calls)
 // It uses the InternalHandler to call the provider directly, then translates the response
 // from OpenAI format to Anthropic format.
@@ -248,8 +257,8 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		return false
 	}
 
-	// Create a response recorder to capture the OpenAI response
-	recorder := httptest.NewRecorder()
+	// Create a response recorder that supports flushing (for streaming)
+	recorder := &flushingResponseRecorder{httptest.NewRecorder()}
 
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
