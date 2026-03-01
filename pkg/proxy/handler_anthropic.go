@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -19,6 +20,15 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
 )
+
+// Debug mode for Anthropic endpoint
+var debugAnthropic = os.Getenv("DEBUG_ANTHROPIC") == "1"
+
+func debugLog(format string, args ...interface{}) {
+	if debugAnthropic {
+		log.Printf("[DEBUG] "+format, args...)
+	}
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Anthropic Messages API Handler
@@ -43,11 +53,21 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	debugLog("=== INCOMING ANTHROPIC REQUEST ===")
+	debugLog("Request Body: %s", string(bodyBytes))
+	debugLog("Headers: %v", r.Header)
+
 	var anthropicReq translator.AnthropicRequest
 	if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
 		h.sendAnthropicError(w, "invalid_request_error", "Invalid JSON body", http.StatusBadRequest)
 		return
 	}
+
+	debugLog("Model: %s", anthropicReq.Model)
+	debugLog("Stream: %v", anthropicReq.Stream)
+	debugLog("Messages Count: %d", len(anthropicReq.Messages))
+	debugLog("MaxTokens: %d", anthropicReq.MaxTokens)
+	debugLog("System: %v", anthropicReq.System)
 
 	// Validate request
 	if err := validateAnthropicRequest(&anthropicReq); err != nil {
@@ -73,6 +93,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		h.sendAnthropicError(w, "api_error", "Failed to translate request", http.StatusInternalServerError)
 		return
 	}
+
+	debugLog("=== TRANSLATED OPENAI REQUEST ===")
+	debugLog("OpenAI Body: %s", string(openaiBodyBytes))
 
 	// Create request log
 	reqID := uuid.New().String()
@@ -223,6 +246,9 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		log.Printf("Anthropic upstream returned %d: %s", resp.StatusCode, string(bodyBytes))
+		debugLog("=== UPSTREAM ERROR RESPONSE ===")
+		debugLog("Status: %d", resp.StatusCode)
+		debugLog("Body: %s", string(bodyBytes))
 		// Don't send error response here - let the retry loop handle it
 		// Store the error for potential use if all retries fail
 		arc.lastError = bodyBytes
@@ -287,12 +313,18 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 
 // handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
 func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
+	debugLog("=== INTERNAL OPENAI RESPONSE ===")
+	debugLog("OpenAI Body: %s", string(openaiBody))
+
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(openaiBody, arc.originalModel)
 	if err != nil {
 		log.Printf("Failed to translate Anthropic internal response: %v", err)
 		return false
 	}
+
+	debugLog("=== ANTHROPIC RESPONSE ===")
+	debugLog("Anthropic Body: %s", string(anthropicResp))
 
 	// Send response
 	w.Header().Set("Content-Type", "application/json")
@@ -382,6 +414,10 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 
 // handleAnthropicStreamResponse handles a streaming response
 func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
+	debugLog("=== STREAM RESPONSE START ===")
+	debugLog("Request ID: %s", arc.reqID)
+	debugLog("Model: %s", arc.originalModel)
+
 	// Send headers immediately for TTFB
 	if !arc.headersSent {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -395,27 +431,49 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
+		debugLog("Headers sent, connection established")
 	}
 
 	// Buffer all OpenAI chunks
 	var buffer bytes.Buffer
 	scanner := bufio.NewScanner(resp.Body)
+	chunkCount := 0
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		chunkCount++
 
 		// Buffer the line
 		buffer.Write(line)
 		buffer.WriteByte('\n')
 
+		// Log chunk (truncated for large content)
+		lineStr := string(line)
+		if len(lineStr) > 200 {
+			debugLog("Chunk #%d: %s...", chunkCount, lineStr[:200])
+		} else {
+			debugLog("Chunk #%d: %s", chunkCount, lineStr)
+		}
+
 		// Check for [DONE]
 		if bytes.HasPrefix(line, []byte("data: [DONE]")) {
+			debugLog("Stream complete, received %d chunks, translating...", chunkCount)
+
 			// Translate buffered stream and flush
 			anthropicEvents, err := translator.TranslateBufferedStream(buffer.Bytes(), arc.originalModel)
 			if err != nil {
 				log.Printf("Failed to translate Anthropic stream: %v", err)
 				h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
 				return true // Don't retry after headers sent
+			}
+
+			// Log translated events
+			eventLines := strings.Split(string(anthropicEvents), "\n")
+			debugLog("=== TRANSLATED EVENTS (%d lines) ===", len(eventLines))
+			for i, eventLine := range eventLines {
+				if strings.TrimSpace(eventLine) != "" {
+					debugLog("Event line %d: %s", i+1, eventLine)
+				}
 			}
 
 			w.Write(anthropicEvents)
@@ -430,6 +488,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			h.store.Add(arc.reqLog)
 			h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
 
+			debugLog("=== STREAM COMPLETE ===")
 			return true
 		}
 	}

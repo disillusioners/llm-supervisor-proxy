@@ -30,3 +30,5 @@ k8s/secrets/
 
 # Environment files
 .env*
+*.log
+proxy_debug*

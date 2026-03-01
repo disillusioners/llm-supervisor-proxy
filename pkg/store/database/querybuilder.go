@@ -192,27 +192,19 @@ func (q *QueryBuilder) GetModelByID() string {
 func (q *QueryBuilder) GetAllModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''),
-			coalesce(internal_base_url, ''), coalesce(internal_model, '')
-			FROM models ORDER BY name`
+            coalesce(internal, false), coalesce(credential_id, ''),
+            coalesce(internal_base_url, ''), coalesce(internal_model, '')
+        FROM models ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''),
-		coalesce(internal_base_url, ''), coalesce(internal_model, '')
-		FROM models ORDER BY name`
+        coalesce(internal, 0), coalesce(credential_id, ''),
+        coalesce(internal_base_url, ''), coalesce(internal_model, '')
+    FROM models ORDER BY name`
 }
 
 // GetEnabledModels returns the appropriate SELECT query for enabled models
 func (q *QueryBuilder) GetEnabledModels() string {
-	if q.dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''),
-			coalesce(internal_base_url, ''), coalesce(internal_model, '')
-			FROM models WHERE enabled = true ORDER BY name`
-	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''),
-		coalesce(internal_base_url, ''), coalesce(internal_model, '')
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
 		FROM models WHERE enabled = 1 ORDER BY name`
 }
 

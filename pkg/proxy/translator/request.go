@@ -108,6 +108,7 @@ func translateMessage(msg AnthropicMessage) map[string]interface{} {
 
 // translateContent translates Anthropic content to OpenAI format.
 // Content can be a string or []ContentBlock.
+// Always returns a string for simplicity (OpenAI accepts both string and array).
 func translateContent(content interface{}) interface{} {
 	if content == nil {
 		return nil
@@ -117,30 +118,32 @@ func translateContent(content interface{}) interface{} {
 	case string:
 		return c
 	case []interface{}:
-		// Array of content blocks
-		result := make([]interface{}, 0, len(c))
+		// Array of content blocks - flatten to single string
+		var result string
 		for _, block := range c {
 			if translated := translateContentBlock(block); translated != nil {
-				result = append(result, translated)
-			}
-		}
-		if len(result) == 1 {
-			// If only one block and it's text, return as string
-			if textBlock, ok := result[0].(string); ok {
-				return textBlock
+				// Extract text from text blocks
+				if textObj, ok := translated.(map[string]interface{}); ok {
+					if textObj["type"] == "text" {
+						if text, ok := textObj["text"].(string); ok {
+							result += text
+						}
+					}
+				}
 			}
 		}
 		return result
 	case []ContentBlock:
-		result := make([]interface{}, 0, len(c))
+		var result string
 		for _, block := range c {
 			if translated := translateContentBlock(block); translated != nil {
-				result = append(result, translated)
-			}
-		}
-		if len(result) == 1 {
-			if textBlock, ok := result[0].(string); ok {
-				return textBlock
+				if textObj, ok := translated.(map[string]interface{}); ok {
+					if textObj["type"] == "text" {
+						if text, ok := textObj["text"].(string); ok {
+							result += text
+						}
+					}
+				}
 			}
 		}
 		return result
@@ -212,9 +215,12 @@ func translateContentBlock(block interface{}) interface{} {
 	switch blockType {
 	case "text":
 		// Anthropic: {"type": "text", "text": "..."}
-		// OpenAI: "..." (string) or {"type": "text", "text": "..."}
-		// For simplicity, return as string for text blocks
-		return text
+		// OpenAI: {"type": "text", "text": "..."} or just string
+		// Return as OpenAI content part object for consistency in arrays
+		return map[string]interface{}{
+			"type": "text",
+			"text": text,
+		}
 
 	case "image":
 		// Anthropic:
