@@ -159,6 +159,12 @@ func generateAnthropicEvents(state *StreamState) []string {
 	}
 	events = append(events, formatSSEEvent(string(EventMessageStart), messageStart))
 
+	// 1b. ping event (sent after message_start per Anthropic spec)
+	pingEvent := map[string]interface{}{
+		"type": EventPing,
+	}
+	events = append(events, formatSSEEvent(string(EventPing), pingEvent))
+
 	// Determine content blocks to emit
 	var contentBlocks []ContentBlock
 	var blockIndex int
@@ -168,8 +174,8 @@ func generateAnthropicEvents(state *StreamState) []string {
 		// content_block_start for thinking
 		events = append(events, formatContentBlockStart(blockIndex, "thinking"))
 
-		// content_block_delta for thinking
-		events = append(events, formatContentBlockDelta(blockIndex, "thinking_delta", state.ThinkingContent))
+		// content_block_delta for thinking (uses 'thinking' field, not 'text')
+		events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent))
 
 		// content_block_stop
 		events = append(events, formatContentBlockStop(blockIndex))
@@ -258,12 +264,23 @@ func formatSSEEvent(eventType string, data interface{}) string {
 
 // formatContentBlockStart formats a content_block_start event
 func formatContentBlockStart(index int, blockType string) string {
+	contentBlock := map[string]interface{}{
+		"type": blockType,
+	}
+
+	// Initialize text/thinking field based on block type
+	// This is required by the Anthropic SDK to avoid None type errors
+	switch blockType {
+	case "text":
+		contentBlock["text"] = ""
+	case "thinking":
+		contentBlock["thinking"] = ""
+	}
+
 	event := map[string]interface{}{
-		"type":  EventContentBlockStart,
-		"index": index,
-		"content_block": map[string]interface{}{
-			"type": blockType,
-		},
+		"type":          EventContentBlockStart,
+		"index":         index,
+		"content_block": contentBlock,
 	}
 	return formatSSEEvent(string(EventContentBlockStart), event)
 }
@@ -283,7 +300,7 @@ func formatToolUseBlockStart(index int, id, name string) string {
 	return formatSSEEvent(string(EventContentBlockStart), event)
 }
 
-// formatContentBlockDelta formats a content_block_delta event
+// formatContentBlockDelta formats a content_block_delta event for text_delta type
 func formatContentBlockDelta(index int, deltaType, text string) string {
 	event := map[string]interface{}{
 		"type":  EventContentBlockDelta,
@@ -291,6 +308,19 @@ func formatContentBlockDelta(index int, deltaType, text string) string {
 		"delta": map[string]interface{}{
 			"type": deltaType,
 			"text": text,
+		},
+	}
+	return formatSSEEvent(string(EventContentBlockDelta), event)
+}
+
+// formatThinkingBlockDelta formats a content_block_delta event for thinking_delta type
+func formatThinkingBlockDelta(index int, thinking string) string {
+	event := map[string]interface{}{
+		"type":  EventContentBlockDelta,
+		"index": index,
+		"delta": map[string]interface{}{
+			"type":     "thinking_delta",
+			"thinking": thinking,
 		},
 	}
 	return formatSSEEvent(string(EventContentBlockDelta), event)
