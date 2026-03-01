@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import type { RequestDetail as RequestDetailType } from '../types';
-import { escapeHtml } from '../utils/helpers';
+import { escapeHtml, escapeHtmlLight, generateCurlCommand } from '../utils/helpers';
 
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -96,6 +96,125 @@ function JsonViewer({
   }
 
   return <span class="text-gray-400">{String(data)}</span>;
+}
+
+// Modal for displaying cURL command
+function CurlModal({ 
+  detail, 
+  onClose 
+}: { 
+  detail: RequestDetailType; 
+  onClose: () => void;
+}) {
+  const modalRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('http://localhost:8080/v1/chat/completions');
+
+  // Close on escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  // Close on backdrop click
+  const handleBackdropClick = (e: MouseEvent) => {
+    if (e.target === modalRef.current) onClose();
+  };
+
+  const curlCommand = generateCurlCommand(
+    detail.model,
+    detail.messages,
+    detail.parameters,
+    detail.is_stream,
+    proxyUrl
+  );
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(curlCommand);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = curlCommand;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div 
+      ref={modalRef}
+      class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+      onClick={handleBackdropClick}
+    >
+      <div class="bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[80vh] flex flex-col border border-gray-600">
+        {/* Header */}
+        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
+          <h3 class="text-lg font-semibold text-gray-100">cURL Command</h3>
+          <button 
+            onClick={onClose}
+            class="text-gray-400 hover:text-white transition-colors p-1"
+          >
+            ✕
+          </button>
+        </div>
+        
+        {/* Content - Scrollable */}
+        <div class="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+          {/* Proxy URL input */}
+          <div>
+            <label class="block text-gray-400 mb-1 text-xs">Proxy URL</label>
+            <input
+              type="text"
+              value={proxyUrl}
+              onInput={(e) => setProxyUrl((e.target as HTMLInputElement).value)}
+              class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-gray-200 text-sm font-mono focus:outline-none focus:border-blue-500"
+              placeholder="http://localhost:8080/v1/chat/completions"
+            />
+          </div>
+
+          {/* cURL command */}
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-gray-400 text-xs">Command</label>
+              <button
+                onClick={handleCopy}
+                class={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                  copied 
+                    ? 'bg-green-600 text-white' 
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+              >
+                {copied ? '✓ Copied!' : 'Copy'}
+              </button>
+            </div>
+            <pre class="text-gray-300 bg-gray-900 p-3 rounded text-xs overflow-x-auto border border-gray-700 font-mono whitespace-pre-wrap break-all">
+              {escapeHtmlLight(curlCommand)}
+            </pre>
+          </div>
+
+          {/* Note */}
+          <div class="text-xs text-gray-500 border-t border-gray-700 pt-3">
+            <p class="mb-1">💡 <strong>Note:</strong></p>
+            <ul class="list-disc list-inside space-y-1 ml-2">
+              <li>Replace <code class="text-yellow-400">YOUR_API_KEY</code> with your actual proxy API token</li>
+              <li>Update the proxy URL if different from localhost</li>
+              <li>The command reconstructs the request from stored data</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // Modal for displaying advanced request info
@@ -298,6 +417,7 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
   const [showModal, setShowModal] = useState(false);
+  const [showCurlModal, setShowCurlModal] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -373,13 +493,22 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
             </div>
           </div>
           {/* Info Button */}
-          <button
-            onClick={() => setShowModal(true)}
-            class="text-gray-400 hover:text-white transition-colors p-2 hover:bg-gray-700 rounded"
-            title="View details"
-          >
-            ℹ️
-          </button>
+          <div class="flex items-center gap-1">
+            <button
+              onClick={() => setShowCurlModal(true)}
+              class="text-gray-400 hover:text-white transition-colors p-2 hover:bg-gray-700 rounded"
+              title="View cURL command"
+            >
+              📋
+            </button>
+            <button
+              onClick={() => setShowModal(true)}
+              class="text-gray-400 hover:text-white transition-colors p-2 hover:bg-gray-700 rounded"
+              title="View details"
+            >
+              ℹ️
+            </button>
+          </div>
         </div>
 
         {/* Error Box */}
@@ -393,6 +522,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
       {/* Modal */}
       {showModal && <AdvancedInfoModal detail={detail} onClose={() => setShowModal(false)} />}
+      {showCurlModal && <CurlModal detail={detail} onClose={() => setShowCurlModal(false)} />}
 
       {/* Messages - Scrollable */}
       <div
