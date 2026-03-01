@@ -27,3 +27,6 @@ proxy.pid
 mock.log
 /main
 k8s/secrets/
+
+# Environment files
+.env*

@@ -9,10 +9,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
@@ -167,6 +169,10 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 // attemptAnthropicModel attempts a single model request with retries
 func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicRequestContext, modelIndex int, currentModel string) bool {
+	// Check if this model uses internal upstream
+	modelConfig := arc.conf.ModelsConfig.GetModel(currentModel)
+	isInternal := modelConfig != nil && modelConfig.Internal
+
 	for retry := 0; retry < arc.conf.MaxUpstreamErrorRetries+1; retry++ {
 		if retry > 0 {
 			log.Printf("Retrying Anthropic request (attempt %d)...", retry)
@@ -180,7 +186,12 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 			return true // Client disconnected
 		}
 
-		success := h.doAnthropicRequest(w, arc, currentModel)
+		var success bool
+		if isInternal {
+			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
+		} else {
+			success = h.doAnthropicRequest(w, arc, currentModel)
+		}
 		if success {
 			return true
 		}
@@ -224,6 +235,110 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 		return h.handleAnthropicStreamResponse(w, resp, arc)
 	}
 	return h.handleAnthropicNonStreamResponse(w, resp, arc)
+}
+
+// doAnthropicInternalRequest handles requests for internal models (direct provider calls)
+// It uses the InternalHandler to call the provider directly, then translates the response
+// from OpenAI format to Anthropic format.
+func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthropicRequestContext, modelConfig *models.ModelConfig) bool {
+	// Parse the OpenAI request body
+	var openaiReq map[string]interface{}
+	if err := json.Unmarshal(arc.openaiBody, &openaiReq); err != nil {
+		log.Printf("Failed to parse OpenAI request body: %v", err)
+		return false
+	}
+
+	// Create a response recorder to capture the OpenAI response
+	recorder := httptest.NewRecorder()
+
+	// Use InternalHandler to make the request
+	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
+	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream)
+	if err != nil {
+		log.Printf("Anthropic internal request failed: %v", err)
+		arc.lastError = []byte(err.Error())
+		arc.lastStatusCode = http.StatusBadGateway
+		return false
+	}
+
+	// Check response status
+	if recorder.Code != http.StatusOK {
+		arc.lastError = recorder.Body.Bytes()
+		arc.lastStatusCode = recorder.Code
+		log.Printf("Anthropic internal request returned %d: %s", recorder.Code, string(arc.lastError))
+		return false
+	}
+
+	// Translate response from OpenAI to Anthropic format
+	if arc.isStream {
+		return h.handleAnthropicInternalStreamResponse(w, recorder.Body.Bytes(), arc)
+	}
+	return h.handleAnthropicInternalNonStreamResponse(w, recorder.Body.Bytes(), arc)
+}
+
+// handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
+func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
+	// Translate to Anthropic format
+	anthropicResp, err := translator.TranslateNonStreamResponse(openaiBody, arc.originalModel)
+	if err != nil {
+		log.Printf("Failed to translate Anthropic internal response: %v", err)
+		return false
+	}
+
+	// Send response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(anthropicResp)
+
+	// Update log
+	arc.reqLog.Status = "completed"
+	arc.reqLog.EndTime = time.Now()
+	arc.reqLog.Duration = time.Since(arc.startTime).String()
+	h.store.Add(arc.reqLog)
+	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+
+	return true
+}
+
+// handleAnthropicInternalStreamResponse handles streaming internal responses
+func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
+	// Translate buffered OpenAI stream to Anthropic format
+	anthropicEvents, err := translator.TranslateBufferedStream(openaiBody, arc.originalModel)
+	if err != nil {
+		log.Printf("Failed to translate Anthropic internal stream: %v", err)
+		h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
+		return true // Don't retry after headers sent
+	}
+
+	// Send headers if not already sent
+	if !arc.headersSent {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		arc.headersSent = true
+
+		// Send initial comment to establish byte stream
+		w.Write([]byte(": connected\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	// Write translated events
+	w.Write(anthropicEvents)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	// Update log
+	arc.reqLog.Status = "completed"
+	arc.reqLog.EndTime = time.Now()
+	arc.reqLog.Duration = time.Since(arc.startTime).String()
+	h.store.Add(arc.reqLog)
+	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+
+	return true
 }
 
 // handleAnthropicNonStreamResponse handles a non-streaming response
@@ -442,16 +557,13 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 
 // getModelMappingConfig extracts model mapping from config
 func getModelMappingConfig(modelsConfig interface{}) *translator.ModelMappingConfig {
-	// For now, return nil (use default mapping)
-	// TODO: Load from config when model mapping is implemented
+	// Return mapping config without default - unknown models pass through unchanged
+	// This allows Anthropic clients to use any model configured in the proxy
 	return &translator.ModelMappingConfig{
-		DefaultModel: "gpt-4o",
+		// No DefaultModel - let unknown models pass through
 		Mapping: map[string]string{
-			"claude-sonnet-4-5-20250929": "gpt-4o",
-			"claude-sonnet-4-5":          "gpt-4o",
-			"claude-3-opus-20240229":     "gpt-4-turbo",
-			"claude-3-sonnet-20240229":   "gpt-4o",
-			"claude-3-haiku-20240307":    "gpt-4o-mini",
+			// Claude model aliases can be mapped here if needed
+			// e.g., "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
 		},
 	}
 }
