@@ -219,10 +219,13 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		// Extract content delta
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
-			if choice.Delta != nil && choice.Delta.Content != "" {
-				eventCh <- StreamEvent{
-					Type:    "content",
-					Content: choice.Delta.Content,
+			if choice.Delta != nil {
+				// Content can be string or nil during streaming
+				if contentStr, ok := choice.Delta.Content.(string); ok && contentStr != "" {
+					eventCh <- StreamEvent{
+						Type:    "content",
+						Content: contentStr,
+					}
 				}
 			}
 			if choice.FinishReason != "" {

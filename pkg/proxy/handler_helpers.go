@@ -121,13 +121,27 @@ func extractParameters(requestBody map[string]interface{}) map[string]interface{
 }
 
 // parseMessages converts the raw JSON "messages" array to store.Message slice.
+// Handles both string content and array content (OpenAI multimodal format).
 func parseMessages(requestBody map[string]interface{}) []store.Message {
 	var storeMessages []store.Message
 	if msgs, ok := requestBody["messages"].([]interface{}); ok {
 		for _, m := range msgs {
 			if msgMap, ok := m.(map[string]interface{}); ok {
 				role, _ := msgMap["role"].(string)
-				content, _ := msgMap["content"].(string)
+				var content string
+				switch c := msgMap["content"].(type) {
+				case string:
+					content = c
+				case []interface{}:
+					// Flatten array content to string for storage
+					for _, part := range c {
+						if partMap, ok := part.(map[string]interface{}); ok {
+							if text, ok := partMap["text"].(string); ok {
+								content += text
+							}
+						}
+					}
+				}
 				storeMessages = append(storeMessages, store.Message{Role: role, Content: content})
 			}
 		}

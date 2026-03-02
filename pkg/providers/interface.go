@@ -39,9 +39,22 @@ type ChatCompletionRequest struct {
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	Name    string `json:"name,omitempty"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name    string      `json:"name,omitempty"`
+}
+
+// ContentPart represents a content part in multimodal messages
+type ContentPart struct {
+	Type     string    `json:"type"` // "text" or "image_url"
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+// ImageURL represents an image URL in multimodal content
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"` // "auto", "low", "high"
 }
 
 // ChatCompletionResponse represents a chat completion response (OpenAI-compatible format)

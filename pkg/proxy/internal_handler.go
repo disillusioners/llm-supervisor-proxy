@@ -165,8 +165,15 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 				if role, ok := msgMap["role"].(string); ok {
 					msg.Role = role
 				}
-				if content, ok := msgMap["content"].(string); ok {
-					msg.Content = content
+				// Handle content as string or array (OpenAI supports both)
+				if content, ok := msgMap["content"]; ok {
+					switch c := content.(type) {
+					case string:
+						msg.Content = c
+					case []interface{}:
+						// Keep as array for multimodal support
+						msg.Content = c
+					}
 				}
 				if name, ok := msgMap["name"].(string); ok {
 					msg.Name = name

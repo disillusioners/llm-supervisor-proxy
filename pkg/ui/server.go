@@ -652,7 +652,20 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	// Extract response content
 	var responseText string
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		responseText = resp.Choices[0].Message.Content
+		// Content can be string or array
+		switch c := resp.Choices[0].Message.Content.(type) {
+		case string:
+			responseText = c
+		case []interface{}:
+			// Flatten array content to string
+			for _, part := range c {
+				if partMap, ok := part.(map[string]interface{}); ok {
+					if text, ok := partMap["text"].(string); ok {
+						responseText += text
+					}
+				}
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
