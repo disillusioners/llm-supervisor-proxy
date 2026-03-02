@@ -8,20 +8,29 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
 // InternalHandler handles requests to internal providers (bypassing upstream)
 type InternalHandler struct {
-	config   *models.ModelConfig
-	resolver models.ModelsConfigInterface // Resolver for credentials
+	config      *models.ModelConfig
+	resolver    models.ModelsConfigInterface // Resolver for credentials
+	bufferStore *bufferstore.BufferStore     // Optional: for saving debug info
+	requestID   string                       // Optional: request ID for buffer naming
 }
 
 // NewInternalHandler creates a new internal handler for a model
 // The resolver is used to resolve credentials from the model's credential_id
 func NewInternalHandler(config *models.ModelConfig, resolver models.ModelsConfigInterface) *InternalHandler {
 	return &InternalHandler{config: config, resolver: resolver}
+}
+
+// SetDebugContext sets the buffer store and request ID for debug file saving
+func (h *InternalHandler) SetDebugContext(bufferStore *bufferstore.BufferStore, requestID string) {
+	h.bufferStore = bufferStore
+	h.requestID = requestID
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -41,6 +50,13 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	// Set debug context on provider if available (for OpenAIProvider)
+	if h.bufferStore != nil && h.requestID != "" {
+		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
+			openaiProvider.SetDebugContext(h.bufferStore, h.requestID)
+		}
 	}
 
 	// Convert request

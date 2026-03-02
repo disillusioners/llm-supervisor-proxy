@@ -240,6 +240,7 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 	logger.Debugf("[DO-INTERNAL] Starting internal attempt %d for request %s, model %s", attempt, rc.reqID, modelConfig.ID)
 
 	internalHandler := NewInternalHandler(modelConfig, h.config.ModelsConfig)
+	internalHandler.SetDebugContext(h.bufferStore, rc.reqID)
 	err := internalHandler.HandleRequest(attemptCtx, bodyToSend, w, rc.isStream)
 
 	if err != nil {
@@ -266,10 +267,21 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 
 		// Other errors - check if retryable
 		log.Printf("Internal request failed: %v", err)
-		h.publishEvent("internal_error", map[string]interface{}{"error": err.Error(), "id": rc.reqID})
+
+		// Check for ProviderError with BufferID
+		eventData := map[string]interface{}{"error": err.Error(), "id": rc.reqID}
+		var providerErr *providers.ProviderError
+		if errors.As(err, &providerErr) {
+			if providerErr.BufferID != "" {
+				eventData["buffer_id"] = providerErr.BufferID
+			}
+			if providerErr.StatusCode > 0 {
+				eventData["status"] = providerErr.StatusCode
+			}
+		}
+		h.publishEvent("internal_error", eventData)
 
 		// Check if error is retryable
-		var providerErr *providers.ProviderError
 		if errors.As(err, &providerErr) && !providerErr.Retryable {
 			// Non-retryable error - break to fallback
 			log.Printf("Internal error is non-retryable, breaking to fallback")
@@ -334,7 +346,24 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	log.Printf("Upstream returned %d. Error body: %s", statusCode, string(bodyBytes))
-	h.publishEvent("upstream_error_status", map[string]interface{}{"status": statusCode, "body": string(bodyBytes), "id": rc.reqID})
+
+	// Save request body to file for debugging and include buffer_id in event
+	eventData := map[string]interface{}{
+		"status": statusCode,
+		"body":   string(bodyBytes),
+		"id":     rc.reqID,
+	}
+	if h.bufferStore != nil {
+		if requestJSON, err := json.MarshalIndent(rc.requestBody, "", "  "); err == nil {
+			bufferID := fmt.Sprintf("%s_request", rc.reqID)
+			if saveErr := h.bufferStore.Save(bufferID, requestJSON); saveErr != nil {
+				log.Printf("Warning: failed to save request body: %v", saveErr)
+			} else {
+				eventData["buffer_id"] = bufferID
+			}
+		}
+	}
+	h.publishEvent("upstream_error_status", eventData)
 
 	if !rc.headersSent {
 		// If there's a fallback model available, try it first

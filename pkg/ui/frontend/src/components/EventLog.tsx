@@ -222,14 +222,14 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
                 </span>
                 <span class="text-gray-300">
                   {getEventMessage(event)}
-                  {event.type === 'stream_error_after_headers' && event.data?.buffer_id && (
+                  {(event.type === 'stream_error_after_headers' || event.type === 'upstream_error_status' || event.type === 'internal_error') && event.data?.buffer_id && (
                     <a
                       href={`/fe/api/buffers/${event.data.buffer_id}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       class="text-blue-400 hover:underline ml-1"
                     >
-                      [View Buffer]
+                      [View Request]
                     </a>
                   )}
                 </span>

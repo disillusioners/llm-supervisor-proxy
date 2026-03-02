@@ -12,13 +12,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 )
 
 // OpenAIProvider implements Provider for OpenAI-compatible APIs
 type OpenAIProvider struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	apiKey      string
+	baseURL     string
+	client      *http.Client
+	bufferStore *bufferstore.BufferStore // Optional: for saving debug info
+	requestID   string                   // Optional: request ID for buffer naming
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
@@ -33,6 +37,12 @@ func NewOpenAIProvider(apiKey, baseURL string) *OpenAIProvider {
 			Timeout: 5 * time.Minute,
 		},
 	}
+}
+
+// SetDebugContext sets the buffer store and request ID for debug file saving
+func (p *OpenAIProvider) SetDebugContext(bufferStore *bufferstore.BufferStore, requestID string) {
+	p.bufferStore = bufferStore
+	p.requestID = requestID
 }
 
 // Name returns the provider name
@@ -67,7 +77,8 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return nil, p.handleError(resp)
+		// Write request to file (message, toolcall) and provide a link in frontend for debugging
+		return nil, p.handleError(resp, req)
 	}
 
 	var result ChatCompletionResponse
@@ -105,7 +116,7 @@ func (p *OpenAIProvider) StreamChatCompletion(ctx context.Context, req *ChatComp
 
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		return nil, p.handleError(resp)
+		return nil, p.handleError(resp, req)
 	}
 
 	eventCh := make(chan StreamEvent, 100)
@@ -136,7 +147,8 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 }
 
 // handleError converts HTTP error response to ProviderError
-func (p *OpenAIProvider) handleError(resp *http.Response) *ProviderError {
+// If bufferStore is configured, saves the request to a file for debugging
+func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionRequest) *ProviderError {
 	body, _ := io.ReadAll(resp.Body)
 
 	var apiErr struct {
@@ -162,12 +174,24 @@ func (p *OpenAIProvider) handleError(resp *http.Response) *ProviderError {
 		retryable = true
 	}
 
-	return &ProviderError{
+	providerErr := &ProviderError{
 		Provider:   p.Name(),
 		StatusCode: resp.StatusCode,
 		Message:    msg,
 		Retryable:  retryable,
 	}
+
+	// Save request to file for debugging
+	if p.bufferStore != nil && p.requestID != "" && req != nil {
+		if requestJSON, err := json.MarshalIndent(req, "", "  "); err == nil {
+			bufferID := fmt.Sprintf("%s_provider_request", p.requestID)
+			if saveErr := p.bufferStore.Save(bufferID, requestJSON); saveErr == nil {
+				providerErr.BufferID = bufferID
+			}
+		}
+	}
+
+	return providerErr
 }
 
 // processStream processes SSE stream and sends normalized events

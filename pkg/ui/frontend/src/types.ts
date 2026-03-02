@@ -131,7 +131,8 @@ export type EventType =
   | 'loop_interrupted'
   | 'client_disconnected_during_retry'
   | 'client_disconnected_during_scan'
-  | 'client_disconnected_during_buffering';
+  | 'client_disconnected_during_buffering'
+  | 'internal_error';
 
 export interface EventData {
   id?: string;

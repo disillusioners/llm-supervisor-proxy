@@ -127,6 +127,7 @@ type ProviderError struct {
 	StatusCode int
 	Message    string
 	Retryable  bool
+	BufferID   string // Optional: ID of saved request buffer for debugging
 }
 
 func (e *ProviderError) Error() string {
