@@ -184,7 +184,12 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 							}
 						}
 						msg.Content = contentStr
+					default:
+						// Unsupported content type, skip or handle as needed
+						log.Printf("Unsupported content type: %T", content)
+						msg.Content = ""
 					}
+
 				}
 				if name, ok := msgMap["name"].(string); ok {
 					msg.Name = name
