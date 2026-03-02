@@ -286,11 +286,13 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// Create a response recorder that supports flushing (for streaming)
 	recorder := &flushingResponseRecorder{httptest.NewRecorder()}
 
+	log.Printf("[DEBUG ANTHROPIC] Creating InternalHandler for model: %s", modelConfig.ID)
+
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
 	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream)
 	if err != nil {
-		log.Printf("Anthropic internal request failed: %v", err)
+		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
 		arc.lastError = []byte(err.Error())
 		arc.lastStatusCode = http.StatusBadGateway
 		return false
@@ -300,14 +302,19 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	if recorder.Code != http.StatusOK {
 		arc.lastError = recorder.Body.Bytes()
 		arc.lastStatusCode = recorder.Code
-		log.Printf("Anthropic internal request returned %d: %s", recorder.Code, string(arc.lastError))
+		log.Printf("[DEBUG ANTHROPIC] Internal request returned %d: %s", recorder.Code, string(arc.lastError))
 		return false
 	}
 
+	log.Printf("[DEBUG ANTHROPIC] Recorder body length: %d bytes", recorder.Body.Len())
+	log.Printf("[DEBUG ANTHROPIC] Recorder body preview: %.200s", recorder.Body.String()[:200])
+
 	// Translate response from OpenAI to Anthropic format
 	if arc.isStream {
+		log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalStreamResponse")
 		return h.handleAnthropicInternalStreamResponse(w, recorder.Body.Bytes(), arc)
 	}
+	log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalNonStreamResponse")
 	return h.handleAnthropicInternalNonStreamResponse(w, recorder.Body.Bytes(), arc)
 }
 

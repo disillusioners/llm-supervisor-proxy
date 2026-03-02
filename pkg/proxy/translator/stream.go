@@ -110,6 +110,7 @@ func extractChunkContent(chunk map[string]interface{}, state *StreamState) {
 				continue
 			}
 
+			// CRITICAL: Preserve the index from OpenAI
 			index := 0
 			if idx, ok := tcMap["index"].(float64); ok {
 				index = int(idx)
@@ -117,7 +118,7 @@ func extractChunkContent(chunk map[string]interface{}, state *StreamState) {
 
 			// Ensure we have enough slots
 			for len(state.ToolCalls) <= index {
-				state.ToolCalls = append(state.ToolCalls, ToolCallState{})
+				state.ToolCalls = append(state.ToolCalls, ToolCallState{Index: index})
 			}
 
 			// Update tool call state
@@ -169,43 +170,25 @@ func generateAnthropicEvents(state *StreamState) []string {
 	var contentBlocks []ContentBlock
 	var blockIndex int
 
-	// 2. Thinking block (if present)
-	if state.ThinkingContent != "" {
-		// content_block_start for thinking
-		events = append(events, formatContentBlockStart(blockIndex, "thinking"))
-
-		// content_block_delta for thinking (uses 'thinking' field, not 'text')
-		events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent))
-
-		// content_block_stop
-		events = append(events, formatContentBlockStop(blockIndex))
-
-		contentBlocks = append(contentBlocks, ContentBlock{
-			Type:     "thinking",
-			Thinking: state.ThinkingContent,
-		})
-		blockIndex++
-	}
-
-	// 3. Text block (if present)
-	if state.AccumulatedContent != "" {
+	// 2. Text block (with thinking merged in using thinking_delta type)
+	if state.ThinkingContent != "" || state.AccumulatedContent != "" {
 		// content_block_start for text
 		events = append(events, formatContentBlockStart(blockIndex, "text"))
 
+		// content_block_delta for thinking first (uses thinking_delta type)
+		if state.ThinkingContent != "" {
+			events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent))
+		}
+
 		// content_block_delta for text
-		events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent))
+		if state.AccumulatedContent != "" {
+			events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent))
+		}
 
 		// content_block_stop
 		events = append(events, formatContentBlockStop(blockIndex))
-
-		contentBlocks = append(contentBlocks, ContentBlock{
-			Type: "text",
-			Text: state.AccumulatedContent,
-		})
 		blockIndex++
 	}
-
-	// 4. Tool use blocks (if present)
 	for _, tc := range state.ToolCalls {
 		if tc.ID == "" || tc.Name == "" {
 			continue

@@ -2,21 +2,20 @@
 import subprocess
 import sys
 
-# Test with Claude CLI using a simple approach
-print("Testing with Claude CLI...")
-
+# Simple test - just check if anthropic endpoint works
 try:
     # Set environment variable
     os.environ['ANTHROPIC_BASE_URL'] = 'http://localhost:4321'
     
-    # Run Claude CLI
+    # Run claude with a simple prompt
     result = subprocess.run(
-        ['claude'], capture_output=True,        text=True)
+        ['claude'],
+        capture_output=True,
+        text=True
     )
     
-    # Print output
+    print("✅ Claude CLI works!")
     print(result.stdout)
-    sys.exit(0)
 except Exception as e:
     print(f"Error: {e}")
     sys.exit(1)

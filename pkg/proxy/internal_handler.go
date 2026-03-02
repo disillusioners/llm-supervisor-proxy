@@ -88,6 +88,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 	}
 
 	for event := range eventCh {
+		log.Printf("[DEBUG INTERNAL] Received event: type=%s, content=%.100s", event.Type, event.Content)
 		switch event.Type {
 		case "content":
 			// Write SSE data event
@@ -107,6 +108,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				},
 			}
 			data, _ := json.Marshal(chunk)
+			log.Printf("[DEBUG INTERNAL] Writing chunk: %s", string(data))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 
@@ -165,14 +167,23 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 				if role, ok := msgMap["role"].(string); ok {
 					msg.Role = role
 				}
-				// Handle content as string or array (OpenAI supports both)
+				// Handle content as string or array
+				// Flatten array to string for provider compatibility
 				if content, ok := msgMap["content"]; ok {
 					switch c := content.(type) {
 					case string:
 						msg.Content = c
 					case []interface{}:
-						// Keep as array for multimodal support
-						msg.Content = c
+						// Flatten array content to string for provider compatibility
+						var contentStr string
+						for _, part := range c {
+							if partMap, ok := part.(map[string]interface{}); ok {
+								if text, ok := partMap["text"].(string); ok {
+									contentStr += text
+								}
+							}
+						}
+						msg.Content = contentStr
 					}
 				}
 				if name, ok := msgMap["name"].(string); ok {

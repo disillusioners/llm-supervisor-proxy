@@ -235,6 +235,7 @@ type StreamState struct {
 
 // ToolCallState holds state for a tool call during streaming.
 type ToolCallState struct {
+	Index     int
 	ID        string
 	Name      string
 	Arguments string
