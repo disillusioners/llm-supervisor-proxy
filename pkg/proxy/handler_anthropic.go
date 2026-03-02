@@ -101,6 +101,15 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	reqID := uuid.New().String()
 	startTime := time.Now()
 	storeMessages := convertAnthropicMessagesToStore(anthropicReq.Messages)
+
+	// Add system message if present (Anthropic has System as separate field)
+	if anthropicReq.System != nil {
+		systemContent := translator.TranslateSystem(anthropicReq.System)
+		if systemContent != "" {
+			storeMessages = append([]store.Message{{Role: "system", Content: systemContent}}, storeMessages...)
+		}
+	}
+
 	isStream := anthropicReq.Stream
 
 	// Safely extract original model name

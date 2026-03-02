@@ -22,7 +22,7 @@ func TranslateRequest(anthropic *AnthropicRequest, modelMapping *ModelMappingCon
 
 	// 2. System message - insert as first message with role: "system"
 	if anthropic.System != nil {
-		systemContent := translateSystem(anthropic.System)
+		systemContent := TranslateSystem(anthropic.System)
 		if systemContent != "" {
 			result["messages"] = append([]interface{}{
 				map[string]interface{}{
@@ -541,9 +541,9 @@ func translateImageSource(source *ImageSource) map[string]interface{} {
 	}
 }
 
-// translateSystem extracts system prompt from Anthropic format.
+// TranslateSystem extracts system prompt from Anthropic format.
 // Handles both string and array formats.
-func translateSystem(system interface{}) string {
+func TranslateSystem(system interface{}) string {
 	if system == nil {
 		return ""
 	}
