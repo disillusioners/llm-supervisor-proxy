@@ -85,30 +85,59 @@ func TranslateRequest(anthropic *AnthropicRequest, modelMapping *ModelMappingCon
 }
 
 // translateMessages translates Anthropic messages to OpenAI format.
+// Note: A single Anthropic message with tool_result blocks may expand to multiple OpenAI messages.
 func translateMessages(messages []AnthropicMessage) []interface{} {
-	result := make([]interface{}, len(messages))
-	for i, msg := range messages {
-		result[i] = translateMessage(msg)
+	var result []interface{}
+	for _, msg := range messages {
+		translated := translateMessage(msg)
+		result = append(result, translated...)
 	}
 	return result
 }
 
 // translateMessage translates a single Anthropic message to OpenAI format.
-func translateMessage(msg AnthropicMessage) map[string]interface{} {
-	openAIMsg := map[string]interface{}{
-		"role": msg.Role,
+// Returns a slice because Anthropic messages with tool_result blocks become multiple OpenAI messages.
+func translateMessage(msg AnthropicMessage) []interface{} {
+	// First, check if this message contains tool_result blocks
+	toolResults := extractToolResults(msg.Content)
+
+	// If there are tool results, we need to handle them specially
+	if len(toolResults) > 0 {
+		var result []interface{}
+
+		// Add tool result messages
+		for _, tr := range toolResults {
+			result = append(result, map[string]interface{}{
+				"role":         "tool",
+				"tool_call_id": tr.ToolUseID,
+				"content":      tr.Content,
+			})
+		}
+
+		// If there's other content (text), add it as a user message
+		otherContent := extractNonToolResultContent(msg.Content)
+		if otherContent != "" {
+			result = append([]interface{}{map[string]interface{}{
+				"role":    msg.Role,
+				"content": otherContent,
+			}}, result...)
+		}
+
+		return result
 	}
 
-	// Handle content
-	content := translateContent(msg.Content)
-	openAIMsg["content"] = content
-
-	return openAIMsg
+	// No tool results - standard translation
+	return []interface{}{
+		map[string]interface{}{
+			"role":    msg.Role,
+			"content": translateContent(msg.Content),
+		},
+	}
 }
 
 // translateContent translates Anthropic content to OpenAI format.
 // Content can be a string or []ContentBlock.
-// Always returns a string for simplicity (OpenAI accepts both string and array).
+// Returns an array for multimodal content, string for text-only content.
 func translateContent(content interface{}) interface{} {
 	if content == nil {
 		return nil
@@ -118,11 +147,41 @@ func translateContent(content interface{}) interface{} {
 	case string:
 		return c
 	case []interface{}:
-		// Array of content blocks - flatten to single string
+		// Check if we have multimodal content (images, etc.)
+		hasMultimodal := false
+		for _, block := range c {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if blockType, ok := bm["type"].(string); ok {
+					// Check for non-text content types (skip tool_result as it's handled separately)
+					if blockType != "text" && blockType != "tool_result" && blockType != "thinking" {
+						hasMultimodal = true
+						break
+					}
+				}
+			}
+		}
+
+		if hasMultimodal {
+			// Return array of content parts for multimodal
+			var result []interface{}
+			for _, block := range c {
+				if translated := translateContentBlock(block); translated != nil {
+					// Skip tool_result blocks - they're handled separately
+					if bm, ok := block.(map[string]interface{}); ok {
+						if blockType, ok := bm["type"].(string); ok && blockType == "tool_result" {
+							continue
+						}
+					}
+					result = append(result, translated)
+				}
+			}
+			return result
+		}
+
+		// Text-only content - flatten to string
 		var result string
 		for _, block := range c {
 			if translated := translateContentBlock(block); translated != nil {
-				// Extract text from text blocks
 				if textObj, ok := translated.(map[string]interface{}); ok {
 					if textObj["type"] == "text" {
 						if text, ok := textObj["text"].(string); ok {
@@ -133,9 +192,39 @@ func translateContent(content interface{}) interface{} {
 			}
 		}
 		return result
+
 	case []ContentBlock:
+		// Check if we have multimodal content (images, etc.)
+		hasMultimodal := false
+		for _, block := range c {
+			// Check for non-text content types (skip tool_result as it's handled separately)
+			if block.Type != "text" && block.Type != "tool_result" && block.Type != "thinking" {
+				hasMultimodal = true
+				break
+			}
+		}
+
+		if hasMultimodal {
+			// Return array of content parts for multimodal
+			var result []interface{}
+			for _, block := range c {
+				// Skip tool_result blocks - they're handled separately
+				if block.Type == "tool_result" {
+					continue
+				}
+				if translated := translateContentBlock(block); translated != nil {
+					result = append(result, translated)
+				}
+			}
+			return result
+		}
+
+		// Text-only content - flatten to string
 		var result string
 		for _, block := range c {
+			if block.Type == "tool_result" {
+				continue
+			}
 			if translated := translateContentBlock(block); translated != nil {
 				if textObj, ok := translated.(map[string]interface{}); ok {
 					if textObj["type"] == "text" {
@@ -147,9 +236,102 @@ func translateContent(content interface{}) interface{} {
 			}
 		}
 		return result
+
 	default:
 		return fmt.Sprintf("%v", c)
 	}
+}
+
+// toolResultInfo holds extracted tool result information
+type toolResultInfo struct {
+	ToolUseID string
+	Content   string
+}
+
+// extractToolResults extracts all tool_result blocks from content
+func extractToolResults(content interface{}) []toolResultInfo {
+	var results []toolResultInfo
+
+	switch c := content.(type) {
+	case []interface{}:
+		for _, block := range c {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if blockType, ok := bm["type"].(string); ok && blockType == "tool_result" {
+					tr := toolResultInfo{}
+					tr.ToolUseID, _ = bm["tool_use_id"].(string)
+
+					// Extract content
+					if contentStr, ok := bm["content"].(string); ok {
+						tr.Content = contentStr
+					} else if contentArr, ok := bm["content"].([]interface{}); ok {
+						// Content can be array of text blocks
+						for _, item := range contentArr {
+							if itemMap, ok := item.(map[string]interface{}); ok {
+								if text, ok := itemMap["text"].(string); ok {
+									tr.Content += text
+								}
+							}
+						}
+					}
+					results = append(results, tr)
+				}
+			}
+		}
+	case []ContentBlock:
+		for _, block := range c {
+			if block.Type == "tool_result" {
+				tr := toolResultInfo{
+					ToolUseID: block.ToolUseID,
+				}
+				switch cont := block.Content.(type) {
+				case string:
+					tr.Content = cont
+				case []interface{}:
+					for _, item := range cont {
+						if itemMap, ok := item.(map[string]interface{}); ok {
+							if text, ok := itemMap["text"].(string); ok {
+								tr.Content += text
+							}
+						}
+					}
+				}
+				results = append(results, tr)
+			}
+		}
+	}
+
+	return results
+}
+
+// extractNonToolResultContent extracts text content that is NOT tool_result
+func extractNonToolResultContent(content interface{}) string {
+	var result string
+
+	switch c := content.(type) {
+	case string:
+		return c
+	case []interface{}:
+		for _, block := range c {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if blockType, ok := bm["type"].(string); ok {
+					// Only extract text blocks, skip tool_result
+					if blockType == "text" {
+						if text, ok := bm["text"].(string); ok {
+							result += text
+						}
+					}
+				}
+			}
+		}
+	case []ContentBlock:
+		for _, block := range c {
+			if block.Type == "text" {
+				result += block.Text
+			}
+		}
+	}
+
+	return result
 }
 
 // translateContentBlock translates a single content block from Anthropic to OpenAI format.

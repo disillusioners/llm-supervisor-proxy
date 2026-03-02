@@ -183,6 +183,80 @@ func TestTranslateRequest_Multimodal(t *testing.T) {
 	}
 }
 
+func TestTranslateRequest_WithToolResult(t *testing.T) {
+	// Test that tool_result blocks are properly translated to tool role messages
+	anthropic := &AnthropicRequest{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: 1024,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "What's the weather?"},
+			{Role: "assistant", Content: []ContentBlock{
+				{Type: "text", Text: "Let me check."},
+				{Type: "tool_use", ID: "toolu_123", Name: "get_weather", Input: json.RawMessage(`{"location":"SF"}`)},
+			}},
+			{
+				Role: "user",
+				Content: []ContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_123", Content: "72°F sunny"},
+				},
+			},
+		},
+	}
+
+	result := TranslateRequest(anthropic, nil)
+
+	msgs, ok := result["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("expected []interface{}, got %T", result["messages"])
+	}
+
+	// Should have 3 messages:
+	// 1. user: "What's the weather?"
+	// 2. assistant with tool_calls
+	// 3. tool: result for toolu_123
+	if len(msgs) != 3 {
+		t.Errorf("expected 3 messages, got %d", len(msgs))
+		for i, m := range msgs {
+			if mm, ok := m.(map[string]interface{}); ok {
+				t.Logf("Message %d: role=%s, content=%v", i, mm["role"], mm["content"])
+			}
+		}
+	}
+
+	// Check first message (user)
+	msg0, ok := msgs[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", msgs[0])
+	}
+	if msg0["role"] != "user" {
+		t.Errorf("expected first message role 'user', got %v", msg0["role"])
+	}
+
+	// Check second message (assistant with tool_calls)
+	msg1, ok := msgs[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", msgs[1])
+	}
+	if msg1["role"] != "assistant" {
+		t.Errorf("expected second message role 'assistant', got %v", msg1["role"])
+	}
+
+	// Check third message (tool result)
+	msg2, ok := msgs[2].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", msgs[2])
+	}
+	if msg2["role"] != "tool" {
+		t.Errorf("expected third message role 'tool', got %v", msg2["role"])
+	}
+	if msg2["tool_call_id"] != "toolu_123" {
+		t.Errorf("expected tool_call_id 'toolu_123', got %v", msg2["tool_call_id"])
+	}
+	if msg2["content"] != "72°F sunny" {
+		t.Errorf("expected content '72°F sunny', got %v", msg2["content"])
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Response Translation Tests
 // ─────────────────────────────────────────────────────────────────────────────
