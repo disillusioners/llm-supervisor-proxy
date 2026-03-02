@@ -41,10 +41,11 @@ type ChatCompletionRequest struct {
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role      string      `json:"role"`
-	Content   interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name      string      `json:"name,omitempty"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name       string      `json:"name,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"` // Required for tool role messages
 }
 
 // Tool represents a tool definition

@@ -232,6 +232,10 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 				if name, ok := msgMap["name"].(string); ok {
 					msg.Name = name
 				}
+				// Handle tool_call_id for tool role messages
+				if toolCallID, ok := msgMap["tool_call_id"].(string); ok {
+					msg.ToolCallID = toolCallID
+				}
 				// Handle tool_calls in messages
 				if toolCalls, ok := msgMap["tool_calls"].([]interface{}); ok {
 					msg.ToolCalls = make([]providers.ToolCall, 0, len(toolCalls))
