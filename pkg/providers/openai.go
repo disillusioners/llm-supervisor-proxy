@@ -227,6 +227,13 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 						Content: contentStr,
 					}
 				}
+				// Handle tool_calls in streaming
+				if len(choice.Delta.ToolCalls) > 0 {
+					eventCh <- StreamEvent{
+						Type:      "tool_call",
+						ToolCalls: choice.Delta.ToolCalls,
+					}
+				}
 			}
 			if choice.FinishReason != "" {
 				lastResponse = &chunk

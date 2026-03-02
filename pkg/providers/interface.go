@@ -34,14 +34,43 @@ type ChatCompletionRequest struct {
 	FrequencyPenalty *float64               `json:"frequency_penalty,omitempty"`
 	LogitBias        map[string]float64     `json:"logit_bias,omitempty"`
 	User             string                 `json:"user,omitempty"`
-	Extra            map[string]interface{} `json:"-"` // Provider-specific extra fields
+	Tools            []Tool                 `json:"tools,omitempty"`
+	ToolChoice       interface{}            `json:"tool_choice,omitempty"` // "none", "auto", "required", or specific tool
+	Extra            map[string]interface{} `json:"-"`                     // Provider-specific extra fields
 }
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name    string      `json:"name,omitempty"`
+	Role      string      `json:"role"`
+	Content   interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name      string      `json:"name,omitempty"`
+	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+}
+
+// Tool represents a tool definition
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction represents a function definition
+type ToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+// ToolCall represents a tool call in a message
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction represents the function details in a tool call
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 // ContentPart represents a content part in multimodal messages
@@ -84,8 +113,9 @@ type Usage struct {
 
 // StreamEvent represents a normalized streaming event
 type StreamEvent struct {
-	Type         string                  // "content", "done", "error"
+	Type         string                  // "content", "tool_call", "done", "error"
 	Content      string                  // Text content delta
+	ToolCalls    []ToolCall              // Tool call deltas for "tool_call" event
 	FinishReason string                  // Finish reason if type is "done"
 	Error        error                   // Error if type is "error"
 	Response     *ChatCompletionResponse // Full response for "done" event

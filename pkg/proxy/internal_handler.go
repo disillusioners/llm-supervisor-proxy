@@ -112,6 +112,28 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 
+		case "tool_call":
+			// Write tool_call delta
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   internalModel,
+				Choices: []providers.Choice{
+					{
+						Index: 0,
+						Delta: &providers.ChatMessage{
+							Role:      "assistant",
+							ToolCalls: event.ToolCalls,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			log.Printf("[DEBUG INTERNAL] Writing tool_call chunk: %s", string(data))
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+
 		case "done":
 			// Write finish chunk
 			finishReason := event.FinishReason
@@ -194,6 +216,30 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 				if name, ok := msgMap["name"].(string); ok {
 					msg.Name = name
 				}
+				// Handle tool_calls in messages
+				if toolCalls, ok := msgMap["tool_calls"].([]interface{}); ok {
+					msg.ToolCalls = make([]providers.ToolCall, 0, len(toolCalls))
+					for _, tc := range toolCalls {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							toolCall := providers.ToolCall{}
+							if id, ok := tcMap["id"].(string); ok {
+								toolCall.ID = id
+							}
+							if t, ok := tcMap["type"].(string); ok {
+								toolCall.Type = t
+							}
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								if name, ok := fn["name"].(string); ok {
+									toolCall.Function.Name = name
+								}
+								if args, ok := fn["arguments"].(string); ok {
+									toolCall.Function.Arguments = args
+								}
+							}
+							msg.ToolCalls = append(msg.ToolCalls, toolCall)
+						}
+					}
+				}
 				req.Messages = append(req.Messages, msg)
 			}
 		}
@@ -238,11 +284,42 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 		req.User = v
 	}
 
-	// Store any extra fields
+	// Handle tools
+	if tools, ok := body["tools"].([]interface{}); ok {
+		req.Tools = make([]providers.Tool, 0, len(tools))
+		for _, t := range tools {
+			if toolMap, ok := t.(map[string]interface{}); ok {
+				tool := providers.Tool{}
+				if typ, ok := toolMap["type"].(string); ok {
+					tool.Type = typ
+				}
+				if fn, ok := toolMap["function"].(map[string]interface{}); ok {
+					if name, ok := fn["name"].(string); ok {
+						tool.Function.Name = name
+					}
+					if desc, ok := fn["description"].(string); ok {
+						tool.Function.Description = desc
+					}
+					if params, ok := fn["parameters"].(map[string]interface{}); ok {
+						tool.Function.Parameters = params
+					}
+				}
+				req.Tools = append(req.Tools, tool)
+			}
+		}
+	}
+
+	// Handle tool_choice
+	if toolChoice, ok := body["tool_choice"]; ok {
+		req.ToolChoice = toolChoice
+	}
+
+	// Store any extra fields not handled above
 	knownFields := map[string]bool{
 		"model": true, "messages": true, "max_tokens": true, "temperature": true,
 		"top_p": true, "n": true, "stream": true, "stop": true,
 		"presence_penalty": true, "frequency_penalty": true, "logit_bias": true, "user": true,
+		"tools": true, "tool_choice": true,
 	}
 	for k, v := range body {
 		if !knownFields[k] {
