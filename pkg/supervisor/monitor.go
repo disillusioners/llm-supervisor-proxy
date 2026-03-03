@@ -29,7 +29,13 @@ func (m *MonitoredReader) Read(p []byte) (n int, err error) {
 
 	go func() {
 		n, err := m.reader.Read(p)
-		ch <- readResult{n, err}
+		// Use non-blocking send to prevent goroutine leak if caller abandons
+		select {
+		case ch <- readResult{n, err}:
+			// Sent successfully
+		default:
+			// Caller abandoned, exit gracefully
+		}
 	}()
 
 	timer := time.NewTimer(m.idleTimeout)

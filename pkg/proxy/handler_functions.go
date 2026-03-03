@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -499,7 +500,13 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 				// to prevent blocking the select loop if the client TCP buffer is full
 				heartbeatData := []byte(": heartbeat\n\n")
 				written := make(chan bool, 1)
+
+				// Use WaitGroup to ensure goroutine completes before exiting
+				var wg sync.WaitGroup
+				wg.Add(1)
+
 				go func() {
+					defer wg.Done()
 					_, err := w.Write(heartbeatData)
 					if err != nil {
 						log.Printf("[HEARTBEAT] Write error: %v", err)
@@ -514,6 +521,7 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 				// Wait for write to complete or context canceled, with timeout
 				select {
 				case <-heartbeatCtx.Done():
+					wg.Wait() // Wait for goroutine to complete before returning
 					return
 				case ok := <-written:
 					if ok {
@@ -522,9 +530,11 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 							f.Flush()
 						}
 					}
+					wg.Wait() // Ensure goroutine completes
 				case <-time.After(3 * time.Second):
-					// Timeout - heartbeat write took too long, log and continue
+					// Timeout - heartbeat write took too long
 					log.Printf("[HEARTBEAT] Write timeout, client may be slow or disconnected")
+					wg.Wait() // Wait for goroutine to complete before continuing
 				}
 			}
 		}
