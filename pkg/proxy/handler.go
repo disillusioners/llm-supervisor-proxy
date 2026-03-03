@@ -62,10 +62,17 @@ type Handler struct {
 
 func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Handler {
 	return &Handler{
-		config:      config,
-		bus:         bus,
-		store:       store,
-		client:      &http.Client{},
+		config: config,
+		bus:    bus,
+		store:  store,
+		client: &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 		bufferStore: bufferStore,
 		tokenStore:  tokenStore,
 	}

@@ -257,8 +257,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sub := s.bus.Subscribe()
+	defer s.bus.Unsubscribe(sub)
 
-	// Clean up on exit
 	// We need to know when client disconnects
 	ctx := r.Context()
 
@@ -277,7 +277,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case <-ctx.Done():
-			s.bus.Unsubscribe(sub)
 			return
 		}
 	}
