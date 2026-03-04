@@ -47,6 +47,12 @@ database:
   urlSecret: ""
   urlSecretKey: url
 
+# Encryption key configuration (required for API key encryption)
+# Generate with: openssl rand -base64 32
+encryption:
+  secretName: "llm-proxy-encryption-key"
+  secretKey: "key"
+
 # Environment variables (non-secret)
 env:
   LOG_LEVEL: "info"
