@@ -4,7 +4,6 @@ import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
-import { ExternalUpstreamTab } from './config/ExternalUpstreamTab';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
 
@@ -23,7 +22,7 @@ interface ConfigModalProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'external_upstream' | 'tokens';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tokens';
 
 export function ConfigModal({
   isOpen,
@@ -44,6 +43,7 @@ export function ConfigModal({
 
   // Proxy Settings state
   const [upstreamUrl, setUpstreamUrl] = useState('');
+  const [upstreamToken, setUpstreamToken] = useState('');
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
   const [maxUpstreamErrorRetries, setMaxUpstreamErrorRetries] = useState(0);
@@ -66,6 +66,7 @@ export function ConfigModal({
   useEffect(() => {
     if (isOpen && config) {
       setUpstreamUrl(config.upstream_url || '');
+      setUpstreamToken(config.upstream_token || '');
       setPort(config.port || 8089);
       setOriginalPort(config.port || 8089);
       setIdleTimeout(config.idle_timeout || '');
@@ -101,6 +102,7 @@ export function ConfigModal({
       setStatus(null);
       const response = await onUpdateConfig({
         upstream_url: upstreamUrl,
+        upstream_token: upstreamToken,
         port,
         idle_timeout: idleTimeout,
         max_upstream_error_retries: maxUpstreamErrorRetries,
@@ -247,15 +249,6 @@ export function ConfigModal({
             Loop Detection
           </button>
           <button
-            class={`px-6 py-3 font-medium transition-colors ${activeTab === 'external_upstream'
-              ? 'text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-              }`}
-            onClick={() => setActiveTab('external_upstream')}
-          >
-            External Upstream
-          </button>
-          <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'tokens'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -271,6 +264,7 @@ export function ConfigModal({
           {activeTab === 'proxy' && (
             <ProxySettings
               upstreamUrl={upstreamUrl}
+              upstreamToken={upstreamToken}
               port={port}
               idleTimeout={idleTimeout}
               maxUpstreamErrorRetries={maxUpstreamErrorRetries}
@@ -279,6 +273,7 @@ export function ConfigModal({
               maxGenTime={maxGenTime}
               originalPort={originalPort}
               onUpstreamUrlChange={setUpstreamUrl}
+              onUpstreamTokenChange={setUpstreamToken}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
               onMaxUpstreamErrorRetriesChange={setMaxUpstreamErrorRetries}
@@ -315,13 +310,6 @@ export function ConfigModal({
             <LoopDetectionSettings
               config={config?.loop_detection ?? null}
               onApply={handleApplyLoopDetection}
-              status={status}
-              setStatus={setStatus}
-            />
-          )}
-
-          {activeTab === 'external_upstream' && (
-            <ExternalUpstreamTab
               status={status}
               setStatus={setStatus}
             />

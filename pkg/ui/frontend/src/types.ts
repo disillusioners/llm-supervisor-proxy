@@ -7,17 +7,6 @@ export interface Credential {
   base_url?: string;
 }
 
-export interface ExternalUpstream {
-  provider: string; // openai, anthropic, etc.
-  api_key?: string; // API key for the external upstream
-  base_url?: string; // Optional custom base URL
-}
-
-export interface ExternalUpstreamUpdateResponse extends ExternalUpstream {
-  restart_required: boolean;
-  changed_fields?: string[];
-}
-
 export interface LoopDetectionConfig {
   enabled: boolean;
   shadow_mode: boolean;
@@ -40,6 +29,7 @@ export interface LoopDetectionConfig {
 export interface AppConfig {
   version: string;
   upstream_url: string;
+  upstream_token: string;
   port: number;
   idle_timeout: string;
   max_generation_time: string;

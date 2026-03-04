@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, ExternalUpstream, ExternalUpstreamUpdateResponse } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential } from '../types';
 
 const API_BASE = '/fe/api';
 
@@ -271,24 +271,4 @@ export async function deleteCredential(id: string): Promise<void> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to delete credential');
   }
-}
-
-// External Upstream API
-export async function getExternalUpstream(): Promise<ExternalUpstream> {
-  const res = await fetch('/fe/api/external-upstream');
-  if (!res.ok) throw new Error('Failed to fetch external upstream');
-  return res.json();
-}
-
-export async function updateExternalUpstream(config: ExternalUpstream): Promise<ExternalUpstreamUpdateResponse> {
-  const res = await fetch('/fe/api/external-upstream', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to update external upstream');
-  }
-  return res.json();
 }

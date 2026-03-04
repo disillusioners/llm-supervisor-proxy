@@ -1,7 +1,6 @@
-import type { InternalProvider } from '../../types';
-
 interface ProxySettingsProps {
   upstreamUrl: string;
+  upstreamToken: string;
   port: number;
   idleTimeout: string;
   maxUpstreamErrorRetries: number;
@@ -10,6 +9,7 @@ interface ProxySettingsProps {
   maxGenTime: string;
   originalPort: number;
   onUpstreamUrlChange: (value: string) => void;
+  onUpstreamTokenChange: (value: string) => void;
   onPortChange: (value: number) => void;
   onIdleTimeoutChange: (value: string) => void;
   onMaxUpstreamErrorRetriesChange: (value: number) => void;
@@ -23,6 +23,7 @@ interface ProxySettingsProps {
 
 export function ProxySettings({
   upstreamUrl,
+  upstreamToken,
   port,
   idleTimeout,
   maxUpstreamErrorRetries,
@@ -31,6 +32,7 @@ export function ProxySettings({
   maxGenTime,
   originalPort,
   onUpstreamUrlChange,
+  onUpstreamTokenChange,
   onPortChange,
   onIdleTimeoutChange,
   onMaxUpstreamErrorRetriesChange,
@@ -69,6 +71,26 @@ export function ProxySettings({
             placeholder="https://api.openai.com/v1"
           />
         </div>
+      </div>
+
+      {/* Upstream Token */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Upstream Token</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+          </span>
+          <input
+            type="password"
+            value={upstreamToken}
+            onInput={(e) => onUpstreamTokenChange((e.target as HTMLInputElement).value)}
+            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="sk-..."
+          />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">API token for the external upstream (LiteLLM)</p>
       </div>
 
       {/* Port */}
