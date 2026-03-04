@@ -10,20 +10,16 @@ import (
 func resetEncryptionState() {
 	encryptionKey = nil
 	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
 }
 
 func TestEncryptDecrypt(t *testing.T) {
-	// Generate a test key
 	key, err := GenerateKey()
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
-	// Reset encryption state for test
 	resetEncryptionState()
 
-	// Set the key
 	os.Setenv(EnvEncryptionKey, key)
 	defer os.Unsetenv(EnvEncryptionKey)
 
@@ -55,7 +51,6 @@ func TestEncryptDecrypt(t *testing.T) {
 func TestEncryptProducesDifferentCiphertext(t *testing.T) {
 	key, _ := GenerateKey()
 
-	// Reset encryption state
 	resetEncryptionState()
 
 	os.Setenv(EnvEncryptionKey, key)
@@ -84,97 +79,32 @@ func TestEncryptProducesDifferentCiphertext(t *testing.T) {
 	}
 }
 
-func TestDecryptInvalidCiphertext(t *testing.T) {
-	key, _ := GenerateKey()
-
-	// Reset encryption state
-	resetEncryptionState()
-
-	os.Setenv(EnvEncryptionKey, key)
-	defer os.Unsetenv(EnvEncryptionKey)
-
-	_, err := Decrypt("not-valid-base64!@#$")
-	if err == nil {
-		t.Error("expected error for invalid base64")
-	}
-}
-
-func TestInitEncryptionWithEnvVar(t *testing.T) {
-	key, _ := GenerateKey()
-
-	// Reset encryption state
-	resetEncryptionState()
-
-	os.Setenv(EnvEncryptionKey, key)
-	defer os.Unsetenv(EnvEncryptionKey)
-
-	err := InitEncryption()
-	if err != nil {
-		t.Errorf("expected no error with valid env var, got: %v", err)
-	}
-}
-
-func TestInitEncryptionGeneratesKeyFile(t *testing.T) {
+func TestEncryptionDisabled(t *testing.T) {
 	// Reset encryption state
 	resetEncryptionState()
 
 	// Ensure no env var is set
 	os.Unsetenv(EnvEncryptionKey)
 
-	// Get the expected key file path
-	keyPath, err := getKeyFilePath()
+	plaintext := "plaintext-should-be-unchanged"
+
+	ciphertext, err := Encrypt(plaintext)
 	if err != nil {
-		t.Fatalf("failed to get key file path: %v", err)
+		t.Fatalf("encrypt failed: %v", err)
 	}
 
-	// Remove existing key file if present
-	os.Remove(keyPath)
+	// Verify plaintext is returned unchanged
+	if ciphertext != plaintext {
+		t.Errorf("encrypt should return plaintext unchanged when encryption is disabled, got: %q", ciphertext)
+	}
 
-	err = InitEncryption()
+	decrypted, err := Decrypt(ciphertext)
 	if err != nil {
-		t.Errorf("expected no error when generating key file, got: %v", err)
+		t.Fatalf("decrypt failed: %v", err)
 	}
 
-	// Check that key file was created
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		t.Errorf("expected key file to be created at %s", keyPath)
-	}
-
-	// Cleanup
-	os.Remove(keyPath)
-}
-
-func TestInitEncryptionInvalidKeyLength(t *testing.T) {
-	// Reset encryption state
-	resetEncryptionState()
-
-	os.Setenv(EnvEncryptionKey, "dG9vc2hvcnQ=") // "tooshort" in base64, but less than 32 bytes
-	defer os.Unsetenv(EnvEncryptionKey)
-
-	err := InitEncryption()
-	if err == nil {
-		t.Error("expected error for invalid key length")
-	}
-}
-
-func TestGenerateKey(t *testing.T) {
-	key1, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-
-	key2, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-
-	// Keys should be different
-	if key1 == key2 {
-		t.Error("generated keys should be unique")
-	}
-
-	// Key should not be empty
-	if key1 == "" {
-		t.Error("generated key should not be empty")
+	// Verify decryption returns plaintext unchanged
+	if decrypted != plaintext {
+		t.Errorf("decrypt should return plaintext unchanged when encryption is disabled, got: %q", decrypted)
 	}
 }

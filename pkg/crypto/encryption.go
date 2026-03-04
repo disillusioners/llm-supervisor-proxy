@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"os"
 	"sync"
 )
 
@@ -140,7 +141,4 @@ func GenerateKey() (string, error) {
 }
 
 // getEnvVar is a wrapper for os.Getenv that can be mocked in tests
-var getEnvVar = func(key string) string {
-	import "os"
-	return os.Getenv(key)
-}
+var getEnvVar = os.Getenv
