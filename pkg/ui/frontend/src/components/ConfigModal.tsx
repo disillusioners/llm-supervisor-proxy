@@ -4,6 +4,7 @@ import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
+import { ExternalUpstreamTab } from './config/ExternalUpstreamTab';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
 
@@ -22,7 +23,7 @@ interface ConfigModalProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tokens';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'external_upstream' | 'tokens';
 
 export function ConfigModal({
   isOpen,
@@ -246,6 +247,15 @@ export function ConfigModal({
             Loop Detection
           </button>
           <button
+            class={`px-6 py-3 font-medium transition-colors ${activeTab === 'external_upstream'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('external_upstream')}
+          >
+            External Upstream
+          </button>
+          <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'tokens'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -305,6 +315,13 @@ export function ConfigModal({
             <LoopDetectionSettings
               config={config?.loop_detection ?? null}
               onApply={handleApplyLoopDetection}
+              status={status}
+              setStatus={setStatus}
+            />
+          )}
+
+          {activeTab === 'external_upstream' && (
+            <ExternalUpstreamTab
               status={status}
               setStatus={setStatus}
             />

@@ -74,7 +74,15 @@ type Config struct {
 	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
+	ExternalUpstream        ExternalUpstream    `json:"external_upstream"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
+}
+
+// ExternalUpstream holds configuration for the external upstream provider
+type ExternalUpstream struct {
+	Provider string `json:"provider"` // openai, anthropic, etc.
+	APIKey   string `json:"api_key"`  // API key for the external upstream (encrypted at rest)
+	BaseURL  string `json:"base_url"` // Optional custom base URL
 }
 
 // ManagerInterface defines the interface for config management
@@ -92,6 +100,7 @@ type ManagerInterface interface {
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
 	GetLoopDetection() LoopDetectionConfig
+	GetExternalUpstream() ExternalUpstream
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -490,6 +499,13 @@ func (m *Manager) GetBufferMaxStorageMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.BufferMaxStorageMB
+}
+
+// GetExternalUpstream returns the external upstream configuration
+func (m *Manager) GetExternalUpstream() ExternalUpstream {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ExternalUpstream
 }
 
 // IsReadOnly returns true if the config file cannot be written

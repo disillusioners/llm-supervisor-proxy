@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -180,6 +181,44 @@ func copyHeaders(dst *http.Request, src http.Header) {
 		}
 		for _, value := range values {
 			dst.Header.Add(name, value)
+		}
+	}
+}
+
+// copyHeadersWithExternalAuth copies headers from src to dst, but replaces the Authorization
+// header with the external upstream token if configured.
+func copyHeadersWithExternalAuth(dst *http.Request, src http.Header, externalUpstream config.ExternalUpstream) {
+	// Headers to strip (never forward upstream)
+	stripHeaders := map[string]bool{
+		"Content-Length":             true,
+		"X-Llmproxy-Bypass-Internal": true,
+	}
+
+	// If external upstream is configured, also strip auth headers from client
+	if externalUpstream.APIKey != "" {
+		stripHeaders["Authorization"] = true
+		stripHeaders["X-Api-Key"] = true
+		stripHeaders["X-Api-Key"] = true // lowercase variant
+	}
+
+	for name, values := range src {
+		if stripHeaders[name] {
+			continue
+		}
+		for _, value := range values {
+			dst.Header.Add(name, value)
+		}
+	}
+
+	// Add external upstream authorization if configured
+	if externalUpstream.APIKey != "" {
+		// Use appropriate header based on provider
+		switch strings.ToLower(externalUpstream.Provider) {
+		case "anthropic":
+			dst.Header.Set("X-Api-Key", externalUpstream.APIKey)
+		default:
+			// OpenAI and most others use Bearer token
+			dst.Header.Set("Authorization", "Bearer "+externalUpstream.APIKey)
 		}
 	}
 }

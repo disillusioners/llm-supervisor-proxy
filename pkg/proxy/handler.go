@@ -35,6 +35,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
+		ExternalUpstream:        cfg.ExternalUpstream,
 	}
 }
 
@@ -49,6 +50,7 @@ type ConfigSnapshot struct {
 	MaxStreamBufferSize     int
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
+	ExternalUpstream        config.ExternalUpstream
 }
 
 type Handler struct {

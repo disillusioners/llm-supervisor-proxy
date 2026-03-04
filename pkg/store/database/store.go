@@ -377,6 +377,13 @@ func (m *ConfigManager) GetBufferMaxStorageMB() int {
 	return m.cfg.BufferMaxStorageMB
 }
 
+// GetExternalUpstream returns the external upstream configuration
+func (m *ConfigManager) GetExternalUpstream() config.ExternalUpstream {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.ExternalUpstream
+}
+
 // IsReadOnly returns true if the config cannot be written
 func (m *ConfigManager) IsReadOnly() bool {
 	m.mu.RLock()

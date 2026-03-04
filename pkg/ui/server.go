@@ -128,6 +128,8 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Credential management
 	mux.HandleFunc("/fe/api/credentials", s.handleCredentials)
 	mux.HandleFunc("/fe/api/credentials/", s.handleCredentialDetail)
+	// External upstream management
+	mux.HandleFunc("/fe/api/external-upstream", s.handleExternalUpstream)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +236,57 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			Config:          s.configMgr.Get(),
 			RestartRequired: result.RestartRequired,
 			ChangedFields:   result.ChangedFields,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleExternalUpstream(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.configMgr.GetExternalUpstream())
+		return
+
+	case http.MethodPut:
+		// Limit request body to 64KB
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+		var externalUpstream config.ExternalUpstream
+		if err := json.NewDecoder(r.Body).Decode(&externalUpstream); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Get current config and update only the external upstream part
+		cfg := s.configMgr.Get()
+		cfg.ExternalUpstream = externalUpstream
+
+		result, err := s.configMgr.Save(cfg)
+		if err != nil {
+			if strings.Contains(err.Error(), "read-only") {
+				http.Error(w, "Config file is read-only", http.StatusForbidden)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to save: %v", err), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// Return updated config with restart hint
+		response := struct {
+			config.ExternalUpstream
+			RestartRequired bool     `json:"restart_required"`
+			ChangedFields   []string `json:"changed_fields,omitempty"`
+		}{
+			ExternalUpstream: s.configMgr.GetExternalUpstream(),
+			RestartRequired:  result.RestartRequired,
+			ChangedFields:    result.ChangedFields,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
