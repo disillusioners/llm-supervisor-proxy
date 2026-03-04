@@ -163,23 +163,27 @@ func (cc *CredentialsConfig) GetCredential(id string) *CredentialConfig {
 	return nil
 }
 
-// GetCredentials returns all credential configurations.
-// API keys are decrypted before returning.
-func (cc *CredentialsConfig) GetCredentials() []CredentialConfig {
+// GetCredential returns the credential configuration for a given ID.
+// Returns nil if the credential is not found.
+// The API key is decrypted before returning.
+func (cc *CredentialsConfig) GetCredential(id string) *CredentialConfig {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
 
-	result := make([]CredentialConfig, 0, len(cc.credentials))
-	for _, cred := range cc.credentials {
+	if cred, ok := cc.credentials[id]; ok {
 		copy := cred
 		// Decrypt API key before returning
-		if copy.APIKey != "" {
+	 if copy.APIKey != "" {
 			decrypted, err := crypto.Decrypt(copy.APIKey)
-			if err != nil {
-				log.Printf("Warning: failed to decrypt API key for credential %s: %v", copy.ID, err)
-			} else {
-				copy.APIKey = decrypted
-			}
+            if err != nil {
+                log.Printf("Warning: failed to decrypt API key for credential %s: %v", id, err)
+            }
+            // Return with encrypted key rather than failing
+            copy := cred
+        }
+    }
+    return nil
+}
 		}
 		result = append(result, copy)
 	}
@@ -202,16 +206,23 @@ func (cc *CredentialsConfig) AddCredential(cred CredentialConfig) error {
 		cred.APIKey = encrypted
 	}
 
-	cc.mu.Lock()
-	defer cc.mu.Unlock()
+// AddCredential adds a new credential configuration after validation.
+// The API key is encrypted before storing.
+func (cc *CredentialsConfig) AddCredential(cred CredentialConfig) error {
+	if err := cred.Validate(); err != nil {
+        return err
+    }
 
-	if _, exists := cc.credentials[cred.ID]; exists {
-		return ErrDuplicateCredentialID
-	}
+    // Encrypt API key before storing
+    if cred.APIKey != "" {
+        encrypted, err := crypto.Encrypt(cred.APIKey)
+        if err != nil {
+            return fmt.Errorf("failed to encrypt API key: %w", err)
+        }
+        cred.APIKey = encrypted
+    }
 
-	cc.credentials[cred.ID] = cred
-	return nil
-}
+
 
 // UpdateCredential updates an existing credential configuration after validation.
 // The API key is encrypted before storing.
