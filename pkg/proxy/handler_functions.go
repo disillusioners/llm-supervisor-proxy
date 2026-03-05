@@ -218,6 +218,26 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 
 	copyHeaders(proxyReq, rc.originalHeaders)
 
+	// If UpstreamCredentialID is configured, resolve the credential and set auth header
+	// This allows the proxy to authenticate with external upstream providers
+	// using a different token than what the client provided
+	if rc.conf.UpstreamCredentialID != "" {
+		// Remove all auth headers first to avoid conflicts
+		proxyReq.Header.Del("Authorization")
+		proxyReq.Header.Del("X-API-Key")
+		proxyReq.Header.Del("x-api-key")
+		proxyReq.Header.Del("api-key")
+
+		// Resolve credential
+		cred := rc.conf.ModelsConfig.GetCredential(rc.conf.UpstreamCredentialID)
+		if cred != nil {
+			apiKey := cred.ResolveAPIKey()
+			if apiKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+		}
+	}
+
 	resp, err := h.client.Do(proxyReq)
 
 	logger.Debugf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())

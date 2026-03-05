@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig } from '../types';
+import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, Credential } from '../types';
+import { getCredentials } from '../hooks/useApi';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
@@ -43,6 +44,8 @@ export function ConfigModal({
 
   // Proxy Settings state
   const [upstreamUrl, setUpstreamUrl] = useState('');
+  const [upstreamCredentialId, setUpstreamCredentialId] = useState('');
+  const [credentials, setCredentials] = useState<Credential[]>([]);
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
   const [maxUpstreamErrorRetries, setMaxUpstreamErrorRetries] = useState(0);
@@ -65,6 +68,7 @@ export function ConfigModal({
   useEffect(() => {
     if (isOpen && config) {
       setUpstreamUrl(config.upstream_url || '');
+      setUpstreamCredentialId(config.upstream_credential_id || '');
       setPort(config.port || 8089);
       setOriginalPort(config.port || 8089);
       setIdleTimeout(config.idle_timeout || '');
@@ -74,6 +78,21 @@ export function ConfigModal({
       setMaxGenTime(config.max_generation_time || '');
     }
   }, [isOpen, config]);
+
+  // Fetch credentials when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      const fetchCredentials = async () => {
+        try {
+          const data = await getCredentials();
+          setCredentials(data || []);
+        } catch (e) {
+          console.error('Failed to fetch credentials:', e);
+        }
+      };
+      fetchCredentials();
+    }
+  }, [isOpen]);
 
   // Close modal and reset specific state
   const handleClose = () => {
@@ -100,6 +119,7 @@ export function ConfigModal({
       setStatus(null);
       const response = await onUpdateConfig({
         upstream_url: upstreamUrl,
+        upstream_credential_id: upstreamCredentialId,
         port,
         idle_timeout: idleTimeout,
         max_upstream_error_retries: maxUpstreamErrorRetries,
@@ -261,6 +281,8 @@ export function ConfigModal({
           {activeTab === 'proxy' && (
             <ProxySettings
               upstreamUrl={upstreamUrl}
+              upstreamCredentialId={upstreamCredentialId}
+              credentials={credentials}
               port={port}
               idleTimeout={idleTimeout}
               maxUpstreamErrorRetries={maxUpstreamErrorRetries}
@@ -269,6 +291,7 @@ export function ConfigModal({
               maxGenTime={maxGenTime}
               originalPort={originalPort}
               onUpstreamUrlChange={setUpstreamUrl}
+              onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
               onMaxUpstreamErrorRetriesChange={setMaxUpstreamErrorRetries}

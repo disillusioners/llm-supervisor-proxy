@@ -29,6 +29,7 @@ export interface LoopDetectionConfig {
 export interface AppConfig {
   version: string;
   upstream_url: string;
+  upstream_credential_id?: string;
   port: number;
   idle_timeout: string;
   max_generation_time: string;

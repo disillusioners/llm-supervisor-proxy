@@ -42,7 +42,7 @@ func (q *Queries) DeleteModel(ctx context.Context, id string) error {
 }
 
 const getAllModels = `-- name: GetAllModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models ORDER BY name
 `
 
 func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
@@ -62,6 +62,13 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 			&i.TruncateParamsJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Internal,
+			&i.InternalProvider,
+			&i.InternalApiKey,
+			&i.InternalBaseUrl,
+			&i.InternalModel,
+			&i.InternalKeyVersion,
+			&i.CredentialID,
 		); err != nil {
 			return nil, err
 		}
@@ -77,7 +84,7 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 }
 
 const getConfig = `-- name: GetConfig :one
-SELECT id, version, upstream_url, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at FROM configs WHERE id = 1
+SELECT id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at FROM configs WHERE id = 1
 `
 
 func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
@@ -87,6 +94,7 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 		&i.ID,
 		&i.Version,
 		&i.UpstreamUrl,
+		&i.UpstreamCredentialID,
 		&i.Port,
 		&i.IdleTimeoutMs,
 		&i.MaxGenerationTimeMs,
@@ -100,7 +108,7 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 }
 
 const getEnabledModels = `-- name: GetEnabledModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models WHERE enabled = 1 ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE enabled = 1 ORDER BY name
 `
 
 func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
@@ -120,6 +128,13 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 			&i.TruncateParamsJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Internal,
+			&i.InternalProvider,
+			&i.InternalApiKey,
+			&i.InternalBaseUrl,
+			&i.InternalModel,
+			&i.InternalKeyVersion,
+			&i.CredentialID,
 		); err != nil {
 			return nil, err
 		}
@@ -135,7 +150,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 }
 
 const getModelByID = `-- name: GetModelByID :one
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models WHERE id = ?
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE id = ?
 `
 
 func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
@@ -149,6 +164,13 @@ func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
 		&i.TruncateParamsJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Internal,
+		&i.InternalProvider,
+		&i.InternalApiKey,
+		&i.InternalBaseUrl,
+		&i.InternalModel,
+		&i.InternalKeyVersion,
+		&i.CredentialID,
 	)
 	return i, err
 }

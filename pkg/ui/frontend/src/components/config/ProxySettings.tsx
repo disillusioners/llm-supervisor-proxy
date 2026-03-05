@@ -1,7 +1,9 @@
-import type { InternalProvider } from '../../types';
+import type { Credential, InternalProvider } from '../../types';
 
 interface ProxySettingsProps {
   upstreamUrl: string;
+  upstreamCredentialId: string;
+  credentials: Credential[];
   port: number;
   idleTimeout: string;
   maxUpstreamErrorRetries: number;
@@ -10,6 +12,7 @@ interface ProxySettingsProps {
   maxGenTime: string;
   originalPort: number;
   onUpstreamUrlChange: (value: string) => void;
+  onUpstreamCredentialIdChange: (value: string) => void;
   onPortChange: (value: number) => void;
   onIdleTimeoutChange: (value: string) => void;
   onMaxUpstreamErrorRetriesChange: (value: number) => void;
@@ -23,6 +26,8 @@ interface ProxySettingsProps {
 
 export function ProxySettings({
   upstreamUrl,
+  upstreamCredentialId,
+  credentials,
   port,
   idleTimeout,
   maxUpstreamErrorRetries,
@@ -31,6 +36,7 @@ export function ProxySettings({
   maxGenTime,
   originalPort,
   onUpstreamUrlChange,
+  onUpstreamCredentialIdChange,
   onPortChange,
   onIdleTimeoutChange,
   onMaxUpstreamErrorRetriesChange,
@@ -69,6 +75,28 @@ export function ProxySettings({
             placeholder="https://api.openai.com/v1"
           />
         </div>
+      </div>
+
+      {/* Upstream Credential */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">
+          Upstream Credential
+        </label>
+        <select
+          value={upstreamCredentialId}
+          onChange={(e) => onUpstreamCredentialIdChange((e.target as HTMLSelectElement).value)}
+          class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+        >
+          <option value="">None (use client's token)</option>
+          {credentials.map((cred) => (
+            <option key={cred.id} value={cred.id}>
+              {cred.id} ({cred.provider})
+            </option>
+          ))}
+        </select>
+        <p class="text-xs text-gray-400 mt-1">
+          Select a credential to use when forwarding requests to external upstream.
+        </p>
       </div>
 
       {/* Port */}

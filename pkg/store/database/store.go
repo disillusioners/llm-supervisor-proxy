@@ -42,6 +42,7 @@ func NewConfigManager(store *Store, eventBus *events.Bus) (*ConfigManager, error
 type dbConfigRow struct {
 	Version                 string
 	UpstreamURL             string
+	UpstreamCredentialID    string
 	Port                    int64
 	IdleTimeoutMs           int64
 	MaxGenerationTimeMs     int64
@@ -69,6 +70,7 @@ func (m *ConfigManager) Load() error {
 	err := row.Scan(
 		&dbCfg.Version,
 		&dbCfg.UpstreamURL,
+		&dbCfg.UpstreamCredentialID,
 		&dbCfg.Port,
 		&dbCfg.IdleTimeoutMs,
 		&dbCfg.MaxGenerationTimeMs,
@@ -90,6 +92,7 @@ func (m *ConfigManager) Load() error {
 	// Map database config to struct
 	cfg.Version = dbCfg.Version
 	cfg.UpstreamURL = dbCfg.UpstreamURL
+	cfg.UpstreamCredentialID = dbCfg.UpstreamCredentialID
 	cfg.Port = int(dbCfg.Port)
 	cfg.IdleTimeout = config.Duration(time.Duration(dbCfg.IdleTimeoutMs) * time.Millisecond)
 	cfg.MaxGenerationTime = config.Duration(time.Duration(dbCfg.MaxGenerationTimeMs) * time.Millisecond)
@@ -146,6 +149,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	_, err = m.store.DB.ExecContext(context.Background(), query,
 		merged.Version,
 		merged.UpstreamURL,
+		merged.UpstreamCredentialID,
 		merged.Port,
 		time.Duration(merged.IdleTimeout).Milliseconds(),
 		time.Duration(merged.MaxGenerationTime).Milliseconds(),
@@ -186,6 +190,10 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// UpstreamURL is required, empty string means not sent
 	if incoming.UpstreamURL != "" {
 		result.UpstreamURL = incoming.UpstreamURL
+	}
+	// UpstreamCredentialID: empty string means not sent
+	if incoming.UpstreamCredentialID != "" {
+		result.UpstreamCredentialID = incoming.UpstreamCredentialID
 	}
 	// Port: 0 means not sent (0 is invalid anyway)
 	if incoming.Port != 0 {

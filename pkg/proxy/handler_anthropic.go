@@ -243,6 +243,26 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	// Copy headers (translate auth)
 	copyAnthropicHeaders(req, arc.originalHeaders)
 
+	// If UpstreamCredentialID is configured, resolve the credential and set auth header
+	// This allows the proxy to authenticate with external upstream providers
+	// using a different token than what the client provided
+	if arc.conf.UpstreamCredentialID != "" {
+		// Remove all auth headers first to avoid conflicts
+		req.Header.Del("Authorization")
+		req.Header.Del("X-API-Key")
+		req.Header.Del("x-api-key")
+		req.Header.Del("api-key")
+
+		// Resolve credential
+		cred := arc.conf.ModelsConfig.GetCredential(arc.conf.UpstreamCredentialID)
+		if cred != nil {
+			apiKey := cred.ResolveAPIKey()
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+		}
+	}
+
 	// Send request
 	resp, err := h.client.Do(req)
 	if err != nil {

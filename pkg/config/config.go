@@ -64,6 +64,7 @@ func (d Duration) Duration() time.Duration {
 type Config struct {
 	Version                 string              `json:"version"`
 	UpstreamURL             string              `json:"upstream_url"`
+	UpstreamCredentialID    string              `json:"upstream_credential_id,omitempty"`
 	Port                    int                 `json:"port"`
 	IdleTimeout             Duration            `json:"idle_timeout"`
 	MaxGenerationTime       Duration            `json:"max_generation_time"`
@@ -121,6 +122,7 @@ type LoopDetectionConfig struct {
 var Defaults = Config{
 	Version:                 ConfigVersion,
 	UpstreamURL:             "http://localhost:4001",
+	UpstreamCredentialID:    "",
 	Port:                    4321,
 	IdleTimeout:             Duration(60 * time.Second),
 	MaxGenerationTime:       Duration(300 * time.Second),
@@ -266,6 +268,9 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	// Only apply if env var exists AND is non-empty
 	if v := os.Getenv("UPSTREAM_URL"); v != "" {
 		cfg.UpstreamURL = v
+	}
+	if v := os.Getenv("UPSTREAM_CREDENTIAL_ID"); v != "" {
+		cfg.UpstreamCredentialID = v
 	}
 	if v := os.Getenv("PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil && port > 0 && port <= 65535 {
