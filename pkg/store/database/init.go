@@ -2,7 +2,6 @@ package database
 
 import (
 	"context"
-	"log"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 )
@@ -20,12 +19,6 @@ func Initialize(ctx context.Context) (*Store, error) {
 	if err := store.RunMigrations(ctx); err != nil {
 		store.Close()
 		return nil, err
-	}
-
-	// Run JSON migration if needed
-	if err := store.MigrateFromJSON(ctx); err != nil {
-		log.Printf("Warning: JSON migration had issues: %v", err)
-		// Don't fail - database is still usable
 	}
 
 	return store, nil

@@ -562,26 +562,3 @@ func (s *Store) runPostgreSQLMigrations(ctx context.Context) error {
 
 	return nil
 }
-
-// IsEmpty checks if the database has no data (for migration purposes)
-func (s *Store) IsEmpty(ctx context.Context) (bool, error) {
-	var count int64
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM configs WHERE id = 1`).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count == 0, nil
-}
-
-// HasModels checks if any models exist in the database
-func (s *Store) HasModels(ctx context.Context) (bool, error) {
-	var count int64
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM models`).Scan(&count)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return false, err
-	}
-	return count > 0, nil
-}
