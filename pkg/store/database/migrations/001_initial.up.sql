@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS configs (
     -- Core settings
     version TEXT NOT NULL DEFAULT '1.0',
     upstream_url TEXT NOT NULL DEFAULT 'http://localhost:4001',
+    upstream_token TEXT NOT NULL DEFAULT '',
     port INTEGER NOT NULL DEFAULT 4321,
     
     -- Timeouts (stored as milliseconds)

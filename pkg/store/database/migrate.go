@@ -323,6 +323,27 @@ func (s *Store) runSQLiteMigrations(ctx context.Context) error {
 		}
 	}
 
+	// Migration 006: Add upstream_token column to configs
+	const migration006 = "006"
+	applied, err = s.isMigrationApplied(ctx, migration006)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration006, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE configs ADD COLUMN upstream_token TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add upstream_token column: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration006); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -556,6 +577,27 @@ func (s *Store) runPostgreSQLMigrations(ctx context.Context) error {
 
 		// Record the migration
 		if err := s.recordMigration(ctx, migration005); err != nil {
+			return err
+		}
+	}
+
+	// Migration 006: Add upstream_token column to configs
+	const migration006 = "006"
+	applied, err = s.isMigrationApplied(ctx, migration006)
+	if err != nil {
+		return fmt.Errorf("failed to check migration %s: %w", migration006, err)
+	}
+
+	if !applied {
+		_, err := s.DB.ExecContext(ctx, `
+			ALTER TABLE configs ADD COLUMN IF NOT EXISTS upstream_token TEXT NOT NULL DEFAULT ''
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add upstream_token column: %w", err)
+		}
+
+		// Record the migration
+		if err := s.recordMigration(ctx, migration006); err != nil {
 			return err
 		}
 	}

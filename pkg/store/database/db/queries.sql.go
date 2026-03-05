@@ -42,7 +42,7 @@ func (q *Queries) DeleteModel(ctx context.Context, id string) error {
 }
 
 const getAllModels = `-- name: GetAllModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models ORDER BY name
 `
 
 func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
@@ -62,6 +62,13 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 			&i.TruncateParamsJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Internal,
+			&i.InternalProvider,
+			&i.InternalApiKey,
+			&i.InternalBaseUrl,
+			&i.InternalModel,
+			&i.InternalKeyVersion,
+			&i.CredentialID,
 		); err != nil {
 			return nil, err
 		}
@@ -77,7 +84,7 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 }
 
 const getConfig = `-- name: GetConfig :one
-SELECT id, version, upstream_url, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at FROM configs WHERE id = 1
+SELECT id, version, upstream_url, upstream_token, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at FROM configs WHERE id = 1
 `
 
 func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
@@ -87,6 +94,7 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 		&i.ID,
 		&i.Version,
 		&i.UpstreamUrl,
+		&i.UpstreamToken,
 		&i.Port,
 		&i.IdleTimeoutMs,
 		&i.MaxGenerationTimeMs,
@@ -100,7 +108,7 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 }
 
 const getEnabledModels = `-- name: GetEnabledModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models WHERE enabled = 1 ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE enabled = 1 ORDER BY name
 `
 
 func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
@@ -120,6 +128,13 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 			&i.TruncateParamsJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Internal,
+			&i.InternalProvider,
+			&i.InternalApiKey,
+			&i.InternalBaseUrl,
+			&i.InternalModel,
+			&i.InternalKeyVersion,
+			&i.CredentialID,
 		); err != nil {
 			return nil, err
 		}
@@ -135,7 +150,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 }
 
 const getModelByID = `-- name: GetModelByID :one
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at FROM models WHERE id = ?
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE id = ?
 `
 
 func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
@@ -149,6 +164,13 @@ func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
 		&i.TruncateParamsJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Internal,
+		&i.InternalProvider,
+		&i.InternalApiKey,
+		&i.InternalBaseUrl,
+		&i.InternalModel,
+		&i.InternalKeyVersion,
+		&i.CredentialID,
 	)
 	return i, err
 }
@@ -192,20 +214,22 @@ const updateConfig = `-- name: UpdateConfig :exec
 UPDATE configs SET
     version = ?1,
     upstream_url = ?2,
-    port = ?3,
-    idle_timeout_ms = ?4,
-    max_generation_time_ms = ?5,
-    max_upstream_error_retries = ?6,
-    max_idle_retries = ?7,
-    max_generation_retries = ?8,
-    loop_detection_json = ?9,
-    updated_at = ?10
+    upstream_token = ?3,
+    port = ?4,
+    idle_timeout_ms = ?5,
+    max_generation_time_ms = ?6,
+    max_upstream_error_retries = ?7,
+    max_idle_retries = ?8,
+    max_generation_retries = ?9,
+    loop_detection_json = ?10,
+    updated_at = ?11
 WHERE id = 1
 `
 
 type UpdateConfigParams struct {
 	Version                 sql.NullString `json:"version"`
 	UpstreamUrl             sql.NullString `json:"upstream_url"`
+	UpstreamToken           sql.NullString `json:"upstream_token"`
 	Port                    sql.NullInt64  `json:"port"`
 	IdleTimeoutMs           sql.NullInt64  `json:"idle_timeout_ms"`
 	MaxGenerationTimeMs     sql.NullInt64  `json:"max_generation_time_ms"`
@@ -220,6 +244,7 @@ func (q *Queries) UpdateConfig(ctx context.Context, arg UpdateConfigParams) erro
 	_, err := q.db.ExecContext(ctx, updateConfig,
 		arg.Version,
 		arg.UpstreamUrl,
+		arg.UpstreamToken,
 		arg.Port,
 		arg.IdleTimeoutMs,
 		arg.MaxGenerationTimeMs,

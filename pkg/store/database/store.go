@@ -42,6 +42,7 @@ func NewConfigManager(store *Store, eventBus *events.Bus) (*ConfigManager, error
 type dbConfigRow struct {
 	Version                 string
 	UpstreamURL             string
+	UpstreamToken           string
 	Port                    int64
 	IdleTimeoutMs           int64
 	MaxGenerationTimeMs     int64
@@ -69,6 +70,7 @@ func (m *ConfigManager) Load() error {
 	err := row.Scan(
 		&dbCfg.Version,
 		&dbCfg.UpstreamURL,
+		&dbCfg.UpstreamToken,
 		&dbCfg.Port,
 		&dbCfg.IdleTimeoutMs,
 		&dbCfg.MaxGenerationTimeMs,
@@ -90,6 +92,7 @@ func (m *ConfigManager) Load() error {
 	// Map database config to struct
 	cfg.Version = dbCfg.Version
 	cfg.UpstreamURL = dbCfg.UpstreamURL
+	cfg.UpstreamToken = dbCfg.UpstreamToken
 	cfg.Port = int(dbCfg.Port)
 	cfg.IdleTimeout = config.Duration(time.Duration(dbCfg.IdleTimeoutMs) * time.Millisecond)
 	cfg.MaxGenerationTime = config.Duration(time.Duration(dbCfg.MaxGenerationTimeMs) * time.Millisecond)
@@ -146,6 +149,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	_, err = m.store.DB.ExecContext(context.Background(), query,
 		merged.Version,
 		merged.UpstreamURL,
+		merged.UpstreamToken,
 		merged.Port,
 		time.Duration(merged.IdleTimeout).Milliseconds(),
 		time.Duration(merged.MaxGenerationTime).Milliseconds(),

@@ -4,10 +4,24 @@
 
 package db
 
+import (
+	"database/sql"
+)
+
+type AuthToken struct {
+	ID        string         `json:"id"`
+	TokenHash string         `json:"token_hash"`
+	Name      string         `json:"name"`
+	ExpiresAt sql.NullString `json:"expires_at"`
+	CreatedAt string         `json:"created_at"`
+	CreatedBy string         `json:"created_by"`
+}
+
 type Config struct {
 	ID                      int64  `json:"id"`
 	Version                 string `json:"version"`
 	UpstreamUrl             string `json:"upstream_url"`
+	UpstreamToken           string `json:"upstream_token"`
 	Port                    int64  `json:"port"`
 	IdleTimeoutMs           int64  `json:"idle_timeout_ms"`
 	MaxGenerationTimeMs     int64  `json:"max_generation_time_ms"`
@@ -18,6 +32,15 @@ type Config struct {
 	UpdatedAt               string `json:"updated_at"`
 }
 
+type Credential struct {
+	ID        string `json:"id"`
+	Provider  string `json:"provider"`
+	ApiKey    string `json:"api_key"`
+	BaseUrl   string `json:"base_url"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 type Model struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
@@ -26,4 +49,11 @@ type Model struct {
 	TruncateParamsJson string `json:"truncate_params_json"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
+	Internal           int64  `json:"internal"`
+	InternalProvider   string `json:"internal_provider"`
+	InternalApiKey     string `json:"internal_api_key"`
+	InternalBaseUrl    string `json:"internal_base_url"`
+	InternalModel      string `json:"internal_model"`
+	InternalKeyVersion int64  `json:"internal_key_version"`
+	CredentialID       string `json:"credential_id"`
 }

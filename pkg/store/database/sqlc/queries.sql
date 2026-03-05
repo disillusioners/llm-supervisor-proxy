@@ -5,6 +5,7 @@ SELECT * FROM configs WHERE id = 1;
 UPDATE configs SET
     version = sqlc.narg('version'),
     upstream_url = sqlc.narg('upstream_url'),
+    upstream_token = sqlc.narg('upstream_token'),
     port = sqlc.narg('port'),
     idle_timeout_ms = sqlc.narg('idle_timeout_ms'),
     max_generation_time_ms = sqlc.narg('max_generation_time_ms'),

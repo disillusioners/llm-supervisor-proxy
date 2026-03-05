@@ -68,12 +68,13 @@ func IntToBoolean(v int64) bool {
 // UpsertConfig returns the appropriate upsert syntax for inserting/updating config
 func (q *QueryBuilder) UpsertConfig() string {
 	if q.dialect == PostgreSQL {
-		return `INSERT INTO configs (id, version, upstream_url, port, idle_timeout_ms, max_generation_time_ms, 
+		return `INSERT INTO configs (id, version, upstream_url, upstream_token, port, idle_timeout_ms, max_generation_time_ms, 
 			max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (id) DO UPDATE SET
 				version = EXCLUDED.version,
 				upstream_url = EXCLUDED.upstream_url,
+				upstream_token = EXCLUDED.upstream_token,
 				port = EXCLUDED.port,
 				idle_timeout_ms = EXCLUDED.idle_timeout_ms,
 				max_generation_time_ms = EXCLUDED.max_generation_time_ms,
@@ -83,9 +84,9 @@ func (q *QueryBuilder) UpsertConfig() string {
 				loop_detection_json = EXCLUDED.loop_detection_json,
 				updated_at = EXCLUDED.updated_at`
 	}
-	return `INSERT OR REPLACE INTO configs (id, version, upstream_url, port, idle_timeout_ms, max_generation_time_ms,
+	return `INSERT OR REPLACE INTO configs (id, version, upstream_url, upstream_token, port, idle_timeout_ms, max_generation_time_ms,
 		max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateConfig returns the appropriate UPDATE query for config
@@ -94,20 +95,22 @@ func (q *QueryBuilder) UpdateConfig() string {
 		return `UPDATE configs SET
 			version = $1,
 			upstream_url = $2,
-			port = $3,
-			idle_timeout_ms = $4,
-			max_generation_time_ms = $5,
-			max_upstream_error_retries = $6,
-			max_idle_retries = $7,
-			max_generation_retries = $8,
-			max_stream_buffer_size = $9,
-			loop_detection_json = $10,
-			updated_at = $11
+			upstream_token = $3,
+			port = $4,
+			idle_timeout_ms = $5,
+			max_generation_time_ms = $6,
+			max_upstream_error_retries = $7,
+			max_idle_retries = $8,
+			max_generation_retries = $9,
+			max_stream_buffer_size = $10,
+			loop_detection_json = $11,
+			updated_at = $12
 		WHERE id = 1`
 	}
 	return `UPDATE configs SET
 			version = ?,
 			upstream_url = ?,
+			upstream_token = ?,
 			port = ?,
 			idle_timeout_ms = ?,
 			max_generation_time_ms = ?,
@@ -210,7 +213,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 
 // GetConfig returns the appropriate SELECT query for config
 func (q *QueryBuilder) GetConfig() string {
-	return `SELECT version, upstream_url, port, idle_timeout_ms, max_generation_time_ms,
+	return `SELECT version, upstream_url, upstream_token, port, idle_timeout_ms, max_generation_time_ms,
 		max_upstream_error_retries, max_idle_retries, max_generation_retries, max_stream_buffer_size, loop_detection_json, updated_at
 		FROM configs WHERE id = 1`
 }
