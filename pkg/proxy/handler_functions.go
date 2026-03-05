@@ -216,8 +216,8 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 
 	logger.Debugf("[DO-ATTEMPT] Starting attempt %d for request %s, baseCtx.Err()=%v", attempt, rc.reqID, rc.baseCtx.Err())
 
-	// Copy headers but replace Authorization with external upstream token if configured
-	copyHeadersWithExternalAuth(proxyReq, rc.originalHeaders, rc.conf.ExternalUpstream)
+	// Copy headers but replace Authorization with upstream token if configured
+	copyHeadersWithUpstreamToken(proxyReq, rc.originalHeaders, rc.conf.UpstreamToken)
 
 	resp, err := h.client.Do(proxyReq)
 

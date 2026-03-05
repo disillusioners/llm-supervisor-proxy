@@ -27,6 +27,7 @@ func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
 		UpstreamURL:             cfg.UpstreamURL,
+		UpstreamToken:           cfg.UpstreamToken,
 		IdleTimeout:             cfg.IdleTimeout.Duration(),
 		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
 		MaxUpstreamErrorRetries: cfg.MaxUpstreamErrorRetries,
@@ -42,6 +43,7 @@ func (c *Config) Clone() ConfigSnapshot {
 // ConfigSnapshot is an immutable snapshot of config values for a single request
 type ConfigSnapshot struct {
 	UpstreamURL             string
+	UpstreamToken           string
 	IdleTimeout             time.Duration
 	MaxGenerationTime       time.Duration
 	MaxUpstreamErrorRetries int

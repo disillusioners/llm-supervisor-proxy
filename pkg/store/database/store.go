@@ -307,6 +307,13 @@ func (m *ConfigManager) GetUpstreamURL() string {
 	return m.cfg.UpstreamURL
 }
 
+// GetUpstreamToken returns the upstream token
+func (m *ConfigManager) GetUpstreamToken() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.UpstreamToken
+}
+
 // GetPort returns the port
 func (m *ConfigManager) GetPort() int {
 	m.mu.RLock()

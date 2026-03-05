@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -185,20 +184,19 @@ func copyHeaders(dst *http.Request, src http.Header) {
 	}
 }
 
-// copyHeadersWithExternalAuth copies headers from src to dst, but replaces the Authorization
-// header with the external upstream token if configured.
-func copyHeadersWithExternalAuth(dst *http.Request, src http.Header, externalUpstream config.ExternalUpstream) {
+// copyHeadersWithUpstreamToken copies headers from src to dst, but replaces the Authorization
+// header with the upstream token if configured.
+func copyHeadersWithUpstreamToken(dst *http.Request, src http.Header, upstreamToken string) {
 	// Headers to strip (never forward upstream)
 	stripHeaders := map[string]bool{
 		"Content-Length":             true,
 		"X-Llmproxy-Bypass-Internal": true,
 	}
 
-	// If external upstream is configured, also strip auth headers from client
-	if externalUpstream.APIKey != "" {
+	// If upstream token is configured, also strip auth headers from client
+	if upstreamToken != "" {
 		stripHeaders["Authorization"] = true
 		stripHeaders["X-Api-Key"] = true
-		stripHeaders["X-Api-Key"] = true // lowercase variant
 	}
 
 	for name, values := range src {
@@ -210,16 +208,9 @@ func copyHeadersWithExternalAuth(dst *http.Request, src http.Header, externalUps
 		}
 	}
 
-	// Add external upstream authorization if configured
-	if externalUpstream.APIKey != "" {
-		// Use appropriate header based on provider
-		switch strings.ToLower(externalUpstream.Provider) {
-		case "anthropic":
-			dst.Header.Set("X-Api-Key", externalUpstream.APIKey)
-		default:
-			// OpenAI and most others use Bearer token
-			dst.Header.Set("Authorization", "Bearer "+externalUpstream.APIKey)
-		}
+	// Add upstream token authorization if configured (always Bearer for LiteLLM)
+	if upstreamToken != "" {
+		dst.Header.Set("Authorization", "Bearer "+upstreamToken)
 	}
 }
 

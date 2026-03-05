@@ -64,6 +64,7 @@ func (d Duration) Duration() time.Duration {
 type Config struct {
 	Version                 string              `json:"version"`
 	UpstreamURL             string              `json:"upstream_url"`
+	UpstreamToken           string              `json:"upstream_token"`
 	Port                    int                 `json:"port"`
 	IdleTimeout             Duration            `json:"idle_timeout"`
 	MaxGenerationTime       Duration            `json:"max_generation_time"`
@@ -90,6 +91,7 @@ type ExternalUpstream struct {
 type ManagerInterface interface {
 	Get() Config
 	GetUpstreamURL() string
+	GetUpstreamToken() string
 	GetPort() int
 	GetIdleTimeout() time.Duration
 	GetMaxGenerationTime() time.Duration
@@ -429,6 +431,13 @@ func (m *Manager) GetUpstreamURL() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.UpstreamURL
+}
+
+// GetUpstreamToken returns the upstream token
+func (m *Manager) GetUpstreamToken() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.UpstreamToken
 }
 
 // GetPort returns the port
