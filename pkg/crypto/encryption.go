@@ -19,9 +19,8 @@ const EnvEncryptionKey = "INTERNAL_ENCRYPTION_KEY"
 const keyFileName = ".encryption_key"
 
 var (
-	ErrEncryptionKeyNotSet = errors.New("INTERNAL_ENCRYPTION_KEY environment variable not set and no key file found")
-	ErrInvalidCiphertext   = errors.New("invalid ciphertext")
-	ErrKeyInvalidLength    = errors.New("encryption key must be 32 bytes")
+	ErrInvalidCiphertext = errors.New("invalid ciphertext")
+	ErrKeyInvalidLength  = errors.New("encryption key must be 32 bytes")
 )
 
 var (
@@ -48,20 +47,8 @@ func loadKeyFromFile(path string) (string, error) {
 	return string(data), nil
 }
 
-// saveKeyToFile saves the encryption key to the specified file with restrictive permissions
-func saveKeyToFile(path, key string) error {
-	// Ensure directory exists
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// Write key with restrictive permissions (0600 = read/write for owner only)
-	return os.WriteFile(path, []byte(key), 0600)
-}
-
 // InitEncryption initializes the encryption key from environment variable or key file
-// If neither exists, generates a new key and saves it to the key file
+// If neither exists, encryption is disabled (Encrypt/Decrypt will pass through plaintext)
 func InitEncryption() error {
 	encryptionKeyOnce.Do(func() {
 		var key string
@@ -73,29 +60,16 @@ func InitEncryption() error {
 		if key == "" {
 			keyFilePath, err := getKeyFilePath()
 			if err != nil {
-				encryptionKeyErr = err
-				return
+				log.Printf("Encryption disabled: failed to get key file path: %v", err)
+				return // No key, encryption disabled
 			}
 
 			keyFromFile, err := loadKeyFromFile(keyFilePath)
 			if err == nil {
 				key = keyFromFile
 			} else if os.IsNotExist(err) {
-				// 3. No key file exists, generate a new one
-				log.Printf("No encryption key found, generating new key at: %s", keyFilePath)
-				newKey, err := GenerateKey()
-				if err != nil {
-					encryptionKeyErr = fmt.Errorf("failed to generate encryption key: %w", err)
-					return
-				}
-
-				if err := saveKeyToFile(keyFilePath, newKey); err != nil {
-					encryptionKeyErr = fmt.Errorf("failed to save encryption key: %w", err)
-					return
-				}
-
-				key = newKey
-				log.Printf("Generated and saved new encryption key")
+				log.Printf("Encryption disabled: no key configured (set %s or create key file)", EnvEncryptionKey)
+				return // No key, encryption disabled
 			} else {
 				encryptionKeyErr = fmt.Errorf("failed to read encryption key file: %w", err)
 				return
@@ -115,15 +89,21 @@ func InitEncryption() error {
 		}
 
 		encryptionKey = decoded
+		log.Printf("Encryption enabled")
 	})
 	return encryptionKeyErr
 }
 
 // Encrypt encrypts plaintext using AES-256-GCM
-// Returns base64-encoded ciphertext
+// If no encryption key is configured, returns plaintext unchanged
 func Encrypt(plaintext string) (string, error) {
 	if err := InitEncryption(); err != nil {
 		return "", err
+	}
+
+	// No key configured - pass through plaintext
+	if encryptionKey == nil {
+		return plaintext, nil
 	}
 
 	block, err := aes.NewCipher(encryptionKey)
@@ -146,9 +126,15 @@ func Encrypt(plaintext string) (string, error) {
 }
 
 // Decrypt decrypts base64-encoded ciphertext using AES-256-GCM
+// If no encryption key is configured, returns input unchanged
 func Decrypt(ciphertext string) (string, error) {
 	if err := InitEncryption(); err != nil {
 		return "", err
+	}
+
+	// No key configured - pass through
+	if encryptionKey == nil {
+		return ciphertext, nil
 	}
 
 	data, err := base64.StdEncoding.DecodeString(ciphertext)

@@ -132,16 +132,19 @@ func TestInitEncryptionGeneratesKeyFile(t *testing.T) {
 
 	err = InitEncryption()
 	if err != nil {
-		t.Errorf("expected no error when generating key file, got: %v", err)
+		t.Errorf("expected no error when no key configured, got: %v", err)
 	}
 
-	// Check that key file was created
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		t.Errorf("expected key file to be created at %s", keyPath)
+	// Encryption should be disabled (no key generated)
+	if encryptionKey != nil {
+		t.Error("expected encryption to be disabled (no auto-generation)")
 	}
 
-	// Cleanup
-	os.Remove(keyPath)
+	// Key file should NOT be created
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Errorf("expected key file NOT to be auto-generated at %s", keyPath)
+		os.Remove(keyPath)
+	}
 }
 
 func TestInitEncryptionInvalidKeyLength(t *testing.T) {
@@ -176,5 +179,39 @@ func TestGenerateKey(t *testing.T) {
 	// Key should not be empty
 	if key1 == "" {
 		t.Error("generated key should not be empty")
+	}
+}
+
+func TestPassthroughWhenNoKey(t *testing.T) {
+	// Reset encryption state
+	resetEncryptionState()
+
+	// Ensure no env var is set
+	os.Unsetenv(EnvEncryptionKey)
+
+	// Get the key file path and remove it
+	keyPath, _ := getKeyFilePath()
+	os.Remove(keyPath)
+
+	plaintext := "my-secret-api-key"
+
+	// Encrypt should return plaintext unchanged
+	encrypted, err := Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("encrypt failed: %v", err)
+	}
+
+	if encrypted != plaintext {
+		t.Errorf("expected passthrough, got encrypted=%q, want %q", encrypted, plaintext)
+	}
+
+	// Decrypt should return input unchanged
+	decrypted, err := Decrypt(plaintext)
+	if err != nil {
+		t.Fatalf("decrypt failed: %v", err)
+	}
+
+	if decrypted != plaintext {
+		t.Errorf("expected passthrough, got decrypted=%q, want %q", decrypted, plaintext)
 	}
 }
