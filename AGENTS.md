@@ -9,7 +9,7 @@ This document provides essential information for AI coding agents working in thi
 | Component | Technology |
 |-----------|------------|
 | Backend | Go 1.24 |
-| Frontend | TypeScript + Preact + Vite |
+| Frontend | TypeScript + Preact + Vite + Tailwind CSS |
 | Database | SQLite (dev) / PostgreSQL (prod) |
 | Code Gen | sqlc for database queries |
 
@@ -38,6 +38,7 @@ go test ./...
 go test -run TestName ./pkg/path/
 # Example:
 go test -run TestHandlerInitialize ./pkg/proxy/
+go test -run TestDuration_MarshalJSON ./pkg/config/
 
 # Run tests with verbose output
 go test -v ./...
@@ -57,11 +58,14 @@ cd pkg/ui/frontend
 # Install dependencies
 npm install
 
-# Development server
+# Development server (hot reload)
 npm run dev
 
 # Production build
 npm run build
+
+# Preview production build
+npm run preview
 ```
 
 ### Database (sqlc)
@@ -69,7 +73,30 @@ npm run build
 ```bash
 # Generate database code from SQL queries
 sqlc generate
+
+# SQL queries location: pkg/store/database/sqlc/queries.sql
+# Generated code location: pkg/store/database/db/
+# Migrations location: pkg/store/database/migrations/
 ```
+
+---
+
+## Environment Variables
+
+Key configuration via environment variables (highest precedence):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPSTREAM_URL` | `http://localhost:4001` | LLM provider URL |
+| `PORT` | `4321` | Proxy listening port |
+| `IDLE_TIMEOUT` | `60s` | Max wait between tokens |
+| `MAX_GENERATION_TIME` | `300s` | Hard request time limit |
+| `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors |
+| `MAX_IDLE_RETRIES` | `2` | Retries for hung streams |
+| `MAX_GENERATION_RETRIES` | `1` | Retries for time limit exceeded |
+| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
+| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only) |
+| `DATABASE_URL` | *(empty)* | PostgreSQL connection string |
 
 ---
 
@@ -215,6 +242,12 @@ export function RequestList({ requests, onSelect, loading }: RequestListProps) {
 - `noUnusedLocals` and `noUnusedParameters` enabled
 - JSX: `react-jsx` with `preact` import source
 
+#### Styling (Tailwind CSS)
+- Use Tailwind utility classes for styling
+- Class names use `class` (not `className`) in Preact
+- Responsive design with Tailwind breakpoints
+- Example: `class="bg-gray-900 border-r border-gray-700"`
+
 ---
 
 ## Project Structure
@@ -255,3 +288,5 @@ llm-supervisor-proxy/
 - Use sqlc for type-safe SQL queries
 - Migrations in `pkg/store/database/migrations/`
 - Queries defined in `pkg/store/database/sqlc/queries.sql`
+- Generated code in `pkg/store/database/db/`
+- After modifying queries, run `sqlc generate`
