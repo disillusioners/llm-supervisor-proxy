@@ -286,7 +286,27 @@ llm-supervisor-proxy/
 
 ### Database
 - Use sqlc for type-safe SQL queries
-- Migrations in `pkg/store/database/migrations/`
 - Queries defined in `pkg/store/database/sqlc/queries.sql`
 - Generated code in `pkg/store/database/db/`
 - After modifying queries, run `sqlc generate`
+
+### Database Migrations
+- Uses `embed.FS` to embed SQL files at compile time
+- Tracked via `schema_migrations` table (version, applied_at)
+- Dialect-specific directories: `migrations/sqlite/` and `migrations/postgres/`
+- Naming convention: `NNN_description.up.sql` (e.g., `007_add_field.up.sql`)
+
+**Adding a new migration:**
+1. Create SQL files in both dialect directories:
+   ```bash
+   # SQLite: pkg/store/database/migrations/sqlite/007_add_field.up.sql
+   # PostgreSQL: pkg/store/database/migrations/postgres/007_add_field.up.sql
+   ```
+2. Register in `pkg/store/database/migrate.go`:
+   ```go
+   var migrations = []migration{
+       // ... existing
+       {"007", "007_add_field.up"},
+   }
+   ```
+3. Run `go build ./...` to embed new files
