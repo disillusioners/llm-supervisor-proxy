@@ -86,7 +86,7 @@ func main() {
 	}
 
 	// Initialize Token Store
-	tokenStore := auth.NewTokenStore(dbStore.DB)
+	tokenStore := auth.NewTokenStore(dbStore.DB, dbStore.Dialect)
 
 	// Initialize UI Server
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore)

@@ -5,17 +5,19 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/google/uuid"
 )
 
 // TokenStore manages auth tokens in the database
 type TokenStore struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect database.Dialect
 }
 
 // NewTokenStore creates a new token store
-func NewTokenStore(db *sql.DB) *TokenStore {
-	return &TokenStore{db: db}
+func NewTokenStore(db *sql.DB, dialect database.Dialect) *TokenStore {
+	return &TokenStore{db: db, dialect: dialect}
 }
 
 // CreateToken creates a new API token
@@ -34,11 +36,14 @@ func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *ti
 		expiresAtStr = expiresAt.Format(time.RFC3339)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		id, hash, name, expiresAtStr, now.Format(time.RFC3339), createdBy,
-	)
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by) VALUES ($1, $2, $3, $4, $5, $6)`
+	} else {
+		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)`
+	}
+
+	_, err = s.db.ExecContext(ctx, query, id, hash, name, expiresAtStr, now.Format(time.RFC3339), createdBy)
 	if err != nil {
 		return "", nil, err
 	}
@@ -67,11 +72,14 @@ func (s *TokenStore) ValidateToken(ctx context.Context, plaintext string) (*Auth
 	var expiresAtStr sql.NullString
 	var createdAtStr string
 
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, token_hash, name, expires_at, created_at, created_by
-		FROM auth_tokens WHERE token_hash = ?`,
-		hash,
-	).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `SELECT id, token_hash, name, expires_at, created_at, created_by FROM auth_tokens WHERE token_hash = $1`
+	} else {
+		query = `SELECT id, token_hash, name, expires_at, created_at, created_by FROM auth_tokens WHERE token_hash = ?`
+	}
+
+	err := s.db.QueryRowContext(ctx, query, hash).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrTokenNotFound
@@ -141,7 +149,14 @@ func (s *TokenStore) ListTokens(ctx context.Context) ([]AuthToken, error) {
 
 // DeleteToken removes a token by ID
 func (s *TokenStore) DeleteToken(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM auth_tokens WHERE id = ?`, id)
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `DELETE FROM auth_tokens WHERE id = $1`
+	} else {
+		query = `DELETE FROM auth_tokens WHERE id = ?`
+	}
+
+	result, err := s.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -163,11 +178,14 @@ func (s *TokenStore) GetTokenByID(ctx context.Context, id string) (*AuthToken, e
 	var expiresAtStr sql.NullString
 	var createdAtStr string
 
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, expires_at, created_at, created_by
-		FROM auth_tokens WHERE id = ?`,
-		id,
-	).Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `SELECT id, name, expires_at, created_at, created_by FROM auth_tokens WHERE id = $1`
+	} else {
+		query = `SELECT id, name, expires_at, created_at, created_by FROM auth_tokens WHERE id = ?`
+	}
+
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrTokenNotFound
