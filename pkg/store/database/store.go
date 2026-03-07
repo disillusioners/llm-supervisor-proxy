@@ -274,54 +274,7 @@ func isLoopDetectionProvided(ld config.LoopDetectionConfig) bool {
 // mergeLoopDetectionConfig merges loop detection settings
 // All fields from incoming are copied (frontend sends complete loop_detection object)
 func mergeLoopDetectionConfig(existing, incoming config.LoopDetectionConfig) config.LoopDetectionConfig {
-	result := existing
-
-	// Copy boolean fields directly
-	result.Enabled = incoming.Enabled
-	result.ShadowMode = incoming.ShadowMode
-
-	// For numeric fields, update if non-zero
-	if incoming.MessageWindow != 0 {
-		result.MessageWindow = incoming.MessageWindow
-	}
-	if incoming.ActionWindow != 0 {
-		result.ActionWindow = incoming.ActionWindow
-	}
-	if incoming.ExactMatchCount != 0 {
-		result.ExactMatchCount = incoming.ExactMatchCount
-	}
-	if incoming.SimilarityThreshold != 0 {
-		result.SimilarityThreshold = incoming.SimilarityThreshold
-	}
-	if incoming.MinTokensForSimHash != 0 {
-		result.MinTokensForSimHash = incoming.MinTokensForSimHash
-	}
-	if incoming.ActionRepeatCount != 0 {
-		result.ActionRepeatCount = incoming.ActionRepeatCount
-	}
-	if incoming.OscillationCount != 0 {
-		result.OscillationCount = incoming.OscillationCount
-	}
-	if incoming.MinTokensForAnalysis != 0 {
-		result.MinTokensForAnalysis = incoming.MinTokensForAnalysis
-	}
-	if incoming.ThinkingMinTokens != 0 {
-		result.ThinkingMinTokens = incoming.ThinkingMinTokens
-	}
-	if incoming.TrigramThreshold != 0 {
-		result.TrigramThreshold = incoming.TrigramThreshold
-	}
-	if incoming.MaxCycleLength != 0 {
-		result.MaxCycleLength = incoming.MaxCycleLength
-	}
-	if incoming.ReasoningTrigramThreshold != 0 {
-		result.ReasoningTrigramThreshold = incoming.ReasoningTrigramThreshold
-	}
-	if len(incoming.ReasoningModelPatterns) > 0 {
-		result.ReasoningModelPatterns = incoming.ReasoningModelPatterns
-	}
-
-	return result
+	return incoming
 }
 
 // isToolRepairProvided checks if tool repair config was explicitly provided
@@ -339,25 +292,7 @@ func isToolRepairProvided(tr toolrepair.Config) bool {
 // mergeToolRepairConfig merges tool repair settings
 // All fields from incoming are copied (frontend sends complete tool_repair object)
 func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Config {
-	result := existing
-
-	// For numeric fields, update if non-zero
-	if incoming.MaxArgumentsSize != 0 {
-		result.MaxArgumentsSize = incoming.MaxArgumentsSize
-	}
-	if incoming.MaxToolCallsPerResponse != 0 {
-		result.MaxToolCallsPerResponse = incoming.MaxToolCallsPerResponse
-	}
-	if incoming.FixerTimeout != 0 {
-		result.FixerTimeout = incoming.FixerTimeout
-	}
-
-	// For string fields, update if non-empty
-	if incoming.FixerModel != "" {
-		result.FixerModel = incoming.FixerModel
-	}
-
-	return result
+	return incoming
 }
 
 // Get returns current configuration
