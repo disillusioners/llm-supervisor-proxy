@@ -11,6 +11,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // InternalHandler handles requests to internal providers (bypassing upstream)
@@ -19,6 +20,7 @@ type InternalHandler struct {
 	resolver    models.ModelsConfigInterface // Resolver for credentials
 	bufferStore *bufferstore.BufferStore     // Optional: for saving debug info
 	requestID   string                       // Optional: request ID for buffer naming
+	repairer    *toolrepair.Repairer         // Optional: for repairing tool call JSON
 }
 
 // NewInternalHandler creates a new internal handler for a model
@@ -31,6 +33,11 @@ func NewInternalHandler(config *models.ModelConfig, resolver models.ModelsConfig
 func (h *InternalHandler) SetDebugContext(bufferStore *bufferstore.BufferStore, requestID string) {
 	h.bufferStore = bufferStore
 	h.requestID = requestID
+}
+
+// SetRepairer sets the tool call repairer
+func (h *InternalHandler) SetRepairer(repairer *toolrepair.Repairer) {
+	h.repairer = repairer
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -56,6 +63,13 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	if h.bufferStore != nil && h.requestID != "" {
 		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
 			openaiProvider.SetDebugContext(h.bufferStore, h.requestID)
+		}
+	}
+
+	// Set repairer on provider if available (for OpenAIProvider)
+	if h.repairer != nil {
+		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
+			openaiProvider.SetRepairer(h.repairer)
 		}
 	}
 

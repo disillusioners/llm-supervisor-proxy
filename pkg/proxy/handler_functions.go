@@ -22,6 +22,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 	"github.com/google/uuid"
 )
 
@@ -262,6 +263,13 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 
 	internalHandler := NewInternalHandler(modelConfig, h.config.ModelsConfig)
 	internalHandler.SetDebugContext(h.bufferStore, rc.reqID)
+
+	// Create and set repairer for tool call JSON repair
+	if rc.conf.ToolRepair.Enabled {
+		repairer := toolrepair.NewRepairer(&rc.conf.ToolRepair)
+		internalHandler.SetRepairer(repairer)
+	}
+
 	err := internalHandler.HandleRequest(attemptCtx, bodyToSend, w, rc.isStream)
 
 	if err != nil {

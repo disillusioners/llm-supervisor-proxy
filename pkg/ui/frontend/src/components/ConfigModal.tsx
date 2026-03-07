@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, Credential } from '../types';
+import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig, Credential } from '../types';
 import { getCredentials } from '../hooks/useApi';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
+import { ToolRepairSettings } from './config/ToolRepairSettings';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
 
@@ -23,7 +24,7 @@ interface ConfigModalProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tokens';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens';
 
 export function ConfigModal({
   isOpen,
@@ -176,6 +177,28 @@ export function ConfigModal({
     }
   };
 
+  // Tool Repair handler
+  const handleApplyToolRepair = async (toolRepairConfig: ToolRepairConfig) => {
+    try {
+      setStatus(null);
+      const response = await onUpdateConfig({
+        tool_repair: toolRepairConfig,
+      });
+
+      if (response.restart_required) {
+        setStatus({
+          type: 'success',
+          message: 'Tool repair configuration updated. Server restart required.',
+          restartRequired: true
+        });
+      } else {
+        setStatus({ type: 'success', message: 'Tool repair configuration updated' });
+      }
+    } catch (e) {
+      setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update tool repair config' });
+    }
+  };
+
   // Token handlers
   const handleCreateToken = async (name: string, expiresAt: string | null) => {
     try {
@@ -266,6 +289,15 @@ export function ConfigModal({
             Loop Detection
           </button>
           <button
+            class={`px-6 py-3 font-medium transition-colors ${activeTab === 'tool_repair'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('tool_repair')}
+          >
+            Tool Repair
+          </button>
+          <button
             class={`px-6 py-3 font-medium transition-colors ${activeTab === 'tokens'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -328,6 +360,15 @@ export function ConfigModal({
             <LoopDetectionSettings
               config={config?.loop_detection ?? null}
               onApply={handleApplyLoopDetection}
+              status={status}
+              setStatus={setStatus}
+            />
+          )}
+
+          {activeTab === 'tool_repair' && (
+            <ToolRepairSettings
+              config={config?.tool_repair ?? null}
+              onApply={handleApplyToolRepair}
               status={status}
               setStatus={setStatus}
             />

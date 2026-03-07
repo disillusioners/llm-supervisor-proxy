@@ -26,6 +26,19 @@ export interface LoopDetectionConfig {
   reasoning_trigram_threshold: number;
 }
 
+export interface ToolRepairConfig {
+  enabled: boolean;
+  strategies: string[];
+  max_arguments_size: number;       // in bytes
+  max_tool_calls_per_response: number;
+  log_original: boolean;
+  log_repaired: boolean;
+  retry_enabled: boolean;
+  max_retries: number;
+  retry_prompt: string;
+  max_repair_duration: number;      // in milliseconds
+}
+
 export interface AppConfig {
   version: string;
   upstream_url: string;
@@ -37,6 +50,7 @@ export interface AppConfig {
   max_idle_retries: number;
   max_generation_retries: number;
   loop_detection: LoopDetectionConfig;
+  tool_repair: ToolRepairConfig;
   updated_at: string;
 }
 

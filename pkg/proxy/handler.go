@@ -14,6 +14,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // Config holds runtime configuration for the proxy handler
@@ -36,6 +37,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
+		ToolRepair:              cfg.ToolRepair,
 	}
 }
 
@@ -51,6 +53,7 @@ type ConfigSnapshot struct {
 	MaxStreamBufferSize     int
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
+	ToolRepair              toolrepair.Config
 }
 
 type Handler struct {
