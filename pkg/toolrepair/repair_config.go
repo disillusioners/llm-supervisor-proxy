@@ -1,6 +1,9 @@
 package toolrepair
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Config holds configuration for the tool repair system
 type Config struct {
@@ -57,4 +60,32 @@ func DisabledConfig() *Config {
 	return &Config{
 		Enabled: false,
 	}
+}
+
+// MarshalJSON customizes JSON marshaling to convert time.Duration to milliseconds
+func (c Config) MarshalJSON() ([]byte, error) {
+	type Alias Config
+	return json.Marshal(&struct {
+		MaxRepairDuration int64 `json:"max_repair_duration"` // in milliseconds
+		*Alias
+	}{
+		MaxRepairDuration: c.MaxRepairDuration.Milliseconds(),
+		Alias:             (*Alias)(&c),
+	})
+}
+
+// UnmarshalJSON customizes JSON unmarshaling to convert milliseconds to time.Duration
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type Alias Config
+	aux := &struct {
+		MaxRepairDuration int64 `json:"max_repair_duration"` // in milliseconds
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	c.MaxRepairDuration = time.Duration(aux.MaxRepairDuration) * time.Millisecond
+	return nil
 }
