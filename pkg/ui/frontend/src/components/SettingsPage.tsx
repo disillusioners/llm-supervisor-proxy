@@ -9,6 +9,7 @@ import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
+import { ToastContainer, type ToastData } from './Toast';
 
 interface SettingsPageProps {
   config: AppConfig | null;
@@ -25,6 +26,9 @@ interface SettingsPageProps {
 
 type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens';
 
+// Helper to generate unique toast IDs
+const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
 export function SettingsPage({
   config,
   onUpdateConfig,
@@ -38,7 +42,30 @@ export function SettingsPage({
   onRefetchTokens,
 }: SettingsPageProps) {
   const [activeTab, setActiveTab] = useState<TabType>('proxy');
-  const [status, setStatus] = useState<{ type: 'success' | 'error'; message: string; restartRequired?: boolean } | null>(null);
+  const [toasts, setToasts] = useState<ToastData[]>([]);
+
+  // Helper to add a toast
+  const addToast = (type: ToastData['type'], message: string, restartRequired?: boolean) => {
+    const newToast: ToastData = {
+      id: generateToastId(),
+      type,
+      message,
+      restartRequired,
+    };
+    setToasts(prev => [...prev, newToast]);
+  };
+
+  // Helper to dismiss a toast
+  const dismissToast = (id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  // Create a setStatus-like function for child components
+  const setStatusWrapper = (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => {
+    if (status) {
+      addToast(status.type, status.message, status.restartRequired);
+    }
+  };
 
   // Proxy Settings state
   const [upstreamUrl, setUpstreamUrl] = useState('');
@@ -93,7 +120,6 @@ export function SettingsPage({
   // Proxy Settings handlers
   const handleApplyProxy = async () => {
     try {
-      setStatus(null);
       const response = await onUpdateConfig({
         upstream_url: upstreamUrl,
         upstream_credential_id: upstreamCredentialId,
@@ -107,71 +133,56 @@ export function SettingsPage({
 
       // Show success message, and also show restart warning if required
       if (response.restart_required) {
-        setStatus({
-          type: 'success',
-          message: 'Configuration updated successfully. Server restart required for changes to take effect.',
-          restartRequired: true
-        });
+        addToast('success', 'Configuration updated successfully. Server restart required for changes to take effect.', true);
       } else {
-        setStatus({ type: 'success', message: 'Configuration updated successfully' });
+        addToast('success', 'Configuration updated successfully');
       }
     } catch (e) {
-      setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update config' });
+      addToast('error', e instanceof Error ? e.message : 'Failed to update config');
     }
   };
 
   // Model handlers
   const handleToggleModel = async (model: Model) => {
     try {
-      setStatus(null);
       await onUpdateModel(model.id, { enabled: !model.enabled });
-      setStatus({ type: 'success', message: 'Model toggled successfully' });
+      addToast('success', 'Model toggled successfully');
     } catch (e) {
-      setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to toggle model' });
+      addToast('error', e instanceof Error ? e.message : 'Failed to toggle model');
     }
   };
 
   // Loop Detection handler
   const handleApplyLoopDetection = async (loopConfig: LoopDetectionConfig) => {
     try {
-      setStatus(null);
       const response = await onUpdateConfig({
         loop_detection: loopConfig,
       });
 
       if (response.restart_required) {
-        setStatus({
-          type: 'success',
-          message: 'Loop detection configuration updated. Server restart required.',
-          restartRequired: true
-        });
+        addToast('success', 'Loop detection configuration updated. Server restart required.', true);
       } else {
-        setStatus({ type: 'success', message: 'Loop detection configuration updated' });
+        addToast('success', 'Loop detection configuration updated');
       }
     } catch (e) {
-      setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update loop detection config' });
+      addToast('error', e instanceof Error ? e.message : 'Failed to update loop detection config');
     }
   };
 
   // Tool Repair handler
   const handleApplyToolRepair = async (toolRepairConfig: ToolRepairConfig) => {
     try {
-      setStatus(null);
       const response = await onUpdateConfig({
         tool_repair: toolRepairConfig,
       });
 
       if (response.restart_required) {
-        setStatus({
-          type: 'success',
-          message: 'Tool repair configuration updated. Server restart required.',
-          restartRequired: true
-        });
+        addToast('success', 'Tool repair configuration updated. Server restart required.', true);
       } else {
-        setStatus({ type: 'success', message: 'Tool repair configuration updated' });
+        addToast('success', 'Tool repair configuration updated');
       }
     } catch (e) {
-      setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update tool repair config' });
+      addToast('error', e instanceof Error ? e.message : 'Failed to update tool repair config');
     }
   };
 
@@ -194,7 +205,7 @@ export function SettingsPage({
   const handleCopyToken = () => {
     if (newToken?.token) {
       navigator.clipboard.writeText(newToken.token);
-      setStatus({ type: 'success', message: 'Token copied to clipboard' });
+      addToast('success', 'Token copied to clipboard');
     }
   };
 
@@ -311,8 +322,7 @@ export function SettingsPage({
               onMaxGenerationRetriesChange={setMaxGenerationRetries}
               onMaxGenTimeChange={setMaxGenTime}
               onApply={handleApplyProxy}
-              status={status}
-              setStatus={setStatus}
+              setStatus={setStatusWrapper}
             />
           )}
 
@@ -323,16 +333,14 @@ export function SettingsPage({
               onUpdateModel={onUpdateModel}
               onDeleteModel={onDeleteModel}
               onToggleModel={handleToggleModel}
-              status={status}
-              setStatus={setStatus}
+              setStatus={setStatusWrapper}
               onNavigateToCredentials={() => setActiveTab('credentials')}
             />
           )}
 
           {activeTab === 'credentials' && (
             <CredentialsTab
-              status={status}
-              setStatus={setStatus}
+              setStatus={setStatusWrapper}
             />
           )}
 
@@ -340,8 +348,7 @@ export function SettingsPage({
             <LoopDetectionSettings
               config={config?.loop_detection ?? null}
               onApply={handleApplyLoopDetection}
-              status={status}
-              setStatus={setStatus}
+              setStatus={setStatusWrapper}
             />
           )}
 
@@ -350,8 +357,7 @@ export function SettingsPage({
               config={config?.tool_repair ?? null}
               models={models}
               onApply={handleApplyToolRepair}
-              status={status}
-              setStatus={setStatus}
+              setStatus={setStatusWrapper}
             />
           )}
 
@@ -361,52 +367,22 @@ export function SettingsPage({
                 <TokenList
                   tokens={tokens}
                   onRevoke={handleRevokeToken}
-                  onStatus={setStatus}
+                  onStatus={setStatusWrapper}
                   onCreateToken={() => setShowTokenForm(true)}
                 />
               ) : (
                 <TokenForm
                   onSubmit={handleCreateToken}
                   onCancel={() => setShowTokenForm(false)}
-                  onStatus={setStatus}
+                  onStatus={setStatusWrapper}
                 />
               )}
             </>
           )}
-
-          {/* Status Message */}
-          {status && activeTab !== 'tokens' && (
-            <div
-              class={`mt-6 p-4 rounded-md shadow-sm border ${status.type === 'success'
-                ? 'bg-green-900/30 text-green-300 border-green-800/50'
-                : 'bg-red-900/30 text-red-300 border-red-800/50'
-                }`}
-            >
-              <div class="flex items-start gap-2">
-                {status.type === 'success' ? (
-                  <svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                ) : (
-                  <svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                )}
-                <div>
-                  <p class="font-medium">{status.message}</p>
-                  {status.restartRequired && (
-                    <p class="mt-1 text-sm text-yellow-300/90 font-medium flex items-center gap-1">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      Server restart required for changes to take effect
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
         </div>
+
+        {/* Toast notifications */}
+        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </div>
 
       {/* Token Value Modal - Show once after creation */}
