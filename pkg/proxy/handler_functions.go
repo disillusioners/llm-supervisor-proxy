@@ -264,9 +264,62 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 	internalHandler := NewInternalHandler(modelConfig, h.config.ModelsConfig)
 	internalHandler.SetDebugContext(h.bufferStore, rc.reqID)
 
-	// Create and set repairer for tool call JSON repair
+	// Set up repairer with optional fixer model
 	if rc.conf.ToolRepair.Enabled {
 		repairer := toolrepair.NewRepairer(&rc.conf.ToolRepair)
+
+		// If fixer model is configured, create a fixer function
+		if rc.conf.ToolRepair.FixerModel != "" {
+			fixerFunc := func(ctx context.Context, model string, prompt string) (string, error) {
+				// Resolve internal config for the fixer model
+				provider, apiKey, baseURL, _, ok := h.config.ModelsConfig.ResolveInternalConfig(model)
+				if !ok {
+					return "", fmt.Errorf("failed to resolve fixer model: %s", model)
+				}
+
+				// Create provider client
+				providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
+				if err != nil {
+					return "", fmt.Errorf("failed to create fixer provider: %w", err)
+				}
+
+				// Build fixer request
+				maxTokens := 2048
+				temp := float64(0)
+				req := &providers.ChatCompletionRequest{
+					Model: model,
+					Messages: []providers.ChatMessage{
+						{Role: "system", Content: "You are a JSON repair tool. Fix malformed JSON and return ONLY the corrected JSON. No explanations, no markdown code blocks, just valid JSON."},
+						{Role: "user", Content: prompt},
+					},
+					MaxTokens:   &maxTokens,
+					Temperature: &temp,
+				}
+
+				// Call fixer
+				resp, err := providerClient.ChatCompletion(ctx, req)
+				if err != nil {
+					return "", fmt.Errorf("fixer request failed: %w", err)
+				}
+
+				// Extract response
+				if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+					return "", fmt.Errorf("fixer returned empty response")
+				}
+
+				// Content is interface{}, need type assertion
+				var contentStr string
+				switch v := resp.Choices[0].Message.Content.(type) {
+				case string:
+					contentStr = v
+				default:
+					return "", fmt.Errorf("fixer returned non-string content: %T", resp.Choices[0].Message.Content)
+				}
+				return strings.TrimSpace(contentStr), nil
+			}
+			repairer.SetFixer(toolrepair.NewFixer(fixerFunc, &rc.conf.ToolRepair))
+		}
+
 		internalHandler.SetRepairer(repairer)
 	}
 

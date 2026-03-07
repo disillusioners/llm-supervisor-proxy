@@ -37,6 +37,12 @@ type Config struct {
 
 	// MaxRepairDuration is the maximum time to spend on repair (0 = unlimited)
 	MaxRepairDuration time.Duration `json:"max_repair_duration" yaml:"max_repair_duration"`
+
+	// FixerModel is the model to use for LLM-based JSON repair (empty = disabled)
+	FixerModel string `json:"fixer_model" yaml:"fixer_model"`
+
+	// FixerTimeout is the timeout in seconds for fixer requests
+	FixerTimeout int `json:"fixer_timeout" yaml:"fixer_timeout"`
 }
 
 // DefaultConfig returns the default configuration for tool repair
@@ -52,6 +58,8 @@ func DefaultConfig() *Config {
 		MaxRetries:              1,
 		RetryPrompt:             "The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema.",
 		MaxRepairDuration:       500 * time.Millisecond,
+		FixerModel:              "",
+		FixerTimeout:            10, // 10 seconds
 	}
 }
 

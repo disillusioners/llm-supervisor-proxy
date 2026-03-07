@@ -162,6 +162,8 @@ var Defaults = Config{
 		MaxRetries:              1,
 		RetryPrompt:             "The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema.",
 		MaxRepairDuration:       500 * time.Millisecond,
+		FixerModel:              "",
+		FixerTimeout:            25, // 25 seconds
 	},
 }
 

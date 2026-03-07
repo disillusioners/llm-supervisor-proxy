@@ -1,6 +1,7 @@
 package toolrepair
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -20,6 +21,7 @@ type RepairResult struct {
 // Repairer handles tool call JSON repair operations
 type Repairer struct {
 	config *Config
+	fixer  *Fixer
 }
 
 // NewRepairer creates a new Repairer with the given configuration
@@ -28,6 +30,11 @@ func NewRepairer(config *Config) *Repairer {
 		config = DefaultConfig()
 	}
 	return &Repairer{config: config}
+}
+
+// SetFixer sets the LLM fixer for advanced repair
+func (r *Repairer) SetFixer(fixer *Fixer) {
+	r.fixer = fixer
 }
 
 // ToolCallData represents a simplified tool call for repair
@@ -134,6 +141,19 @@ func (r *Repairer) RepairArguments(arguments, toolName string) *RepairResult {
 		if err == nil {
 			arguments = repaired
 		}
+	}
+
+	// All strategies failed - try fixer model
+	if !result.Success && r.config.FixerModel != "" && r.fixer != nil {
+		fixed, err := r.fixer.Fix(context.Background(), arguments)
+		if err == nil && isValidJSON(fixed) {
+			result.Repaired = fixed
+			result.Success = true
+			result.Strategies = append(result.Strategies, "fixer_model")
+			result.Duration = time.Since(start)
+			return result
+		}
+		// Log fixer failure but continue
 	}
 
 	// All strategies failed
