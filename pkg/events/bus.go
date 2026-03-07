@@ -29,6 +29,25 @@ type LoopDetectionEvent struct {
 	ShadowMode  bool     `json:"shadow_mode"`  // Whether detection was in shadow mode
 }
 
+// ToolRepairEvent represents a tool call repair operation
+type ToolRepairEvent struct {
+	RequestID      string         `json:"request_id"`
+	TotalToolCalls int            `json:"total_tool_calls"`
+	Repaired       int            `json:"repaired"`
+	Failed         int            `json:"failed"`
+	StrategiesUsed []string       `json:"strategies_used"`
+	Duration       string         `json:"duration"` // Human-readable duration
+	Details        []RepairDetail `json:"details,omitempty"`
+}
+
+// RepairDetail contains details about a single repair operation
+type RepairDetail struct {
+	ToolName   string `json:"tool_name"`
+	Success    bool   `json:"success"`
+	Strategies string `json:"strategies,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 type Bus struct {
 	mu          sync.RWMutex
 	subscribers []chan Event

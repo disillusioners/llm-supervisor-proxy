@@ -142,6 +142,7 @@ export type EventType =
   | 'all_models_failed'
   | 'loop_detected'
   | 'loop_interrupted'
+  | 'tool_repair'
   | 'client_disconnected_during_retry'
   | 'client_disconnected_during_scan'
   | 'client_disconnected_during_buffering'
@@ -170,6 +171,21 @@ export interface EventData {
   raw_data?: string;
   buffer_size?: number;
   buffer_id?: string;  // Link to buffer file instead of inline preview
+  // Tool repair fields
+  total_tool_calls?: number;
+  repaired?: number;
+  failed?: number;
+  strategies_used?: string[];
+  duration?: string;
+  details?: RepairDetail[];
+}
+
+// Repair detail for tool repair events
+export interface RepairDetail {
+  tool_name: string;
+  success: boolean;
+  strategies?: string;
+  error?: string;
 }
 
 export interface Event {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -17,6 +18,11 @@ type RepairResult struct {
 	Error      string        `json:"error,omitempty"`
 	ToolName   string        `json:"tool_name"`
 }
+
+// RepairEventCallback is called when a repair operation completes.
+// The callback receives the repair stats and individual results.
+// Note: The callback must be thread-safe if used concurrently.
+type RepairEventCallback func(stats *RepairStats, results []*RepairResult)
 
 // Repairer handles tool call JSON repair operations
 type Repairer struct {
@@ -45,9 +51,11 @@ type ToolCallData struct {
 	Arguments string
 }
 
-// RepairToolCallsData repairs a slice of tool call data
-// Returns the repaired data and statistics
-func (r *Repairer) RepairToolCallsData(toolCalls []ToolCallData) ([]ToolCallData, *RepairStats) {
+// RepairToolCallsData repairs a slice of tool call data.
+// Returns the repaired data and statistics.
+// If callback is provided and repairs occurred, it will be called with the stats and results.
+// The callback is protected from panics - if it panics, the panic is recovered and logged.
+func (r *Repairer) RepairToolCallsData(toolCalls []ToolCallData, callback RepairEventCallback) ([]ToolCallData, *RepairStats) {
 	if !r.config.Enabled {
 		return toolCalls, &RepairStats{}
 	}
@@ -64,6 +72,7 @@ func (r *Repairer) RepairToolCallsData(toolCalls []ToolCallData) ([]ToolCallData
 		return toolCalls, stats
 	}
 
+	var repairResults []*RepairResult
 	repairedCalls := make([]ToolCallData, len(toolCalls))
 	for i, tc := range toolCalls {
 		repairedCalls[i] = tc
@@ -84,6 +93,7 @@ func (r *Repairer) RepairToolCallsData(toolCalls []ToolCallData) ([]ToolCallData
 		// Attempt repair
 		stats.InvalidJSON++
 		result := r.RepairArguments(tc.Arguments, tc.Name)
+		repairResults = append(repairResults, result)
 
 		if result.Success {
 			repairedCalls[i].Arguments = result.Repaired
@@ -100,6 +110,19 @@ func (r *Repairer) RepairToolCallsData(toolCalls []ToolCallData) ([]ToolCallData
 
 	stats.EndTime = time.Now()
 	stats.Duration = stats.EndTime.Sub(stats.StartTime)
+
+	// Call event callback if provided and there were repairs
+	// Protected from panics to prevent crashing the repair operation
+	if callback != nil && (stats.Repaired > 0 || stats.Failed > 0) {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Printf("[TOOL-REPAIR] Panic in event callback: %v", recovered)
+				}
+			}()
+			callback(stats, repairResults)
+		}()
+	}
 
 	return repairedCalls, stats
 }

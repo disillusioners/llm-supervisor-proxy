@@ -268,6 +268,36 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 	if rc.conf.ToolRepair.Enabled {
 		repairer := toolrepair.NewRepairer(&rc.conf.ToolRepair)
 
+		// Create event callback to publish tool repair events
+		eventCallback := func(stats *toolrepair.RepairStats, results []*toolrepair.RepairResult) {
+			// Build event data
+			details := make([]events.RepairDetail, 0, len(results))
+			for _, r := range results {
+				details = append(details, events.RepairDetail{
+					ToolName:   r.ToolName,
+					Success:    r.Success,
+					Strategies: strings.Join(r.Strategies, ", "),
+					Error:      r.Error,
+				})
+			}
+
+			// Extract strategy names
+			strategiesUsed := make([]string, 0, len(stats.StrategiesUsed))
+			for strategy := range stats.StrategiesUsed {
+				strategiesUsed = append(strategiesUsed, strategy)
+			}
+
+			h.publishEvent("tool_repair", events.ToolRepairEvent{
+				RequestID:      rc.reqID,
+				TotalToolCalls: stats.TotalToolCalls,
+				Repaired:       stats.Repaired,
+				Failed:         stats.Failed,
+				StrategiesUsed: strategiesUsed,
+				Duration:       stats.Duration.String(),
+				Details:        details,
+			})
+		}
+
 		// If fixer model is configured, create a fixer function
 		if rc.conf.ToolRepair.FixerModel != "" {
 			fixerFunc := func(ctx context.Context, model string, prompt string) (string, error) {
@@ -320,7 +350,7 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 			repairer.SetFixer(toolrepair.NewFixer(fixerFunc, &rc.conf.ToolRepair))
 		}
 
-		internalHandler.SetRepairer(repairer)
+		internalHandler.SetRepairer(repairer, eventCallback)
 	}
 
 	err := internalHandler.HandleRequest(attemptCtx, bodyToSend, w, rc.isStream)

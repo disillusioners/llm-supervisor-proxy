@@ -118,7 +118,7 @@ func TestRepairToolCallsData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repairer := NewRepairer(tt.config)
-			repaired, stats := repairer.RepairToolCallsData(tt.toolCalls)
+			repaired, stats := repairer.RepairToolCallsData(tt.toolCalls, nil)
 
 			// Check repaired results
 			for i, tc := range repaired {
@@ -313,7 +313,7 @@ func TestRepairStats(t *testing.T) {
 		_, stats := repairer.RepairToolCallsData([]ToolCallData{
 			{ID: "1", Arguments: `{"valid": true}`},
 			{ID: "2", Arguments: `{invalid: true}`},
-		})
+		}, nil)
 
 		if stats.TotalToolCalls != 2 {
 			t.Errorf("TotalToolCalls = %v, want 2", stats.TotalToolCalls)
@@ -589,5 +589,107 @@ func TestRepairResult(t *testing.T) {
 		if len(result.Strategies) != 2 {
 			t.Errorf("Strategies length = %v, want 2", len(result.Strategies))
 		}
+	})
+}
+
+func TestEventCallback(t *testing.T) {
+	t.Run("callback not called when no repairs", func(t *testing.T) {
+		callbackCalled := false
+		repairer := NewRepairer(DefaultConfig())
+		callback := func(stats *RepairStats, results []*RepairResult) {
+			callbackCalled = true
+		}
+
+		// Valid JSON - no repairs needed
+		toolCalls := []ToolCallData{
+			{ID: "1", Type: "function", Name: "test", Arguments: `{"key": "value"}`},
+		}
+
+		_, _ = repairer.RepairToolCallsData(toolCalls, callback)
+
+		if callbackCalled {
+			t.Error("callback should not be called when no repairs needed")
+		}
+	})
+
+	t.Run("callback called when repairs occur", func(t *testing.T) {
+		var capturedStats *RepairStats
+		var capturedResults []*RepairResult
+
+		repairer := NewRepairer(DefaultConfig())
+		callback := func(stats *RepairStats, results []*RepairResult) {
+			capturedStats = stats
+			capturedResults = results
+		}
+
+		// Invalid JSON that can be repaired
+		toolCalls := []ToolCallData{
+			{ID: "1", Type: "function", Name: "test", Arguments: `{key: "value"}`},
+		}
+
+		_, _ = repairer.RepairToolCallsData(toolCalls, callback)
+
+		if capturedStats == nil {
+			t.Fatal("callback should have been called")
+		}
+		if capturedStats.Repaired != 1 {
+			t.Errorf("Repaired = %v, want 1", capturedStats.Repaired)
+		}
+		if len(capturedResults) != 1 {
+			t.Errorf("Results length = %v, want 1", len(capturedResults))
+		}
+		if capturedResults[0].ToolName != "test" {
+			t.Errorf("ToolName = %v, want 'test'", capturedResults[0].ToolName)
+		}
+	})
+
+	t.Run("callback called when repairs fail", func(t *testing.T) {
+		var capturedStats *RepairStats
+
+		repairer := NewRepairer(DefaultConfig())
+		callback := func(stats *RepairStats, results []*RepairResult) {
+			capturedStats = stats
+		}
+
+		// Completely invalid JSON that cannot be repaired - use something that clearly fails
+		toolCalls := []ToolCallData{
+			{ID: "1", Type: "function", Name: "test", Arguments: `{{{broken`},
+		}
+
+		_, _ = repairer.RepairToolCallsData(toolCalls, callback)
+
+		if capturedStats == nil {
+			t.Fatal("callback should have been called")
+		}
+		// Check that we have either repaired or failed (the exact outcome depends on repair strategies)
+		if capturedStats.Failed == 0 && capturedStats.Repaired == 0 {
+			t.Errorf("Expected either Failed > 0 or Repaired > 0, got Failed=%v, Repaired=%v", capturedStats.Failed, capturedStats.Repaired)
+		}
+	})
+
+	t.Run("nil callback does not panic", func(t *testing.T) {
+		repairer := NewRepairer(DefaultConfig())
+		// Pass nil callback
+
+		toolCalls := []ToolCallData{
+			{ID: "1", Type: "function", Name: "test", Arguments: `{key: "value"}`},
+		}
+
+		// Should not panic
+		_, _ = repairer.RepairToolCallsData(toolCalls, nil)
+	})
+
+	t.Run("panic in callback is recovered", func(t *testing.T) {
+		repairer := NewRepairer(DefaultConfig())
+		callback := func(stats *RepairStats, results []*RepairResult) {
+			panic("intentional panic")
+		}
+
+		toolCalls := []ToolCallData{
+			{ID: "1", Type: "function", Name: "test", Arguments: `{key: "value"}`},
+		}
+
+		// Should not panic - callback panic should be recovered
+		_, _ = repairer.RepairToolCallsData(toolCalls, callback)
 	})
 }

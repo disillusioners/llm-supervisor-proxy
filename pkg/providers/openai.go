@@ -20,12 +20,13 @@ import (
 
 // OpenAIProvider implements Provider for OpenAI-compatible APIs
 type OpenAIProvider struct {
-	apiKey      string
-	baseURL     string
-	client      *http.Client
-	bufferStore *bufferstore.BufferStore // Optional: for saving debug info
-	requestID   string                   // Optional: request ID for buffer naming
-	repairer    *toolrepair.Repairer     // Optional: for repairing tool call JSON
+	apiKey        string
+	baseURL       string
+	client        *http.Client
+	bufferStore   *bufferstore.BufferStore       // Optional: for saving debug info
+	requestID     string                         // Optional: request ID for buffer naming
+	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
+	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
@@ -48,9 +49,10 @@ func (p *OpenAIProvider) SetDebugContext(bufferStore *bufferstore.BufferStore, r
 	p.requestID = requestID
 }
 
-// SetRepairer sets the tool call repairer
-func (p *OpenAIProvider) SetRepairer(repairer *toolrepair.Repairer) {
+// SetRepairer sets the tool call repairer and optional event callback
+func (p *OpenAIProvider) SetRepairer(repairer *toolrepair.Repairer, callback toolrepair.RepairEventCallback) {
 	p.repairer = repairer
+	p.eventCallback = callback
 }
 
 // Name returns the provider name
@@ -113,7 +115,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 			}
 
 			// Repair tool calls
-			repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData)
+			repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData, p.eventCallback)
 			if stats.Repaired > 0 || stats.Failed > 0 {
 				log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
 					stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)
@@ -302,7 +304,7 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 						}
 
 						// Repair tool calls
-						repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData)
+						repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData, p.eventCallback)
 						if stats.Repaired > 0 || stats.Failed > 0 {
 							log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
 								stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)

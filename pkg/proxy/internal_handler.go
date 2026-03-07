@@ -16,11 +16,12 @@ import (
 
 // InternalHandler handles requests to internal providers (bypassing upstream)
 type InternalHandler struct {
-	config      *models.ModelConfig
-	resolver    models.ModelsConfigInterface // Resolver for credentials
-	bufferStore *bufferstore.BufferStore     // Optional: for saving debug info
-	requestID   string                       // Optional: request ID for buffer naming
-	repairer    *toolrepair.Repairer         // Optional: for repairing tool call JSON
+	config        *models.ModelConfig
+	resolver      models.ModelsConfigInterface   // Resolver for credentials
+	bufferStore   *bufferstore.BufferStore       // Optional: for saving debug info
+	requestID     string                         // Optional: request ID for buffer naming
+	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
+	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
 }
 
 // NewInternalHandler creates a new internal handler for a model
@@ -35,9 +36,10 @@ func (h *InternalHandler) SetDebugContext(bufferStore *bufferstore.BufferStore, 
 	h.requestID = requestID
 }
 
-// SetRepairer sets the tool call repairer
-func (h *InternalHandler) SetRepairer(repairer *toolrepair.Repairer) {
+// SetRepairer sets the tool call repairer and optional event callback
+func (h *InternalHandler) SetRepairer(repairer *toolrepair.Repairer, callback toolrepair.RepairEventCallback) {
 	h.repairer = repairer
+	h.eventCallback = callback
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -69,7 +71,7 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	// Set repairer on provider if available (for OpenAIProvider)
 	if h.repairer != nil {
 		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
-			openaiProvider.SetRepairer(h.repairer)
+			openaiProvider.SetRepairer(h.repairer, h.eventCallback)
 		}
 	}
 

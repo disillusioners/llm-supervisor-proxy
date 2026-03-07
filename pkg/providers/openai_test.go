@@ -249,7 +249,7 @@ func TestOpenAIProvider_ToolRepair_ValidJSON(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -286,7 +286,7 @@ func TestOpenAIProvider_ToolRepair_MalformedJSON_ExtractFromText(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -335,7 +335,7 @@ func TestOpenAIProvider_ToolRepair_MalformedJSON_UnclosedBrackets(t *testing.T) 
 		Strategies: []string{"library_repair"},
 	}
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(config))
+	provider.SetRepairer(toolrepair.NewRepairer(config), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -373,7 +373,7 @@ func TestOpenAIProvider_ToolRepair_MalformedJSON_TrailingComma(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -408,7 +408,7 @@ func TestOpenAIProvider_ToolRepair_MultipleToolCalls(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -441,7 +441,7 @@ func TestOpenAIProvider_ToolRepair_Disabled(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DisabledConfig())) // Disabled
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DisabledConfig()), nil) // Disabled
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -508,7 +508,7 @@ func TestOpenAIProvider_ToolRepair_SingleQuotes(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -545,7 +545,7 @@ func TestOpenAIProvider_ToolRepair_EmptyArguments(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -583,7 +583,7 @@ func TestOpenAIProvider_ToolRepair_SizeLimit(t *testing.T) {
 		Strategies:       []string{"library_repair"},
 	}
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(config))
+	provider.SetRepairer(toolrepair.NewRepairer(config), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -619,7 +619,7 @@ func TestOpenAIProvider_ToolRepair_Streaming(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
@@ -663,7 +663,7 @@ func TestOpenAIProvider_ToolRepair_StreamingToolCalls(t *testing.T) {
 	defer server.Close()
 
 	provider := NewOpenAIProvider("test-key", server.URL)
-	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()))
+	provider.SetRepairer(toolrepair.NewRepairer(toolrepair.DefaultConfig()), nil)
 
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4",
