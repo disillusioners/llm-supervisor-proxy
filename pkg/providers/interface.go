@@ -63,6 +63,7 @@ type ToolFunction struct {
 
 // ToolCall represents a tool call in a message
 type ToolCall struct {
+	Index    int              `json:"index,omitempty"` // Used in streaming deltas
 	ID       string           `json:"id"`
 	Type     string           `json:"type"` // "function"
 	Function ToolCallFunction `json:"function"`

@@ -350,11 +350,8 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				// Handle tool_calls in streaming - accumulate them
 				if len(choice.Delta.ToolCalls) > 0 {
 					for _, tc := range choice.Delta.ToolCalls {
-						// Get or create accumulated tool call
-						index := 0
-						if tc.Index != nil {
-							index = *tc.Index
-						}
+						// Get or create accumulated tool call using the index
+						index := tc.Index
 
 						if accumulatedToolCalls[index] == nil {
 							accumulatedToolCalls[index] = &ToolCall{
