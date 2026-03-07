@@ -11,9 +11,7 @@ interface ToolRepairSettingsProps {
 const AVAILABLE_STRATEGIES = [
   { id: 'extract_json', label: 'Extract JSON', description: 'Extracts JSON from mixed text content' },
   { id: 'library_repair', label: 'Library Repair', description: 'Uses jsonrepair library to fix common issues' },
-  { id: 'escape_quotes', label: 'Escape Quotes', description: 'Fixes unescaped quotes in strings' },
   { id: 'remove_reasoning', label: 'Remove Reasoning', description: 'Strips reasoning leakage patterns from JSON' },
-  { id: 'close_brackets', label: 'Close Brackets', description: 'Closes unclosed braces/brackets' },
 ];
 
 export function ToolRepairSettings({

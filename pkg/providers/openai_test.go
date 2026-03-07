@@ -313,7 +313,7 @@ func TestOpenAIProvider_ToolRepair_MalformedJSON_ExtractFromText(t *testing.T) {
 	}
 }
 
-// TestOpenAIProvider_ToolRepair_MalformedJSON_UnclosedBrackets tests closing unclosed brackets
+// TestOpenAIProvider_ToolRepair_MalformedJSON_UnclosedBrackets tests library repair for unclosed brackets
 func TestOpenAIProvider_ToolRepair_MalformedJSON_UnclosedBrackets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// LLM sends JSON with missing closing brace
@@ -329,10 +329,10 @@ func TestOpenAIProvider_ToolRepair_MalformedJSON_UnclosedBrackets(t *testing.T) 
 	}))
 	defer server.Close()
 
-	// Use config with close_brackets strategy
+	// Use config with library_repair strategy (handles unclosed brackets)
 	config := &toolrepair.Config{
 		Enabled:    true,
-		Strategies: []string{"close_brackets"},
+		Strategies: []string{"library_repair"},
 	}
 	provider := NewOpenAIProvider("test-key", server.URL)
 	provider.SetRepairer(toolrepair.NewRepairer(config))

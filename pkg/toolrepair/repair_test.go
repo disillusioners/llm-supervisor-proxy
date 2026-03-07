@@ -176,14 +176,6 @@ func TestRepairArguments(t *testing.T) {
 			wantSuccess:  true,
 			wantRepaired: `{"key": "value"}`,
 		},
-		{
-			name:         "repair with close_brackets strategy",
-			config:       &Config{Enabled: true, Strategies: []string{"close_brackets"}},
-			arguments:    `{"key": "value"`,
-			toolName:     "test",
-			wantSuccess:  true,
-			wantRepaired: `{"key": "value"}`,
-		},
 	}
 
 	for _, tt := range tests {
@@ -549,89 +541,6 @@ func TestRemoveReasoningLeakage(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("removeReasoningLeakage() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCloseUnclosedBrackets(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{
-			name:    "already valid",
-			input:   `{"key": "value"}`,
-			want:    `{"key": "value"}`,
-			wantErr: false,
-		},
-		{
-			name:    "already valid array",
-			input:   `["a", "b"]`,
-			want:    `["a", "b"]`,
-			wantErr: false,
-		},
-		{
-			name:    "missing closing brace",
-			input:   `{"key": "value"`,
-			want:    `{"key": "value"}`,
-			wantErr: false,
-		},
-		{
-			name:    "missing closing bracket",
-			input:   `["a", "b"`,
-			want:    `["a", "b"]`,
-			wantErr: false,
-		},
-		{
-			name:    "both missing",
-			input:   `{"key": ["value"`,
-			want:    `{"key": ["value"]}`,
-			wantErr: false,
-		},
-		{
-			name:    "multiple missing braces returns original",
-			input:   `{"outer": {"inner"`,
-			want:    `{"outer": {"inner"`,
-			wantErr: false,
-		},
-		{
-			name:    "empty object gets closed",
-			input:   `{`,
-			want:    `{}`,
-			wantErr: false,
-		},
-		{
-			name:    "cannot fix returns original",
-			input:   `"unclosed string`,
-			want:    `"unclosed string`,
-			wantErr: false,
-		},
-		{
-			name:    "nested with missing closing",
-			input:   `[{"key": "value"}`,
-			want:    `[{"key": "value"}]`,
-			wantErr: false,
-		},
-		{
-			name:    "extra closing already present",
-			input:   `{"key": "value"}}`,
-			want:    `{"key": "value"}}`,
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := closeUnclosedBrackets(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("closeUnclosedBrackets() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("closeUnclosedBrackets() = %v, want %v", got, tt.want)
 			}
 		})
 	}

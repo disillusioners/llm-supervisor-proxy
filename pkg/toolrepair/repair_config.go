@@ -11,7 +11,7 @@ type Config struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 
 	// Strategies is the ordered list of repair strategies to attempt
-	// Available strategies: "extract_json", "library_repair", "escape_quotes", "remove_reasoning", "close_brackets"
+	// Available strategies: "extract_json", "library_repair", "remove_reasoning"
 	Strategies []string `json:"strategies" yaml:"strategies"`
 
 	// MaxArgumentsSize is the maximum size of tool arguments in bytes (0 = unlimited)
@@ -43,7 +43,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:                 true,
-		Strategies:              []string{"extract_json", "library_repair", "escape_quotes", "remove_reasoning"},
+		Strategies:              []string{"extract_json", "library_repair", "remove_reasoning"},
 		MaxArgumentsSize:        10 * 1024, // 10KB
 		MaxToolCallsPerResponse: 8,
 		LogOriginal:             false,

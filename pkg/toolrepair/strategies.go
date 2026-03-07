@@ -43,12 +43,8 @@ func getStrategy(name string) Strategy {
 		return extractJSONBlock
 	case "library_repair":
 		return libraryRepair
-	case "escape_quotes":
-		return escapeQuotesRecursively
 	case "remove_reasoning":
 		return removeReasoningLeakage
-	case "close_brackets":
-		return closeUnclosedBrackets
 	default:
 		return nil
 	}
@@ -98,23 +94,6 @@ func libraryRepair(input string) (string, error) {
 	return repaired, nil
 }
 
-// escapeQuotesRecursively attempts to escape unescaped quotes within strings
-func escapeQuotesRecursively(input string) (string, error) {
-	// Try to parse as-is first
-	if isValidJSON(input) {
-		return input, nil
-	}
-
-	// Try to fix common quote escaping issues
-	// This is a simplified version - more sophisticated logic may be needed
-
-	// Pattern: find strings with unescaped quotes inside
-	// Example: {"text": "He said "hello""} -> {"text": "He said \"hello\""}
-
-	// For now, use the library repair which handles most quote issues
-	return libraryRepair(input)
-}
-
 // removeReasoningLeakage removes common reasoning patterns from tool arguments
 func removeReasoningLeakage(input string) (string, error) {
 	// Initialize reasoning patterns on first use (lazy compilation)
@@ -128,70 +107,6 @@ func removeReasoningLeakage(input string) (string, error) {
 	result = strings.TrimSpace(result)
 
 	// If the result is still invalid, return original
-	if !isValidJSON(result) {
-		return input, nil
-	}
-
-	return result, nil
-}
-
-// closeUnclosedBrackets attempts to close unclosed brackets and braces
-func closeUnclosedBrackets(input string) (string, error) {
-	// Try to parse as-is first
-	if isValidJSON(input) {
-		return input, nil
-	}
-
-	// Count brackets
-	braceCount := 0
-	bracketCount := 0
-	inString := false
-	escape := false
-
-	for _, ch := range input {
-		if escape {
-			escape = false
-			continue
-		}
-
-		if ch == '\\' {
-			escape = true
-			continue
-		}
-
-		if ch == '"' {
-			inString = !inString
-			continue
-		}
-
-		if inString {
-			continue
-		}
-
-		switch ch {
-		case '{':
-			braceCount++
-		case '}':
-			braceCount--
-		case '[':
-			bracketCount++
-		case ']':
-			bracketCount--
-		}
-	}
-
-	// Add missing closing brackets
-	result := input
-	for bracketCount > 0 {
-		result += "]"
-		bracketCount--
-	}
-	for braceCount > 0 {
-		result += "}"
-		braceCount--
-	}
-
-	// If still invalid, return original
 	if !isValidJSON(result) {
 		return input, nil
 	}

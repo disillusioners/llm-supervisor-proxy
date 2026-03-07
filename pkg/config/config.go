@@ -153,7 +153,7 @@ var Defaults = Config{
 	},
 	ToolRepair: toolrepair.Config{
 		Enabled:                 true,
-		Strategies:              []string{"extract_json", "library_repair", "escape_quotes", "remove_reasoning"},
+		Strategies:              []string{"extract_json", "library_repair", "remove_reasoning"},
 		MaxArgumentsSize:        10 * 1024, // 10KB
 		MaxToolCallsPerResponse: 8,
 		LogOriginal:             false,
