@@ -1,21 +1,71 @@
 import { useState, useCallback } from 'preact/hooks';
-import { Header, RequestList, RequestDetail, EventLog, ConfigModal } from './components';
+import { Router, route, getCurrentUrl } from 'preact-router';
+import { Header, RequestList, RequestDetail, EventLog, SettingsPage } from './components';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens } from './hooks';
 
+// Base path for the app (must match vite.config.ts base)
+const BASE_PATH = '/ui';
+
+// Custom URL getter that strips the base path
+function getUrl() {
+  const url = getCurrentUrl();
+  // Strip the base path from the URL for routing
+  if (url.startsWith(BASE_PATH)) {
+    return url.slice(BASE_PATH.length) || '/';
+  }
+  return url;
+}
 
 export function App() {
-  // UI State
-  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [showConfig, setShowConfig] = useState(false);
-
-  // API hooks
+  // API hooks - fetch data once at the top level
   const { requests, loading: requestsLoading, refetch: refetchRequests } = useRequests();
-  const { detail, loading: detailLoading } = useRequestDetail(selectedRequestId);
   const { config, updateConfig, refetch: refetchConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel, refetch: refetchModels } = useModels();
   const { tokens, createToken, deleteToken, refetch: refetchTokens } = useTokens();
-  const { displayedEvents, containerRef, clearEvents } = useEvents(selectedRequestId, autoScroll);
+
+  return (
+    <Router url={getUrl()}>
+      <SettingsRoute
+        path="/settings"
+        config={config}
+        onUpdateConfig={updateConfig}
+        models={models}
+        onAddModel={addModel}
+        onUpdateModel={updateModel}
+        onDeleteModel={deleteModel}
+        tokens={tokens}
+        onCreateToken={createToken}
+        onDeleteToken={deleteToken}
+        onRefetchTokens={refetchTokens}
+      />
+      <DashboardRoute
+        default
+        path="/"
+        requests={requests}
+        requestsLoading={requestsLoading}
+        refetchRequests={refetchRequests}
+      />
+    </Router>
+  );
+}
+
+// Dashboard route component
+function DashboardRoute({ 
+  requests, 
+  requestsLoading, 
+  refetchRequests 
+}: { 
+  requests: any[];
+  requestsLoading: boolean;
+  refetchRequests: () => void;
+}) {
+  // Use a separate state for selected request ID in dashboard
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  
+  // Get detail for selected request
+  const { detail: selectedDetail, loading: selectedDetailLoading } = useRequestDetail(selectedRequestId);
+  const { displayedEvents: selectedEvents, containerRef: selectedContainerRef, clearEvents: clearSelectedEvents } = useEvents(selectedRequestId, autoScroll);
 
   // Event refresh callback
   const handleEventRefresh = useCallback(() => {
@@ -34,24 +84,13 @@ export function App() {
   }, []);
 
   const handleClearEvents = useCallback(() => {
-    clearEvents();
-  }, [clearEvents]);
-
-  const handleOpenConfig = useCallback(() => {
-    setShowConfig(true);
-    refetchConfig();
-    refetchModels();
-    refetchTokens();
-  }, [refetchConfig, refetchModels, refetchTokens]);
-
-  const handleCloseConfig = useCallback(() => {
-    setShowConfig(false);
-  }, []);
+    clearSelectedEvents();
+  }, [clearSelectedEvents]);
 
   return (
-    <>
+    <div class="h-screen flex flex-col bg-gray-900">
       {/* Header */}
-      <Header onOpenConfig={handleOpenConfig} />
+      <Header />
 
       {/* Main Content Grid */}
       <main class="flex-1 grid grid-cols-12 gap-0 overflow-hidden">
@@ -66,33 +105,57 @@ export function App() {
 
         {/* Right Panel: Stacked Request Details and Event Log */}
         <div class="col-span-9 flex flex-col min-h-0">
-          <RequestDetail detail={detail} loading={detailLoading} />
+          <RequestDetail detail={selectedDetail} loading={selectedDetailLoading} />
 
           <EventLog
-            events={displayedEvents}
+            events={selectedEvents}
             autoScroll={autoScroll}
             onToggleAutoScroll={handleToggleAutoScroll}
             onClear={handleClearEvents}
-            containerRef={containerRef}
+            containerRef={selectedContainerRef}
           />
         </div>
       </main>
+    </div>
+  );
+}
 
-      {/* Config Modal */}
-      <ConfigModal
-        isOpen={showConfig}
-        onClose={handleCloseConfig}
-        config={config}
-        onUpdateConfig={updateConfig}
-        models={models}
-        onAddModel={addModel}
-        onUpdateModel={updateModel}
-        onDeleteModel={deleteModel}
-        tokens={tokens}
-        onCreateToken={createToken}
-        onDeleteToken={deleteToken}
-        onRefetchTokens={refetchTokens}
-      />
-    </>
+// Settings route component - wraps SettingsPage with data fetching
+function SettingsRoute({ 
+  config, 
+  onUpdateConfig, 
+  models, 
+  onAddModel, 
+  onUpdateModel, 
+  onDeleteModel,
+  tokens,
+  onCreateToken,
+  onDeleteToken,
+  onRefetchTokens,
+}: { 
+  config: any;
+  onUpdateConfig: (config: any) => Promise<any>;
+  models: any[];
+  onAddModel: (model: any) => Promise<void>;
+  onUpdateModel: (id: string, updates: any) => Promise<void>;
+  onDeleteModel: (id: string) => Promise<void>;
+  tokens: any[];
+  onCreateToken: (name: string, expiresAt: string | null) => Promise<any>;
+  onDeleteToken: (id: string) => Promise<void>;
+  onRefetchTokens: () => void;
+}) {
+  return (
+    <SettingsPage
+      config={config}
+      onUpdateConfig={onUpdateConfig}
+      models={models}
+      onAddModel={onAddModel}
+      onUpdateModel={onUpdateModel}
+      onDeleteModel={onDeleteModel}
+      tokens={tokens}
+      onCreateToken={onCreateToken}
+      onDeleteToken={onDeleteToken}
+      onRefetchTokens={onRefetchTokens}
+    />
   );
 }

@@ -1,12 +1,13 @@
 import { FunctionComponent } from 'preact';
+import { route } from 'preact-router';
 import { useVersion } from '../hooks/useApi';
 
-interface HeaderProps {
-  onOpenConfig: () => void;
-}
-
-const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
+const Header: FunctionComponent = () => {
   const { version } = useVersion();
+
+  const handleOpenSettings = () => {
+    route('/settings');
+  };
 
   return (
     <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shadow-md z-10 shrink-0">
@@ -31,7 +32,7 @@ const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
         <h1 class="text-xl font-bold tracking-wide">LLM Supervisor Proxy</h1>
       </div>
 
-      {/* Right side: Version + System Active indicator + Config button */}
+      {/* Right side: Version + System Active indicator + Settings button */}
       <div class="text-sm text-gray-400 flex items-center space-x-4">
         <span class="px-2 py-1 bg-gray-700 rounded text-xs font-mono text-gray-300">v{version}</span>
         <div class="flex items-center space-x-2">
@@ -39,9 +40,9 @@ const Header: FunctionComponent<HeaderProps> = ({ onOpenConfig }) => {
           <span>System Active</span>
         </div>
         <button
-          onClick={onOpenConfig}
+          onClick={handleOpenSettings}
           class="text-gray-400 hover:text-white transition-colors"
-          title="Configuration"
+          title="Settings"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
