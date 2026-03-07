@@ -25,10 +25,8 @@ export function ToolRepairSettings({
   const [maxToolCallsPerResponse, setMaxToolCallsPerResponse] = useState(8);
   const [logOriginal, setLogOriginal] = useState(false);
   const [logRepaired, setLogRepaired] = useState(true);
-  const [retryEnabled, setRetryEnabled] = useState(true);
-  const [maxRetries, setMaxRetries] = useState(1);
-  const [retryPrompt, setRetryPrompt] = useState('');
-  const [maxRepairDuration, setMaxRepairDuration] = useState(500); // ms
+  const [fixerModel, setFixerModel] = useState('');
+  const [fixerTimeout, setFixerTimeout] = useState(10); // seconds
 
   // Sync state when config changes
   useEffect(() => {
@@ -39,10 +37,8 @@ export function ToolRepairSettings({
       setMaxToolCallsPerResponse(config.max_tool_calls_per_response || 8);
       setLogOriginal(config.log_original || false);
       setLogRepaired(config.log_repaired ?? true);
-      setRetryEnabled(config.retry_enabled ?? true);
-      setMaxRetries(config.max_retries || 1);
-      setRetryPrompt(config.retry_prompt || '');
-      setMaxRepairDuration(config.max_repair_duration || 500);
+      setFixerModel(config.fixer_model || '');
+      setFixerTimeout(config.fixer_timeout || 10);
     }
   }, [config]);
 
@@ -80,10 +76,8 @@ export function ToolRepairSettings({
         max_tool_calls_per_response: maxToolCallsPerResponse,
         log_original: logOriginal,
         log_repaired: logRepaired,
-        retry_enabled: retryEnabled,
-        max_retries: maxRetries,
-        retry_prompt: retryPrompt,
-        max_repair_duration: maxRepairDuration,
+        fixer_model: fixerModel,
+        fixer_timeout: fixerTimeout,
       });
     } catch (e) {
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update tool repair config' });
@@ -234,56 +228,36 @@ export function ToolRepairSettings({
         </div>
       </div>
 
-      {/* Retry Options */}
+      {/* Fixer Model Options */}
       <div class="border-t border-gray-700 pt-4">
-        <h4 class="text-sm font-medium text-gray-200 mb-3">Retry Options</h4>
-        <div class="flex gap-6 mb-3">
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={retryEnabled}
-              onInput={(e) => setRetryEnabled((e.target as HTMLInputElement).checked)}
-              class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800"
-            />
-            <span class="text-gray-300">Retry Enabled</span>
-            <span class="text-xs text-gray-500">(retry with prompt injection)</span>
-          </label>
+        <h4 class="text-sm font-medium text-gray-200 mb-3">Fixer Model (Optional)</h4>
+        <div class="bg-yellow-900/20 border border-yellow-800/30 rounded-md p-3 mb-3">
+          <p class="text-sm text-yellow-300">
+            <strong>Experimental:</strong> When enabled, uses an LLM to repair malformed JSON that cannot be fixed by other strategies.
+          </p>
         </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-1">Max Retries</label>
-            <input
-              type="number"
-              value={maxRetries}
-              onInput={(e) => setMaxRetries(parseInt((e.target as HTMLInputElement).value) || 1)}
-              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min="0"
-              max="5"
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-1">Max Repair Duration (ms)</label>
-            <input
-              type="number"
-              value={maxRepairDuration}
-              onInput={(e) => setMaxRepairDuration(parseInt((e.target as HTMLInputElement).value) || 500)}
-              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min="100"
-              max="5000"
-              step="100"
-            />
-          </div>
-        </div>
-        <div class="mt-3">
-          <label class="block text-sm font-medium text-gray-300 mb-1">Retry Prompt</label>
-          <textarea
-            value={retryPrompt}
-            onInput={(e) => setRetryPrompt((e.target as HTMLTextAreaElement).value)}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Model ID</label>
+          <input
+            type="text"
+            value={fixerModel}
+            onInput={(e) => setFixerModel((e.target as HTMLInputElement).value)}
             class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            rows={2}
-            placeholder="The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema."
+            placeholder="e.g., gpt-4o-mini (leave empty to disable)"
           />
-          <p class="text-xs text-gray-500 mt-1">Prompt injected when repair fails and retry is enabled</p>
+          <p class="text-xs text-gray-500 mt-1">Internal model ID to use for JSON repair (empty = disabled)</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Timeout (seconds)</label>
+          <input
+            type="number"
+            value={fixerTimeout}
+            onInput={(e) => setFixerTimeout(parseInt((e.target as HTMLInputElement).value) || 10)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            min="1"
+            max="60"
+          />
+          <p class="text-xs text-gray-500 mt-1">Timeout for fixer model requests</p>
         </div>
       </div>
 

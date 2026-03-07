@@ -332,26 +332,14 @@ func isToolRepairProvided(tr toolrepair.Config) bool {
 	return len(tr.Strategies) > 0 ||
 		tr.MaxArgumentsSize != 0 ||
 		tr.MaxToolCallsPerResponse != 0 ||
-		tr.MaxRetries != 0 ||
-		tr.RetryPrompt != "" ||
-		tr.MaxRepairDuration != 0
+		tr.FixerModel != "" ||
+		tr.FixerTimeout != 0
 }
 
 // mergeToolRepairConfig merges tool repair settings
 // All fields from incoming are copied (frontend sends complete tool_repair object)
 func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Config {
 	result := existing
-
-	// Copy boolean fields directly
-	result.Enabled = incoming.Enabled
-	result.LogOriginal = incoming.LogOriginal
-	result.LogRepaired = incoming.LogRepaired
-	result.RetryEnabled = incoming.RetryEnabled
-
-	// For slice fields, update if non-empty
-	if len(incoming.Strategies) > 0 {
-		result.Strategies = incoming.Strategies
-	}
 
 	// For numeric fields, update if non-zero
 	if incoming.MaxArgumentsSize != 0 {
@@ -360,18 +348,13 @@ func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Conf
 	if incoming.MaxToolCallsPerResponse != 0 {
 		result.MaxToolCallsPerResponse = incoming.MaxToolCallsPerResponse
 	}
-	if incoming.MaxRetries != 0 {
-		result.MaxRetries = incoming.MaxRetries
+	if incoming.FixerTimeout != 0 {
+		result.FixerTimeout = incoming.FixerTimeout
 	}
 
 	// For string fields, update if non-empty
-	if incoming.RetryPrompt != "" {
-		result.RetryPrompt = incoming.RetryPrompt
-	}
-
-	// For duration fields, update if non-zero
-	if incoming.MaxRepairDuration != 0 {
-		result.MaxRepairDuration = incoming.MaxRepairDuration
+	if incoming.FixerModel != "" {
+		result.FixerModel = incoming.FixerModel
 	}
 
 	return result

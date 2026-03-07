@@ -154,14 +154,10 @@ var Defaults = Config{
 	ToolRepair: toolrepair.Config{
 		Enabled:                 true,
 		Strategies:              []string{"extract_json", "library_repair", "remove_reasoning"},
-		MaxArgumentsSize:        10 * 1024, // 10KB
-		MaxToolCallsPerResponse: 8,
+		MaxArgumentsSize:        20 * 1024, // 20KB
+		MaxToolCallsPerResponse: 10,
 		LogOriginal:             false,
 		LogRepaired:             true,
-		RetryEnabled:            true,
-		MaxRetries:              1,
-		RetryPrompt:             "The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema.",
-		MaxRepairDuration:       500 * time.Millisecond,
 		FixerModel:              "",
 		FixerTimeout:            25, // 25 seconds
 	},

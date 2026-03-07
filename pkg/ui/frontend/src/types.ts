@@ -33,10 +33,8 @@ export interface ToolRepairConfig {
   max_tool_calls_per_response: number;
   log_original: boolean;
   log_repaired: boolean;
-  retry_enabled: boolean;
-  max_retries: number;
-  retry_prompt: string;
-  max_repair_duration: number;      // in milliseconds
+  fixer_model: string;
+  fixer_timeout: number;            // in seconds
 }
 
 export interface AppConfig {

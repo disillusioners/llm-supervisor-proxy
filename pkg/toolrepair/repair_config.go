@@ -2,7 +2,6 @@ package toolrepair
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Config holds configuration for the tool repair system
@@ -26,18 +25,6 @@ type Config struct {
 	// LogRepaired logs the repaired JSON for verification
 	LogRepaired bool `json:"log_repaired" yaml:"log_repaired"`
 
-	// RetryEnabled enables retry with prompt injection when repair fails
-	RetryEnabled bool `json:"retry_enabled" yaml:"retry_enabled"`
-
-	// MaxRetries is the maximum number of retries (0 = no retry)
-	MaxRetries int `json:"max_retries" yaml:"max_retries"`
-
-	// RetryPrompt is the prompt template for retry attempts
-	RetryPrompt string `json:"retry_prompt" yaml:"retry_prompt"`
-
-	// MaxRepairDuration is the maximum time to spend on repair (0 = unlimited)
-	MaxRepairDuration time.Duration `json:"max_repair_duration" yaml:"max_repair_duration"`
-
 	// FixerModel is the model to use for LLM-based JSON repair (empty = disabled)
 	FixerModel string `json:"fixer_model" yaml:"fixer_model"`
 
@@ -54,10 +41,6 @@ func DefaultConfig() *Config {
 		MaxToolCallsPerResponse: 8,
 		LogOriginal:             false,
 		LogRepaired:             true,
-		RetryEnabled:            true,
-		MaxRetries:              1,
-		RetryPrompt:             "The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema.",
-		MaxRepairDuration:       500 * time.Millisecond,
 		FixerModel:              "",
 		FixerTimeout:            10, // 10 seconds
 	}
@@ -70,23 +53,18 @@ func DisabledConfig() *Config {
 	}
 }
 
-// MarshalJSON customizes JSON marshaling to convert time.Duration to milliseconds
+// MarshalJSON customizes JSON marshaling
 func (c Config) MarshalJSON() ([]byte, error) {
 	type Alias Config
 	return json.Marshal(&struct {
-		MaxRepairDuration int64 `json:"max_repair_duration"` // in milliseconds
 		*Alias
-	}{
-		MaxRepairDuration: c.MaxRepairDuration.Milliseconds(),
-		Alias:             (*Alias)(&c),
-	})
+	}{})
 }
 
-// UnmarshalJSON customizes JSON unmarshaling to convert milliseconds to time.Duration
+// UnmarshalJSON customizes JSON unmarshaling
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type Alias Config
 	aux := &struct {
-		MaxRepairDuration int64 `json:"max_repair_duration"` // in milliseconds
 		*Alias
 	}{
 		Alias: (*Alias)(c),
@@ -94,6 +72,5 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	c.MaxRepairDuration = time.Duration(aux.MaxRepairDuration) * time.Millisecond
 	return nil
 }
