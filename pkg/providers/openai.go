@@ -241,6 +241,9 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 
 	var lastResponse *ChatCompletionResponse
 
+	// Accumulate tool calls during streaming (index -> accumulated data)
+	accumulatedToolCalls := make(map[int]*ToolCall)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -259,16 +262,37 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		// Check for stream end
 		if data == "[DONE]" {
 			if lastResponse != nil {
-				// Repair tool calls in the final response
-				if p.repairer != nil {
-					for i := range lastResponse.Choices {
-						if lastResponse.Choices[i].Message == nil {
-							continue
+				// Convert accumulated tool calls to Message.ToolCalls for the final response
+				if len(accumulatedToolCalls) > 0 {
+					// Ensure Message exists
+					if lastResponse.Choices[0].Message == nil {
+						lastResponse.Choices[0].Message = &ChatMessage{
+							Role: "assistant",
 						}
+					}
 
+					// Convert accumulated tool calls to sorted slice
+					maxIndex := 0
+					for idx := range accumulatedToolCalls {
+						if idx > maxIndex {
+							maxIndex = idx
+						}
+					}
+
+					toolCalls := make([]ToolCall, maxIndex+1)
+					for idx, tc := range accumulatedToolCalls {
+						toolCalls[idx] = *tc
+					}
+					lastResponse.Choices[0].Message.ToolCalls = toolCalls
+				}
+
+				// Repair tool calls in the final response
+				if p.repairer != nil && lastResponse.Choices[0].Message != nil {
+					toolCalls := lastResponse.Choices[0].Message.ToolCalls
+					if len(toolCalls) > 0 {
 						// Convert tool calls to repair data
-						toolCallsData := make([]toolrepair.ToolCallData, len(lastResponse.Choices[i].Message.ToolCalls))
-						for j, tc := range lastResponse.Choices[i].Message.ToolCalls {
+						toolCallsData := make([]toolrepair.ToolCallData, len(toolCalls))
+						for j, tc := range toolCalls {
 							toolCallsData[j] = toolrepair.ToolCallData{
 								ID:        tc.ID,
 								Type:      tc.Type,
@@ -286,7 +310,7 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 
 						// Update with repaired data
 						for j, rc := range repairedCalls {
-							lastResponse.Choices[i].Message.ToolCalls[j].Function.Arguments = rc.Arguments
+							lastResponse.Choices[0].Message.ToolCalls[j].Function.Arguments = rc.Arguments
 						}
 					}
 				}
@@ -323,8 +347,35 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 						Content: contentStr,
 					}
 				}
-				// Handle tool_calls in streaming
+				// Handle tool_calls in streaming - accumulate them
 				if len(choice.Delta.ToolCalls) > 0 {
+					for _, tc := range choice.Delta.ToolCalls {
+						// Get or create accumulated tool call
+						index := 0
+						if tc.Index != nil {
+							index = *tc.Index
+						}
+
+						if accumulatedToolCalls[index] == nil {
+							accumulatedToolCalls[index] = &ToolCall{
+								Type: tc.Type,
+							}
+						}
+
+						// Accumulate ID (only set once)
+						if tc.ID != "" {
+							accumulatedToolCalls[index].ID = tc.ID
+						}
+
+						// Accumulate function data
+						if tc.Function.Name != "" {
+							accumulatedToolCalls[index].Function.Name = tc.Function.Name
+						}
+						if tc.Function.Arguments != "" {
+							accumulatedToolCalls[index].Function.Arguments += tc.Function.Arguments
+						}
+					}
+
 					eventCh <- StreamEvent{
 						Type:      "tool_call",
 						ToolCalls: choice.Delta.ToolCalls,
