@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // OpenAIProvider implements Provider for OpenAI-compatible APIs
@@ -23,6 +25,7 @@ type OpenAIProvider struct {
 	client      *http.Client
 	bufferStore *bufferstore.BufferStore // Optional: for saving debug info
 	requestID   string                   // Optional: request ID for buffer naming
+	repairer    *toolrepair.Repairer     // Optional: for repairing tool call JSON
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
@@ -43,6 +46,11 @@ func NewOpenAIProvider(apiKey, baseURL string) *OpenAIProvider {
 func (p *OpenAIProvider) SetDebugContext(bufferStore *bufferstore.BufferStore, requestID string) {
 	p.bufferStore = bufferStore
 	p.requestID = requestID
+}
+
+// SetRepairer sets the tool call repairer
+func (p *OpenAIProvider) SetRepairer(repairer *toolrepair.Repairer) {
+	p.repairer = repairer
 }
 
 // Name returns the provider name
@@ -84,6 +92,38 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 	var result ChatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Repair tool calls if repairer is configured
+	if p.repairer != nil {
+		for i := range result.Choices {
+			if result.Choices[i].Message == nil {
+				continue
+			}
+
+			// Convert tool calls to repair data
+			toolCallsData := make([]toolrepair.ToolCallData, len(result.Choices[i].Message.ToolCalls))
+			for j, tc := range result.Choices[i].Message.ToolCalls {
+				toolCallsData[j] = toolrepair.ToolCallData{
+					ID:        tc.ID,
+					Type:      tc.Type,
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				}
+			}
+
+			// Repair tool calls
+			repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData)
+			if stats.Repaired > 0 || stats.Failed > 0 {
+				log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
+					stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)
+			}
+
+			// Update with repaired data
+			for j, rc := range repairedCalls {
+				result.Choices[i].Message.ToolCalls[j].Function.Arguments = rc.Arguments
+			}
+		}
 	}
 
 	return &result, nil
@@ -219,6 +259,38 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		// Check for stream end
 		if data == "[DONE]" {
 			if lastResponse != nil {
+				// Repair tool calls in the final response
+				if p.repairer != nil {
+					for i := range lastResponse.Choices {
+						if lastResponse.Choices[i].Message == nil {
+							continue
+						}
+
+						// Convert tool calls to repair data
+						toolCallsData := make([]toolrepair.ToolCallData, len(lastResponse.Choices[i].Message.ToolCalls))
+						for j, tc := range lastResponse.Choices[i].Message.ToolCalls {
+							toolCallsData[j] = toolrepair.ToolCallData{
+								ID:        tc.ID,
+								Type:      tc.Type,
+								Name:      tc.Function.Name,
+								Arguments: tc.Function.Arguments,
+							}
+						}
+
+						// Repair tool calls
+						repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData)
+						if stats.Repaired > 0 || stats.Failed > 0 {
+							log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
+								stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)
+						}
+
+						// Update with repaired data
+						for j, rc := range repairedCalls {
+							lastResponse.Choices[i].Message.ToolCalls[j].Function.Arguments = rc.Arguments
+						}
+					}
+				}
+
 				eventCh <- StreamEvent{
 					Type:     "done",
 					Response: lastResponse,

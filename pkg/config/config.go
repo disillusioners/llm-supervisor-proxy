@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 const (
@@ -75,6 +76,7 @@ type Config struct {
 	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
+	ToolRepair              toolrepair.Config   `json:"tool_repair"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
 }
 
@@ -148,6 +150,18 @@ var Defaults = Config{
 		MaxCycleLength:            5,
 		ReasoningModelPatterns:    []string{"o1", "o3", "deepseek-r1"},
 		ReasoningTrigramThreshold: 0.15,
+	},
+	ToolRepair: toolrepair.Config{
+		Enabled:                 true,
+		Strategies:              []string{"extract_json", "library_repair", "escape_quotes", "remove_reasoning"},
+		MaxArgumentsSize:        10 * 1024, // 10KB
+		MaxToolCallsPerResponse: 8,
+		LogOriginal:             false,
+		LogRepaired:             true,
+		RetryEnabled:            true,
+		MaxRetries:              1,
+		RetryPrompt:             "The previous tool call arguments were invalid JSON. Return only valid JSON matching the tool schema.",
+		MaxRepairDuration:       500 * time.Millisecond,
 	},
 }
 
