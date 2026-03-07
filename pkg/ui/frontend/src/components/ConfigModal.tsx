@@ -368,6 +368,7 @@ export function ConfigModal({
           {activeTab === 'tool_repair' && (
             <ToolRepairSettings
               config={config?.tool_repair ?? null}
+              models={models}
               onApply={handleApplyToolRepair}
               status={status}
               setStatus={setStatus}

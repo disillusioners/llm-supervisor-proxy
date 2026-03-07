@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { ToolRepairConfig } from '../../types';
+import type { ToolRepairConfig, Model } from '../../types';
 
 interface ToolRepairSettingsProps {
   config: ToolRepairConfig | null;
+  models: Model[];
   onApply: (config: ToolRepairConfig) => Promise<void>;
   status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
@@ -16,6 +17,7 @@ const AVAILABLE_STRATEGIES = [
 
 export function ToolRepairSettings({
   config,
+  models,
   onApply,
   setStatus,
 }: ToolRepairSettingsProps) {
@@ -237,28 +239,33 @@ export function ToolRepairSettings({
           </p>
         </div>
         <div class="mb-3">
-          <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Model ID</label>
-          <input
-            type="text"
+          <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Model</label>
+          <select
             value={fixerModel}
-            onInput={(e) => setFixerModel((e.target as HTMLInputElement).value)}
+            onChange={(e) => setFixerModel((e.target as HTMLSelectElement).value)}
             class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="e.g., gpt-4o-mini (leave empty to disable)"
-          />
-          <p class="text-xs text-gray-500 mt-1">Internal model ID to use for JSON repair (empty = disabled)</p>
+          >
+            <option value="">Disabled (no LLM repair)</option>
+            {models.filter(m => m.enabled).map(model => (
+              <option key={model.id} value={model.id}>{model.name}</option>
+            ))}
+          </select>
+          <p class="text-xs text-gray-500 mt-1">Select a model to use for LLM-based JSON repair</p>
         </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Timeout (seconds)</label>
-          <input
-            type="number"
-            value={fixerTimeout}
-            onInput={(e) => setFixerTimeout(parseInt((e.target as HTMLInputElement).value) || 10)}
-            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            min="1"
-            max="60"
-          />
-          <p class="text-xs text-gray-500 mt-1">Timeout for fixer model requests</p>
-        </div>
+        {fixerModel && (
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">Fixer Timeout (seconds)</label>
+            <input
+              type="number"
+              value={fixerTimeout}
+              onInput={(e) => setFixerTimeout(parseInt((e.target as HTMLInputElement).value) || 10)}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              min="1"
+              max="60"
+            />
+            <p class="text-xs text-gray-500 mt-1">Timeout for fixer model requests</p>
+          </div>
+        )}
       </div>
 
       {/* Apply Button */}
