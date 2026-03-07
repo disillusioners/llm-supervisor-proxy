@@ -12,6 +12,7 @@ UPDATE configs SET
     max_idle_retries = sqlc.narg('max_idle_retries'),
     max_generation_retries = sqlc.narg('max_generation_retries'),
     loop_detection_json = sqlc.narg('loop_detection_json'),
+    tool_repair_json = sqlc.narg('tool_repair_json'),
     updated_at = sqlc.narg('updated_at')
 WHERE id = 1;
 

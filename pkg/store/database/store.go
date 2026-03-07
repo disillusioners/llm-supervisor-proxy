@@ -13,6 +13,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // ConfigManager implements config.ManagerInterface using database storage
@@ -51,6 +52,7 @@ type dbConfigRow struct {
 	MaxGenerationRetries    int64
 	MaxStreamBufferSize     int64
 	LoopDetectionJSON       string
+	ToolRepairJSON          string
 	UpdatedAt               string
 }
 
@@ -79,6 +81,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.MaxGenerationRetries,
 		&dbCfg.MaxStreamBufferSize,
 		&dbCfg.LoopDetectionJSON,
+		&dbCfg.ToolRepairJSON,
 		&dbCfg.UpdatedAt,
 	)
 	if err != nil {
@@ -109,16 +112,19 @@ func (m *ConfigManager) Load() error {
 		}
 	}
 
+	// Parse tool repair JSON
+	if dbCfg.ToolRepairJSON != "" && dbCfg.ToolRepairJSON != "{}" {
+		if err := json.Unmarshal([]byte(dbCfg.ToolRepairJSON), &cfg.ToolRepair); err != nil {
+			cfg.ToolRepair = *toolrepair.DefaultConfig()
+		}
+	}
+
 	m.cfg = cfg
 	return nil
 }
 
 // Save persists configuration to database
 func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -126,14 +132,19 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		return nil, fmt.Errorf("config is read-only")
 	}
 
+	// Merge incoming config with existing config to preserve fields not sent by frontend
+	merged := mergeConfig(m.cfg, cfg)
+
+	// Validate the merged config, not the partial incoming config
+	if err := merged.Validate(); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
 	result := &config.SaveResult{}
-	if m.cfg.Port != cfg.Port {
+	if m.cfg.Port != merged.Port {
 		result.RestartRequired = true
 		result.ChangedFields = append(result.ChangedFields, "port")
 	}
-
-	// Merge incoming config with existing config to preserve fields not sent by frontend
-	merged := mergeConfig(m.cfg, cfg)
 
 	merged.Version = config.ConfigVersion
 	merged.UpdatedAt = time.Now().Format(time.RFC3339)
@@ -142,6 +153,12 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	loopDetectionJSON, err := json.Marshal(merged.LoopDetection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize loop detection: %w", err)
+	}
+
+	// Serialize tool repair
+	toolRepairJSON, err := json.Marshal(merged.ToolRepair)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize tool repair: %w", err)
 	}
 
 	// Update database using dialect-aware query
@@ -158,6 +175,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		merged.MaxGenerationRetries,
 		merged.MaxStreamBufferSize,
 		string(loopDetectionJSON),
+		string(toolRepairJSON),
 		merged.UpdatedAt,
 	)
 	if err != nil {
@@ -223,6 +241,11 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// We check multiple fields to detect if loop_detection was intentionally sent
 	if isLoopDetectionProvided(incoming.LoopDetection) {
 		result.LoopDetection = mergeLoopDetectionConfig(existing.LoopDetection, incoming.LoopDetection)
+	}
+
+	// Tool repair: check if any tool repair field was set
+	if isToolRepairProvided(incoming.ToolRepair) {
+		result.ToolRepair = mergeToolRepairConfig(existing.ToolRepair, incoming.ToolRepair)
 	}
 
 	return result
@@ -296,6 +319,59 @@ func mergeLoopDetectionConfig(existing, incoming config.LoopDetectionConfig) con
 	}
 	if len(incoming.ReasoningModelPatterns) > 0 {
 		result.ReasoningModelPatterns = incoming.ReasoningModelPatterns
+	}
+
+	return result
+}
+
+// isToolRepairProvided checks if tool repair config was explicitly provided
+// by looking for any non-zero field values (excluding booleans which default to false)
+func isToolRepairProvided(tr toolrepair.Config) bool {
+	// Check if any non-boolean field has a non-zero value
+	// We don't check Enabled/LogOriginal/LogRepaired because false is valid but also zero value
+	return len(tr.Strategies) > 0 ||
+		tr.MaxArgumentsSize != 0 ||
+		tr.MaxToolCallsPerResponse != 0 ||
+		tr.MaxRetries != 0 ||
+		tr.RetryPrompt != "" ||
+		tr.MaxRepairDuration != 0
+}
+
+// mergeToolRepairConfig merges tool repair settings
+// All fields from incoming are copied (frontend sends complete tool_repair object)
+func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Config {
+	result := existing
+
+	// Copy boolean fields directly
+	result.Enabled = incoming.Enabled
+	result.LogOriginal = incoming.LogOriginal
+	result.LogRepaired = incoming.LogRepaired
+	result.RetryEnabled = incoming.RetryEnabled
+
+	// For slice fields, update if non-empty
+	if len(incoming.Strategies) > 0 {
+		result.Strategies = incoming.Strategies
+	}
+
+	// For numeric fields, update if non-zero
+	if incoming.MaxArgumentsSize != 0 {
+		result.MaxArgumentsSize = incoming.MaxArgumentsSize
+	}
+	if incoming.MaxToolCallsPerResponse != 0 {
+		result.MaxToolCallsPerResponse = incoming.MaxToolCallsPerResponse
+	}
+	if incoming.MaxRetries != 0 {
+		result.MaxRetries = incoming.MaxRetries
+	}
+
+	// For string fields, update if non-empty
+	if incoming.RetryPrompt != "" {
+		result.RetryPrompt = incoming.RetryPrompt
+	}
+
+	// For duration fields, update if non-zero
+	if incoming.MaxRepairDuration != 0 {
+		result.MaxRepairDuration = incoming.MaxRepairDuration
 	}
 
 	return result

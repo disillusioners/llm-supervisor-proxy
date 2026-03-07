@@ -28,6 +28,7 @@ var migrations = []migration{
 	{"004", "004_add_auth_tokens.up"},
 	{"005", "005_add_credentials.up"},
 	{"006", "006_add_upstream_credential.up"},
+	{"007", "007_add_tool_repair.up"},
 }
 
 // RunMigrations executes database schema migrations
