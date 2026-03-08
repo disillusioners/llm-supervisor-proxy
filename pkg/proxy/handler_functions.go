@@ -862,7 +862,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// Track chunk content for both existing accumulation and loop detection
 			prevLen := rc.accumulatedResponse.Len()
 			prevThinkLen := rc.accumulatedThinking.Len()
-			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking)
+			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls)
 			newContent := rc.accumulatedResponse.String()[prevLen:]
 			newThinking := rc.accumulatedThinking.String()[prevThinkLen:]
 
@@ -1042,11 +1042,18 @@ func (h *Handler) finalizeSuccess(rc *requestContext) {
 
 	// Append assistant message to Messages array
 	// This is the source of response content - no separate Response/Thinking fields needed
-	rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
+	assistantMsg := store.Message{
 		Role:     "assistant",
 		Content:  rc.accumulatedResponse.String(),
 		Thinking: rc.accumulatedThinking.String(),
-	})
+	}
+
+	// Include tool calls if any were accumulated
+	if len(rc.accumulatedToolCalls) > 0 {
+		assistantMsg.ToolCalls = rc.accumulatedToolCalls
+	}
+
+	rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
 
 	rc.reqLog.EndTime = time.Now()
 	rc.reqLog.Duration = time.Since(rc.startTime).String()

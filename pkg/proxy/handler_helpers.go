@@ -42,8 +42,9 @@ type requestContext struct {
 	originalMessages []interface{}
 
 	// Accumulated response buffers
-	accumulatedResponse strings.Builder
-	accumulatedThinking strings.Builder
+	accumulatedResponse  strings.Builder
+	accumulatedThinking  strings.Builder
+	accumulatedToolCalls []store.ToolCall
 
 	// Stream buffer for retry-safe streaming
 	// Chunks are buffered until stream completes successfully, then flushed to client
@@ -123,6 +124,7 @@ func extractParameters(requestBody map[string]interface{}) map[string]interface{
 
 // parseMessages converts the raw JSON "messages" array to store.Message slice.
 // Handles both string content and array content (OpenAI multimodal format).
+// Also extracts tool_calls for assistant messages.
 func parseMessages(requestBody map[string]interface{}) []store.Message {
 	var storeMessages []store.Message
 	if msgs, ok := requestBody["messages"].([]interface{}); ok {
@@ -143,7 +145,29 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 						}
 					}
 				}
-				storeMessages = append(storeMessages, store.Message{Role: role, Content: content})
+
+				// Extract tool_calls if present (for assistant messages)
+				var toolCalls []store.ToolCall
+				if tcInterface, ok := msgMap["tool_calls"].([]interface{}); ok {
+					for _, tc := range tcInterface {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							toolCall := store.ToolCall{}
+							toolCall.ID, _ = tcMap["id"].(string)
+							toolCall.Type, _ = tcMap["type"].(string)
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								toolCall.Function.Name, _ = fn["name"].(string)
+								toolCall.Function.Arguments, _ = fn["arguments"].(string)
+							}
+							toolCalls = append(toolCalls, toolCall)
+						}
+					}
+				}
+
+				msg := store.Message{Role: role, Content: content}
+				if len(toolCalls) > 0 {
+					msg.ToolCalls = toolCalls
+				}
+				storeMessages = append(storeMessages, msg)
 			}
 		}
 	}
@@ -268,7 +292,7 @@ func extractNonStreamContent(bodyBytes []byte, response, thinking *strings.Build
 }
 
 // extractStreamChunkContent extracts content and thinking from a single SSE chunk.
-func extractStreamChunkContent(data []byte, response, thinking *strings.Builder) {
+func extractStreamChunkContent(data []byte, response, thinking *strings.Builder, toolCallsAccum *[]store.ToolCall) {
 	var chunk map[string]interface{}
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return
@@ -297,6 +321,52 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder)
 		thinking.WriteString(t)
 	} else if t, ok := delta["thinking"].(string); ok && t != "" {
 		thinking.WriteString(t)
+	}
+
+	// Extract and accumulate tool calls
+	if toolCalls, ok := delta["tool_calls"].([]interface{}); ok && toolCallsAccum != nil {
+		for _, tc := range toolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Get index (required for streaming)
+			index, ok := tcMap["index"].(float64)
+			if !ok {
+				continue
+			}
+			idx := int(index)
+
+			// Ensure accumulator has enough capacity
+			for len(*toolCallsAccum) <= idx {
+				*toolCallsAccum = append(*toolCallsAccum, store.ToolCall{})
+			}
+
+			// Update tool call at index
+			toolCall := &(*toolCallsAccum)[idx]
+
+			// ID (usually appears in first chunk)
+			if id, ok := tcMap["id"].(string); ok && id != "" {
+				toolCall.ID = id
+			}
+
+			// Type (usually appears in first chunk)
+			if typ, ok := tcMap["type"].(string); ok && typ != "" {
+				toolCall.Type = typ
+			}
+
+			// Function details (name and arguments are streamed incrementally)
+			if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok && name != "" {
+					toolCall.Function.Name = name
+				}
+				if args, ok := fn["arguments"].(string); ok {
+					// Arguments are streamed in chunks, so append
+					toolCall.Function.Arguments += args
+				}
+			}
+		}
 	}
 }
 
