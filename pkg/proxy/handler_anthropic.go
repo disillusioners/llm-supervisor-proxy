@@ -352,6 +352,12 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	debugLog("=== INTERNAL OPENAI RESPONSE ===")
 	debugLog("OpenAI Body: %s", string(openaiBody))
 
+	// Extract content for storage before translation
+	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	arc.accumulatedResponse.WriteString(content)
+	arc.accumulatedThinking.WriteString(thinking)
+	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(openaiBody, arc.originalModel)
 	if err != nil {
@@ -367,18 +373,20 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	w.WriteHeader(http.StatusOK)
 	w.Write(anthropicResp)
 
-	// Update log
-	arc.reqLog.Status = "completed"
-	arc.reqLog.EndTime = time.Now()
-	arc.reqLog.Duration = time.Since(arc.startTime).String()
-	h.store.Add(arc.reqLog)
-	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+	// Finalize with assistant message
+	h.finalizeAnthropicSuccess(arc)
 
 	return true
 }
 
 // handleAnthropicInternalStreamResponse handles streaming internal responses
 func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
+	// Extract content for storage before translation
+	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	arc.accumulatedResponse.WriteString(content)
+	arc.accumulatedThinking.WriteString(thinking)
+	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
 	// Translate buffered OpenAI stream to Anthropic format
 	anthropicEvents, err := translator.TranslateBufferedStream(openaiBody, arc.originalModel)
 	if err != nil {
@@ -408,12 +416,8 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 		f.Flush()
 	}
 
-	// Update log
-	arc.reqLog.Status = "completed"
-	arc.reqLog.EndTime = time.Now()
-	arc.reqLog.Duration = time.Since(arc.startTime).String()
-	h.store.Add(arc.reqLog)
-	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+	// Finalize with assistant message
+	h.finalizeAnthropicSuccess(arc)
 
 	return true
 }
@@ -425,6 +429,12 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 		log.Printf("Failed to read Anthropic upstream response: %v", err)
 		return false
 	}
+
+	// Extract content for storage before translation
+	content, thinking, toolCalls := extractOpenAIResponseContent(bodyBytes)
+	arc.accumulatedResponse.WriteString(content)
+	arc.accumulatedThinking.WriteString(thinking)
+	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
 
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(bodyBytes, arc.originalModel)
@@ -438,12 +448,8 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	w.WriteHeader(http.StatusOK)
 	w.Write(anthropicResp)
 
-	// Update log
-	arc.reqLog.Status = "completed"
-	arc.reqLog.EndTime = time.Now()
-	arc.reqLog.Duration = time.Since(arc.startTime).String()
-	h.store.Add(arc.reqLog)
-	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+	// Finalize with assistant message
+	h.finalizeAnthropicSuccess(arc)
 
 	return true
 }
@@ -495,6 +501,12 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 		if bytes.HasPrefix(line, []byte("data: [DONE]")) {
 			debugLog("Stream complete, received %d chunks, translating...", chunkCount)
 
+			// Extract content for storage before translation
+			content, thinking, toolCalls := extractOpenAIResponseContent(buffer.Bytes())
+			arc.accumulatedResponse.WriteString(content)
+			arc.accumulatedThinking.WriteString(thinking)
+			arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
 			// Translate buffered stream and flush
 			anthropicEvents, err := translator.TranslateBufferedStream(buffer.Bytes(), arc.originalModel)
 			if err != nil {
@@ -517,12 +529,8 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 				f.Flush()
 			}
 
-			// Update log
-			arc.reqLog.Status = "completed"
-			arc.reqLog.EndTime = time.Now()
-			arc.reqLog.Duration = time.Since(arc.startTime).String()
-			h.store.Add(arc.reqLog)
-			h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+			// Finalize with assistant message
+			h.finalizeAnthropicSuccess(arc)
 
 			debugLog("=== STREAM COMPLETE ===")
 			return true
@@ -560,6 +568,11 @@ type anthropicRequestContext struct {
 	headersSent     bool
 	lastError       []byte
 	lastStatusCode  int
+
+	// Response tracking (for storing assistant message)
+	accumulatedResponse  strings.Builder
+	accumulatedThinking  strings.Builder
+	accumulatedToolCalls []store.ToolCall
 }
 
 // sendAnthropicError sends an error response in Anthropic format
@@ -575,6 +588,84 @@ func (h *Handler) sendAnthropicError(w http.ResponseWriter, errorType, message s
 		},
 	}
 	json.NewEncoder(w).Encode(errorResp)
+}
+
+// finalizeAnthropicSuccess updates the request log and appends the assistant message.
+// This is the equivalent of finalizeSuccess in handler_functions.go.
+func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
+	// Build assistant message from accumulated response
+	assistantMsg := store.Message{
+		Role:     "assistant",
+		Content:  arc.accumulatedResponse.String(),
+		Thinking: arc.accumulatedThinking.String(),
+	}
+
+	// Include tool calls if any were accumulated
+	if len(arc.accumulatedToolCalls) > 0 {
+		assistantMsg.ToolCalls = arc.accumulatedToolCalls
+	}
+
+	// Append to messages array
+	arc.reqLog.Messages = append(arc.reqLog.Messages, assistantMsg)
+
+	// Update status and timing
+	arc.reqLog.Status = "completed"
+	arc.reqLog.EndTime = time.Now()
+	arc.reqLog.Duration = time.Since(arc.startTime).String()
+	h.store.Add(arc.reqLog)
+	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+}
+
+// extractOpenAIResponseContent extracts content, thinking, and tool calls from OpenAI response.
+func extractOpenAIResponseContent(openaiBody []byte) (content, thinking string, toolCalls []store.ToolCall) {
+	var resp map[string]interface{}
+	if err := json.Unmarshal(openaiBody, &resp); err != nil {
+		return "", "", nil
+	}
+
+	choices, _ := resp["choices"].([]interface{})
+	if len(choices) == 0 {
+		return "", "", nil
+	}
+
+	choice, _ := choices[0].(map[string]interface{})
+	message, _ := choice["message"].(map[string]interface{})
+	if message == nil {
+		return "", "", nil
+	}
+
+	// Extract content
+	content, _ = message["content"].(string)
+
+	// Extract thinking (from reasoning_content if present)
+	thinking, _ = message["reasoning_content"].(string)
+
+	// Extract tool calls
+	if tcs, ok := message["tool_calls"].([]interface{}); ok {
+		for _, tc := range tcs {
+			if tcMap, ok := tc.(map[string]interface{}); ok {
+				toolCall := store.ToolCall{
+					ID:   getStringVal(tcMap, "id"),
+					Type: getStringVal(tcMap, "type"),
+				}
+				if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+					toolCall.Function.Name = getStringVal(fn, "name")
+					toolCall.Function.Arguments = getStringVal(fn, "arguments")
+				}
+				toolCalls = append(toolCalls, toolCall)
+			}
+		}
+	}
+
+	return content, thinking, toolCalls
+}
+
+// getStringVal safely extracts a string from a map
+func getStringVal(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // sendAnthropicSSEError sends an error as an SSE event in Anthropic format
