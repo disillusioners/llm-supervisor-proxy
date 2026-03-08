@@ -241,6 +241,45 @@ func TestTranslateRequest_WithToolResult(t *testing.T) {
 		t.Errorf("expected second message role 'assistant', got %v", msg1["role"])
 	}
 
+	// Verify tool_calls field exists and is correct format (not in content!)
+	toolCalls, ok := msg1["tool_calls"].([]interface{})
+	if !ok {
+		t.Fatalf("expected tool_calls array, got %T", msg1["tool_calls"])
+	}
+	if len(toolCalls) != 1 {
+		t.Errorf("expected 1 tool_call, got %d", len(toolCalls))
+	}
+
+	// Verify tool_call structure
+	tc0, ok := toolCalls[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_call map, got %T", toolCalls[0])
+	}
+	if tc0["type"] != "function" {
+		t.Errorf("expected tool_call type 'function', got %v", tc0["type"])
+	}
+	if tc0["id"] != "toolu_123" {
+		t.Errorf("expected tool_call id 'toolu_123', got %v", tc0["id"])
+	}
+
+	// Verify function details
+	func0, ok := tc0["function"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected function map, got %T", tc0["function"])
+	}
+	if func0["name"] != "get_weather" {
+		t.Errorf("expected function name 'get_weather', got %v", func0["name"])
+	}
+
+	// Verify content is text only (not an array with tool_use)
+	content1, ok := msg1["content"].(string)
+	if !ok {
+		t.Errorf("expected content to be string (text only), got %T", msg1["content"])
+	}
+	if content1 != "Let me check." {
+		t.Errorf("expected content 'Let me check.', got %v", content1)
+	}
+
 	// Check third message (tool result)
 	msg2, ok := msgs[2].(map[string]interface{})
 	if !ok {

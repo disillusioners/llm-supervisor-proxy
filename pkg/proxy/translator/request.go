@@ -126,6 +126,37 @@ func translateMessage(msg AnthropicMessage) []interface{} {
 		return result
 	}
 
+	// Check if this is an assistant message with tool_use blocks
+	// In OpenAI format, tool_calls must be a separate field, not in content
+	if msg.Role == "assistant" {
+		toolUses := extractToolUses(msg.Content)
+		if len(toolUses) > 0 {
+			// Extract text content only (no tool_use in content)
+			textContent := extractTextContentOnly(msg.Content)
+
+			openaiMsg := map[string]interface{}{
+				"role":    "assistant",
+				"content": textContent,
+			}
+
+			// Add tool_calls field
+			var toolCalls []interface{}
+			for _, tu := range toolUses {
+				toolCalls = append(toolCalls, map[string]interface{}{
+					"type": "function",
+					"id":   tu.ID,
+					"function": map[string]interface{}{
+						"name":      tu.Name,
+						"arguments": tu.Input,
+					},
+				})
+			}
+			openaiMsg["tool_calls"] = toolCalls
+
+			return []interface{}{openaiMsg}
+		}
+	}
+
 	// No tool results - standard translation
 	return []interface{}{
 		map[string]interface{}{
@@ -248,6 +279,13 @@ type toolResultInfo struct {
 	Content   string
 }
 
+// toolUseInfo holds extracted tool use information
+type toolUseInfo struct {
+	ID    string
+	Name  string
+	Input string
+}
+
 // extractToolResults extracts all tool_result blocks from content
 func extractToolResults(content interface{}) []toolResultInfo {
 	var results []toolResultInfo
@@ -319,6 +357,80 @@ func extractNonToolResultContent(content interface{}) string {
 						if text, ok := bm["text"].(string); ok {
 							result += text
 						}
+					}
+				}
+			}
+		}
+	case []ContentBlock:
+		for _, block := range c {
+			if block.Type == "text" {
+				result += block.Text
+			}
+		}
+	}
+
+	return result
+}
+
+// extractToolUses extracts all tool_use blocks from content
+func extractToolUses(content interface{}) []toolUseInfo {
+	var results []toolUseInfo
+
+	switch c := content.(type) {
+	case []interface{}:
+		for _, block := range c {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if blockType, ok := bm["type"].(string); ok && blockType == "tool_use" {
+					tu := toolUseInfo{}
+					tu.ID, _ = bm["id"].(string)
+					tu.Name, _ = bm["name"].(string)
+					// Input can be string or object
+					if inputStr, ok := bm["input"].(string); ok {
+						tu.Input = inputStr
+					} else if inputMap, ok := bm["input"].(map[string]interface{}); ok {
+						if bytes, err := json.Marshal(inputMap); err == nil {
+							tu.Input = string(bytes)
+						}
+					}
+					if tu.Input == "" {
+						tu.Input = "{}"
+					}
+					results = append(results, tu)
+				}
+			}
+		}
+	case []ContentBlock:
+		for _, block := range c {
+			if block.Type == "tool_use" {
+				input := "{}"
+				if len(block.Input) > 0 {
+					input = string(block.Input)
+				}
+				results = append(results, toolUseInfo{
+					ID:    block.ID,
+					Name:  block.Name,
+					Input: input,
+				})
+			}
+		}
+	}
+
+	return results
+}
+
+// extractTextContentOnly extracts only text content, excluding tool_use and tool_result
+func extractTextContentOnly(content interface{}) string {
+	var result string
+
+	switch c := content.(type) {
+	case string:
+		return c
+	case []interface{}:
+		for _, block := range c {
+			if bm, ok := block.(map[string]interface{}); ok {
+				if blockType, ok := bm["type"].(string); ok && blockType == "text" {
+					if text, ok := bm["text"].(string); ok {
+						result += text
 					}
 				}
 			}
