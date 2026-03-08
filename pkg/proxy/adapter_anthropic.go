@@ -150,16 +150,18 @@ func (a *AnthropicAdapter) WriteNonStreamResponse(w http.ResponseWriter, openaiR
 	return err
 }
 
-func (a *AnthropicAdapter) WriteStreamEvent(w http.ResponseWriter, openaiChunk []byte) error {
-	// For streaming, we need to translate each OpenAI chunk to Anthropic format
-	// This is more complex and handled by the stream translator
-	// For now, we'll use the buffered approach
-	return fmt.Errorf("streaming requires buffered translation - use BufferedStreamTranslator")
-}
+func (a *AnthropicAdapter) WriteBufferedStream(w http.ResponseWriter, openaiBuffer []byte) error {
+	// Translate the entire buffered OpenAI stream to Anthropic format
+	// The model is extracted from the response by the translator
+	anthropicEvents, err := translator.TranslateBufferedStream(openaiBuffer, "")
+	if err != nil {
+		return fmt.Errorf("failed to translate buffered stream: %w", err)
+	}
 
-func (a *AnthropicAdapter) WriteStreamDone(w http.ResponseWriter) error {
-	// Anthropic uses message_stop event
-	fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+	_, err = w.Write(anthropicEvents)
+	if err != nil {
+		return err
+	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

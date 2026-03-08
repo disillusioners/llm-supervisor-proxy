@@ -93,17 +93,12 @@ func (a *OpenAIAdapter) WriteNonStreamResponse(w http.ResponseWriter, openaiResp
 	return err
 }
 
-func (a *OpenAIAdapter) WriteStreamEvent(w http.ResponseWriter, openaiChunk []byte) error {
-	// OpenAI format: pass through as-is
-	fmt.Fprintf(w, "data: %s\n", string(openaiChunk))
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+func (a *OpenAIAdapter) WriteBufferedStream(w http.ResponseWriter, openaiBuffer []byte) error {
+	// OpenAI format: passthrough the entire buffer as-is
+	_, err := w.Write(openaiBuffer)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func (a *OpenAIAdapter) WriteStreamDone(w http.ResponseWriter) error {
-	fmt.Fprintf(w, "data: [DONE]\n\n")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

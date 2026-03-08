@@ -61,15 +61,17 @@ Both handlers (`handleStreamResponse` and `handleAnthropicStreamResponse`) buffe
 
 ---
 
+---
+
 ## Remaining Work 📋
 
-### Phase 1: Fix Adapter Interface (1-2 days)
+### Phase 1: Fix Adapter Interface (1-2 days) ✅ DONE
 
 **Problem**: Current `ResponseWriter` interface has `WriteStreamEvent()` which assumes per-chunk streaming, but our architecture is buffer-then-flush.
 
-- [ ] Replace `WriteStreamEvent()` with `WriteBufferedStream()` in interface
-- [ ] Update `OpenAIAdapter.WriteBufferedStream()` - passthrough
-- [ ] Update `AnthropicAdapter.WriteBufferedStream()` - call `translator.TranslateBufferedStream()`
+- [x] Replace `WriteStreamEvent()` with `WriteBufferedStream()` in interface
+- [x] Update `OpenAIAdapter.WriteBufferedStream()` - passthrough
+- [x] Update `AnthropicAdapter.WriteBufferedStream()` - call `translator.TranslateBufferedStream()`
 - [ ] Fix `getAnthropicModelMapping()` - currently returns empty config, ignores parameter
 
 ### Phase 2: Create Unified Handler (2-3 days)
@@ -109,9 +111,9 @@ Both handlers (`handleStreamResponse` and `handleAnthropicStreamResponse`) buffe
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `adapter.go` | ⚠️ Fix interface | Interface definitions |
-| `adapter_openai.go` | ⚠️ Fix streaming | OpenAI passthrough |
-| `adapter_anthropic.go` | ⚠️ Fix streaming + mapping | Anthropic translation |
+| `adapter.go` | ✅ Fixed | Interface definitions |
+| `adapter_openai.go` | ✅ Fixed | OpenAI passthrough |
+| `adapter_anthropic.go` | ✅ Fixed | Anthropic translation |
 | `handler_unified.go` | 📋 TODO | Single handler flow |
 | `handler_functions.go` | 🔧 Refactor | Remove duplication |
 | `handler_anthropic.go` | 🔧 Refactor | Remove duplication |
@@ -138,6 +140,17 @@ type ResponseWriter interface {
     SetStreamHeaders(w http.ResponseWriter)
 }
 ```
+
+---
+
+**Note**: 5 pre-existing test failures discovered (unrelated to adapter interface changes):
+- `TestAnthropic_ThinkingStream`
+- `TestInvalidJSON`
+- `TestMockLLM_ToolCall`
+- `TestProviderSpecificThinking`
+- `TestFallback4xxTriggered`
+
+These failures existed before Phase 1 changes and should be investigated separately.
 
 ---
 

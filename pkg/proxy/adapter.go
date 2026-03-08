@@ -65,17 +65,16 @@ type RequestMetadata struct {
 }
 
 // ResponseWriter handles writing responses back to the client.
+// This interface is designed for buffer-then-flush streaming pattern.
 type ResponseWriter interface {
 	// WriteNonStreamResponse writes a non-streaming response.
 	// openaiResponse is the raw OpenAI-format response from upstream.
 	WriteNonStreamResponse(w http.ResponseWriter, openaiResponse []byte) error
 
-	// WriteStreamEvent writes a single streaming event.
-	// openaiChunk is a single SSE event from upstream (OpenAI format).
-	WriteStreamEvent(w http.ResponseWriter, openaiChunk []byte) error
-
-	// WriteStreamDone signals the end of a streaming response.
-	WriteStreamDone(w http.ResponseWriter) error
+	// WriteBufferedStream writes a buffered streaming response.
+	// openaiBuffer contains ALL chunks from upstream (including "data: [DONE]\n\n").
+	// The adapter translates the buffer if needed and writes to client.
+	WriteBufferedStream(w http.ResponseWriter, openaiBuffer []byte) error
 
 	// SetStreamHeaders sets the appropriate headers for streaming responses.
 	SetStreamHeaders(w http.ResponseWriter)
