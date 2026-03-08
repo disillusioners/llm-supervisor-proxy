@@ -1,9 +1,5 @@
 package toolrepair
 
-import (
-	"encoding/json"
-)
-
 // Config holds configuration for the tool repair system
 type Config struct {
 	// Enabled enables or disables tool repair
@@ -51,26 +47,4 @@ func DisabledConfig() *Config {
 	return &Config{
 		Enabled: false,
 	}
-}
-
-// MarshalJSON customizes JSON marshaling
-func (c Config) MarshalJSON() ([]byte, error) {
-	type Alias Config
-	return json.Marshal(&struct {
-		*Alias
-	}{})
-}
-
-// UnmarshalJSON customizes JSON unmarshaling
-func (c *Config) UnmarshalJSON(data []byte) error {
-	type Alias Config
-	aux := &struct {
-		*Alias
-	}{
-		Alias: (*Alias)(c),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	return nil
 }
