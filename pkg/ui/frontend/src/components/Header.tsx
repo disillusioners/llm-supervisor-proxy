@@ -6,7 +6,7 @@ const Header: FunctionComponent = () => {
   const { version } = useVersion();
 
   const handleOpenSettings = () => {
-    route('/settings');
+    route('/ui/settings');
   };
 
   return (

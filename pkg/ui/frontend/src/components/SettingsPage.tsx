@@ -216,7 +216,7 @@ export function SettingsPage({
   };
 
   const handleGoBack = () => {
-    route('/');
+    route('/ui/');
   };
 
   return (
