@@ -4,7 +4,21 @@
 
 Anthropic endpoint didn't show messages in frontend while OpenAI endpoint worked correctly.
 
-**Root cause**: Duplicated handler logic (~1700 lines) with inconsistent behavior.
+**Root cause**: Duplicated handler logic (~1856 lines) with inconsistent behavior.
+
+## Streaming Architecture
+
+> **Important**: This proxy uses **buffer-then-flush** streaming, NOT word-by-word streaming.
+
+```
+Upstream chunks → Buffer (accumulate) → [DONE] → Flush to client
+```
+
+Both handlers (`handleStreamResponse` and `handleAnthropicStreamResponse`) buffer ALL chunks from upstream and only write to the client after receiving `[DONE]`. This means:
+
+- **No per-chunk streaming** to client
+- **No complex state management** needed in adapters
+- **Simple flow**: buffer → translate (if needed) → write
 
 ## Target Architecture
 
@@ -12,7 +26,7 @@ Anthropic endpoint didn't show messages in frontend while OpenAI endpoint worked
 ┌──────────────────────────────────────────────┐
 │            Unified Proxy Handler              │
 │  - Single request flow                        │
-│  - Shared state tracking (ResponseState)      │
+│  - Buffer-then-flush for streaming            │
 │  - finalizeSuccess() called once              │
 └───────────────────┬──────────────────────────┘
                     │
@@ -49,25 +63,45 @@ Anthropic endpoint didn't show messages in frontend while OpenAI endpoint worked
 
 ## Remaining Work 📋
 
-### Phase 1: Create Unified Handler
+### Phase 1: Fix Adapter Interface (1-2 days)
+
+**Problem**: Current `ResponseWriter` interface has `WriteStreamEvent()` which assumes per-chunk streaming, but our architecture is buffer-then-flush.
+
+- [ ] Replace `WriteStreamEvent()` with `WriteBufferedStream()` in interface
+- [ ] Update `OpenAIAdapter.WriteBufferedStream()` - passthrough
+- [ ] Update `AnthropicAdapter.WriteBufferedStream()` - call `translator.TranslateBufferedStream()`
+- [ ] Fix `getAnthropicModelMapping()` - currently returns empty config, ignores parameter
+
+### Phase 2: Create Unified Handler (2-3 days)
+
 - [ ] Create `pkg/proxy/handler_unified.go` with `HandleWithAdapter()`
-- [ ] Unified flow: parse → translate → upstream → translate → finalize
+- [ ] Unified flow:
+  ```
+  parse → translate → upstream → buffer → translate → flush → finalize
+  ```
 - [ ] Single `finalizeSuccess()` for both protocols
+- [ ] Handle both streaming (buffer-then-flush) and non-streaming
 
-### Phase 2: Migrate Endpoints
+### Phase 3: Migrate OpenAI Endpoint (2-3 days)
+
 - [ ] Update `HandleChatCompletions` to use OpenAI adapter
-- [ ] Update `HandleAnthropicMessages` to use Anthropic adapter
-- [ ] Both call same unified handler internally
+- [ ] Verify existing tests pass
+- [ ] A/B testing: route 10% traffic to new handler
+- [ ] Monitor: latency, error rates
 
-### Phase 3: Cleanup
+### Phase 4: Migrate Anthropic Endpoint (2-3 days)
+
+- [ ] Update `HandleAnthropicMessages` to use Anthropic adapter
+- [ ] Verify frontend displays messages correctly (original bug)
+- [ ] A/B testing: 10% → 50% → 100%
+- [ ] Test response tracking end-to-end
+
+### Phase 5: Cleanup (1-2 days)
+
+- [ ] Consolidate `requestContext` and `anthropicRequestContext` into single type
 - [ ] Remove duplicated code from `handler_functions.go`
 - [ ] Remove duplicated code from `handler_anthropic.go`
-- [ ] Consolidate `requestContext` and `anthropicRequestContext`
-
-### Phase 4: Testing
-- [ ] Add integration tests for unified handler
-- [ ] Verify both endpoints show messages in frontend
-- [ ] Performance benchmarks
+- [ ] Update documentation
 
 ---
 
@@ -75,12 +109,68 @@ Anthropic endpoint didn't show messages in frontend while OpenAI endpoint worked
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `adapter.go` | ✅ Done | Interface definitions |
-| `adapter_openai.go` | ✅ Done | OpenAI passthrough |
-| `adapter_anthropic.go` | ✅ Done | Anthropic translation |
+| `adapter.go` | ⚠️ Fix interface | Interface definitions |
+| `adapter_openai.go` | ⚠️ Fix streaming | OpenAI passthrough |
+| `adapter_anthropic.go` | ⚠️ Fix streaming + mapping | Anthropic translation |
 | `handler_unified.go` | 📋 TODO | Single handler flow |
 | `handler_functions.go` | 🔧 Refactor | Remove duplication |
 | `handler_anthropic.go` | 🔧 Refactor | Remove duplication |
+
+---
+
+## Interface Changes
+
+### Before (Current - Wrong)
+```go
+type ResponseWriter interface {
+    WriteNonStreamResponse(w http.ResponseWriter, openaiResponse []byte) error
+    WriteStreamEvent(w http.ResponseWriter, openaiChunk []byte) error  // ❌ Per-chunk
+    WriteStreamDone(w http.ResponseWriter) error
+    SetStreamHeaders(w http.ResponseWriter)
+}
+```
+
+### After (Correct for buffer-then-flush)
+```go
+type ResponseWriter interface {
+    WriteNonStreamResponse(w http.ResponseWriter, openaiResponse []byte) error
+    WriteBufferedStream(w http.ResponseWriter, openaiBuffer []byte) error  // ✅ Full buffer
+    SetStreamHeaders(w http.ResponseWriter)
+}
+```
+
+---
+
+## Known Issues to Fix
+
+### 1. Model Mapping Bug
+**Location**: `adapter_anthropic.go:258-267`
+```go
+func getAnthropicModelMapping(_ models.ModelsConfigInterface) *translator.ModelMappingConfig {
+    return &translator.ModelMappingConfig{
+        // No DefaultModel - let unknown models pass through
+    }
+}
+```
+**Fix**: Actually use the config parameter to extract mappings.
+
+### 2. Context Duplication
+- `requestContext` (43 fields) in `handler_helpers.go`
+- `anthropicRequestContext` (22 fields) in `handler_anthropic.go`
+- ~80% overlap → should consolidate into single `unifiedRequestContext`
+
+---
+
+## Timeline Estimate
+
+| Phase | Days | Risk |
+|-------|------|------|
+| Phase 1: Fix Interface | 1-2 | Low |
+| Phase 2: Unified Handler | 2-3 | Medium |
+| Phase 3: Migrate OpenAI | 2-3 | Low |
+| Phase 4: Migrate Anthropic | 2-3 | Medium |
+| Phase 5: Cleanup | 1-2 | Low |
+| **Total** | **8-13** | - |
 
 ---
 
@@ -90,3 +180,12 @@ Anthropic endpoint didn't show messages in frontend while OpenAI endpoint worked
 2. **Easier maintenance** - Change logic in one place
 3. **Extensibility** - Add new protocols by implementing ProtocolAdapter
 4. **Testability** - Test adapter translations independently
+5. **Simplicity** - Buffer-then-flush means no complex streaming state
+
+---
+
+## Rollback Strategy
+
+- Feature flags for each endpoint
+- Keep old handlers for 2 weeks post-migration
+- Monitoring dashboards for error rates, latency
