@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -184,53 +185,86 @@ func copyHeaders(dst *http.Request, src http.Header) {
 	}
 }
 
-// extractNonStreamContent extracts content and thinking from a non-streaming response body.
 func extractNonStreamContent(bodyBytes []byte, response, thinking *strings.Builder) {
 	var respMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &respMap); err != nil {
-		return
-	}
-	choices, ok := respMap["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return
-	}
-	choice, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return
-	}
-	msg, ok := choice["message"].(map[string]interface{})
-	if !ok {
+		log.Printf("[DEBUG] extractNonStreamContent: failed to parse body: %v", err)
 		return
 	}
 
+	choices, ok := respMap["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		log.Printf("[DEBUG] extractNonStreamContent: no choices found")
+		return
+	}
+
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		log.Printf("[DEBUG] extractNonStreamContent: choice[0] is not a map")
+		return
+	}
+
+	msg, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		log.Printf("[DEBUG] extractNonStreamContent: message is not a map")
+		return
+	}
+
+	// Extract content
 	if content, ok := msg["content"]; ok && content != nil {
 		switch c := content.(type) {
 		case string:
-			// Simple string format
 			if c != "" {
 				response.WriteString(c)
+				log.Printf("[DEBUG] extractNonStreamContent: string content len=%d", len(c))
 			}
 		case []interface{}:
-			// Structured content parts array (modern OpenAI format)
 			for _, part := range c {
 				if partMap, ok := part.(map[string]interface{}); ok {
-					if partType, ok := partMap["type"].(string); ok && partType == "text" {
+					partType, _ := partMap["type"].(string)
+					switch partType {
+					case "text":
 						if text, ok := partMap["text"].(string); ok {
 							response.WriteString(text)
+							log.Printf("[DEBUG] extractNonStreamContent: text part len=%d", len(text))
+						}
+					case "thinking":
+						if t, ok := partMap["thinking"].(string); ok {
+							thinking.WriteString(t)
+							log.Printf("[DEBUG] extractNonStreamContent: thinking part len=%d", len(t))
 						}
 					}
 				}
 			}
 		}
 	}
-	if rc, ok := msg["reasoning_content"].(string); ok {
-		thinking.WriteString(rc)
+
+	// Extract thinking/reasoning from top-level fields
+	var thinkingContent string
+	if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
+		thinkingContent = rc
+		log.Printf("[DEBUG] extractNonStreamContent: top-level reasoning_content len=%d", len(rc))
+	} else if rc, ok := msg["reasoning"].(string); ok && rc != "" {
+		thinkingContent = rc
+		log.Printf("[DEBUG] extractNonStreamContent: top-level reasoning len=%d", len(rc))
+	} else if t, ok := msg["thinking"].(string); ok && t != "" {
+		thinkingContent = t
+		log.Printf("[DEBUG] extractNonStreamContent: top-level thinking len=%d", len(t))
 	}
+
+	if thinkingContent != "" {
+		thinking.WriteString(thinkingContent)
+	}
+
+	// Check provider_specific_fields
 	if psf, ok := msg["provider_specific_fields"].(map[string]interface{}); ok {
-		if rc, ok := psf["reasoning_content"].(string); ok {
+		if rc, ok := psf["reasoning_content"].(string); ok && rc != "" && thinking.Len() == 0 {
 			thinking.WriteString(rc)
+			log.Printf("[DEBUG] extractNonStreamContent: provider_specific_fields.reasoning_content len=%d", len(rc))
 		}
 	}
+
+	log.Printf("[DEBUG] extractNonStreamContent: total response len=%d, thinking len=%d", response.Len(), thinking.Len())
 }
 
 // extractStreamChunkContent extracts content and thinking from a single SSE chunk.
@@ -255,9 +289,13 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder)
 	if content, ok := delta["content"].(string); ok {
 		response.WriteString(content)
 	}
-	if t, ok := delta["reasoning_content"].(string); ok {
+	// Extract thinking/reasoning content - support multiple provider field names
+	// Priority: reasoning_content > reasoning > thinking
+	if t, ok := delta["reasoning_content"].(string); ok && t != "" {
 		thinking.WriteString(t)
-	} else if t, ok := delta["thinking"].(string); ok {
+	} else if t, ok := delta["reasoning"].(string); ok && t != "" {
+		thinking.WriteString(t)
+	} else if t, ok := delta["thinking"].(string); ok && t != "" {
 		thinking.WriteString(t)
 	}
 }
