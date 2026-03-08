@@ -551,7 +551,10 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
               {/* Thinking - Collapsible */}
               {message.thinking && (
-                <details class="ml-8 mr-0 mt-1">
+                <details 
+                  class="ml-8 mr-0 mt-1"
+                  open={expandedThoughts.has(index)}
+                >
                   <summary
                     class="cursor-pointer text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1"
                     onClick={(e) => {
@@ -564,11 +567,9 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
                     </span>
                     Thinking
                   </summary>
-                  {expandedThoughts.has(index) && (
-                    <div class="mt-2 p-3 bg-amber-950/40 border border-amber-500/30 rounded text-amber-200/90 text-xs">
-                      <CollapsibleText text={message.thinking} role="assistant" />
-                    </div>
-                  )}
+                  <div class="mt-2 p-3 bg-amber-950/40 border border-amber-500/30 rounded text-amber-200/90 text-xs">
+                    <CollapsibleText text={message.thinking} role="assistant" />
+                  </div>
                 </details>
               )}
 
