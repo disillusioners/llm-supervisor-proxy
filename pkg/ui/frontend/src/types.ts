@@ -117,9 +117,8 @@ export interface Request {
 }
 
 export interface RequestDetail extends Request {
-  messages: Message[];
-  response?: string;
-  thinking?: string;
+  messages: Message[]; // Full conversation including assistant response
+  // Note: Response content is in messages[last].content, thinking in messages[last].thinking
   parameters?: Record<string, unknown>;
 }
 

@@ -1039,10 +1039,9 @@ func (h *Handler) sanitizeAndRetry(rc *requestContext, result *loopdetection.Det
 // finalizeSuccess updates the request log with the completed status.
 func (h *Handler) finalizeSuccess(rc *requestContext) {
 	rc.reqLog.Status = "completed"
-	rc.reqLog.Response = rc.accumulatedResponse.String()
-	rc.reqLog.Thinking = rc.accumulatedThinking.String()
 
-	// Append assistant message to Messages array for frontend display
+	// Append assistant message to Messages array
+	// This is the source of response content - no separate Response/Thinking fields needed
 	rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
 		Role:     "assistant",
 		Content:  rc.accumulatedResponse.String(),

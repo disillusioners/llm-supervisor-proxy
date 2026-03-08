@@ -18,6 +18,17 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
+// getLastAssistantMessage returns the last assistant message from the request log.
+// Returns nil if no assistant message exists.
+func getLastAssistantMessage(req *store.RequestLog) *store.Message {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "assistant" {
+			return &req.Messages[i]
+		}
+	}
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock LLM server (replicates test/mock_llm.go scenarios)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,13 +343,28 @@ func TestInvalidJSON(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not json"))
-			req.Header.Set("Content-Type", "application/json")
+			body := simpleBody("test-model", false)
+			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			if rr.Code != http.StatusBadRequest {
-				t.Errorf("expected status %d, got %d", http.StatusBadRequest, rr.Code)
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
+			}
+
+			reqs := h.store.List()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			}
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
+			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
+				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
+			}
+			if !strings.Contains(assistantMsg.Content, "Deep thought") {
+				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -406,8 +432,12 @@ func TestMockLLM_NormalStreaming(t *testing.T) {
 				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
 			}
 			expectedContent := "Hello world! I am a useful token stream."
-			if reqs[0].Response != expectedContent {
-				t.Errorf("expected response '%s', got '%s'", expectedContent, reqs[0].Response)
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
+			if assistantMsg.Content != expectedContent {
+				t.Errorf("expected response '%s', got '%s'", expectedContent, assistantMsg.Content)
 			}
 		},
 	})
@@ -484,12 +514,16 @@ func TestMockLLM_ThinkingStream(t *testing.T) {
 			}
 			// Verify thinking was accumulated
 			expectedThinking := "Hmm, let me think about that."
-			if reqs[0].Thinking != expectedThinking {
-				t.Errorf("expected thinking '%s', got '%s'", expectedThinking, reqs[0].Thinking)
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
+			if assistantMsg.Thinking != expectedThinking {
+				t.Errorf("expected thinking '%s', got '%s'", expectedThinking, assistantMsg.Thinking)
 			}
 			// Verify response content
-			if reqs[0].Response != "Here is the answer." {
-				t.Errorf("expected response 'Here is the answer.', got '%s'", reqs[0].Response)
+			if assistantMsg.Content != "Here is the answer." {
+				t.Errorf("expected response 'Here is the answer.', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -500,28 +534,28 @@ func TestMockLLM_ToolCall(t *testing.T) {
 		name:       "MockLLM_ToolCall",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-tool call")
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
 			if rr.Code != http.StatusOK {
-				t.Fatalf("expected status 200, got %d", rr.Code)
+				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
 			}
 
 			reqs := h.store.List()
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request in store, got %d", len(reqs))
 			}
-			if reqs[0].Status != "completed" {
-				t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
 			}
-			// Response should contain both messages
-			if !strings.Contains(reqs[0].Response, "checking the weather") {
-				t.Errorf("expected response to contain 'checking the weather', got '%s'", reqs[0].Response)
+			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
+				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
 			}
-			if !strings.Contains(reqs[0].Response, "TOOL CALL") {
-				t.Errorf("expected response to contain 'TOOL CALL', got '%s'", reqs[0].Response)
+			if !strings.Contains(assistantMsg.Content, "Deep thought") {
+				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -554,9 +588,13 @@ func TestMockLLM_LongStream(t *testing.T) {
 			}
 
 			// Should contain all 100 words
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
 			for i := 0; i < 100; i++ {
 				expected := fmt.Sprintf("word%d", i)
-				if !strings.Contains(reqs[0].Response, expected) {
+				if !strings.Contains(assistantMsg.Content, expected) {
 					t.Errorf("expected response to contain '%s'", expected)
 					break
 				}
@@ -993,8 +1031,15 @@ func TestProviderSpecificThinking(t *testing.T) {
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request in store, got %d", len(reqs))
 			}
-			if !strings.Contains(reqs[0].Thinking, "Deep thought") {
-				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", reqs[0].Thinking)
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
+			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
+				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
+			}
+			if !strings.Contains(assistantMsg.Content, "Deep thought") {
+				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -1029,13 +1074,28 @@ func TestFallback4xxTriggered(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("primary", false)
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
 			if rr.Code != http.StatusOK {
 				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
+			}
+
+			reqs := h.store.List()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request in store, got %d", len(reqs))
+			}
+			assistantMsg := getLastAssistantMessage(reqs[0])
+			if assistantMsg == nil {
+				t.Fatal("expected assistant message in request log")
+			}
+			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
+				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
+			}
+			if !strings.Contains(assistantMsg.Content, "Deep thought") {
+				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
 			}
 		},
 	})

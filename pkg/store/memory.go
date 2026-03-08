@@ -24,22 +24,15 @@ type Message struct {
 }
 
 type RequestLog struct {
-	ID        string     `json:"id"`
-	Status    string     `json:"status"` // "pending", "running", "completed", "failed", "retrying"
-	Model     string     `json:"model"`
-	StartTime time.Time  `json:"startTime"`
-	EndTime   time.Time  `json:"endTime"`
-	Duration  string     `json:"duration"` // Store as string for easy JSON
-	Messages  []Message  `json:"messages"`
-	Response  string     `json:"response"`
-	Thinking  string     `json:"thinking,omitempty"`   // Captured thinking content
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // Captured tool calls in the response?
-	// Actually, tool calls are usually part of the response message in OpenAI API.
-	// But our "Response" field is just a string buffer.
-	// Let's store them separately for easy access,
-	// OR we should construct a proper Assistant Message at the end.
-	Retries int    `json:"retries"`
-	Error   string `json:"error,omitempty"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"` // "pending", "running", "completed", "failed", "retrying"
+	Model     string    `json:"model"`
+	StartTime time.Time `json:"startTime"`
+	EndTime   time.Time `json:"endTime"`
+	Duration  string    `json:"duration"` // Store as string for easy JSON
+	Messages  []Message `json:"messages"` // Full conversation including assistant response
+	Retries   int       `json:"retries"`
+	Error     string    `json:"error,omitempty"`
 
 	// Fallback tracking
 	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model
