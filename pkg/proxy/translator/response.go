@@ -135,12 +135,37 @@ func extractContentFromOpenAIMessage(msg map[string]interface{}) []ContentBlock 
 		})
 	}
 
-	// Extract text content
-	if content, ok := msg["content"].(string); ok && content != "" {
-		blocks = append(blocks, ContentBlock{
-			Type: "text",
-			Text: content,
-		})
+	// Extract text content - handle both string and array formats
+	// OpenAI can send: content: "text" OR content: [{"type": "text", "text": "..."}]
+	if content, ok := msg["content"]; ok && content != nil {
+		switch c := content.(type) {
+		case string:
+			// Simple string format
+			if c != "" {
+				blocks = append(blocks, ContentBlock{
+					Type: "text",
+					Text: c,
+				})
+			}
+		case []interface{}:
+			// Structured content parts array
+			for _, part := range c {
+				if partMap, ok := part.(map[string]interface{}); ok {
+					partType, _ := partMap["type"].(string)
+					switch partType {
+					case "text":
+						if text, ok := partMap["text"].(string); ok && text != "" {
+							blocks = append(blocks, ContentBlock{
+								Type: "text",
+								Text: text,
+							})
+						}
+						// Note: image_url parts in assistant responses are rare,
+						// but we could handle them here if needed
+					}
+				}
+			}
+		}
 	}
 
 	// Extract tool calls if present

@@ -786,19 +786,23 @@ func TestMockLLM_MultipleMessages(t *testing.T) {
 				t.Fatalf("expected status 200, got %d", rr.Code)
 			}
 
-			// Verify all messages are stored
+			// Verify all messages are stored (4 input + 1 assistant response)
 			reqs := h.store.List()
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request in store, got %d", len(reqs))
 			}
-			if len(reqs[0].Messages) != 4 {
-				t.Errorf("expected 4 messages stored, got %d", len(reqs[0].Messages))
+			if len(reqs[0].Messages) != 5 {
+				t.Errorf("expected 5 messages stored (4 input + 1 assistant), got %d", len(reqs[0].Messages))
 			}
 			if reqs[0].Messages[0].Role != "system" {
 				t.Errorf("expected first message role 'system', got '%s'", reqs[0].Messages[0].Role)
 			}
 			if reqs[0].Messages[3].Content != "And 3+3?" {
-				t.Errorf("expected last message 'And 3+3?', got '%s'", reqs[0].Messages[3].Content)
+				t.Errorf("expected 4th message 'And 3+3?', got '%s'", reqs[0].Messages[3].Content)
+			}
+			// Last message should be the assistant response
+			if reqs[0].Messages[4].Role != "assistant" {
+				t.Errorf("expected last message role 'assistant', got '%s'", reqs[0].Messages[4].Role)
 			}
 		},
 	})
@@ -936,8 +940,11 @@ func TestEmptyMessages(t *testing.T) {
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request in store, got %d", len(reqs))
 			}
-			if len(reqs[0].Messages) != 0 {
-				t.Errorf("expected 0 messages, got %d", len(reqs[0].Messages))
+			if len(reqs[0].Messages) != 1 {
+				t.Errorf("expected 1 message (assistant response), got %d", len(reqs[0].Messages))
+			}
+			if reqs[0].Messages[0].Role != "assistant" {
+				t.Errorf("expected message role 'assistant', got '%s'", reqs[0].Messages[0].Role)
 			}
 		},
 	})

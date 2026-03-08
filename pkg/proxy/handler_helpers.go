@@ -203,8 +203,25 @@ func extractNonStreamContent(bodyBytes []byte, response, thinking *strings.Build
 		return
 	}
 
-	if content, ok := msg["content"].(string); ok {
-		response.WriteString(content)
+	if content, ok := msg["content"]; ok && content != nil {
+		switch c := content.(type) {
+		case string:
+			// Simple string format
+			if c != "" {
+				response.WriteString(c)
+			}
+		case []interface{}:
+			// Structured content parts array (modern OpenAI format)
+			for _, part := range c {
+				if partMap, ok := part.(map[string]interface{}); ok {
+					if partType, ok := partMap["type"].(string); ok && partType == "text" {
+						if text, ok := partMap["text"].(string); ok {
+							response.WriteString(text)
+						}
+					}
+				}
+			}
+		}
 	}
 	if rc, ok := msg["reasoning_content"].(string); ok {
 		thinking.WriteString(rc)

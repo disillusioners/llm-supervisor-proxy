@@ -439,6 +439,119 @@ func TestTranslateNonStreamResponse_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestTranslateNonStreamResponse_ArrayContent(t *testing.T) {
+	// Test handling of content as array of parts (modern OpenAI format)
+	openaiResp := map[string]interface{}{
+		"id":    "chatcmpl-123",
+		"model": "gpt-4o",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type": "text",
+							"text": "Hello! How can I help you?",
+						},
+					},
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{},
+	}
+
+	openaiBody, _ := json.Marshal(openaiResp)
+
+	result, err := TranslateNonStreamResponse(openaiBody, "claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var anthropicResp map[string]interface{}
+	json.Unmarshal(result, &anthropicResp)
+
+	content, ok := anthropicResp["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content array, got %T", anthropicResp["content"])
+	}
+
+	// Should have 1 text block
+	if len(content) != 1 {
+		t.Errorf("expected 1 content block, got %d", len(content))
+	}
+
+	textBlock, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content block map, got %T", content[0])
+	}
+
+	if textBlock["type"] != "text" {
+		t.Errorf("expected type 'text', got %v", textBlock["type"])
+	}
+
+	if textBlock["text"] != "Hello! How can I help you?" {
+		t.Errorf("expected text 'Hello! How can I help you?', got %v", textBlock["text"])
+	}
+}
+
+func TestTranslateNonStreamResponse_ArrayContentWithMultipleParts(t *testing.T) {
+	// Test handling of content array with multiple text parts
+	openaiResp := map[string]interface{}{
+		"id":    "chatcmpl-123",
+		"model": "gpt-4o",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type": "text",
+							"text": "First paragraph.",
+						},
+						map[string]interface{}{
+							"type": "text",
+							"text": "Second paragraph.",
+						},
+					},
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{},
+	}
+
+	openaiBody, _ := json.Marshal(openaiResp)
+
+	result, err := TranslateNonStreamResponse(openaiBody, "claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var anthropicResp map[string]interface{}
+	json.Unmarshal(result, &anthropicResp)
+
+	content, _ := anthropicResp["content"].([]interface{})
+
+	// Should have 2 text blocks
+	if len(content) != 2 {
+		t.Errorf("expected 2 content blocks, got %d", len(content))
+	}
+
+	// Check both blocks
+	firstBlock, _ := content[0].(map[string]interface{})
+	if firstBlock["text"] != "First paragraph." {
+		t.Errorf("expected first text 'First paragraph.', got %v", firstBlock["text"])
+	}
+
+	secondBlock, _ := content[1].(map[string]interface{})
+	if secondBlock["text"] != "Second paragraph." {
+		t.Errorf("expected second text 'Second paragraph.', got %v", secondBlock["text"])
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Translation Tests
 // ─────────────────────────────────────────────────────────────────────────────

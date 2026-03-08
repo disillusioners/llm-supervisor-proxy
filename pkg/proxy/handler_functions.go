@@ -1041,6 +1041,14 @@ func (h *Handler) finalizeSuccess(rc *requestContext) {
 	rc.reqLog.Status = "completed"
 	rc.reqLog.Response = rc.accumulatedResponse.String()
 	rc.reqLog.Thinking = rc.accumulatedThinking.String()
+
+	// Append assistant message to Messages array for frontend display
+	rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
+		Role:     "assistant",
+		Content:  rc.accumulatedResponse.String(),
+		Thinking: rc.accumulatedThinking.String(),
+	})
+
 	rc.reqLog.EndTime = time.Now()
 	rc.reqLog.Duration = time.Since(rc.startTime).String()
 	h.store.Add(rc.reqLog)
