@@ -1,20 +1,7 @@
 import { useState, useCallback } from 'preact/hooks';
-import { Router, route, getCurrentUrl } from 'preact-router';
+import { Router, route } from 'preact-router';
 import { Header, RequestList, RequestDetail, EventLog, SettingsPage } from './components';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens } from './hooks';
-
-// Base path for the app (must match vite.config.ts base)
-const BASE_PATH = '/ui';
-
-// Custom URL getter that strips the base path
-function getUrl() {
-  const url = getCurrentUrl();
-  // Strip the base path from the URL for routing
-  if (url.startsWith(BASE_PATH)) {
-    return url.slice(BASE_PATH.length) || '/';
-  }
-  return url;
-}
 
 export function App() {
   // API hooks - fetch data once at the top level
@@ -24,9 +11,9 @@ export function App() {
   const { tokens, createToken, deleteToken, refetch: refetchTokens } = useTokens();
 
   return (
-    <Router url={getUrl()}>
+    <Router>
       <SettingsRoute
-        path="/settings"
+        path="/ui/settings"
         config={config}
         onUpdateConfig={updateConfig}
         models={models}
@@ -40,7 +27,7 @@ export function App() {
       />
       <DashboardRoute
         default
-        path="/"
+        path="/ui"
         requests={requests}
         requestsLoading={requestsLoading}
         refetchRequests={refetchRequests}
