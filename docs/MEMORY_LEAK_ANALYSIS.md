@@ -290,6 +290,155 @@ func (h *Handler) handleStreamResponse(...) (result attemptResult) {
 
 ---
 
+## Fix Implementation & Review
+
+**Review Date**: 2026-03-11  
+**Status**: ✅ Completed
+
+### Fixes Implemented
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| Issue 1: No Total Stream Duration Limit | ✅ Fixed | Added `attemptCtx.Err()` check in stream loop |
+| Issue 2: MonitoredReader Goroutine Accumulation | ✅ Fixed | Refactored to single persistent goroutine |
+| Issue 3: Config Context Leak | ⏸️ Deferred | Low severity, file I/O is fast |
+| Issue 4: No Panic Recovery | ✅ Fixed | Added `defer recover()` with named return |
+
+### Issues Found During Code Review
+
+The initial fix implementation had **2 critical bugs** that were identified and corrected:
+
+#### Bug 1: Double Close Panic (HIGH 🔴)
+
+**Location**: `pkg/supervisor/monitor.go`
+
+**Problem**: When `Read()` times out, it closed `m.done` channel. If `Close()` was called later, it would panic trying to close an already-closed channel.
+
+```go
+// BEFORE (buggy):
+case <-timer.C:
+    close(m.done)      // Closes channel
+    m.reader.Close()
+    return 0, ErrIdleTimeout
+
+// Later, Close() would panic:
+func (m *MonitoredReader) Close() error {
+    close(m.done)      // PANIC: close of closed channel
+}
+```
+
+**Fix**: Use mutex-protected `closed` flag before closing channel:
+
+```go
+// AFTER (fixed):
+case <-timer.C:
+    m.mu.Lock()
+    if !m.closed {
+        m.closed = true
+        close(m.done)
+    }
+    m.mu.Unlock()
+    m.reader.Close()
+    return 0, ErrIdleTimeout
+```
+
+#### Bug 2: Wrong Byte Count & Data Loss (HIGH 🔴)
+
+**Location**: `pkg/supervisor/monitor.go`
+
+**Problem**: `Read()` returned the full read size even when caller's buffer was smaller, causing:
+1. Incorrect byte count returned
+2. Data loss (leftover bytes discarded)
+3. Panic when caller tried to copy more bytes than buffer capacity
+
+```go
+// BEFORE (buggy):
+case res := <-m.readCh:
+    copy(p, res.data)
+    return res.n, nil  // Returns 32KB even if p is only 5 bytes!
+```
+
+**Fix**: Added leftover buffer handling:
+
+```go
+// AFTER (fixed):
+type MonitoredReader struct {
+    // ... other fields
+    leftover []byte  // Buffer for data that doesn't fit in caller's buffer
+}
+
+func (m *MonitoredReader) Read(p []byte) (n int, err error) {
+    // Use leftover data first if available
+    if len(m.leftover) > 0 {
+        copied := copy(p, m.leftover)
+        m.leftover = m.leftover[copied:]
+        return copied, nil
+    }
+    
+    // ... select from readCh ...
+    
+    case res := <-m.readCh:
+        copied := copy(p, res.data)
+        if copied < len(res.data) {
+            m.leftover = res.data[copied:]  // Save leftover for next Read()
+        }
+        return copied, nil
+}
+```
+
+### Final Implementation
+
+#### pkg/supervisor/monitor.go
+
+Key changes:
+1. Single persistent `readLoop()` goroutine spawned in constructor
+2. `sync.WaitGroup` ensures clean shutdown
+3. Mutex-protected `closed` flag prevents double-close panic
+4. `leftover` buffer handles small caller buffers
+5. 5-second timeout on `Close()` to prevent indefinite blocking
+
+#### pkg/proxy/handler_functions.go
+
+Key changes:
+1. Added panic recovery with named return value
+2. Added `attemptCtx.Err()` check to enforce `MaxGenerationTime`
+3. Ensured `monitor.Close()` called in defer
+
+### Test Coverage
+
+Created comprehensive test suite in `pkg/supervisor/monitor_test.go`:
+
+| Test | Description |
+|------|-------------|
+| `TestMonitoredReader_BasicRead` | Normal read operation |
+| `TestMonitoredReader_IdleTimeout` | Timeout fires correctly (~100ms) |
+| `TestMonitoredReader_ReadAfterClose` | Error on closed reader |
+| `TestMonitoredReader_DoubleClose` | No panic on double close |
+| `TestMonitoredReader_EOF` | EOF propagated correctly |
+| `TestMonitoredReader_ReadError` | Errors propagated correctly |
+| `TestMonitoredReader_ConcurrentClose` | Clean shutdown during read |
+| `TestMonitoredReader_BytesReader` | Works with real bytes.Reader |
+| `TestMonitoredReader_LargeData` | 100KB data handled correctly |
+| `TestMonitoredReader_SmallBuffer` | Small caller buffers work |
+| `TestMonitoredReader_TimeoutThenClose` | Close after timeout doesn't panic |
+
+All 11 tests pass.
+
+### Verification Commands
+
+```bash
+# Build entire project
+go build ./...
+
+# Run supervisor tests
+go test -v ./pkg/supervisor/...
+
+# Run proxy stream/heartbeat tests
+go test -v ./pkg/proxy/... -run "TestStream|TestHeartbeat"
+```
+
+---
+
 ## Testing Recommendations
 
 1. **Slow upstream test**: Simulate upstream sending tokens every 50s for 10 minutes
