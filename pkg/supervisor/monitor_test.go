@@ -255,3 +255,71 @@ func TestMonitoredReader_TimeoutThenClose(t *testing.T) {
 	// Close after timeout should not panic
 	mr.Close()
 }
+
+// mockDataWithEOFReader simulates a reader that returns data AND EOF in a single Read call
+// This is the behavior that caused the UNEXPECTED_EOF bug
+type mockDataWithEOFReader struct {
+	data   []byte
+	called bool
+}
+
+func (m *mockDataWithEOFReader) Read(p []byte) (n int, err error) {
+	if m.called {
+		return 0, io.EOF
+	}
+	m.called = true
+	n = copy(p, m.data)
+	return n, io.EOF // Return data AND EOF together (like external upstream does)
+}
+
+func (m *mockDataWithEOFReader) Close() error {
+	return nil
+}
+
+func TestMonitoredReader_DataWithEOF(t *testing.T) {
+	// This test reproduces the bug where data+EOF returned together
+	// caused the data to be discarded, resulting in UNEXPECTED_EOF
+	data := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n")
+	reader := &mockDataWithEOFReader{data: data}
+	mr := NewMonitoredReader(reader, 1*time.Second)
+	defer mr.Close()
+
+	// Read all data using io.ReadAll
+	received, err := io.ReadAll(mr)
+	if err != nil && err != io.EOF {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+
+	if string(received) != string(data) {
+		t.Errorf("Received %q, want %q", received, data)
+	}
+}
+
+func TestMonitoredReader_DataWithEOF_SmallBuffer(t *testing.T) {
+	// Test data+EOF with small caller buffer to ensure leftover handling is correct
+	data := []byte("this is test data that should all be returned")
+	reader := &mockDataWithEOFReader{data: data}
+	mr := NewMonitoredReader(reader, 1*time.Second)
+	defer mr.Close()
+
+	// Read with small buffer
+	buf := make([]byte, 5)
+	received := make([]byte, 0, len(data))
+	for {
+		n, err := mr.Read(buf)
+		if err == io.EOF {
+			if n > 0 {
+				received = append(received, buf[:n]...)
+			}
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		received = append(received, buf[:n]...)
+	}
+
+	if string(received) != string(data) {
+		t.Errorf("Received %q, want %q", received, data)
+	}
+}

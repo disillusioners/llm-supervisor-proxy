@@ -30,6 +30,8 @@ type MonitoredReader struct {
 	closed      bool
 	// Buffer for leftover data when caller's buffer is smaller than read data
 	leftover []byte
+	// pendingErr stores error from readLoop to return after leftover is exhausted
+	pendingErr error
 }
 
 type readResult struct {
@@ -91,9 +93,24 @@ func (m *MonitoredReader) Read(p []byte) (n int, err error) {
 		m.leftover = m.leftover[copied:]
 		if len(m.leftover) == 0 {
 			m.leftover = nil // Release memory
+			// If we had a pending error, return it now that leftover is exhausted
+			if m.pendingErr != nil {
+				pending := m.pendingErr
+				m.pendingErr = nil
+				m.mu.Unlock()
+				return copied, pending
+			}
 		}
 		m.mu.Unlock()
 		return copied, nil
+	}
+
+	// If we have a pending error (from previous read with data+error), return it
+	if m.pendingErr != nil {
+		pending := m.pendingErr
+		m.pendingErr = nil
+		m.mu.Unlock()
+		return 0, pending
 	}
 	m.mu.Unlock()
 
@@ -102,17 +119,35 @@ func (m *MonitoredReader) Read(p []byte) (n int, err error) {
 
 	select {
 	case res := <-m.readCh:
+		// IMPORTANT: Data may come WITH an error (e.g., final chunk + EOF)
+		// We must return data first, then return error on next Read()
+		if len(res.data) > 0 {
+			// Copy data to caller's buffer, store leftover if buffer is too small
+			copied := copy(p, res.data)
+			if copied < len(res.data) {
+				m.mu.Lock()
+				m.leftover = res.data[copied:]
+				// Store error to return after leftover is exhausted
+				if res.err != nil {
+					m.pendingErr = res.err
+				}
+				m.mu.Unlock()
+				return copied, nil
+			}
+			// If we have an error but returned all data, store error for next call
+			if res.err != nil {
+				m.mu.Lock()
+				m.pendingErr = res.err
+				m.mu.Unlock()
+				return copied, nil
+			}
+			return copied, nil
+		}
+		// No data, just return the error
 		if res.err != nil {
 			return 0, res.err
 		}
-		// Copy data to caller's buffer, store leftover if buffer is too small
-		copied := copy(p, res.data)
-		if copied < len(res.data) {
-			m.mu.Lock()
-			m.leftover = res.data[copied:]
-			m.mu.Unlock()
-		}
-		return copied, nil
+		return 0, nil
 	case <-timer.C:
 		// Timeout occurred - signal read loop to stop
 		// Close done channel directly (safe because Close() checks m.closed first)
