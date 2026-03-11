@@ -729,7 +729,15 @@ func (h *Handler) handleNonStreamResponse(w http.ResponseWriter, rc *requestCont
 // handleStreamResponse processes a Server-Sent Events stream with buffering.
 // All chunks are buffered in memory until the stream completes successfully.
 // This enables safe retry mid-stream since nothing is sent to client until [DONE].
-func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters, heartbeatStop context.CancelFunc) attemptResult {
+func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext, resp *http.Response, monitor *supervisor.MonitoredReader, attemptCtx context.Context, attempt int, counters *retryCounters, heartbeatStop context.CancelFunc) (result attemptResult) {
+	// Panic recovery to ensure resources are cleaned up even on unexpected errors
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC recovered in handleStreamResponse: %v", r)
+			result = attemptBreakToFallback
+		}
+	}()
+
 	// Ensure heartbeat is always stopped (prevents goroutine leak)
 	// Note: We also stop it explicitly before writes to prevent race conditions
 	var heartbeatStopped bool
@@ -739,7 +747,13 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			heartbeatStopped = true
 		}
 	}
-	defer stopHeartbeat()
+	defer func() {
+		stopHeartbeat()
+		// Ensure monitor is always closed (prevents connection leak)
+		if monitor != nil {
+			monitor.Close()
+		}
+	}()
 
 	scanner := bufio.NewScanner(monitor)
 	buffer := make([]byte, 0, 1024*1024)
@@ -781,6 +795,16 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	streamBuf := detector.NewStreamBuffer()
 
 	for scanner.Scan() {
+		// Check total stream duration (MaxGenerationTime) to prevent indefinite streams
+		// This catches slow upstreams that send tokens within IdleTimeout but never complete
+		if attemptCtx.Err() != nil {
+			log.Printf("Stream exceeded max generation time (%v), aborting", rc.conf.MaxGenerationTime)
+			h.publishEvent("stream_max_generation_time_exceeded", map[string]interface{}{"id": rc.reqID, "duration": time.Since(rc.startTime).String()})
+			monitor.Close()
+			counters.genRetries++
+			return attemptContinueRetry
+		}
+
 		// Check if client disconnected while we're buffering
 		// This prevents wasting upstream resources on abandoned requests
 		if rc.baseCtx.Err() != nil {
