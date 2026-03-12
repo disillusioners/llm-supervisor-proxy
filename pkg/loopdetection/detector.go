@@ -165,6 +165,13 @@ func (d *Detector) Reset() {
 	defer d.mu.Unlock()
 	d.window = d.window[:0]
 	d.msgCounter = 0
+
+	// Reset all strategies that have accumulated state
+	for _, s := range d.strategies {
+		if resetter, ok := s.(interface{ Reset() }); ok {
+			resetter.Reset()
+		}
+	}
 }
 
 // WindowSize returns the current number of messages in the sliding window.

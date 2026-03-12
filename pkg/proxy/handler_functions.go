@@ -769,7 +769,12 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	rc.streamIDSet = false
 	rc.streamID = ""
 
-	// Use per-request detector (persists across retries within this request)
+	// Reset loop detector state between retries to prevent memory accumulation
+	if rc.loopDetector != nil {
+		rc.loopDetector.Reset()
+	}
+
+	// Initialize detector if first attempt (detector state is reset between retries above)
 	if rc.loopDetector == nil {
 		ldCfg := loopdetection.Config{
 			Enabled:              rc.conf.LoopDetection.Enabled,

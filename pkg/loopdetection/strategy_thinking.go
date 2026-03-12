@@ -8,6 +8,8 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection/fingerprint"
 )
 
+const maxThinkingBufferSize = 1 * 1024 * 1024 // 1MB limit
+
 // ThinkingStrategy detects repetitive thinking/reasoning patterns.
 // Reasoning models (o1, o3-mini, etc.) naturally produce iterative thinking
 // that can loop when stuck. This strategy uses trigram repetition analysis
@@ -71,6 +73,19 @@ func (s *ThinkingStrategy) SetModel(model string) {
 
 // AddThinkingContent accumulates thinking/reasoning content for analysis.
 func (s *ThinkingStrategy) AddThinkingContent(text string) {
+	// Enforce memory limit by keeping only the tail (most recent content)
+	if s.accumulatedThinking.Len() >= maxThinkingBufferSize {
+		current := s.accumulatedThinking.String()
+		keepLen := maxThinkingBufferSize / 2 // Keep last 512KB
+		if keepLen > len(current) {
+			keepLen = len(current)
+		}
+		tail := current[len(current)-keepLen:]
+		s.accumulatedThinking.Reset()
+		s.accumulatedThinking.WriteString(tail)
+		s.thinkingTokenCount = fingerprint.EstimateTokenCount(tail)
+	}
+
 	s.accumulatedThinking.WriteString(text)
 	s.thinkingTokenCount += fingerprint.EstimateTokenCount(text)
 }
@@ -78,13 +93,6 @@ func (s *ThinkingStrategy) AddThinkingContent(text string) {
 // Analyze checks the accumulated thinking content for repetitive patterns.
 // It only runs when enough thinking tokens have been accumulated.
 func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
-	// Also check window messages for thinking content type
-	for _, msg := range window {
-		if msg.ContentType == "thinking" && len(msg.Content) > 0 {
-			s.AddThinkingContent(msg.Content + " ")
-		}
-	}
-
 	if s.thinkingTokenCount < s.thinkingMinTokens {
 		return nil
 	}
