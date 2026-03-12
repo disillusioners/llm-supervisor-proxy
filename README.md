@@ -1,25 +1,43 @@
 # LLM Supervisor Proxy
 
-A lightweight sidecar proxy designed to sit between your autonomous agents (e.g., OpenCode) and your LLM provider (e.g., LiteLLM, vLLM, Ollama). It detects "zombie" requests where the LLM stops generating tokens mid-stream and automatically retries them, ensuring your agents don't freeze indefinitely.
+A production-ready OpenAI-compatible proxy server that sits between your autonomous agents and LLM providers. It detects "zombie" requests where the LLM stops generating tokens mid-stream and automatically retries them, ensuring your agents don't freeze indefinitely.
+
+**Supports multiple LLM providers**: OpenAI, Anthropic, Azure OpenAI, Google Gemini, Zhipu/GLM, MiniMax, and ZAI.
 
 ## 🚀 Features
 
+### Core Reliability
 -   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
 -   **Multi-Strategy Auto-Retry**:
     -   **Idle Reset**: Retries when a stream hangs mid-generation.
     -   **Upstream Recovery**: Retries on 5xx errors or connectivity issues from the provider.
     -   **Generation Guard**: Ensures requests eventually finish within `MAX_GENERATION_TIME`.
--   **Loop Detection**: Detects when LLMs enter repetitive patterns (identical responses, similar content, repeated tool calls, circular action workflows, stagnating progress). Optionally interrupts the stream and retries with sanitized context.
--   **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
 -   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
--   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
 -   **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
     > ⚠️ **Note**: For streaming requests, retry only occurs before headers are sent (e.g., on 5xx errors). Once streaming begins, mid-stream failures send an SSE error event to the client instead of retrying.
+
+### Loop Detection & Recovery
+-   **Loop Detection**: Detects when LLMs enter repetitive patterns (identical responses, similar content, repeated tool calls, circular action workflows, stagnating progress). Optionally interrupts the stream and retries with sanitized context.
+
+### Multi-Provider Support
+-   **Multiple LLM Providers**: Works with OpenAI, Anthropic, Azure OpenAI, Google Gemini, Zhipu/GLM, MiniMax, and ZAI out of the box.
+-   **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
+-   **Credential Management**: Store encrypted API keys and configure per-model credentials. Supports environment variable expansion (`${API_KEY}`) for secure secret management.
+
+### Tool Call Handling
+-   **Automatic Tool Call Repair**: Repairs malformed JSON in LLM tool call arguments using multiple strategies (extraction, library repair, reasoning removal, or LLM-based fixing).
+
+### Authentication & Security
+-   **API Token Authentication**: Token-based authentication with `sk-` prefix tokens, expiration dates, and secure SHA-256 hashing.
+
+### Deployment & Monitoring
+-   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
+-   **Kubernetes Ready**: Helm chart with OAuth2 proxy integration, PostgreSQL support, and long-running request handling (3600s timeout for streaming).
 
 ## 🛠️ Installation
 
 ### Prerequisites
--   Go 1.20+
+-   Go 1.24+
 -   Node.js 18+ (required for building the frontend)
 
 ### Build & Install
@@ -56,6 +74,7 @@ The proxy uses a three-tier configuration system with the following precedence:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
+| `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before considering the stream hung. |
 | `MAX_GENERATION_TIME` | `300s` | Hard limit for the entire request lifecycle. |
@@ -65,6 +84,7 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
+| `INTERNAL_ENCRYPTION_KEY` | *(empty)* | Base64-encoded 32-byte key for encrypting stored API keys. |
 
 ### Database Storage
 
@@ -105,6 +125,104 @@ The proxy includes a built-in monitoring dashboard accessible at `http://localho
 - **Live Configuration**: Change timeouts and retry limits on the fly without restarting.
 - **Fallback Management**: Configure model-to-model fallback chains.
 - **Loop Detection Config**: Tune detection thresholds and toggle shadow mode.
+- **Token Management**: Create, list, and revoke API tokens.
+- **Credential Management**: Store and manage encrypted API keys for direct provider access.
+
+## 🔌 Multi-Provider Support
+
+The proxy supports multiple LLM providers out of the box:
+
+| Provider | Default Base URL | Notes |
+|----------|-----------------|-------|
+| **OpenAI** | `https://api.openai.com/v1` | Standard OpenAI API |
+| **Anthropic** | — | Anthropic Messages API |
+| **Azure OpenAI** | — | Requires `AZURE_API_KEY` and deployment URL |
+| **Google Gemini** | — | Google AI Studio / Vertex AI |
+| **Zhipu/GLM** | `https://open.bigmodel.cn/api/paas/v4` | OpenAI-compatible |
+| **MiniMax** | `https://api.minimax.io/v1` | OpenAI-compatible |
+| **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI-compatible |
+
+Configure per-model credentials and base URLs via the Web UI or database.
+
+## 🔐 API Token Authentication
+
+Enable token-based authentication for your proxy:
+
+```bash
+# Create a token (via API)
+curl -X POST http://localhost:4321/api/tokens \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-agent", "expires_at": "2025-12-31T23:59:59Z"}'
+
+# Use the token
+curl http://localhost:4321/v1/chat/completions \
+  -H "Authorization: Bearer sk_xxx..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [...]}'
+```
+
+Tokens use the `sk-` prefix with 64 hex characters and support optional expiration dates.
+
+## 🔧 Tool Call Repair
+
+When LLMs output malformed JSON in tool call arguments, the proxy can automatically repair them:
+
+| Strategy | Description |
+|----------|-------------|
+| `extract_json` | Extracts valid JSON from mixed content |
+| `library_repair` | Uses jsonrepair library for common issues |
+| `remove_reasoning` | Strips reasoning patterns (e.g., "Let me...", "Summary:") |
+| `fixer_model` | Uses a separate LLM to repair malformed JSON |
+
+Configure via the Web UI under Tool Repair settings.
+
+## 🔑 Credential Management
+
+Store encrypted API keys and call providers directly (bypassing LiteLLM):
+
+1. **Set an encryption key**:
+   ```bash
+   export INTERNAL_ENCRYPTION_KEY=$(openssl rand -base64 32)
+   ```
+
+2. **Create a credential** (via Web UI or API):
+   ```json
+   {
+     "name": "openai-prod",
+     "api_key": "${OPENAI_API_KEY}",
+     "base_url": "https://api.openai.com/v1"
+   }
+   ```
+
+3. **Use in model config**:
+   ```json
+   {
+     "model": "gpt-4",
+     "credential_id": "cred_xxx"
+   }
+   ```
+
+Supports environment variable expansion: `${VAR}` or `${VAR:-default}`.
+
+## ☸️ Kubernetes Deployment
+
+Deploy to Kubernetes using the included Helm chart:
+
+```bash
+# Install with Helm
+helm install llm-supervisor-proxy ./k8s
+
+# With OAuth2 proxy for authentication
+helm install llm-supervisor-proxy ./k8s \
+  --set oauth2Proxy.enabled=true \
+  --set postgresql.enabled=true
+```
+
+Features:
+- **OAuth2 Proxy integration** for OIDC authentication
+- **PostgreSQL support** for production workloads
+- **Long-running request support** (3600s timeout for streaming)
+- **Secret management** for database and OAuth credentials
 
 ## 🔄 Loop Detection
 
@@ -144,12 +262,20 @@ For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detect
 │   │   ├── static/          # Built frontend (embedded)
 │   │   └── frontend/        # Preact frontend source
 │   ├── proxy/               # Core proxy logic & retry handling
+│   ├── providers/           # LLM provider adapters (OpenAI, Anthropic, etc.)
 │   ├── loopdetection/       # Loop detection strategies & recovery
+│   ├── toolrepair/          # Automatic tool call JSON repair
+│   ├── auth/                # API token authentication
 │   ├── events/              # Event bus for SSE updates
-│   ├── models/              # Model & fallback configuration
+│   ├── models/              # Model, fallback & credential management
+│   ├── bufferstore/         # Persistent stream buffering
 │   ├── store/               # In-memory storage & SQLite/PostgreSQL Database
 │   │   ├── database/        # DB Connection, migrations, sqlc queries
+│   │   └── database/sqlc/   # sqlc query definitions
 │   └── config/              # App-wide configuration management
+├── k8s/                     # Kubernetes Helm chart & manifests
+│   ├── templates/           # Helm templates
+│   └── values.yaml          # Default values
 ├── docs/                    # Design docs & implementation details
 └── LICENSE                  # MIT License
 ```

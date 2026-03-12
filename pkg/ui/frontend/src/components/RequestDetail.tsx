@@ -10,6 +10,81 @@ interface RequestDetailProps {
   loading: boolean;
 }
 
+// Tool Call Display Component - Collapsible with formatted arguments
+function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; arguments: string } } }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [parsedArgs, setParsedArgs] = useState<unknown>(null);
+  const [parseError, setParseError] = useState(false);
+
+  // Parse arguments on mount
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(toolCall.function.arguments);
+      setParsedArgs(parsed);
+      setParseError(false);
+    } catch {
+      setParsedArgs(null);
+      setParseError(true);
+    }
+  }, [toolCall.function.arguments]);
+
+  const toggleExpand = () => setIsExpanded(!isExpanded);
+
+  return (
+    <div class="bg-purple-900/20 border border-purple-500/30 rounded-lg overflow-hidden transition-all duration-200 hover:border-purple-500/50 hover:bg-purple-900/30">
+      {/* Header - Always visible, clickable */}
+      <button
+        type="button"
+        onClick={toggleExpand}
+        class="w-full flex items-center justify-between p-3 text-left hover:bg-purple-800/20 transition-colors"
+      >
+        <div class="flex items-center gap-2">
+          <span class="text-lg" role="img" aria-label="tool">🔧</span>
+          <span class="text-purple-200 font-semibold text-sm">
+            {escapeHtml(toolCall.function.name)}
+          </span>
+        </div>
+        <div class="flex items-center gap-2">
+          {parsedArgs && !parseError && (
+            <span class="text-xs text-purple-400/70">
+              {Array.isArray(parsedArgs) 
+                ? `${parsedArgs.length} args` 
+                : typeof parsedArgs === 'object' 
+                  ? `${Object.keys(parsedArgs).length} keys`
+                  : ''}
+            </span>
+          )}
+          <span class={`text-purple-400 text-xs transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+            ▶
+          </span>
+        </div>
+      </button>
+
+      {/* Arguments - Collapsible */}
+      <div 
+        class={`overflow-hidden transition-all duration-300 ease-in-out ${
+          isExpanded ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
+        }`}
+      >
+        <div class="px-3 pb-3">
+          <div class="text-xs text-purple-400/60 mb-2 ml-6">Arguments</div>
+          <div class="bg-purple-950/50 rounded border border-purple-500/20 p-3 ml-6">
+            {parseError ? (
+              <pre class="text-xs text-red-400 overflow-x-auto">
+                {escapeHtml(toolCall.function.arguments)}
+              </pre>
+            ) : parsedArgs ? (
+              <JsonViewer data={parsedArgs} depth={0} defaultExpanded={true} />
+            ) : (
+              <span class="text-gray-500 text-xs">Loading...</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Collapsible JSON viewer component
 function JsonViewer({ 
   data, 
@@ -577,18 +652,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
               {message.tool_calls && message.tool_calls.length > 0 && (
                 <div class="ml-8 mr-0 mt-2 space-y-2">
                   {message.tool_calls.map((toolCall, tcIndex) => (
-                    <div
-                      key={tcIndex}
-                      class="bg-purple-900/30 border border-purple-500/40 rounded p-3"
-                    >
-                      <div class="text-xs text-purple-400 mb-1">Tool Call</div>
-                      <div class="text-purple-200">
-                        <span class="font-semibold">{escapeHtml(toolCall.function.name)}</span>
-                        <pre class="mt-2 text-xs bg-purple-950/50 p-2 rounded overflow-x-auto">
-                          {escapeHtml(toolCall.function.arguments)}
-                        </pre>
-                      </div>
-                    </div>
+                    <ToolCallDisplay key={toolCall.id || tcIndex} toolCall={toolCall} />
                   ))}
                 </div>
               )}
