@@ -30,6 +30,17 @@ import (
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 
+// sendShadowResult sends result to shadow channel in a non-blocking manner
+// to prevent panics if channel is closed or full
+func sendShadowResult(ch chan shadowResult, result shadowResult) {
+	select {
+	case ch <- result:
+	default:
+		// Channel full or closed - that's fine, main already has a result or canceled
+		log.Printf("[SHADOW] Channel full or closed, result not sent")
+	}
+}
+
 // shouldStartShadow checks if shadow retry should be triggered
 func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
 	// Must be enabled in config
@@ -44,8 +55,9 @@ func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
 	if rc.streamBuffer.Len() > 0 {
 		return false
 	}
-	// Must have a fallback model available
-	if len(rc.modelList) < 2 {
+	// Must have a fallback model available (next in chain after current)
+	shadowModelIndex := rc.currentModelIndex + 1
+	if shadowModelIndex >= len(rc.modelList) {
 		return false
 	}
 	// Shadow must not already be running
@@ -59,8 +71,8 @@ func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
 // to the fallback model. If shadow completes successfully before the main request,
 // its buffer will be used instead.
 func (h *Handler) startShadowRequest(rc *requestContext) {
-	// Get fallback model (next in chain)
-	shadowModelIndex := 1 // Always use first fallback for shadow
+	// Get next fallback model in chain
+	shadowModelIndex := rc.currentModelIndex + 1
 	if shadowModelIndex >= len(rc.modelList) {
 		return
 	}
@@ -96,13 +108,22 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 		}
 		shadowBody["model"] = shadowModel
 
+		// Apply TruncateParams for shadow model (strip unsupported params)
+		if rc.conf.ModelsConfig != nil {
+			if toStrip := rc.conf.ModelsConfig.GetTruncateParams(shadowModel); len(toStrip) > 0 {
+				for _, param := range toStrip {
+					delete(shadowBody, param)
+				}
+			}
+		}
+
 		// Clone body bytes
 		newBodyBytes, _ := json.Marshal(shadowBody)
 
 		// Create request with shadow context
 		proxyReq, err := http.NewRequestWithContext(shadowCtx, rc.method, rc.targetURL, bytes.NewBuffer(newBodyBytes))
 		if err != nil {
-			rc.shadow.done <- shadowResult{err: err}
+			sendShadowResult(rc.shadow.done, shadowResult{err: err})
 			return
 		}
 
@@ -125,14 +146,14 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 		// Make request
 		resp, err := h.client.Do(proxyReq)
 		if err != nil {
-			rc.shadow.done <- shadowResult{err: err}
+			sendShadowResult(rc.shadow.done, shadowResult{err: err})
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			rc.shadow.done <- shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))}
+			sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))})
 			return
 		}
 
@@ -155,14 +176,14 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 		}
 
 		if err := scanner.Err(); err != nil {
-			rc.shadow.done <- shadowResult{err: err}
+			sendShadowResult(rc.shadow.done, shadowResult{err: err})
 			return
 		}
 
-		rc.shadow.done <- shadowResult{
+		sendShadowResult(rc.shadow.done, shadowResult{
 			buffer:    buffer,
 			completed: completed,
-		}
+		})
 	}()
 }
 
@@ -251,6 +272,8 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 // attemptModel runs the retry loop for a single model. Returns true if the
 // request completed successfully (response has been written to w).
 func (h *Handler) attemptModel(w http.ResponseWriter, rc *requestContext, modelIndex int, currentModel string) bool {
+	// Store current model index for shadow retry logic
+	rc.currentModelIndex = modelIndex
 	counters := &retryCounters{}
 
 	for {

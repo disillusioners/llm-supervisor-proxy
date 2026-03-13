@@ -48,6 +48,9 @@ type requestContext struct {
 	reqLog    *store.RequestLog
 	modelList []string
 
+	// Current model index in the fallback chain (set by attemptModel)
+	currentModelIndex int
+
 	// Request body (mutated on retries)
 	requestBody map[string]interface{}
 	isStream    bool
