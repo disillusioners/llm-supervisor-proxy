@@ -103,10 +103,22 @@ func (s *ThinkingStrategy) AddThinkingContent(text string) {
 
 // Analyze checks the accumulated thinking content for repetitive patterns.
 // It only runs when enough thinking tokens have been accumulated.
+// Rate limited to prevent CPU/memory thrashing on fast reasoning models.
 func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
 	if s.thinkingTokenCount < s.thinkingMinTokens {
 		return nil
 	}
+
+	// Rate limit: skip analysis if called too recently
+	// This prevents memory explosion when reasoning models generate content rapidly
+	s.mu.Lock()
+	now := time.Now()
+	if now.Sub(s.lastAnalysisTime) < minAnalysisInterval {
+		s.mu.Unlock()
+		return nil
+	}
+	s.lastAnalysisTime = now
+	s.mu.Unlock()
 
 	text := s.accumulatedThinking.String()
 	ratio := fingerprint.TrigramRepetitionRatio(text)
@@ -151,6 +163,7 @@ func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
 func (s *ThinkingStrategy) Reset() {
 	s.accumulatedThinking.Reset()
 	s.thinkingTokenCount = 0
+	s.lastAnalysisTime = time.Time{} // Reset rate limiter
 }
 
 // isReasoningModel checks if the current model matches any reasoning model pattern.
