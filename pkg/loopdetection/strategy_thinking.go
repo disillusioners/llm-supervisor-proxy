@@ -78,12 +78,19 @@ func (s *ThinkingStrategy) Name() string {
 }
 
 // SetModel sets the current model name for threshold selection.
+// Thread-safe: protected by mutex to prevent data races with Analyze().
 func (s *ThinkingStrategy) SetModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.currentModel = model
 }
 
 // AddThinkingContent accumulates thinking/reasoning content for analysis.
+// Thread-safe: protected by mutex to prevent data races with Analyze().
 func (s *ThinkingStrategy) AddThinkingContent(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Enforce memory limit by keeping only the tail (most recent content)
 	if s.accumulatedThinking.Len() >= maxThinkingBufferSize {
 		current := s.accumulatedThinking.String()
@@ -104,29 +111,35 @@ func (s *ThinkingStrategy) AddThinkingContent(text string) {
 // Analyze checks the accumulated thinking content for repetitive patterns.
 // It only runs when enough thinking tokens have been accumulated.
 // Rate limited to prevent CPU/memory thrashing on fast reasoning models.
+// Thread-safe: captures all needed state under lock, releases before expensive computation.
 func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
+	s.mu.Lock()
+
 	if s.thinkingTokenCount < s.thinkingMinTokens {
+		s.mu.Unlock()
 		return nil
 	}
 
 	// Rate limit: skip analysis if called too recently
 	// This prevents memory explosion when reasoning models generate content rapidly
-	s.mu.Lock()
 	now := time.Now()
 	if now.Sub(s.lastAnalysisTime) < minAnalysisInterval {
 		s.mu.Unlock()
 		return nil
 	}
 	s.lastAnalysisTime = now
-	s.mu.Unlock()
 
+	// Capture all needed state while holding lock
 	text := s.accumulatedThinking.String()
-	ratio := fingerprint.TrigramRepetitionRatio(text)
-
+	tokenCount := s.thinkingTokenCount
 	threshold := s.trigramThreshold
 	if s.isReasoningModel() {
 		threshold = s.reasoningTrigramThreshold
 	}
+	s.mu.Unlock()
+
+	// Perform expensive trigram analysis without lock
+	ratio := fingerprint.TrigramRepetitionRatio(text)
 
 	if ratio < threshold {
 		severity := SeverityWarning
@@ -149,7 +162,7 @@ func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
 			Severity:     severity,
 			Strategy:     s.Name(),
 			Evidence: fmt.Sprintf("Thinking content has high trigram repetition (ratio=%.3f, threshold=%.3f, tokens=%d)",
-				ratio, threshold, s.thinkingTokenCount),
+				ratio, threshold, tokenCount),
 			Confidence:  confidence,
 			Pattern:     []string{evidenceText},
 			RepeatCount: int(1.0 / ratio), // approximate repeats
@@ -160,7 +173,10 @@ func (s *ThinkingStrategy) Analyze(window []MessageContext) *DetectionResult {
 }
 
 // Reset clears accumulated thinking content.
+// Thread-safe: protected by mutex to prevent data races.
 func (s *ThinkingStrategy) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.accumulatedThinking.Reset()
 	s.thinkingTokenCount = 0
 	s.lastAnalysisTime = time.Time{} // Reset rate limiter

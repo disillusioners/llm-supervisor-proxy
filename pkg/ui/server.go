@@ -33,6 +33,8 @@ type Model struct {
 	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential
 	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional)
 	InternalModel   string `json:"internal_model,omitempty"`
+	// Stream buffering deadline
+	ReleaseStreamChunkDeadline models.Duration `json:"release_stream_chunk_deadline,omitempty"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -290,15 +292,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		models := make([]Model, len(modelConfigs))
 		for i, mc := range modelConfigs {
 			models[i] = Model{
-				ID:              mc.ID,
-				Name:            mc.Name,
-				Enabled:         mc.Enabled,
-				FallbackChain:   mc.FallbackChain,
-				TruncateParams:  mc.TruncateParams,
-				Internal:        mc.Internal,
-				CredentialID:    mc.CredentialID,
-				InternalBaseURL: mc.InternalBaseURL,
-				InternalModel:   mc.InternalModel,
+				ID:                         mc.ID,
+				Name:                       mc.Name,
+				Enabled:                    mc.Enabled,
+				FallbackChain:              mc.FallbackChain,
+				TruncateParams:             mc.TruncateParams,
+				Internal:                   mc.Internal,
+				CredentialID:               mc.CredentialID,
+				InternalBaseURL:            mc.InternalBaseURL,
+				InternalModel:              mc.InternalModel,
+				ReleaseStreamChunkDeadline: mc.ReleaseStreamChunkDeadline,
 			}
 		}
 
@@ -332,15 +335,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig
 		modelConfig := models.ModelConfig{
-			ID:              newModel.ID,
-			Name:            newModel.Name,
-			Enabled:         newModel.Enabled,
-			FallbackChain:   newModel.FallbackChain,
-			TruncateParams:  newModel.TruncateParams,
-			Internal:        newModel.Internal,
-			CredentialID:    newModel.CredentialID,
-			InternalBaseURL: newModel.InternalBaseURL,
-			InternalModel:   newModel.InternalModel,
+			ID:                         newModel.ID,
+			Name:                       newModel.Name,
+			Enabled:                    newModel.Enabled,
+			FallbackChain:              newModel.FallbackChain,
+			TruncateParams:             newModel.TruncateParams,
+			Internal:                   newModel.Internal,
+			CredentialID:               newModel.CredentialID,
+			InternalBaseURL:            newModel.InternalBaseURL,
+			InternalModel:              newModel.InternalModel,
+			ReleaseStreamChunkDeadline: newModel.ReleaseStreamChunkDeadline,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -402,15 +406,16 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig and update
 		modelConfig := models.ModelConfig{
-			ID:              updatedModel.ID,
-			Name:            updatedModel.Name,
-			Enabled:         updatedModel.Enabled,
-			FallbackChain:   updatedModel.FallbackChain,
-			TruncateParams:  updatedModel.TruncateParams,
-			Internal:        updatedModel.Internal,
-			CredentialID:    updatedModel.CredentialID,
-			InternalBaseURL: updatedModel.InternalBaseURL,
-			InternalModel:   updatedModel.InternalModel,
+			ID:                         updatedModel.ID,
+			Name:                       updatedModel.Name,
+			Enabled:                    updatedModel.Enabled,
+			FallbackChain:              updatedModel.FallbackChain,
+			TruncateParams:             updatedModel.TruncateParams,
+			Internal:                   updatedModel.Internal,
+			CredentialID:               updatedModel.CredentialID,
+			InternalBaseURL:            updatedModel.InternalBaseURL,
+			InternalModel:              updatedModel.InternalModel,
+			ReleaseStreamChunkDeadline: updatedModel.ReleaseStreamChunkDeadline,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
