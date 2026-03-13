@@ -42,6 +42,9 @@ type RequestLog struct {
 	// Request metadata
 	IsStream   bool                   `json:"is_stream"`            // Whether this was a streaming request
 	Parameters map[string]interface{} `json:"parameters,omitempty"` // Request parameters (temperature, max_tokens, etc.)
+
+	// Application tag for grouping requests
+	AppTag string `json:"app_tag,omitempty"` // Value from x-proxy-app header
 }
 
 type RequestStore struct {
@@ -101,4 +104,83 @@ func (s *RequestStore) List() []*RequestLog {
 		list[n-1-i] = req
 	}
 	return list
+}
+
+// ListFiltered returns requests filtered by app tag.
+// If appTag is empty string, returns requests with no app tag (null/empty).
+// If appTag is "*", returns all requests (same as List()).
+func (s *RequestStore) ListFiltered(appTag string) []*RequestLog {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// "*" means all requests
+	if appTag == "*" {
+		n := len(s.requests)
+		list := make([]*RequestLog, n)
+		for i, req := range s.requests {
+			list[n-1-i] = req
+		}
+		return list
+	}
+
+	// Filter by app tag
+	var filtered []*RequestLog
+	for i := len(s.requests) - 1; i >= 0; i-- {
+		req := s.requests[i]
+		if appTag == "" {
+			// Empty string means requests with no app tag
+			if req.AppTag == "" {
+				filtered = append(filtered, req)
+			}
+		} else {
+			// Match specific app tag
+			if req.AppTag == appTag {
+				filtered = append(filtered, req)
+			}
+		}
+	}
+	return filtered
+}
+
+// GetUniqueAppTags returns a sorted list of unique app tags from all requests.
+// Includes an empty string entry if there are requests without an app tag.
+func (s *RequestStore) GetUniqueAppTags() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tagSet := make(map[string]bool)
+	hasEmptyTag := false
+
+	for _, req := range s.requests {
+		if req.AppTag == "" {
+			hasEmptyTag = true
+		} else {
+			tagSet[req.AppTag] = true
+		}
+	}
+
+	// Convert to sorted slice
+	tags := make([]string, 0, len(tagSet))
+	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+
+	// Sort tags
+	for i := 0; i < len(tags); i++ {
+		for j := i + 1; j < len(tags); j++ {
+			if tags[i] > tags[j] {
+				tags[i], tags[j] = tags[j], tags[i]
+			}
+		}
+	}
+
+	// Add "default" at the beginning if there are requests without app tag
+	if hasEmptyTag {
+		result := make([]string, 0, len(tags)+1)
+		result = append(result, "") // Empty string represents "default"
+		result = append(result, tags...)
+		return result
+	}
+
+	return tags
 }

@@ -116,6 +116,12 @@ export interface Request {
   original_model?: string;
   is_stream?: boolean;
   fallback_used?: string[];
+  parameters?: Record<string, unknown>;
+  tool_calls?: ToolCall[];
+  thinking?: string;
+  is_stream?: boolean;
+  // Application tag for grouping/filtering
+  app_tag?: string;
 }
 
 export interface RequestDetail extends Request {

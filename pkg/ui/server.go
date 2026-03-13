@@ -123,6 +123,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
+	mux.HandleFunc("/fe/api/app-tags", s.handleAppTags)
 	mux.HandleFunc("/fe/api/buffers/", s.handleBufferContent)
 	// Token management
 	mux.HandleFunc("/fe/api/tokens", s.handleTokens)
@@ -143,9 +144,34 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requests := s.store.List()
+	appFilter := r.URL.Query().Get("app")
+
+	var requests []*store.RequestLog
+	switch appFilter {
+	case "", "all":
+		// Show all requests
+		requests = s.store.List()
+	case "default":
+		// Show requests without app tag (empty string filter)
+		requests = s.store.ListFiltered("")
+	default:
+		// Filter by specific app tag
+		requests = s.store.ListFiltered(appFilter)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(requests)
+}
+
+func (s *Server) handleAppTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tags := s.store.GetUniqueAppTags()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tags)
 }
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {

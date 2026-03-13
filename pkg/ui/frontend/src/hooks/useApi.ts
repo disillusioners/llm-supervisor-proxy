@@ -20,15 +20,18 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 // Requests API
-export function useRequests() {
+export function useRequests(initialAppTag?: string) {
   const [requests, setRequests] = useState<Request[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [currentAppTag, setCurrentAppTag] = useState(initialAppTag);
 
-  const fetchRequests = useCallback(async () => {
+  const fetchRequests = useCallback(async (overrideTag?: string) => {
     try {
       setLoading(true);
-      const data = await apiFetch<Request[]>('/requests');
+      const tag = overrideTag !== undefined ? overrideTag : currentAppTag;
+      const url = tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests';
+      const data = await apiFetch<Request[]>(url);
       setRequests(data);
       setError(null);
     } catch (e) {
@@ -36,13 +39,13 @@ export function useRequests() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentAppTag]);
 
   useEffect(() => {
     fetchRequests();
   }, [fetchRequests]);
 
-  return { requests, loading, error, refetch: fetchRequests };
+  return { requests, loading, error, refetch: fetchRequests, setAppTag: setCurrentAppTag };
 }
 
 export function useRequestDetail(id: string | null) {
@@ -168,6 +171,30 @@ export function formatDuration(value: string | number): string {
     return value + 's';
   }
   return value;
+}
+
+// App Tags API - fetch unique app tags for filtering
+export function useAppTags() {
+  const [appTags, setAppTags] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchAppTags = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await apiFetch<string[]>('/app-tags');
+      setAppTags(data || []);
+    } catch (e) {
+      console.error('Failed to fetch app tags:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAppTags();
+  }, []);
+
+  return { appTags, loading, refetch: fetchAppTags };
 }
 
 // Version API
