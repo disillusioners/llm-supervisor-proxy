@@ -74,6 +74,8 @@ export interface Model {
   internal_api_key?: string;   // Display only, write-only
   internal_base_url?: string; // Base URL override (optional)
   internal_model?: string;     // Actual model name at provider
+  // Release stream chunk deadline
+  release_stream_chunk_deadline?: string; // Duration string (e.g., "1m50s", "2m30s")
 }
 
 export interface ApiToken {

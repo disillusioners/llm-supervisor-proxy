@@ -53,6 +53,7 @@ export function ModelsTab({
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
+    release_stream_chunk_deadline?: string;
   }) => {
     try {
       if (modelFormMode === 'add') {
@@ -67,6 +68,7 @@ export function ModelsTab({
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,
           internal_model: data.internal_model,
+          release_stream_chunk_deadline: data.release_stream_chunk_deadline,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
       } else {
@@ -79,6 +81,7 @@ export function ModelsTab({
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,
           internal_model: data.internal_model,
+          release_stream_chunk_deadline: data.release_stream_chunk_deadline,
         });
         setStatus({ type: 'success', message: 'Model updated successfully' });
       }
@@ -172,10 +175,18 @@ export function ModelsTab({
                         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
                           <span class="text-xs text-gray-500 font-medium">STRIP PARAMS:</span>
                           {(model.truncate_params ?? []).map(p => (
-                            <span class="text-xs bg-orange-900/50 text-orange-300 border border-orange-800/40 px-1.5 py-0.5 rounded font-mono">
+                            <span class="text-xs bg-purple-900/50 text-purple-300 border border-purple-800/40 px-1.5 py-0.5 rounded font-mono">
                               {escapeHtml(p)}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {model.release_stream_chunk_deadline && (
+                        <div class="mt-1 flex items-center gap-1.5 flex-wrap">
+                          <span class="text-xs text-gray-500 font-medium">STREAM DEADLINE:</span>
+                          <span class="text-xs bg-blue-900/50 text-blue-300 border border-blue-800/40 px-1.5 py-0.5 rounded font-mono">
+                            {escapeHtml(model.release_stream_chunk_deadline)}
+                          </span>
                         </div>
                       )}
                     </div>

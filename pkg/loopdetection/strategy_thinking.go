@@ -4,11 +4,18 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection/fingerprint"
 )
 
 const maxThinkingBufferSize = 1 * 1024 * 1024 // 1MB limit
+
+// Minimum time between trigram analyses to prevent CPU/memory thrashing
+// With reasoning models generating content rapidly, this prevents running
+// expensive trigram analysis on every small chunk
+const minAnalysisInterval = 500 * time.Millisecond
 
 // ThinkingStrategy detects repetitive thinking/reasoning patterns.
 // Reasoning models (o1, o3-mini, etc.) naturally produce iterative thinking
@@ -28,6 +35,10 @@ type ThinkingStrategy struct {
 	accumulatedThinking strings.Builder
 	thinkingTokenCount  int
 	currentModel        string
+
+	// Rate limiting for expensive analysis
+	lastAnalysisTime time.Time
+	mu               sync.Mutex
 }
 
 // NewThinkingStrategy creates a new thinking loop detection strategy.

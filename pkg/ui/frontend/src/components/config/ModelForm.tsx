@@ -15,6 +15,7 @@ interface ModelFormProps {
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
+    release_stream_chunk_deadline?: string;
   }) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
@@ -40,6 +41,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     internal_api_key: '',
     internal_base_url: '',
     internal_model: '',
+    release_stream_chunk_deadline: '',
   });
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loadingCredentials, setLoadingCredentials] = useState(false);
@@ -79,6 +81,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
         internal_model: initialData.internal_model ?? '',
+        release_stream_chunk_deadline: initialData.release_stream_chunk_deadline ?? '',
       });
     } else if (mode === 'add') {
       setFormData({
@@ -91,6 +94,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: '',
         internal_base_url: '',
         internal_model: '',
+        release_stream_chunk_deadline: '',
       });
     }
   }, [mode, initialData]);
@@ -156,6 +160,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
         internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
+        release_stream_chunk_deadline: formData.release_stream_chunk_deadline || undefined,
       });
     } catch (e) {
       onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save model' });
@@ -265,15 +270,36 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         </div>
         
         <div>
-          <label class="block text-sm font-medium text-gray-300 mb-1">Strip Parameters (comma-separated)</label>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Strip Params <span class="text-gray-500">(optional)</span></label>
           <input
             type="text"
             value={formData.truncate_params}
             onInput={(e) => handleInputChange('truncate_params', (e.target as HTMLInputElement).value)}
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-shadow"
+            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-shadow"
             placeholder="e.g., max_completion_tokens, store"
           />
           <p class="text-xs text-gray-400 mt-1">Parameters to remove before forwarding to this model (e.g. unsupported OpenAI params).</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Stream Chunk Deadline <span class="text-gray-500">(optional)</span></label>
+          <div class="relative">
+            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </span>
+            <input
+              type="text"
+              value={formData.release_stream_chunk_deadline}
+              onInput={(e) => handleInputChange('release_stream_chunk_deadline', (e.target as HTMLInputElement).value)}
+              class="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+              placeholder="e.g., 1m30s, 2m"
+            />
+          </div>
+          <p class="text-xs text-gray-400 mt-1">
+            Time limit for buffering stream chunks before releasing to client. Impro responsiveness for slow connections. Leave empty for no deadline.
+          </p>
         </div>
 
         {/* Internal Upstream Section */}
