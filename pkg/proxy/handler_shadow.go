@@ -1,0 +1,339 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Shadow Retry
+// ─────────────────────────────────────────────────────────────────────────────
+
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+)
+
+// sendShadowResult sends result to shadow channel in a non-blocking manner
+// to prevent panics if channel is closed or full
+func sendShadowResult(ch chan shadowResult, result shadowResult) {
+	select {
+	case ch <- result:
+	default:
+		// Channel full or closed - that's fine, main already has a result or canceled
+		log.Printf("[SHADOW] Channel full or closed, result not sent")
+	}
+}
+
+// shouldStartShadow checks if shadow retry should be triggered
+func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
+	// Must be enabled in config
+	if !rc.conf.ShadowRetryEnabled {
+		return false
+	}
+	// Only on first idle timeout
+	if counters.idleRetries != 0 {
+		return false
+	}
+	// Only if no data has been sent to client yet (buffer is empty)
+	if rc.streamBuffer.Len() > 0 {
+		return false
+	}
+	// Must have a fallback model available (next in chain after current)
+	shadowModelIndex := rc.currentModelIndex + 1
+	if shadowModelIndex >= len(rc.modelList) {
+		return false
+	}
+	// Shadow must not already be running
+	if rc.shadow != nil {
+		return false
+	}
+	return true
+}
+
+// startShadowRequest spawns a background goroutine to make a parallel request
+// to the fallback model. If shadow completes successfully before the main request,
+// its buffer will be used instead.
+func (h *Handler) startShadowRequest(rc *requestContext) {
+	// Get next fallback model in chain
+	shadowModelIndex := rc.currentModelIndex + 1
+	if shadowModelIndex >= len(rc.modelList) {
+		return
+	}
+	shadowModel := rc.modelList[shadowModelIndex]
+
+	// Check if shadow model is internal (direct provider call)
+	var isInternalShadow bool
+	var shadowModelConfig *models.ModelConfig
+	if rc.conf.ModelsConfig != nil {
+		if modelCfg := rc.conf.ModelsConfig.GetModel(shadowModel); modelCfg != nil && modelCfg.Internal {
+			isInternalShadow = true
+			shadowModelConfig = modelCfg
+		}
+	}
+
+	// Create shadow state
+	shadowCtx, shadowCancel := context.WithCancel(rc.baseCtx)
+
+	rc.shadow = &shadowRequestState{
+		done:       make(chan shadowResult, 1),
+		cancelFunc: shadowCancel,
+		started:    true,
+		model:      shadowModel,
+		startTime:  time.Now(),
+	}
+
+	h.publishEvent("shadow_retry_started", map[string]interface{}{
+		"id":       rc.reqID,
+		"model":    shadowModel,
+		"trigger":  "idle_timeout",
+		"internal": isInternalShadow,
+	})
+
+	log.Printf("[SHADOW] Starting shadow request to model %s for request %s (internal=%v)", shadowModel, rc.reqID, isInternalShadow)
+
+	// Branch based on internal vs external
+	if isInternalShadow {
+		go h.executeInternalShadowRequest(rc, shadowCtx, shadowCancel, shadowModel, shadowModelConfig)
+	} else {
+		go h.executeExternalShadowRequest(rc, shadowCtx, shadowCancel, shadowModel)
+	}
+}
+
+// executeInternalShadowRequest handles shadow requests for internal models (direct provider calls)
+func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string, shadowModelConfig *models.ModelConfig) {
+	defer shadowCancel()
+	defer close(rc.shadow.done)
+
+	// Resolve internal config for shadow model (uses shadow model's credentials, not main request's)
+	provider, apiKey, baseURL, internalModel, ok := rc.conf.ModelsConfig.ResolveInternalConfig(shadowModel)
+	if !ok {
+		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to resolve internal config for shadow model %s", shadowModel)})
+		return
+	}
+
+	// Create provider client
+	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
+	if err != nil {
+		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to create shadow provider: %w", err)})
+		return
+	}
+
+	// Build request body with shadow model
+	shadowBody := make(map[string]interface{})
+	for k, v := range rc.requestBody {
+		shadowBody[k] = v
+	}
+	shadowBody["model"] = internalModel // Use internal model ID for provider
+
+	// Apply TruncateParams for shadow model
+	if rc.conf.ModelsConfig != nil {
+		if toStrip := rc.conf.ModelsConfig.GetTruncateParams(shadowModel); len(toStrip) > 0 {
+			for _, param := range toStrip {
+				delete(shadowBody, param)
+			}
+		}
+	}
+
+	// Make streaming request to internal provider
+	req := &providers.ChatCompletionRequest{}
+	if model, ok := shadowBody["model"].(string); ok {
+		req.Model = model
+	}
+	if msgs, ok := shadowBody["messages"].([]interface{}); ok {
+		req.Messages = make([]providers.ChatMessage, len(msgs))
+		for i, m := range msgs {
+			if mm, ok := m.(map[string]interface{}); ok {
+				msg := providers.ChatMessage{}
+				if role, ok := mm["role"].(string); ok {
+					msg.Role = role
+				}
+				if content, ok := mm["content"].(string); ok {
+					msg.Content = content
+				}
+				req.Messages[i] = msg
+			}
+		}
+	}
+	req.Stream = true
+
+	// Stream response to buffer
+	eventCh, err := providerClient.StreamChatCompletion(shadowCtx, req)
+	if err != nil {
+		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		return
+	}
+
+	buffer := &bytes.Buffer{}
+	completed := false
+
+	for event := range eventCh {
+		// Convert event to SSE format (matching external upstream format)
+		switch event.Type {
+		case "content":
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   shadowModel, // Keep original model ID for client compatibility
+				Choices: []providers.Choice{
+					{
+						Index: 0,
+						Delta: &providers.ChatMessage{
+							Role:    "assistant",
+							Content: event.Content,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(buffer, "data: %s\n", data)
+
+		case "tool_call":
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   shadowModel,
+				Choices: []providers.Choice{
+					{
+						Index: 0,
+						Delta: &providers.ChatMessage{
+							Role:      "assistant",
+							ToolCalls: event.ToolCalls,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(buffer, "data: %s\n", data)
+
+		case "done":
+			finishReason := event.FinishReason
+			if finishReason == "" {
+				finishReason = "stop"
+			}
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   shadowModel,
+				Choices: []providers.Choice{
+					{
+						Index:        0,
+						Delta:        &providers.ChatMessage{},
+						FinishReason: finishReason,
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(buffer, "data: %s\n", data)
+			fmt.Fprintf(buffer, "data: [DONE]\n")
+			completed = true
+
+		case "error":
+			sendShadowResult(rc.shadow.done, shadowResult{err: event.Error})
+			return
+		}
+	}
+
+	sendShadowResult(rc.shadow.done, shadowResult{
+		buffer:    buffer,
+		completed: completed,
+	})
+}
+
+// executeExternalShadowRequest handles shadow requests via HTTP upstream
+func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string) {
+	defer shadowCancel()
+	defer close(rc.shadow.done)
+
+	// Build request body with shadow model
+	shadowBody := make(map[string]interface{})
+	for k, v := range rc.requestBody {
+		shadowBody[k] = v
+	}
+	shadowBody["model"] = shadowModel
+
+	// Apply TruncateParams for shadow model (strip unsupported params)
+	if rc.conf.ModelsConfig != nil {
+		if toStrip := rc.conf.ModelsConfig.GetTruncateParams(shadowModel); len(toStrip) > 0 {
+			for _, param := range toStrip {
+				delete(shadowBody, param)
+			}
+		}
+	}
+
+	// Clone body bytes
+	newBodyBytes, _ := json.Marshal(shadowBody)
+
+	// Create request with shadow context
+	proxyReq, err := http.NewRequestWithContext(shadowCtx, rc.method, rc.targetURL, bytes.NewBuffer(newBodyBytes))
+	if err != nil {
+		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		return
+	}
+
+	copyHeaders(proxyReq, rc.originalHeaders)
+
+	// Set auth if configured (EXTERNAL UPSTREAM CREDENTIALS)
+	if rc.conf.UpstreamCredentialID != "" {
+		proxyReq.Header.Del("Authorization")
+		proxyReq.Header.Del("X-API-Key")
+		proxyReq.Header.Del("x-api-key")
+		proxyReq.Header.Del("api-key")
+		cred := rc.conf.ModelsConfig.GetCredential(rc.conf.UpstreamCredentialID)
+		if cred != nil {
+			if apiKey := cred.ResolveAPIKey(); apiKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+		}
+	}
+
+	// Make request
+	resp, err := h.client.Do(proxyReq)
+	if err != nil {
+		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))})
+		return
+	}
+
+	// Stream response to buffer
+	buffer := &bytes.Buffer{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	completed := false
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		buffer.Write(line)
+		buffer.Write([]byte("\n"))
+
+		// Check for [DONE] marker
+		if bytes.HasPrefix(line, []byte("data: [DONE]")) {
+			completed = true
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		return
+	}
+
+	sendShadowResult(rc.shadow.done, shadowResult{
+		buffer:    buffer,
+		completed: completed,
+	})
+}
