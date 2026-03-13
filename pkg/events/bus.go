@@ -48,6 +48,14 @@ type RepairDetail struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// StreamChunkDeadlineEvent represents a stream chunk deadline reached event
+type StreamChunkDeadlineEvent struct {
+	RequestID  string `json:"request_id"`
+	Deadline   string `json:"deadline"`    // Configured deadline duration
+	BufferSize int    `json:"buffer_size"` // Size of buffer flushed
+	Elapsed    string `json:"elapsed"`     // Time since request start
+}
+
 type Bus struct {
 	mu          sync.RWMutex
 	subscribers []chan Event

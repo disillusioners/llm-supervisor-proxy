@@ -144,6 +144,7 @@ export type EventType =
   | 'loop_detected'
   | 'loop_interrupted'
   | 'tool_repair'
+  | 'stream_chunk_deadline'
   | 'client_disconnected_during_retry'
   | 'client_disconnected_during_scan'
   | 'client_disconnected_during_buffering'
@@ -172,6 +173,9 @@ export interface EventData {
   raw_data?: string;
   buffer_size?: number;
   buffer_id?: string;  // Link to buffer file instead of inline preview
+  // Stream chunk deadline fields
+  deadline?: string;
+  elapsed?: string;
   // Tool repair fields
   total_tool_calls?: number;
   repaired?: number;

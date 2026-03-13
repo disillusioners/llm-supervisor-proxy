@@ -823,6 +823,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	// 1. Flush buffer to downstream
 	// 2. Mark request as non-retryable (streamingNonRetryable=true)
 	// 3. Continue streaming without buffering
+	//
+	// Note: If releaseDeadline is 0, the feature is disabled (stream buffers until [DONE]).
 	// ─────────────────────────────────────────────────────────────────────────────
 	var releaseDeadline time.Duration
 	currentModel, _ := rc.requestBody["model"].(string)
@@ -831,22 +833,25 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			releaseDeadline = modelCfg.GetReleaseStreamChunkDeadline()
 		}
 	}
-	if releaseDeadline == 0 {
-		releaseDeadline = time.Duration(110 * time.Second) // Default 1m50s
+	// Only set deadlineTime if deadline is enabled (> 0)
+	var deadlineTime time.Time
+	var deadlineReached bool
+	if releaseDeadline > 0 {
+		deadlineTime = rc.startTime.Add(releaseDeadline)
 	}
-	deadlineTime := rc.startTime.Add(releaseDeadline)
-	deadlineReached := false
 
 	for scanner.Scan() {
 		// CHECK RELEASE DEADLINE FIRST
 		// If deadline has passed and we haven't flushed yet, flush buffer now
-		if !deadlineReached && time.Now().After(deadlineTime) && rc.streamBuffer.Len() > 0 {
+		// Only check if deadline is enabled (releaseDeadline > 0)
+		if releaseDeadline > 0 && !deadlineReached && time.Now().After(deadlineTime) && rc.streamBuffer.Len() > 0 {
 			log.Printf("[RELEASE_DEADLINE] Flushing buffer after %v (deadline: %v, bufferSize: %d)",
 				time.Since(rc.startTime), releaseDeadline, rc.streamBuffer.Len())
-			h.publishEvent("release_stream_chunk_deadline_reached", map[string]interface{}{
-				"id":         rc.reqID,
-				"deadline":   releaseDeadline.String(),
-				"bufferSize": rc.streamBuffer.Len(),
+			h.publishEvent("stream_chunk_deadline", events.StreamChunkDeadlineEvent{
+				RequestID:  rc.reqID,
+				Deadline:   releaseDeadline.String(),
+				BufferSize: rc.streamBuffer.Len(),
+				Elapsed:    time.Since(rc.startTime).String(),
 			})
 
 			// Mark request as non-retryable - content has been sent to client

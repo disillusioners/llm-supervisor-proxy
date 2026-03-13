@@ -63,6 +63,8 @@ const getEventMessage = (event: Event): string => {
       return `Client disconnected during stream scan (buffer: ${event.data?.buffer_size || 0} bytes)`;
     case 'client_disconnected_during_buffering':
       return `Client disconnected during buffering (buffer: ${event.data?.buffer_size || 0} bytes)`;
+    case 'stream_chunk_deadline':
+      return `Stream chunk deadline reached - flushing buffer (${event.data?.buffer_size || 0} bytes, deadline: ${event.data?.deadline || '?'}, elapsed: ${event.data?.elapsed || '?'})`;
     default:
       return `Event: ${event.type}`;
   }
@@ -94,6 +96,7 @@ const getEventColor = (type: EventType): string => {
     case 'client_disconnected_during_retry':
     case 'client_disconnected_during_scan':
     case 'client_disconnected_during_buffering':
+    case 'stream_chunk_deadline':
       return 'text-yellow-400';
     case 'loop_detected':
       return 'text-amber-400';
@@ -148,6 +151,8 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'CLIENT_DISCONNECTED_SCAN';
     case 'client_disconnected_during_buffering':
       return 'CLIENT_DISCONNECTED_BUFFERING';
+    case 'stream_chunk_deadline':
+      return 'STREAM_CHUNK_DEADLINE';
     default:
       return String(type).toUpperCase();
   }

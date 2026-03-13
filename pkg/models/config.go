@@ -32,6 +32,9 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("invalid duration format: %s", value)
 		}
+		if parsed < 0 {
+			return errors.New("duration cannot be negative")
+		}
 		*d = Duration(parsed)
 	case float64:
 		if value < 0 {
@@ -89,15 +92,16 @@ type ModelConfig struct {
 	// ReleaseStreamChunkDeadline is the duration after which buffered stream chunks
 	// should be flushed to downstream even if the stream hasn't completed.
 	// This prevents clients with idle chunk detection from dropping the connection.
-	// Default: 1m50s (110 seconds) - set to 0 to disable (immediate streaming, no buffering)
+	// Example: "1m50s" (110 seconds). Set to 0 or omit to disable this feature.
 	ReleaseStreamChunkDeadline Duration `json:"release_stream_chunk_deadline,omitempty"`
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.
-// Returns the default (1m50s) if not set or set to 0.
+// Returns 0 if not set (feature disabled), otherwise returns the configured duration.
+// Note: The comment "Default: 1m50s" refers to the suggested value, but 0 means disabled.
 func (m *ModelConfig) GetReleaseStreamChunkDeadline() time.Duration {
 	if m.ReleaseStreamChunkDeadline == 0 {
-		return time.Duration(110 * time.Second) // Default 1m50s
+		return 0 // Disabled - no deadline
 	}
 	return time.Duration(m.ReleaseStreamChunkDeadline)
 }
