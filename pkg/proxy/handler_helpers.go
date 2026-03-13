@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
@@ -15,6 +16,24 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 )
+
+// shadowResult represents the result from a shadow request
+type shadowResult struct {
+	buffer    *bytes.Buffer
+	completed bool
+	err       error
+}
+
+// shadowRequestState tracks the state of a shadow request
+type shadowRequestState struct {
+	mu         sync.RWMutex
+	done       chan shadowResult // Closed when shadow completes
+	cancelFunc context.CancelFunc
+	started    bool
+	completed  bool
+	model      string
+	startTime  time.Time
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // requestContext holds all mutable state for a single request lifecycle.
@@ -69,6 +88,9 @@ type requestContext struct {
 	// When true, this request will not retry upstream on errors
 	// This is set after ReleaseStreamChunkDeadline is reached and buffer is flushed
 	streamingNonRetryable bool
+
+	// Shadow retry state
+	shadow *shadowRequestState
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

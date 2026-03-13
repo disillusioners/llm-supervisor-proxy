@@ -358,13 +358,6 @@ func (m *ConfigManager) GetMaxStreamBufferSize() int {
 	return m.cfg.MaxStreamBufferSize
 }
 
-// GetLoopDetection returns the loop detection configuration
-func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.LoopDetection
-}
-
 // GetBufferStorageDir returns the buffer storage directory
 func (m *ConfigManager) GetBufferStorageDir() string {
 	m.mu.RLock()
@@ -377,6 +370,20 @@ func (m *ConfigManager) GetBufferMaxStorageMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.BufferMaxStorageMB
+}
+
+// GetShadowRetryEnabled returns whether shadow retry is enabled
+func (m *ConfigManager) GetShadowRetryEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.ShadowRetryEnabled
+}
+
+// GetLoopDetection returns the loop detection configuration
+func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.LoopDetection
 }
 
 // IsReadOnly returns true if the config cannot be written

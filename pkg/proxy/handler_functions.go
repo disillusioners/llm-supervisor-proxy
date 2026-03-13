@@ -30,6 +30,142 @@ import (
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 
+// shouldStartShadow checks if shadow retry should be triggered
+func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
+	// Must be enabled in config
+	if !rc.conf.ShadowRetryEnabled {
+		return false
+	}
+	// Only on first idle timeout
+	if counters.idleRetries != 0 {
+		return false
+	}
+	// Only if no data has been sent to client yet (buffer is empty)
+	if rc.streamBuffer.Len() > 0 {
+		return false
+	}
+	// Must have a fallback model available
+	if len(rc.modelList) < 2 {
+		return false
+	}
+	// Shadow must not already be running
+	if rc.shadow != nil {
+		return false
+	}
+	return true
+}
+
+// startShadowRequest spawns a background goroutine to make a parallel request
+// to the fallback model. If shadow completes successfully before the main request,
+// its buffer will be used instead.
+func (h *Handler) startShadowRequest(rc *requestContext) {
+	// Get fallback model (next in chain)
+	shadowModelIndex := 1 // Always use first fallback for shadow
+	if shadowModelIndex >= len(rc.modelList) {
+		return
+	}
+	shadowModel := rc.modelList[shadowModelIndex]
+
+	// Create shadow state
+	shadowCtx, shadowCancel := context.WithCancel(rc.baseCtx)
+
+	rc.shadow = &shadowRequestState{
+		done:       make(chan shadowResult, 1),
+		cancelFunc: shadowCancel,
+		started:    true,
+		model:      shadowModel,
+		startTime:  time.Now(),
+	}
+
+	h.publishEvent("shadow_retry_started", map[string]interface{}{
+		"id":      rc.reqID,
+		"model":   shadowModel,
+		"trigger": "idle_timeout",
+	})
+
+	log.Printf("[SHADOW] Starting shadow request to model %s for request %s", shadowModel, rc.reqID)
+
+	go func() {
+		defer shadowCancel()
+		defer close(rc.shadow.done)
+
+		// Build request body with shadow model
+		shadowBody := make(map[string]interface{})
+		for k, v := range rc.requestBody {
+			shadowBody[k] = v
+		}
+		shadowBody["model"] = shadowModel
+
+		// Clone body bytes
+		newBodyBytes, _ := json.Marshal(shadowBody)
+
+		// Create request with shadow context
+		proxyReq, err := http.NewRequestWithContext(shadowCtx, rc.method, rc.targetURL, bytes.NewBuffer(newBodyBytes))
+		if err != nil {
+			rc.shadow.done <- shadowResult{err: err}
+			return
+		}
+
+		copyHeaders(proxyReq, rc.originalHeaders)
+
+		// Set auth if configured
+		if rc.conf.UpstreamCredentialID != "" {
+			proxyReq.Header.Del("Authorization")
+			proxyReq.Header.Del("X-API-Key")
+			proxyReq.Header.Del("x-api-key")
+			proxyReq.Header.Del("api-key")
+			cred := rc.conf.ModelsConfig.GetCredential(rc.conf.UpstreamCredentialID)
+			if cred != nil {
+				if apiKey := cred.ResolveAPIKey(); apiKey != "" {
+					proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+				}
+			}
+		}
+
+		// Make request
+		resp, err := h.client.Do(proxyReq)
+		if err != nil {
+			rc.shadow.done <- shadowResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			rc.shadow.done <- shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))}
+			return
+		}
+
+		// Stream response to buffer
+		buffer := &bytes.Buffer{}
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+		completed := false
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			buffer.Write(line)
+			buffer.Write([]byte("\n"))
+
+			// Check for [DONE] marker
+			if bytes.HasPrefix(line, []byte("data: [DONE]")) {
+				completed = true
+				break
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			rc.shadow.done <- shadowResult{err: err}
+			return
+		}
+
+		rc.shadow.done <- shadowResult{
+			buffer:    buffer,
+			completed: completed,
+		}
+	}()
+}
+
 // initRequestContext parses the incoming request, creates the request log,
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
@@ -577,6 +713,13 @@ func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, mon
 	if errors.Is(err, supervisor.ErrIdleTimeout) {
 		log.Println("Stream idle timeout detected!")
 		h.publishEvent("timeout_idle", map[string]interface{}{"timeout": rc.conf.IdleTimeout.String(), "id": rc.reqID})
+
+		// TRIGGER SHADOW RETRY on first idle timeout
+		// This starts a parallel request to fallback model while main continues retrying
+		if shouldStartShadow(rc, counters) {
+			h.startShadowRequest(rc)
+		}
+
 		monitor.Close()
 		counters.idleRetries++
 		return attemptContinueRetry
@@ -899,6 +1042,79 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			return attemptReturnImmediately
 		}
 
+		// CHECK SHADOW RETRY RESULT
+		// If a shadow request is running and has completed successfully, use its buffer instead
+		if rc.shadow != nil {
+			select {
+			case result := <-rc.shadow.done:
+				if result.err == nil && result.completed && result.buffer != nil {
+					log.Printf("[SHADOW] Shadow request completed successfully, using shadow buffer (model: %s)", rc.shadow.model)
+					h.publishEvent("shadow_retry_won", map[string]interface{}{
+						"id":        rc.reqID,
+						"model":     rc.shadow.model,
+						"duration":  time.Since(rc.shadow.startTime).String(),
+						"mainModel": currentModel,
+					})
+
+					// Cancel shadow context to signal completion
+					if rc.shadow.cancelFunc != nil {
+						rc.shadow.cancelFunc()
+					}
+
+					// Swap buffers - use shadow's completed buffer instead of main
+					rc.streamBuffer = *result.buffer
+
+					// Update accumulated response from shadow buffer
+					rc.accumulatedResponse.Reset()
+					rc.accumulatedThinking.Reset()
+					// Parse shadow buffer to extract content
+					shadowScanner := bufio.NewScanner(bytes.NewReader(rc.streamBuffer.Bytes()))
+					shadowScanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+					for shadowScanner.Scan() {
+						shadowLine := shadowScanner.Bytes()
+						if bytes.HasPrefix(shadowLine, []byte("data: ")) {
+							data := bytes.TrimPrefix(shadowLine, []byte("data: "))
+							if string(data) != "[DONE]" {
+								extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, nil)
+							}
+						}
+					}
+
+					// Mark shadow as completed
+					rc.shadow.mu.Lock()
+					rc.shadow.completed = true
+					rc.shadow.mu.Unlock()
+
+					// Stop heartbeat and monitor
+					stopHeartbeat()
+					monitor.Close()
+
+					// Flush shadow buffer to client
+					w.Write(rc.streamBuffer.Bytes())
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+
+					h.publishEvent("request_completed", map[string]interface{}{"id": rc.reqID})
+					h.finalizeSuccess(rc)
+					return attemptSuccess
+				} else if result.err != nil {
+					log.Printf("[SHADOW] Shadow request failed: %v", result.err)
+					h.publishEvent("shadow_retry_failed", map[string]interface{}{
+						"id":    rc.reqID,
+						"model": rc.shadow.model,
+						"error": result.err.Error(),
+					})
+					// Mark shadow as completed (failed) so we don't check again
+					rc.shadow.mu.Lock()
+					rc.shadow.completed = true
+					rc.shadow.mu.Unlock()
+				}
+			default:
+				// No shadow result yet, continue with main stream
+			}
+		}
+
 		line := scanner.Bytes()
 
 		// Check if this line is an error response dumped into the stream
@@ -1051,6 +1267,18 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	// Stream completed successfully - flush buffered body to client
 	// Note: Headers were already sent immediately when upstream responded (TTFB fix)
 	if streamEndedSuccessfully {
+		// Cancel shadow request if running (main succeeded first)
+		if rc.shadow != nil && rc.shadow.cancelFunc != nil {
+			log.Printf("[SHADOW] Main stream succeeded, cancelling shadow request")
+			h.publishEvent("shadow_retry_lost", map[string]interface{}{
+				"id":        rc.reqID,
+				"model":     rc.shadow.model,
+				"duration":  time.Since(rc.shadow.startTime).String(),
+				"mainModel": currentModel,
+			})
+			rc.shadow.cancelFunc()
+		}
+
 		// Stop heartbeat BEFORE writing to prevent race condition
 		stopHeartbeat()
 

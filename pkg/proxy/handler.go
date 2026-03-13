@@ -38,6 +38,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
 		ToolRepair:              cfg.ToolRepair,
+		ShadowRetryEnabled:      cfg.ShadowRetryEnabled,
 	}
 }
 
@@ -54,6 +55,7 @@ type ConfigSnapshot struct {
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
 	ToolRepair              toolrepair.Config
+	ShadowRetryEnabled      bool
 }
 
 type Handler struct {

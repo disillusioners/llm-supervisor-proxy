@@ -75,6 +75,7 @@ type Config struct {
 	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
 	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
+	ShadowRetryEnabled      bool                `json:"shadow_retry_enabled"`   // Enable parallel shadow requests on first idle timeout
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	ToolRepair              toolrepair.Config   `json:"tool_repair"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
@@ -94,6 +95,7 @@ type ManagerInterface interface {
 	GetMaxStreamBufferSize() int
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
+	GetShadowRetryEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
@@ -134,6 +136,7 @@ var Defaults = Config{
 	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
 	BufferStorageDir:        "",               // Empty means use default data directory
 	BufferMaxStorageMB:      100,              // 100MB default
+	ShadowRetryEnabled:      true,             // Enable shadow retry by default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -319,6 +322,9 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("LOOP_DETECTION_SHADOW_MODE"); v != "" {
 		cfg.LoopDetection.ShadowMode = v == "true" || v == "1"
+	}
+	if v := os.Getenv("SHADOW_RETRY_ENABLED"); v != "" {
+		cfg.ShadowRetryEnabled = v == "true" || v == "1"
 	}
 	return cfg
 }
@@ -507,6 +513,13 @@ func (m *Manager) GetBufferMaxStorageMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.BufferMaxStorageMB
+}
+
+// GetShadowRetryEnabled returns whether shadow retry is enabled
+func (m *Manager) GetShadowRetryEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ShadowRetryEnabled
 }
 
 // IsReadOnly returns true if the config file cannot be written
