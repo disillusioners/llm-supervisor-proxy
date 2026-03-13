@@ -126,3 +126,43 @@ function DashboardRoute({
         </div>
     );
 }
+
+// Settings route component - wraps SettingsPage with data fetching
+function SettingsRoute({
+    config,
+    onUpdateConfig,
+    models,
+    onAddModel,
+    onUpdateModel,
+    onDeleteModel,
+    tokens,
+    onCreateToken,
+    onDeleteToken,
+    onRefetchTokens,
+}: {
+    config: any;
+    onUpdateConfig: (config: any) => Promise<any>;
+    models: any[];
+    onAddModel: (model: any) => Promise<void>;
+    onUpdateModel: (id: string, updates: any) => Promise<void>;
+    onDeleteModel: (id: string) => Promise<void>;
+    tokens: any[];
+    onCreateToken: (name: string, expiresAt: string | null) => Promise<any>;
+    onDeleteToken: (id: string) => Promise<void>;
+    onRefetchTokens: () => void;
+}) {
+    return (
+        <SettingsPage
+            config={config}
+            onUpdateConfig={onUpdateConfig}
+            models={models}
+            onAddModel={onAddModel}
+            onUpdateModel={onUpdateModel}
+            onDeleteModel={onDeleteModel}
+            tokens={tokens}
+            onCreateToken={onCreateToken}
+            onDeleteToken={onDeleteToken}
+            onRefetchTokens={onRefetchTokens}
+        />
+    );
+}
