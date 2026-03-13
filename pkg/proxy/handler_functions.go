@@ -869,9 +869,10 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// Clear buffer for any subsequent content
 			rc.streamBuffer.Reset()
 
-			// Restart heartbeat for continued streaming
-			heartbeatStop = h.startSSEHeartbeat(w, rc.baseCtx)
-			heartbeatStopped = false
+			// Note: We don't restart heartbeat here because after deadline:
+			// 1. streamingNonRetryable=true means no more buffering
+			// 2. Content is streamed directly to client
+			// 3. Direct streaming keeps connection alive naturally
 		}
 
 		// Check total stream duration (MaxGenerationTime) to prevent indefinite streams
