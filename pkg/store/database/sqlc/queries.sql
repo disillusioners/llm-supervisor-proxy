@@ -31,8 +31,10 @@ INSERT INTO models (
     name,
     enabled,
     fallback_chain_json,
-    truncate_params_json
+    truncate_params_json,
+    release_stream_chunk_deadline
 ) VALUES (
+    ?,
     ?,
     ?,
     ?,
@@ -46,6 +48,7 @@ UPDATE models SET
     enabled = ?,
     fallback_chain_json = ?,
     truncate_params_json = ?,
+    release_stream_chunk_deadline = ?,
     updated_at = datetime('now')
 WHERE id = ?;
 

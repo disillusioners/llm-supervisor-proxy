@@ -42,7 +42,7 @@ func (q *Queries) DeleteModel(ctx context.Context, id string) error {
 }
 
 const getAllModels = `-- name: GetAllModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models ORDER BY name
 `
 
 func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
@@ -69,6 +69,7 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 			&i.InternalModel,
 			&i.InternalKeyVersion,
 			&i.CredentialID,
+			&i.ReleaseStreamChunkDeadline,
 		); err != nil {
 			return nil, err
 		}
@@ -84,7 +85,7 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 }
 
 const getConfig = `-- name: GetConfig :one
-SELECT id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, updated_at FROM configs WHERE id = 1
+SELECT id, version, upstream_url, port, idle_timeout_ms, max_generation_time_ms, max_upstream_error_retries, max_idle_retries, max_generation_retries, loop_detection_json, tool_repair_json, updated_at, upstream_credential_id, buffer_size FROM configs WHERE id = 1
 `
 
 func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
@@ -94,7 +95,6 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 		&i.ID,
 		&i.Version,
 		&i.UpstreamUrl,
-		&i.UpstreamCredentialID,
 		&i.Port,
 		&i.IdleTimeoutMs,
 		&i.MaxGenerationTimeMs,
@@ -102,13 +102,16 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 		&i.MaxIdleRetries,
 		&i.MaxGenerationRetries,
 		&i.LoopDetectionJson,
+		&i.ToolRepairJson,
 		&i.UpdatedAt,
+		&i.UpstreamCredentialID,
+		&i.BufferSize,
 	)
 	return i, err
 }
 
 const getEnabledModels = `-- name: GetEnabledModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE enabled = 1 ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models WHERE enabled = 1 ORDER BY name
 `
 
 func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
@@ -135,6 +138,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 			&i.InternalModel,
 			&i.InternalKeyVersion,
 			&i.CredentialID,
+			&i.ReleaseStreamChunkDeadline,
 		); err != nil {
 			return nil, err
 		}
@@ -150,7 +154,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 }
 
 const getModelByID = `-- name: GetModelByID :one
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id FROM models WHERE id = ?
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models WHERE id = ?
 `
 
 func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
@@ -171,6 +175,7 @@ func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
 		&i.InternalModel,
 		&i.InternalKeyVersion,
 		&i.CredentialID,
+		&i.ReleaseStreamChunkDeadline,
 	)
 	return i, err
 }
@@ -181,8 +186,10 @@ INSERT INTO models (
     name,
     enabled,
     fallback_chain_json,
-    truncate_params_json
+    truncate_params_json,
+    release_stream_chunk_deadline
 ) VALUES (
+    ?,
     ?,
     ?,
     ?,
@@ -192,11 +199,12 @@ INSERT INTO models (
 `
 
 type InsertModelParams struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Enabled            int64  `json:"enabled"`
-	FallbackChainJson  string `json:"fallback_chain_json"`
-	TruncateParamsJson string `json:"truncate_params_json"`
+	ID                         string `json:"id"`
+	Name                       string `json:"name"`
+	Enabled                    int64  `json:"enabled"`
+	FallbackChainJson          string `json:"fallback_chain_json"`
+	TruncateParamsJson         string `json:"truncate_params_json"`
+	ReleaseStreamChunkDeadline int64  `json:"release_stream_chunk_deadline"`
 }
 
 func (q *Queries) InsertModel(ctx context.Context, arg InsertModelParams) error {
@@ -206,6 +214,7 @@ func (q *Queries) InsertModel(ctx context.Context, arg InsertModelParams) error 
 		arg.Enabled,
 		arg.FallbackChainJson,
 		arg.TruncateParamsJson,
+		arg.ReleaseStreamChunkDeadline,
 	)
 	return err
 }
@@ -221,7 +230,8 @@ UPDATE configs SET
     max_idle_retries = ?7,
     max_generation_retries = ?8,
     loop_detection_json = ?9,
-    updated_at = ?10
+    tool_repair_json = ?10,
+    updated_at = ?11
 WHERE id = 1
 `
 
@@ -235,6 +245,7 @@ type UpdateConfigParams struct {
 	MaxIdleRetries          sql.NullInt64  `json:"max_idle_retries"`
 	MaxGenerationRetries    sql.NullInt64  `json:"max_generation_retries"`
 	LoopDetectionJson       sql.NullString `json:"loop_detection_json"`
+	ToolRepairJson          sql.NullString `json:"tool_repair_json"`
 	UpdatedAt               sql.NullString `json:"updated_at"`
 }
 
@@ -249,6 +260,7 @@ func (q *Queries) UpdateConfig(ctx context.Context, arg UpdateConfigParams) erro
 		arg.MaxIdleRetries,
 		arg.MaxGenerationRetries,
 		arg.LoopDetectionJson,
+		arg.ToolRepairJson,
 		arg.UpdatedAt,
 	)
 	return err
@@ -260,16 +272,18 @@ UPDATE models SET
     enabled = ?,
     fallback_chain_json = ?,
     truncate_params_json = ?,
+    release_stream_chunk_deadline = ?,
     updated_at = datetime('now')
 WHERE id = ?
 `
 
 type UpdateModelParams struct {
-	Name               string `json:"name"`
-	Enabled            int64  `json:"enabled"`
-	FallbackChainJson  string `json:"fallback_chain_json"`
-	TruncateParamsJson string `json:"truncate_params_json"`
-	ID                 string `json:"id"`
+	Name                       string `json:"name"`
+	Enabled                    int64  `json:"enabled"`
+	FallbackChainJson          string `json:"fallback_chain_json"`
+	TruncateParamsJson         string `json:"truncate_params_json"`
+	ReleaseStreamChunkDeadline int64  `json:"release_stream_chunk_deadline"`
+	ID                         string `json:"id"`
 }
 
 func (q *Queries) UpdateModel(ctx context.Context, arg UpdateModelParams) error {
@@ -278,6 +292,7 @@ func (q *Queries) UpdateModel(ctx context.Context, arg UpdateModelParams) error 
 		arg.Enabled,
 		arg.FallbackChainJson,
 		arg.TruncateParamsJson,
+		arg.ReleaseStreamChunkDeadline,
 		arg.ID,
 	)
 	return err

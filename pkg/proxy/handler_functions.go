@@ -518,6 +518,22 @@ func (h *Handler) handleNonOKStatus(w http.ResponseWriter, rc *requestContext, r
 func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, monitor *supervisor.MonitoredReader, err error, attemptCtx context.Context, attempt int, counters *retryCounters) attemptResult {
 	counters.lastErr = err
 
+	// CHECK FOR STREAMING NON-RETRYABLE STATE FIRST
+	// If the request is marked as non-retryable (after release deadline), return immediately
+	// This prevents retry attempts after content has already been sent to the client
+	if rc.streamingNonRetryable {
+		log.Printf("[STREAM_NON_RETRYABLE] Request marked non-retryable after deadline flush, returning immediately (error: %v)", err)
+		h.publishEvent("stream_non_retryable_error", map[string]interface{}{
+			"id":         rc.reqID,
+			"error":      err.Error(),
+			"bufferSize": rc.streamBuffer.Len(),
+		})
+		monitor.Close()
+		// Send SSE error to client since we can't retry
+		h.sendSSEError(w, fmt.Sprintf("Stream error after deadline: %v", err))
+		return attemptReturnImmediately
+	}
+
 	// Check for client disconnection FIRST - this is not an error, client just left
 	// This can manifest as "context canceled" when the base context is canceled
 	if rc.baseCtx.Err() == context.Canceled {
@@ -799,7 +815,65 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	detector := rc.loopDetector
 	streamBuf := detector.NewStreamBuffer()
 
+	// ─────────────────────────────────────────────────────────────────────────────
+	// RELEASE STREAM CHUNK DEADLINE
+	// After this duration, flush buffered content to downstream even if stream hasn't completed.
+	// This prevents clients with idle chunk detection from dropping the connection.
+	// Once deadline is reached:
+	// 1. Flush buffer to downstream
+	// 2. Mark request as non-retryable (streamingNonRetryable=true)
+	// 3. Continue streaming without buffering
+	// ─────────────────────────────────────────────────────────────────────────────
+	var releaseDeadline time.Duration
+	currentModel, _ := rc.requestBody["model"].(string)
+	if rc.conf.ModelsConfig != nil {
+		if modelCfg := rc.conf.ModelsConfig.GetModel(currentModel); modelCfg != nil {
+			releaseDeadline = modelCfg.GetReleaseStreamChunkDeadline()
+		}
+	}
+	if releaseDeadline == 0 {
+		releaseDeadline = time.Duration(110 * time.Second) // Default 1m50s
+	}
+	deadlineTime := rc.startTime.Add(releaseDeadline)
+	deadlineReached := false
+
 	for scanner.Scan() {
+		// CHECK RELEASE DEADLINE FIRST
+		// If deadline has passed and we haven't flushed yet, flush buffer now
+		if !deadlineReached && time.Now().After(deadlineTime) && rc.streamBuffer.Len() > 0 {
+			log.Printf("[RELEASE_DEADLINE] Flushing buffer after %v (deadline: %v, bufferSize: %d)",
+				time.Since(rc.startTime), releaseDeadline, rc.streamBuffer.Len())
+			h.publishEvent("release_stream_chunk_deadline_reached", map[string]interface{}{
+				"id":         rc.reqID,
+				"deadline":   releaseDeadline.String(),
+				"bufferSize": rc.streamBuffer.Len(),
+			})
+
+			// Mark request as non-retryable - content has been sent to client
+			rc.streamingNonRetryable = true
+			deadlineReached = true
+
+			// Stop heartbeat before flush to prevent race condition
+			stopHeartbeat()
+
+			// Flush entire buffer to downstream
+			if _, err := w.Write(rc.streamBuffer.Bytes()); err != nil {
+				log.Printf("[RELEASE_DEADLINE] Failed to flush buffer: %v", err)
+				monitor.Close()
+				return attemptReturnImmediately
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+
+			// Clear buffer for any subsequent content
+			rc.streamBuffer.Reset()
+
+			// Restart heartbeat for continued streaming
+			heartbeatStop = h.startSSEHeartbeat(w, rc.baseCtx)
+			heartbeatStopped = false
+		}
+
 		// Check total stream duration (MaxGenerationTime) to prevent indefinite streams
 		// This catches slow upstreams that send tokens within IdleTimeout but never complete
 		if attemptCtx.Err() != nil {

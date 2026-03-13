@@ -3,11 +3,56 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+// Duration is a custom type that serializes to human-readable format (e.g., "1m50s")
+// instead of nanoseconds. Required because time.Duration marshals to int64.
+type Duration int64
+
+// MarshalJSON serializes Duration to a human-readable string format
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// UnmarshalJSON parses Duration from string or number
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	switch value := v.(type) {
+	case string:
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration format: %s", value)
+		}
+		*d = Duration(parsed)
+	case float64:
+		if value < 0 {
+			return errors.New("duration cannot be negative")
+		}
+		*d = Duration(time.Duration(value))
+	default:
+		return errors.New("invalid duration format")
+	}
+	return nil
+}
+
+// String returns the Duration as a human-readable string
+func (d Duration) String() string {
+	return time.Duration(d).String()
+}
+
+// Duration returns the time.Duration value
+func (d Duration) Duration() time.Duration {
+	return time.Duration(d)
+}
 
 // AppName is the application name used for config directory
 const AppName = "llm-supervisor-proxy"
@@ -40,6 +85,21 @@ type ModelConfig struct {
 	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential (required if internal is true)
 	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
 	InternalModel   string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
+
+	// ReleaseStreamChunkDeadline is the duration after which buffered stream chunks
+	// should be flushed to downstream even if the stream hasn't completed.
+	// This prevents clients with idle chunk detection from dropping the connection.
+	// Default: 1m50s (110 seconds) - set to 0 to disable (immediate streaming, no buffering)
+	ReleaseStreamChunkDeadline Duration `json:"release_stream_chunk_deadline,omitempty"`
+}
+
+// GetReleaseStreamChunkDeadline returns the configured deadline duration.
+// Returns the default (1m50s) if not set or set to 0.
+func (m *ModelConfig) GetReleaseStreamChunkDeadline() time.Duration {
+	if m.ReleaseStreamChunkDeadline == 0 {
+		return time.Duration(110 * time.Second) // Default 1m50s
+	}
+	return time.Duration(m.ReleaseStreamChunkDeadline)
 }
 
 // ModelsConfigInterface defines the interface for models configuration

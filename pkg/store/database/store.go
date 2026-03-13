@@ -396,13 +396,14 @@ func (m *ConfigManager) GetFilePath() string {
 
 // dbModelRow represents a row from the models table
 type dbModelRow struct {
-	ID                 string
-	Name               string
-	Enabled            interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
-	FallbackChainJSON  string
-	TruncateParamsJSON string
-	CreatedAt          string
-	UpdatedAt          string
+	ID                         string
+	Name                       string
+	Enabled                    interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	FallbackChainJSON          string
+	TruncateParamsJSON         string
+	CreatedAt                  string
+	UpdatedAt                  string
+	ReleaseStreamChunkDeadline int64 // Deadline in milliseconds for releasing stream chunks
 	// Internal upstream fields
 	Internal        interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
 	CredentialID    string      // Reference to credential
@@ -488,23 +489,25 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.TruncateParamsJSON,
 			&dbModel.CreatedAt,
 			&dbModel.UpdatedAt,
+			&dbModel.ReleaseStreamChunkDeadline,
 			&dbModel.Internal,
 			&dbModel.CredentialID,
 			&dbModel.InternalBaseURL,
 			&dbModel.InternalModel,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan error: %w", err)
 		}
 
 		model := models.ModelConfig{
-			ID:              dbModel.ID,
-			Name:            dbModel.Name,
-			Enabled:         dbModel.isEnabled(),
-			Internal:        dbModel.isInternal(),
-			CredentialID:    dbModel.CredentialID,
-			InternalBaseURL: dbModel.InternalBaseURL,
-			InternalModel:   dbModel.InternalModel,
+			ID:                         dbModel.ID,
+			Name:                       dbModel.Name,
+			Enabled:                    dbModel.isEnabled(),
+			ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+			Internal:                   dbModel.isInternal(),
+			CredentialID:               dbModel.CredentialID,
+			InternalBaseURL:            dbModel.InternalBaseURL,
+			InternalModel:              dbModel.InternalModel,
 		}
 
 		// Parse fallback chain
@@ -520,7 +523,11 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 		result = append(result, model)
 	}
 
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return result, nil
 }
 
 // GetModel returns a single model configuration by ID, including internal fields
@@ -529,13 +536,13 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	defer m.mu.RUnlock()
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, '')
 			FROM models WHERE id = $1`
 	}
@@ -549,6 +556,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.TruncateParamsJSON,
 		&dbModel.CreatedAt,
 		&dbModel.UpdatedAt,
+		&dbModel.ReleaseStreamChunkDeadline,
 		&dbModel.Internal,
 		&dbModel.CredentialID,
 		&dbModel.InternalBaseURL,
@@ -559,13 +567,14 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:              dbModel.ID,
-		Name:            dbModel.Name,
-		Enabled:         dbModel.isEnabled(),
-		Internal:        dbModel.isInternal(),
-		CredentialID:    dbModel.CredentialID,
-		InternalBaseURL: dbModel.InternalBaseURL,
-		InternalModel:   dbModel.InternalModel,
+		ID:                         dbModel.ID,
+		Name:                       dbModel.Name,
+		Enabled:                    dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                   dbModel.isInternal(),
+		CredentialID:               dbModel.CredentialID,
+		InternalBaseURL:            dbModel.InternalBaseURL,
+		InternalModel:              dbModel.InternalModel,
 	}
 
 	// Parse fallback chain
@@ -622,6 +631,11 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.TruncateParamsJSON,
 		&dbModel.CreatedAt,
 		&dbModel.UpdatedAt,
+		&dbModel.ReleaseStreamChunkDeadline,
+		&dbModel.Internal,
+		&dbModel.CredentialID,
+		&dbModel.InternalBaseURL,
+		&dbModel.InternalModel,
 	)
 	if err != nil {
 		return nil
@@ -658,6 +672,11 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.TruncateParamsJSON,
 		&dbModel.CreatedAt,
 		&dbModel.UpdatedAt,
+		&dbModel.ReleaseStreamChunkDeadline,
+		&dbModel.Internal,
+		&dbModel.CredentialID,
+		&dbModel.InternalBaseURL,
+		&dbModel.InternalModel,
 	)
 	if err != nil {
 		return nil
@@ -690,13 +709,16 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
 
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
+
+	// Convert Duration (nanoseconds) to milliseconds for storage
+	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
 
 	insertQuery := m.qb.InsertModel()
 	_, err = m.store.DB.ExecContext(context.Background(), insertQuery,
@@ -709,6 +731,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.CredentialID,
 		model.InternalBaseURL,
 		model.InternalModel,
+		releaseStreamChunkDeadlineMs,
 	)
 	return err
 }
@@ -732,13 +755,16 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
 
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
+
+	// Convert Duration (nanoseconds) to milliseconds for storage
+	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
 
 	updateQuery := m.qb.UpdateModel()
 	_, err = m.store.DB.ExecContext(context.Background(), updateQuery,
@@ -750,6 +776,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.CredentialID,
 		model.InternalBaseURL,
 		model.InternalModel,
+		releaseStreamChunkDeadlineMs,
 		modelID,
 	)
 	return err
@@ -764,7 +791,7 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}

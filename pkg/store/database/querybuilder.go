@@ -131,8 +131,8 @@ func (q *QueryBuilder) UpdateConfig() string {
 func (q *QueryBuilder) InsertModel() string {
 	if q.dialect == PostgreSQL {
 		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-			internal, credential_id, internal_base_url, internal_model)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
@@ -142,11 +142,12 @@ func (q *QueryBuilder) InsertModel() string {
 				credential_id = EXCLUDED.credential_id,
 				internal_base_url = EXCLUDED.internal_base_url,
 				internal_model = EXCLUDED.internal_model,
+				release_stream_chunk_deadline = EXCLUDED.release_stream_chunk_deadline,
 				updated_at = NOW()`
 	}
 	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-		internal, credential_id, internal_base_url, internal_model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateModel returns the appropriate UPDATE query for a model
@@ -161,8 +162,9 @@ func (q *QueryBuilder) UpdateModel() string {
 			credential_id = $6,
 			internal_base_url = $7,
 			internal_model = $8,
+			release_stream_chunk_deadline = $9,
 			updated_at = NOW()
-		WHERE id = $9`
+		WHERE id = $10`
 	}
 	return `UPDATE models SET
 			name = ?,
@@ -173,6 +175,7 @@ func (q *QueryBuilder) UpdateModel() string {
 			credential_id = ?,
 			internal_base_url = ?,
 			internal_model = ?,
+			release_stream_chunk_deadline = ?,
 			updated_at = datetime('now')
 		WHERE id = ?`
 }
@@ -188,22 +191,30 @@ func (q *QueryBuilder) DeleteModel() string {
 // GetModelByID returns the appropriate SELECT query for a model
 func (q *QueryBuilder) GetModelByID() string {
 	if q.dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
-			FROM models WHERE id = $1`
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+			coalesce(release_stream_chunk_deadline, 0), 
+			coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, '')
+		FROM models WHERE id = $1`
 	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
-		FROM models WHERE id = ?`
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+		coalesce(release_stream_chunk_deadline, 0),
+		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, '')
+	FROM models WHERE id = ?`
 }
 
 // GetAllModels returns the appropriate SELECT query for all models
 func (q *QueryBuilder) GetAllModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+            coalesce(release_stream_chunk_deadline, 0),
             coalesce(internal, false), coalesce(credential_id, ''),
             coalesce(internal_base_url, ''), coalesce(internal_model, '')
         FROM models ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+        coalesce(release_stream_chunk_deadline, 0),
         coalesce(internal, 0), coalesce(credential_id, ''),
         coalesce(internal_base_url, ''), coalesce(internal_model, '')
     FROM models ORDER BY name`
@@ -211,8 +222,18 @@ func (q *QueryBuilder) GetAllModels() string {
 
 // GetEnabledModels returns the appropriate SELECT query for enabled models
 func (q *QueryBuilder) GetEnabledModels() string {
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at 
-		FROM models WHERE enabled = 1 ORDER BY name`
+	if q.dialect == PostgreSQL {
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(release_stream_chunk_deadline, 0),
+			coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, '')
+		FROM models WHERE enabled = true ORDER BY name`
+	}
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(release_stream_chunk_deadline, 0),
+		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, '')
+	FROM models WHERE enabled = 1 ORDER BY name`
 }
 
 // GetConfig returns the appropriate SELECT query for config

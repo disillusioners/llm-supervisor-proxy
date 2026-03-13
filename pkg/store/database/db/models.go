@@ -21,7 +21,6 @@ type Config struct {
 	ID                      int64          `json:"id"`
 	Version                 string         `json:"version"`
 	UpstreamUrl             string         `json:"upstream_url"`
-	UpstreamCredentialID    sql.NullString `json:"upstream_credential_id"`
 	Port                    int64          `json:"port"`
 	IdleTimeoutMs           int64          `json:"idle_timeout_ms"`
 	MaxGenerationTimeMs     int64          `json:"max_generation_time_ms"`
@@ -29,7 +28,10 @@ type Config struct {
 	MaxIdleRetries          int64          `json:"max_idle_retries"`
 	MaxGenerationRetries    int64          `json:"max_generation_retries"`
 	LoopDetectionJson       string         `json:"loop_detection_json"`
+	ToolRepairJson          string         `json:"tool_repair_json"`
 	UpdatedAt               string         `json:"updated_at"`
+	UpstreamCredentialID    sql.NullString `json:"upstream_credential_id"`
+	BufferSize              int64          `json:"buffer_size"`
 }
 
 type Credential struct {
@@ -42,18 +44,19 @@ type Credential struct {
 }
 
 type Model struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Enabled            int64  `json:"enabled"`
-	FallbackChainJson  string `json:"fallback_chain_json"`
-	TruncateParamsJson string `json:"truncate_params_json"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
-	Internal           int64  `json:"internal"`
-	InternalProvider   string `json:"internal_provider"`
-	InternalApiKey     string `json:"internal_api_key"`
-	InternalBaseUrl    string `json:"internal_base_url"`
-	InternalModel      string `json:"internal_model"`
-	InternalKeyVersion int64  `json:"internal_key_version"`
-	CredentialID       string `json:"credential_id"`
+	ID                         string         `json:"id"`
+	Name                       string         `json:"name"`
+	Enabled                    int64          `json:"enabled"`
+	FallbackChainJson          string         `json:"fallback_chain_json"`
+	TruncateParamsJson         string         `json:"truncate_params_json"`
+	CreatedAt                  string         `json:"created_at"`
+	UpdatedAt                  string         `json:"updated_at"`
+	Internal                   int64          `json:"internal"`
+	InternalProvider           sql.NullString `json:"internal_provider"`
+	InternalApiKey             sql.NullString `json:"internal_api_key"`
+	InternalBaseUrl            sql.NullString `json:"internal_base_url"`
+	InternalModel              sql.NullString `json:"internal_model"`
+	InternalKeyVersion         int64          `json:"internal_key_version"`
+	CredentialID               sql.NullString `json:"credential_id"`
+	ReleaseStreamChunkDeadline int64          `json:"release_stream_chunk_deadline"`
 }

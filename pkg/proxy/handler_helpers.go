@@ -64,6 +64,11 @@ type requestContext struct {
 
 	// Proxy-only flags (stripped before forwarding upstream)
 	bypassInternal bool // Force external upstream, skip internal provider routing
+
+	// Streaming non-retryable state
+	// When true, this request will not retry upstream on errors
+	// This is set after ReleaseStreamChunkDeadline is reached and buffer is flushed
+	streamingNonRetryable bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
