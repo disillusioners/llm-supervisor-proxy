@@ -224,6 +224,10 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
+		// Reusable timer for write timeouts to avoid memory leaks from time.After in loop
+		writeTimeout := time.NewTimer(3 * time.Second)
+		defer writeTimeout.Stop()
+
 		for {
 			select {
 			case <-heartbeatCtx.Done():
@@ -251,6 +255,15 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 					}
 				}()
 
+				// Reset timer for this iteration
+				if !writeTimeout.Stop() {
+					select {
+					case <-writeTimeout.C:
+					default:
+					}
+				}
+				writeTimeout.Reset(3 * time.Second)
+
 				// Wait for write to complete or context canceled, with timeout
 				select {
 				case <-heartbeatCtx.Done():
@@ -264,7 +277,7 @@ func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) 
 						}
 					}
 					wg.Wait() // Ensure goroutine completes
-				case <-time.After(3 * time.Second):
+				case <-writeTimeout.C:
 					// Timeout - heartbeat write took too long
 					log.Printf("[HEARTBEAT] Write timeout, client may be slow or disconnected")
 					wg.Wait() // Wait for goroutine to complete before continuing

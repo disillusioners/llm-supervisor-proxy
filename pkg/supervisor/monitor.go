@@ -184,9 +184,12 @@ func (m *MonitoredReader) Close() error {
 		close(done)
 	}()
 
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-timeout.C:
 		log.Printf("[MonitoredReader] Timeout waiting for readLoop to finish")
 	}
 
