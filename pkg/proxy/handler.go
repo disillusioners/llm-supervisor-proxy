@@ -39,6 +39,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		LoopDetection:           cfg.LoopDetection,
 		ToolRepair:              cfg.ToolRepair,
 		ShadowRetryEnabled:      cfg.ShadowRetryEnabled,
+		SSEHeartbeatEnabled:     cfg.SSEHeartbeatEnabled,
 	}
 }
 
@@ -56,6 +57,7 @@ type ConfigSnapshot struct {
 	LoopDetection           config.LoopDetectionConfig
 	ToolRepair              toolrepair.Config
 	ShadowRetryEnabled      bool
+	SSEHeartbeatEnabled     bool
 }
 
 type Handler struct {

@@ -62,12 +62,12 @@ resources:
     memory: 2Gi
   requests:
     cpu: 100m
-    memory: 256Mi
+    memory: 128Mi
 
 # Liveness and readiness probes
 livenessProbe:
   httpGet:
-    path: /healthz
+    path: /
     port: 4321
   initialDelaySeconds: 30
   periodSeconds: 10
@@ -76,7 +76,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /healthz
+    path: /
     port: 4321
   initialDelaySeconds: 10
   periodSeconds: 5

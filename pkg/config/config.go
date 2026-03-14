@@ -76,6 +76,7 @@ type Config struct {
 	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
 	ShadowRetryEnabled      bool                `json:"shadow_retry_enabled"`   // Enable parallel shadow requests on first idle timeout
+	SSEHeartbeatEnabled     bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	ToolRepair              toolrepair.Config   `json:"tool_repair"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
@@ -96,6 +97,7 @@ type ManagerInterface interface {
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
 	GetShadowRetryEnabled() bool
+	GetSSEHeartbeatEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
@@ -137,6 +139,7 @@ var Defaults = Config{
 	BufferStorageDir:        "",               // Empty means use default data directory
 	BufferMaxStorageMB:      100,              // 100MB default
 	ShadowRetryEnabled:      true,             // Enable shadow retry by default
+	SSEHeartbeatEnabled:     false,            // Disable heartbeat by default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -325,6 +328,9 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("SHADOW_RETRY_ENABLED"); v != "" {
 		cfg.ShadowRetryEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("SSE_HEARTBEAT_ENABLED"); v != "" {
+		cfg.SSEHeartbeatEnabled = v == "true" || v == "1"
 	}
 	return cfg
 }
@@ -520,6 +526,13 @@ func (m *Manager) GetShadowRetryEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.ShadowRetryEnabled
+}
+
+// GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses
+func (m *Manager) GetSSEHeartbeatEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.SSEHeartbeatEnabled
 }
 
 // IsReadOnly returns true if the config file cannot be written

@@ -48,7 +48,7 @@ func (h *Handler) handleOKResponse(w http.ResponseWriter, rc *requestContext, re
 
 	// Start heartbeat for streaming responses to keep connection alive while buffering
 	var heartbeatStop context.CancelFunc
-	if rc.isStream {
+	if rc.isStream && rc.conf.SSEHeartbeatEnabled {
 		heartbeatStop = h.startSSEHeartbeat(w, rc.baseCtx)
 	}
 
