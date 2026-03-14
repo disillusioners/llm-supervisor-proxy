@@ -155,6 +155,10 @@ export type EventType =
   | 'client_disconnected_during_retry'
   | 'client_disconnected_during_scan'
   | 'client_disconnected_during_buffering'
+  | 'shadow_retry_started'
+  | 'shadow_retry_won'
+  | 'shadow_retry_failed'
+  | 'shadow_retry_lost'
   | 'internal_error';
 
 export interface EventData {
@@ -190,6 +194,11 @@ export interface EventData {
   strategies_used?: string[];
   duration?: string;
   details?: RepairDetail[];
+  // Shadow retry fields
+  model?: string;
+  main_model?: string;
+  trigger?: string;
+  internal?: boolean;
 }
 
 // Repair detail for tool repair events

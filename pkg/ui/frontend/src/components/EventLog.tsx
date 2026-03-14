@@ -65,6 +65,23 @@ const getEventMessage = (event: Event): string => {
       return `Client disconnected during buffering (buffer: ${event.data?.buffer_size || 0} bytes)`;
     case 'stream_chunk_deadline':
       return `Stream chunk deadline reached - flushing buffer (${event.data?.buffer_size || 0} bytes, deadline: ${event.data?.deadline || '?'}, elapsed: ${event.data?.elapsed || '?'})`;
+    case 'shadow_retry_started': {
+      const d = event.data;
+      const trigger = d?.trigger ? ` (${d.trigger})` : '';
+      return `Shadow retry started: ${d?.model || '?'} vs ${d?.main_model || 'main'}${trigger}`;
+    }
+    case 'shadow_retry_won': {
+      const d = event.data;
+      const dur = d?.duration ? ` in ${d.duration}` : '';
+      return `Shadow retry won: ${d?.model || '?'} completed faster than ${d?.main_model || 'main'}${dur}`;
+    }
+    case 'shadow_retry_failed':
+      return `Shadow retry failed: ${event.data?.model || '?'} - ${event.data?.error || 'Unknown error'}`;
+    case 'shadow_retry_lost': {
+      const d = event.data;
+      const dur = d?.duration ? ` after ${d.duration}` : '';
+      return `Shadow retry lost: ${d?.main_model || 'main'} completed before ${d?.model || '?'}${dur}`;
+    }
     default:
       return `Event: ${event.type}`;
   }
@@ -102,6 +119,14 @@ const getEventColor = (type: EventType): string => {
       return 'text-amber-400';
     case 'loop_interrupted':
       return 'text-red-300';
+    case 'shadow_retry_started':
+      return 'text-cyan-400';
+    case 'shadow_retry_won':
+      return 'text-green-400';
+    case 'shadow_retry_failed':
+      return 'text-red-400';
+    case 'shadow_retry_lost':
+      return 'text-gray-400';
     default:
       return 'text-gray-400';
   }
@@ -153,6 +178,14 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'CLIENT_DISCONNECTED_BUFFERING';
     case 'stream_chunk_deadline':
       return 'STREAM_CHUNK_DEADLINE';
+    case 'shadow_retry_started':
+      return 'SHADOW_RETRY_STARTED';
+    case 'shadow_retry_won':
+      return 'SHADOW_RETRY_WON';
+    case 'shadow_retry_failed':
+      return 'SHADOW_RETRY_FAILED';
+    case 'shadow_retry_lost':
+      return 'SHADOW_RETRY_LOST';
     default:
       return String(type).toUpperCase();
   }
