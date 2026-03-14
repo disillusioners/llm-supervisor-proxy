@@ -260,9 +260,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 					})
 
 					// Cancel shadow context to signal completion
-					if rc.shadow.cancelFunc != nil {
-						rc.shadow.cancelFunc()
-					}
+					// Note: Cancel() is safe to call multiple times (uses sync.Once)
+					rc.shadow.Cancel()
 
 					// Swap buffers - use shadow's completed buffer instead of main
 					rc.streamBuffer = *result.buffer
@@ -471,7 +470,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	// Note: Headers were already sent immediately when upstream responded (TTFB fix)
 	if streamEndedSuccessfully {
 		// Cancel shadow request if running (main succeeded first)
-		if rc.shadow != nil && rc.shadow.cancelFunc != nil {
+		// Note: Cancel() is safe to call multiple times (uses sync.Once)
+		if rc.shadow != nil {
 			log.Printf("[SHADOW] Main stream succeeded, cancelling shadow request")
 			h.publishEvent("shadow_retry_lost", map[string]interface{}{
 				"id":        rc.reqID,
@@ -479,7 +479,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				"duration":  time.Since(rc.shadow.startTime).String(),
 				"mainModel": currentModel,
 			})
-			rc.shadow.cancelFunc()
+			rc.shadow.Cancel()
 		}
 
 		// Stop heartbeat BEFORE writing to prevent race condition

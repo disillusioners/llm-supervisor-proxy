@@ -29,6 +29,7 @@ type shadowRequestState struct {
 	mu         sync.RWMutex
 	done       chan shadowResult // Closed when shadow completes
 	closeOnce  sync.Once         // Ensures done channel is closed exactly once
+	cancelOnce sync.Once         // Ensures cancel is called exactly once
 	cancelFunc context.CancelFunc
 	started    bool
 	completed  bool
@@ -42,6 +43,18 @@ func (s *shadowRequestState) Close() {
 	s.closeOnce.Do(func() {
 		if s.done != nil {
 			close(s.done)
+		}
+	})
+}
+
+// Cancel safely cancels the shadow context exactly once.
+// It is safe to call Cancel multiple times from any goroutine.
+// This prevents race conditions between the main goroutine and shadow goroutine
+// both trying to cancel the context.
+func (s *shadowRequestState) Cancel() {
+	s.cancelOnce.Do(func() {
+		if s.cancelFunc != nil {
+			s.cancelFunc()
 		}
 	})
 }
