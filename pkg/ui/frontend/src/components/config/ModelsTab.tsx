@@ -49,6 +49,7 @@ export function ModelsTab({
     fallback_chain: string[];
     truncate_params: string[];
     internal?: boolean;
+    credential_id?: string;
     internal_provider?: 'openai' | 'zhipu' | 'azure';
     internal_api_key?: string;
     internal_base_url?: string;
@@ -77,6 +78,7 @@ export function ModelsTab({
           fallback_chain: data.fallback_chain,
           truncate_params: data.truncate_params,
           internal: data.internal,
+          credential_id: data.internal ? data.credential_id : undefined,
           internal_provider: data.internal_provider,
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,
