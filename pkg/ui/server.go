@@ -1014,15 +1014,21 @@ func (s *Server) handleCredentialDetail(w http.ResponseWriter, r *http.Request) 
 			json.NewEncoder(w).Encode(map[string]string{"error": "provider is required"})
 			return
 		}
-		if updatedCred.APIKey == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "api_key is required"})
-			return
-		}
 
 		// Keep the same ID
 		updatedCred.ID = id
+
+		// If api_key is empty, preserve the existing one
+		if updatedCred.APIKey == "" {
+			existingCred := s.modelsConfig.GetCredential(id)
+			if existingCred == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "credential not found"})
+				return
+			}
+			updatedCred.APIKey = existingCred.APIKey
+		}
 
 		// Convert to models.CredentialConfig
 		credConfig := models.CredentialConfig{
