@@ -88,6 +88,22 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 		startTime:  time.Now(),
 	}
 
+	// Track if goroutine was successfully launched
+	goroutineLaunched := false
+
+	// Ensure cleanup on failure (panic or error before goroutine launch)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SHADOW] Panic during start for request %s: %v", rc.reqID, r)
+			// Clean up shadow state on panic
+			if !goroutineLaunched && rc.shadow != nil {
+				rc.shadow.Cancel()
+				rc.shadow.Close()
+				rc.shadow = nil
+			}
+		}
+	}()
+
 	h.publishEvent("shadow_retry_started", map[string]interface{}{
 		"id":       rc.reqID,
 		"model":    shadowModel,
@@ -103,6 +119,9 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 	} else {
 		go h.executeExternalShadowRequest(rc, shadowCtx, shadowCancel, shadowModel)
 	}
+
+	// Mark goroutine as successfully launched
+	goroutineLaunched = true
 }
 
 // executeInternalShadowRequest handles shadow requests for internal models (direct provider calls)
