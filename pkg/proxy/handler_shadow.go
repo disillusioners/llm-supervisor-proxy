@@ -108,7 +108,7 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 // executeInternalShadowRequest handles shadow requests for internal models (direct provider calls)
 func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string, shadowModelConfig *models.ModelConfig) {
 	defer shadowCancel()
-	defer close(rc.shadow.done)
+	defer rc.shadow.Close()
 
 	// Resolve internal config for shadow model (uses shadow model's credentials, not main request's)
 	provider, apiKey, baseURL, internalModel, ok := rc.conf.ModelsConfig.ResolveInternalConfig(shadowModel)
@@ -251,7 +251,7 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 // executeExternalShadowRequest handles shadow requests via HTTP upstream
 func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string) {
 	defer shadowCancel()
-	defer close(rc.shadow.done)
+	defer rc.shadow.Close()
 
 	// Build request body with shadow model
 	shadowBody := make(map[string]interface{})

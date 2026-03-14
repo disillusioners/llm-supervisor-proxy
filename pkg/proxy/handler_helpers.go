@@ -28,11 +28,22 @@ type shadowResult struct {
 type shadowRequestState struct {
 	mu         sync.RWMutex
 	done       chan shadowResult // Closed when shadow completes
+	closeOnce  sync.Once         // Ensures done channel is closed exactly once
 	cancelFunc context.CancelFunc
 	started    bool
 	completed  bool
 	model      string
 	startTime  time.Time
+}
+
+// Close safely closes the done channel exactly once.
+// It is safe to call Close multiple times from any goroutine.
+func (s *shadowRequestState) Close() {
+	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
