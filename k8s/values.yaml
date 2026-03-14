@@ -51,14 +51,18 @@ database:
 env:
   LOG_LEVEL: "info"
 
+# Go runtime memory limit (should be ~80-90% of memory limit)
+# Defaults to resources.limits.memory if not set
+goMemLimit: "1800MiB"
+
 # Resources
 resources:
   limits:
     cpu: "1"
-    memory: 1Gi
+    memory: 2Gi
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 256Mi
 
 # Liveness and readiness probes
 livenessProbe:
