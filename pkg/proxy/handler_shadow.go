@@ -19,14 +19,47 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
-// sendShadowResult sends result to shadow channel in a non-blocking manner
-// to prevent panics if channel is closed or full
-func sendShadowResult(ch chan shadowResult, result shadowResult) {
+// sendShadowResult sends result to shadow channel in a non-blocking manner.
+// Returns (sent=true, closed=false) on success, (sent=false, closed=true) if channel is closed,
+// or (sent=false, closed=false) if channel is full.
+// The caller should exit immediately if closed=true to avoid unnecessary work.
+func sendShadowResult(ch chan shadowResult, result shadowResult) (sent bool, closed bool) {
+	// Recover from panic when sending to a closed channel
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was closed - this is expected if main request finished
+			log.Printf("[SHADOW] Channel closed, result not sent")
+			sent = false
+			closed = true
+		}
+	}()
+
 	select {
 	case ch <- result:
+		return true, false
 	default:
-		// Channel full or closed - that's fine, main already has a result or canceled
-		log.Printf("[SHADOW] Channel full or closed, result not sent")
+		// Channel is full (not closed, since closed channels would panic above)
+		// Try a non-blocking receive to verify channel state
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				// Channel is closed (shouldn't reach here due to panic, but safety check)
+				return false, true
+			}
+			// Channel had data, we drained it. Try sending again.
+			select {
+			case ch <- result:
+				return true, false
+			default:
+				// Still full after draining
+				log.Printf("[SHADOW] Channel full, result not sent")
+				return false, false
+			}
+		default:
+			// Channel is empty but full (buffer full with no readers)
+			log.Printf("[SHADOW] Channel full, result not sent")
+			return false, false
+		}
 	}
 }
 
@@ -132,14 +165,18 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 	// Resolve internal config for shadow model (uses shadow model's credentials, not main request's)
 	provider, apiKey, baseURL, internalModel, ok := rc.conf.ModelsConfig.ResolveInternalConfig(shadowModel)
 	if !ok {
-		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to resolve internal config for shadow model %s", shadowModel)})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to resolve internal config for shadow model %s", shadowModel)}); closed {
+			return
+		}
 		return
 	}
 
 	// Create provider client
 	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
-		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to create shadow provider: %w", err)})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to create shadow provider: %w", err)}); closed {
+			return
+		}
 		return
 	}
 
@@ -253,7 +290,9 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 	// Stream response to buffer
 	eventCh, err := providerClient.StreamChatCompletion(shadowCtx, req)
 	if err != nil {
-		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+			return
+		}
 		return
 	}
 
@@ -325,15 +364,19 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 			completed = true
 
 		case "error":
-			sendShadowResult(rc.shadow.done, shadowResult{err: event.Error})
+			if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: event.Error}); closed {
+				return
+			}
 			return
 		}
 	}
 
-	sendShadowResult(rc.shadow.done, shadowResult{
+	if _, closed := sendShadowResult(rc.shadow.done, shadowResult{
 		buffer:    buffer,
 		completed: completed,
-	})
+	}); closed {
+		return
+	}
 }
 
 // executeExternalShadowRequest handles shadow requests via HTTP upstream
@@ -363,7 +406,9 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	// Create request with shadow context
 	proxyReq, err := http.NewRequestWithContext(shadowCtx, rc.method, rc.targetURL, bytes.NewBuffer(newBodyBytes))
 	if err != nil {
-		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+			return
+		}
 		return
 	}
 
@@ -390,14 +435,18 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 		if resp != nil {
 			resp.Body.Close()
 		}
-		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+			return
+		}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))}); closed {
+			return
+		}
 		return
 	}
 
@@ -420,12 +469,16 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	}
 
 	if err := scanner.Err(); err != nil {
-		sendShadowResult(rc.shadow.done, shadowResult{err: err})
+		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+			return
+		}
 		return
 	}
 
-	sendShadowResult(rc.shadow.done, shadowResult{
+	if _, closed := sendShadowResult(rc.shadow.done, shadowResult{
 		buffer:    buffer,
 		completed: completed,
-	})
+	}); closed {
+		return
+	}
 }
