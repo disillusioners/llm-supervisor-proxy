@@ -150,12 +150,81 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 		for i, m := range msgs {
 			if mm, ok := m.(map[string]interface{}); ok {
 				msg := providers.ChatMessage{}
+
+				// Role (required)
 				if role, ok := mm["role"].(string); ok {
 					msg.Role = role
 				}
+
+				// Name (optional, for tool/function messages)
+				if name, ok := mm["name"].(string); ok {
+					msg.Name = name
+				}
+
+				// ToolCallID (optional, required for tool role messages)
+				if toolCallID, ok := mm["tool_call_id"].(string); ok {
+					msg.ToolCallID = toolCallID
+				}
+
+				// Content (string OR array for multimodal)
 				if content, ok := mm["content"].(string); ok {
 					msg.Content = content
+				} else if contentArray, ok := mm["content"].([]interface{}); ok {
+					// Handle multimodal content array
+					parts := make([]providers.ContentPart, 0, len(contentArray))
+					for _, part := range contentArray {
+						if partMap, ok := part.(map[string]interface{}); ok {
+							cp := providers.ContentPart{}
+							if t, ok := partMap["type"].(string); ok {
+								cp.Type = t
+							}
+							if text, ok := partMap["text"].(string); ok {
+								cp.Text = text
+							}
+							if imgURL, ok := partMap["image_url"].(map[string]interface{}); ok {
+								cp.ImageURL = &providers.ImageURL{}
+								if url, ok := imgURL["url"].(string); ok {
+									cp.ImageURL.URL = url
+								}
+								if detail, ok := imgURL["detail"].(string); ok {
+									cp.ImageURL.Detail = detail
+								}
+							}
+							parts = append(parts, cp)
+						}
+					}
+					msg.Content = parts
 				}
+
+				// Tool calls (optional)
+				if toolCalls, ok := mm["tool_calls"].([]interface{}); ok {
+					msg.ToolCalls = make([]providers.ToolCall, 0, len(toolCalls))
+					for _, tc := range toolCalls {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							toolCall := providers.ToolCall{}
+							if idx, ok := tcMap["index"].(float64); ok {
+								toolCall.Index = int(idx)
+							}
+							if id, ok := tcMap["id"].(string); ok {
+								toolCall.ID = id
+							}
+							if t, ok := tcMap["type"].(string); ok {
+								toolCall.Type = t
+							}
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								toolCall.Function = providers.ToolCallFunction{}
+								if name, ok := fn["name"].(string); ok {
+									toolCall.Function.Name = name
+								}
+								if args, ok := fn["arguments"].(string); ok {
+									toolCall.Function.Arguments = args
+								}
+							}
+							msg.ToolCalls = append(msg.ToolCalls, toolCall)
+						}
+					}
+				}
+
 				req.Messages[i] = msg
 			}
 		}
