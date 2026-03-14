@@ -78,6 +78,11 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		// Per Go's http.Client.Do docs: "If the returned error is non-nil, the
+		// Response.Body is non-nil and must be closed" in some error cases (e.g., redirect errors)
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return nil, &ProviderError{
 			Provider:  p.Name(),
 			Message:   err.Error(),
@@ -149,6 +154,10 @@ func (p *OpenAIProvider) StreamChatCompletion(ctx context.Context, req *ChatComp
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		// Per Go's http.Client.Do docs: even on error, resp.Body may be non-nil and must be closed
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return nil, &ProviderError{
 			Provider:  p.Name(),
 			Message:   err.Error(),

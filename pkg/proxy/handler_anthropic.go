@@ -266,6 +266,10 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	// Send request
 	resp, err := h.client.Do(req)
 	if err != nil {
+		// Per Go's http.Client.Do docs: even on error, resp.Body may be non-nil and must be closed
+		if resp != nil {
+			resp.Body.Close()
+		}
 		log.Printf("Anthropic upstream request failed: %v", err)
 		return false
 	}

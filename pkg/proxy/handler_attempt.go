@@ -156,6 +156,10 @@ func (h *Handler) doSingleAttempt(w http.ResponseWriter, rc *requestContext, mod
 	logger.Debugf("[DO-ATTEMPT] Completed attempt %d, err=%v, baseCtx.Err()=%v", attempt, err, rc.baseCtx.Err())
 
 	if err != nil {
+		// Per Go's http.Client.Do docs: even on error, resp.Body may be non-nil and must be closed
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return h.handleUpstreamRequestError(rc, err, attemptCtx, attempt, counters)
 	}
 

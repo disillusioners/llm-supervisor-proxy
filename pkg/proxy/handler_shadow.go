@@ -298,6 +298,10 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	// Make request
 	resp, err := h.client.Do(proxyReq)
 	if err != nil {
+		// Per Go's http.Client.Do docs: even on error, resp.Body may be non-nil and must be closed
+		if resp != nil {
+			resp.Body.Close()
+		}
 		sendShadowResult(rc.shadow.done, shadowResult{err: err})
 		return
 	}
