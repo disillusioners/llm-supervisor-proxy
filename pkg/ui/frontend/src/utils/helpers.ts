@@ -27,17 +27,72 @@ export function formatLocaleTime(dateStr: string): string {
 
 export function formatDuration(duration: string): string {
   if (!duration) return '';
-  const match = duration.match(/^([\d.]+)(s|ms|m|h)$/);
-  if (!match) return duration;
 
-  const value = parseFloat(match[1]);
-  const unit = match[2];
+  // Parse Go-style duration (e.g., "1m41.385559131s", "2.5s", "500ms")
+  const totalMs = parseGoDuration(duration);
+  if (totalMs === null) return duration;
 
-  // Round to 1 decimal place
-  const rounded = Math.round(value * 10) / 10;
+  // Format in human-readable way
+  return formatMilliseconds(totalMs);
+}
 
-  // Remove trailing .0 for whole numbers
-  return rounded % 1 === 0 ? `${rounded}${unit}` : `${rounded}${unit}`;
+function parseGoDuration(duration: string): number | null {
+  let totalMs = 0;
+  let remaining = duration;
+
+  // Match patterns like "1h", "30m", "45s", "500ms"
+  const unitMultipliers: Record<string, number> = {
+    'h': 3600000,
+    'm': 60000,
+    's': 1000,
+    'ms': 1,
+  };
+
+  // Process in order of longest unit first to handle compound durations
+  const regex = /([\d.]+)(ms|h|m|s)/g;
+  let match;
+  let hasMatch = false;
+
+  while ((match = regex.exec(remaining)) !== null) {
+    hasMatch = true;
+    const value = parseFloat(match[1]);
+    const unit = match[2];
+    totalMs += value * unitMultipliers[unit];
+  }
+
+  return hasMatch ? totalMs : null;
+}
+
+function formatMilliseconds(ms: number): string {
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+
+  if (hours > 0) {
+    const remainMins = minutes % 60;
+    const remainSecs = seconds % 60;
+    if (remainMins > 0) {
+      return `${hours}h ${remainMins}m`;
+    }
+    return `${hours}h`;
+  }
+
+  if (minutes > 0) {
+    const remainSecs = seconds % 60;
+    if (remainSecs > 0) {
+      return `${minutes}m ${remainSecs}s`;
+    }
+    return `${minutes}m`;
+  }
+
+  // Less than a minute: show seconds with 1 decimal
+  const sec = ms / 1000;
+  const rounded = Math.round(sec * 10) / 10;
+  return rounded % 1 === 0 ? `${rounded}s` : `${rounded}s`;
 }
 
 export function truncateId(id: string, length = 8): string {
