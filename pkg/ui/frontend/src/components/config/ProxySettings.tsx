@@ -1,4 +1,4 @@
-import type { Credential, InternalProvider } from '../../types';
+import type { Credential } from '../../types';
 
 interface ProxySettingsProps {
   upstreamUrl: string;
@@ -10,6 +10,7 @@ interface ProxySettingsProps {
   maxIdleRetries: number;
   maxGenerationRetries: number;
   maxGenTime: string;
+  shadowRetryEnabled: boolean;
   originalPort: number;
   onUpstreamUrlChange: (value: string) => void;
   onUpstreamCredentialIdChange: (value: string) => void;
@@ -19,8 +20,8 @@ interface ProxySettingsProps {
   onMaxIdleRetriesChange: (value: number) => void;
   onMaxGenerationRetriesChange: (value: number) => void;
   onMaxGenTimeChange: (value: string) => void;
+  onShadowRetryEnabledChange: (value: boolean) => void;
   onApply: () => Promise<void>;
-  status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
 }
 
@@ -34,6 +35,7 @@ export function ProxySettings({
   maxIdleRetries,
   maxGenerationRetries,
   maxGenTime,
+  shadowRetryEnabled,
   originalPort,
   onUpstreamUrlChange,
   onUpstreamCredentialIdChange,
@@ -43,8 +45,8 @@ export function ProxySettings({
   onMaxIdleRetriesChange,
   onMaxGenerationRetriesChange,
   onMaxGenTimeChange,
+  onShadowRetryEnabledChange,
   onApply,
-  status,
   setStatus,
 }: ProxySettingsProps) {
   const handleApply = async () => {
@@ -178,6 +180,32 @@ export function ProxySettings({
             placeholder="2"
           />
         </div>
+      </div>
+
+      {/* Shadow Retry Enabled */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Shadow Retry</label>
+        <div class="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onShadowRetryEnabledChange(!shadowRetryEnabled)}
+            class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              shadowRetryEnabled ? 'bg-blue-600' : 'bg-gray-600'
+            }`}
+          >
+            <span
+              class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                shadowRetryEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+          <span class="text-sm text-gray-400">
+            {shadowRetryEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+          Enable parallel shadow requests on first idle timeout to reduce latency.
+        </p>
       </div>
 
       {/* Max Generation Retries */}

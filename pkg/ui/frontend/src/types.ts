@@ -47,6 +47,7 @@ export interface AppConfig {
   max_upstream_error_retries: number;
   max_idle_retries: number;
   max_generation_retries: number;
+  shadow_retry_enabled: boolean;
   loop_detection: LoopDetectionConfig;
   tool_repair: ToolRepairConfig;
   updated_at: string;

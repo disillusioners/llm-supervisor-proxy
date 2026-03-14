@@ -77,6 +77,7 @@ export function SettingsPage({
   const [maxIdleRetries, setMaxIdleRetries] = useState(0);
   const [maxGenerationRetries, setMaxGenerationRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
+  const [shadowRetryEnabled, setShadowRetryEnabled] = useState(true);
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -101,6 +102,7 @@ export function SettingsPage({
       setMaxIdleRetries(config.max_idle_retries || 0);
       setMaxGenerationRetries(config.max_generation_retries || 0);
       setMaxGenTime(config.max_generation_time || '');
+      setShadowRetryEnabled(config.shadow_retry_enabled ?? true);
     }
   }, [config]);
 
@@ -129,6 +131,7 @@ export function SettingsPage({
         max_idle_retries: maxIdleRetries,
         max_generation_retries: maxGenerationRetries,
         max_generation_time: maxGenTime,
+        shadow_retry_enabled: shadowRetryEnabled,
       });
 
       // Show success message, and also show restart warning if required
@@ -312,6 +315,7 @@ export function SettingsPage({
               maxIdleRetries={maxIdleRetries}
               maxGenerationRetries={maxGenerationRetries}
               maxGenTime={maxGenTime}
+              shadowRetryEnabled={shadowRetryEnabled}
               originalPort={originalPort}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
@@ -321,6 +325,7 @@ export function SettingsPage({
               onMaxIdleRetriesChange={setMaxIdleRetries}
               onMaxGenerationRetriesChange={setMaxGenerationRetries}
               onMaxGenTimeChange={setMaxGenTime}
+              onShadowRetryEnabledChange={setShadowRetryEnabled}
               onApply={handleApplyProxy}
               setStatus={setStatusWrapper}
             />
