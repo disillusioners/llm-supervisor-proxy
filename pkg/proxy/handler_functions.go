@@ -59,6 +59,9 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// Extract parameters (exclude standard fields that are shown separately)
 	parameters := extractParameters(requestBody)
 
+	// Extract app tag from x-proxy-app header for request grouping
+	appTag := r.Header.Get("x-proxy-app")
+
 	reqLog := &store.RequestLog{
 		ID:            reqID,
 		Status:        "running",
@@ -70,6 +73,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		FallbackUsed:  []string{},
 		IsStream:      isStream,
 		Parameters:    parameters,
+		AppTag:        appTag,
 	}
 	h.store.Add(reqLog)
 

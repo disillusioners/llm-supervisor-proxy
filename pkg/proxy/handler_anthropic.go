@@ -112,6 +112,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	isStream := anthropicReq.Stream
 
+	// Extract app tag from x-proxy-app header for request grouping
+	appTag := r.Header.Get("x-proxy-app")
+
 	// Safely extract original model name
 	originalModel, _ := openaiReq["model"].(string)
 	if originalModel == "" {
@@ -130,6 +133,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			"max_tokens": anthropicReq.MaxTokens,
 			"endpoint":   "anthropic",
 		},
+		AppTag: appTag,
 	}
 	h.store.Add(reqLog)
 
