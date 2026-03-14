@@ -25,6 +25,21 @@ export function formatLocaleTime(dateStr: string): string {
   return new Date(dateStr).toLocaleTimeString();
 }
 
+export function formatDuration(duration: string): string {
+  if (!duration) return '';
+  const match = duration.match(/^([\d.]+)(s|ms|m|h)$/);
+  if (!match) return duration;
+
+  const value = parseFloat(match[1]);
+  const unit = match[2];
+
+  // Round to 1 decimal place
+  const rounded = Math.round(value * 10) / 10;
+
+  // Remove trailing .0 for whole numbers
+  return rounded % 1 === 0 ? `${rounded}${unit}` : `${rounded}${unit}`;
+}
+
 export function truncateId(id: string, length = 8): string {
   return id.substring(0, length) + '...';
 }

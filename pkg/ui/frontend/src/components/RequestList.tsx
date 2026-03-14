@@ -1,6 +1,6 @@
 import { FunctionComponent } from 'preact';
 import { Request } from '../types';
-import { formatLocaleTime } from '../utils/helpers';
+import { formatLocaleTime, formatDuration } from '../utils/helpers';
 
 interface RequestListProps {
   requests: Request[];
@@ -104,8 +104,9 @@ const RequestList: FunctionComponent<RequestListProps> = ({
                             <div class={`w-2 h-2 rounded-full ${statusColors[req.status] || 'bg-gray-500'}`} />
                             <div class="flex-1 min-w-0">
                                 <span class="text-sm text-gray-300">{req.model}</span>
-                                <div class="text-xs text-gray-400">
-                                    {formatLocaleTime(req.startTime)}
+                                <div class="text-xs text-gray-400 flex items-center gap-2">
+                                    <span>{formatLocaleTime(req.startTime)}</span>
+                                    {req.duration && <span class="text-gray-500">• {formatDuration(req.duration)}</span>}
                                 </div>
                                 {req.error && (
                                     <div class="mt-1 text-sm text-red-400 bg-red-900/50 bg-opacity-10 rounded truncate">
