@@ -67,7 +67,7 @@ resources:
 # Liveness and readiness probes
 livenessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: 4321
   initialDelaySeconds: 30
   periodSeconds: 10
@@ -76,7 +76,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: 4321
   initialDelaySeconds: 10
   periodSeconds: 5
