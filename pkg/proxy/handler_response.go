@@ -205,6 +205,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 		// CHECK RELEASE DEADLINE
 		// If deadline has passed and we haven't flushed yet, flush buffer now
 		// Only check if deadline is enabled (releaseDeadline > 0)
+		// this feature only active if rc.streamBuffer.Len() > 0: upstream is sending data but hasn't completed, so we flush what we have to prevent client timeouts
 		if releaseDeadline > 0 && !deadlineReached && time.Now().After(deadlineTime) && rc.streamBuffer.Len() > 0 {
 			log.Printf("[RELEASE_DEADLINE] Flushing buffer after %v (deadline: %v, bufferSize: %d)",
 				time.Since(rc.startTime), releaseDeadline, rc.streamBuffer.Len())
