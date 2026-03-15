@@ -61,6 +61,17 @@ func (m *MonitoredReader) readLoop() {
 	for {
 		n, err := m.reader.Read(buf)
 
+		// CRITICAL FIX: Handle empty reads (n=0, err=nil)
+		// Some HTTP implementations may return n=0 without error, which would cause
+		// a busy loop where readCh keeps getting empty results and the idle timer
+		// never fires. Skip sending empty results and retry after a small backoff.
+		if n == 0 && err == nil {
+			// Small backoff to prevent CPU spinning while waiting for data
+			// This allows the idle timer in Read() to fire correctly
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
 		// Copy data to result (must copy since buf is reused)
 		result := readResult{
 			data: append([]byte(nil), buf[:n]...),

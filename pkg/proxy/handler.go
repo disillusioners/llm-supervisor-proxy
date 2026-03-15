@@ -82,11 +82,15 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 		bus:    bus,
 		store:  store,
 		client: &http.Client{
-			Timeout: 5 * time.Minute,
+			// IMPORTANT: Timeout is set to 0 for streaming support.
+			// We use context deadlines (attemptCtx) instead of http.Client.Timeout because:
+			// 1. http.Client.Timeout applies to entire request including response body reading
+			// 2. For streaming, we need to allow reading the response body indefinitely
+			// 3. Context deadline in doSingleAttempt handles cancellation properly
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
+				IdleConnTimeout:     300 * time.Second,
 			},
 		},
 		bufferStore: bufferStore,
