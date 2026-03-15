@@ -73,10 +73,6 @@ func shouldStartShadow(rc *requestContext, counters *retryCounters) bool {
 	if counters.idleRetries != 0 {
 		return false
 	}
-	// Only if no data has been sent to client yet (buffer is empty)
-	if rc.streamBuffer.Len() > 0 {
-		return false
-	}
 	// Must have a fallback model available (next in chain after current)
 	shadowModelIndex := rc.currentModelIndex + 1
 	if shadowModelIndex >= len(rc.modelList) {
