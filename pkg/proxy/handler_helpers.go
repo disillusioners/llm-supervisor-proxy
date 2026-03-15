@@ -39,7 +39,11 @@ type shadowRequestState struct {
 
 // Close safely closes the done channel exactly once.
 // It is safe to call Close multiple times from any goroutine.
+// Handles nil receiver to prevent panics in deferred calls.
 func (s *shadowRequestState) Close() {
+	if s == nil {
+		return
+	}
 	s.closeOnce.Do(func() {
 		if s.done != nil {
 			close(s.done)
@@ -51,7 +55,11 @@ func (s *shadowRequestState) Close() {
 // It is safe to call Cancel multiple times from any goroutine.
 // This prevents race conditions between the main goroutine and shadow goroutine
 // both trying to cancel the context.
+// Handles nil receiver to prevent panics in deferred calls.
 func (s *shadowRequestState) Cancel() {
+	if s == nil {
+		return
+	}
 	s.cancelOnce.Do(func() {
 		if s.cancelFunc != nil {
 			s.cancelFunc()

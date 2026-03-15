@@ -179,6 +179,9 @@ func (m *MonitoredReader) Read(p []byte) (n int, err error) {
 
 // Close closes the underlying reader and stops the read loop goroutine.
 func (m *MonitoredReader) Close() error {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()

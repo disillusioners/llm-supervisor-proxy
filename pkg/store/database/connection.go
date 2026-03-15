@@ -109,6 +109,9 @@ func importPgxDriver() {
 
 // Close closes the database connection
 func (s *Store) Close() error {
+	if s == nil || s.DB == nil {
+		return nil
+	}
 	return s.DB.Close()
 }
 

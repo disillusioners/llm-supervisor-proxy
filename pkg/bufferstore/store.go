@@ -90,6 +90,9 @@ func (s *BufferStore) Delete(bufferID string) error {
 
 // Cleanup removes old buffer files to free up space
 func (s *BufferStore) Cleanup() error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cleanupAllLocked()
