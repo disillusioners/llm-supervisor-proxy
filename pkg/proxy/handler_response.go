@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -406,12 +407,20 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// Carry for content/loop extraction
 			data = normalizedData
 
-			// Track chunk content for both existing accumulation and loop detection
-			prevLen := rc.accumulatedResponse.Len()
-			prevThinkLen := rc.accumulatedThinking.Len()
-			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls)
-			newContent := rc.accumulatedResponse.String()[prevLen:]
-			newThinking := rc.accumulatedThinking.String()[prevThinkLen:]
+			// Extract chunk content into temporary builders to avoid O(n²) memory growth.
+			// Previously: accumulatedResponse.String()[prevLen:] was called on every chunk,
+			// which copies the FULL accumulated string each time (quadratic memory).
+			// Now: extract new content directly from this chunk, then append to accumulators.
+			var chunkResponse, chunkThinking strings.Builder
+			extractStreamChunkContent(data, &chunkResponse, &chunkThinking, &rc.accumulatedToolCalls)
+			newContent := chunkResponse.String()
+			newThinking := chunkThinking.String()
+			if newContent != "" {
+				rc.accumulatedResponse.WriteString(newContent)
+			}
+			if newThinking != "" {
+				rc.accumulatedThinking.WriteString(newThinking)
+			}
 
 			// Feed content to loop detection buffer
 			if detector.IsEnabled() {
