@@ -57,12 +57,18 @@ const getEventMessage = (event: Event): string => {
       const d = event.data;
       return `Loop interrupted: ${d?.strategy || '?'} - ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
     }
+    case 'client_disconnected':
+      return 'Client disconnected';
     case 'client_disconnected_during_retry':
       return `Client disconnected during retry (Attempt ${event.data?.attempt || '?'})`;
     case 'client_disconnected_during_scan':
       return `Client disconnected during stream scan (buffer: ${event.data?.buffer_size || 0} bytes)`;
     case 'client_disconnected_during_buffering':
       return `Client disconnected during buffering (buffer: ${event.data?.buffer_size || 0} bytes)`;
+    case 'client_disconnected_during_stream':
+      return 'Client disconnected during stream read';
+    case 'client_disconnected_during_internal':
+      return 'Client disconnected during internal request';
     case 'stream_chunk_deadline':
       return `Stream chunk deadline reached - flushing buffer (${event.data?.buffer_size || 0} bytes, deadline: ${event.data?.deadline || '?'}, elapsed: ${event.data?.elapsed || '?'})`;
     case 'shadow_retry_started': {
@@ -110,9 +116,12 @@ const getEventColor = (type: EventType): string => {
     case 'stream_error_chunk':
     case 'stream_error_after_headers':
     case 'stream_ended_unexpectedly':
+    case 'client_disconnected':
     case 'client_disconnected_during_retry':
     case 'client_disconnected_during_scan':
     case 'client_disconnected_during_buffering':
+    case 'client_disconnected_during_stream':
+    case 'client_disconnected_during_internal':
     case 'stream_chunk_deadline':
       return 'text-yellow-400';
     case 'loop_detected':
@@ -170,12 +179,18 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'LOOP_DETECTED';
     case 'loop_interrupted':
       return 'LOOP_INTERRUPTED';
+    case 'client_disconnected':
+      return 'CLIENT_DISCONNECTED';
     case 'client_disconnected_during_retry':
       return 'CLIENT_DISCONNECTED';
     case 'client_disconnected_during_scan':
       return 'CLIENT_DISCONNECTED_SCAN';
     case 'client_disconnected_during_buffering':
       return 'CLIENT_DISCONNECTED_BUFFERING';
+    case 'client_disconnected_during_stream':
+      return 'CLIENT_DISCONNECTED_STREAM';
+    case 'client_disconnected_during_internal':
+      return 'CLIENT_DISCONNECTED_INTERNAL';
     case 'stream_chunk_deadline':
       return 'STREAM_CHUNK_DEADLINE';
     case 'shadow_retry_started':

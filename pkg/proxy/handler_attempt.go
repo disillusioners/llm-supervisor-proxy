@@ -277,6 +277,7 @@ func (h *Handler) doInternalAttempt(w http.ResponseWriter, rc *requestContext, m
 		// Check for client disconnection
 		if rc.baseCtx.Err() == context.Canceled {
 			log.Println("Client disconnected during internal request")
+			h.publishEvent("client_disconnected_during_internal", map[string]interface{}{"id": rc.reqID})
 			rc.reqLog.Status = "failed"
 			rc.reqLog.Error = "Client disconnected"
 			rc.reqLog.EndTime = time.Now()

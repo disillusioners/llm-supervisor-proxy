@@ -88,9 +88,10 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 			// 2. For streaming, we need to allow reading the response body indefinitely
 			// 3. Context deadline in doSingleAttempt handles cancellation properly
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     300 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   100,
+				IdleConnTimeout:       300 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second, // Timeout waiting for response headers (prevents stuck requests)
 			},
 		},
 		bufferStore: bufferStore,

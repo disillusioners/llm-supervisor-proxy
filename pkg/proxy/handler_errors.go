@@ -31,6 +31,7 @@ func (h *Handler) handleUpstreamRequestError(rc *requestContext, err error, atte
 
 	if errors.Is(rc.baseCtx.Err(), context.Canceled) {
 		log.Println("Client disconnected")
+		h.publishEvent("client_disconnected", map[string]interface{}{"id": rc.reqID})
 		rc.reqLog.Status = "failed"
 		rc.reqLog.Error = "Client disconnected"
 		rc.reqLog.EndTime = time.Now()
@@ -136,6 +137,7 @@ func (h *Handler) handleReadError(w http.ResponseWriter, rc *requestContext, mon
 	// This can manifest as "context canceled" when the base context is canceled
 	if rc.baseCtx.Err() == context.Canceled {
 		log.Println("Client disconnected during stream read")
+		h.publishEvent("client_disconnected_during_stream", map[string]interface{}{"id": rc.reqID})
 		rc.reqLog.Status = "failed"
 		rc.reqLog.Error = "Client disconnected"
 		rc.reqLog.EndTime = time.Now()
