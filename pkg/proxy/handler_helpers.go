@@ -72,6 +72,10 @@ type requestContext struct {
 	reqLog    *store.RequestLog
 	modelList []string
 
+	// Hard deadline for the entire request (absolute timeout across all retries)
+	// This ensures the server will never serve a connection longer than MaxRequestTime
+	hardDeadline time.Time
+
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 
@@ -146,6 +150,17 @@ type retryCounters struct {
 
 func (rc *retryCounters) totalAttempts() int {
 	return rc.errorRetries + rc.idleRetries + rc.genRetries
+}
+
+// cancelShadow safely cancels and cleans up any running shadow request.
+// This prevents goroutine and connection leaks when requests are aborted early
+// (e.g., on hard deadline, client disconnect, or all models failed).
+func cancelShadow(rc *requestContext) {
+	if rc.shadow != nil {
+		rc.shadow.Cancel()
+		rc.shadow.Close()
+		rc.shadow = nil
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

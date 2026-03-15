@@ -90,7 +90,8 @@ Key configuration via environment variables (highest precedence):
 | `UPSTREAM_URL` | `http://localhost:4001` | LLM provider URL |
 | `PORT` | `4321` | Proxy listening port |
 | `IDLE_TIMEOUT` | `60s` | Max wait between tokens |
-| `MAX_GENERATION_TIME` | `300s` | Hard request time limit |
+| `MAX_GENERATION_TIME` | `300s` | Hard request time limit per attempt |
+| `MAX_REQUEST_TIME` | `600s` | **Absolute hard timeout for entire request** (covers all retries) |
 | `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors |
 | `MAX_IDLE_RETRIES` | `2` | Retries for hung streams |
 | `MAX_GENERATION_RETRIES` | `1` | Retries for time limit exceeded |

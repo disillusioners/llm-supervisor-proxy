@@ -112,9 +112,33 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	// Calculate server timeouts
+	// ReadTimeout: Time limit for reading entire request (headers + body)
+	// This prevents slowloris attacks where client sends headers byte-by-byte
+	readTimeout := 30 * time.Second
+
+	// WriteTimeout: Time limit for writing response
+	// Set to MaxGenerationTime + buffer for retries + processing overhead
+	// This ensures connections can't hang indefinitely
+	writeTimeout := cfg.MaxGenerationTime.Duration() * 3 // 3x for retries + overhead
+	if writeTimeout < 5*time.Minute {
+		writeTimeout = 5 * time.Minute // Minimum 5 minutes
+	}
+	if writeTimeout > 30*time.Minute {
+		writeTimeout = 30 * time.Minute // Maximum 30 minutes
+	}
+
+	// IdleTimeout: Time to keep keep-alive connections alive between requests
+	// This prevents connection pool exhaustion
+	idleTimeout := 300 * time.Second
+
 	srv := &http.Server{
-		Addr:    ":" + strconv.Itoa(cfg.Port),
-		Handler: mux,
+		Addr:           ":" + strconv.Itoa(cfg.Port),
+		Handler:        mux,
+		ReadTimeout:    readTimeout,
+		WriteTimeout:   writeTimeout,
+		IdleTimeout:    idleTimeout,
+		MaxHeaderBytes: 1 << 20, // 1MB max header size (prevents memory exhaustion)
 	}
 
 	// Graceful Shutdown

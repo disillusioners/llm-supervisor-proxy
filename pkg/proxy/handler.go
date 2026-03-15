@@ -26,11 +26,17 @@ type Config struct {
 // Clone returns a snapshot of the current config values
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
+	// MaxRequestTime defaults to MaxGenerationTime * 2 if not set
+	maxRequestTime := cfg.MaxRequestTime.Duration()
+	if maxRequestTime == 0 {
+		maxRequestTime = cfg.MaxGenerationTime.Duration() * 2
+	}
 	return ConfigSnapshot{
 		UpstreamURL:             cfg.UpstreamURL,
 		UpstreamCredentialID:    cfg.UpstreamCredentialID,
 		IdleTimeout:             cfg.IdleTimeout.Duration(),
 		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
+		MaxRequestTime:          maxRequestTime,
 		MaxUpstreamErrorRetries: cfg.MaxUpstreamErrorRetries,
 		MaxIdleRetries:          cfg.MaxIdleRetries,
 		MaxGenerationRetries:    cfg.MaxGenerationRetries,
@@ -49,6 +55,7 @@ type ConfigSnapshot struct {
 	UpstreamCredentialID    string
 	IdleTimeout             time.Duration
 	MaxGenerationTime       time.Duration
+	MaxRequestTime          time.Duration
 	MaxUpstreamErrorRetries int
 	MaxIdleRetries          int
 	MaxGenerationRetries    int
@@ -247,6 +254,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
 		}
 
+		// Check hard deadline - ensures server never serves a connection longer than MaxRequestTime
+		if time.Now().After(rc.hardDeadline) {
+			log.Printf("Request exceeded hard deadline (%v), aborting", rc.conf.MaxRequestTime)
+			h.publishEvent("hard_deadline_exceeded", map[string]interface{}{
+				"id":       rc.reqID,
+				"duration": time.Since(rc.startTime).String(),
+				"limit":    rc.conf.MaxRequestTime.String(),
+			})
+			// Cancel any running shadow request to prevent goroutine leak
+			cancelShadow(rc)
+			break
+		}
+
 		if rc.baseCtx.Err() != nil {
 			log.Printf("Client disconnected, failing request")
 			break
@@ -263,6 +283,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// All models have failed
+	// Cancel any running shadow request to prevent goroutine leak
+	cancelShadow(rc)
+
 	if !rc.headersSent {
 		log.Printf("All models failed, sending error response to client")
 		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})

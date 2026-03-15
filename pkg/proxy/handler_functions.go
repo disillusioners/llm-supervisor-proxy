@@ -96,5 +96,6 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		baseCtx:          r.Context(),
 		originalMessages: originalMessages,
 		bypassInternal:   bypassInternal,
+		hardDeadline:     startTime.Add(conf.MaxRequestTime), // Absolute hard deadline
 	}, nil
 }

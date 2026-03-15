@@ -69,6 +69,7 @@ type Config struct {
 	Port                    int                 `json:"port"`
 	IdleTimeout             Duration            `json:"idle_timeout"`
 	MaxGenerationTime       Duration            `json:"max_generation_time"`
+	MaxRequestTime          Duration            `json:"max_request_time"` // Absolute hard timeout for entire request (including all retries)
 	MaxUpstreamErrorRetries int                 `json:"max_upstream_error_retries"`
 	MaxIdleRetries          int                 `json:"max_idle_retries"`
 	MaxGenerationRetries    int                 `json:"max_generation_retries"`
@@ -90,6 +91,7 @@ type ManagerInterface interface {
 	GetPort() int
 	GetIdleTimeout() time.Duration
 	GetMaxGenerationTime() time.Duration
+	GetMaxRequestTime() time.Duration
 	GetMaxUpstreamErrorRetries() int
 	GetMaxIdleRetries() int
 	GetMaxGenerationRetries() int
@@ -132,6 +134,7 @@ var Defaults = Config{
 	Port:                    4321,
 	IdleTimeout:             Duration(60 * time.Second),
 	MaxGenerationTime:       Duration(300 * time.Second),
+	MaxRequestTime:          Duration(600 * time.Second), // 10 minutes absolute hard limit
 	MaxUpstreamErrorRetries: 1,
 	MaxIdleRetries:          2,
 	MaxGenerationRetries:    1,
@@ -192,6 +195,16 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxGenerationTime < Duration(time.Second) {
 		return errors.New("max_generation_time must be at least 1s")
+	}
+	// MaxRequestTime validation: 0 means use default (MaxGenerationTime * 2)
+	// Only validate if explicitly set to non-zero
+	if c.MaxRequestTime != 0 {
+		if c.MaxRequestTime < Duration(time.Second) {
+			return errors.New("max_request_time must be at least 1s")
+		}
+		if c.MaxRequestTime < c.MaxGenerationTime {
+			return errors.New("max_request_time must be >= max_generation_time")
+		}
 	}
 	if c.MaxUpstreamErrorRetries < 0 {
 		return errors.New("max_upstream_error_retries cannot be negative")
@@ -303,6 +316,11 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.MaxGenerationTime = Duration(d)
+		}
+	}
+	if v := os.Getenv("MAX_REQUEST_TIME"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.MaxRequestTime = Duration(d)
 		}
 	}
 	if v := os.Getenv("MAX_UPSTREAM_ERROR_RETRIES"); v != "" {
@@ -470,6 +488,13 @@ func (m *Manager) GetMaxGenerationTime() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxGenerationTime.Duration()
+}
+
+// GetMaxRequestTime returns the absolute max request time (hard limit for all attempts)
+func (m *Manager) GetMaxRequestTime() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.MaxRequestTime.Duration()
 }
 
 // GetMaxUpstreamErrorRetries returns the max upstream error retries

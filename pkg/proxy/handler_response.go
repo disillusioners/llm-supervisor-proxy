@@ -115,6 +115,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 		if monitor != nil {
 			monitor.Close()
 		}
+		// Cancel any running shadow request to prevent goroutine leak
+		cancelShadow(rc)
 	}()
 
 	scanner := bufio.NewScanner(monitor)
@@ -187,7 +189,20 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	}
 
 	for scanner.Scan() {
-		// CHECK RELEASE DEADLINE FIRST
+		// CHECK HARD DEADLINE FIRST - ensures server never serves a connection longer than MaxRequestTime
+		// This is an absolute timeout that covers all retries and attempts
+		if time.Now().After(rc.hardDeadline) {
+			log.Printf("Stream exceeded hard deadline (%v), aborting", rc.conf.MaxRequestTime)
+			h.publishEvent("stream_hard_deadline_exceeded", map[string]interface{}{
+				"id":       rc.reqID,
+				"duration": time.Since(rc.startTime).String(),
+				"limit":    rc.conf.MaxRequestTime.String(),
+			})
+			monitor.Close()
+			return attemptReturnImmediately
+		}
+
+		// CHECK RELEASE DEADLINE
 		// If deadline has passed and we haven't flushed yet, flush buffer now
 		// Only check if deadline is enabled (releaseDeadline > 0)
 		if releaseDeadline > 0 && !deadlineReached && time.Now().After(deadlineTime) && rc.streamBuffer.Len() > 0 {

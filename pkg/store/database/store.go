@@ -330,6 +330,13 @@ func (m *ConfigManager) GetMaxGenerationTime() time.Duration {
 	return time.Duration(m.cfg.MaxGenerationTime)
 }
 
+// GetMaxRequestTime returns the absolute max request time (hard limit for all attempts)
+func (m *ConfigManager) GetMaxRequestTime() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.cfg.MaxRequestTime)
+}
+
 // GetMaxUpstreamErrorRetries returns the max upstream error retries
 func (m *ConfigManager) GetMaxUpstreamErrorRetries() int {
 	m.mu.RLock()
