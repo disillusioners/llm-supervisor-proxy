@@ -214,14 +214,14 @@ func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
 	}
 }
 
-// startSSEHeartbeat starts a goroutine that sends SSE comments every 10 seconds
+// startSSEHeartbeat starts a goroutine that sends SSE comments every 30 seconds
 // to keep the client connection alive while buffering upstream data.
 // Returns a cancel function to stop the heartbeat.
 func (h *Handler) startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) context.CancelFunc {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		// Reusable timer for write timeouts to avoid memory leaks from time.After in loop
