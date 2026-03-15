@@ -25,7 +25,15 @@ func (h *Handler) finalizeSuccess(rc *requestContext) {
 
 	// Include tool calls if any were accumulated
 	if len(rc.accumulatedToolCalls) > 0 {
-		assistantMsg.ToolCalls = rc.accumulatedToolCalls
+		// Convert argument builders to strings
+		assistantMsg.ToolCalls = make([]store.ToolCall, len(rc.accumulatedToolCalls))
+		for i, tc := range rc.accumulatedToolCalls {
+			assistantMsg.ToolCalls[i] = tc
+			// Copy arguments from builder (if available)
+			if i < len(rc.toolCallArgBuilders) {
+				assistantMsg.ToolCalls[i].Function.Arguments = rc.toolCallArgBuilders[i].String()
+			}
+		}
 	}
 
 	rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)

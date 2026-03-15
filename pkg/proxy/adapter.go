@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -96,27 +97,29 @@ type ErrorWriter interface {
 
 // ResponseState tracks the accumulated response content during a request.
 // This is used to build the assistant message that gets stored in the request log.
+// Uses strings.Builder to avoid allocation pressure from repeated string concatenation
+// during streaming (memory trap #2: string += in loops).
 type ResponseState struct {
-	Content   string
-	Thinking  string
-	ToolCalls []store.ToolCall
+	contentBuilder  strings.Builder
+	thinkingBuilder strings.Builder
+	ToolCalls       []store.ToolCall
 }
 
 // Reset clears the response state.
 func (rs *ResponseState) Reset() {
-	rs.Content = ""
-	rs.Thinking = ""
+	rs.contentBuilder.Reset()
+	rs.thinkingBuilder.Reset()
 	rs.ToolCalls = nil
 }
 
 // AppendContent appends text content to the response.
 func (rs *ResponseState) AppendContent(text string) {
-	rs.Content += text
+	rs.contentBuilder.WriteString(text)
 }
 
 // AppendThinking appends thinking content to the response.
 func (rs *ResponseState) AppendThinking(text string) {
-	rs.Thinking += text
+	rs.thinkingBuilder.WriteString(text)
 }
 
 // AddToolCall adds a tool call to the response.
@@ -124,12 +127,22 @@ func (rs *ResponseState) AddToolCall(tc store.ToolCall) {
 	rs.ToolCalls = append(rs.ToolCalls, tc)
 }
 
+// GetContent returns the accumulated content string.
+func (rs *ResponseState) GetContent() string {
+	return rs.contentBuilder.String()
+}
+
+// GetThinking returns the accumulated thinking string.
+func (rs *ResponseState) GetThinking() string {
+	return rs.thinkingBuilder.String()
+}
+
 // ToAssistantMessage converts the response state to a store.Message.
 func (rs *ResponseState) ToAssistantMessage() store.Message {
 	msg := store.Message{
 		Role:     "assistant",
-		Content:  rs.Content,
-		Thinking: rs.Thinking,
+		Content:  rs.contentBuilder.String(),
+		Thinking: rs.thinkingBuilder.String(),
 	}
 	if len(rs.ToolCalls) > 0 {
 		msg.ToolCalls = rs.ToolCalls
@@ -165,12 +178,12 @@ func (e *ResponseExtractor) ExtractFromNonStream(openaiResponse []byte) (state R
 
 	// Extract content
 	if content, ok := message["content"].(string); ok {
-		state.Content = content
+		state.AppendContent(content)
 	}
 
 	// Extract thinking (from reasoning_content if present)
 	if reasoning, ok := message["reasoning_content"].(string); ok {
-		state.Thinking = reasoning
+		state.AppendThinking(reasoning)
 	}
 
 	// Extract tool calls

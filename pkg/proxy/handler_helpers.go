@@ -96,6 +96,10 @@ type requestContext struct {
 	accumulatedThinking  strings.Builder
 	accumulatedToolCalls []store.ToolCall
 
+	// Tool call argument builders - avoids string += memory trap in streaming
+	// Each index corresponds to accumulatedToolCalls[index]
+	toolCallArgBuilders []strings.Builder
+
 	// Stream buffer for retry-safe streaming
 	// Chunks are buffered until stream completes successfully, then flushed to client
 	// This enables safe retry mid-stream since nothing is sent until [DONE]
@@ -361,7 +365,10 @@ func extractNonStreamContent(bodyBytes []byte, response, thinking *strings.Build
 }
 
 // extractStreamChunkContent extracts content and thinking from a single SSE chunk.
-func extractStreamChunkContent(data []byte, response, thinking *strings.Builder, toolCallsAccum *[]store.ToolCall) {
+// toolCallsAccum and toolCallArgBuilders must both be non-nil and are used together:
+// - toolCallsAccum tracks ID, type, and function name per index
+// - toolCallArgBuilders tracks the arguments string per index (avoids += memory trap)
+func extractStreamChunkContent(data []byte, response, thinking *strings.Builder, toolCallsAccum *[]store.ToolCall, toolCallArgBuilders *[]strings.Builder) {
 	var chunk map[string]interface{}
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return
@@ -393,7 +400,7 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 	}
 
 	// Extract and accumulate tool calls
-	if toolCalls, ok := delta["tool_calls"].([]interface{}); ok && toolCallsAccum != nil {
+	if toolCalls, ok := delta["tool_calls"].([]interface{}); ok && toolCallsAccum != nil && toolCallArgBuilders != nil {
 		for _, tc := range toolCalls {
 			tcMap, ok := tc.(map[string]interface{})
 			if !ok {
@@ -410,6 +417,7 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 			// Ensure accumulator has enough capacity
 			for len(*toolCallsAccum) <= idx {
 				*toolCallsAccum = append(*toolCallsAccum, store.ToolCall{})
+				*toolCallArgBuilders = append(*toolCallArgBuilders, strings.Builder{})
 			}
 
 			// Update tool call at index
@@ -431,8 +439,8 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 					toolCall.Function.Name = name
 				}
 				if args, ok := fn["arguments"].(string); ok {
-					// Arguments are streamed in chunks, so append
-					toolCall.Function.Arguments += args
+					// Use builder to avoid memory trap from repeated string concatenation
+					(*toolCallArgBuilders)[idx].WriteString(args)
 				}
 			}
 		}

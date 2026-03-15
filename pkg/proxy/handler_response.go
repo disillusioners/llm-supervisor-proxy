@@ -134,6 +134,10 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	rc.streamBuffer = bytes.Buffer{}
 	rc.accumulatedResponse.Reset()
 	rc.accumulatedThinking.Reset()
+	// Reset tool call accumulators for retries
+	rc.accumulatedToolCalls = nil
+	rc.toolCallArgBuilders = nil
+
 	// Reset stream ID caching to get fresh ID from new upstream
 	rc.streamIDSet = false
 	rc.streamID = ""
@@ -298,7 +302,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 						if bytes.HasPrefix(shadowLine, []byte("data: ")) {
 							data := bytes.TrimPrefix(shadowLine, []byte("data: "))
 							if string(data) != "[DONE]" {
-								extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, nil)
+								extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, nil, nil)
 							}
 						}
 					}
@@ -412,7 +416,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// which copies the FULL accumulated string each time (quadratic memory).
 			// Now: extract new content directly from this chunk, then append to accumulators.
 			var chunkResponse, chunkThinking strings.Builder
-			extractStreamChunkContent(data, &chunkResponse, &chunkThinking, &rc.accumulatedToolCalls)
+			extractStreamChunkContent(data, &chunkResponse, &chunkThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
 			newContent := chunkResponse.String()
 			newThinking := chunkThinking.String()
 			if newContent != "" {
