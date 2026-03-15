@@ -284,7 +284,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sub := s.bus.Subscribe()
+	sub, err := s.bus.Subscribe()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	defer s.bus.Unsubscribe(sub)
 
 	// We need to know when client disconnects
@@ -298,11 +302,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case evt := <-sub:
 			data, _ := json.Marshal(evt)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				// Client disconnected or write error
+				return
+			}
 			flusher.Flush()
 		case <-ticker.C:
 			// Send comment heartbeat
-			fmt.Fprintf(w, ": heartbeat\n\n")
+			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {
+				// Client disconnected
+				return
+			}
 			flusher.Flush()
 		case <-ctx.Done():
 			return

@@ -1179,7 +1179,7 @@ func TestLoopDetection_ExactMatch(t *testing.T) {
 	defer upstream.Close()
 
 	// Subscribe to events to capture loop_detected
-	eventCh := h.bus.Subscribe()
+	eventCh, _ := h.bus.Subscribe()
 	defer h.bus.Unsubscribe(eventCh)
 
 	// Send 3 identical requests — each gets the same response from mock.
@@ -1213,7 +1213,7 @@ func TestLoopDetection_NormalNoTrigger(t *testing.T) {
 	h, upstream := newTestHandler(t, mockLLMHandler(t), nil)
 	defer upstream.Close()
 
-	eventCh := h.bus.Subscribe()
+	eventCh, _ := h.bus.Subscribe()
 	defer h.bus.Unsubscribe(eventCh)
 
 	// Send different types of requests — each is a separate request with its own detector
