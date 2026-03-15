@@ -403,9 +403,10 @@ func TestAnthropic_ThinkingStream(t *testing.T) {
 
 	respBody := rr.Body.String()
 
-	// Verify thinking content block
-	if !strings.Contains(respBody, `"type":"thinking"`) {
-		t.Error("expected thinking content block in response")
+	// In streaming mode, thinking is sent as thinking_delta inside a text block
+	// The content_block_start has type "text", and thinking is sent via thinking_delta events
+	if !strings.Contains(respBody, `"type":"thinking_delta"`) {
+		t.Error("expected thinking_delta in response")
 	}
 }
 

@@ -343,28 +343,14 @@ func TestInvalidJSON(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("test-model", false)
-			req := makeRequest(t, body)
+			// Send actually invalid JSON
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not valid json{"))
+			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			if rr.Code != http.StatusOK {
-				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
-			}
-
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			assistantMsg := getLastAssistantMessage(reqs[0])
-			if assistantMsg == nil {
-				t.Fatal("expected assistant message in request log")
-			}
-			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
-				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
-			}
-			if !strings.Contains(assistantMsg.Content, "Deep thought") {
-				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("expected status %d, got %d", http.StatusBadRequest, rr.Code)
 			}
 		},
 	})
@@ -534,7 +520,7 @@ func TestMockLLM_ToolCall(t *testing.T) {
 		name:       "MockLLM_ToolCall",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("test-model", false)
+			body := bodyWithPrompt("mock-model", true, "mock-tool call")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -551,11 +537,9 @@ func TestMockLLM_ToolCall(t *testing.T) {
 			if assistantMsg == nil {
 				t.Fatal("expected assistant message in request log")
 			}
-			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
-				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
-			}
-			if !strings.Contains(assistantMsg.Content, "Deep thought") {
-				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
+			// Verify tool call content is in the response
+			if !strings.Contains(assistantMsg.Content, "TOOL CALL") {
+				t.Errorf("expected response to contain 'TOOL CALL', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -1038,8 +1022,8 @@ func TestProviderSpecificThinking(t *testing.T) {
 			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
 				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
 			}
-			if !strings.Contains(assistantMsg.Content, "Deep thought") {
-				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
+			if !strings.Contains(assistantMsg.Content, "Answer") {
+				t.Errorf("expected response to contain 'Answer', got '%s'", assistantMsg.Content)
 			}
 		},
 	})
@@ -1061,7 +1045,7 @@ func TestFallback4xxTriggered(t *testing.T) {
 
 				var reqBody map[string]interface{}
 				json.Unmarshal(bodyBytes, &reqBody)
-				model := reqBody["model"].(string)
+				model, _ := reqBody["model"].(string)
 
 				if model == "primary" {
 					w.WriteHeader(http.StatusNotFound)
@@ -1074,7 +1058,8 @@ func TestFallback4xxTriggered(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("test-model", false)
+			// Use "primary" model to trigger 404 and fallback to secondary
+			body := simpleBody("primary", false)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -1091,11 +1076,10 @@ func TestFallback4xxTriggered(t *testing.T) {
 			if assistantMsg == nil {
 				t.Fatal("expected assistant message in request log")
 			}
-			if !strings.Contains(assistantMsg.Thinking, "Deep thought") {
-				t.Errorf("expected thinking to contain 'Deep thought', got '%s'", assistantMsg.Thinking)
-			}
-			if !strings.Contains(assistantMsg.Content, "Deep thought") {
-				t.Errorf("expected response to contain 'Deep thought', got '%s'", assistantMsg.Content)
+			// Secondary model returns the standard mock response
+			expectedContent := "Hello world! I am a useful token stream."
+			if assistantMsg.Content != expectedContent {
+				t.Errorf("expected response '%s', got '%s'", expectedContent, assistantMsg.Content)
 			}
 		},
 	})
