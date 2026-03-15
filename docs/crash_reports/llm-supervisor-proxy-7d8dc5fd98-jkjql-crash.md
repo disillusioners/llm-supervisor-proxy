@@ -24,30 +24,85 @@ The pod crashed due to a **nil pointer dereference panic** in the shadow request
 
 ---
 
-## Root Cause
+## Root Cause Analysis
 
-A panic occurred in `executeExternalShadowRequest` at `handler_shadow.go:434`, which triggered deferred `Cancel()` and `Close()` calls on the `shadowRequestState`. These methods didn't check for nil receivers, causing a cascading panic.
+### The Architecture Problem
 
-### Stack Trace
+The shadow retry had a **race condition** between the main request goroutine and the shadow goroutine:
 
 ```
-panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0xab8bce]
-
-goroutine 170 [running]:
-github.com/disillusioners/llm-supervisor-proxy/pkg/proxy.(*shadowRequestState).Cancel
-    /app/pkg/proxy/handler_helpers.go:55 +0xe
-panic({0xbb5ca0?, 0x135a660?})
-    /usr/local/go/src/runtime/panic.go:860 +0x13a
-github.com/disillusioners/llm-supervisor-proxy/pkg/proxy.(*shadowRequestState).Close
-    /app/pkg/proxy/handler_helpers.go:43 +0xe
-panic({0xbb5ca0?, 0x135a660?})
-    /usr/local/go/src/runtime/panic.go:860 +0x13a
-github.com/disillusioners/llm-supervisor-proxy/pkg/proxy.(*Handler).executeExternalShadowRequest
-    /app/pkg/proxy/handler_shadow.go:434 +0x701
-created by github.com/disillusioners/llm-supervisor-proxy/pkg/proxy.(*Handler).startShadowRequest
-    /app/pkg/proxy/handler_shadow.go:149 +0x647
+┌─────────────────────────────────────────────────────────────────┐
+│ Main Request Goroutine                                          │
+│                                                                  │
+│ startShadowRequest()                                            │
+│   rc.shadow = &shadowRequestState{...}  ──────┐                │
+│   go executeExternalShadowRequest()         │ creates          │
+│                                            ▼                    │
+└───────────────────────────────────────────────┼─────────────────┘
+                                             │ 
+                              rc.shadow can be SET TO NIL here
+                                             │ by cancelShadow()
+                                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Shadow Goroutine (concurrent)                                    │
+│                                                                  │
+│ executeExternalShadowRequest()                                  │
+│   defer rc.shadow.Cancel()  ◄── CRASH! rc.shadow is nil        │
+│   defer rc.shadow.Close()                                        │
+│   ...                                                            │
+│   rc.shadow.done  ◄── CRASH! nil pointer dereference            │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Where the bug was created
+
+1. **[`handler_shadow.go:112`](pkg/proxy/handler_shadow.go:112)**: Creates `rc.shadow`
+2. **[`handler_shadow.go:149`](pkg/proxy/handler_shadow.go:149)**: Starts goroutine with `rc.shadow`
+3. **Any time**: Main request calls [`cancelShadow(rc)`](pkg/proxy/handler_helpers.go:170) which sets `rc.shadow = nil`
+4. **Shadow goroutine**: Tries to access `rc.shadow.done` → **CRASH**
+
+---
+
+## Fix Applied
+
+### Solution: Local State Ownership
+
+Instead of sharing mutable state (`rc.shadow`) between concurrent goroutines, each shadow goroutine now creates and owns its own local state:
+
+**Before (buggy)**:
+```go
+func (h *Handler) executeExternalShadowRequest(rc *requestContext, ...) {
+    defer rc.shadow.Cancel()    // ← Uses rc.shadow (shared, can be nil)
+    defer rc.shadow.Close()
+    sendShadowResult(rc.shadow.done, result)
+}
+```
+
+**After (fixed)**:
+```go
+func (h *Handler) executeExternalShadowRequest(rc *requestContext, ...) {
+    // Create LOCAL state - shadow goroutine owns its own state
+    shadowState := &shadowRequestState{
+        done:       make(chan shadowResult, 1),
+        cancelFunc: shadowCancel,
+        // ...
+    }
+    defer shadowState.Cancel()    // ← Uses local state
+    defer shadowState.Close()
+    sendShadowResult(shadowState.done, result)  // ← Uses local state
+}
+```
+
+Now `rc.shadow` is only used as a **flag** (nil vs non-nil) to indicate "shadow is running", not as the state owner.
+
+### Files Modified
+
+1. **[`pkg/proxy/handler_shadow.go`](pkg/proxy/handler_shadow.go)**: 
+   - `executeInternalShadowRequest`: Uses local `shadowState` instead of `rc.shadow`
+   - `executeExternalShadowRequest`: Uses local `shadowState` instead of `rc.shadow`
+
+2. **[`pkg/proxy/handler_helpers.go`](pkg/proxy/handler_helpers.go)**:
+   - Removed nil receiver checks (no longer needed with proper architecture)
 
 ---
 
@@ -78,32 +133,9 @@ created by github.com/disillusioners/llm-supervisor-proxy/pkg/proxy.(*Handler).s
 
 ---
 
-## Fix Applied
-
-Added nil receiver checks to `shadowRequestState.Close()` and `shadowRequestState.Cancel()` in `pkg/proxy/handler_helpers.go`:
-
-```go
-func (s *shadowRequestState) Close() {
-    if s == nil {
-        return
-    }
-    // ... existing code
-}
-
-func (s *shadowRequestState) Cancel() {
-    if s == nil {
-        return
-    }
-    // ... existing code
-}
-```
-
-This prevents the cascading panic when deferred cleanup calls are made on a nil shadow state.
-
----
-
 ## Status
 
 - **Build**: ✅ Passes
-- **Fix Applied**: Yes
+- **Tests**: ✅ All pass
+- **Fix Applied**: Yes (architectural fix)
 - **Deployed**: Pending

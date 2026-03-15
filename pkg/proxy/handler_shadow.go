@@ -155,13 +155,22 @@ func (h *Handler) startShadowRequest(rc *requestContext) {
 
 // executeInternalShadowRequest handles shadow requests for internal models (direct provider calls)
 func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string, shadowModelConfig *models.ModelConfig) {
-	defer rc.shadow.Cancel()
-	defer rc.shadow.Close()
+	// Create LOCAL state - shadow goroutine owns its own state
+	// This prevents race condition where main goroutine sets rc.shadow = nil
+	shadowState := &shadowRequestState{
+		done:       make(chan shadowResult, 1),
+		cancelFunc: shadowCancel,
+		started:    true,
+		model:      shadowModel,
+		startTime:  time.Now(),
+	}
+	defer shadowState.Cancel()
+	defer shadowState.Close()
 
 	// Resolve internal config for shadow model (uses shadow model's credentials, not main request's)
 	provider, apiKey, baseURL, internalModel, ok := rc.conf.ModelsConfig.ResolveInternalConfig(shadowModel)
 	if !ok {
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to resolve internal config for shadow model %s", shadowModel)}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: fmt.Errorf("failed to resolve internal config for shadow model %s", shadowModel)}); closed {
 			return
 		}
 		return
@@ -170,7 +179,7 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 	// Create provider client
 	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("failed to create shadow provider: %w", err)}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: fmt.Errorf("failed to create shadow provider: %w", err)}); closed {
 			return
 		}
 		return
@@ -286,7 +295,7 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 	// Stream response to buffer
 	eventCh, err := providerClient.StreamChatCompletion(shadowCtx, req)
 	if err != nil {
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: err}); closed {
 			return
 		}
 		return
@@ -360,14 +369,14 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 			completed = true
 
 		case "error":
-			if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: event.Error}); closed {
+			if _, closed := sendShadowResult(shadowState.done, shadowResult{err: event.Error}); closed {
 				return
 			}
 			return
 		}
 	}
 
-	if _, closed := sendShadowResult(rc.shadow.done, shadowResult{
+	if _, closed := sendShadowResult(shadowState.done, shadowResult{
 		buffer:    buffer,
 		completed: completed,
 	}); closed {
@@ -377,8 +386,17 @@ func (h *Handler) executeInternalShadowRequest(rc *requestContext, shadowCtx con
 
 // executeExternalShadowRequest handles shadow requests via HTTP upstream
 func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx context.Context, shadowCancel context.CancelFunc, shadowModel string) {
-	defer rc.shadow.Cancel()
-	defer rc.shadow.Close()
+	// Create LOCAL state - shadow goroutine owns its own state
+	// This prevents race condition where main goroutine sets rc.shadow = nil
+	shadowState := &shadowRequestState{
+		done:       make(chan shadowResult, 1),
+		cancelFunc: shadowCancel,
+		started:    true,
+		model:      shadowModel,
+		startTime:  time.Now(),
+	}
+	defer shadowState.Cancel()
+	defer shadowState.Close()
 
 	// Build request body with shadow model
 	shadowBody := make(map[string]interface{})
@@ -402,7 +420,7 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	// Create request with shadow context
 	proxyReq, err := http.NewRequestWithContext(shadowCtx, rc.method, rc.targetURL, bytes.NewBuffer(newBodyBytes))
 	if err != nil {
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: err}); closed {
 			return
 		}
 		return
@@ -431,7 +449,7 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 		if resp != nil {
 			resp.Body.Close()
 		}
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: err}); closed {
 			return
 		}
 		return
@@ -440,7 +458,7 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: fmt.Errorf("shadow request failed with status %d: %s", resp.StatusCode, string(bodyBytes))}); closed {
 			return
 		}
 		return
@@ -466,13 +484,13 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	}
 
 	if err := scanner.Err(); err != nil {
-		if _, closed := sendShadowResult(rc.shadow.done, shadowResult{err: err}); closed {
+		if _, closed := sendShadowResult(shadowState.done, shadowResult{err: err}); closed {
 			return
 		}
 		return
 	}
 
-	if _, closed := sendShadowResult(rc.shadow.done, shadowResult{
+	if _, closed := sendShadowResult(shadowState.done, shadowResult{
 		buffer:    buffer,
 		completed: completed,
 	}); closed {
