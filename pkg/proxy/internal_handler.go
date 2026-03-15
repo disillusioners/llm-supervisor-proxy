@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
@@ -120,7 +121,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 	}
 
 	for event := range eventCh {
-		log.Printf("[DEBUG INTERNAL] Received event: type=%s, content=%.100s", event.Type, event.Content)
+		logger.Debugf("[DEBUG INTERNAL] Received event: type=%s, content=%.100s", event.Type, event.Content)
 		switch event.Type {
 		case "content":
 			// Write SSE data event
@@ -140,7 +141,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				},
 			}
 			data, _ := json.Marshal(chunk)
-			log.Printf("[DEBUG INTERNAL] Writing chunk: %s", string(data))
+			logger.Debugf("[DEBUG INTERNAL] Writing chunk: %s", string(data))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 
@@ -162,7 +163,7 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				},
 			}
 			data, _ := json.Marshal(chunk)
-			log.Printf("[DEBUG INTERNAL] Writing tool_call chunk: %s", string(data))
+			logger.Debugf("[DEBUG INTERNAL] Writing tool_call chunk: %s", string(data))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 
@@ -240,7 +241,7 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 						msg.Content = contentStr
 					default:
 						// Unsupported content type, skip or handle as needed
-						log.Printf("Unsupported content type: %T", content)
+						logger.Debugf("Unsupported content type: %T", content)
 						msg.Content = ""
 					}
 
