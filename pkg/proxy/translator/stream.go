@@ -58,7 +58,8 @@ func TranslateBufferedStream(openaiBuffer []byte, originalModel string) ([]byte,
 		buf.WriteString(event)
 	}
 
-	return buf.Bytes(), nil
+	// Trap 5 Fix: Copy buffer into new slice before returning to prevent retaining large backing array
+	return append([]byte(nil), buf.Bytes()...), nil
 }
 
 // extractChunkContent extracts content from an OpenAI stream chunk into state
@@ -91,15 +92,15 @@ func extractChunkContent(chunk map[string]interface{}, state *StreamState) {
 
 	// Text content
 	if content, ok := delta["content"].(string); ok {
-		state.AccumulatedContent += content
+		state.AccumulatedContent.WriteString(content)
 	}
 
 	// Reasoning/thinking content
 	if reasoning, ok := delta["reasoning_content"].(string); ok {
-		state.ThinkingContent += reasoning
+		state.ThinkingContent.WriteString(reasoning)
 	}
 	if thinking, ok := delta["thinking"].(string); ok {
-		state.ThinkingContent += thinking
+		state.ThinkingContent.WriteString(thinking)
 	}
 
 	// Tool calls
@@ -131,7 +132,7 @@ func extractChunkContent(chunk map[string]interface{}, state *StreamState) {
 					state.ToolCalls[index].Name = name
 				}
 				if args, ok := function["arguments"].(string); ok {
-					state.ToolCalls[index].Arguments += args
+					state.ToolCalls[index].Arguments.WriteString(args)
 				}
 			}
 		}
@@ -171,18 +172,18 @@ func generateAnthropicEvents(state *StreamState) []string {
 	var blockIndex int
 
 	// 2. Text block (with thinking merged in using thinking_delta type)
-	if state.ThinkingContent != "" || state.AccumulatedContent != "" {
+	if state.ThinkingContent.Len() > 0 || state.AccumulatedContent.Len() > 0 {
 		// content_block_start for text
 		events = append(events, formatContentBlockStart(blockIndex, "text"))
 
 		// content_block_delta for thinking first (uses thinking_delta type)
-		if state.ThinkingContent != "" {
-			events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent))
+		if state.ThinkingContent.Len() > 0 {
+			events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent.String()))
 		}
 
 		// content_block_delta for text
-		if state.AccumulatedContent != "" {
-			events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent))
+		if state.AccumulatedContent.Len() > 0 {
+			events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent.String()))
 		}
 
 		// content_block_stop
@@ -198,8 +199,8 @@ func generateAnthropicEvents(state *StreamState) []string {
 		events = append(events, formatToolUseBlockStart(blockIndex, tc.ID, tc.Name))
 
 		// content_block_delta for input_json_delta (if there are arguments)
-		if tc.Arguments != "" {
-			events = append(events, formatInputJsonDelta(blockIndex, tc.Arguments))
+		if tc.Arguments.Len() > 0 {
+			events = append(events, formatInputJsonDelta(blockIndex, tc.Arguments.String()))
 		}
 
 		// content_block_stop
@@ -209,7 +210,7 @@ func generateAnthropicEvents(state *StreamState) []string {
 			Type:  "tool_use",
 			ID:    tc.ID,
 			Name:  tc.Name,
-			Input: json.RawMessage(tc.Arguments),
+			Input: json.RawMessage(tc.Arguments.String()),
 		})
 		blockIndex++
 	}

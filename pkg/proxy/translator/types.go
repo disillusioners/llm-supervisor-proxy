@@ -4,6 +4,7 @@ package translator
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,8 +227,8 @@ type OpenAIFunctionSchema struct {
 type StreamState struct {
 	MessageID          string
 	OriginalModel      string
-	AccumulatedContent string
-	ThinkingContent    string
+	AccumulatedContent strings.Builder
+	ThinkingContent    strings.Builder
 	ToolCalls          []ToolCallState
 	Usage              UsageInfo
 	StopReason         string
@@ -238,7 +239,7 @@ type ToolCallState struct {
 	Index     int
 	ID        string
 	Name      string
-	Arguments string
+	Arguments strings.Builder
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
