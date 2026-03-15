@@ -83,6 +83,8 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `MAX_GENERATION_RETRIES` | `1` | Retries for time-limit exceeded. |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
+| `SHADOW_RETRY_ENABLED` | `true` | Enable parallel shadow requests on first idle timeout. |
+| `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses (keeps connections alive during buffering). |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
 | `INTERNAL_ENCRYPTION_KEY` | *(empty)* | Base64-encoded 32-byte key for encrypting stored API keys. |
 

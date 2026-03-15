@@ -50,6 +50,7 @@ database:
 # Environment variables (non-secret)
 env:
   LOG_LEVEL: "info"
+  SSE_HEARTBEAT_ENABLED: "true"
 
 # Go runtime memory limit (should be ~80-90% of memory limit)
 # Defaults to resources.limits.memory if not set
