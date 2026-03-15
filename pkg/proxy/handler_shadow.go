@@ -449,7 +449,8 @@ func (h *Handler) executeExternalShadowRequest(rc *requestContext, shadowCtx con
 	// Stream response to buffer
 	buffer := &bytes.Buffer{}
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// Use smaller buffer (256KB) to reduce memory footprint
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
 
 	completed := false
 	for scanner.Scan() {

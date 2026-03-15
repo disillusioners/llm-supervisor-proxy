@@ -120,13 +120,17 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 	}()
 
 	scanner := bufio.NewScanner(monitor)
-	buffer := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buffer, 1024*1024)
+	// Use smaller buffer (256KB) - SSE chunks are typically small (<64KB)
+	// Large buffer (1MB) causes memory accumulation under continuous retries
+	buffer := make([]byte, 0, 256*1024)
+	scanner.Buffer(buffer, 256*1024)
 
 	streamEndedSuccessfully := false
 
 	// Clear any previous buffer content from failed attempts
-	rc.streamBuffer.Reset()
+	// Create a NEW buffer to allow old one to be garbage collected
+	// (Reset() doesn't free underlying memory, which causes accumulation under retries)
+	rc.streamBuffer = bytes.Buffer{}
 	rc.accumulatedResponse.Reset()
 	rc.accumulatedThinking.Reset()
 	// Reset stream ID caching to get fresh ID from new upstream
@@ -287,7 +291,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 					rc.accumulatedThinking.Reset()
 					// Parse shadow buffer to extract content
 					shadowScanner := bufio.NewScanner(bytes.NewReader(rc.streamBuffer.Bytes()))
-					shadowScanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+					shadowScanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
 					for shadowScanner.Scan() {
 						shadowLine := shadowScanner.Bytes()
 						if bytes.HasPrefix(shadowLine, []byte("data: ")) {
