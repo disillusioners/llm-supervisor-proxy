@@ -22,11 +22,12 @@ This document describes a complete redesign of the proxy retry mechanism to use 
 ### 1. Data Race on Buffer (Panic Risk)
 **Issue**: Go's `bytes.Buffer` is NOT safe for concurrent read/write. If the winner continues streaming while the handler reads, we get `panic: concurrent write to bytes.Buffer`.
 
-**Solution**: Use channel-based chunk streaming instead of shared buffer:
+**Solution**: Use slice + notification channel pattern (NOT chunk channel):
 ```go
-// Each request sends chunks to a channel
-// Handler reads from winner's channel (thread-safe)
-chunkCh chan []byte
+// Writer appends to slice under lock, sends notification
+// Reader tracks read index, reads slice under lock, waits for notification
+notifyCh chan struct{}  // Capacity 1 - non-blocking signal
+chunks   [][]byte       // Protected by mutex
 ```
 
 ### 2. Deadlock on done Channel (Hang Risk)
@@ -40,17 +41,33 @@ chunkCh chan []byte
 **Solution**: Track failed count. If `failed_count == spawned_count`, immediately close `done` and return no winner.
 
 ### 4. Memory Usage
-**Issue**: Buffering up to 3 full LLM responses (megabytes each) risks memory exhaustion.
+**Issue**: Buffering up to 3 full LLM responses (megabytes each, ~150MB total) risks memory exhaustion under load.
 
-**Solution**: 
-- Implement bounded buffer with max bytes limit
+**Solution**:
+- Implement bounded buffer with max bytes limit (50MB per request)
 - Use chunk-based storage instead of contiguous buffer
 - Drop/reject data if limits exceeded
+- Consider global semaphore for memory pressure (future enhancement)
 
 ### 5. SSE Chunk Size Limit
 **Issue**: `bufio.Scanner` with 256KB limit will fail on large chunks (base64 images, large code blocks).
 
-**Solution**: Increase to 4MB or use manual byte reading with `Reader.ReadLine()`.
+**Solution**: Use `bufio.Scanner` with increased buffer (64KB initial, 4MB max):
+```go
+scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+```
+
+### 6. Winner Context Leak (Resource Leak)
+**Issue**: After winner is chosen, `coordinate()` exits. If client disconnects during `streamResult()`, winner's context is never cancelled - upstream continues downloading.
+
+**Solution**: Add defer in `HandleChatCompletions` to always cancel winner:
+```go
+defer func() {
+    if winner := coordinator.GetWinner(); winner != nil {
+        winner.cancel()
+    }
+}()
+```
 
 ---
 
@@ -236,9 +253,13 @@ Client Request (time_start recorded)
 
 ## Detailed Design
 
-### 1. Thread-Safe Chunk Buffer
+### 1. Thread-Safe Stream Buffer (Notification Pattern)
 
-Instead of `bytes.Buffer` (not concurrency-safe), we use a channel-based approach:
+Instead of `bytes.Buffer` (not concurrency-safe) or chunk channels (deadlock/corruption risk), we use a **notification pattern**:
+
+- Writer appends to slice under lock, sends non-blocking notification
+- Reader tracks read index, reads slice under lock, waits for notification
+- No blocking on either side, no data loss
 
 ```go
 package proxy
@@ -248,22 +269,13 @@ import (
     "sync/atomic"
 )
 
-// chunk represents a single SSE data chunk
-type chunk struct {
-    data []byte
-    err  error  // Non-nil on stream error
-    done bool   // True when stream completes with [DONE]
-}
-
 // streamBuffer is a thread-safe, bounded buffer for SSE chunks
-// It supports both:
-// - Live streaming via chunkCh (handler reads while request writes)
-// - Replay via chunks slice (for late joiners)
+// Uses notification pattern to avoid blocking writer or corrupting stream
 type streamBuffer struct {
     mu         sync.RWMutex
-    chunks     [][]byte      // Completed chunks (for replay/winner selection)
-    chunkCh    chan chunk    // Channel for live streaming (concurrent safe)
+    chunks     [][]byte      // All chunks (protected by mu)
     done       chan struct{} // Closed when stream completes
+    notifyCh   chan struct{} // Capacity 1 - signals new data available
     err        error         // Final error (if any)
     totalLen   int64         // Total bytes buffered (atomic access)
     maxBytes   int64         // Maximum bytes to buffer (memory protection)
@@ -273,7 +285,6 @@ type streamBuffer struct {
 
 const (
     defaultMaxBufferBytes = 50 * 1024 * 1024  // 50MB default limit
-    chunkChannelSize      = 64                // Buffer size for chunk channel
 )
 
 func newStreamBuffer(maxBytes int64) *streamBuffer {
@@ -282,13 +293,13 @@ func newStreamBuffer(maxBytes int64) *streamBuffer {
     }
     return &streamBuffer{
         chunks:   make([][]byte, 0, 100),
-        chunkCh:  make(chan chunk, chunkChannelSize),
         done:     make(chan struct{}),
+        notifyCh: make(chan struct{}, 1), // Capacity 1 - non-blocking signal
         maxBytes: maxBytes,
     }
 }
 
-// Add appends a chunk to the buffer. Thread-safe.
+// Add appends a chunk to the buffer. Thread-safe. Never blocks.
 // Returns false if buffer overflow (caller should stop).
 func (sb *streamBuffer) Add(data []byte) bool {
     // Check if already completed
@@ -307,17 +318,16 @@ func (sb *streamBuffer) Add(data []byte) bool {
     chunkData := make([]byte, len(data))
     copy(chunkData, data)
     
-    // Store in slice for replay
+    // Store in slice under lock
     sb.mu.Lock()
     sb.chunks = append(sb.chunks, chunkData)
     sb.mu.Unlock()
     
-    // Send to channel for live streaming (non-blocking)
+    // Send non-blocking notification (signal that new data is available)
     select {
-    case sb.chunkCh <- chunk{data: chunkData}:
+    case sb.notifyCh <- struct{}{}:
     default:
-        // Channel full - that's OK, chunks are also in slice
-        // Consumer can read from slice if they fall behind
+        // Notification already pending - that's fine
     }
     
     return true
@@ -333,23 +343,30 @@ func (sb *streamBuffer) Close(err error) {
     sb.err = err
     sb.mu.Unlock()
     
-    // Send final chunk to signal completion
+    // Send final notification and close done channel
     select {
-    case sb.chunkCh <- chunk{done: true, err: err}:
+    case sb.notifyCh <- struct{}{}:
     default:
     }
-    
     close(sb.done)
 }
 
-// GetAll returns all buffered chunks. Thread-safe.
-func (sb *streamBuffer) GetAll() [][]byte {
+// GetChunksFrom returns chunks starting from index. Thread-safe.
+// Returns the chunks and the new index to use for next call.
+func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
     sb.mu.RLock()
     defer sb.mu.RUnlock()
     
-    result := make([][]byte, len(sb.chunks))
-    copy(result, sb.chunks)
-    return result
+    if fromIndex >= len(sb.chunks) {
+        return nil, fromIndex
+    }
+    
+    // Return copy of chunks from index
+    chunks := sb.chunks[fromIndex:]
+    result := make([][]byte, len(chunks))
+    copy(result, chunks)
+    
+    return result, len(sb.chunks)
 }
 
 // TotalLen returns total buffered bytes. Thread-safe.
@@ -362,14 +379,21 @@ func (sb *streamBuffer) IsComplete() bool {
     return atomic.LoadInt32(&sb.completed) == 1
 }
 
-// ChunkCh returns the channel for live streaming.
-func (sb *streamBuffer) ChunkCh() <-chan chunk {
-    return sb.chunkCh
+// NotifyCh returns the notification channel (signals when new data available).
+func (sb *streamBuffer) NotifyCh() <-chan struct{} {
+    return sb.notifyCh
 }
 
 // Done returns a channel that's closed when the stream completes.
 func (sb *streamBuffer) Done() <-chan struct{} {
     return sb.done
+}
+
+// Err returns the final error (if any). Thread-safe.
+func (sb *streamBuffer) Err() error {
+    sb.mu.RLock()
+    defer sb.mu.RUnlock()
+    return sb.err
 }
 ```
 
@@ -830,12 +854,13 @@ func (rc *raceCoordinator) executeRequest(req *upstreamRequest) {
         return
     }
     
-    // Stream response to buffer using manual reading (avoids bufio.Scanner size limit)
-    // Use 4MB max line size to handle large chunks (base64 images, etc.)
-    maxLineSize := 4 * 1024 * 1024  // 4MB
-    lineBuf := make([]byte, 0, 64*1024)
+    // Stream response to buffer using bufio.Scanner with increased buffer
+    // IMPORTANT: Use bufio.Scanner with 64KB initial buffer, 4MB max to handle large chunks
+    // (base64 images, large code blocks) without byte-by-byte reading overhead
+    scanner := bufio.NewScanner(resp.Body)
+    scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // 64KB initial, 4MB max
     
-    for {
+    for scanner.Scan() {
         // Check for cancellation
         select {
         case <-req.ctx.Done():
@@ -845,59 +870,30 @@ func (rc *raceCoordinator) executeRequest(req *upstreamRequest) {
         default:
         }
         
-        // Read a single byte to detect line boundaries
-        var b [1]byte
-        n, err := resp.Body.Read(b[:])
+        line := scanner.Bytes()
         
-        if err != nil {
-            if err == io.EOF {
-                // Stream ended
-                break
-            }
+        // Add newline back (scanner strips it)
+        lineWithNewline := make([]byte, len(line)+1)
+        copy(lineWithNewline, line)
+        lineWithNewline[len(line)] = '\n'
+        
+        // Write line to buffer
+        if !req.buffer.Add(lineWithNewline) {
+            // Buffer overflow
+            log.Printf("[RACE] Request %s buffer overflow, stopping", req.id)
             req.setStatus(statusFailed)
-            req.err = fmt.Errorf("read error: %w", err)
+            req.err = fmt.Errorf("buffer overflow")
             req.buffer.Close(req.err)
             return
         }
         
-        if n == 0 {
-            continue
-        }
-        
-        lineBuf = append(lineBuf, b[0])
-        
-        // Check for line end
-        if b[0] == '\n' {
-            // Write line to buffer
-            if !req.buffer.Add(lineBuf) {
-                // Buffer overflow
-                log.Printf("[RACE] Request %s buffer overflow, stopping", req.id)
-                req.setStatus(statusFailed)
-                req.err = fmt.Errorf("buffer overflow")
-                req.buffer.Close(req.err)
-                return
-            }
-            
-            // Check for [DONE] marker
-            if bytes.Contains(lineBuf, []byte("data: [DONE]")) {
-                req.setStatus(statusCompleted)
-                req.completedAt = time.Now()
-                req.buffer.Close(nil)
-                log.Printf("[RACE] Request %s completed successfully", req.id)
-                return
-            }
-            
-            // Reset line buffer
-            lineBuf = lineBuf[:0]
-            
-            // Check line size limit
-            if len(lineBuf) > maxLineSize {
-                log.Printf("[RACE] Request %s line too large (%d bytes)", req.id, len(lineBuf))
-                req.setStatus(statusFailed)
-                req.err = fmt.Errorf("line too large: %d bytes", len(lineBuf))
-                req.buffer.Close(req.err)
-                return
-            }
+        // Check for [DONE] marker
+        if bytes.Contains(line, []byte("data: [DONE]")) {
+            req.setStatus(statusCompleted)
+            req.completedAt = time.Now()
+            req.buffer.Close(nil)
+            log.Printf("[RACE] Request %s completed successfully", req.id)
+            return
         }
     }
     
@@ -946,11 +942,16 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
         return
     }
     
+    // CRITICAL: Ensure winner is cancelled when we exit to prevent resource leaks
+    // (upstream continues downloading if client disconnects during streamResult)
+    defer winner.cancel()
+    
     // Stream winner's buffer to client
     h.streamResult(w, winner)
 }
 
-// streamResult streams the winner's buffer to the client
+// streamResult streams the winner's buffer to the client using notification pattern
+// IMPORTANT: Caller must defer cancellation of winner to prevent resource leaks
 func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
     // Set SSE headers
     w.Header().Set("Content-Type", "text/event-stream")
@@ -958,43 +959,57 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
     w.Header().Set("Connection", "keep-alive")
     w.WriteHeader(http.StatusOK)
     
+    // Track read index for incremental reading
+    readIndex := 0
+    
     // First, flush any buffered chunks
-    for _, chunk := range winner.buffer.GetAll() {
+    chunks, newIndex := winner.buffer.GetChunksFrom(readIndex)
+    for _, chunk := range chunks {
         w.Write(chunk)
     }
+    readIndex = newIndex
     if f, ok := w.(http.Flusher); ok {
         f.Flush()
     }
     
-    // If stream is still running, continue streaming from channel
-    if !winner.buffer.IsComplete() {
-        for {
-            select {
-            case c, ok := <-winner.buffer.ChunkCh():
-                if !ok {
-                    return // Channel closed
-                }
-                if c.done {
-                    return // Stream complete
-                }
-                if c.err != nil {
-                    // Stream error - send SSE error
-                    fmt.Fprintf(w, "event: error\ndata: {\"error\": %q}\n\n", c.err.Error())
-                    if f, ok := w.(http.Flusher); ok {
-                        f.Flush()
-                    }
-                    return
-                }
-                w.Write(c.data)
-                if f, ok := w.(http.Flusher); ok {
-                    f.Flush()
-                }
-            case <-winner.buffer.Done():
-                return
-            case <-winner.ctx.Done():
-                return
+    // If stream is still running, continue streaming using notification pattern
+    for !winner.buffer.IsComplete() {
+        select {
+        case <-winner.buffer.NotifyCh():
+            // New data available - read it
+            chunks, newIndex := winner.buffer.GetChunksFrom(readIndex)
+            for _, chunk := range chunks {
+                w.Write(chunk)
             }
+            readIndex = newIndex
+            if f, ok := w.(http.Flusher); ok {
+                f.Flush()
+            }
+            
+        case <-winner.buffer.Done():
+            // Stream completed - flush any remaining chunks
+            chunks, _ := winner.buffer.GetChunksFrom(readIndex)
+            for _, chunk := range chunks {
+                w.Write(chunk)
+            }
+            if f, ok := w.(http.Flusher); ok {
+                f.Flush()
+            }
+            return
+            
+        case <-winner.ctx.Done():
+            // Context cancelled (client disconnect or hard deadline)
+            return
         }
+    }
+    
+    // Stream completed - flush any remaining chunks
+    chunks, _ = winner.buffer.GetChunksFrom(readIndex)
+    for _, chunk := range chunks {
+        w.Write(chunk)
+    }
+    if f, ok := w.(http.Flusher); ok {
+        f.Flush()
     }
 }
 
