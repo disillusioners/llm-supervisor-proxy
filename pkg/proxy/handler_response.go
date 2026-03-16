@@ -373,29 +373,49 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			// Normalize chunk - rewrite ID and strip role for transparent fallbacks
 			normalizedData := normalizeStreamChunk(data, rc)
 
-			// Buffer the normalized chunk (don't send to client yet)
-			rc.streamBuffer.Write([]byte("data: "))
-			rc.streamBuffer.Write(normalizedData)
-			rc.streamBuffer.Write([]byte("\n"))
+			// After deadline flush, stream directly to client instead of buffering
+			// This ensures content is delivered even if a subsequent error occurs
+			if rc.streamingNonRetryable {
+				// Write directly to response writer
+				w.Write([]byte("data: "))
+				w.Write(normalizedData)
+				w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			} else {
+				// Buffer the normalized chunk (don't send to client yet)
+				rc.streamBuffer.Write([]byte("data: "))
+				rc.streamBuffer.Write(normalizedData)
+				rc.streamBuffer.Write([]byte("\n"))
 
-			// Check buffer size limit
-			// If MaxStreamBufferSize is configured, use that; otherwise use 100MB hard cap
-			bufferLimit := rc.conf.MaxStreamBufferSize
-			if bufferLimit <= 0 {
-				bufferLimit = 100 * 1024 * 1024 // 100MB hard cap when unlimited
-			}
-			if rc.streamBuffer.Len() > bufferLimit {
-				log.Printf("Stream buffer exceeded limit (%d > %d bytes)", rc.streamBuffer.Len(), bufferLimit)
-				h.publishEvent("stream_buffer_overflow", map[string]interface{}{"size": rc.streamBuffer.Len(), "limit": bufferLimit, "id": rc.reqID})
-				monitor.Close()
-				counters.errorRetries++
-				return attemptContinueRetry
+				// Check buffer size limit
+				// If MaxStreamBufferSize is configured, use that; otherwise use 100MB hard cap
+				bufferLimit := rc.conf.MaxStreamBufferSize
+				if bufferLimit <= 0 {
+					bufferLimit = 100 * 1024 * 1024 // 100MB hard cap when unlimited
+				}
+				if rc.streamBuffer.Len() > bufferLimit {
+					log.Printf("Stream buffer exceeded limit (%d > %d bytes)", rc.streamBuffer.Len(), bufferLimit)
+					h.publishEvent("stream_buffer_overflow", map[string]interface{}{"size": rc.streamBuffer.Len(), "limit": bufferLimit, "id": rc.reqID})
+					monitor.Close()
+					counters.errorRetries++
+					return attemptContinueRetry
+				}
 			}
 
 			// Continue processing for [DONE] check and content extraction
 			if string(normalizedData) == "[DONE]" {
 				streamEndedSuccessfully = true
-				rc.streamBuffer.Write([]byte("\n"))
+				if rc.streamingNonRetryable {
+					// Send final newline for [DONE]
+					w.Write([]byte("\n"))
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				} else {
+					rc.streamBuffer.Write([]byte("\n"))
+				}
 
 				// Flush remaining buffer for final analysis
 				if detector.IsEnabled() {
@@ -475,9 +495,19 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				}
 			}
 		} else {
-			// Buffer any other content (empty lines, SSE comments, etc.)
-			rc.streamBuffer.Write(line)
-			rc.streamBuffer.Write([]byte("\n"))
+			// Handle any other content (empty lines, SSE comments, etc.)
+			if rc.streamingNonRetryable {
+				// Write directly to response writer
+				w.Write(line)
+				w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			} else {
+				// Buffer for later
+				rc.streamBuffer.Write(line)
+				rc.streamBuffer.Write([]byte("\n"))
+			}
 		}
 	}
 
