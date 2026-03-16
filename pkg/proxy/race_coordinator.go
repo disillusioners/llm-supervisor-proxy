@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -222,4 +224,47 @@ func (c *raceCoordinator) WaitForWinner() *upstreamRequest {
 	case <-c.baseCtx.Done():
 		return nil
 	}
+}
+
+// GetCommonFailureStatus returns the HTTP status code if all failed requests share the same status, else 0
+func (c *raceCoordinator) GetCommonFailureStatus() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if len(c.requests) == 0 {
+		return 0
+	}
+
+	var commonStatus int
+	for _, req := range c.requests {
+		err := req.GetError()
+		if err == nil {
+			return 0 // Not failed yet or didn't fail
+		}
+
+		// Parse status text like "upstream returned error: 429 Too Many Requests"
+		errStr := err.Error()
+		var status int
+		if strings.Contains(errStr, "upstream returned error: ") {
+			fmt.Sscanf(errStr, "upstream returned error: %d", &status)
+		} else if strings.Contains(errStr, "idle timeout") || strings.Contains(errStr, "context") || strings.Contains(errStr, "timeout") {
+			status = http.StatusGatewayTimeout
+		} else if strings.Contains(errStr, "buffer limit") {
+			status = http.StatusRequestEntityTooLarge
+		} else {
+			status = http.StatusBadGateway
+		}
+
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+
+		if commonStatus == 0 {
+			commonStatus = status
+		} else if commonStatus != status {
+			return 0 // Mismatch
+		}
+	}
+
+	return commonStatus
 }

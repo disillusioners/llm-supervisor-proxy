@@ -375,6 +375,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		winner := coordinator.WaitForWinner()
 		if winner != nil {
+			defer func() {
+				if winner.cancel != nil {
+					winner.cancel()
+				}
+			}()
+
 			if rc.isStream {
 				// Stream the final result from the winner's buffer
 				h.streamResult(w, rc, winner)
@@ -392,7 +398,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		default:
 			// All attempts failed
 			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
-			h.sendError(w, http.StatusInternalServerError, "All upstream models failed", "server_error", "")
+
+			statusCode := http.StatusBadGateway // Default 502
+			// Check if all requests failed with same HTTP status
+			if commonStatus := coordinator.GetCommonFailureStatus(); commonStatus != 0 {
+				statusCode = commonStatus
+			}
+
+			h.sendError(w, statusCode, "All upstream models failed", "server_error", "")
 			return
 		}
 	} else {
@@ -467,7 +480,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	// Stream existing chunks first
 	chunks, _ := buffer.GetChunksFrom(readIndex)
 	for _, chunk := range chunks {
-		w.Write(chunk)
+		if _, err := w.Write(chunk); err != nil {
+			return
+		}
 		// Extract content for logging
 		if bytes.HasPrefix(chunk, []byte("data: ")) {
 			data := bytes.TrimPrefix(chunk, []byte("data: "))
@@ -492,7 +507,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// New data available
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			for _, chunk := range chunks {
-				w.Write(chunk)
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
 				// Extract content for logging
 				if bytes.HasPrefix(chunk, []byte("data: ")) {
 					data := bytes.TrimPrefix(chunk, []byte("data: "))
@@ -508,7 +525,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// Stream complete - drain remaining data
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			for _, chunk := range chunks {
-				w.Write(chunk)
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -571,7 +590,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			if len(chunks) > 0 {
 				for _, chunk := range chunks {
-					w.Write(chunk)
+					if _, err := w.Write(chunk); err != nil {
+						return
+					}
 					if bytes.HasPrefix(chunk, []byte("data: ")) {
 						data := bytes.TrimPrefix(chunk, []byte("data: "))
 						extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)

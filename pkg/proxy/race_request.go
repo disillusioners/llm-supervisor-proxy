@@ -61,13 +61,7 @@ func newUpstreamRequest(id int, mType upstreamModelType, modelID string, maxBuff
 	}
 }
 
-// markStarted transitions status to running
-func (r *upstreamRequest) markStarted() {
-	r.mu.Lock()
-	defer r.mu.RUnlock() // BUG FIX: Unlock! (Wait, I used defer RUnlock, should be Unlock)
-}
-
-// Correcting the above:
+// MarkStarted transitions status to running
 func (r *upstreamRequest) MarkStarted() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

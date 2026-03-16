@@ -69,6 +69,10 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
 
+	// Create ticker outside the loop
+	idleTimer := time.NewTimer(time.Duration(cfg.IdleTimeout))
+	defer idleTimer.Stop()
+
 	for {
 		// Set idle timeout for reading
 		var line []byte
@@ -85,8 +89,16 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-readDone:
+			// Reset idle timer after successful read
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(time.Duration(cfg.IdleTimeout))
 			// Continuous processing
-		case <-time.After(time.Duration(cfg.IdleTimeout)):
+		case <-idleTimer.C:
 			return fmt.Errorf("idle timeout exceeded")
 		}
 
