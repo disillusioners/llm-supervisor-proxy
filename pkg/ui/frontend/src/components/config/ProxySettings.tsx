@@ -1,9 +1,10 @@
-import type { Credential } from '../../types';
+import type { Credential, Model } from '../../types';
 
 interface ProxySettingsProps {
   upstreamUrl: string;
   upstreamCredentialId: string;
   credentials: Credential[];
+  models: Model[];
   port: number;
   idleTimeout: string;
   maxUpstreamErrorRetries: number;
@@ -34,6 +35,7 @@ export function ProxySettings({
   upstreamUrl,
   upstreamCredentialId,
   credentials,
+  models,
   port,
   idleTimeout,
   maxUpstreamErrorRetries,
@@ -266,15 +268,20 @@ export function ProxySettings({
         {/* Ultimate Model ID */}
         <div class="mb-3">
           <label class="block text-sm font-medium text-gray-300 mb-1">Ultimate Model ID</label>
-          <input
-            type="text"
+          <select
             value={ultimateModelId}
-            onInput={(e) => onUltimateModelIdChange((e.target as HTMLInputElement).value)}
-            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="e.g., claude-3-opus-20240229"
-          />
+            onChange={(e) => onUltimateModelIdChange((e.target as HTMLSelectElement).value)}
+            class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+          >
+            <option value="">None (disabled)</option>
+            {models.filter(m => m.enabled).map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name || model.id}
+              </option>
+            ))}
+          </select>
           <p class="text-xs text-gray-500 mt-1">
-            Leave empty to disable. Model must exist in database.
+            Select a model to use for duplicate request handling. Leave empty to disable.
           </p>
         </div>
 

@@ -319,6 +319,7 @@ export function SettingsPage({
               upstreamUrl={upstreamUrl}
               upstreamCredentialId={upstreamCredentialId}
               credentials={credentials}
+              models={models}
               port={port}
               idleTimeout={idleTimeout}
               maxUpstreamErrorRetries={maxUpstreamErrorRetries}
