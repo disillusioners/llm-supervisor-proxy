@@ -370,23 +370,27 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 				continue
 			}
 
-			// Normalize chunk - rewrite ID and strip role for transparent fallbacks
-			normalizedData := normalizeStreamChunk(data, rc)
+			// Note: normalizeStreamChunk is DEPRECATED - see handler_helpers.go
+			// We now pass data directly since:
+			// 1. Stream ID is reset on each attempt (line ~142)
+			// 2. Buffering ensures consistent IDs within a stream
+			// 3. True mid-stream resume is not possible
+			chunkData := data
 
 			// After deadline flush, stream directly to client instead of buffering
 			// This ensures content is delivered even if a subsequent error occurs
 			if rc.streamingNonRetryable {
 				// Write directly to response writer
 				w.Write([]byte("data: "))
-				w.Write(normalizedData)
+				w.Write(chunkData)
 				w.Write([]byte("\n"))
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
 			} else {
-				// Buffer the normalized chunk (don't send to client yet)
+				// Buffer the chunk (don't send to client yet)
 				rc.streamBuffer.Write([]byte("data: "))
-				rc.streamBuffer.Write(normalizedData)
+				rc.streamBuffer.Write(chunkData)
 				rc.streamBuffer.Write([]byte("\n"))
 
 				// Check buffer size limit
@@ -405,7 +409,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			}
 
 			// Continue processing for [DONE] check and content extraction
-			if string(normalizedData) == "[DONE]" {
+			if string(chunkData) == "[DONE]" {
 				streamEndedSuccessfully = true
 				if rc.streamingNonRetryable {
 					// Send final newline for [DONE]
@@ -429,7 +433,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, rc *requestContext
 			}
 
 			// Carry for content/loop extraction
-			data = normalizedData
+			data = chunkData
 
 			// Extract chunk content into temporary builders to avoid O(n²) memory growth.
 			// Previously: accumulatedResponse.String()[prevLen:] was called on every chunk,

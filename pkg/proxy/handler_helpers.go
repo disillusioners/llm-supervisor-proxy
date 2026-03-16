@@ -470,15 +470,25 @@ func isValidStreamChunk(data []byte) bool {
 	return json.Valid(data)
 }
 
-// normalizeStreamChunk rewrites a stream chunk to maintain consistency across
-// retries and fallbacks. It:
-// 1. Caches the original stream ID from the first chunk
-// 2. Replaces the ID in all subsequent chunks with the cached original
-// 3. Strips "role" from delta (should only appear in first chunk)
+// normalizeStreamChunk normalizes stream chunks to maintain consistency across
+// retries and fallbacks.
 //
-// This prevents strict clients (SDKs) from disconnecting due to:
-// - Message ID changing mid-stream
+// DEPRECATED: This function is no longer needed because:
+// 1. The proxy buffers the entire stream until [DONE] (or release deadline)
+// 2. On failure/retry, the stream ID is explicitly reset (see handler_response.go)
+// 3. True "resume mid-stream" is not possible - either stream completes or restarts
+//
+// The function is kept for now to avoid breaking changes, but its effect is minimal.
+// It caches the original stream ID from the first chunk and replaces IDs in subsequent
+// chunks, and strips "role" from delta (should only appear in first chunk).
+//
+// This prevented issues with strict clients when:
+// - Message ID changed mid-stream
 // - Role being re-announced mid-stream
+//
+// However, with current buffering behavior:
+// - First chunk naturally has the original ID in buffer
+// - Retries start fresh with reset streamID
 func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 	// Don't process [DONE] marker
 	if string(data) == "[DONE]" {
