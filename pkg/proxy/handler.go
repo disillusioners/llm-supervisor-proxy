@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -47,10 +49,13 @@ func (c *Config) Clone() ConfigSnapshot {
 		ToolRepair:              cfg.ToolRepair,
 		ShadowRetryEnabled:      cfg.ShadowRetryEnabled,
 		SSEHeartbeatEnabled:     cfg.SSEHeartbeatEnabled,
+		RaceRetryEnabled:        cfg.RaceRetryEnabled,
+		RaceParallelOnIdle:      cfg.RaceParallelOnIdle,
+		RaceMaxParallel:         cfg.RaceMaxParallel,
+		RaceMaxBufferBytes:      cfg.RaceMaxBufferBytes,
 	}
 }
 
-// ConfigSnapshot is an immutable snapshot of config values for a single request
 type ConfigSnapshot struct {
 	UpstreamURL             string
 	UpstreamCredentialID    string
@@ -66,6 +71,13 @@ type ConfigSnapshot struct {
 	ToolRepair              toolrepair.Config
 	ShadowRetryEnabled      bool
 	SSEHeartbeatEnabled     bool
+
+	// Race Retry
+	RaceRetryEnabled   bool
+	RaceParallelOnIdle bool
+	RaceMaxParallel    int
+	RaceMaxBufferBytes int
+	ModelID            string // Primary model for this request
 }
 
 type Handler struct {
@@ -217,6 +229,20 @@ func (h *Handler) sendAuthError(w http.ResponseWriter) {
 	})
 }
 
+// sendError sends a JSON error response in OpenAI format
+func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, param string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    errType,
+			"param":   param,
+			"code":    nil,
+		},
+	})
+}
+
 // HandleChatCompletions is the main entry point for proxying chat completions.
 func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -341,38 +367,69 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})
 
-	// Outer loop: iterate through models (original + fallbacks)
-	for modelIndex, currentModel := range rc.modelList {
-		if modelIndex > 0 {
-			log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
-		}
+	// Unified Race Retry Design (Parallel Race)
+	if rc.conf.RaceRetryEnabled {
+		log.Printf("[RACE] Parallel race retry enabled for request %s", rc.reqID)
+		coordinator := newRaceCoordinator(rc.baseCtx, &rc.conf, r, rc.rawBody)
+		coordinator.Start()
 
-		// Check hard deadline - ensures server never serves a connection longer than MaxRequestTime
-		if time.Now().After(rc.hardDeadline) {
-			log.Printf("Request exceeded hard deadline (%v), aborting", rc.conf.MaxRequestTime)
-			h.publishEvent("hard_deadline_exceeded", map[string]interface{}{
-				"id":       rc.reqID,
-				"duration": time.Since(rc.startTime).String(),
-				"limit":    rc.conf.MaxRequestTime.String(),
-			})
-			// Cancel any running shadow request to prevent goroutine leak
-			cancelShadow(rc)
-			break
-		}
-
-		if rc.baseCtx.Err() != nil {
-			log.Printf("Client disconnected, failing request")
-			break
-		}
-
-		rc.requestBody["model"] = currentModel
-
-		success := h.attemptModel(w, rc, modelIndex, currentModel)
-		if success {
+		winner := coordinator.WaitForWinner()
+		if winner != nil {
+			if rc.isStream {
+				// Stream the final result from the winner's buffer
+				h.streamResult(w, rc, winner)
+			} else {
+				// Send a single JSON response from the winner's buffer
+				h.handleNonStreamResult(w, rc, winner)
+			}
 			return
 		}
 
-		h.handleModelFailure(rc, modelIndex, currentModel)
+		// If winner is nil, it means either context cancelled or all models failed
+		select {
+		case <-rc.baseCtx.Done():
+			return
+		default:
+			// All attempts failed
+			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
+			h.sendError(w, http.StatusInternalServerError, "All upstream models failed", "server_error", "")
+			return
+		}
+	} else {
+		// Old Sequential Retry Logic
+		// Outer loop: iterate through models (original + fallbacks)
+		for modelIndex, currentModel := range rc.modelList {
+			if modelIndex > 0 {
+				log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
+			}
+
+			// Check hard deadline - ensures server never serves a connection longer than MaxRequestTime
+			if time.Now().After(rc.hardDeadline) {
+				log.Printf("Request exceeded hard deadline (%v), aborting", rc.conf.MaxRequestTime)
+				h.publishEvent("hard_deadline_exceeded", map[string]interface{}{
+					"id":       rc.reqID,
+					"duration": time.Since(rc.startTime).String(),
+					"limit":    rc.conf.MaxRequestTime.String(),
+				})
+				// Cancel any running shadow request to prevent goroutine leak
+				cancelShadow(rc)
+				break
+			}
+
+			if rc.baseCtx.Err() != nil {
+				log.Printf("Client disconnected, failing request")
+				break
+			}
+
+			rc.requestBody["model"] = currentModel
+
+			success := h.attemptModel(w, rc, modelIndex, currentModel)
+			if success {
+				return
+			}
+
+			h.handleModelFailure(rc, modelIndex, currentModel)
+		}
 	}
 
 	// All models have failed
@@ -389,4 +446,210 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})
 		h.sendSSEError(w, "All models failed after retries")
 	}
+}
+
+// streamResult flushes the winner's buffer to the client
+func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) {
+	buffer := winner.GetBuffer()
+	readIndex := 0
+
+	// Set headers if not already sent
+	if !rc.headersSent {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		rc.headersSent = true
+	}
+
+	flusher, _ := w.(http.Flusher)
+
+	// Stream existing chunks first
+	chunks, _ := buffer.GetChunksFrom(readIndex)
+	for _, chunk := range chunks {
+		w.Write(chunk)
+		// Extract content for logging
+		if bytes.HasPrefix(chunk, []byte("data: ")) {
+			data := bytes.TrimPrefix(chunk, []byte("data: "))
+			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
+		}
+		readIndex++
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	buffer.Prune(readIndex)
+
+	// Continue streaming until complete
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-rc.baseCtx.Done():
+			return
+		case <-buffer.NotifyCh():
+			// New data available
+			chunks, _ = buffer.GetChunksFrom(readIndex)
+			for _, chunk := range chunks {
+				w.Write(chunk)
+				// Extract content for logging
+				if bytes.HasPrefix(chunk, []byte("data: ")) {
+					data := bytes.TrimPrefix(chunk, []byte("data: "))
+					extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
+				}
+				readIndex++
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			buffer.Prune(readIndex)
+		case <-buffer.Done():
+			// Stream complete - drain remaining data
+			chunks, _ = buffer.GetChunksFrom(readIndex)
+			for _, chunk := range chunks {
+				w.Write(chunk)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				// Extract content for logging
+				if bytes.HasPrefix(chunk, []byte("data: ")) {
+					data := bytes.TrimPrefix(chunk, []byte("data: "))
+					extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
+				}
+				readIndex++
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			buffer.Prune(readIndex)
+
+			// If stream failed, send error event to client
+			if err := buffer.Err(); err != nil {
+				log.Printf("[ERROR] Stream buffer closed with error: %v", err)
+				fmt.Fprintf(w, "data: {\"error\": {\"message\": \"Streaming error: %v\", \"type\": \"server_error\"}}\n\n", err)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			
+			// Finalize tool call arguments from builders
+			for i := range rc.accumulatedToolCalls {
+				if i < len(rc.toolCallArgBuilders) {
+					rc.accumulatedToolCalls[i].Function.Arguments = rc.toolCallArgBuilders[i].String()
+				}
+			}
+
+			// Store assistant message
+			assistantMsg := store.Message{
+				Role:    "assistant",
+				Content: rc.accumulatedResponse.String(),
+			}
+			if rc.accumulatedThinking.Len() > 0 {
+				assistantMsg.Thinking = rc.accumulatedThinking.String()
+			}
+			if len(rc.accumulatedToolCalls) > 0 {
+				assistantMsg.ToolCalls = rc.accumulatedToolCalls
+			}
+
+			// Log success
+			rc.reqLog.Status = "completed"
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
+			h.store.Add(rc.reqLog)
+			
+			h.publishEvent("request_completed", map[string]interface{}{
+				"id":       rc.reqID,
+				"model":    winner.GetModelID(),
+				"duration": rc.reqLog.Duration,
+				"race":     true,
+			})
+			return
+		case <-ticker.C:
+			// Safety backup if notification missed
+			chunks, _ = buffer.GetChunksFrom(readIndex)
+			if len(chunks) > 0 {
+				for _, chunk := range chunks {
+					w.Write(chunk)
+					if bytes.HasPrefix(chunk, []byte("data: ")) {
+						data := bytes.TrimPrefix(chunk, []byte("data: "))
+						extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
+					}
+					readIndex++
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				buffer.Prune(readIndex)
+			}
+		}
+	}
+}
+// handleNonStreamResult sends a single JSON response from the winner's buffer
+func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) {
+	buffer := winner.GetBuffer()
+
+	// Wait for buffer to be complete if not already
+	select {
+	case <-buffer.Done():
+	case <-rc.baseCtx.Done():
+		return
+	}
+
+	chunks, _ := buffer.GetChunksFrom(0)
+	var finalBody []byte
+
+	// Concatenate chunks, stripping SSE prefixes if present
+	for _, chunk := range chunks {
+		line := string(chunk)
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			data = strings.TrimSpace(data)
+			if data == "[DONE]" || data == "" {
+				continue
+			}
+			finalBody = append(finalBody, []byte(data)...)
+		} else {
+			finalBody = append(finalBody, chunk...)
+		}
+	}
+
+	// Set headers
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(finalBody)
+
+	// Extract content for logging
+	var resp map[string]interface{}
+	if err := json.Unmarshal(finalBody, &resp); err == nil {
+		if choices, ok := resp["choices"].([]interface{}); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]interface{}); ok {
+				if msg, ok := choice["message"].(map[string]interface{}); ok {
+					if content, ok := msg["content"].(string); ok {
+						rc.accumulatedResponse.WriteString(content)
+					}
+				}
+			}
+		}
+	}
+
+	// Log success
+	rc.reqLog.Status = "completed"
+	rc.reqLog.EndTime = time.Now()
+	rc.reqLog.Duration = time.Since(rc.startTime).String()
+
+	assistantMsg := store.Message{
+		Role:    "assistant",
+		Content: rc.accumulatedResponse.String(),
+	}
+	rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
+	h.store.Add(rc.reqLog)
+
+	h.publishEvent("request_completed", map[string]interface{}{
+		"id":       rc.reqID,
+		"model":    winner.GetModelID(),
+		"duration": rc.reqLog.Duration,
+		"race":     true,
+	})
 }

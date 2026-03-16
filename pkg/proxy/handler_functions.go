@@ -82,6 +82,9 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
 	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
 
+	// Populate ModelID in snapshot
+	conf.ModelID = originalModel
+
 	return &requestContext{
 		conf:             conf,
 		targetURL:        targetURL,
@@ -90,6 +93,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		reqLog:           reqLog,
 		modelList:        modelList,
 		requestBody:      requestBody,
+		rawBody:          bodyBytes, // Save original body bytes
 		isStream:         isStream,
 		originalHeaders:  r.Header,
 		method:           r.Method,

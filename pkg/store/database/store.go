@@ -55,6 +55,10 @@ type dbConfigRow struct {
 	ToolRepairJSON          string
 	UltimateModelJSON       string
 	UpdatedAt               string
+	RaceRetryEnabled        interface{}
+	RaceParallelOnIdle      interface{}
+	RaceMaxParallel         int64
+	RaceMaxBufferBytes      int64
 }
 
 // Load initializes configuration from database
@@ -85,6 +89,10 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.ToolRepairJSON,
 		&dbCfg.UltimateModelJSON,
 		&dbCfg.UpdatedAt,
+		&dbCfg.RaceRetryEnabled,
+		&dbCfg.RaceParallelOnIdle,
+		&dbCfg.RaceMaxParallel,
+		&dbCfg.RaceMaxBufferBytes,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -106,6 +114,12 @@ func (m *ConfigManager) Load() error {
 	cfg.MaxGenerationRetries = int(dbCfg.MaxGenerationRetries)
 	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
 	cfg.UpdatedAt = dbCfg.UpdatedAt
+
+	// Race retry
+	cfg.RaceRetryEnabled = isDbBoolTrue(dbCfg.RaceRetryEnabled)
+	cfg.RaceParallelOnIdle = isDbBoolTrue(dbCfg.RaceParallelOnIdle)
+	cfg.RaceMaxParallel = int(dbCfg.RaceMaxParallel)
+	cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
 
 	// Parse loop detection JSON
 	if dbCfg.LoopDetectionJSON != "" && dbCfg.LoopDetectionJSON != "{}" {
@@ -193,6 +207,10 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		string(toolRepairJSON),
 		string(ultimateModelJSON),
 		merged.UpdatedAt,
+		m.qb.BooleanLiteral(merged.RaceRetryEnabled),
+		m.qb.BooleanLiteral(merged.RaceParallelOnIdle),
+		int64(merged.RaceMaxParallel),
+		int64(merged.RaceMaxBufferBytes),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save config to database: %w", err)
@@ -251,6 +269,15 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// MaxStreamBufferSize: update if incoming differs from existing (it's always sent with proxy settings)
 	if incoming.MaxStreamBufferSize != 0 {
 		result.MaxStreamBufferSize = incoming.MaxStreamBufferSize
+	}
+
+	// Race retry
+	// We check RaceMaxParallel/RaceMaxBufferBytes as indicators if the race part was sent
+	if incoming.RaceMaxParallel != 0 {
+		result.RaceRetryEnabled = incoming.RaceRetryEnabled
+		result.RaceParallelOnIdle = incoming.RaceParallelOnIdle
+		result.RaceMaxParallel = incoming.RaceMaxParallel
+		result.RaceMaxBufferBytes = incoming.RaceMaxBufferBytes
 	}
 
 	// Loop detection: check if any loop detection field was set
@@ -434,6 +461,34 @@ func (m *ConfigManager) GetUltimateModel() config.UltimateModelConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.UltimateModel
+}
+
+// GetRaceRetryEnabled returns whether race retry is enabled
+func (m *ConfigManager) GetRaceRetryEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.RaceRetryEnabled
+}
+
+// GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout
+func (m *ConfigManager) GetRaceParallelOnIdle() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.RaceParallelOnIdle
+}
+
+// GetRaceMaxParallel returns the max parallel requests
+func (m *ConfigManager) GetRaceMaxParallel() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.RaceMaxParallel
+}
+
+// GetRaceMaxBufferBytes returns the max bytes per request buffer
+func (m *ConfigManager) GetRaceMaxBufferBytes() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.RaceMaxBufferBytes
 }
 
 // IsReadOnly returns true if the config cannot be written
@@ -1127,4 +1182,18 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 	}
 
 	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
+}
+
+// isDbBoolTrue converts a database value (bool or int64) to boolean
+func isDbBoolTrue(v interface{}) bool {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case int64:
+		return val != 0
+	case int:
+		return val != 0
+	default:
+		return false
+	}
 }

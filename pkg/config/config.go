@@ -82,6 +82,12 @@ type Config struct {
 	ToolRepair              toolrepair.Config   `json:"tool_repair"`
 	UltimateModel           UltimateModelConfig `json:"ultimate_model"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
+
+	// Race Retry (Redesign)
+	RaceRetryEnabled    bool `json:"race_retry_enabled"`
+	RaceParallelOnIdle  bool `json:"race_parallel_on_idle"`
+	RaceMaxParallel     int  `json:"race_max_parallel"`
+	RaceMaxBufferBytes  int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
 }
 
 // ManagerInterface defines the interface for config management
@@ -103,6 +109,10 @@ type ManagerInterface interface {
 	GetSSEHeartbeatEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
 	GetUltimateModel() UltimateModelConfig
+	GetRaceRetryEnabled() bool
+	GetRaceParallelOnIdle() bool
+	GetRaceMaxParallel() int
+	GetRaceMaxBufferBytes() int
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -184,6 +194,10 @@ var Defaults = Config{
 		ModelID: "",
 		MaxHash: 100,
 	},
+	RaceRetryEnabled:   false,
+	RaceParallelOnIdle: true,
+	RaceMaxParallel:    3,
+	RaceMaxBufferBytes: 5 * 1024 * 1024, // 5MB limit
 }
 
 // Validate ensures config values are valid before saving
@@ -231,6 +245,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxStreamBufferSize < 0 {
 		return errors.New("max_stream_buffer_size cannot be negative")
+	}
+	if c.RaceMaxParallel < 1 {
+		return errors.New("race_max_parallel must be at least 1")
+	}
+	if c.RaceMaxBufferBytes < 0 {
+		return errors.New("race_max_buffer_bytes cannot be negative")
 	}
 	return nil
 }
@@ -370,6 +390,22 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("ULTIMATE_MODEL_MAX_HASH"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r > 0 {
 			cfg.UltimateModel.MaxHash = r
+		}
+	}
+	if v := os.Getenv("RACE_RETRY_ENABLED"); v != "" {
+		cfg.RaceRetryEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("RACE_PARALLEL_ON_IDLE"); v != "" {
+		cfg.RaceParallelOnIdle = v == "true" || v == "1"
+	}
+	if v := os.Getenv("RACE_MAX_PARALLEL"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r > 0 {
+			cfg.RaceMaxParallel = r
+		}
+	}
+	if v := os.Getenv("RACE_MAX_BUFFER_BYTES"); v != "" {
+		if r, err := strconv.ParseInt(v, 10, 64); err == nil && r >= 0 {
+			cfg.RaceMaxBufferBytes = int(r)
 		}
 	}
 	return cfg
@@ -587,6 +623,34 @@ func (m *Manager) GetUltimateModel() UltimateModelConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.UltimateModel
+}
+
+// GetRaceRetryEnabled returns whether race retry is enabled
+func (m *Manager) GetRaceRetryEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.RaceRetryEnabled
+}
+
+// GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout
+func (m *Manager) GetRaceParallelOnIdle() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.RaceParallelOnIdle
+}
+
+// GetRaceMaxParallel returns the max parallel requests
+func (m *Manager) GetRaceMaxParallel() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.RaceMaxParallel
+}
+
+// GetRaceMaxBufferBytes returns the max bytes per request buffer
+func (m *Manager) GetRaceMaxBufferBytes() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.RaceMaxBufferBytes
 }
 
 // IsReadOnly returns true if the config file cannot be written

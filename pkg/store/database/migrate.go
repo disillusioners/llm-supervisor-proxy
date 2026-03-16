@@ -31,6 +31,7 @@ var migrations = []migration{
 	{"007", "007_add_tool_repair.up"},
 	{"008", "008_add_release_stream_chunk_deadline.up"},
 	{"009", "009_add_ultimate_model.up"},
+	{"010", "010_add_race_retry.up"},
 }
 
 // RunMigrations executes database schema migrations

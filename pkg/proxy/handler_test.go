@@ -197,6 +197,7 @@ func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*co
 	t.Helper()
 
 	t.Setenv("UPSTREAM_URL", upstreamURL)
+	t.Setenv("MAX_REQUEST_TIME", "10s")
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -1683,6 +1684,7 @@ func TestBufferOverflow_SendsSSEError(t *testing.T) {
 		// No [DONE] - stream fails mid-way
 	}, nil, func(c *config.Config) {
 		c.MaxStreamBufferSize = 100 // Very small limit
+		c.RaceRetryEnabled = false  // Disable race retry for this legacy test
 	})
 	defer upstream.Close()
 
@@ -1830,7 +1832,9 @@ func TestStreamError_SendsSSEError(t *testing.T) {
 			flusher.Flush()
 		}
 		// No [DONE] - stream fails unexpectedly
-	}, nil)
+	}, nil, func(c *config.Config) {
+		c.RaceRetryEnabled = false // Disable race retry for this legacy test
+	})
 	defer upstream.Close()
 
 	body := simpleBody("mock-model", true)

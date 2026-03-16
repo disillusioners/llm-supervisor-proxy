@@ -92,6 +92,7 @@ type requestContext struct {
 	isStream    bool
 
 	// Original request metadata
+	rawBody         []byte // Original raw request body
 	originalHeaders http.Header
 	method          string
 	baseCtx         context.Context
