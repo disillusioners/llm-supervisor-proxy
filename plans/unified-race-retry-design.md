@@ -181,48 +181,17 @@ No strict wait is needed since goroutines don't hold shared resources that requi
 - Use strict struct definition instead of `map[string]interface{}`
 - Only decode fields that need modification (like `"model"`)
 
-### 2. bufio.Scanner Buffer Retention (Trap #17 & #3)
+### 2. ~~bufio.Scanner Buffer Retention (Trap #17 & #3)~~ - IMPLEMENTED IN PHASE 1
 
-**Potential Issue:** `bufio.Scanner` buffers grow but never shrink. If a single 3MB chunk (e.g., base64 image) is seen, that 3MB internal buffer stays tied to the goroutine for the entire streaming duration. For 3 parallel requests, this could be 9-12MB of scanner buffering per connection.
+**UPDATE:** This optimization has been elevated to Phase 1 implementation. See:
+- [`executeRequest()`](#4-request-execution) - Now uses `bufio.Reader.ReadBytes()` instead of `bufio.Scanner`
+- Critical Design Consideration #5 updated to reflect this change
 
-**Future Optimization:** If memory profiles show persistent 4MB buffers lingering:
-- Switch from `bufio.Scanner` to `bufio.Reader.ReadBytes('\n')` or `bufio.Reader.ReadLine()`
-- This naturally orphans large temporary buffers immediately so GC can clean them up
+### 3. ~~Chunk Buffer Pruning (Trap #18)~~ - IMPLEMENTED IN PHASE 1
 
-```go
-// Alternative implementation if needed
-reader := bufio.NewReader(resp.Body)
-for {
-    line, err := reader.ReadBytes('\n')
-    if err != nil {
-        break
-    }
-    // line is a new allocation each time - GC can reclaim immediately
-    if !req.buffer.Add(line[:len(line)-1]) { // strip newline since Add adds it
-        // overflow handling
-    }
-}
-```
-
-### 3. Chunk Buffer Pruning (Trap #18)
-
-**Potential Issue:** `streamBuffer.chunks` holds up to 5MB per request. Even after a winner is chosen and streaming begins, the buffer keeps growing until completion or limit.
-
-**Future Optimization:** Implement `.Prune(readIndex int)` on `streamBuffer`:
-- Since streaming only reads forward, already-sent chunks can be set to `nil`
-- Allows GC to harvest already-sent chunks before response completes
-
-```go
-// Prune releases already-read chunks to GC
-func (sb *streamBuffer) Prune(readIndex int) {
-    sb.mu.Lock()
-    defer sb.mu.Unlock()
-    
-    for i := 0; i < readIndex && i < len(sb.chunks); i++ {
-        sb.chunks[i] = nil // Allow GC to reclaim
-    }
-}
-```
+**UPDATE:** This optimization has been elevated to Phase 1 implementation. See:
+- [`streamBuffer.Prune()`](#1-thread-safe-stream-buffer-notification-pattern) - Method added to release already-read chunks
+- [`streamResult()`](#5-handler-integration) - Now calls `Prune()` after sending chunks
 
 ---
 
@@ -531,6 +500,20 @@ func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
     copy(result, chunks)
     
     return result, len(sb.chunks)
+}
+
+// Prune releases already-read chunks to GC. Thread-safe.
+// MEMORY OPTIMIZATION (Phase 1): Call this after successfully sending chunks
+// to allow GC to reclaim memory during long streams instead of holding all
+// chunks until stream completes. This is critical for long-running streams.
+func (sb *streamBuffer) Prune(readIndex int) {
+    sb.mu.Lock()
+    defer sb.mu.Unlock()
+    
+    // Set already-read chunks to nil to allow GC to reclaim
+    for i := 0; i < readIndex && i < len(sb.chunks); i++ {
+        sb.chunks[i] = nil
+    }
 }
 
 // TotalLen returns total buffered bytes. Thread-safe.
@@ -1023,13 +1006,14 @@ func (rc *raceCoordinator) executeRequest(req *upstreamRequest) {
         return
     }
     
-    // Stream response to buffer using bufio.Scanner with increased buffer
-    // IMPORTANT: Use bufio.Scanner with 64KB initial buffer, 4MB max to handle large chunks
-    // (base64 images, large code blocks) without byte-by-byte reading overhead
-    scanner := bufio.NewScanner(resp.Body)
-    scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // 64KB initial, 4MB max
+    // Stream response to buffer using bufio.Reader (avoids scanner buffer retention)
+    // MEMORY TRAP FIX (Phase 1): Use bufio.Reader instead of bufio.Scanner
+    // bufio.Scanner buffers grow but never shrink. If a single 3MB chunk is seen,
+    // that 3MB internal buffer stays attached to the goroutine for the entire stream.
+    // bufio.Reader.ReadBytes() allocates a new slice each time, allowing GC to reclaim immediately.
+    reader := bufio.NewReader(resp.Body)
     
-    for scanner.Scan() {
+    for {
         // Check for cancellation
         select {
         case <-req.ctx.Done():
@@ -1039,11 +1023,22 @@ func (rc *raceCoordinator) executeRequest(req *upstreamRequest) {
         default:
         }
         
-        line := scanner.Bytes()
+        line, err := reader.ReadBytes('\n')
+        if err != nil {
+            if err == io.EOF {
+                break
+            }
+            // Handle other errors
+            req.setStatus(statusFailed)
+            req.err = fmt.Errorf("read error: %w", err)
+            req.buffer.Close(req.err)
+            return
+        }
         
         // MEMORY TRAP FIX: Pass line directly to Add()
         // Add() now handles newline internally with single allocation
         // (previously: double allocation - once here, once in Add())
+        // Note: ReadBytes includes the newline in the returned slice
         if !req.buffer.Add(line) {
             // Buffer overflow
             log.Printf("[RACE] Request %s buffer overflow, stopping", req.id)
@@ -1118,6 +1113,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 // streamResult streams the winner's buffer to the client using notification pattern
 // IMPORTANT: Caller must defer cancellation of winner to prevent resource leaks
+// MEMORY OPTIMIZATION (Phase 1): Uses Prune() to release already-sent chunks to GC
 func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
     // Set SSE headers
     w.Header().Set("Content-Type", "text/event-stream")
@@ -1146,6 +1142,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
         return // Client disconnected
     }
     readIndex = newIndex
+    // MEMORY OPTIMIZATION (Phase 1): Prune already-sent chunks to allow GC to reclaim
+    winner.buffer.Prune(readIndex)
     if f, ok := w.(http.Flusher); ok {
         f.Flush()
     }
@@ -1160,6 +1158,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
                 return // Client disconnected
             }
             readIndex = newIndex
+            // MEMORY OPTIMIZATION (Phase 1): Prune already-sent chunks
+            winner.buffer.Prune(readIndex)
             if f, ok := w.(http.Flusher); ok {
                 f.Flush()
             }
@@ -1377,7 +1377,9 @@ Race Retry Logic
 - [ ] Implement `declareWinner()` to cancel losers
 - [ ] Implement `handleStreamingDeadline()` to pick best and continue streaming
 - [ ] Implement `checkAllFailed()` for early termination
-- [ ] Implement `executeRequest()` with manual byte reading (4MB limit)
+- [ ] Implement `executeRequest()` with `bufio.Reader.ReadBytes()` (NOT bufio.Scanner - memory trap)
+- [ ] Implement `streamBuffer.Prune()` method for GC cleanup during streaming
+- [ ] Call `Prune()` in `streamResult()` after successfully sending chunks
 
 ### Phase 3: Handler Integration
 
