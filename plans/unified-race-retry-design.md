@@ -71,6 +71,73 @@ defer func() {
 
 ---
 
+## Implementation Notes (From Review)
+
+> **NOTE**: These are minor refinements to consider during implementation:
+
+### 1. HTTP Client / Transport Timeouts
+
+**Risk:** Ensure that the underlying `http.Client` used by `rc.client` (inherited from `Handler`) does not have a hardcoded timeout shorter than `MaxRequestTime` or `hardDeadline`. If it does, requests could fail prematurely with a network timeout before the `streamDeadlineTimer` or `hardDeadline` triggers.
+
+**Recommendation:** Verify that the proxy's `http.Client` relies purely on context cancellation (`req.ctx`) or has a very generous global timeout.
+
+### 2. HTTP Status Code Propagation
+
+**Risk:** In `executeRequest`, if a request fails with HTTP 429 Rate Limit or 401 Unauthorized, it's marked as `statusFailed`. If **all** requests fail, `sendAllFailedError` currently emits a hardcoded `http.StatusBadGateway` (502).
+
+**Recommendation:** In `sendAllFailedError`, inspect the final `req.err` of the failed requests. If they all failed with the same 4xx code, proxy that specific HTTP status code back to the client rather than masking everything behind 502 Bad Gateway.
+
+```go
+// Enhanced sendAllFailedError with status code propagation
+func (h *Handler) sendAllFailedError(w http.ResponseWriter, rc *requestContext, coordinator *raceCoordinator) {
+    // Try to find a consistent error status from failed requests
+    statusCode := http.StatusBadGateway // Default
+    
+    // Check if all requests failed with same HTTP status
+    if commonStatus := coordinator.GetCommonFailureStatus(); commonStatus != 0 {
+        statusCode = commonStatus
+    }
+    
+    if !rc.headersSent {
+        http.Error(w, "All upstream requests failed", statusCode)
+    } else {
+        // Headers already sent - send SSE error
+        fmt.Fprintf(w, "event: error\ndata: {\"error\": \"All upstream requests failed\"}\n\n")
+        if f, ok := w.(http.Flusher); ok {
+            f.Flush()
+        }
+    }
+}
+```
+
+### 3. Write Error Handling in streamResult()
+
+**Risk:** In `streamResult()`, when writing to `w.Write(chunk)`, if the client has disconnected, `w.Write` will eventually return an error (usually `syscall.EPIPE` or similar).
+
+**Recommendation:** Check `w.Write()` error returns and return early if the connection is dropped. This is standard practice in Go HTTP handlers:
+
+```go
+for _, chunk := range chunks {
+    if _, err := w.Write(chunk); err != nil {
+        // Client disconnected - return early
+        return
+    }
+}
+```
+
+### 4. WaitGroup and Goroutine Cleanup
+
+**Risk:** `WaitGroup` `req.wg.Add(1)` is called before the goroutine starts, which is correct. However, `req.wg.Wait()` is not explicitly called anywhere.
+
+**Recommendation:** Relying on `req.ctx` cancellation to stop goroutines is sufficient for this design. The goroutines will naturally exit when:
+- Request completes successfully
+- Context is cancelled (winner chosen, client disconnect, deadline)
+- Buffer overflow occurs
+
+No strict wait is needed since goroutines don't hold shared resources that require explicit cleanup beyond context cancellation.
+
+---
+
 ## Architecture Diagram
 
 ```mermaid
@@ -962,10 +1029,22 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
     // Track read index for incremental reading
     readIndex := 0
     
+    // Helper function to write chunks with error checking
+    // Returns false if write failed (client disconnected)
+    writeChunks := func(chunks [][]byte) bool {
+        for _, chunk := range chunks {
+            if _, err := w.Write(chunk); err != nil {
+                // Client disconnected - return early
+                return false
+            }
+        }
+        return true
+    }
+    
     // First, flush any buffered chunks
     chunks, newIndex := winner.buffer.GetChunksFrom(readIndex)
-    for _, chunk := range chunks {
-        w.Write(chunk)
+    if !writeChunks(chunks) {
+        return // Client disconnected
     }
     readIndex = newIndex
     if f, ok := w.(http.Flusher); ok {
@@ -978,8 +1057,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
         case <-winner.buffer.NotifyCh():
             // New data available - read it
             chunks, newIndex := winner.buffer.GetChunksFrom(readIndex)
-            for _, chunk := range chunks {
-                w.Write(chunk)
+            if !writeChunks(chunks) {
+                return // Client disconnected
             }
             readIndex = newIndex
             if f, ok := w.(http.Flusher); ok {
@@ -989,9 +1068,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
         case <-winner.buffer.Done():
             // Stream completed - flush any remaining chunks
             chunks, _ := winner.buffer.GetChunksFrom(readIndex)
-            for _, chunk := range chunks {
-                w.Write(chunk)
-            }
+            writeChunks(chunks) // Ignore error - we're done anyway
             if f, ok := w.(http.Flusher); ok {
                 f.Flush()
             }
@@ -1005,9 +1082,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, winner *upstreamRequest) {
     
     // Stream completed - flush any remaining chunks
     chunks, _ = winner.buffer.GetChunksFrom(readIndex)
-    for _, chunk := range chunks {
-        w.Write(chunk)
-    }
+    writeChunks(chunks) // Ignore error - we're done anyway
     if f, ok := w.(http.Flusher); ok {
         f.Flush()
     }
