@@ -196,8 +196,8 @@ func (c *raceCoordinator) cancelAllExcept(winner *upstreamRequest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, req := range c.requests {
-		if req != winner && req.cancel != nil {
-			req.cancel()
+		if req != winner {
+			req.Cancel()
 		}
 	}
 }

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
 
 // mockSlowReader simulates a reader that blocks for a duration before returning data
 type mockSlowReader struct {
+	mu          sync.Mutex
 	data        []byte
 	readDelay   time.Duration
 	returnError error
@@ -17,6 +19,9 @@ type mockSlowReader struct {
 }
 
 func (m *mockSlowReader) Read(p []byte) (n int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
 	if m.returnError != nil {
 		return 0, m.returnError
 	}
@@ -24,7 +29,12 @@ func (m *mockSlowReader) Read(p []byte) (n int, err error) {
 		return 0, errors.New("read on closed reader")
 	}
 	if m.readDelay > 0 {
+		m.mu.Unlock()
 		time.Sleep(m.readDelay)
+		m.mu.Lock()
+	}
+	if m.closed {
+		return 0, errors.New("read on closed reader")
 	}
 	if len(m.data) == 0 {
 		return 0, io.EOF
@@ -35,6 +45,8 @@ func (m *mockSlowReader) Read(p []byte) (n int, err error) {
 }
 
 func (m *mockSlowReader) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.closed = true
 	return nil
 }

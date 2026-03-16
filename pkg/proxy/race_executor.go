@@ -27,18 +27,17 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	}
 	u.Path, _ = url.JoinPath(u.Path, "/v1/chat/completions")
 
-	
-// 1.5 Modify body to use current model ID
-var bodyMap map[string]interface{}
-finalBody := rawBody
-if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
-bodyMap["model"] = req.modelID
-if b, err := json.Marshal(bodyMap); err == nil {
-finalBody = b
-}
-}
-// Create fresh request with context and body
-upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(finalBody))
+	// 1.5 Modify body to use current model ID
+	var bodyMap map[string]interface{}
+	finalBody := rawBody
+	if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
+		bodyMap["model"] = req.modelID
+		if b, err := json.Marshal(bodyMap); err == nil {
+			finalBody = b
+		}
+	}
+	// Create fresh request with context and body
+	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(finalBody))
 	if err != nil {
 		return fmt.Errorf("failed to create upstream request: %w", err)
 	}
@@ -54,7 +53,7 @@ upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.Ne
 	upstreamReq.Host = u.Host
 
 	log.Printf("[DEBUG] Race attempt %d calling: %s (Host: %s)", req.id, upstreamReq.URL.String(), upstreamReq.Host)
-	
+
 	client := &http.Client{
 		Timeout: 0, // Timeout is handled by context
 	}
@@ -73,9 +72,38 @@ upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.Ne
 		return fmt.Errorf("upstream returned error: %s", resp.Status)
 	}
 
-	// 4. Handle streaming response
-	req.MarkStreaming()
+	// 4. Check if this is a streaming or non-streaming response
+	contentType := resp.Header.Get("Content-Type")
+	isStreaming := strings.Contains(contentType, "text/event-stream")
 
+	if !isStreaming {
+		// Non-streaming response: read entire body as single chunk
+		return handleNonStreamingResponse(ctx, cfg, resp, req)
+	}
+
+	// Streaming response
+	req.MarkStreaming()
+	return handleStreamingResponse(ctx, cfg, resp, req)
+}
+
+// handleNonStreamingResponse reads a non-streaming JSON response
+func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest) error {
+	// Read entire body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read error: %w", err)
+	}
+
+	// Add as single chunk (the non-streaming JSON response)
+	if !req.buffer.Add(body) {
+		return fmt.Errorf("buffer limit exceeded")
+	}
+
+	return nil
+}
+
+// handleStreamingResponse handles SSE streaming responses
+func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer

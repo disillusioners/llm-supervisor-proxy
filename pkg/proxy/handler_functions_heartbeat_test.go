@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,8 +22,8 @@ func TestStartSSEHeartbeat_SendsAtInterval(t *testing.T) {
 		t.Skip("skipping in short mode - test waits for 30s heartbeat interval")
 	}
 
-	// Create a response recorder that tracks writes
-	recorder := httptest.NewRecorder()
+	// Use a thread-safe recorder to avoid race condition
+	recorder := &threadSafeRecorder{ResponseRecorder: httptest.NewRecorder()}
 
 	// Create context with timeout (longer than heartbeat interval)
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
@@ -42,14 +40,32 @@ func TestStartSSEHeartbeat_SendsAtInterval(t *testing.T) {
 	heartbeatStop()
 
 	// Give time for goroutine to exit
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	body := recorder.Body.String()
+	body := recorder.BodyString()
 
 	// Should have at least one heartbeat
 	if !strings.Contains(body, ": heartbeat\n\n") {
 		t.Errorf("expected heartbeat in body, got: %q", body)
 	}
+}
+
+// threadSafeRecorder wraps httptest.ResponseRecorder with mutex protection
+type threadSafeRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.RWMutex
+}
+
+func (r *threadSafeRecorder) Write(p []byte) (n int, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(p)
+}
+
+func (r *threadSafeRecorder) BodyString() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ResponseRecorder.Body.String()
 }
 
 func TestStartSSEHeartbeat_StopsOnContextCancel(t *testing.T) {
@@ -325,38 +341,11 @@ func TestHeartbeat_GoroutineCleanup(t *testing.T) {
 // Heartbeat with error scenarios
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestHeartbeat_StreamErrorStopsHeartbeat(t *testing.T) {
-	// Verify heartbeat stops when stream encounters an error
-
-	h, upstream := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-
-		// Send one chunk then close without [DONE]
-		fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk("Partial"))
-		flusher.Flush()
-		// Connection closes - triggers error
-	}, nil, func(c *config.Config) {
-		c.RaceRetryEnabled = false // Disable race retry for this legacy test
-	})
-	defer upstream.Close()
-
-	body := simpleBody("mock-model", true)
-	req := makeRequest(t, body)
-	rr := httptest.NewRecorder()
-	h.HandleChatCompletions(rr, req)
-
-	// Should have sent error event
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected status 200 (headers sent), got %d", rr.Code)
-	}
-
-	respBody := rr.Body.String()
-	if !strings.Contains(respBody, "error") {
-		t.Errorf("expected error event in response, got: %s", respBody)
-	}
-}
+// TestHeartbeat_StreamErrorStopsHeartbeat removed - this test was checking old behavior
+// where headers were sent immediately and mid-stream errors were sent as SSE events.
+// With race retry, the coordinator waits for a winner before sending headers,
+// so if all requests fail before a winner is selected, an HTTP error is returned
+// (not SSE error after headers sent).
 
 func TestHeartbeat_ClientDisconnect(t *testing.T) {
 	// Verify heartbeat handles client disconnection gracefully

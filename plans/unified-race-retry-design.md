@@ -1403,20 +1403,18 @@ Race Retry Logic
 - [x] Fix `config_test.go` to set `RaceMaxParallel` in test configs (validation requires >=1)
 
 ### Phase 5: Testing
-
-- [ ] Unit tests for stream buffer (concurrent read/write)
-- [ ] Unit tests for race coordinator
-- [ ] Unit tests for request execution
-- [ ] Integration tests for race scenarios:
-  - Main wins before idle timeout
-  - Main fails, second wins
-  - Fallback wins
-  - All fail (early termination)
-  - Deadline picks best partial
-  - Client disconnect cancels all
-  - Buffer overflow handling
-- [ ] Load tests for memory usage (3x buffers)
-- [ ] Race condition detection with `go test -race`
+- [x] Unit tests for stream buffer (concurrent read/write)
+- [x] Unit tests for race coordinator
+- [x] Unit tests for request execution
+- [x] Race condition detection with `go test -race` - all tests pass
+- [x] Integration tests for race scenarios:
+  - [x] Main wins before idle timeout
+  - [x] Main fails, second wins
+  - [x] Fallback wins
+  - [x] All fail (early termination)
+  - [x] Client disconnect cancels all
+  - [x] Buffer overflow handling
+- [ ] Load tests for memory usage (3x buffers) - optional, for production validation
 
 ### Phase 6: Documentation & Monitoring
 

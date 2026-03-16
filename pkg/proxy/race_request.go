@@ -141,3 +141,13 @@ func (r *upstreamRequest) IsStreaming() bool {
 	defer r.mu.RUnlock()
 	return r.status == statusStreaming
 }
+
+// Cancel safely cancels the request's context if cancel function is set
+func (r *upstreamRequest) Cancel() {
+	r.mu.RLock()
+	cancel := r.cancel
+	r.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
