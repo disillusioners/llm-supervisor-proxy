@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// spawnTrigger indicates why parallel requests are being spawned
+type spawnTrigger string
+
+const (
+	triggerIdleTimeout spawnTrigger = "idle_timeout"
+	triggerMainError   spawnTrigger = "main_error"
+)
+
 // raceCoordinator manages multiple parallel upstream requests
 type raceCoordinator struct {
 	mu sync.RWMutex
@@ -30,6 +38,10 @@ type raceCoordinator struct {
 	
 	onceStream sync.Once
 	onceDone   sync.Once
+
+	// Metrics for logging/monitoring
+	startTime       time.Time
+	spawnTriggers   []spawnTrigger // Track why requests were spawned
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string) *raceCoordinator {
@@ -37,39 +49,47 @@ func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Requ
 		models = []string{cfg.ModelID}
 	}
 	return &raceCoordinator{
-		baseCtx: ctx,
-		cfg:     cfg,
-		req:     req,
-		rawBody: rawBody,
-		models:  models,
-		requests: make([]*upstreamRequest, 0, len(models)),
-		winnerIdx: -1,
-		done:     make(chan struct{}),
-		streamCh: make(chan struct{}),
+		baseCtx:       ctx,
+		cfg:           cfg,
+		req:           req,
+		rawBody:       rawBody,
+		models:        models,
+		requests:      make([]*upstreamRequest, 0, len(models)),
+		winnerIdx:     -1,
+		done:          make(chan struct{}),
+		streamCh:      make(chan struct{}),
+		startTime:     time.Now(),
+		spawnTriggers: make([]spawnTrigger, 0),
 	}
 }
 
 // Start initiates the race
 func (c *raceCoordinator) Start() {
-	// 1. Spawn main request
-	c.spawn(modelTypeMain)
+	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
+	
+	// 1. Spawn main request (no trigger - it's the initial request)
+	c.spawn(modelTypeMain, "")
 
 	// 2. Start manager loop
 	go c.manage()
 }
 
-func (c *raceCoordinator) spawn(mType upstreamModelType) {
+func (c *raceCoordinator) spawn(mType upstreamModelType, trigger spawnTrigger) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	idx := len(c.requests)
 	if idx >= len(c.models) {
+		log.Printf("[RACE] Cannot spawn more requests: reached max models (%d)", len(c.models))
 		return
 	}
 
 	modelID := c.models[idx]
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
 	c.requests = append(c.requests, req)
+	c.spawnTriggers = append(c.spawnTriggers, trigger)
+
+	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, trigger)
 
 	// Execute in background
 	go c.execute(req)
@@ -102,7 +122,12 @@ func (c *raceCoordinator) manage() {
 						if c.winner == nil || i < c.winnerIdx {
 							c.winner = req
 							c.winnerIdx = i
-							log.Printf("[RACE] Winner selected: request %d (%s, %s)", i, req.modelType, req.modelID)
+							
+							// Enhanced logging with timing and buffer stats
+							elapsed := time.Since(c.startTime)
+							bufferLen := req.buffer.TotalLen()
+							log.Printf("[RACE] Winner selected: request %d (%s, %s) after %v, buffer=%d bytes",
+								i, req.modelType, req.modelID, elapsed.Round(time.Millisecond), bufferLen)
 							c.onceStream.Do(func() { close(c.streamCh) })
 						}
 					}
@@ -129,6 +154,7 @@ func (c *raceCoordinator) manage() {
 				}
 
 				shouldSpawn := false
+				var trigger spawnTrigger
 				nextType := modelTypeSecond
 				if len(c.requests) >= 2 {
 					nextType = modelTypeFallback
@@ -140,6 +166,7 @@ func (c *raceCoordinator) manage() {
 					if latestReq.IsDone() && latestReq.GetError() != nil {
 						log.Printf("[RACE] Latest request %d failed, spawning next attempt", latestReq.id)
 						shouldSpawn = true
+						trigger = triggerMainError
 					}
 
 					// Case 2: Main request is idle (Parallel race retry)
@@ -152,6 +179,7 @@ func (c *raceCoordinator) manage() {
 							} else if time.Now().After(idleDeadline) {
 								log.Printf("[RACE] Main request idle, spawning parallel request")
 								shouldSpawn = true
+								trigger = triggerIdleTimeout
 								idleTimerStarted = false
 							}
 						}
@@ -160,7 +188,7 @@ func (c *raceCoordinator) manage() {
 
 				if shouldSpawn {
 					c.mu.Unlock()
-					c.spawn(nextType)
+					c.spawn(nextType, trigger)
 					c.mu.Lock()
 				}
 			}
@@ -278,4 +306,43 @@ func (c *raceCoordinator) GetCommonFailureStatus() int {
 	}
 
 	return commonStatus
+}
+
+// RaceStats contains statistics about a completed race
+type RaceStats struct {
+	TotalRequests   int            `json:"total_requests"`
+	WinnerType      string         `json:"winner_type"`
+	WinnerModel     string         `json:"winner_model"`
+	WinnerIndex     int            `json:"winner_index"`
+	Duration        time.Duration  `json:"duration"`
+	SpawnTriggers   []string       `json:"spawn_triggers"`
+	FailedCount     int            `json:"failed_count"`
+	WinnerBufferLen int64          `json:"winner_buffer_bytes"`
+}
+
+// GetStats returns statistics about the race for logging/metrics
+func (c *raceCoordinator) GetStats() RaceStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	stats := RaceStats{
+		TotalRequests: len(c.requests),
+		WinnerIndex:   c.winnerIdx,
+		Duration:      time.Since(c.startTime),
+		FailedCount:   c.failedCount,
+	}
+
+	// Convert spawn triggers to strings
+	for _, t := range c.spawnTriggers {
+		stats.SpawnTriggers = append(stats.SpawnTriggers, string(t))
+	}
+
+	// Winner info
+	if c.winner != nil {
+		stats.WinnerType = string(c.winner.modelType)
+		stats.WinnerModel = c.winner.modelID
+		stats.WinnerBufferLen = c.winner.buffer.TotalLen()
+	}
+
+	return stats
 }

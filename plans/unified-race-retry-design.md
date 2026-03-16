@@ -1418,7 +1418,7 @@ Race Retry Logic
 
 ### Phase 6: Documentation & Monitoring
 
-- [ ] Update README with new retry behavior
-- [ ] Add metrics for race outcomes (main/second/fallback win rates)
-- [ ] Add logging for debugging race decisions
-- [ ] Update AGENTS.md with new architecture
+- [x] Update README with new retry behavior
+- [x] Add metrics for race outcomes (main/second/fallback win rates) - `GetStats()` method in race_coordinator.go
+- [x] Add logging for debugging race decisions - Enhanced logging with timing, triggers, and buffer stats
+- [x] Update AGENTS.md with new architecture

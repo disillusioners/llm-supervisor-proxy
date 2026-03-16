@@ -8,10 +8,7 @@ A production-ready OpenAI-compatible proxy server that sits between your autonom
 
 ### Core Reliability
 -   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
--   **Multi-Strategy Auto-Retry**:
-    -   **Idle Reset**: Retries when a stream hangs mid-generation.
-    -   **Upstream Recovery**: Retries on 5xx errors or connectivity issues from the provider.
-    -   **Generation Guard**: Ensures requests eventually finish within `MAX_GENERATION_TIME`.
+-   **Parallel Race Retry**: When a request hangs or fails, spawns parallel requests (same model + fallback) and races them to completion. First successful response wins.
 -   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
 -   **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
     > ⚠️ **Note**: For streaming requests, retry only occurs before headers are sent (e.g., on 5xx errors). Once streaming begins, mid-stream failures send an SSE error event to the client instead of retrying.
@@ -78,15 +75,37 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before considering the stream hung. |
 | `MAX_GENERATION_TIME` | `300s` | Hard limit for the entire request lifecycle. |
-| `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors. |
-| `MAX_IDLE_RETRIES` | `2` | Retries for hung streams. |
-| `MAX_GENERATION_RETRIES` | `1` | Retries for time-limit exceeded. |
+| `MAX_REQUEST_TIME` | `600s` | **Absolute hard timeout for entire request** (covers all retries). |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
-| `SHADOW_RETRY_ENABLED` | `true` | Enable parallel shadow requests on first idle timeout. |
 | `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses (keeps connections alive during buffering). |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
 | `INTERNAL_ENCRYPTION_KEY` | *(empty)* | Base64-encoded 32-byte key for encrypting stored API keys. |
+
+### Race Retry Configuration
+
+The proxy uses a **parallel race retry** mechanism for maximum reliability:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `RACE_RETRY_ENABLED` | `false` | Enable parallel race retry (recommended: `true`). |
+| `RACE_PARALLEL_ON_IDLE` | `true` | Spawn parallel requests when main request hits idle timeout. |
+| `RACE_MAX_PARALLEL` | `3` | Max parallel requests (main + second + fallback). |
+| `RACE_MAX_BUFFER_BYTES` | `5242880` | Max bytes per request buffer (5MB default). |
+
+**How Race Retry Works:**
+1. Main request starts immediately with the original model
+2. If main request hits idle timeout or fails, parallel requests spawn:
+   - **Second request**: Same model, fresh attempt
+   - **Fallback request**: First fallback model in chain
+3. First request to complete successfully **wins** the race
+4. Other requests are cancelled immediately
+5. Winner's buffered response streams to client
+
+**Benefits over sequential retry:**
+- Faster response (don't wait for stuck requests to timeout)
+- Better success rate (multiple attempts running simultaneously)
+- Preserved progress (main request continues even after idle timeout)
 
 ### Database Storage
 

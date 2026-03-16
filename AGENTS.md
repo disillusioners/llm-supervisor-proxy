@@ -92,12 +92,18 @@ Key configuration via environment variables (highest precedence):
 | `IDLE_TIMEOUT` | `60s` | Max wait between tokens |
 | `MAX_GENERATION_TIME` | `300s` | Hard request time limit per attempt |
 | `MAX_REQUEST_TIME` | `600s` | **Absolute hard timeout for entire request** (covers all retries) |
-| `MAX_UPSTREAM_ERROR_RETRIES` | `1` | Retries for 5xx/network errors |
-| `MAX_IDLE_RETRIES` | `2` | Retries for hung streams |
-| `MAX_GENERATION_RETRIES` | `1` | Retries for time limit exceeded |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only) |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string |
+
+### Race Retry Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RACE_RETRY_ENABLED` | `false` | Enable parallel race retry |
+| `RACE_PARALLEL_ON_IDLE` | `true` | Spawn parallel requests on idle timeout |
+| `RACE_MAX_PARALLEL` | `3` | Max parallel requests (main + second + fallback) |
+| `RACE_MAX_BUFFER_BYTES` | `5242880` | Max bytes per request buffer (5MB) |
 
 ---
 
@@ -258,6 +264,11 @@ llm-supervisor-proxy/
 ├── cmd/main.go              # Entry point
 ├── pkg/
 │   ├── proxy/               # Core proxy logic & handlers
+│   │   ├── handler.go           # Main HTTP handler with race retry integration
+│   │   ├── race_coordinator.go  # Parallel race retry coordinator
+│   │   ├── race_executor.go     # Upstream request execution
+│   │   ├── race_request.go      # Request state structure
+│   │   └── stream_buffer.go     # Thread-safe SSE chunk buffer
 │   ├── config/              # Configuration management
 │   ├── auth/                # Token authentication
 │   ├── models/              # Data models
@@ -269,6 +280,50 @@ llm-supervisor-proxy/
 ├── k8s/                     # Kubernetes manifests
 └── docs/                    # Documentation
 ```
+
+---
+
+## Race Retry Architecture
+
+The proxy uses a **parallel race retry** mechanism for maximum reliability:
+
+```
+Client Request
+     │
+     ├─► UltimateModel.ShouldTrigger() ──► YES ──► Execute ultimate model (no retry)
+     │
+     └─► NO ──► Race Coordinator
+                     │
+                     ├─ MAIN REQUEST (original model, starts immediately)
+                     │       │
+                     │       ├─ ERROR ──► Spawn parallel requests immediately
+                     │       │
+                     │       └─ IDLE TIMEOUT ──► Spawn parallel requests
+                     │
+                     ├─ SECOND REQUEST (same model, spawned on idle/error)
+                     │
+                     └─ FALLBACK REQUEST (first fallback model)
+                             │
+                             ▼
+                     FIRST TO COMPLETE WINS
+                     (others cancelled, winner streams to client)
+```
+
+**Key Components:**
+
+| File | Purpose |
+|------|---------|
+| `race_coordinator.go` | Manages parallel requests, selects winner |
+| `race_executor.go` | Executes HTTP requests to upstream |
+| `race_request.go` | Request state with atomic status tracking |
+| `stream_buffer.go` | Thread-safe chunk buffer with notification pattern |
+
+**Thread Safety:**
+- Uses notification channel pattern (not shared buffer)
+- Atomic status transitions
+- Mutex-protected chunk storage with GC-friendly pruning
+
+For full design details, see [`plans/unified-race-retry-design.md`](plans/unified-race-retry-design.md).
 
 ---
 
