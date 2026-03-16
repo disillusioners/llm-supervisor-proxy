@@ -1363,31 +1363,31 @@ Race Retry Logic
 
 ### Phase 1: Core Infrastructure
 
-- [ ] Create `pkg/proxy/stream_buffer.go` with thread-safe chunk buffer
-- [ ] Create `pkg/proxy/race_request.go` with `upstreamRequest` struct and atomic status
-- [ ] Create `pkg/proxy/race_coordinator.go` with coordinator struct
-- [ ] Create `pkg/proxy/race_executor.go` with request execution logic
-- [ ] Add new config options to `pkg/config/config.go`
+- [x] Create `pkg/proxy/stream_buffer.go` with thread-safe chunk buffer
+- [x] Create `pkg/proxy/race_request.go` with `upstreamRequest` struct and atomic status
+- [x] Create `pkg/proxy/race_coordinator.go` with coordinator struct
+- [x] Create `pkg/proxy/race_executor.go` with request execution logic
+- [x] Add new config options to `pkg/config/config.go`
 
 ### Phase 2: Coordinator Logic
 
-- [ ] Implement `Start()` method to begin main request
-- [ ] Implement `coordinate()` event loop with `defer close(rc.done)`
-- [ ] Implement `spawnParallelRequests()` for second + fallback
-- [ ] Implement `declareWinner()` to cancel losers
-- [ ] Implement `handleStreamingDeadline()` to pick best and continue streaming
-- [ ] Implement `checkAllFailed()` for early termination
-- [ ] Implement `executeRequest()` with `bufio.Reader.ReadBytes()` (NOT bufio.Scanner - memory trap)
-- [ ] Implement `streamBuffer.Prune()` method for GC cleanup during streaming
-- [ ] Call `Prune()` in `streamResult()` after successfully sending chunks
+- [x] Implement `Start()` method to begin main request
+- [x] Implement `coordinate()` event loop with `defer close(rc.done)`
+- [x] Implement `spawnParallelRequests()` for second + fallback
+- [x] Implement `declareWinner()` to cancel losers
+- [x] Implement `handleStreamingDeadline()` to pick best and continue streaming
+- [x] Implement `checkAllFailed()` for early termination
+- [x] Implement `executeRequest()` with `bufio.Reader.ReadBytes()` (NOT bufio.Scanner - memory trap)
+- [x] Implement `streamBuffer.Prune()` method for GC cleanup during streaming
+- [x] Call `Prune()` in `streamResult()` after successfully sending chunks
 
 ### Phase 3: Handler Integration
 
-- [ ] Modify `pkg/proxy/handler.go` to use race coordinator
-- [ ] Add feature flag check for `RACE_RETRY_ENABLED`
-- [ ] Implement `streamResult()` to flush winner buffer + continue streaming
-- [ ] Update request logging to track race outcomes
-- [ ] Add event publishing for race events (spawn, win, lose, deadline)
+- [x] Modify `pkg/proxy/handler.go` to use race coordinator
+- [x] Add feature flag check for `RACE_RETRY_ENABLED`
+- [x] Implement `streamResult()` to flush winner buffer + continue streaming
+- [x] Update request logging to track race outcomes
+- [x] Add event publishing for race events (spawn, win, lose, deadline)
 
 ### Phase 4: Cleanup
 
