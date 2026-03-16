@@ -203,36 +203,24 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// attemptAnthropicModel attempts a single model request with retries
+// attemptAnthropicModel attempts a single model request
 func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicRequestContext, modelIndex int, currentModel string) bool {
 	// Check if this model uses internal upstream
 	modelConfig := arc.conf.ModelsConfig.GetModel(currentModel)
 	isInternal := modelConfig != nil && modelConfig.Internal
 
-	for retry := 0; retry < arc.conf.MaxUpstreamErrorRetries+1; retry++ {
-		if retry > 0 {
-			log.Printf("Retrying Anthropic request (attempt %d)...", retry)
-			arc.reqLog.Retries = retry
-			arc.reqLog.Status = "retrying"
-			h.store.Add(arc.reqLog)
-			h.publishEvent("retry_attempt", map[string]interface{}{"attempt": retry, "id": arc.reqID})
-		}
-
-		if arc.baseCtx.Err() != nil {
-			return true // Client disconnected
-		}
-
-		var success bool
-		if isInternal {
-			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
-		} else {
-			success = h.doAnthropicRequest(w, arc, currentModel)
-		}
-		if success {
-			return true
-		}
+	if arc.baseCtx.Err() != nil {
+		return true // Client disconnected
 	}
-	return false
+
+	var success bool
+	if isInternal {
+		success = h.doAnthropicInternalRequest(w, arc, modelConfig)
+	} else {
+		success = h.doAnthropicRequest(w, arc, currentModel)
+	}
+	
+	return success
 }
 
 // doAnthropicRequest performs a single upstream request

@@ -47,9 +47,7 @@ type dbConfigRow struct {
 	Port                    int64
 	IdleTimeoutMs           int64
 	MaxGenerationTimeMs     int64
-	MaxUpstreamErrorRetries int64
-	MaxIdleRetries          int64
-	MaxGenerationRetries    int64
+
 	MaxStreamBufferSize     int64
 	LoopDetectionJSON       string
 	ToolRepairJSON          string
@@ -81,9 +79,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.Port,
 		&dbCfg.IdleTimeoutMs,
 		&dbCfg.MaxGenerationTimeMs,
-		&dbCfg.MaxUpstreamErrorRetries,
-		&dbCfg.MaxIdleRetries,
-		&dbCfg.MaxGenerationRetries,
+
 		&dbCfg.MaxStreamBufferSize,
 		&dbCfg.LoopDetectionJSON,
 		&dbCfg.ToolRepairJSON,
@@ -109,9 +105,7 @@ func (m *ConfigManager) Load() error {
 	cfg.Port = int(dbCfg.Port)
 	cfg.IdleTimeout = config.Duration(time.Duration(dbCfg.IdleTimeoutMs) * time.Millisecond)
 	cfg.MaxGenerationTime = config.Duration(time.Duration(dbCfg.MaxGenerationTimeMs) * time.Millisecond)
-	cfg.MaxUpstreamErrorRetries = int(dbCfg.MaxUpstreamErrorRetries)
-	cfg.MaxIdleRetries = int(dbCfg.MaxIdleRetries)
-	cfg.MaxGenerationRetries = int(dbCfg.MaxGenerationRetries)
+
 	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
 	cfg.UpdatedAt = dbCfg.UpdatedAt
 
@@ -199,9 +193,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		merged.Port,
 		time.Duration(merged.IdleTimeout).Milliseconds(),
 		time.Duration(merged.MaxGenerationTime).Milliseconds(),
-		merged.MaxUpstreamErrorRetries,
-		merged.MaxIdleRetries,
-		merged.MaxGenerationRetries,
+
 		merged.MaxStreamBufferSize,
 		string(loopDetectionJSON),
 		string(toolRepairJSON),
@@ -259,13 +251,7 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	if incoming.MaxGenerationTime != 0 {
 		result.MaxGenerationTime = incoming.MaxGenerationTime
 	}
-	// For retry counts, 0 could be valid, so we check if any retry field is set
-	// If any retry field is non-zero, update all retry fields (frontend sends all or none)
-	if incoming.MaxUpstreamErrorRetries != 0 || incoming.MaxIdleRetries != 0 || incoming.MaxGenerationRetries != 0 {
-		result.MaxUpstreamErrorRetries = incoming.MaxUpstreamErrorRetries
-		result.MaxIdleRetries = incoming.MaxIdleRetries
-		result.MaxGenerationRetries = incoming.MaxGenerationRetries
-	}
+
 	// MaxStreamBufferSize: update if incoming differs from existing (it's always sent with proxy settings)
 	if incoming.MaxStreamBufferSize != 0 {
 		result.MaxStreamBufferSize = incoming.MaxStreamBufferSize
@@ -393,27 +379,6 @@ func (m *ConfigManager) GetMaxRequestTime() time.Duration {
 	return time.Duration(m.cfg.MaxRequestTime)
 }
 
-// GetMaxUpstreamErrorRetries returns the max upstream error retries
-func (m *ConfigManager) GetMaxUpstreamErrorRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.MaxUpstreamErrorRetries
-}
-
-// GetMaxIdleRetries returns the max idle retries
-func (m *ConfigManager) GetMaxIdleRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.MaxIdleRetries
-}
-
-// GetMaxGenerationRetries returns the max generation retries
-func (m *ConfigManager) GetMaxGenerationRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.MaxGenerationRetries
-}
-
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes
 func (m *ConfigManager) GetMaxStreamBufferSize() int {
 	m.mu.RLock()
@@ -435,12 +400,7 @@ func (m *ConfigManager) GetBufferMaxStorageMB() int {
 	return m.cfg.BufferMaxStorageMB
 }
 
-// GetShadowRetryEnabled returns whether shadow retry is enabled
-func (m *ConfigManager) GetShadowRetryEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.ShadowRetryEnabled
-}
+
 
 // GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses
 func (m *ConfigManager) GetSSEHeartbeatEnabled() bool {

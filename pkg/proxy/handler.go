@@ -40,14 +40,10 @@ func (c *Config) Clone() ConfigSnapshot {
 		IdleTimeout:             cfg.IdleTimeout.Duration(),
 		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
 		MaxRequestTime:          maxRequestTime,
-		MaxUpstreamErrorRetries: cfg.MaxUpstreamErrorRetries,
-		MaxIdleRetries:          cfg.MaxIdleRetries,
-		MaxGenerationRetries:    cfg.MaxGenerationRetries,
 		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
 		ToolRepair:              cfg.ToolRepair,
-		ShadowRetryEnabled:      cfg.ShadowRetryEnabled,
 		SSEHeartbeatEnabled:     cfg.SSEHeartbeatEnabled,
 		RaceRetryEnabled:        cfg.RaceRetryEnabled,
 		RaceParallelOnIdle:      cfg.RaceParallelOnIdle,
@@ -62,14 +58,10 @@ type ConfigSnapshot struct {
 	IdleTimeout             time.Duration
 	MaxGenerationTime       time.Duration
 	MaxRequestTime          time.Duration
-	MaxUpstreamErrorRetries int
-	MaxIdleRetries          int
-	MaxGenerationRetries    int
 	MaxStreamBufferSize     int
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig
 	ToolRepair              toolrepair.Config
-	ShadowRetryEnabled      bool
 	SSEHeartbeatEnabled     bool
 
 	// Race Retry
@@ -243,6 +235,17 @@ func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, p
 	})
 }
 
+// sendSSEError sends an error as an SSE event to the client.
+// This is used when a streaming error occurs after headers have been sent,
+// so we can't send a regular HTTP error response.
+func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
+	errorEvent := fmt.Sprintf("event: error\ndata: {\"error\": %q}\n\n", message)
+	w.Write([]byte(errorEvent))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // HandleChatCompletions is the main entry point for proxying chat completions.
 func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -368,96 +371,56 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})
 
 	// Unified Race Retry Design (Parallel Race)
-	if rc.conf.RaceRetryEnabled {
-		log.Printf("[RACE] Parallel race retry enabled for request %s", rc.reqID)
-		coordinator := newRaceCoordinator(rc.baseCtx, &rc.conf, r, rc.rawBody)
-		coordinator.Start()
+	log.Printf("[RACE] Parallel race retry started for request %s", rc.reqID)
+	coordinator := newRaceCoordinator(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList)
+	coordinator.Start()
 
-		winner := coordinator.WaitForWinner()
-		if winner != nil {
-			defer func() {
-				if winner.cancel != nil {
-					winner.cancel()
-				}
-			}()
-
-			if rc.isStream {
-				// Stream the final result from the winner's buffer
-				h.streamResult(w, rc, winner)
-			} else {
-				// Send a single JSON response from the winner's buffer
-				h.handleNonStreamResult(w, rc, winner)
+	winner := coordinator.WaitForWinner()
+	if winner != nil {
+		defer func() {
+			if winner.cancel != nil {
+				winner.cancel()
 			}
-			return
+		}()
+
+		if rc.isStream {
+			// Stream the final result from the winner's buffer
+			h.streamResult(w, rc, winner)
+		} else {
+			// Send a single JSON response from the winner's buffer
+			h.handleNonStreamResult(w, rc, winner)
 		}
-
-		// If winner is nil, it means either context cancelled or all models failed
-		select {
-		case <-rc.baseCtx.Done():
-			return
-		default:
-			// All attempts failed
-			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
-
-			statusCode := http.StatusBadGateway // Default 502
-			// Check if all requests failed with same HTTP status
-			if commonStatus := coordinator.GetCommonFailureStatus(); commonStatus != 0 {
-				statusCode = commonStatus
-			}
-
-			h.sendError(w, statusCode, "All upstream models failed", "server_error", "")
-			return
-		}
-	} else {
-		// Old Sequential Retry Logic
-		// Outer loop: iterate through models (original + fallbacks)
-		for modelIndex, currentModel := range rc.modelList {
-			if modelIndex > 0 {
-				log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
-			}
-
-			// Check hard deadline - ensures server never serves a connection longer than MaxRequestTime
-			if time.Now().After(rc.hardDeadline) {
-				log.Printf("Request exceeded hard deadline (%v), aborting", rc.conf.MaxRequestTime)
-				h.publishEvent("hard_deadline_exceeded", map[string]interface{}{
-					"id":       rc.reqID,
-					"duration": time.Since(rc.startTime).String(),
-					"limit":    rc.conf.MaxRequestTime.String(),
-				})
-				// Cancel any running shadow request to prevent goroutine leak
-				cancelShadow(rc)
-				break
-			}
-
-			if rc.baseCtx.Err() != nil {
-				log.Printf("Client disconnected, failing request")
-				break
-			}
-
-			rc.requestBody["model"] = currentModel
-
-			success := h.attemptModel(w, rc, modelIndex, currentModel)
-			if success {
-				return
-			}
-
-			h.handleModelFailure(rc, modelIndex, currentModel)
-		}
+		return
 	}
 
-	// All models have failed
-	// Cancel any running shadow request to prevent goroutine leak
-	cancelShadow(rc)
+	// If winner is nil, it means either context cancelled or all models failed
+	select {
+	case <-rc.baseCtx.Done():
+		return
+	default:
+		// All attempts failed
+		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
 
-	if !rc.headersSent {
-		log.Printf("All models failed, sending error response to client")
-		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})
-		http.Error(w, "All models failed after retries", http.StatusBadGateway)
-	} else {
-		// Headers already sent (streaming) - send SSE error event
-		log.Printf("All models failed after headers sent, sending SSE error event")
-		h.publishEvent("all_models_failed", map[string]interface{}{"id": rc.reqID})
-		h.sendSSEError(w, "All models failed after retries")
+		statusCode := http.StatusBadGateway // Default 502
+		// Check if all requests failed with same HTTP status
+		if commonStatus := coordinator.GetCommonFailureStatus(); commonStatus != 0 {
+			statusCode = commonStatus
+		}
+
+		// Log failure
+		rc.reqLog.Status = "failed"
+		rc.reqLog.Error = "All upstream models failed"
+		rc.reqLog.EndTime = time.Now()
+		rc.reqLog.Duration = time.Since(rc.startTime).String()
+		h.store.Add(rc.reqLog)
+
+		h.publishEvent("request_failed", map[string]interface{}{
+			"id":    rc.reqID,
+			"error": rc.reqLog.Error,
+		})
+
+		h.sendError(w, statusCode, "All upstream models failed", "server_error", "")
+		return
 	}
 }
 
@@ -476,6 +439,20 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	}
 
 	flusher, _ := w.(http.Flusher)
+
+	// Send initial connected message for SSE
+	if rc.isStream {
+		if _, err := w.Write([]byte(": connected\n\n")); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	// Start heartbeat goroutine
+	heartbeatCancel := h.startSSEHeartbeat(w, rc.baseCtx)
+	defer heartbeatCancel()
 
 	// Stream existing chunks first
 	chunks, _ := buffer.GetChunksFrom(readIndex)

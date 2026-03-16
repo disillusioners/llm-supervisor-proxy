@@ -338,7 +338,7 @@ func TestHeartbeat_StreamErrorStopsHeartbeat(t *testing.T) {
 		flusher.Flush()
 		// Connection closes - triggers error
 	}, nil, func(c *config.Config) {
-		c.MaxUpstreamErrorRetries = 0 // No retries
+		c.RaceRetryEnabled = false // Disable race retry for this legacy test
 	})
 	defer upstream.Close()
 

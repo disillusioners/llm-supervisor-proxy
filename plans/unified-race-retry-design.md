@@ -1391,12 +1391,16 @@ Race Retry Logic
 
 ### Phase 4: Cleanup
 
-- [ ] Remove old retry counter logic from `handler_helpers.go`
-- [ ] Remove shadow retry code from `handler_shadow.go`
-- [ ] Remove attempt code from `handler_attempt.go`
-- [ ] Simplify error handling in `handler_errors.go`
-- [ ] Update `handler_response.go` to work with coordinator
-- [ ] Remove deprecated config variables
+- [x] Remove old retry counter logic from `handler_helpers.go` (already clean - no old retry logic found)
+- [x] Remove shadow retry code from `handler_shadow.go` (file doesn't exist - already removed)
+- [x] Remove attempt code from `handler_attempt.go` (file doesn't exist - already removed)
+- [x] Simplify error handling in `handler_errors.go` (file doesn't exist - already removed)
+- [x] Update `handler_response.go` to work with coordinator (file doesn't exist - functionality in handler.go)
+- [x] Remove deprecated config variables from tests (`MaxUpstreamErrorRetries`, `MaxIdleRetries`, `MaxGenerationRetries`) - replaced with `RaceRetryEnabled`, `RaceMaxParallel` in all test files
+- [x] Update database schema to remove deprecated columns (optional - for future migration) - keeping for backward compatibility
+- [x] Clean up comments referencing non-existent files (e.g., "handler_response.go" → "streamResult in handler.go")
+- [x] Fix `race_retry_test.go` to pass `models` parameter to `newRaceCoordinator`
+- [x] Fix `config_test.go` to set `RaceMaxParallel` in test configs (validation requires >=1)
 
 ### Phase 5: Testing
 

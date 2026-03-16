@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -26,8 +27,18 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	}
 	u.Path, _ = url.JoinPath(u.Path, "/v1/chat/completions")
 
-	// Create fresh request with context and body
-	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(rawBody))
+	
+// 1.5 Modify body to use current model ID
+var bodyMap map[string]interface{}
+finalBody := rawBody
+if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
+bodyMap["model"] = req.modelID
+if b, err := json.Marshal(bodyMap); err == nil {
+finalBody = b
+}
+}
+// Create fresh request with context and body
+upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(finalBody))
 	if err != nil {
 		return fmt.Errorf("failed to create upstream request: %w", err)
 	}
@@ -72,6 +83,8 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	// Create ticker outside the loop
 	idleTimer := time.NewTimer(time.Duration(cfg.IdleTimeout))
 	defer idleTimer.Stop()
+
+	sawDone := false
 
 	for {
 		// Set idle timeout for reading
@@ -124,6 +137,7 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 
 			// Check for [DONE]
 			if string(line) == "data: [DONE]" {
+				sawDone = true
 				break
 			}
 		}
@@ -136,5 +150,8 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 		}
 	}
 
+	if !sawDone {
+		return fmt.Errorf("upstream closed connection prematurely")
+	}
 	return nil
 }

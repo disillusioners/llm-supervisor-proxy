@@ -20,6 +20,7 @@ type raceCoordinator struct {
 	rawBody []byte
 
 	requests   []*upstreamRequest
+	models     []string
 	winner     *upstreamRequest
 	winnerIdx  int
 	failedCount int
@@ -31,13 +32,17 @@ type raceCoordinator struct {
 	onceDone   sync.Once
 }
 
-func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte) *raceCoordinator {
+func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string) *raceCoordinator {
+	if len(models) == 0 {
+		models = []string{cfg.ModelID}
+	}
 	return &raceCoordinator{
 		baseCtx: ctx,
 		cfg:     cfg,
 		req:     req,
 		rawBody: rawBody,
-		requests: make([]*upstreamRequest, 0, 3),
+		models:  models,
+		requests: make([]*upstreamRequest, 0, len(models)),
 		winnerIdx: -1,
 		done:     make(chan struct{}),
 		streamCh: make(chan struct{}),
@@ -58,14 +63,11 @@ func (c *raceCoordinator) spawn(mType upstreamModelType) {
 	defer c.mu.Unlock()
 
 	idx := len(c.requests)
-	if idx >= c.cfg.RaceMaxParallel {
+	if idx >= len(c.models) {
 		return
 	}
 
-	modelID := c.cfg.ModelID
-	// For second/fallback, we might want different models if configured
-	// For now, use the same model (retry logic)
-	
+	modelID := c.models[idx]
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
 	c.requests = append(c.requests, req)
 
@@ -118,31 +120,40 @@ func (c *raceCoordinator) manage() {
 				return
 			}
 			// Spawning logic (on failure or idle)
-			if c.winner == nil && len(c.requests) < c.cfg.RaceMaxParallel {
+			if c.winner == nil && len(c.requests) < len(c.models) {
+				running := 0
+				for _, r := range c.requests {
+					if !r.IsDone() {
+						running++
+					}
+				}
+
 				shouldSpawn := false
 				nextType := modelTypeSecond
-				if len(c.requests) == 2 {
+				if len(c.requests) >= 2 {
 					nextType = modelTypeFallback
 				}
 
-				// Case 1: Latest request failed
-				latestReq := c.requests[len(c.requests)-1]
-				if latestReq.IsDone() && latestReq.GetError() != nil {
-					log.Printf("[RACE] Latest request %d failed, spawning next attempt", latestReq.id)
-					shouldSpawn = true
-				}
+				if running < c.cfg.RaceMaxParallel {
+					// Case 1: Latest request failed
+					latestReq := c.requests[len(c.requests)-1]
+					if latestReq.IsDone() && latestReq.GetError() != nil {
+						log.Printf("[RACE] Latest request %d failed, spawning next attempt", latestReq.id)
+						shouldSpawn = true
+					}
 
-				// Case 2: Main request is idle (Parallel race retry)
-				if !shouldSpawn && c.cfg.RaceParallelOnIdle && len(c.requests) == 1 {
-					mainReq := c.requests[0]
-					if mainReq.GetStatus() == statusRunning {
-						if !idleTimerStarted {
-							idleDeadline = time.Now().Add(time.Duration(c.cfg.IdleTimeout))
-							idleTimerStarted = true
-						} else if time.Now().After(idleDeadline) {
-							log.Printf("[RACE] Main request idle, spawning parallel request")
-							shouldSpawn = true
-							idleTimerStarted = false
+					// Case 2: Main request is idle (Parallel race retry)
+					if !shouldSpawn && c.cfg.RaceParallelOnIdle && len(c.requests) == 1 {
+						mainReq := c.requests[0]
+						if mainReq.GetStatus() == statusRunning {
+							if !idleTimerStarted {
+								idleDeadline = time.Now().Add(time.Duration(c.cfg.IdleTimeout))
+								idleTimerStarted = true
+							} else if time.Now().After(idleDeadline) {
+								log.Printf("[RACE] Main request idle, spawning parallel request")
+								shouldSpawn = true
+								idleTimerStarted = false
+							}
 						}
 					}
 				}
@@ -155,7 +166,7 @@ func (c *raceCoordinator) manage() {
 			}
 
 			// If no winner and reached max parallel attempts, check if all failed
-			if c.winner == nil && len(c.requests) >= c.cfg.RaceMaxParallel {
+			if c.winner == nil && len(c.requests) >= len(c.models) {
 				allFailed := true
 				for _, r := range c.requests {
 					if !r.IsDone() || r.GetError() == nil {

@@ -225,33 +225,32 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
 			name: "valid config with https",
 			cfg: Config{
-				UpstreamURL:             "https://api.example.com",
-				Port:                    443,
-				IdleTimeout:             Duration(30 * time.Second),
-				MaxGenerationTime:       Duration(300 * time.Second),
-				MaxUpstreamErrorRetries: 3,
+				UpstreamURL:       "https://api.example.com",
+				Port:              443,
+				IdleTimeout:       Duration(30 * time.Second),
+				MaxGenerationTime: Duration(300 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
 			name: "missing upstream_url",
 			cfg: Config{
-				UpstreamURL:             "",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "upstream_url is required",
@@ -259,11 +258,10 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "invalid upstream_url - no http prefix",
 			cfg: Config{
-				UpstreamURL:             "localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "upstream_url must use http or https scheme",
@@ -271,11 +269,10 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "invalid upstream_url - bad protocol",
 			cfg: Config{
-				UpstreamURL:             "ftp://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "ftp://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "upstream_url must use http or https scheme",
@@ -283,11 +280,10 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port too low",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    0,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              0,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "port must be between 1 and 65535",
@@ -295,11 +291,10 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port too high",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    65536,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              65536,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "port must be between 1 and 65535",
@@ -307,33 +302,32 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port at minimum",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    1,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              1,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
 			name: "port at maximum",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    65535,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              65535,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
 			name: "idle_timeout too low",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(500 * time.Millisecond),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(500 * time.Millisecond),
+				MaxGenerationTime: Duration(180 * time.Second),
 			},
 			wantError: true,
 			errorMsg:  "idle_timeout must be at least 1s",
@@ -341,22 +335,21 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle_timeout at minimum",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(1 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(1 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
 			name: "max_generation_time too low",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(500 * time.Millisecond),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(500 * time.Millisecond),
 			},
 			wantError: true,
 			errorMsg:  "max_generation_time must be at least 1s",
@@ -364,36 +357,38 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "max_generation_time at minimum",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(1 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(1 * time.Second),
+				RaceMaxParallel:   3,
 			},
 			wantError: false,
 		},
 		{
-			name: "negative max_upstream_error_retries",
+			name: "race_max_parallel too low",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: -1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   0,
 			},
 			wantError: true,
-			errorMsg:  "max_upstream_error_retries cannot be negative",
+			errorMsg:  "race_max_parallel must be at least 1",
 		},
 		{
-			name: "zero max_upstream_error_retries",
+			name: "race_max_buffer_bytes negative",
 			cfg: Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    8089,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 0,
+				UpstreamURL:        "http://localhost:4001",
+				Port:               8089,
+				IdleTimeout:        Duration(10 * time.Second),
+				MaxGenerationTime:  Duration(180 * time.Second),
+				RaceMaxParallel:    3,
+				RaceMaxBufferBytes: -1,
 			},
-			wantError: false,
+			wantError: true,
+			errorMsg:  "race_max_buffer_bytes cannot be negative",
 		},
 	}
 
@@ -423,7 +418,8 @@ func TestDefaults(t *testing.T) {
 	wantPort := 4321
 	wantIdleTimeout := Duration(60 * time.Second)
 	wantMaxGenerationTime := Duration(300 * time.Second)
-	wantMaxUpstreamErrorRetries := 1
+	wantRaceRetryEnabled := false
+	wantRaceMaxParallel := 3
 
 	if Defaults.Version != wantVersion {
 		t.Errorf("Defaults.Version = %s, want %s", Defaults.Version, wantVersion)
@@ -440,8 +436,11 @@ func TestDefaults(t *testing.T) {
 	if Defaults.MaxGenerationTime != wantMaxGenerationTime {
 		t.Errorf("Defaults.MaxGenerationTime = %v, want %v", Defaults.MaxGenerationTime, wantMaxGenerationTime)
 	}
-	if Defaults.MaxUpstreamErrorRetries != wantMaxUpstreamErrorRetries {
-		t.Errorf("Defaults.MaxUpstreamErrorRetries = %d, want %d", Defaults.MaxUpstreamErrorRetries, wantMaxUpstreamErrorRetries)
+	if Defaults.RaceRetryEnabled != wantRaceRetryEnabled {
+		t.Errorf("Defaults.RaceRetryEnabled = %v, want %v", Defaults.RaceRetryEnabled, wantRaceRetryEnabled)
+	}
+	if Defaults.RaceMaxParallel != wantRaceMaxParallel {
+		t.Errorf("Defaults.RaceMaxParallel = %d, want %d", Defaults.RaceMaxParallel, wantRaceMaxParallel)
 	}
 }
 
@@ -487,12 +486,12 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 
 	// Create a config file with custom values
 	customCfg := Config{
-		Version:                 ConfigVersion,
-		UpstreamURL:             "http://custom:8080",
-		Port:                    9999,
-		IdleTimeout:             Duration(20 * time.Second),
-		MaxGenerationTime:       Duration(300 * time.Second),
-		MaxUpstreamErrorRetries: 5,
+		Version:           ConfigVersion,
+		UpstreamURL:       "http://custom:8080",
+		Port:              9999,
+		IdleTimeout:       Duration(20 * time.Second),
+		MaxGenerationTime: Duration(300 * time.Second),
+		RaceMaxParallel:   5,
 	}
 	data, err := json.Marshal(customCfg)
 	if err != nil {
@@ -523,8 +522,8 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 	if cfg.MaxGenerationTime != customCfg.MaxGenerationTime {
 		t.Errorf("MaxGenerationTime = %v, want %v", cfg.MaxGenerationTime, customCfg.MaxGenerationTime)
 	}
-	if cfg.MaxUpstreamErrorRetries != customCfg.MaxUpstreamErrorRetries {
-		t.Errorf("MaxUpstreamErrorRetries = %d, want %d", cfg.MaxUpstreamErrorRetries, customCfg.MaxUpstreamErrorRetries)
+	if cfg.RaceMaxParallel != customCfg.RaceMaxParallel {
+		t.Errorf("RaceMaxParallel = %d, want %d", cfg.RaceMaxParallel, customCfg.RaceMaxParallel)
 	}
 }
 
@@ -570,13 +569,15 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	os.Setenv("PORT", "9000")
 	os.Setenv("IDLE_TIMEOUT", "30s")
 	os.Setenv("MAX_GENERATION_TIME", "600s")
-	os.Setenv("MAX_UPSTREAM_ERROR_RETRIES", "10")
+	os.Setenv("RACE_RETRY_ENABLED", "true")
+	os.Setenv("RACE_MAX_PARALLEL", "5")
 	defer func() {
 		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("IDLE_TIMEOUT")
 		os.Unsetenv("MAX_GENERATION_TIME")
-		os.Unsetenv("MAX_UPSTREAM_ERROR_RETRIES")
+		os.Unsetenv("RACE_RETRY_ENABLED")
+		os.Unsetenv("RACE_MAX_PARALLEL")
 	}()
 
 	m := &Manager{
@@ -600,8 +601,11 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	if cfg.MaxGenerationTime != Duration(600*time.Second) {
 		t.Errorf("MaxGenerationTime = %v, want 600s", cfg.MaxGenerationTime)
 	}
-	if cfg.MaxUpstreamErrorRetries != 10 {
-		t.Errorf("MaxUpstreamErrorRetries = %d, want 10", cfg.MaxUpstreamErrorRetries)
+	if cfg.RaceRetryEnabled != true {
+		t.Errorf("RaceRetryEnabled = %v, want true", cfg.RaceRetryEnabled)
+	}
+	if cfg.RaceMaxParallel != 5 {
+		t.Errorf("RaceMaxParallel = %d, want 5", cfg.RaceMaxParallel)
 	}
 }
 
@@ -614,13 +618,13 @@ func TestManager_Load_EmptyEnvVarsDontOverride(t *testing.T) {
 	os.Setenv("PORT", "")
 	os.Setenv("IDLE_TIMEOUT", "")
 	os.Setenv("MAX_GENERATION_TIME", "")
-	os.Setenv("MAX_UPSTREAM_ERROR_RETRIES", "")
+	os.Setenv("RACE_RETRY_ENABLED", "")
 	defer func() {
 		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("IDLE_TIMEOUT")
 		os.Unsetenv("MAX_GENERATION_TIME")
-		os.Unsetenv("MAX_UPSTREAM_ERROR_RETRIES")
+		os.Unsetenv("RACE_RETRY_ENABLED")
 	}()
 
 	// Create a config file with values
@@ -664,11 +668,11 @@ func TestManager_Save(t *testing.T) {
 	}
 
 	newCfg := Config{
-		UpstreamURL:             "http://saved:9000",
-		Port:                    9001,
-		IdleTimeout:             Duration(25 * time.Second),
-		MaxGenerationTime:       Duration(240 * time.Second),
-		MaxUpstreamErrorRetries: 3,
+		UpstreamURL:       "http://saved:9000",
+		Port:              9001,
+		IdleTimeout:       Duration(25 * time.Second),
+		MaxGenerationTime: Duration(240 * time.Second),
+		RaceMaxParallel:   3,
 	}
 
 	result, err := m.Save(newCfg)
@@ -752,11 +756,11 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 
 	// Save with different URL
 	newCfg := Config{
-		UpstreamURL:             "http://saved:9000",
-		Port:                    9001,
-		IdleTimeout:             Duration(25 * time.Second),
-		MaxGenerationTime:       Duration(240 * time.Second),
-		MaxUpstreamErrorRetries: 3,
+		UpstreamURL:       "http://saved:9000",
+		Port:              9001,
+		IdleTimeout:       Duration(25 * time.Second),
+		MaxGenerationTime: Duration(240 * time.Second),
+		RaceMaxParallel:   3,
 	}
 
 	_, err := m.Save(newCfg)
@@ -820,11 +824,11 @@ func TestManager_ReadOnly(t *testing.T) {
 
 	// Attempt to save should fail
 	_, err := m.Save(Config{
-		UpstreamURL:             "http://localhost:4001",
-		Port:                    8089,
-		IdleTimeout:             Duration(10 * time.Second),
-		MaxGenerationTime:       Duration(180 * time.Second),
-		MaxUpstreamErrorRetries: 1,
+		UpstreamURL:       "http://localhost:4001",
+		Port:              8089,
+		IdleTimeout:       Duration(10 * time.Second),
+		MaxGenerationTime: Duration(180 * time.Second),
+		RaceMaxParallel:   3,
 	})
 
 	if err == nil {
@@ -888,7 +892,8 @@ func TestManager_ConcurrentGet(t *testing.T) {
 				_ = m.GetPort()
 				_ = m.GetIdleTimeout()
 				_ = m.GetMaxGenerationTime()
-				_ = m.GetMaxUpstreamErrorRetries()
+				_ = m.GetRaceRetryEnabled()
+				_ = m.GetRaceMaxParallel()
 			}
 		}()
 	}
@@ -934,13 +939,13 @@ func TestManager_ConcurrentGetWhileSave(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				cfg := Config{
-					UpstreamURL:             "http://localhost:4001",
-					Port:                    8089 + j,
-					IdleTimeout:             Duration(10 * time.Second),
-					MaxGenerationTime:       Duration(180 * time.Second),
-					MaxUpstreamErrorRetries: 1,
-				}
+			cfg := Config{
+				UpstreamURL:       "http://localhost:4001",
+				Port:              8089 + j,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
+			}
 				_, _ = m.Save(cfg)
 			}
 		}()
@@ -980,11 +985,10 @@ func TestManager_ConcurrentSave(t *testing.T) {
 		go func(port int) {
 			defer wg.Done()
 			cfg := Config{
-				UpstreamURL:             "http://localhost:4001",
-				Port:                    port,
-				IdleTimeout:             Duration(10 * time.Second),
-				MaxGenerationTime:       Duration(180 * time.Second),
-				MaxUpstreamErrorRetries: 1,
+				UpstreamURL:       "http://localhost:4001",
+				Port:              port,
+				IdleTimeout:       Duration(10 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
 			}
 			_, err := m.Save(cfg)
 			if err != nil {
@@ -1013,12 +1017,13 @@ func TestManager_ConcurrentSave(t *testing.T) {
 
 func TestConfig_JSONRoundtrip(t *testing.T) {
 	original := Config{
-		Version:                 ConfigVersion,
-		UpstreamURL:             "http://test:8080",
-		Port:                    9999,
-		IdleTimeout:             Duration(45 * time.Second),
-		MaxGenerationTime:       Duration(120 * time.Second),
-		MaxUpstreamErrorRetries: 7,
+		Version:           ConfigVersion,
+		UpstreamURL:       "http://test:8080",
+		Port:              9999,
+		IdleTimeout:       Duration(45 * time.Second),
+		MaxGenerationTime: Duration(120 * time.Second),
+		RaceRetryEnabled:  true,
+		RaceMaxParallel:   7,
 	}
 
 	data, err := json.Marshal(original)
@@ -1046,7 +1051,10 @@ func TestConfig_JSONRoundtrip(t *testing.T) {
 	if loaded.MaxGenerationTime != original.MaxGenerationTime {
 		t.Errorf("MaxGenerationTime = %v, want %v", loaded.MaxGenerationTime, original.MaxGenerationTime)
 	}
-	if loaded.MaxUpstreamErrorRetries != original.MaxUpstreamErrorRetries {
-		t.Errorf("MaxUpstreamErrorRetries = %d, want %d", loaded.MaxUpstreamErrorRetries, original.MaxUpstreamErrorRetries)
+	if loaded.RaceRetryEnabled != original.RaceRetryEnabled {
+		t.Errorf("RaceRetryEnabled = %v, want %v", loaded.RaceRetryEnabled, original.RaceRetryEnabled)
+	}
+	if loaded.RaceMaxParallel != original.RaceMaxParallel {
+		t.Errorf("RaceMaxParallel = %d, want %d", loaded.RaceMaxParallel, original.RaceMaxParallel)
 	}
 }

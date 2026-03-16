@@ -70,13 +70,9 @@ type Config struct {
 	IdleTimeout             Duration            `json:"idle_timeout"`
 	MaxGenerationTime       Duration            `json:"max_generation_time"`
 	MaxRequestTime          Duration            `json:"max_request_time"` // Absolute hard timeout for entire request (including all retries)
-	MaxUpstreamErrorRetries int                 `json:"max_upstream_error_retries"`
-	MaxIdleRetries          int                 `json:"max_idle_retries"`
-	MaxGenerationRetries    int                 `json:"max_generation_retries"`
 	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
 	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
-	ShadowRetryEnabled      bool                `json:"shadow_retry_enabled"`   // Enable parallel shadow requests on first idle timeout
 	SSEHeartbeatEnabled     bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	ToolRepair              toolrepair.Config   `json:"tool_repair"`
@@ -99,13 +95,9 @@ type ManagerInterface interface {
 	GetIdleTimeout() time.Duration
 	GetMaxGenerationTime() time.Duration
 	GetMaxRequestTime() time.Duration
-	GetMaxUpstreamErrorRetries() int
-	GetMaxIdleRetries() int
-	GetMaxGenerationRetries() int
 	GetMaxStreamBufferSize() int
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
-	GetShadowRetryEnabled() bool
 	GetSSEHeartbeatEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
 	GetUltimateModel() UltimateModelConfig
@@ -155,13 +147,9 @@ var Defaults = Config{
 	IdleTimeout:             Duration(60 * time.Second),
 	MaxGenerationTime:       Duration(300 * time.Second),
 	MaxRequestTime:          Duration(600 * time.Second), // 10 minutes absolute hard limit
-	MaxUpstreamErrorRetries: 1,
-	MaxIdleRetries:          2,
-	MaxGenerationRetries:    1,
 	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
 	BufferStorageDir:        "",               // Empty means use default data directory
 	BufferMaxStorageMB:      100,              // 100MB default
-	ShadowRetryEnabled:      true,             // Enable shadow retry by default
 	SSEHeartbeatEnabled:     false,            // Disable heartbeat by default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
@@ -233,15 +221,6 @@ func (c *Config) Validate() error {
 		if c.MaxRequestTime < c.MaxGenerationTime {
 			return errors.New("max_request_time must be >= max_generation_time")
 		}
-	}
-	if c.MaxUpstreamErrorRetries < 0 {
-		return errors.New("max_upstream_error_retries cannot be negative")
-	}
-	if c.MaxIdleRetries < 0 {
-		return errors.New("max_idle_retries cannot be negative")
-	}
-	if c.MaxGenerationRetries < 0 {
-		return errors.New("max_generation_retries cannot be negative")
 	}
 	if c.MaxStreamBufferSize < 0 {
 		return errors.New("max_stream_buffer_size cannot be negative")
@@ -357,29 +336,11 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 			cfg.MaxRequestTime = Duration(d)
 		}
 	}
-	if v := os.Getenv("MAX_UPSTREAM_ERROR_RETRIES"); v != "" {
-		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.MaxUpstreamErrorRetries = r
-		}
-	}
-	if v := os.Getenv("MAX_IDLE_RETRIES"); v != "" {
-		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.MaxIdleRetries = r
-		}
-	}
-	if v := os.Getenv("MAX_GENERATION_RETRIES"); v != "" {
-		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.MaxGenerationRetries = r
-		}
-	}
 	if v := os.Getenv("LOOP_DETECTION_ENABLED"); v != "" {
 		cfg.LoopDetection.Enabled = v == "true" || v == "1"
 	}
 	if v := os.Getenv("LOOP_DETECTION_SHADOW_MODE"); v != "" {
 		cfg.LoopDetection.ShadowMode = v == "true" || v == "1"
-	}
-	if v := os.Getenv("SHADOW_RETRY_ENABLED"); v != "" {
-		cfg.ShadowRetryEnabled = v == "true" || v == "1"
 	}
 	if v := os.Getenv("SSE_HEARTBEAT_ENABLED"); v != "" {
 		cfg.SSEHeartbeatEnabled = v == "true" || v == "1"
@@ -555,27 +516,6 @@ func (m *Manager) GetMaxRequestTime() time.Duration {
 	return m.config.MaxRequestTime.Duration()
 }
 
-// GetMaxUpstreamErrorRetries returns the max upstream error retries
-func (m *Manager) GetMaxUpstreamErrorRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.MaxUpstreamErrorRetries
-}
-
-// GetMaxIdleRetries returns the max retries for idle timeouts
-func (m *Manager) GetMaxIdleRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.MaxIdleRetries
-}
-
-// GetMaxGenerationRetries returns the max retries for generation timeouts
-func (m *Manager) GetMaxGenerationRetries() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.MaxGenerationRetries
-}
-
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes
 func (m *Manager) GetMaxStreamBufferSize() int {
 	m.mu.RLock()
@@ -602,13 +542,6 @@ func (m *Manager) GetBufferMaxStorageMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.BufferMaxStorageMB
-}
-
-// GetShadowRetryEnabled returns whether shadow retry is enabled
-func (m *Manager) GetShadowRetryEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.ShadowRetryEnabled
 }
 
 // GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses

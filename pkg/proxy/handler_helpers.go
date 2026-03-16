@@ -4,68 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/supervisor"
 )
 
-// shadowResult represents the result from a shadow request
-type shadowResult struct {
-	buffer    *bytes.Buffer
-	completed bool
-	err       error
-}
 
-// shadowRequestState tracks the state of a shadow request
-type shadowRequestState struct {
-	mu         sync.RWMutex
-	done       chan shadowResult // Closed when shadow completes
-	closeOnce  sync.Once         // Ensures done channel is closed exactly once
-	cancelOnce sync.Once         // Ensures cancel is called exactly once
-	cancelFunc context.CancelFunc
-	started    bool
-	completed  bool
-	model      string
-	startTime  time.Time
-}
-
-// Close safely closes the done channel exactly once.
-// It is safe to call Close multiple times from any goroutine.
-// Handles nil receiver to prevent panics in deferred calls.
-func (s *shadowRequestState) Close() {
-	if s == nil {
-		return
-	}
-	s.closeOnce.Do(func() {
-		if s.done != nil {
-			close(s.done)
-		}
-	})
-}
-
-// Cancel safely cancels the shadow context exactly once.
-// It is safe to call Cancel multiple times from any goroutine.
-// This prevents race conditions between the main goroutine and shadow goroutine
-// both trying to cancel the context.
-// Handles nil receiver to prevent panics in deferred calls.
-func (s *shadowRequestState) Cancel() {
-	if s == nil {
-		return
-	}
-	s.cancelOnce.Do(func() {
-		if s.cancelFunc != nil {
-			s.cancelFunc()
-		}
-	})
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // requestContext holds all mutable state for a single request lifecycle.
@@ -132,49 +81,9 @@ type requestContext struct {
 	// When true, this request will not retry upstream on errors
 	// This is set after ReleaseStreamChunkDeadline is reached and buffer is flushed
 	streamingNonRetryable bool
-
-	// Shadow retry state
-	shadow *shadowRequestState
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// attemptResult represents the outcome of a single upstream attempt.
-// ─────────────────────────────────────────────────────────────────────────────
 
-type attemptResult int
-
-const (
-	attemptSuccess           attemptResult = iota // Request completed successfully
-	attemptReturnImmediately                      // Handler should return (error written or headers already sent)
-	attemptContinueRetry                          // Retry current model
-	attemptBreakToFallback                        // Move to next model (fallback)
-)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// retryCounters tracks per-model retry state.
-// ─────────────────────────────────────────────────────────────────────────────
-
-type retryCounters struct {
-	errorRetries int
-	idleRetries  int
-	genRetries   int
-	lastErr      error
-}
-
-func (rc *retryCounters) totalAttempts() int {
-	return rc.errorRetries + rc.idleRetries + rc.genRetries
-}
-
-// cancelShadow safely cancels and cleans up any running shadow request.
-// This prevents goroutine and connection leaks when requests are aborted early
-// (e.g., on hard deadline, client disconnect, or all models failed).
-func cancelShadow(rc *requestContext) {
-	if rc.shadow != nil {
-		rc.shadow.Cancel()
-		rc.shadow.Close()
-		rc.shadow = nil
-	}
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helper functions (no Handler receiver)
@@ -476,7 +385,7 @@ func isValidStreamChunk(data []byte) bool {
 //
 // DEPRECATED: This function is no longer needed because:
 // 1. The proxy buffers the entire stream until [DONE] (or release deadline)
-// 2. On failure/retry, the stream ID is explicitly reset (see handler_response.go)
+// 2. On failure/retry, the stream ID is explicitly reset (see streamResult in handler.go)
 // 3. True "resume mid-stream" is not possible - either stream completes or restarts
 //
 // The function is kept for now to avoid breaking changes, but its effect is minimal.
@@ -533,25 +442,7 @@ func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 	return normalized
 }
 
-// determineFailureReason determines the reason for failure based on the last error and attempt count.
-func determineFailureReason(err error, errorRetries, maxUpstreamErrorRetries, idleRetries, maxIdleRetries, genRetries, maxGenRetries int) string {
-	if err != nil && errors.Is(err, context.DeadlineExceeded) {
-		return "deadline_exceeded"
-	}
-	if err != nil && errors.Is(err, supervisor.ErrIdleTimeout) {
-		return "idle_timeout"
-	}
-	if idleRetries > maxIdleRetries {
-		return "max_idle_retries"
-	}
-	if genRetries > maxGenRetries {
-		return "max_generation_retries"
-	}
-	if errorRetries > maxUpstreamErrorRetries {
-		return "max_upstream_error_retries"
-	}
-	return "upstream_error"
-}
+
 
 // extractToolCallActions extracts tool call actions from an SSE chunk's raw JSON.
 // Returns nil if no tool_calls are present in the chunk.

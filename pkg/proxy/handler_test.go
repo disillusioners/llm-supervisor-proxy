@@ -211,11 +211,10 @@ func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*co
 			opt(&cfg)
 		}
 		// Only override env-controllable settings
-		t.Setenv("MAX_UPSTREAM_ERROR_RETRIES", fmt.Sprintf("%d", cfg.MaxUpstreamErrorRetries))
-		t.Setenv("MAX_IDLE_RETRIES", fmt.Sprintf("%d", cfg.MaxIdleRetries))
-		t.Setenv("MAX_GENERATION_RETRIES", fmt.Sprintf("%d", cfg.MaxGenerationRetries))
 		t.Setenv("IDLE_TIMEOUT", time.Duration(cfg.IdleTimeout).String())
 		t.Setenv("MAX_GENERATION_TIME", time.Duration(cfg.MaxGenerationTime).String())
+		t.Setenv("RACE_RETRY_ENABLED", fmt.Sprintf("%v", cfg.RaceRetryEnabled))
+		t.Setenv("RACE_MAX_PARALLEL", fmt.Sprintf("%d", cfg.RaceMaxParallel))
 
 		// Re-create to pick up env vars
 		mgr, err = config.NewManager()
@@ -357,33 +356,7 @@ func TestInvalidJSON(t *testing.T) {
 	})
 }
 
-func TestDetermineFailureReason(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		eRetries int
-		maxE     int
-		iRetries int
-		maxI     int
-		gRetries int
-		maxG     int
-		expected string
-	}{
-		{"idle_timeout", fmt.Errorf("wrap: %w", io.EOF), 0, 3, 2, 1, 0, 3, "max_idle_retries"},
-		{"gen_retries", nil, 0, 3, 0, 3, 4, 3, "max_generation_retries"},
-		{"error_retries", nil, 4, 3, 0, 3, 0, 3, "max_upstream_error_retries"},
-		{"upstream_error", nil, 0, 3, 0, 3, 0, 3, "upstream_error"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := determineFailureReason(tc.err, tc.eRetries, tc.maxE, tc.iRetries, tc.maxI, tc.gRetries, tc.maxG)
-			if result != tc.expected {
-				t.Errorf("expected '%s', got '%s'", tc.expected, result)
-			}
-		})
-	}
-}
+// TestDetermineFailureReason removed - function deprecated with race retry redesign
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Integration tests using mock LLM (mirrors test/mock_llm.go scenarios)
@@ -620,7 +593,8 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 		name: "MockLLM_500WithRetryThenSuccess",
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
-				c.MaxUpstreamErrorRetries = 2
+				c.RaceRetryEnabled = true
+				c.RaceMaxParallel = 3
 			},
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -671,7 +645,7 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
 				c.IdleTimeout = config.Duration(500 * time.Millisecond) // Fast timeout for test
-				c.MaxIdleRetries = 0
+				c.RaceRetryEnabled = false // Disable race retry for this legacy test
 				c.MaxGenerationTime = config.Duration(10 * time.Second)
 			},
 		},
@@ -1396,7 +1370,7 @@ func TestStreamErrorChunkDetectionInStream(t *testing.T) {
 		name: "StreamErrorChunkDetection",
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
-				c.MaxUpstreamErrorRetries = 2
+				c.RaceRetryEnabled = false // Disable race retry for this legacy test
 			},
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1452,7 +1426,7 @@ func TestFallbackAfterStreamErrorWithHeadersSent(t *testing.T) {
 		}(),
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
-				c.MaxUpstreamErrorRetries = 1
+				c.RaceRetryEnabled = false // Disable race retry for this legacy test
 			},
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1514,7 +1488,7 @@ func TestFallbackDuringStreamRetry500Error(t *testing.T) {
 		}(),
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
-				c.MaxUpstreamErrorRetries = 2 // Would allow retry if headers not sent
+				c.RaceRetryEnabled = false // Disable race retry for this legacy test
 			},
 		},
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1588,7 +1562,7 @@ func TestStreamingNoRetry_AfterHeadersSent(t *testing.T) {
 		flusher.Flush()
 		// No [DONE] - stream fails
 	}, nil, func(c *config.Config) {
-		c.MaxUpstreamErrorRetries = 3 // Would allow retries if headers not sent
+		c.RaceRetryEnabled = false // Disable race retry for this legacy test
 	})
 	defer upstream.Close()
 

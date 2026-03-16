@@ -73,8 +73,9 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 	ctx := context.Background()
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
+	models := []string{"test-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -134,8 +135,9 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 	
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
+	models := []string{"test-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()

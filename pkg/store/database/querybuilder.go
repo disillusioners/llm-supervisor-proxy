@@ -69,9 +69,9 @@ func IntToBoolean(v int64) bool {
 func (q *QueryBuilder) UpsertConfig() string {
 	if q.dialect == PostgreSQL {
 		return `INSERT INTO configs (id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, max_generation_time_ms,
-			max_upstream_error_retries, max_idle_retries, max_generation_retries, max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
+			max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
 			race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (id) DO UPDATE SET
 				version = EXCLUDED.version,
 				upstream_url = EXCLUDED.upstream_url,
@@ -79,9 +79,6 @@ func (q *QueryBuilder) UpsertConfig() string {
 				port = EXCLUDED.port,
 				idle_timeout_ms = EXCLUDED.idle_timeout_ms,
 				max_generation_time_ms = EXCLUDED.max_generation_time_ms,
-				max_upstream_error_retries = EXCLUDED.max_upstream_error_retries,
-				max_idle_retries = EXCLUDED.max_idle_retries,
-				max_generation_retries = EXCLUDED.max_generation_retries,
 				max_stream_buffer_size = EXCLUDED.max_stream_buffer_size,
 				loop_detection_json = EXCLUDED.loop_detection_json,
 				tool_repair_json = EXCLUDED.tool_repair_json,
@@ -93,9 +90,9 @@ func (q *QueryBuilder) UpsertConfig() string {
 				race_max_buffer_bytes = EXCLUDED.race_max_buffer_bytes`
 	}
 	return `INSERT OR REPLACE INTO configs (id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, max_generation_time_ms,
-		max_upstream_error_retries, max_idle_retries, max_generation_retries, max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
+		max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
 		race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateConfig returns the appropriate UPDATE query for config
@@ -108,18 +105,15 @@ func (q *QueryBuilder) UpdateConfig() string {
 			port = $4,
 			idle_timeout_ms = $5,
 			max_generation_time_ms = $6,
-			max_upstream_error_retries = $7,
-			max_idle_retries = $8,
-			max_generation_retries = $9,
-			max_stream_buffer_size = $10,
-			loop_detection_json = $11,
-			tool_repair_json = $12,
-			ultimate_model_json = $13,
-			updated_at = $14,
-			race_retry_enabled = $15,
-			race_parallel_on_idle = $16,
-			race_max_parallel = $17,
-			race_max_buffer_bytes = $18
+			max_stream_buffer_size = $7,
+			loop_detection_json = $8,
+			tool_repair_json = $9,
+			ultimate_model_json = $10,
+			updated_at = $11,
+			race_retry_enabled = $12,
+			race_parallel_on_idle = $13,
+			race_max_parallel = $14,
+			race_max_buffer_bytes = $15
 		WHERE id = 1`
 	}
 	return `UPDATE configs SET
@@ -129,9 +123,6 @@ func (q *QueryBuilder) UpdateConfig() string {
 			port = ?,
 			idle_timeout_ms = ?,
 			max_generation_time_ms = ?,
-			max_upstream_error_retries = ?,
-			max_idle_retries = ?,
-			max_generation_retries = ?,
 			max_stream_buffer_size = ?,
 			loop_detection_json = ?,
 			tool_repair_json = ?,
@@ -256,7 +247,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 // GetConfig returns the appropriate SELECT query for config
 func (q *QueryBuilder) GetConfig() string {
 	return `SELECT version, upstream_url, upstream_credential_id, port, idle_timeout_ms, max_generation_time_ms,
-		max_upstream_error_retries, max_idle_retries, max_generation_retries, max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
+		max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
 		race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes
 		FROM configs WHERE id = 1`
 }
