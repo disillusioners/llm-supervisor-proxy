@@ -168,6 +168,64 @@ No strict wait is needed since goroutines don't hold shared resources that requi
 
 ---
 
+## Future Optimizations (Based on Memory Review)
+
+> **NOTE**: These are potential optimizations to consider if memory profiling indicates issues under load. Not required for initial implementation.
+
+### 1. JSON Handling Optimization (Trap #10)
+
+**Potential Issue:** `requestBody map[string]interface{}` creates heavy heap allocations and interface boxes upon `json.Unmarshal`, increasing GC pressure for large payloads.
+
+**Future Optimization:** If profiling shows high GC pressure from JSON handling:
+- Use `json.RawMessage` for fields that don't need modification
+- Use strict struct definition instead of `map[string]interface{}`
+- Only decode fields that need modification (like `"model"`)
+
+### 2. bufio.Scanner Buffer Retention (Trap #17 & #3)
+
+**Potential Issue:** `bufio.Scanner` buffers grow but never shrink. If a single 3MB chunk (e.g., base64 image) is seen, that 3MB internal buffer stays tied to the goroutine for the entire streaming duration. For 3 parallel requests, this could be 9-12MB of scanner buffering per connection.
+
+**Future Optimization:** If memory profiles show persistent 4MB buffers lingering:
+- Switch from `bufio.Scanner` to `bufio.Reader.ReadBytes('\n')` or `bufio.Reader.ReadLine()`
+- This naturally orphans large temporary buffers immediately so GC can clean them up
+
+```go
+// Alternative implementation if needed
+reader := bufio.NewReader(resp.Body)
+for {
+    line, err := reader.ReadBytes('\n')
+    if err != nil {
+        break
+    }
+    // line is a new allocation each time - GC can reclaim immediately
+    if !req.buffer.Add(line[:len(line)-1]) { // strip newline since Add adds it
+        // overflow handling
+    }
+}
+```
+
+### 3. Chunk Buffer Pruning (Trap #18)
+
+**Potential Issue:** `streamBuffer.chunks` holds up to 5MB per request. Even after a winner is chosen and streaming begins, the buffer keeps growing until completion or limit.
+
+**Future Optimization:** Implement `.Prune(readIndex int)` on `streamBuffer`:
+- Since streaming only reads forward, already-sent chunks can be set to `nil`
+- Allows GC to harvest already-sent chunks before response completes
+
+```go
+// Prune releases already-read chunks to GC
+func (sb *streamBuffer) Prune(readIndex int) {
+    sb.mu.Lock()
+    defer sb.mu.Unlock()
+    
+    for i := 0; i < readIndex && i < len(sb.chunks); i++ {
+        sb.chunks[i] = nil // Allow GC to reclaim
+    }
+}
+```
+
+---
+
 ## Architecture Diagram
 
 ```mermaid
