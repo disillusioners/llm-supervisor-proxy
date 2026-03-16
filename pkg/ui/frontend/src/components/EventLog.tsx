@@ -88,6 +88,13 @@ const getEventMessage = (event: Event): string => {
       const dur = d?.duration ? ` after ${d.duration}` : '';
       return `Shadow retry lost: ${d?.main_model || 'main'} completed before ${d?.model || '?'}${dur}`;
     }
+    case 'ultimate_model_triggered': {
+      const d = event.data;
+      const hash = d?.hash ? ` (${d.hash.substring(0, 8)}...)` : '';
+      return `Ultimate model triggered: ${d?.original_model || '?'} -> ${d?.ultimate_model || '?'}${hash}`;
+    }
+    case 'ultimate_model_failed':
+      return `Ultimate model failed: ${event.data?.ultimate_model || '?'} - ${event.data?.error || 'Unknown error'}`;
     default:
       return `Event: ${event.type}`;
   }
@@ -136,6 +143,10 @@ const getEventColor = (type: EventType): string => {
       return 'text-red-400';
     case 'shadow_retry_lost':
       return 'text-gray-400';
+    case 'ultimate_model_triggered':
+      return 'text-pink-400';
+    case 'ultimate_model_failed':
+      return 'text-red-400';
     default:
       return 'text-gray-400';
   }
@@ -201,6 +212,10 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'SHADOW_RETRY_FAILED';
     case 'shadow_retry_lost':
       return 'SHADOW_RETRY_LOST';
+    case 'ultimate_model_triggered':
+      return 'ULTIMATE_MODEL';
+    case 'ultimate_model_failed':
+      return 'ULTIMATE_MODEL_FAILED';
     default:
       return String(type).toUpperCase();
   }
