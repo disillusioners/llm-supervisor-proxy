@@ -19,7 +19,7 @@ var validProviders = map[string]bool{
 	"azure":     true,
 	"zai":       true,
 	"minimax":   true,
-	"gork":      true,
+	"grok":      true,
 }
 
 // isValidProvider checks if the provider is in the allowed list

@@ -15,7 +15,7 @@ func TestNewProvider(t *testing.T) {
 		{"azure", "azure", false},
 		{"zai", "zai", false},
 		{"minimax", "minimax", false},
-		{"gork", "gork", false},
+		{"grok", "grok", false},
 		{"unknown", "unknown", true},
 	}
 
@@ -39,7 +39,7 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestIsProviderSupported(t *testing.T) {
-	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "gork"}
+	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok"}
 	for _, p := range supported {
 		if !IsProviderSupported(p) {
 			t.Errorf("expected %s to be supported", p)

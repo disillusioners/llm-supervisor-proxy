@@ -15,7 +15,7 @@ const (
 	ProviderAzure     ProviderType = "azure"
 	ProviderZAI       ProviderType = "zai"
 	ProviderMiniMax   ProviderType = "minimax"
-	ProviderGork      ProviderType = "gork"
+	ProviderGrok      ProviderType = "grok"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -51,8 +51,8 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 		// Azure OpenAI uses OpenAI-compatible API with different auth
 		// For now, treat as OpenAI with custom base URL
 		return NewOpenAIProvider(apiKey, baseURL), nil
-	case ProviderGork:
-		// Gork (X.ai) uses OpenAI-compatible API
+	case ProviderGrok:
+		// Grok (X.ai) uses OpenAI-compatible API
 		if baseURL == "" {
 			baseURL = "https://api.x.ai/v1"
 		}
@@ -65,7 +65,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGork:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok:
 		return true
 	default:
 		return false
@@ -132,7 +132,7 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "yellow",
 		description: "MiniMax API",
 	},
-	ProviderGork: {
+	ProviderGrok: {
 		name:        "Grok (xAI)",
 		baseURL:     "https://api.x.ai/v1",
 		color:       "gray",
@@ -167,6 +167,6 @@ func GetProviderTypes() []ProviderType {
 		ProviderAzure,
 		ProviderZAI,
 		ProviderMiniMax,
-		ProviderGork,
+		ProviderGrok,
 	}
 }
