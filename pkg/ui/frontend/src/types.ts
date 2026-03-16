@@ -37,6 +37,11 @@ export interface ToolRepairConfig {
   fixer_timeout: number;            // in seconds
 }
 
+export interface UltimateModelConfig {
+  model_id: string;
+  max_hash: number;
+}
+
 export interface AppConfig {
   version: string;
   upstream_url: string;
@@ -50,6 +55,7 @@ export interface AppConfig {
   shadow_retry_enabled: boolean;
   loop_detection: LoopDetectionConfig;
   tool_repair: ToolRepairConfig;
+  ultimate_model: UltimateModelConfig;
   updated_at: string;
 }
 
@@ -120,7 +126,9 @@ export interface Request {
   parameters?: Record<string, unknown>;
   tool_calls?: ToolCall[];
   thinking?: string;
-  is_stream?: boolean;
+  // Ultimate model tracking
+  ultimate_model_used?: boolean;
+  ultimate_model_id?: string;
   // Application tag for grouping/filtering
   app_tag?: string;
 }
@@ -162,6 +170,8 @@ export type EventType =
   | 'shadow_retry_won'
   | 'shadow_retry_failed'
   | 'shadow_retry_lost'
+  | 'ultimate_model_triggered'
+  | 'ultimate_model_failed'
   | 'internal_error';
 
 export interface EventData {
@@ -202,6 +212,10 @@ export interface EventData {
   main_model?: string;
   trigger?: string;
   internal?: boolean;
+  // Ultimate model fields
+  ultimate_model?: string;
+  original_model?: string;
+  hash?: string;
 }
 
 // Repair detail for tool repair events

@@ -12,6 +12,9 @@ interface ProxySettingsProps {
   maxGenTime: string;
   shadowRetryEnabled: boolean;
   originalPort: number;
+  // Ultimate model fields
+  ultimateModelId: string;
+  ultimateModelMaxHash: number;
   onUpstreamUrlChange: (value: string) => void;
   onUpstreamCredentialIdChange: (value: string) => void;
   onPortChange: (value: number) => void;
@@ -21,6 +24,8 @@ interface ProxySettingsProps {
   onMaxGenerationRetriesChange: (value: number) => void;
   onMaxGenTimeChange: (value: string) => void;
   onShadowRetryEnabledChange: (value: boolean) => void;
+  onUltimateModelIdChange: (value: string) => void;
+  onUltimateModelMaxHashChange: (value: number) => void;
   onApply: () => Promise<void>;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
 }
@@ -37,6 +42,8 @@ export function ProxySettings({
   maxGenTime,
   shadowRetryEnabled,
   originalPort,
+  ultimateModelId,
+  ultimateModelMaxHash,
   onUpstreamUrlChange,
   onUpstreamCredentialIdChange,
   onPortChange,
@@ -46,6 +53,8 @@ export function ProxySettings({
   onMaxGenerationRetriesChange,
   onMaxGenTimeChange,
   onShadowRetryEnabledChange,
+  onUltimateModelIdChange,
+  onUltimateModelMaxHashChange,
   onApply,
   setStatus,
 }: ProxySettingsProps) {
@@ -243,6 +252,48 @@ export function ProxySettings({
             class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
             placeholder="120s"
           />
+        </div>
+      </div>
+
+      {/* Ultimate Model Section */}
+      <div class="border-t border-gray-700 pt-4 mt-4">
+        <h3 class="text-sm font-medium text-gray-200 mb-3">Ultimate Model</h3>
+        <p class="text-xs text-gray-400 mb-3">
+          When a duplicate request is detected, the proxy will bypass all normal logic
+          (fallback, retry, buffering) and use this model as a raw proxy.
+        </p>
+
+        {/* Ultimate Model ID */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Ultimate Model ID</label>
+          <input
+            type="text"
+            value={ultimateModelId}
+            onInput={(e) => onUltimateModelIdChange((e.target as HTMLInputElement).value)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="e.g., claude-3-opus-20240229"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Leave empty to disable. Model must exist in database.
+          </p>
+        </div>
+
+        {/* Max Hash Cache Size */}
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Max Hash Cache Size</label>
+          <input
+            type="number"
+            value={ultimateModelMaxHash}
+            onInput={(e) => onUltimateModelMaxHashChange(parseInt((e.target as HTMLInputElement).value) || 100)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="100"
+            min="1"
+            max="10000"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Maximum number of request hashes to remember for duplicate detection.
+            Uses circular buffer (oldest removed when full).
+          </p>
         </div>
       </div>
 

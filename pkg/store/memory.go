@@ -39,6 +39,10 @@ type RequestLog struct {
 	FallbackUsed    []string `json:"fallback_used,omitempty"`    // List of fallback models that were attempted
 	CurrentFallback string   `json:"current_fallback,omitempty"` // Currently active fallback model (if any)
 
+	// Ultimate model tracking
+	UltimateModelUsed bool   `json:"ultimate_model_used"`         // Whether ultimate model was triggered for this request
+	UltimateModelID   string `json:"ultimate_model_id,omitempty"` // The ultimate model ID used (if triggered)
+
 	// Request metadata
 	IsStream   bool                   `json:"is_stream"`            // Whether this was a streaming request
 	Parameters map[string]interface{} `json:"parameters,omitempty"` // Request parameters (temperature, max_tokens, etc.)

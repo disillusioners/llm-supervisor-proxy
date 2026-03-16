@@ -15,6 +15,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
 )
 
 // Config holds runtime configuration for the proxy handler
@@ -68,16 +69,17 @@ type ConfigSnapshot struct {
 }
 
 type Handler struct {
-	config      *Config
-	bus         *events.Bus
-	store       *store.RequestStore
-	client      *http.Client
-	bufferStore *bufferstore.BufferStore
-	tokenStore  *auth.TokenStore
+	config          *Config
+	bus             *events.Bus
+	store           *store.RequestStore
+	client          *http.Client
+	bufferStore     *bufferstore.BufferStore
+	tokenStore      *auth.TokenStore
+	ultimateHandler *ultimatemodel.Handler
 }
 
 func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Handler {
-	return &Handler{
+	h := &Handler{
 		config: config,
 		bus:    bus,
 		store:  store,
@@ -97,6 +99,11 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 		bufferStore: bufferStore,
 		tokenStore:  tokenStore,
 	}
+
+	// Initialize ultimate model handler
+	h.ultimateHandler = ultimatemodel.NewHandler(config.ConfigMgr, config.ModelsConfig, bus)
+
+	return h
 }
 
 func (h *Handler) publishEvent(eventType string, data interface{}) {
@@ -250,6 +257,87 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+
+	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
+	// Check if ultimate model should be triggered for duplicate requests
+	if h.ultimateHandler != nil {
+		// Extract messages from request body
+		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+			// Convert to map[string]interface{} format for hashing
+			msgMaps := make([]map[string]interface{}, len(messages))
+			for i, msg := range messages {
+				if m, ok := msg.(map[string]interface{}); ok {
+					msgMaps[i] = m
+				}
+			}
+
+			if triggered, hash := h.ultimateHandler.ShouldTrigger(msgMaps); triggered {
+				ultimateModelID := h.ultimateHandler.GetModelID()
+				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s...",
+					ultimateModelID, hash[:8])
+
+				// Update request log with ultimate model info
+				rc.reqLog.UltimateModelUsed = true
+				rc.reqLog.UltimateModelID = ultimateModelID
+				rc.reqLog.Status = "running"
+				h.store.Add(rc.reqLog)
+
+				// Publish event
+				h.publishEvent("ultimate_model_triggered", map[string]interface{}{
+					"id":             rc.reqID,
+					"ultimate_model": ultimateModelID,
+					"original_model": rc.reqLog.Model,
+					"hash":           hash[:8],
+				})
+
+				// Execute with ultimate model (raw proxy, no retry/fallback)
+				// The Execute method determines streaming from requestBody["stream"]
+				err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, hash, &rc.headersSent)
+				if err != nil {
+					log.Printf("[UltimateModel] Error: %v", err)
+					rc.reqLog.Status = "failed"
+					rc.reqLog.Error = err.Error()
+					rc.reqLog.EndTime = time.Now()
+					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					h.store.Add(rc.reqLog)
+
+					h.publishEvent("ultimate_model_failed", map[string]interface{}{
+						"id":    rc.reqID,
+						"error": err.Error(),
+					})
+
+					// If headers not sent, send error response
+					if !rc.headersSent {
+						if strings.Contains(err.Error(), "not found") {
+							http.Error(w, "Ultimate model not found in database", http.StatusBadGateway)
+						} else {
+							http.Error(w, err.Error(), http.StatusBadGateway)
+						}
+					} else {
+						// Headers already sent (streaming) - send SSE error
+						h.sendSSEError(w, err.Error())
+					}
+					return
+				}
+
+				// Success - update log
+				rc.reqLog.Status = "completed"
+				rc.reqLog.EndTime = time.Now()
+				rc.reqLog.Duration = time.Since(rc.startTime).String()
+				h.store.Add(rc.reqLog)
+
+				h.publishEvent("request_completed", map[string]interface{}{
+					"id":             rc.reqID,
+					"model":          ultimateModelID,
+					"duration":       rc.reqLog.Duration,
+					"ultimate_model": true,
+				})
+
+				return // DONE - no fallback, no retry
+			}
+		}
+	}
+	// === END ULTIMATE MODEL CHECK ===
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})
 

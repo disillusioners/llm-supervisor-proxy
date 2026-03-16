@@ -53,6 +53,7 @@ type dbConfigRow struct {
 	MaxStreamBufferSize     int64
 	LoopDetectionJSON       string
 	ToolRepairJSON          string
+	UltimateModelJSON       string
 	UpdatedAt               string
 }
 
@@ -82,6 +83,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.MaxStreamBufferSize,
 		&dbCfg.LoopDetectionJSON,
 		&dbCfg.ToolRepairJSON,
+		&dbCfg.UltimateModelJSON,
 		&dbCfg.UpdatedAt,
 	)
 	if err != nil {
@@ -116,6 +118,13 @@ func (m *ConfigManager) Load() error {
 	if dbCfg.ToolRepairJSON != "" && dbCfg.ToolRepairJSON != "{}" {
 		if err := json.Unmarshal([]byte(dbCfg.ToolRepairJSON), &cfg.ToolRepair); err != nil {
 			cfg.ToolRepair = *toolrepair.DefaultConfig()
+		}
+	}
+
+	// Parse ultimate model JSON
+	if dbCfg.UltimateModelJSON != "" && dbCfg.UltimateModelJSON != "{}" {
+		if err := json.Unmarshal([]byte(dbCfg.UltimateModelJSON), &cfg.UltimateModel); err != nil {
+			cfg.UltimateModel = config.Defaults.UltimateModel
 		}
 	}
 
@@ -161,6 +170,12 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		return nil, fmt.Errorf("failed to serialize tool repair: %w", err)
 	}
 
+	// Serialize ultimate model
+	ultimateModelJSON, err := json.Marshal(merged.UltimateModel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize ultimate model: %w", err)
+	}
+
 	// Update database using dialect-aware query
 	query := m.qb.UpdateConfig()
 	_, err = m.store.DB.ExecContext(context.Background(), query,
@@ -176,6 +191,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		merged.MaxStreamBufferSize,
 		string(loopDetectionJSON),
 		string(toolRepairJSON),
+		string(ultimateModelJSON),
 		merged.UpdatedAt,
 	)
 	if err != nil {
@@ -398,6 +414,13 @@ func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.LoopDetection
+}
+
+// GetUltimateModel returns the ultimate model configuration
+func (m *ConfigManager) GetUltimateModel() config.UltimateModelConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.UltimateModel
 }
 
 // IsReadOnly returns true if the config cannot be written

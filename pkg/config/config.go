@@ -80,6 +80,7 @@ type Config struct {
 	SSEHeartbeatEnabled     bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
 	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
 	ToolRepair              toolrepair.Config   `json:"tool_repair"`
+	UltimateModel           UltimateModelConfig `json:"ultimate_model"`
 	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
 }
 
@@ -101,6 +102,7 @@ type ManagerInterface interface {
 	GetShadowRetryEnabled() bool
 	GetSSEHeartbeatEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
+	GetUltimateModel() UltimateModelConfig
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -124,6 +126,14 @@ type LoopDetectionConfig struct {
 	MaxCycleLength            int      `json:"max_cycle_length"`            // Max action cycle length to check (default: 5)
 	ReasoningModelPatterns    []string `json:"reasoning_model_patterns"`    // Regex patterns for reasoning models
 	ReasoningTrigramThreshold float64  `json:"reasoning_trigram_threshold"` // More forgiving threshold for reasoning models (default: 0.15)
+}
+
+// UltimateModelConfig holds configuration for the ultimate model feature.
+// When a duplicate request is detected, the proxy bypasses all normal logic
+// (fallback, retry, buffering) and acts as a raw proxy to this model.
+type UltimateModelConfig struct {
+	ModelID string `json:"model_id"` // Model ID to use for duplicate requests (e.g., "claude-3-opus")
+	MaxHash int    `json:"max_hash"` // Max hashes in circular buffer (default: 100)
 }
 
 // Defaults - used when env not set and file doesn't exist
@@ -169,6 +179,10 @@ var Defaults = Config{
 		LogRepaired:             true,
 		FixerModel:              "",
 		FixerTimeout:            25, // 25 seconds
+	},
+	UltimateModel: UltimateModelConfig{
+		ModelID: "",
+		MaxHash: 100,
 	},
 }
 
@@ -349,6 +363,14 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("SSE_HEARTBEAT_ENABLED"); v != "" {
 		cfg.SSEHeartbeatEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("ULTIMATE_MODEL_ID"); v != "" {
+		cfg.UltimateModel.ModelID = v
+	}
+	if v := os.Getenv("ULTIMATE_MODEL_MAX_HASH"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r > 0 {
+			cfg.UltimateModel.MaxHash = r
+		}
 	}
 	return cfg
 }
@@ -558,6 +580,13 @@ func (m *Manager) GetSSEHeartbeatEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.SSEHeartbeatEnabled
+}
+
+// GetUltimateModel returns the ultimate model configuration
+func (m *Manager) GetUltimateModel() UltimateModelConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.UltimateModel
 }
 
 // IsReadOnly returns true if the config file cannot be written

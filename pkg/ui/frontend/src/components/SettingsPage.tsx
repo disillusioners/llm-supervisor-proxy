@@ -78,6 +78,9 @@ export function SettingsPage({
   const [maxGenerationRetries, setMaxGenerationRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
   const [shadowRetryEnabled, setShadowRetryEnabled] = useState(true);
+  // Ultimate model state
+  const [ultimateModelId, setUltimateModelId] = useState('');
+  const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -103,6 +106,9 @@ export function SettingsPage({
       setMaxGenerationRetries(config.max_generation_retries || 0);
       setMaxGenTime(config.max_generation_time || '');
       setShadowRetryEnabled(config.shadow_retry_enabled ?? true);
+      // Ultimate model sync
+      setUltimateModelId(config.ultimate_model?.model_id || '');
+      setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
     }
   }, [config]);
 
@@ -132,6 +138,10 @@ export function SettingsPage({
         max_generation_retries: maxGenerationRetries,
         max_generation_time: maxGenTime,
         shadow_retry_enabled: shadowRetryEnabled,
+        ultimate_model: {
+          model_id: ultimateModelId,
+          max_hash: ultimateModelMaxHash,
+        },
       });
 
       // Show success message, and also show restart warning if required
@@ -317,6 +327,8 @@ export function SettingsPage({
               maxGenTime={maxGenTime}
               shadowRetryEnabled={shadowRetryEnabled}
               originalPort={originalPort}
+              ultimateModelId={ultimateModelId}
+              ultimateModelMaxHash={ultimateModelMaxHash}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
@@ -326,6 +338,8 @@ export function SettingsPage({
               onMaxGenerationRetriesChange={setMaxGenerationRetries}
               onMaxGenTimeChange={setMaxGenTime}
               onShadowRetryEnabledChange={setShadowRetryEnabled}
+              onUltimateModelIdChange={setUltimateModelId}
+              onUltimateModelMaxHashChange={setUltimateModelMaxHash}
               onApply={handleApplyProxy}
               setStatus={setStatusWrapper}
             />
