@@ -1,44 +1,89 @@
-# Unified Race Retry Design - Review
+# Review of Unified Race Retry Design against Go Memory Traps
 
-## Overview & Architecture Assessment
+## Review Status: ✅ ALL MEMORY TRAPS ADDRESSED
 
-The proposed "Unified Race Retry Design" is a significant improvement over the sequential retry scheme. Running requests in parallel (main, second, and fallback) and implementing a "race-to-first-chunk" or "best-buffer-at-deadline" strategy will result in a more resilient and lower-latency proxy. The documentation clearly details the motivations, changes in architecture, sequence flows, and critical fixes derived from previous review findings.
+All critical memory traps identified have been fixed in the design document.
 
-## Strengths & Excellent Design Choices
+---
 
-1. **Concurrency Control (Notification Pattern):**
-   Replacing the non-thread-safe `bytes.Buffer` with a custom `streamBuffer` utilizing an atomic read/write lock and a capacity-1 `notifyCh` is an excellent choice. It completely mitigates the `panic: concurrent write to bytes.Buffer` risk. 
-   - **Memory Leak Prevention:** Forcing `copy()` within `streamBuffer.Add` to prevent holding references to `bufio.Scanner` slices is a brilliant defensive programming measure.
-2. **Coordinator Loop Safety:**
-   The `raceCoordinator.coordinate()` function uses a central event loop with a `select` statement. Adding `defer close(rc.done)` comprehensively rules out the hang risk where the main goroutine would otherwise wait forever.
-3. **Early Termination:**
-   Tracking `spawnedCount` and `failedCount` atomically and using `checkAllFailed()` to cleanly exit if no requests are viable prevents the gateway from hanging up until a timeout occurs.
-4. **Context and Resource Management:**
-   - Deferring `winner.cancel()` inside the main handler strictly fixes the context leak where the background runner would keep executing when a client disconnects.
-   - Using limits on `bufio.Scanner` (`64KB` initial to `4MB` max) ensures large tokens or base64 data structures won't trivially break parsing.
+## Original Issues and Resolutions
 
-## Areas for Improvement & Potential Pitfalls
+### 1. `time.After()` in Loops (Trap 11) - ✅ FIXED
 
-While the architecture is highly solid, here are small refinements and edge-cases that should be considered during the implementation phase:
+**Original Issue:**  
+Using `time.After` inside a `for/select` loop creates a new timer on the heap every iteration. If the upstream provider generates tokens slowly over 5 minutes (300 seconds), this loop will iterate 3000 times, creating 3000 un-garbage-collected timers per request.
 
-### 1. HTTP Client / Transport Timeouts
-- **Risk:** Ensure that the underlying `http.Client` used by `rc.client` (inherited from `Handler`) does not have a hardcoded timeout that is shorter than your `MaxRequestTime` or `hardDeadline`. If it does, requests could fail prematurely with a network timeout before the `streamDeadlineTimer` or `hardDeadline` triggers.
-- **Recommendation:** Verify that the proxy's `http.Client` relies purely on context cancellation (`req.ctx`) or has a very generous global timeout.
+**Fix Applied:**  
+Replaced `time.After()` with `time.Ticker` created outside the loop:
+```go
+checkFailedTicker := time.NewTicker(100 * time.Millisecond)
+defer checkFailedTicker.Stop()
 
-### 2. Stream Response HTTP Status Propagation
-- **Risk:** At line 851, the `executeRequest` logic checks `if resp.StatusCode != http.StatusOK`. If a request fails with e.g., HTTP 429 Rate Limit or a 401 Unauthorized, it's accurately marked as `statusFailed`. If **all** requests fail, `sendAllFailedError` currently emits a hardcoded `http.StatusBadGateway` (502).
-- **Recommendation:** In `sendAllFailedError`, it might be beneficial to inspect the final `req.err` of the failed requests (especially if they all failed with the same 4xx code) and perhaps proxy that specific HTTP status code back to the client, rather than masking everything behind 502 Bad Gateway.
+for {
+    select {
+    case <-checkFailedTicker.C:
+        if rc.checkAllFailed() { ... }
+    }
+}
+```
 
-### 3. Client Disconnect Signals in `streamResult()`
-- **Risk:** In `streamResult()`, the code listens for case `<-winner.ctx.Done():`. Because `winner.ctx` is derived from `r.Context()`, this correctly captures client disconnects. However, when writing to `w.Write(chunk)`, if the client has disconnected, `w.Write` will eventually return an error (usually `syscall.EPIPE` or similar). 
-- **Recommendation:** `w.Write()` error returns are currently ignored inside `streamResult()`. It is standard in Go HTTP handlers to ignore it or inspect it and `return` early if the connection is dropped. Just verify you're comfortable with dropping silently on socket write failure (which is fine, since the context will cancel).
+### 2. Double Allocation of Byte Slices - ✅ FIXED
 
-### 4. WaitGroup Safety
-- **Risk:** WaitGroup `req.wg.Add(1)` is called before the goroutine starts (Line 808). This is perfectly correct. However, `req.wg.Wait()` doesn't seem to be explicitly called anywhere in the coordinator or during cancellation to enforce complete teardown.
-- **Recommendation:** Just confirm whether you want to strictly wait for all goroutines to finish upon handler exit, or if relying on `req.ctx` cancellation to orphan and eventually kill them is sufficient. Orphaned goroutines dying naturally is generally fine if they don't hold shared resources.
+**Original Issue:**  
+When chunks are read via the scanner, a new byte slice is allocated to add the newline character. Then, that new slice is passed to `req.buffer.Add()`, which allocates *another* byte slice and copies the data again.
 
-## Conclusion
+**Fix Applied:**  
+Modified `streamBuffer.Add()` to handle newline internally with single allocation:
+```go
+// Add now accepts line without newline
+func (sb *streamBuffer) Add(line []byte) bool {
+    // Single allocation with newline included
+    chunkData := make([]byte, len(line) + 1)
+    copy(chunkData, line)
+    chunkData[len(line)] = '\n'
+    // ...
+}
+```
 
-**Status:** APPROVED WITH MINOR RECOMMENDATIONS
+And updated `executeRequest` to pass line directly:
+```go
+// No longer creates lineWithNewline here
+if !req.buffer.Add(line) { ... }
+```
 
-The plan is well-thought-out, safely concurrent, and actively mitigates previously observed leaks, deadlocks, and race conditions. The data structures and atomic implementations correctly map exactly to Go concurrency best practices. Proceed to Phases 1 and 2 outlined in the Migration path.
+### 3. High Memory Consumption Limits (Trap 18) - ✅ FIXED
+
+**Original Issue:**  
+The default buffer size of 50MB per request × 3 parallel requests = 150MB per client. With 100 concurrent streams, this could require up to 15GB of RAM, causing OOM crashes.
+
+**Fix Applied:**  
+Reduced `defaultMaxBufferBytes` from 50MB to **5MB**:
+```go
+const (
+    // With 3 parallel requests, max ~15MB per client request
+    // LLM responses rarely exceed a few megabytes
+    defaultMaxBufferBytes = 5 * 1024 * 1024  // 5MB default limit
+)
+```
+
+### 4. `bufio.Scanner` with Very Large Tokens - ✅ ALREADY HANDLED
+
+**Observation:** The plan correctly increases the scanner buffer to 4MB max and implements proper slicing/copying. The design handles this well.
+
+### 5. Goroutine / Resource Leaks - ✅ ALREADY HANDLED
+
+**Observation:** The plan successfully includes `defer winner.cancel()` blocks and `defer resp.Body.Close()`. Context tree correctly stops background processing.
+
+---
+
+## Summary
+
+| Issue | Status | Resolution |
+|-------|--------|------------|
+| `time.After()` in loop | ✅ Fixed | Use `time.Ticker` outside loop |
+| Double allocation | ✅ Fixed | Single allocation in `Add()` with newline |
+| High memory (50MB) | ✅ Fixed | Reduced to 5MB per buffer |
+| bufio.Scanner large tokens | ✅ OK | 4MB max buffer, proper copying |
+| Goroutine/resource leaks | ✅ OK | defer cancel/close patterns |
+
+**The design is now safe from memory traps and ready for implementation.**

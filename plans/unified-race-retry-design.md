@@ -40,11 +40,12 @@ chunks   [][]byte       // Protected by mutex
 
 **Solution**: Track failed count. If `failed_count == spawned_count`, immediately close `done` and return no winner.
 
-### 4. Memory Usage
-**Issue**: Buffering up to 3 full LLM responses (megabytes each, ~150MB total) risks memory exhaustion under load.
+### 4. Memory Usage (UPDATED - Memory Trap Fix)
+**Issue**: Buffering up to 3 full LLM responses (megabytes each, ~150MB total with 50MB limit) risks memory exhaustion under load. With 100 concurrent requests, this could require 15GB of RAM.
 
 **Solution**:
-- Implement bounded buffer with max bytes limit (50MB per request)
+- **REDUCED** buffer limit from 50MB to **5MB per request** (~15MB total per client with 3 parallel)
+- LLM responses rarely exceed a few megabytes
 - Use chunk-based storage instead of contiguous buffer
 - Drop/reject data if limits exceeded
 - Consider global semaphore for memory pressure (future enhancement)
@@ -67,6 +68,35 @@ defer func() {
         winner.cancel()
     }
 }()
+```
+
+### 7. time.After() in Loop (Memory Trap - Trap 11)
+**Issue**: Using `time.After()` inside a `for/select` loop creates a new timer on the heap every iteration. For a 5-minute stream with 100ms checks, this creates 3000 un-garbage-collected timers per request.
+
+**Solution**: Use `time.Ticker` created outside the loop:
+```go
+checkFailedTicker := time.NewTicker(100 * time.Millisecond)
+defer checkFailedTicker.Stop()
+
+for {
+    select {
+    case <-checkFailedTicker.C:
+        // check logic
+    }
+}
+```
+
+### 8. Double Allocation of Byte Slices (Memory Trap - GC Pressure)
+**Issue**: When reading chunks, the code allocated twice:
+1. `executeRequest` allocated `lineWithNewline` to add newline
+2. `streamBuffer.Add()` allocated again to copy data
+
+**Solution**: Modified `Add()` to accept the line without newline and handle newline internally with a single allocation:
+```go
+// Single allocation in Add()
+chunkData := make([]byte, len(line) + 1)
+copy(chunkData, line)
+chunkData[len(line)] = '\n'
 ```
 
 ---
@@ -351,7 +381,10 @@ type streamBuffer struct {
 }
 
 const (
-    defaultMaxBufferBytes = 50 * 1024 * 1024  // 50MB default limit
+    // MEMORY TRAP FIX: Reduced from 50MB to 5MB per buffer
+    // With 3 parallel requests, max ~15MB per client request
+    // LLM responses rarely exceed a few megabytes
+    defaultMaxBufferBytes = 5 * 1024 * 1024  // 5MB default limit
 )
 
 func newStreamBuffer(maxBytes int64) *streamBuffer {
@@ -367,23 +400,29 @@ func newStreamBuffer(maxBytes int64) *streamBuffer {
 }
 
 // Add appends a chunk to the buffer. Thread-safe. Never blocks.
+// MEMORY TRAP FIX: Single allocation - allocates once with newline included
 // Returns false if buffer overflow (caller should stop).
-func (sb *streamBuffer) Add(data []byte) bool {
+func (sb *streamBuffer) Add(line []byte) bool {
     // Check if already completed
     if atomic.LoadInt32(&sb.completed) == 1 {
         return false
     }
     
+    // Calculate size with newline
+    chunkSize := int64(len(line) + 1) // +1 for newline
+    
     // Check overflow atomically
-    newLen := atomic.AddInt64(&sb.totalLen, int64(len(data)))
+    newLen := atomic.AddInt64(&sb.totalLen, chunkSize)
     if newLen > sb.maxBytes {
         sb.overflow = true
         return false
     }
     
-    // Copy data (don't retain caller's slice - avoids memory leaks)
-    chunkData := make([]byte, len(data))
-    copy(chunkData, data)
+    // SINGLE ALLOCATION: Allocate once with newline included
+    // This avoids double allocation (once in caller, once here)
+    chunkData := make([]byte, chunkSize)
+    copy(chunkData, line)
+    chunkData[len(line)] = '\n' // Add newline (scanner strips it)
     
     // Store in slice under lock
     sb.mu.Lock()
@@ -641,6 +680,11 @@ func (rc *raceCoordinator) coordinate(ctx context.Context) {
     streamDeadlineTimer := time.NewTimer(rc.streamDeadline)
     defer streamDeadlineTimer.Stop()
     
+    // MEMORY TRAP FIX: Use time.Ticker instead of time.After in loops
+    // time.After creates a new timer on every iteration causing memory leak
+    checkFailedTicker := time.NewTicker(100 * time.Millisecond)
+    defer checkFailedTicker.Stop()
+    
     for {
         select {
         case <-idleTimer.C:
@@ -667,7 +711,7 @@ func (rc *raceCoordinator) coordinate(ctx context.Context) {
             rc.handleContextDone(ctx)
             return
             
-        case <-time.After(100 * time.Millisecond):
+        case <-checkFailedTicker.C:
             // Periodic check for "all failed" condition
             if rc.checkAllFailed() {
                 log.Printf("[RACE] All requests failed, terminating early")
@@ -939,13 +983,10 @@ func (rc *raceCoordinator) executeRequest(req *upstreamRequest) {
         
         line := scanner.Bytes()
         
-        // Add newline back (scanner strips it)
-        lineWithNewline := make([]byte, len(line)+1)
-        copy(lineWithNewline, line)
-        lineWithNewline[len(line)] = '\n'
-        
-        // Write line to buffer
-        if !req.buffer.Add(lineWithNewline) {
+        // MEMORY TRAP FIX: Pass line directly to Add()
+        // Add() now handles newline internally with single allocation
+        // (previously: double allocation - once here, once in Add())
+        if !req.buffer.Add(line) {
             // Buffer overflow
             log.Printf("[RACE] Request %s buffer overflow, stopping", req.id)
             req.setStatus(statusFailed)
@@ -1113,7 +1154,7 @@ func (h *Handler) sendAllFailedError(w http.ResponseWriter, rc *requestContext) 
 | `RACE_RETRY_ENABLED` | `true` | Enable unified race retry |
 | `RACE_PARALLEL_ON_IDLE` | `true` | Spawn parallel requests on idle timeout |
 | `RACE_MAX_PARALLEL` | `3` | Max parallel requests (main + second + fallback) |
-| `RACE_MAX_BUFFER_BYTES` | `52428800` | Max bytes per request buffer (50MB) |
+| `RACE_MAX_BUFFER_BYTES` | `5242880` | Max bytes per request buffer (5MB) - reduced to prevent OOM |
 
 ### Removed Environment Variables
 
