@@ -264,6 +264,11 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.ToolRepair = mergeToolRepairConfig(existing.ToolRepair, incoming.ToolRepair)
 	}
 
+	// Ultimate model: check if ultimate model config was provided
+	if isUltimateModelProvided(incoming.UltimateModel) {
+		result.UltimateModel = incoming.UltimateModel
+	}
+
 	return result
 }
 
@@ -309,6 +314,14 @@ func isToolRepairProvided(tr toolrepair.Config) bool {
 // All fields from incoming are copied (frontend sends complete tool_repair object)
 func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Config {
 	return incoming
+}
+
+// isUltimateModelProvided checks if ultimate model config was explicitly provided
+// by checking if ModelID is non-empty (MaxHash defaults to 100, so 0 means not set)
+func isUltimateModelProvided(um config.UltimateModelConfig) bool {
+	// ModelID is the primary indicator - empty string means feature is disabled
+	// We also check MaxHash to detect if the config was sent at all
+	return um.ModelID != "" || um.MaxHash != 0
 }
 
 // Get returns current configuration
