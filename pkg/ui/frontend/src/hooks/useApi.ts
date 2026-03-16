@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider } from '../types';
 
 const API_BASE = '/fe/api';
 
@@ -298,4 +298,34 @@ export async function deleteCredential(id: string): Promise<void> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to delete credential');
   }
+}
+
+// Providers API
+export function useProviders() {
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchProviders = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await apiFetch<Provider[]>('/providers');
+      setProviders(data || []);
+    } catch (e) {
+      console.error('Failed to fetch providers:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchProviders();
+  }, [fetchProviders]);
+
+  return { providers, loading, refetch: fetchProviders };
+}
+
+export async function getProviders(): Promise<Provider[]> {
+  const res = await fetch('/fe/api/providers');
+  if (!res.ok) throw new Error('Failed to fetch providers');
+  return res.json();
 }

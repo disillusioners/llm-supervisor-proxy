@@ -1,35 +1,28 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Credential } from '../../types';
+import type { Credential, Provider } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
-import { getCredentials, createCredential, updateCredential, deleteCredential } from '../../hooks/useApi';
+import { getCredentials, createCredential, updateCredential, deleteCredential, useProviders } from '../../hooks/useApi';
 
 interface CredentialsTabProps {
   status: { type: 'success' | 'error'; message: string } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
 
-const PROVIDERS = ['openai', 'anthropic', 'gemini', 'zhipu', 'azure', 'zai', 'minimax'] as const;
-type Provider = typeof PROVIDERS[number];
-
-const PROVIDER_DEFAULTS: Record<Provider, string> = {
-  openai: 'https://api.openai.com/v1',
-  anthropic: 'https://api.anthropic.com',
-  gemini: 'https://generativelanguage.googleapis.com',
-  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
-  azure: '',
-  zai: 'https://api.z.ai/api/coding/paas/v4',
-  minimax: 'https://api.minimax.io/v1',
+// Provider color mapping (frontend-specific styling)
+const PROVIDER_COLORS: Record<string, string> = {
+  green: 'bg-green-900/50 text-green-300 border-green-800/40',
+  orange: 'bg-orange-900/50 text-orange-300 border-orange-800/40',
+  blue: 'bg-blue-900/50 text-blue-300 border-blue-800/40',
+  purple: 'bg-purple-900/50 text-purple-300 border-purple-800/40',
+  cyan: 'bg-cyan-900/50 text-cyan-300 border-cyan-800/40',
+  red: 'bg-red-900/50 text-red-300 border-red-800/40',
+  yellow: 'bg-yellow-900/50 text-yellow-300 border-yellow-800/40',
+  gray: 'bg-gray-900/50 text-gray-300 border-gray-800/40',
 };
 
-const providerColors: Record<Provider, string> = {
-  openai: 'bg-green-900/50 text-green-300 border-green-800/40',
-  anthropic: 'bg-orange-900/50 text-orange-300 border-orange-800/40',
-  gemini: 'bg-blue-900/50 text-blue-300 border-blue-800/40',
-  zhipu: 'bg-purple-900/50 text-purple-300 border-purple-800/40',
-  azure: 'bg-cyan-900/50 text-cyan-300 border-cyan-800/40',
-  zai: 'bg-red-900/50 text-red-300 border-red-800/40',
-  minimax: 'bg-yellow-900/50 text-yellow-300 border-yellow-800/40',
-};
+function getProviderColorClass(color: string): string {
+  return PROVIDER_COLORS[color] || 'bg-gray-900/50 text-gray-300 border-gray-800/40';
+}
 
 export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -40,6 +33,9 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
   const [credentialToDelete, setCredentialToDelete] = useState<Credential | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  
+  // Fetch providers from API (single source of truth)
+  const { providers } = useProviders();
 
   // Fetch credentials on mount
   useEffect(() => {
@@ -187,8 +183,8 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
                           </span>
                         </td>
                         <td class="py-3 px-2">
-                          <span class={`inline-flex items-center text-xs px-2 py-1 rounded border ${providerColors[cred.provider as Provider] || 'bg-gray-700 text-gray-300 border-gray-600'}`}>
-                            {escapeHtml(cred.provider)}
+                          <span class={`inline-flex items-center text-xs px-2 py-1 rounded border ${getProviderColorClass(providers.find(p => p.type === cred.provider)?.color || 'gray')}`}>
+                            {escapeHtml(providers.find(p => p.type === cred.provider)?.name || cred.provider)}
                           </span>
                         </td>
                         <td class="py-3 px-2">
@@ -239,6 +235,7 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
         <CredentialForm
           mode={formMode}
           initialData={credentialToEdit}
+          providers={providers}
           onSave={handleSave}
           onCancel={() => {
             setShowForm(false);
@@ -287,6 +284,7 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
 interface CredentialFormProps {
   mode: 'add' | 'edit';
   initialData?: Credential;
+  providers: Provider[];
   onSave: (data: {
     id: string;
     provider: string;
@@ -297,23 +295,30 @@ interface CredentialFormProps {
   saving: boolean;
 }
 
-function CredentialForm({ mode, initialData, onSave, onCancel, saving }: CredentialFormProps) {
+function CredentialForm({ mode, initialData, providers, onSave, onCancel, saving }: CredentialFormProps) {
   const [id, setId] = useState(initialData?.id || '');
-  const [provider, setProvider] = useState<Provider>(initialData?.provider as Provider || 'openai');
+  const [provider, setProvider] = useState(initialData?.provider || 'openai');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(initialData?.base_url || '');
 
+  // Get default base URL for current provider
+  const currentProvider = providers.find(p => p.type === provider);
+  const defaultBaseURL = currentProvider?.base_url || '';
+
   // Prefill base URL when provider changes (only in add mode or if empty)
   useEffect(() => {
-    if (mode === 'add') {
-      setBaseUrl(PROVIDER_DEFAULTS[provider] || '');
+    if (mode === 'add' && !baseUrl) {
+      setBaseUrl(defaultBaseURL);
     }
   }, [provider, mode]);
 
-  const handleProviderChange = (newProvider: Provider) => {
+  const handleProviderChange = (newProvider: string) => {
     setProvider(newProvider);
-    // Update base URL when provider changes
-    setBaseUrl(PROVIDER_DEFAULTS[newProvider] || '');
+    // Update base URL when provider changes (only if empty in add mode)
+    const newProviderData = providers.find(p => p.type === newProvider);
+    if (mode === 'add' || !baseUrl) {
+      setBaseUrl(newProviderData?.base_url || '');
+    }
   };
 
   const handleSubmit = async (e: Event) => {
@@ -352,13 +357,13 @@ function CredentialForm({ mode, initialData, onSave, onCancel, saving }: Credent
           <label class="block text-sm font-medium text-gray-300 mb-1">Provider</label>
           <select
             value={provider}
-            onChange={(e) => handleProviderChange((e.target as HTMLSelectElement).value as Provider)}
+            onChange={(e) => handleProviderChange((e.target as HTMLSelectElement).value)}
             required
             class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           >
-            {PROVIDERS.map((p) => (
-              <option key={p} value={p}>
-                {p.charAt(0).toUpperCase() + p.slice(1)}
+            {providers.map((p) => (
+              <option key={p.type} value={p.type}>
+                {p.name}
               </option>
             ))}
           </select>
@@ -390,11 +395,11 @@ function CredentialForm({ mode, initialData, onSave, onCancel, saving }: Credent
             value={baseUrl}
             onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}
             class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder={PROVIDER_DEFAULTS[provider] || 'Custom endpoint URL'}
+            placeholder={defaultBaseURL || 'Custom endpoint URL'}
           />
-          {PROVIDER_DEFAULTS[provider] && (
+          {defaultBaseURL && (
             <p class="text-xs text-gray-500 mt-1">
-              Default: <span class="text-gray-400">{PROVIDER_DEFAULTS[provider]}</span>
+              Default: <span class="text-gray-400">{defaultBaseURL}</span>
             </p>
           )}
         </div>

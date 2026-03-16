@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { Model, Credential } from '../../types';
-import { getCredentials } from '../../hooks/useApi';
+import { getCredentials, useProviders } from '../../hooks/useApi';
 
 interface ModelFormProps {
   mode: 'add' | 'edit';
@@ -22,15 +22,16 @@ interface ModelFormProps {
   onNavigateToCredentials?: () => void;
 }
 
-const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  openai: 'OpenAI',
-  zhipu: 'Zhipu (智谱)',
-  azure: 'Azure OpenAI',
-  zai: 'ZAI',
-  minimax: 'MiniMax',
-};
-
 export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNavigateToCredentials }: ModelFormProps) {
+  // Fetch providers from API (single source of truth)
+  const { providers } = useProviders();
+
+  // Get provider display name from API data
+  const getProviderName = (providerType: string): string => {
+    const provider = providers.find(p => p.type === providerType);
+    return provider?.name || providerType;
+  };
+
   const [formData, setFormData] = useState({
     id: '',
     name: '',
@@ -367,7 +368,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                 <div class="mt-2 flex items-center gap-2">
                   <span class="text-xs text-gray-400">Provider:</span>
                   <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
-                    {PROVIDER_DISPLAY_NAMES[selectedProvider] || selectedProvider}
+                    {getProviderName(selectedProvider)}
                   </span>
                 </div>
               )}

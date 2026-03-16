@@ -131,11 +131,24 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// Credential management
 	mux.HandleFunc("/fe/api/credentials", s.handleCredentials)
 	mux.HandleFunc("/fe/api/credentials/", s.handleCredentialDetail)
+	// Provider list
+	mux.HandleFunc("/fe/api/providers", s.handleProviders)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
+}
+
+func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	providersList := providers.GetProviders()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(providersList)
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {

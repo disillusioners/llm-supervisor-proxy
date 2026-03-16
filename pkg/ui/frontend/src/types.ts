@@ -1,5 +1,13 @@
 // API Types - matching Go backend structures
 
+export interface Provider {
+  type: string;
+  name: string;
+  base_url: string;
+  color: string;
+  description?: string;
+}
+
 export interface Credential {
   id: string;
   provider: string;
