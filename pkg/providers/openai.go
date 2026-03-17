@@ -312,9 +312,16 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				}
 			}
 
+			// Extract finish reason from the response
+			finishReason := ""
+			if len(lastResponse.Choices) > 0 {
+				finishReason = lastResponse.Choices[0].FinishReason
+			}
+
 			eventCh <- StreamEvent{
-				Type:     "done",
-				Response: lastResponse,
+				Type:         "done",
+				Response:     lastResponse,
+				FinishReason: finishReason,
 			}
 		} else {
 			eventCh <- StreamEvent{
