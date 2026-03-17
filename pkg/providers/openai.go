@@ -401,6 +401,15 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 			Type:  "error",
 			Error: err,
 		}
+		return
+	}
+
+	// If we reach here without seeing [DONE], the stream ended prematurely.
+	// This can happen if the upstream closes the connection unexpectedly.
+	// Send an error event to signal the stream was incomplete.
+	eventCh <- StreamEvent{
+		Type:  "error",
+		Error: fmt.Errorf("stream ended without [DONE] marker"),
 	}
 }
 
