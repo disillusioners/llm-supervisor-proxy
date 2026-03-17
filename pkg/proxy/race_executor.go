@@ -365,8 +365,12 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			return nil
 
 		case "error":
-			log.Printf("[RACE] Internal provider stream error: %s", event.Content)
-			return fmt.Errorf("provider stream error: %s", event.Content)
+			errMsg := "unknown error"
+			if event.Error != nil {
+				errMsg = event.Error.Error()
+			}
+			log.Printf("[RACE] Internal provider stream error: %s", errMsg)
+			return fmt.Errorf("provider stream error: %s", errMsg)
 		}
 	}
 
