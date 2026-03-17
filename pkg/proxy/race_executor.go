@@ -12,13 +12,71 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
 // executeRequest performs the actual HTTP call to upstream
 // and streams the response into the request's buffer.
+// It checks if the model is internal and routes accordingly.
 func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
 	req.MarkStarted()
 
+	// Check if this model uses internal upstream
+	// Note: ModelsConfig may be nil in tests, so check first
+	if cfg.ModelsConfig != nil {
+		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		if modelConfig != nil && modelConfig.Internal {
+			return executeInternalRequest(ctx, cfg, rawBody, req)
+		}
+	}
+
+	// External upstream: use the configured upstream URL
+	return executeExternalRequest(ctx, cfg, originalReq, rawBody, req)
+}
+
+// executeInternalRequest handles requests to internal providers (bypassing external upstream)
+func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest) error {
+	// Resolve internal config (including credential lookup)
+	provider, apiKey, baseURL, internalModel, ok := cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+	if !ok {
+		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
+	}
+
+	// Create provider client
+	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
+	if err != nil {
+		return fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	log.Printf("[DEBUG] Race attempt %d calling internal provider: %s (model=%s, baseURL=%s)", req.id, provider, internalModel, baseURL)
+
+	// Parse request body
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+		return fmt.Errorf("failed to parse request body: %w", err)
+	}
+
+	// Check if streaming
+	isStream := false
+	if stream, ok := bodyMap["stream"].(bool); ok {
+		isStream = stream
+	}
+
+	// Convert to provider request
+	providerReq, err := convertToProviderRequest(bodyMap, internalModel)
+	if err != nil {
+		return fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	if isStream {
+		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel)
+	}
+	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel)
+}
+
+// executeExternalRequest handles requests to external upstream (LiteLLM, etc.)
+func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
 	// 1. Prepare upstream request
 	// Set the target URL to upstream
 	u, err := url.Parse(cfg.UpstreamURL)
@@ -84,6 +142,260 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	// Streaming response
 	req.MarkStreaming()
 	return handleStreamingResponse(ctx, cfg, resp, req)
+}
+
+// handleInternalNonStream handles non-streaming requests for internal providers
+func handleInternalNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string) error {
+	resp, err := provider.ChatCompletion(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	// Marshal response to JSON
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal response: %w", err)
+	}
+
+	// Add as single chunk
+	if !upstreamReq.buffer.Add(data) {
+		return fmt.Errorf("buffer limit exceeded")
+	}
+
+	return nil
+}
+
+// handleInternalStream handles streaming requests for internal providers
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string) error {
+	eventCh, err := provider.StreamChatCompletion(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	upstreamReq.MarkStreaming()
+
+	for event := range eventCh {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		switch event.Type {
+		case "content":
+			// Write SSE data event
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   internalModel,
+				Choices: []providers.Choice{
+					{
+						Index: 0,
+						Delta: &providers.ChatMessage{
+							Role:    "assistant",
+							Content: event.Content,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			line := fmt.Sprintf("data: %s\n", data)
+			if !upstreamReq.buffer.Add([]byte(line)) {
+				return fmt.Errorf("buffer limit exceeded")
+			}
+
+		case "tool_call":
+			// Write tool_call delta
+			if len(event.ToolCalls) > 0 {
+				tc := event.ToolCalls[0]
+				chunk := providers.ChatCompletionResponse{
+					ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   internalModel,
+					Choices: []providers.Choice{
+						{
+							Index: 0,
+							Delta: &providers.ChatMessage{
+								ToolCalls: []providers.ToolCall{
+									{
+										ID:   tc.ID,
+										Type: tc.Type,
+										Function: providers.ToolCallFunction{
+											Name:      tc.Function.Name,
+											Arguments: tc.Function.Arguments,
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				data, _ := json.Marshal(chunk)
+				line := fmt.Sprintf("data: %s\n", data)
+				if !upstreamReq.buffer.Add([]byte(line)) {
+					return fmt.Errorf("buffer limit exceeded")
+				}
+			}
+
+		case "thinking":
+			// Write thinking/reasoning content
+			chunk := providers.ChatCompletionResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   internalModel,
+				Choices: []providers.Choice{
+					{
+						Index: 0,
+						Delta: &providers.ChatMessage{
+							Content: event.Content,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			line := fmt.Sprintf("data: %s\n", data)
+			if !upstreamReq.buffer.Add([]byte(line)) {
+				return fmt.Errorf("buffer limit exceeded")
+			}
+
+		case "done":
+			// Write [DONE] marker
+			if !upstreamReq.buffer.Add([]byte("data: [DONE]\n")) {
+				return fmt.Errorf("buffer limit exceeded")
+			}
+			return nil
+
+		case "error":
+			log.Printf("[RACE] Internal provider stream error: %s", event.Content)
+			return fmt.Errorf("provider stream error: %s", event.Content)
+		}
+	}
+
+	// If we get here without "done", the stream ended unexpectedly
+	return fmt.Errorf("stream ended without done signal")
+}
+
+// convertToProviderRequest converts map[string]interface{} to providers.ChatCompletionRequest
+func convertToProviderRequest(body map[string]interface{}, model string) (*providers.ChatCompletionRequest, error) {
+	req := &providers.ChatCompletionRequest{}
+	req.Model = model
+
+	if messages, ok := body["messages"].([]interface{}); ok {
+		for _, m := range messages {
+			if msg, ok := m.(map[string]interface{}); ok {
+				chatMsg := providers.ChatMessage{}
+				if role, ok := msg["role"].(string); ok {
+					chatMsg.Role = role
+				}
+				if content, ok := msg["content"]; ok {
+					switch c := content.(type) {
+					case string:
+						chatMsg.Content = content
+					case []interface{}:
+						// Multimodal content - handle each part
+						contentParts := make([]providers.ContentPart, len(c))
+						for i, part := range c {
+							if partMap, ok := part.(map[string]interface{}); ok {
+								cp := providers.ContentPart{}
+								if partType, ok := partMap["type"].(string); ok {
+									cp.Type = partType
+								}
+								if text, ok := partMap["text"].(string); ok {
+									cp.Text = text
+								}
+								if imageURL, ok := partMap["image_url"].(map[string]interface{}); ok {
+									if url, ok := imageURL["url"].(string); ok {
+										cp.ImageURL = &providers.ImageURL{
+											URL: url,
+										}
+									}
+								}
+								contentParts[i] = cp
+							}
+						}
+						chatMsg.Content = contentParts
+					}
+				}
+				if toolCalls, ok := msg["tool_calls"].([]interface{}); ok {
+					chatMsg.ToolCalls = make([]providers.ToolCall, len(toolCalls))
+					for i, tc := range toolCalls {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							toolCall := providers.ToolCall{}
+							if id, ok := tcMap["id"].(string); ok {
+								toolCall.ID = id
+							}
+							if tcType, ok := tcMap["type"].(string); ok {
+								toolCall.Type = tcType
+							}
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								toolCall.Function = providers.ToolCallFunction{}
+								if name, ok := fn["name"].(string); ok {
+									toolCall.Function.Name = name
+								}
+								if args, ok := fn["arguments"].(string); ok {
+									toolCall.Function.Arguments = args
+								}
+							}
+							chatMsg.ToolCalls[i] = toolCall
+						}
+					}
+				}
+				req.Messages = append(req.Messages, chatMsg)
+			}
+		}
+	}
+
+	if temperature, ok := body["temperature"].(float64); ok {
+		req.Temperature = &temperature
+	}
+
+	if maxTokens, ok := body["max_tokens"].(float64); ok {
+		maxTokensInt := int(maxTokens)
+		req.MaxTokens = &maxTokensInt
+	}
+
+	if stream, ok := body["stream"].(bool); ok {
+		req.Stream = stream
+	}
+
+	if tools, ok := body["tools"].([]interface{}); ok {
+		req.Tools = make([]providers.Tool, len(tools))
+		for i, t := range tools {
+			if tMap, ok := t.(map[string]interface{}); ok {
+				tool := providers.Tool{}
+				if toolType, ok := tMap["type"].(string); ok {
+					tool.Type = toolType
+				}
+				if fn, ok := tMap["function"].(map[string]interface{}); ok {
+					tool.Function = providers.ToolFunction{}
+					if name, ok := fn["name"].(string); ok {
+						tool.Function.Name = name
+					}
+					if desc, ok := fn["description"].(string); ok {
+						tool.Function.Description = desc
+					}
+					if params, ok := fn["parameters"].(map[string]interface{}); ok {
+						tool.Function.Parameters = params
+					}
+				}
+				req.Tools[i] = tool
+			}
+		}
+	}
+
+	if toolChoice, exists := body["tool_choice"]; exists {
+		req.ToolChoice = toolChoice
+	}
+
+	if extra, ok := body["extra"].(map[string]interface{}); ok {
+		req.Extra = extra
+	}
+
+	return req, nil
 }
 
 // handleNonStreamingResponse reads a non-streaming JSON response
