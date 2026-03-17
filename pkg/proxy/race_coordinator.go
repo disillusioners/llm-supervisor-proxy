@@ -20,6 +20,13 @@ const (
 	triggerMainError   spawnTrigger = "main_error"
 )
 
+// spawnTriggerInfo contains detailed information about why a spawn was triggered
+type spawnTriggerInfo struct {
+	trigger       spawnTrigger
+	errorMessage  string // Only populated when trigger is main_error
+	failedRequest int    // Index of the failed request, -1 if not applicable
+}
+
 // raceCoordinator manages multiple parallel upstream requests
 type raceCoordinator struct {
 	mu sync.RWMutex
@@ -42,9 +49,9 @@ type raceCoordinator struct {
 	onceDone   sync.Once
 
 	// Metrics for logging/monitoring
-	startTime       time.Time
-	spawnTriggers   []spawnTrigger // Track why requests were spawned
-	
+	startTime     time.Time
+	spawnTriggers []spawnTriggerInfo // Track detailed info about why requests were spawned
+
 	// Event publishing
 	eventBus  *events.Bus
 	requestID string
@@ -59,19 +66,19 @@ func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req 
 		models = []string{cfg.ModelID}
 	}
 	return &raceCoordinator{
-		baseCtx:       ctx,
-		cfg:           cfg,
-		req:           req,
-		rawBody:       rawBody,
-		models:        models,
-		requests:      make([]*upstreamRequest, 0, len(models)),
-		winnerIdx:     -1,
+		baseCtx:          ctx,
+		cfg:              cfg,
+		req:              req,
+		rawBody:          rawBody,
+		models:           models,
+		requests:         make([]*upstreamRequest, 0, len(models)),
+		winnerIdx:        -1,
 		done:          make(chan struct{}),
 		streamCh:      make(chan struct{}),
 		startTime:     time.Now(),
-		spawnTriggers: make([]spawnTrigger, 0),
+		spawnTriggers: make([]spawnTriggerInfo, 0),
 		eventBus:      eventBus,
-		requestID:     requestID,
+		requestID:        requestID,
 	}
 }
 
@@ -101,13 +108,17 @@ func (c *raceCoordinator) Start() {
 	})
 	
 	// 1. Spawn main request (no trigger - it's the initial request)
-	c.spawn(modelTypeMain, "")
+	c.spawn(modelTypeMain, spawnTriggerInfo{
+		trigger:       "",
+		errorMessage:  "",
+		failedRequest: -1,
+	})
 
 	// 2. Start manager loop
 	go c.manage()
 }
 
-func (c *raceCoordinator) spawn(mType upstreamModelType, trigger spawnTrigger) {
+func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTriggerInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -120,17 +131,26 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, trigger spawnTrigger) {
 	modelID := c.models[idx]
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
 	c.requests = append(c.requests, req)
-	c.spawnTriggers = append(c.spawnTriggers, trigger)
+	c.spawnTriggers = append(c.spawnTriggers, triggerInfo)
 
-	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, trigger)
+	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, triggerInfo.trigger)
 
-	// Publish race_spawn event
-	c.publishEvent("race_spawn", map[string]interface{}{
+	// Build event data with detailed error info if available
+	eventData := map[string]interface{}{
 		"request_index": idx,
 		"model":         modelID,
 		"type":          string(mType),
-		"trigger":       string(trigger),
-	})
+		"trigger":       string(triggerInfo.trigger),
+	}
+	
+	// Add detailed error information if this spawn was triggered by an error
+	if triggerInfo.trigger == triggerMainError {
+		eventData["trigger_reason"] = triggerInfo.errorMessage
+		eventData["failed_request_index"] = triggerInfo.failedRequest
+	}
+
+	// Publish race_spawn event
+	c.publishEvent("race_spawn", eventData)
 
 	// Execute in background
 	go c.execute(req)
@@ -231,7 +251,7 @@ func (c *raceCoordinator) manage() {
 				}
 
 				shouldSpawn := false
-				var trigger spawnTrigger
+				var triggerInfo spawnTriggerInfo
 				nextType := modelTypeSecond
 				if len(c.requests) >= 2 {
 					nextType = modelTypeFallback
@@ -241,9 +261,14 @@ func (c *raceCoordinator) manage() {
 					// Case 1: Latest request failed
 					latestReq := c.requests[len(c.requests)-1]
 					if latestReq.IsDone() && latestReq.GetError() != nil {
-						log.Printf("[RACE] Latest request %d failed, spawning next attempt", latestReq.id)
+						errMsg := latestReq.GetError().Error()
+						log.Printf("[RACE] Latest request %d failed: %s, spawning next attempt", latestReq.id, errMsg)
 						shouldSpawn = true
-						trigger = triggerMainError
+						triggerInfo = spawnTriggerInfo{
+							trigger:       triggerMainError,
+							errorMessage:  errMsg,
+							failedRequest: latestReq.id,
+						}
 					}
 
 					// Case 2: Main request is idle (Parallel race retry)
@@ -259,20 +284,28 @@ func (c *raceCoordinator) manage() {
 							if time.Since(idleCheckStart) > time.Duration(c.cfg.IdleTimeout) {
 								log.Printf("[RACE] Main request idle (no first byte), spawning parallel request")
 								shouldSpawn = true
-								trigger = triggerIdleTimeout
+								triggerInfo = spawnTriggerInfo{
+									trigger:       triggerIdleTimeout,
+									errorMessage:  "",
+									failedRequest: -1,
+								}
 							}
 						} else if mainReq.IsIdle(time.Duration(c.cfg.IdleTimeout)) {
 							// Has received data but is now idle
 							log.Printf("[RACE] Main request idle (no data for %v), spawning parallel request", time.Duration(c.cfg.IdleTimeout))
 							shouldSpawn = true
-							trigger = triggerIdleTimeout
+							triggerInfo = spawnTriggerInfo{
+								trigger:       triggerIdleTimeout,
+								errorMessage:  "",
+								failedRequest: -1,
+							}
 						}
 					}
 				}
 
 				if shouldSpawn {
 					c.mu.Unlock()
-					c.spawn(nextType, trigger)
+					c.spawn(nextType, triggerInfo)
 					c.mu.Lock()
 				}
 			}
@@ -289,10 +322,24 @@ func (c *raceCoordinator) manage() {
 				if allFailed {
 					log.Printf("[RACE] All requests failed")
 					
-					// Publish race_all_failed event
+					// Collect all error details
+					errors := make([]map[string]interface{}, 0, len(c.requests))
+					for _, r := range c.requests {
+						if r.GetError() != nil {
+							errors = append(errors, map[string]interface{}{
+								"request_index": r.id,
+								"model":         r.modelID,
+								"type":          string(r.modelType),
+								"error":         r.GetError().Error(),
+							})
+						}
+					}
+					
+					// Publish race_all_failed event with detailed error info
 					c.publishEvent("race_all_failed", map[string]interface{}{
 						"total_attempts": len(c.requests),
 						"duration_ms":    time.Since(c.startTime).Milliseconds(),
+						"errors":         errors,
 					})
 					
 					c.mu.Unlock()
@@ -429,6 +476,14 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	if err != nil {
 		req.MarkFailed(err)
 		log.Printf("[RACE] Request %d failed: %v", req.id, err)
+		
+		// Publish race_request_failed event with detailed error info
+		c.publishEvent("race_request_failed", map[string]interface{}{
+			"request_index": req.id,
+			"model":         req.modelID,
+			"type":          string(req.modelType),
+			"error":         err.Error(),
+		})
 	} else {
 		req.MarkCompleted()
 		log.Printf("[RACE] Request %d completed successfully", req.id)
@@ -523,7 +578,7 @@ func (c *raceCoordinator) GetStats() RaceStats {
 
 	// Convert spawn triggers to strings
 	for _, t := range c.spawnTriggers {
-		stats.SpawnTriggers = append(stats.SpawnTriggers, string(t))
+		stats.SpawnTriggers = append(stats.SpawnTriggers, string(t.trigger))
 	}
 
 	// Winner info
