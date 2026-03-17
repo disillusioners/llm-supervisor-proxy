@@ -547,14 +547,14 @@ func getNormalizerDescription(normalizerName string) string {
 }
 
 // handleStreamingResponse handles SSE streaming responses
+// IMPORTANT: This function does NOT return error on idle timeout.
+// Per the unified race retry design, the main request should continue streaming
+// even after idle timeout - the coordinator will spawn parallel requests.
+// Idle timeout detection is handled by the coordinator via TrackActivity().
 func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
-
-	// Create ticker outside the loop
-	idleTimer := time.NewTimer(time.Duration(cfg.IdleTimeout))
-	defer idleTimer.Stop()
 
 	sawDone := false
 
@@ -569,7 +569,13 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 		var line []byte
 		var readErr error
 
-		// Setup idle timeout wrapper
+		// Setup idle timeout wrapper with configurable timeout
+		// Use a longer read timeout to allow the coordinator to detect idle
+		readTimeout := time.Duration(cfg.IdleTimeout) * 2 // Double the idle timeout for read
+		if readTimeout < 30*time.Second {
+			readTimeout = 30 * time.Second // Minimum 30s
+		}
+		
 		readDone := make(chan struct{})
 		go func() {
 			line, readErr = reader.ReadBytes('\n')
@@ -580,17 +586,23 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-readDone:
-			// Reset idle timer after successful read
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(time.Duration(cfg.IdleTimeout))
+			// Track activity for coordinator's idle detection
+			req.TrackActivity()
 			// Continuous processing
-		case <-idleTimer.C:
-			return fmt.Errorf("idle timeout exceeded")
+		case <-time.After(readTimeout):
+			// Read timeout - but DON'T return error!
+			// The coordinator will detect idle and spawn parallel requests.
+			// We continue waiting for the read to complete.
+			// This prevents cancelling the main request prematurely.
+			log.Printf("[RACE] Request %d: read timeout after %v, continuing to wait...", req.id, readTimeout)
+			// Wait for the read to eventually complete or context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-readDone:
+				req.TrackActivity()
+				// Continue processing
+			}
 		}
 
 		if len(line) > 0 {

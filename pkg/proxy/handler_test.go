@@ -662,17 +662,21 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// With race retry: winner is only selected when request completes with [DONE]
-			// If the request hangs (idle timeout), no winner is selected and all requests fail
-			// Result: HTTP error 504 (Gateway Timeout) instead of SSE error
-			if rr.Code != http.StatusGatewayTimeout {
-				t.Errorf("expected status 504 (Gateway Timeout), got %d", rr.Code)
+			// With race retry: when streaming deadline (MaxGenerationTime) is reached,
+			// the coordinator picks the best buffer and continues streaming partial content.
+			// This is correct behavior per design spec: "Streaming Deadline: Continue streaming
+			// winner until complete or hard deadline"
+			//
+			// The test sends "mock-hang please" which triggers mockLLMHandler to send 6 tokens
+			// then hang. When MaxGenerationTime (10s) is reached, the partial content is returned.
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected status 200, got %d", rr.Code)
 			}
 
-			// Response should contain error message
+			// Verify we got partial content (first few tokens from the hang response)
 			respBody := rr.Body.String()
-			if !strings.Contains(respBody, "error") && !strings.Contains(respBody, "failed") {
-				t.Errorf("expected response to contain error message, got: %s", respBody)
+			if !strings.Contains(respBody, "Hello") && !strings.Contains(respBody, "world") {
+				t.Errorf("expected response to contain partial content, got: %s", respBody)
 			}
 		},
 	})

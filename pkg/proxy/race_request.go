@@ -45,6 +45,7 @@ type upstreamRequest struct {
 	startTime      time.Time
 	firstByteTime  time.Time
 	completionTime time.Time
+	lastActivityTime time.Time // Last time we received data (for idle detection)
 
 	// Stats
 	totalChunks int
@@ -74,6 +75,7 @@ func (r *upstreamRequest) MarkStreaming() {
 	defer r.mu.Unlock()
 	r.status = statusStreaming
 	r.firstByteTime = time.Now()
+	r.lastActivityTime = time.Now() // Initialize activity time when streaming starts
 }
 
 func (r *upstreamRequest) MarkCompleted() {
@@ -157,4 +159,34 @@ func (r *upstreamRequest) Cancel() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// TrackActivity updates the last activity time to now
+// This is used by the executor to signal that data is still being received
+func (r *upstreamRequest) TrackActivity() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastActivityTime = time.Now()
+}
+
+// GetLastActivity returns the time of last activity
+func (r *upstreamRequest) GetLastActivity() time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastActivityTime
+}
+
+// IsIdle returns true if the request has been idle for longer than the given duration
+func (r *upstreamRequest) IsIdle(idleTimeout time.Duration) bool {
+	r.mu.RLock()
+	lastActivity := r.lastActivityTime
+	status := r.status
+	r.mu.RUnlock()
+	
+	// Only consider idle if we're streaming (have received at least some data)
+	// and haven't received data for idleTimeout duration
+	if status != statusStreaming {
+		return false
+	}
+	return time.Since(lastActivity) > idleTimeout
 }

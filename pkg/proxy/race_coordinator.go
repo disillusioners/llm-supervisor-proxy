@@ -141,8 +141,14 @@ func (c *raceCoordinator) manage() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	idleTimerStarted := false
-	var idleDeadline time.Time
+	// STREAMING DEADLINE TIMER
+	// Per the unified race retry design, when MaxGenerationTime is reached,
+	// we pick the best buffer and continue streaming it until complete.
+	streamDeadlineTimer := time.NewTimer(time.Duration(c.cfg.MaxGenerationTime))
+	defer streamDeadlineTimer.Stop()
+
+	// Track when we started monitoring for idle
+	idleCheckStart := time.Now()
 
 	for {
 		select {
@@ -150,6 +156,10 @@ func (c *raceCoordinator) manage() {
 			c.cancelAll()
 			c.onceDone.Do(func() { close(c.done) })
 			c.onceStream.Do(func() { close(c.streamCh) })
+			return
+		case <-streamDeadlineTimer.C:
+			// Streaming deadline reached - pick best buffer and continue streaming
+			c.handleStreamingDeadline()
 			return
 		case <-ticker.C:
 			c.mu.Lock()
@@ -226,18 +236,25 @@ func (c *raceCoordinator) manage() {
 					}
 
 					// Case 2: Main request is idle (Parallel race retry)
+					// FIXED: Now uses IsIdle() which tracks last activity time during streaming
+					// This correctly detects idle even after the request has started streaming
 					if !shouldSpawn && c.cfg.RaceParallelOnIdle && len(c.requests) == 1 {
 						mainReq := c.requests[0]
+						// Check for idle in two ways:
+						// 1. statusRunning: hasn't received first byte yet (use start time)
+						// 2. statusStreaming: has received data but is now idle (use last activity time)
 						if mainReq.GetStatus() == statusRunning {
-							if !idleTimerStarted {
-								idleDeadline = time.Now().Add(time.Duration(c.cfg.IdleTimeout))
-								idleTimerStarted = true
-							} else if time.Now().After(idleDeadline) {
-								log.Printf("[RACE] Main request idle, spawning parallel request")
+							// Haven't received first byte yet - check from start time
+							if time.Since(idleCheckStart) > time.Duration(c.cfg.IdleTimeout) {
+								log.Printf("[RACE] Main request idle (no first byte), spawning parallel request")
 								shouldSpawn = true
 								trigger = triggerIdleTimeout
-								idleTimerStarted = false
 							}
+						} else if mainReq.IsIdle(time.Duration(c.cfg.IdleTimeout)) {
+							// Has received data but is now idle
+							log.Printf("[RACE] Main request idle (no data for %v), spawning parallel request", time.Duration(c.cfg.IdleTimeout))
+							shouldSpawn = true
+							trigger = triggerIdleTimeout
 						}
 					}
 				}
@@ -276,6 +293,79 @@ func (c *raceCoordinator) manage() {
 			
 			c.mu.Unlock()
 		}
+	}
+}
+
+// handleStreamingDeadline picks the best buffer when MaxGenerationTime is reached
+// Per the unified race retry design:
+// - Pick the request with the most content (best candidate to continue)
+// - Cancel the winner to stop waiting for more data
+// - Cancel only the other requests (they were already cancelled by the previous code)
+func (c *raceCoordinator) handleStreamingDeadline() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.winner != nil {
+		return // Already have a winner
+	}
+
+	log.Printf("[RACE] Streaming deadline reached after %v, picking best buffer", time.Since(c.startTime))
+
+	// Find request with most content (best candidate to continue)
+	var best *upstreamRequest
+	var bestLen int64
+
+	for _, req := range c.requests {
+		if req != nil && !req.IsDone() {
+			bufferLen := req.buffer.TotalLen()
+			if bufferLen > bestLen {
+				best = req
+				bestLen = bufferLen
+			}
+		}
+	}
+
+	if best != nil && bestLen > 0 {
+		c.winner = best
+		c.winnerIdx = best.id
+		
+		log.Printf("[RACE] Picked best buffer: request %d (%s, %s) with %d bytes",
+			best.id, best.modelType, best.modelID, bestLen)
+
+		// Publish race_deadline_pick event
+		c.publishEvent("race_deadline_pick", map[string]interface{}{
+			"winner_index":  c.winnerIdx,
+			"winner_type":   string(best.modelType),
+			"winner_model":  best.modelID,
+			"buffer_bytes":  bestLen,
+			"duration_ms":   time.Since(c.startTime).Milliseconds(),
+		})
+
+		// Signal that streaming can start
+		c.onceStream.Do(func() { close(c.streamCh) })
+
+		// Cancel the winner to stop waiting for more data
+		// This ensures streamResult() doesn't wait forever
+		best.Cancel()
+
+		// Cancel only the other requests
+		for _, req := range c.requests {
+			if req != nil && req != best {
+				req.Cancel()
+			}
+		}
+	} else {
+		// No content at all - all failed or no requests started
+		log.Printf("[RACE] Streaming deadline reached, no content available")
+		
+		c.publishEvent("race_all_failed", map[string]interface{}{
+			"total_attempts": len(c.requests),
+			"duration_ms":    time.Since(c.startTime).Milliseconds(),
+			"reason":         "streaming_deadline_no_content",
+		})
+		
+		c.onceDone.Do(func() { close(c.done) })
+		c.onceStream.Do(func() { close(c.streamCh) })
 	}
 }
 

@@ -63,11 +63,12 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
-		RaceRetryEnabled:   true,
-		RaceMaxParallel:    2,
+		UpstreamURL:       server.URL,
+		RaceRetryEnabled:  true,
+		RaceMaxParallel:   2,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        1 * time.Second,
+		MaxGenerationTime:  5 * time.Second, // Allow enough time for request to complete
 		ModelID:            "test-model",
 	}
 
@@ -128,6 +129,7 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 		RaceMaxParallel:    2,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        100 * time.Millisecond, // Fast idle timeout to trigger second spawn
+		MaxGenerationTime:  5 * time.Second,        // Allow enough time for retry
 		ModelID:            "test-model",
 	}
 
@@ -175,6 +177,7 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 		RaceMaxParallel:    3,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        1 * time.Second,
+		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
 		ModelID:            "test-model",
 	}
 
@@ -231,6 +234,7 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		RaceMaxParallel:    3,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        50 * time.Millisecond, // Fast idle timeout
+		MaxGenerationTime:  5 * time.Second,        // Add streaming deadline
 		ModelID:            "test-model",
 	}
 
@@ -273,6 +277,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 		RaceMaxParallel:    3,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        50 * time.Millisecond,
+		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
 		ModelID:            "test-model",
 	}
 
@@ -387,6 +392,7 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 		RaceMaxParallel:    3,
 		RaceMaxBufferBytes: 500, // Small buffer to trigger overflow
 		IdleTimeout:        50 * time.Millisecond,
+		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
 		ModelID:            "test-model",
 	}
 
