@@ -282,6 +282,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
           <p class="text-xs text-gray-400 mt-1">Parameters to remove before forwarding to this model (e.g. unsupported OpenAI params).</p>
         </div>
 
+        {/* STREAM CHUNK DEADLINE: Hidden - feature not used anymore, can be re-enabled later
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1">Stream Chunk Deadline <span class="text-gray-500">(optional)</span></label>
           <div class="relative">
@@ -302,6 +303,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
             Time limit for buffering stream chunks before releasing to client. Impro responsiveness for slow connections. Leave empty for no deadline.
           </p>
         </div>
+        */}
 
         {/* Internal Upstream Section */}
         <div class="border-t border-gray-600 pt-4">

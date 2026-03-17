@@ -183,6 +183,7 @@ export function ModelsTab({
                           ))}
                         </div>
                       )}
+                      {/* STREAM DEADLINE: Hidden - feature not used anymore, can be re-enabled later
                       {model.release_stream_chunk_deadline && (
                         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
                           <span class="text-xs text-gray-500 font-medium">STREAM DEADLINE:</span>
@@ -191,6 +192,7 @@ export function ModelsTab({
                           </span>
                         </div>
                       )}
+                      */}
                     </div>
                   </div>
                   <div class="flex items-center gap-1 flex-shrink-0 ml-4">
