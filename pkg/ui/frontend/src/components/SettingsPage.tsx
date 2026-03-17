@@ -73,6 +73,7 @@ export function SettingsPage({
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
+  const [streamDeadline, setStreamDeadline] = useState('');
   const [maxGenTime, setMaxGenTime] = useState('');
   // Race retry state
   const [raceRetryEnabled, setRaceRetryEnabled] = useState(false);
@@ -102,6 +103,7 @@ export function SettingsPage({
       setPort(config.port || 8089);
       setOriginalPort(config.port || 8089);
       setIdleTimeout(config.idle_timeout || '');
+      setStreamDeadline(config.stream_deadline || '');
       setMaxGenTime(config.max_generation_time || '');
       // Race retry sync
       setRaceRetryEnabled(config.race_retry_enabled ?? false);
@@ -135,6 +137,7 @@ export function SettingsPage({
         upstream_credential_id: upstreamCredentialId,
         port,
         idle_timeout: idleTimeout,
+        stream_deadline: streamDeadline,
         max_generation_time: maxGenTime,
         // Race retry configuration
         race_retry_enabled: raceRetryEnabled,
@@ -326,6 +329,7 @@ export function SettingsPage({
               models={models}
               port={port}
               idleTimeout={idleTimeout}
+              streamDeadline={streamDeadline}
               maxGenTime={maxGenTime}
               originalPort={originalPort}
               raceRetryEnabled={raceRetryEnabled}
@@ -338,6 +342,7 @@ export function SettingsPage({
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
+              onStreamDeadlineChange={setStreamDeadline}
               onMaxGenTimeChange={setMaxGenTime}
               onRaceRetryEnabledChange={setRaceRetryEnabled}
               onRaceParallelOnIdleChange={setRaceParallelOnIdle}

@@ -56,6 +56,7 @@ export interface AppConfig {
   upstream_credential_id?: string;
   port: number;
   idle_timeout: string;
+  stream_deadline: string;
   max_generation_time: string;
   // Race retry configuration (new)
   race_retry_enabled: boolean;

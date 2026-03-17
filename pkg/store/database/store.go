@@ -365,6 +365,13 @@ func (m *ConfigManager) GetIdleTimeout() time.Duration {
 	return time.Duration(m.cfg.IdleTimeout)
 }
 
+// GetStreamDeadline returns the stream deadline for race retry buffer caching
+func (m *ConfigManager) GetStreamDeadline() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.cfg.StreamDeadline)
+}
+
 // GetMaxGenerationTime returns the max generation time
 func (m *ConfigManager) GetMaxGenerationTime() time.Duration {
 	m.mu.RLock()

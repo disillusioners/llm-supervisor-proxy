@@ -68,6 +68,7 @@ type Config struct {
 	UpstreamCredentialID    string              `json:"upstream_credential_id,omitempty"`
 	Port                    int                 `json:"port"`
 	IdleTimeout             Duration            `json:"idle_timeout"`
+	StreamDeadline          Duration            `json:"stream_deadline"`    // Max buffer caching time for race retry - flush buffer to client after this, winner is the one with most content
 	MaxGenerationTime       Duration            `json:"max_generation_time"`
 	MaxRequestTime          Duration            `json:"max_request_time"` // Absolute hard timeout for entire request (including all retries)
 	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
@@ -93,6 +94,7 @@ type ManagerInterface interface {
 	GetUpstreamURL() string
 	GetPort() int
 	GetIdleTimeout() time.Duration
+	GetStreamDeadline() time.Duration
 	GetMaxGenerationTime() time.Duration
 	GetMaxRequestTime() time.Duration
 	GetMaxStreamBufferSize() int
@@ -145,6 +147,7 @@ var Defaults = Config{
 	UpstreamCredentialID:    "",
 	Port:                    4321,
 	IdleTimeout:             Duration(60 * time.Second),
+	StreamDeadline:          Duration(110 * time.Second), // Max buffer caching time for race retry - winner is the one with most content
 	MaxGenerationTime:       Duration(300 * time.Second),
 	MaxRequestTime:          Duration(600 * time.Second), // 10 minutes absolute hard limit
 	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
@@ -208,6 +211,9 @@ func (c *Config) Validate() error {
 	}
 	if c.IdleTimeout < Duration(time.Second) {
 		return errors.New("idle_timeout must be at least 1s")
+	}
+	if c.StreamDeadline < Duration(time.Second) {
+		return errors.New("stream_deadline must be at least 1s")
 	}
 	if c.MaxGenerationTime < Duration(time.Second) {
 		return errors.New("max_generation_time must be at least 1s")
@@ -324,6 +330,11 @@ func (m *Manager) applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.IdleTimeout = Duration(d)
+		}
+	}
+	if v := os.Getenv("STREAM_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.StreamDeadline = Duration(d)
 		}
 	}
 	if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
@@ -500,6 +511,13 @@ func (m *Manager) GetIdleTimeout() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.IdleTimeout.Duration()
+}
+
+// GetStreamDeadline returns the stream deadline for race retry buffer caching
+func (m *Manager) GetStreamDeadline() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.StreamDeadline.Duration()
 }
 
 // GetMaxGenerationTime returns the max generation time

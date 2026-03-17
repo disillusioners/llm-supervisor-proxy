@@ -7,6 +7,7 @@ interface ProxySettingsProps {
   models: Model[];
   port: number;
   idleTimeout: string;
+  streamDeadline: string;
   maxGenTime: string;
   originalPort: number;
   // Race retry fields
@@ -22,6 +23,7 @@ interface ProxySettingsProps {
   onUpstreamCredentialIdChange: (value: string) => void;
   onPortChange: (value: number) => void;
   onIdleTimeoutChange: (value: string) => void;
+  onStreamDeadlineChange: (value: string) => void;
   onMaxGenTimeChange: (value: string) => void;
   onRaceRetryEnabledChange: (value: boolean) => void;
   onRaceParallelOnIdleChange: (value: boolean) => void;
@@ -40,6 +42,7 @@ export function ProxySettings({
   models,
   port,
   idleTimeout,
+  streamDeadline,
   maxGenTime,
   originalPort,
   raceRetryEnabled,
@@ -52,6 +55,7 @@ export function ProxySettings({
   onUpstreamCredentialIdChange,
   onPortChange,
   onIdleTimeoutChange,
+  onStreamDeadlineChange,
   onMaxGenTimeChange,
   onRaceRetryEnabledChange,
   onRaceParallelOnIdleChange,
@@ -155,6 +159,28 @@ export function ProxySettings({
             placeholder="30s"
           />
         </div>
+      </div>
+
+      {/* Stream Deadline */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Stream Deadline</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </span>
+          <input
+            type="text"
+            value={streamDeadline}
+            onInput={(e) => onStreamDeadlineChange((e.target as HTMLInputElement).value)}
+            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="1m50s"
+          />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+          Max buffer caching time for race retry. After this deadline, the request with most content wins and others are cancelled.
+        </p>
       </div>
 
       {/* Max Generation Time */}
