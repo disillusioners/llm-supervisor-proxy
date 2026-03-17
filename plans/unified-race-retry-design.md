@@ -661,7 +661,7 @@ type raceCoordinator struct {
     // Timing
     startTime       time.Time          // When client request arrived
     idleTimeout     time.Duration      // Idle timeout duration
-    streamDeadline  time.Duration      // Max generation time
+    streamDeadline  time.Duration      // Max buffer caching time, must flush buffer to client after this, the winner will be the one with most content at this point and all other requests will be cancelled
     hardDeadline    time.Time          // Absolute deadline (MaxRequestTime)
     
     // State
