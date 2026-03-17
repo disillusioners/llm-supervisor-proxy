@@ -2,7 +2,7 @@
 
 # Test script for Ultimate Model functionality - Internal Path
 # Tests duplicate detection and ultimate model triggering with full OpenAI spec support
-# Maximum runtime: 60 seconds
+# Maximum runtime: 75 seconds
 #
 # This test uses an "internal" model configuration that bypasses the external
 # UPSTREAM_URL and calls the mock server directly via internal_base_url.
@@ -35,8 +35,8 @@ TIMER_PID=""
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Hard timeout: kill everything after 60 seconds
-HARD_TIMEOUT=60
+# Hard timeout: kill everything after 75 seconds (increased for test 8)
+HARD_TIMEOUT=75
 
 cleanup_all() {
     echo -e "\n${YELLOW}Cleaning up all processes...${NC}"
@@ -84,7 +84,7 @@ source "$SCRIPT_DIR/test_mock_clean_ports.sh" "$PROXY_PORT" "$MOCK_PORT"
 clean_ports "$PROXY_PORT" "$MOCK_PORT"
 
 # Start mock OpenAI server (use mock_llm_openai.go for full OpenAI spec support)
-echo -e "\n${YELLOW}[1/10] Starting Mock OpenAI Server (port $MOCK_PORT)...${NC}"
+echo -e "\n${YELLOW}[1/11] Starting Mock OpenAI Server (port $MOCK_PORT)...${NC}"
 cd "$SCRIPT_DIR"
 go run mock_llm_openai.go -port=$MOCK_PORT &
 MOCK_PID=$!
@@ -99,7 +99,7 @@ fi
 echo -e "${GREEN}Mock server started (PID: $MOCK_PID)${NC}"
 
 # Start proxy with ultimate model configured via env override
-echo -e "\n${YELLOW}[2/10] Starting Proxy with Ultimate Model enabled (port $PROXY_PORT)...${NC}"
+echo -e "\n${YELLOW}[2/11] Starting Proxy with Ultimate Model enabled (port $PROXY_PORT)...${NC}"
 echo -e "  ULTIMATE_MODEL_ID=mock-ultimate-model (internal model)"
 echo -e "  ULTIMATE_MODEL_MAX_HASH=100"
 echo -e "  ULTIMATE_MODEL_MAX_RETRIES=2"
@@ -128,7 +128,7 @@ fi
 echo -e "${GREEN}Proxy started (PID: $PROXY_PID)${NC}"
 
 # Configure internal models via API
-echo -e "\n${YELLOW}[3/10] Configuring internal mock models via API...${NC}"
+echo -e "\n${YELLOW}[3/11] Configuring internal mock models via API...${NC}"
 
 # First, delete existing models/credentials from previous runs (ignore errors)
 # Order matters: delete models first (they reference credentials), then credentials
@@ -215,7 +215,7 @@ assert_contains() {
 }
 
 # Test 1: First request (normal - should use regular model with full OpenAI spec)
-echo -e "\n${YELLOW}[4/10] Test 1: First Request (Normal Streaming)${NC}"
+echo -e "\n${YELLOW}[4/11] Test 1: First Request (Normal Streaming)${NC}"
 echo -e "Expected: Uses mock-internal-model via race retry, normal response with DONE marker"
 OUTPUT1=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -231,7 +231,7 @@ assert_contains "$OUTPUT1" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT1" '"content"' "Content delta present"
 
 # Test 2: Duplicate request (should trigger ultimate model)
-echo -e "\n${YELLOW}[5/10] Test 2: Duplicate Request (Ultimate Model Triggered)${NC}"
+echo -e "\n${YELLOW}[5/11] Test 2: Duplicate Request (Ultimate Model Triggered)${NC}"
 echo -e "Expected: Duplicate detected, uses mock-ultimate-model directly (no race retry)"
 OUTPUT2=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -247,7 +247,7 @@ assert_contains "$OUTPUT2" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT2" '"content"' "Content delta present"
 
 # Test 3: First tool call request (normal path)
-echo -e "\n${YELLOW}[6/10] Test 3: First Tool Call Request (Normal Path)${NC}"
+echo -e "\n${YELLOW}[6/11] Test 3: First Tool Call Request (Normal Path)${NC}"
 echo -e "Expected: Uses mock-internal-model via race retry, tool call response"
 OUTPUT3=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -265,7 +265,7 @@ assert_contains "$OUTPUT3" '"finish_reason":"tool_calls"' "finish_reason=tool_ca
 assert_contains "$OUTPUT3" "data: \[DONE\]" "DONE marker present"
 
 # Test 4: Duplicate tool call request (ultimate model path)
-echo -e "\n${YELLOW}[7/10] Test 4: Duplicate Tool Call Request (Ultimate Model Path)${NC}"
+echo -e "\n${YELLOW}[7/11] Test 4: Duplicate Tool Call Request (Ultimate Model Path)${NC}"
 echo -e "Expected: Ultimate model triggered, tool call with full OpenAI spec support"
 OUTPUT4=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -283,7 +283,7 @@ assert_contains "$OUTPUT4" '"finish_reason":"tool_calls"' "finish_reason=tool_ca
 assert_contains "$OUTPUT4" "data: \[DONE\]" "DONE marker present"
 
 # Test 5: First reasoning request (normal path)
-echo -e "\n${YELLOW}[8/10] Test 5: First Reasoning Request (Normal Path)${NC}"
+echo -e "\n${YELLOW}[8/11] Test 5: First Reasoning Request (Normal Path)${NC}"
 echo -e "Expected: Uses mock-internal-model via race retry, reasoning_content present"
 OUTPUT5=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -300,7 +300,7 @@ assert_contains "$OUTPUT5" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT5" "data: \[DONE\]" "DONE marker present"
 
 # Test 6: Duplicate reasoning request (ultimate model path)
-echo -e "\n${YELLOW}[9/10] Test 6: Duplicate Reasoning Request (Ultimate Model Path)${NC}"
+echo -e "\n${YELLOW}[9/11] Test 6: Duplicate Reasoning Request (Ultimate Model Path)${NC}"
 echo -e "Expected: Ultimate model triggered, reasoning_content with full OpenAI spec support"
 OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -316,11 +316,12 @@ assert_contains "$OUTPUT6" '"content"' "Regular content present"
 assert_contains "$OUTPUT6" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT6" "data: \[DONE\]" "DONE marker present"
 
-# Test 7: Retry limit exhausted
-# With MAX_RETRIES=2, the ultimate model can be triggered 2 times for the same hash.
-# After that, the retry limit is exhausted and an error is returned.
-echo -e "\n${YELLOW}[10/10] Test 7: Retry Limit Exhausted${NC}"
-echo -e "Expected: After 2 successful ultimate model calls, 3rd call returns retry_exhausted error"
+# Test 7: Retry counter cleared on success
+# With MAX_RETRIES=2, successful ultimate model calls clear the retry counter.
+# This means multiple successful ultimate model calls should never exhaust.
+# The retry limit only applies to CONSECUTIVE FAILURES.
+echo -e "\n${YELLOW}[10/11] Test 7: Retry Counter Cleared on Success${NC}"
+echo -e "Expected: Multiple successful ultimate model calls work (counter cleared after each success)"
 
 # First: Store hash via normal request
 OUTPUT7A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
@@ -333,7 +334,7 @@ OUTPUT7A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     }" 2>&1)
 assert_contains "$OUTPUT7A" "data: \[DONE\]" "First request: DONE marker present"
 
-# Second: Trigger ultimate model (retry 1/2) - should succeed
+# Second: Trigger ultimate model (retry 1/2) - should succeed and clear counter
 OUTPUT7B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -344,7 +345,7 @@ OUTPUT7B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     }" 2>&1)
 assert_contains "$OUTPUT7B" "data: \[DONE\]" "Second request (retry 1/2): DONE marker present"
 
-# Third: Trigger ultimate model (retry 2/2) - should succeed (2 <= 2)
+# Third: Trigger ultimate model (counter was cleared, so still retry 1/2) - should succeed
 OUTPUT7C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -353,9 +354,9 @@ OUTPUT7C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
         \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT7C" "data: \[DONE\]" "Third request (retry 2/2): DONE marker present"
+assert_contains "$OUTPUT7C" "data: \[DONE\]" "Third request (counter cleared): DONE marker present"
 
-# Fourth: Trigger ultimate model (retry 3/2) - should FAIL with exhausted error
+# Fourth: Trigger ultimate model (counter was cleared again) - should STILL succeed
 OUTPUT7D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -364,8 +365,59 @@ OUTPUT7D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
         \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT7D" 'ultimate_model_retry_exhausted' "Fourth request (retry 3/2): retry_exhausted error"
-assert_contains "$OUTPUT7D" 'attempt 3 of 2 max' "Fourth request: shows attempt count"
+assert_contains "$OUTPUT7D" "data: \[DONE\]" "Fourth request (counter cleared again): DONE marker present"
+
+# Test 8: Retry Limit Exhausted (with consecutive failures)
+# With MAX_RETRIES=2, after 2 consecutive failures, the3rd attempt should return exhausted error.
+# This uses mock-error-500 to force the ultimate model to fail.
+echo -e "\n${YELLOW}[11/11] Test 8: Retry Limit Exhausted (Consecutive Failures)${NC}"
+echo -e "Expected: After 2 consecutive failures, 3rd attempt returns retry_exhausted error"
+
+# First: Store hash via normal request (with error trigger for later)
+OUTPUT8A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "{
+        \"model\": \"mock-internal-model\",
+        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"stream\": true
+    }" 2>&1)
+assert_contains "$OUTPUT8A" "data: \[DONE\]" "First request: DONE marker present"
+
+# Second: Trigger ultimate model (retry 1/2) - will FAIL with 500 error
+OUTPUT8B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "{
+        \"model\": \"mock-internal-model\",
+        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"stream\": true
+    }" 2>&1)
+# This should contain an error (500 from mock server), not DONE
+assert_contains "$OUTPUT8B" "error" "Second request (retry 1/2): Error returned from ultimate model"
+
+# Third: Trigger ultimate model (retry 2/2) - will FAIL again, counter at 2
+OUTPUT8C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "{
+        \"model\": \"mock-internal-model\",
+        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"stream\": true
+    }" 2>&1)
+assert_contains "$OUTPUT8C" "error" "Third request (retry 2/2): Error returned from ultimate model"
+
+# Fourth: Trigger ultimate model (retry 3 > 2) - should FAIL with RETRY EXHAUSTED error
+OUTPUT8D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "{
+        \"model\": \"mock-internal-model\",
+        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"stream\": true
+    }" 2>&1)
+assert_contains "$OUTPUT8D" 'ultimate_model_retry_exhausted' "Fourth request (retry 3/2): retry_exhausted error"
+assert_contains "$OUTPUT8D" 'attempt 3 of 2 max' "Fourth request: shows attempt count"
 
 # Summary
 echo -e "\n${BLUE}======================================${NC}"
@@ -387,7 +439,8 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo -e "  ${YELLOW}✓${NC} Reasoning content (DeepSeek-style)"
     echo -e "  ${YELLOW}✓${NC} Ultimate model triggered on duplicate requests"
     echo -e "  ${YELLOW}✓${NC} Ultimate model supports full OpenAI spec"
-    echo -e "  ${YELLOW}✓${NC} Retry limit enforced (MAX_RETRIES=2)"
+    echo -e "  ${YELLOW}✓${NC} Retry counter cleared on success (prevents false exhaustion)"
+    echo -e "  ${YELLOW}✓${NC} Retry limit enforced after consecutive failures (MAX_RETRIES=2)"
     # Cancel the hard timeout timer
     kill $TIMER_PID 2>/dev/null || true
     TIMER_PID=""
