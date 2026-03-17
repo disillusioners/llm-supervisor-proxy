@@ -373,6 +373,14 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 						Content: contentStr,
 					}
 				}
+				// Handle reasoning_content (DeepSeek-style thinking)
+				// Parse from raw chunk since it's not in the standard struct
+				if reasoningContent := extractReasoningContent([]byte(data)); reasoningContent != "" {
+					eventCh <- StreamEvent{
+						Type:             "thinking",
+						ReasoningContent: reasoningContent,
+					}
+				}
 				// Handle tool_calls in streaming - accumulate them
 				if len(choice.Delta.ToolCalls) > 0 {
 					for _, tc := range choice.Delta.ToolCalls {
@@ -464,4 +472,23 @@ func parseRetryAfter(header string) time.Duration {
 	}
 
 	return 0
+}
+
+// extractReasoningContent extracts reasoning_content field from raw JSON chunk
+// This is used for DeepSeek-style thinking models that include reasoning_content in deltas
+func extractReasoningContent(data []byte) string {
+	var rawChunk struct {
+		Choices []struct {
+			Delta struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &rawChunk); err != nil {
+		return ""
+	}
+	if len(rawChunk.Choices) > 0 {
+		return rawChunk.Choices[0].Delta.ReasoningContent
+	}
+	return ""
 }

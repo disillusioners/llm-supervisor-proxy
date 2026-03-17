@@ -333,7 +333,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			}
 
 		case "thinking":
-			// Write thinking/reasoning content
+			// Write thinking/reasoning content (DeepSeek-style reasoning_content field)
 			// Use map to control exactly what gets serialized
 			chunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -344,7 +344,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 					{
 						"index": 0,
 						"delta": map[string]interface{}{
-							"content": event.Content,
+							"reasoning_content": event.ReasoningContent,
 						},
 					},
 				},

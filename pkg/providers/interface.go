@@ -115,12 +115,13 @@ type Usage struct {
 
 // StreamEvent represents a normalized streaming event
 type StreamEvent struct {
-	Type         string                  // "content", "tool_call", "done", "error"
-	Content      string                  // Text content delta
-	ToolCalls    []ToolCall              // Tool call deltas for "tool_call" event
-	FinishReason string                  // Finish reason if type is "done"
-	Error        error                   // Error if type is "error"
-	Response     *ChatCompletionResponse // Full response for "done" event
+	Type             string                  // "content", "tool_call", "thinking", "done", "error"
+	Content          string                  // Text content delta
+	ReasoningContent string                  // Reasoning content delta (DeepSeek-style)
+	ToolCalls        []ToolCall              // Tool call deltas for "tool_call" event
+	FinishReason     string                  // Finish reason if type is "done"
+	Error            error                   // Error if type is "error"
+	Response         *ChatCompletionResponse // Full response for "done" event
 }
 
 // ProviderError wraps provider-specific errors with retry information
