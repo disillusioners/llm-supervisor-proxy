@@ -52,7 +52,8 @@ type requestContext struct {
 
 	// Tool call argument builders - avoids string += memory trap in streaming
 	// Each index corresponds to accumulatedToolCalls[index]
-	toolCallArgBuilders []strings.Builder
+	// Uses pointers to avoid copying strings.Builder when slice grows
+	toolCallArgBuilders []*strings.Builder
 
 	// Stream buffer for retry-safe streaming
 	// Chunks are buffered until stream completes successfully, then flushed to client
@@ -282,7 +283,7 @@ func extractNonStreamContent(bodyBytes []byte, response, thinking *strings.Build
 // toolCallsAccum and toolCallArgBuilders must both be non-nil and are used together:
 // - toolCallsAccum tracks ID, type, and function name per index
 // - toolCallArgBuilders tracks the arguments string per index (avoids += memory trap)
-func extractStreamChunkContent(data []byte, response, thinking *strings.Builder, toolCallsAccum *[]store.ToolCall, toolCallArgBuilders *[]strings.Builder) {
+func extractStreamChunkContent(data []byte, response, thinking *strings.Builder, toolCallsAccum *[]store.ToolCall, toolCallArgBuilders *[]*strings.Builder) {
 	var chunk map[string]interface{}
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return
@@ -331,7 +332,7 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 			// Ensure accumulator has enough capacity
 			for len(*toolCallsAccum) <= idx {
 				*toolCallsAccum = append(*toolCallsAccum, store.ToolCall{})
-				*toolCallArgBuilders = append(*toolCallArgBuilders, strings.Builder{})
+				*toolCallArgBuilders = append(*toolCallArgBuilders, &strings.Builder{})
 			}
 
 			// Update tool call at index

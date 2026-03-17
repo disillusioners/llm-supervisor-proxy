@@ -109,9 +109,10 @@ echo -e "${GREEN}Proxy started (PID: $PROXY_PID)${NC}"
 # Configure internal model via API
 echo -e "\n${YELLOW}[3/8] Configuring internal mock model via API...${NC}"
 
-# Create credential
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-openai-cred" 2>/dev/null || true
+# Delete model first (must be done before credential), then credential
 curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-openai-model" 2>/dev/null || true
+sleep 0.5
+curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-openai-cred" 2>/dev/null || true
 sleep 1
 
 CREDENTIAL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/credentials" \
