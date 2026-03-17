@@ -89,52 +89,98 @@ func (h *Handler) handleInternalStream(
 		return fmt.Errorf("streaming not supported")
 	}
 
+	// Track state for proper streaming format
+	firstChunk := true
+	nextToolCallIndex := 0
+	seenToolCallIDs := make(map[string]int)
+
 	for event := range eventCh {
 		switch event.Type {
 		case "content":
 			// Write SSE data event
-			chunk := providers.ChatCompletionResponse{
-				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   internalModel,
-				Choices: []providers.Choice{
-					{
-						Index: 0,
-						Delta: &providers.ChatMessage{
-							Role:    "assistant",
-							Content: event.Content,
+			// OpenAI streaming format: role is only present in FIRST chunk
+			// Use map to control exactly what gets serialized (avoid zero-value string issue)
+			var data []byte
+			if firstChunk {
+				// First chunk includes role
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"role":    "assistant",
+								"content": event.Content,
+							},
 						},
 					},
-				},
+				}
+				data, _ = json.Marshal(chunk)
+			} else {
+				// Subsequent chunks: NO role field at all (not even empty string)
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"content": event.Content,
+							},
+						},
+					},
+				}
+				data, _ = json.Marshal(chunk)
 			}
-			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+			firstChunk = false
 
 		case "tool_call":
 			// Write tool_call delta
+			// Must include index field for each tool call (required for streaming)
 			if len(event.ToolCalls) > 0 {
-				tc := event.ToolCalls[0]
-				chunk := providers.ChatCompletionResponse{
-					ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-					Object:  "chat.completion.chunk",
-					Created: time.Now().Unix(),
-					Model:   internalModel,
-					Choices: []providers.Choice{
+				toolCalls := make([]map[string]interface{}, len(event.ToolCalls))
+				for i, tc := range event.ToolCalls {
+					// Assign index based on tool call ID if seen before, otherwise use next available
+					var index int
+					if tc.ID != "" {
+						if idx, seen := seenToolCallIDs[tc.ID]; seen {
+							index = idx
+						} else {
+							index = nextToolCallIndex
+							seenToolCallIDs[tc.ID] = index
+							nextToolCallIndex++
+						}
+					} else {
+						// No ID, use position-based index
+						index = i
+					}
+					toolCalls[i] = map[string]interface{}{
+						"index": index,
+						"id":    tc.ID,
+						"type":  tc.Type,
+						"function": map[string]interface{}{
+							"name":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+						},
+					}
+				}
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
 						{
-							Index: 0,
-							Delta: &providers.ChatMessage{
-								ToolCalls: []providers.ToolCall{
-									{
-										ID:   tc.ID,
-										Type: tc.Type,
-										Function: providers.ToolCallFunction{
-											Name:      tc.Function.Name,
-											Arguments: tc.Function.Arguments,
-										},
-									},
-								},
+							"index": 0,
+							"delta": map[string]interface{}{
+								"tool_calls": toolCalls,
 							},
 						},
 					},
@@ -145,19 +191,18 @@ func (h *Handler) handleInternalStream(
 			}
 
 		case "thinking":
-			// Write thinking/reasoning content
-			// Note: Some providers may support reasoning content in the future
-			// For now, we treat it as regular content
-			chunk := providers.ChatCompletionResponse{
-				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   internalModel,
-				Choices: []providers.Choice{
+			// Write thinking/reasoning content (DeepSeek-style reasoning_content field)
+			// Use map to control exactly what gets serialized
+			chunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
 					{
-						Index: 0,
-						Delta: &providers.ChatMessage{
-							Content: event.Content,
+						"index": 0,
+						"delta": map[string]interface{}{
+							"reasoning_content": event.ReasoningContent,
 						},
 					},
 				},
@@ -196,19 +241,23 @@ func (h *Handler) handleInternalStream(
 
 		case "error":
 			// Write error as SSE event
-			log.Printf("[UltimateModel] Stream error from provider: %s", event.Content)
+			errMsg := "unknown error"
+			if event.Error != nil {
+				errMsg = event.Error.Error()
+			}
+			log.Printf("[UltimateModel] Stream error from provider: %s", errMsg)
 			// If headers not sent, we can return error
 			// Otherwise, we need to send SSE error
 			errorChunk := map[string]interface{}{
 				"error": map[string]string{
-					"message": event.Content,
+					"message": errMsg,
 					"type":    "ultimate_model_error",
 				},
 			}
 			data, _ := json.Marshal(errorChunk)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
-			return fmt.Errorf("provider stream error: %s", event.Content)
+			return fmt.Errorf("provider stream error: %s", errMsg)
 		}
 	}
 
