@@ -299,8 +299,8 @@ func (c *raceCoordinator) manage() {
 // handleStreamingDeadline picks the best buffer when MaxGenerationTime is reached
 // Per the unified race retry design:
 // - Pick the request with the most content (best candidate to continue)
-// - Cancel the winner to stop waiting for more data
-// - Cancel only the other requests (they were already cancelled by the previous code)
+// - DON'T cancel the winner - let it continue streaming until complete or hardDeadline
+// - Cancel only the other requests
 func (c *raceCoordinator) handleStreamingDeadline() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -344,9 +344,9 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 		// Signal that streaming can start
 		c.onceStream.Do(func() { close(c.streamCh) })
 
-		// Cancel the winner to stop waiting for more data
-		// This ensures streamResult() doesn't wait forever
-		best.Cancel()
+		// DON'T cancel the winner - let it continue streaming until complete or hardDeadline
+		// This is per the unified race retry design: "Continue streaming winner until complete or hard deadline"
+		// The winner was picked because it has the most content, so we want to keep receiving more data.
 
 		// Cancel only the other requests
 		for _, req := range c.requests {
