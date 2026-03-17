@@ -399,3 +399,47 @@ func TestHashCache_ConcurrentRetryCounter(t *testing.T) {
 		t.Errorf("Expected final count=10, got %d", count)
 	}
 }
+
+func TestHashCache_Contains(t *testing.T) {
+	cache := NewHashCache(10)
+
+	// Empty cache should not contain any hash
+	if cache.Contains("hash1") {
+		t.Error("Empty cache should not contain hash1")
+	}
+
+	// Store a hash
+	cache.StoreAndCheck("hash1")
+
+	// Now it should contain the hash
+	if !cache.Contains("hash1") {
+		t.Error("Cache should contain hash1 after StoreAndCheck")
+	}
+
+	// Different hash should not be found
+	if cache.Contains("hash2") {
+		t.Error("Cache should not contain hash2")
+	}
+
+	// Store another hash
+	cache.StoreAndCheck("hash2")
+
+	// Both should be found
+	if !cache.Contains("hash1") {
+		t.Error("Cache should contain hash1")
+	}
+	if !cache.Contains("hash2") {
+		t.Error("Cache should contain hash2")
+	}
+
+	// Remove hash1
+	cache.Remove("hash1")
+
+	// hash1 should not be found after removal
+	if cache.Contains("hash1") {
+		t.Error("Cache should not contain hash1 after removal")
+	}
+	if !cache.Contains("hash2") {
+		t.Error("Cache should still contain hash2")
+	}
+}

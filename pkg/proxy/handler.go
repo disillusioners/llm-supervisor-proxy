@@ -434,8 +434,21 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	case <-rc.baseCtx.Done():
 		return
 	default:
-		// All attempts failed
+		// All attempts failed - mark for ultimate model retry
 		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
+
+		// Mark this request as failed so ultimate model can be triggered on retry
+		if h.ultimateHandler != nil {
+			if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+				msgMaps := make([]map[string]interface{}, len(messages))
+				for i, msg := range messages {
+					if m, ok := msg.(map[string]interface{}); ok {
+						msgMaps[i] = m
+					}
+				}
+				h.ultimateHandler.MarkFailed(msgMaps)
+			}
+		}
 
 		statusCode := http.StatusBadGateway // Default 502
 		// Check if all requests failed with same HTTP status
@@ -559,10 +572,25 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// If stream failed, send error event to client
 			if err := buffer.Err(); err != nil {
 				log.Printf("[ERROR] Stream buffer closed with error: %v", err)
+
+				// Mark this request as failed so ultimate model can be triggered on retry
+				if h.ultimateHandler != nil {
+					if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+						msgMaps := make([]map[string]interface{}, len(messages))
+						for i, msg := range messages {
+							if m, ok := msg.(map[string]interface{}); ok {
+								msgMaps[i] = m
+							}
+						}
+						h.ultimateHandler.MarkFailed(msgMaps)
+					}
+				}
+
 				fmt.Fprintf(w, "data: {\"error\": {\"message\": \"Streaming error: %v\", \"type\": \"server_error\"}}\n\n", err)
 				if flusher != nil {
 					flusher.Flush()
 				}
+				return
 			}
 			
 			// Finalize tool call arguments from builders

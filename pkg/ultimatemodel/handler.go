@@ -47,12 +47,13 @@ func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterf
 }
 
 // ShouldTrigger checks if ultimate model should be triggered.
-// It stores the hash and returns true if:
+// It ONLY checks if hash exists (does NOT store hash).
+// Returns true if:
 // 1. Ultimate model is configured (non-empty ModelID)
-// 2. This request hash was already in cache (duplicate)
+// 2. This request hash was already in cache (previously failed)
 //
-// IMPORTANT: This method atomically increments the retry counter when triggered.
-// This prevents TOCTOU race condition between check and increment.
+// IMPORTANT: Hash is only stored when MarkFailed is called after a failure.
+// This prevents simple messages like "hi", "hello" from triggering ultimate model.
 func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTriggerResult {
 	cfg := h.config.Get()
 	if cfg.UltimateModel.ModelID == "" {
@@ -67,10 +68,9 @@ func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTrigger
 	// Generate hash from messages (role + content only)
 	hash := HashMessages(messages)
 
-	// StoreAndCheck: atomic store-first, returns true if was already present
-	wasDuplicate := h.hashCache.StoreAndCheck(hash)
-
-	if !wasDuplicate {
+	// Only CHECK if hash exists (don't store)
+	// Hash is only stored when MarkFailed is called
+	if !h.hashCache.Contains(hash) {
 		return ShouldTriggerResult{Triggered: false, Hash: hash}
 	}
 
@@ -97,6 +97,20 @@ func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTrigger
 		CurrentRetry:   newCount,
 		MaxRetries:     maxRetries,
 	}
+}
+
+// MarkFailed stores the hash to mark this request as failed.
+// This should be called when a normal request fails, so subsequent
+// retries can trigger the ultimate model.
+// Returns the computed hash for reference.
+func (h *Handler) MarkFailed(messages []map[string]interface{}) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	hash := HashMessages(messages)
+	h.hashCache.StoreAndCheck(hash) // Store hash to mark as failed
+	return hash
 }
 
 // GetModelID returns the configured ultimate model ID

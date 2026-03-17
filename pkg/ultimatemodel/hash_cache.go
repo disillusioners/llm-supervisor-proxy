@@ -95,6 +95,19 @@ func (c *HashCache) Remove(hash string) {
 	delete(c.retryCounter, hash)
 }
 
+// Contains checks if a hash exists in the cache without storing it.
+// Returns true if the hash is present, false otherwise.
+func (c *HashCache) Contains(hash string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := 0; i < c.count; i++ {
+		if c.hashes[i] == hash {
+			return true
+		}
+	}
+	return false
+}
+
 // Reset clears all hashes from the cache.
 // This is called when the ultimate_model_id config changes.
 func (c *HashCache) Reset() {

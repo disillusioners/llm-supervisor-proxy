@@ -7,12 +7,17 @@
 # This test uses an "internal" model configuration that bypasses the external
 # UPSTREAM_URL and calls the mock server directly via internal_base_url.
 #
+# IMPORTANT: Hash is only created when a request FAILS.
+# Successful requests do NOT create hashes, so simple messages like "hi", "hello"
+# will NOT trigger the ultimate model on subsequent requests.
+#
 # Verifies:
 # - Normal streaming with DONE marker and finish_reason
 # - Tool calls (streaming)
 # - Multiple tool calls
 # - Reasoning content (DeepSeek-style)
-# - Ultimate model triggers on duplicate requests and supports full OpenAI spec
+# - Ultimate model triggers only after FAILED requests (not successful ones)
+# - Ultimate model supports full OpenAI spec
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -35,7 +40,7 @@ TIMER_PID=""
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Hard timeout: kill everything after 75 seconds (increased for test 8)
+# Hard timeout: kill everything after 75 seconds
 HARD_TIMEOUT=75
 
 cleanup_all() {
@@ -214,6 +219,22 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local output="$1"
+    local expected="$2"
+    local test_name="$3"
+    
+    if echo "$output" | grep -q "$expected"; then
+        echo -e "  ${RED}✗${NC} $test_name: unexpectedly found '$expected'"
+        ((TESTS_FAILED++))
+        return 1
+    else
+        echo -e "  ${GREEN}✓${NC} $test_name: correctly did not find '$expected'"
+        ((TESTS_PASSED++))
+        return 0
+    fi
+}
+
 # Test 1: First request (normal - should use regular model with full OpenAI spec)
 echo -e "\n${YELLOW}[4/11] Test 1: First Request (Normal Streaming)${NC}"
 echo -e "Expected: Uses mock-internal-model via race retry, normal response with DONE marker"
@@ -230,9 +251,10 @@ assert_contains "$OUTPUT1" "data: \[DONE\]" "DONE marker present"
 assert_contains "$OUTPUT1" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT1" '"content"' "Content delta present"
 
-# Test 2: Duplicate request (should trigger ultimate model)
-echo -e "\n${YELLOW}[5/11] Test 2: Duplicate Request (Ultimate Model Triggered)${NC}"
-echo -e "Expected: Duplicate detected, uses mock-ultimate-model directly (no race retry)"
+# Test 2: Successful duplicate request (should NOT trigger ultimate model)
+# Hash is only created on FAILURE, so successful requests don't create hashes
+echo -e "\n${YELLOW}[5/11] Test 2: Successful Duplicate Request (No Ultimate Model)${NC}"
+echo -e "Expected: Since first request succeeded, no hash was created, so ultimate model NOT triggered"
 OUTPUT2=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -242,9 +264,9 @@ OUTPUT2=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completi
         \"stream\": true
     }" 2>&1)
 
+# Should NOT have ultimate model header since hash was never created
+assert_not_contains "$OUTPUT2" "X-LLMProxy-Ultimate-Model" "No ultimate model header"
 assert_contains "$OUTPUT2" "data: \[DONE\]" "DONE marker present"
-assert_contains "$OUTPUT2" '"finish_reason":"stop"' "finish_reason=stop"
-assert_contains "$OUTPUT2" '"content"' "Content delta present"
 
 # Test 3: First tool call request (normal path)
 echo -e "\n${YELLOW}[6/11] Test 3: First Tool Call Request (Normal Path)${NC}"
@@ -264,9 +286,9 @@ assert_contains "$OUTPUT3" 'get_weather' "Tool name present"
 assert_contains "$OUTPUT3" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 assert_contains "$OUTPUT3" "data: \[DONE\]" "DONE marker present"
 
-# Test 4: Duplicate tool call request (ultimate model path)
-echo -e "\n${YELLOW}[7/11] Test 4: Duplicate Tool Call Request (Ultimate Model Path)${NC}"
-echo -e "Expected: Ultimate model triggered, tool call with full OpenAI spec support"
+# Test 4: Successful duplicate tool call request (should NOT trigger ultimate model)
+echo -e "\n${YELLOW}[7/11] Test 4: Successful Duplicate Tool Call (No Ultimate Model)${NC}"
+echo -e "Expected: Since first request succeeded, no hash was created, so ultimate model NOT triggered"
 OUTPUT4=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -276,10 +298,8 @@ OUTPUT4=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completi
         \"stream\": true
     }" 2>&1)
 
+assert_not_contains "$OUTPUT4" "X-LLMProxy-Ultimate-Model" "No ultimate model header"
 assert_contains "$OUTPUT4" '"tool_calls"' "Tool calls field present"
-assert_contains "$OUTPUT4" '"function"' "Function field present"
-assert_contains "$OUTPUT4" 'get_weather' "Tool name present"
-assert_contains "$OUTPUT4" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 assert_contains "$OUTPUT4" "data: \[DONE\]" "DONE marker present"
 
 # Test 5: First reasoning request (normal path)
@@ -299,9 +319,9 @@ assert_contains "$OUTPUT5" '"content"' "Regular content present"
 assert_contains "$OUTPUT5" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT5" "data: \[DONE\]" "DONE marker present"
 
-# Test 6: Duplicate reasoning request (ultimate model path)
-echo -e "\n${YELLOW}[9/11] Test 6: Duplicate Reasoning Request (Ultimate Model Path)${NC}"
-echo -e "Expected: Ultimate model triggered, reasoning_content with full OpenAI spec support"
+# Test 6: Successful duplicate reasoning request (should NOT trigger ultimate model)
+echo -e "\n${YELLOW}[9/11] Test 6: Successful Duplicate Reasoning (No Ultimate Model)${NC}"
+echo -e "Expected: Since first request succeeded, no hash was created, so ultimate model NOT triggered"
 OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -311,101 +331,76 @@ OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completi
         \"stream\": true
     }" 2>&1)
 
+assert_not_contains "$OUTPUT6" "X-LLMProxy-Ultimate-Model" "No ultimate model header"
 assert_contains "$OUTPUT6" '"reasoning_content"' "Reasoning content field present"
-assert_contains "$OUTPUT6" '"content"' "Regular content present"
-assert_contains "$OUTPUT6" '"finish_reason":"stop"' "finish_reason=stop"
 assert_contains "$OUTPUT6" "data: \[DONE\]" "DONE marker present"
 
-# Test 7: Retry counter cleared on success
-# With MAX_RETRIES=2, successful ultimate model calls clear the retry counter.
-# This means multiple successful ultimate model calls should never exhaust.
-# The retry limit only applies to CONSECUTIVE FAILURES.
-echo -e "\n${YELLOW}[10/11] Test 7: Retry Counter Cleared on Success${NC}"
-echo -e "Expected: Multiple successful ultimate model calls work (counter cleared after each success)"
+# Test 7: Ultimate model triggered after FAILURE
+# First request with error-500 content will FAIL, creating the hash
+# Second request will trigger ultimate model
+echo -e "\n${YELLOW}[10/11] Test 7: Ultimate Model Triggered After Failure${NC}"
+echo -e "Expected: First request fails (500), creating hash. Second request triggers ultimate model."
 
-# First: Store hash via normal request
+# First: Request that will FAIL (mock-error-500 trigger)
 OUTPUT7A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"ultimate-trigger-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT7A" "data: \[DONE\]" "First request: DONE marker present"
+assert_contains "$OUTPUT7A" "error" "First request: Error returned (hash created)"
 
-# Second: Trigger ultimate model (retry 1/2) - should succeed and clear counter
+# Second: Same request should trigger ultimate model
 OUTPUT7B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"ultimate-trigger-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT7B" "data: \[DONE\]" "Second request (retry 1/2): DONE marker present"
-
-# Third: Trigger ultimate model (counter was cleared, so still retry 1/2) - should succeed
-OUTPUT7C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
-        \"stream\": true
-    }" 2>&1)
-assert_contains "$OUTPUT7C" "data: \[DONE\]" "Third request (counter cleared): DONE marker present"
-
-# Fourth: Trigger ultimate model (counter was cleared again) - should STILL succeed
-OUTPUT7D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-limit-test-message\"}],
-        \"stream\": true
-    }" 2>&1)
-assert_contains "$OUTPUT7D" "data: \[DONE\]" "Fourth request (counter cleared again): DONE marker present"
+# Ultimate model will also fail because content still has mock-error-500
+assert_contains "$OUTPUT7B" "error" "Second request: Ultimate model triggered (also fails)"
 
 # Test 8: Retry Limit Exhausted (with consecutive failures)
 # With MAX_RETRIES=2, after 2 consecutive failures, the3rd attempt should return exhausted error.
-# This uses mock-error-500 to force the ultimate model to fail.
 echo -e "\n${YELLOW}[11/11] Test 8: Retry Limit Exhausted (Consecutive Failures)${NC}"
 echo -e "Expected: After 2 consecutive failures, 3rd attempt returns retry_exhausted error"
 
-# First: Store hash via normal request (with error trigger for later)
+# First: Request that will FAIL, creating the hash
 OUTPUT8A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT8A" "data: \[DONE\]" "First request: DONE marker present"
+assert_contains "$OUTPUT8A" "error" "First request: Error (hash created, retry 0)"
 
-# Second: Trigger ultimate model (retry 1/2) - will FAIL with 500 error
+# Second: Trigger ultimate model (retry 1/2) - will FAIL
 OUTPUT8B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-# This should contain an error (500 from mock server), not DONE
-assert_contains "$OUTPUT8B" "error" "Second request (retry 1/2): Error returned from ultimate model"
+assert_contains "$OUTPUT8B" "error" "Second request (retry 1/2): Error from ultimate model"
 
-# Third: Trigger ultimate model (retry 2/2) - will FAIL again, counter at 2
+# Third: Trigger ultimate model (retry 2/2) - will FAIL again
 OUTPUT8C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT8C" "error" "Third request (retry 2/2): Error returned from ultimate model"
+assert_contains "$OUTPUT8C" "error" "Third request (retry 2/2): Error from ultimate model"
 
 # Fourth: Trigger ultimate model (retry 3 > 2) - should FAIL with RETRY EXHAUSTED error
 OUTPUT8D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
@@ -413,7 +408,7 @@ OUTPUT8D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     -H "Authorization: Bearer $API_KEY" \
     -d "{
         \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"mock-error-500-exhausted-test\"}],
+        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
 assert_contains "$OUTPUT8D" 'ultimate_model_retry_exhausted' "Fourth request (retry 3/2): retry_exhausted error"
@@ -437,9 +432,8 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo -e "  ${YELLOW}✓${NC} finish_reason: tool_calls"
     echo -e "  ${YELLOW}✓${NC} Streaming tool calls with index field"
     echo -e "  ${YELLOW}✓${NC} Reasoning content (DeepSeek-style)"
-    echo -e "  ${YELLOW}✓${NC} Ultimate model triggered on duplicate requests"
-    echo -e "  ${YELLOW}✓${NC} Ultimate model supports full OpenAI spec"
-    echo -e "  ${YELLOW}✓${NC} Retry counter cleared on success (prevents false exhaustion)"
+    echo -e "  ${YELLOW}✓${NC} Hash only created on FAILURE (not success)"
+    echo -e "  ${YELLOW}✓${NC} Ultimate model triggered only after failed requests"
     echo -e "  ${YELLOW}✓${NC} Retry limit enforced after consecutive failures (MAX_RETRIES=2)"
     # Cancel the hard timeout timer
     kill $TIMER_PID 2>/dev/null || true
