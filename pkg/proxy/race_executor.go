@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 )
 
 // executeRequest performs the actual HTTP call to upstream
@@ -141,7 +143,9 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 	// Streaming response
 	req.MarkStreaming()
-	return handleStreamingResponse(ctx, cfg, resp, req)
+	// Detect provider for normalization
+	provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
+	return handleStreamingResponse(ctx, cfg, resp, req, provider)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -415,7 +419,7 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 }
 
 // handleStreamingResponse handles SSE streaming responses
-func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest) error {
+func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
@@ -425,6 +429,12 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 	defer idleTimer.Stop()
 
 	sawDone := false
+
+	// Create normalization context for this stream
+	normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
+
+	// Reset normalizer state for this new stream to avoid state leakage
+	normalizers.GetRegistry().ResetAll(normCtx)
 
 	for {
 		// Set idle timeout for reading
@@ -465,8 +475,14 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 				line = line[:len(line)-1]
 			}
 
+			// Apply normalization to fix malformed chunks
+			normalizedLine, modified := normalizers.NormalizeWithContext(line, normCtx)
+			if modified {
+				log.Printf("[DEBUG] Race attempt %d: normalized malformed stream chunk", req.id)
+			}
+
 			// Add chunk to buffer
-			if !req.buffer.Add(line) {
+			if !req.buffer.Add(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded")
 			}
 
