@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 )
 
 // spawnTrigger indicates why parallel requests are being spawned
@@ -42,9 +44,17 @@ type raceCoordinator struct {
 	// Metrics for logging/monitoring
 	startTime       time.Time
 	spawnTriggers   []spawnTrigger // Track why requests were spawned
+	
+	// Event publishing
+	eventBus  *events.Bus
+	requestID string
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string) *raceCoordinator {
+	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "")
+}
+
+func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, eventBus *events.Bus, requestID string) *raceCoordinator {
 	if len(models) == 0 {
 		models = []string{cfg.ModelID}
 	}
@@ -60,12 +70,35 @@ func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Requ
 		streamCh:      make(chan struct{}),
 		startTime:     time.Now(),
 		spawnTriggers: make([]spawnTrigger, 0),
+		eventBus:      eventBus,
+		requestID:     requestID,
 	}
+}
+
+// publishEvent publishes an event to the event bus if available
+func (c *raceCoordinator) publishEvent(eventType string, data map[string]interface{}) {
+	if c.eventBus == nil {
+		return
+	}
+	// Always include request ID for correlation
+	if c.requestID != "" {
+		data["id"] = c.requestID
+	}
+	c.eventBus.Publish(events.Event{
+		Type:      eventType,
+		Timestamp: time.Now().Unix(),
+		Data:      data,
+	})
 }
 
 // Start initiates the race
 func (c *raceCoordinator) Start() {
 	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
+	
+	// Publish race_started event
+	c.publishEvent("race_started", map[string]interface{}{
+		"models": c.models,
+	})
 	
 	// 1. Spawn main request (no trigger - it's the initial request)
 	c.spawn(modelTypeMain, "")
@@ -90,6 +123,14 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, trigger spawnTrigger) {
 	c.spawnTriggers = append(c.spawnTriggers, trigger)
 
 	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, trigger)
+
+	// Publish race_spawn event
+	c.publishEvent("race_spawn", map[string]interface{}{
+		"request_index": idx,
+		"model":         modelID,
+		"type":          string(mType),
+		"trigger":       string(trigger),
+	})
 
 	// Execute in background
 	go c.execute(req)
@@ -128,6 +169,16 @@ func (c *raceCoordinator) manage() {
 							bufferLen := req.buffer.TotalLen()
 							log.Printf("[RACE] Winner selected: request %d (%s, %s) after %v, buffer=%d bytes",
 								i, req.modelType, req.modelID, elapsed.Round(time.Millisecond), bufferLen)
+							
+							// Publish race_winner_selected event
+							c.publishEvent("race_winner_selected", map[string]interface{}{
+								"winner_index":  c.winnerIdx,
+								"winner_type":   string(c.winner.modelType),
+								"winner_model":  c.winner.modelID,
+								"duration_ms":   elapsed.Milliseconds(),
+								"buffer_bytes":  bufferLen,
+							})
+							
 							c.onceStream.Do(func() { close(c.streamCh) })
 						}
 					}
@@ -204,6 +255,13 @@ func (c *raceCoordinator) manage() {
 				}
 				if allFailed {
 					log.Printf("[RACE] All requests failed")
+					
+					// Publish race_all_failed event
+					c.publishEvent("race_all_failed", map[string]interface{}{
+						"total_attempts": len(c.requests),
+						"duration_ms":    time.Since(c.startTime).Milliseconds(),
+					})
+					
 					c.mu.Unlock()
 					c.onceDone.Do(func() { close(c.done) })
 					c.onceStream.Do(func() { close(c.streamCh) })

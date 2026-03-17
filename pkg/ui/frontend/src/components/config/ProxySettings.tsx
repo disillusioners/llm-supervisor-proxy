@@ -7,24 +7,26 @@ interface ProxySettingsProps {
   models: Model[];
   port: number;
   idleTimeout: string;
-  maxUpstreamErrorRetries: number;
-  maxIdleRetries: number;
-  maxGenerationRetries: number;
   maxGenTime: string;
-  shadowRetryEnabled: boolean;
   originalPort: number;
+  // Race retry fields
+  raceRetryEnabled: boolean;
+  raceParallelOnIdle: boolean;
+  raceMaxParallel: number;
+  raceMaxBufferBytes: number;
   // Ultimate model fields
   ultimateModelId: string;
   ultimateModelMaxHash: number;
+  // Handlers
   onUpstreamUrlChange: (value: string) => void;
   onUpstreamCredentialIdChange: (value: string) => void;
   onPortChange: (value: number) => void;
   onIdleTimeoutChange: (value: string) => void;
-  onMaxUpstreamErrorRetriesChange: (value: number) => void;
-  onMaxIdleRetriesChange: (value: number) => void;
-  onMaxGenerationRetriesChange: (value: number) => void;
   onMaxGenTimeChange: (value: string) => void;
-  onShadowRetryEnabledChange: (value: boolean) => void;
+  onRaceRetryEnabledChange: (value: boolean) => void;
+  onRaceParallelOnIdleChange: (value: boolean) => void;
+  onRaceMaxParallelChange: (value: number) => void;
+  onRaceMaxBufferBytesChange: (value: number) => void;
   onUltimateModelIdChange: (value: string) => void;
   onUltimateModelMaxHashChange: (value: number) => void;
   onApply: () => Promise<void>;
@@ -38,23 +40,23 @@ export function ProxySettings({
   models,
   port,
   idleTimeout,
-  maxUpstreamErrorRetries,
-  maxIdleRetries,
-  maxGenerationRetries,
   maxGenTime,
-  shadowRetryEnabled,
   originalPort,
+  raceRetryEnabled,
+  raceParallelOnIdle,
+  raceMaxParallel,
+  raceMaxBufferBytes,
   ultimateModelId,
   ultimateModelMaxHash,
   onUpstreamUrlChange,
   onUpstreamCredentialIdChange,
   onPortChange,
   onIdleTimeoutChange,
-  onMaxUpstreamErrorRetriesChange,
-  onMaxIdleRetriesChange,
-  onMaxGenerationRetriesChange,
   onMaxGenTimeChange,
-  onShadowRetryEnabledChange,
+  onRaceRetryEnabledChange,
+  onRaceParallelOnIdleChange,
+  onRaceMaxParallelChange,
+  onRaceMaxBufferBytesChange,
   onUltimateModelIdChange,
   onUltimateModelMaxHashChange,
   onApply,
@@ -155,89 +157,6 @@ export function ProxySettings({
         </div>
       </div>
 
-      {/* Max Error Retries */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">Max Error Retries</label>
-        <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </span>
-          <input
-            type="number"
-            value={maxUpstreamErrorRetries}
-            onInput={(e) => onMaxUpstreamErrorRetriesChange(parseInt((e.target as HTMLInputElement).value) || 0)}
-            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="3"
-          />
-        </div>
-      </div>
-
-      {/* Max Idle Retries */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">Max Idle Retries</label>
-        <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </span>
-          <input
-            type="number"
-            value={maxIdleRetries}
-            onInput={(e) => onMaxIdleRetriesChange(parseInt((e.target as HTMLInputElement).value) || 0)}
-            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="2"
-          />
-        </div>
-      </div>
-
-      {/* Shadow Retry Enabled */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">Shadow Retry</label>
-        <div class="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => onShadowRetryEnabledChange(!shadowRetryEnabled)}
-            class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              shadowRetryEnabled ? 'bg-blue-600' : 'bg-gray-600'
-            }`}
-          >
-            <span
-              class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                shadowRetryEnabled ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-          <span class="text-sm text-gray-400">
-            {shadowRetryEnabled ? 'Enabled' : 'Disabled'}
-          </span>
-        </div>
-        <p class="text-xs text-gray-500 mt-1">
-          Enable parallel shadow requests on first idle timeout to reduce latency.
-        </p>
-      </div>
-
-      {/* Max Generation Retries */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">Max Generation Retries</label>
-        <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </span>
-          <input
-            type="number"
-            value={maxGenerationRetries}
-            onInput={(e) => onMaxGenerationRetriesChange(parseInt((e.target as HTMLInputElement).value) || 0)}
-            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="2"
-          />
-        </div>
-      </div>
-
       {/* Max Generation Time */}
       <div>
         <label class="block text-sm font-medium text-gray-300 mb-1">Max Generation Time</label>
@@ -254,6 +173,93 @@ export function ProxySettings({
             class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
             placeholder="120s"
           />
+        </div>
+      </div>
+
+      {/* Race Retry Section */}
+      <div class="border-t border-gray-700 pt-4 mt-4">
+        <h3 class="text-sm font-medium text-gray-200 mb-3">Race Retry (Parallel Requests)</h3>
+        <p class="text-xs text-gray-400 mb-3">
+          When enabled, multiple upstream requests race in parallel. The first to complete wins.
+        </p>
+
+        {/* Enable Race Retry */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Enable Race Retry</label>
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onRaceRetryEnabledChange(!raceRetryEnabled)}
+              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                raceRetryEnabled ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                raceRetryEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+            <span class="text-sm text-gray-400">
+              {raceRetryEnabled ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+        </div>
+
+        {/* Parallel on Idle */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Spawn Parallel on Idle</label>
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onRaceParallelOnIdleChange(!raceParallelOnIdle)}
+              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                raceParallelOnIdle ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                raceParallelOnIdle ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+            <span class="text-sm text-gray-400">
+              {raceParallelOnIdle ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">
+            When main request hits idle timeout, spawn parallel requests instead of cancelling.
+          </p>
+        </div>
+
+        {/* Max Parallel Requests */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Max Parallel Requests</label>
+          <input
+            type="number"
+            value={raceMaxParallel}
+            onInput={(e) => onRaceMaxParallelChange(parseInt((e.target as HTMLInputElement).value) || 3)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="3"
+            min="1"
+            max="5"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Maximum concurrent requests (main + second + fallback). Default: 3
+          </p>
+        </div>
+
+        {/* Max Buffer Bytes */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Max Buffer Per Request (MB)</label>
+          <input
+            type="number"
+            value={Math.round(raceMaxBufferBytes / (1024 * 1024))}
+            onInput={(e) => onRaceMaxBufferBytesChange(parseInt((e.target as HTMLInputElement).value) * 1024 * 1024 || 5242880)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="5"
+            min="1"
+            max="50"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Maximum bytes to buffer per request. Default: 5MB
+          </p>
         </div>
       </div>
 

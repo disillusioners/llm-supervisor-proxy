@@ -73,11 +73,12 @@ export function SettingsPage({
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
-  const [maxUpstreamErrorRetries, setMaxUpstreamErrorRetries] = useState(0);
-  const [maxIdleRetries, setMaxIdleRetries] = useState(0);
-  const [maxGenerationRetries, setMaxGenerationRetries] = useState(0);
   const [maxGenTime, setMaxGenTime] = useState('');
-  const [shadowRetryEnabled, setShadowRetryEnabled] = useState(true);
+  // Race retry state
+  const [raceRetryEnabled, setRaceRetryEnabled] = useState(false);
+  const [raceParallelOnIdle, setRaceParallelOnIdle] = useState(true);
+  const [raceMaxParallel, setRaceMaxParallel] = useState(3);
+  const [raceMaxBufferBytes, setRaceMaxBufferBytes] = useState(5 * 1024 * 1024);
   // Ultimate model state
   const [ultimateModelId, setUltimateModelId] = useState('');
   const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
@@ -101,11 +102,12 @@ export function SettingsPage({
       setPort(config.port || 8089);
       setOriginalPort(config.port || 8089);
       setIdleTimeout(config.idle_timeout || '');
-      setMaxUpstreamErrorRetries(config.max_upstream_error_retries || 0);
-      setMaxIdleRetries(config.max_idle_retries || 0);
-      setMaxGenerationRetries(config.max_generation_retries || 0);
       setMaxGenTime(config.max_generation_time || '');
-      setShadowRetryEnabled(config.shadow_retry_enabled ?? true);
+      // Race retry sync
+      setRaceRetryEnabled(config.race_retry_enabled ?? false);
+      setRaceParallelOnIdle(config.race_parallel_on_idle ?? true);
+      setRaceMaxParallel(config.race_max_parallel ?? 3);
+      setRaceMaxBufferBytes(config.race_max_buffer_bytes ?? 5242880);
       // Ultimate model sync
       setUltimateModelId(config.ultimate_model?.model_id || '');
       setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
@@ -133,11 +135,13 @@ export function SettingsPage({
         upstream_credential_id: upstreamCredentialId,
         port,
         idle_timeout: idleTimeout,
-        max_upstream_error_retries: maxUpstreamErrorRetries,
-        max_idle_retries: maxIdleRetries,
-        max_generation_retries: maxGenerationRetries,
         max_generation_time: maxGenTime,
-        shadow_retry_enabled: shadowRetryEnabled,
+        // Race retry configuration
+        race_retry_enabled: raceRetryEnabled,
+        race_parallel_on_idle: raceParallelOnIdle,
+        race_max_parallel: raceMaxParallel,
+        race_max_buffer_bytes: raceMaxBufferBytes,
+        // Ultimate model
         ultimate_model: {
           model_id: ultimateModelId,
           max_hash: ultimateModelMaxHash,
@@ -322,23 +326,23 @@ export function SettingsPage({
               models={models}
               port={port}
               idleTimeout={idleTimeout}
-              maxUpstreamErrorRetries={maxUpstreamErrorRetries}
-              maxIdleRetries={maxIdleRetries}
-              maxGenerationRetries={maxGenerationRetries}
               maxGenTime={maxGenTime}
-              shadowRetryEnabled={shadowRetryEnabled}
               originalPort={originalPort}
+              raceRetryEnabled={raceRetryEnabled}
+              raceParallelOnIdle={raceParallelOnIdle}
+              raceMaxParallel={raceMaxParallel}
+              raceMaxBufferBytes={raceMaxBufferBytes}
               ultimateModelId={ultimateModelId}
               ultimateModelMaxHash={ultimateModelMaxHash}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
-              onMaxUpstreamErrorRetriesChange={setMaxUpstreamErrorRetries}
-              onMaxIdleRetriesChange={setMaxIdleRetries}
-              onMaxGenerationRetriesChange={setMaxGenerationRetries}
               onMaxGenTimeChange={setMaxGenTime}
-              onShadowRetryEnabledChange={setShadowRetryEnabled}
+              onRaceRetryEnabledChange={setRaceRetryEnabled}
+              onRaceParallelOnIdleChange={setRaceParallelOnIdle}
+              onRaceMaxParallelChange={setRaceMaxParallel}
+              onRaceMaxBufferBytesChange={setRaceMaxBufferBytes}
               onUltimateModelIdChange={setUltimateModelId}
               onUltimateModelMaxHashChange={setUltimateModelMaxHash}
               onApply={handleApplyProxy}

@@ -57,14 +57,20 @@ export interface AppConfig {
   port: number;
   idle_timeout: string;
   max_generation_time: string;
-  max_upstream_error_retries: number;
-  max_idle_retries: number;
-  max_generation_retries: number;
-  shadow_retry_enabled: boolean;
+  // Race retry configuration (new)
+  race_retry_enabled: boolean;
+  race_parallel_on_idle: boolean;
+  race_max_parallel: number;
+  race_max_buffer_bytes: number;
   loop_detection: LoopDetectionConfig;
   tool_repair: ToolRepairConfig;
   ultimate_model: UltimateModelConfig;
   updated_at: string;
+  // Deprecated - kept for backward compatibility with older backend versions
+  max_upstream_error_retries?: number;
+  max_idle_retries?: number;
+  max_generation_retries?: number;
+  shadow_retry_enabled?: boolean;
 }
 
 export interface ConfigUpdateResponse extends AppConfig {
@@ -174,6 +180,12 @@ export type EventType =
   | 'client_disconnected_during_buffering'
   | 'client_disconnected_during_stream'
   | 'client_disconnected_during_internal'
+  // Race retry events (new)
+  | 'race_started'
+  | 'race_spawn'
+  | 'race_winner_selected'
+  | 'race_all_failed'
+  // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
   | 'shadow_retry_won'
   | 'shadow_retry_failed'
@@ -215,15 +227,25 @@ export interface EventData {
   strategies_used?: string[];
   duration?: string;
   details?: RepairDetail[];
-  // Shadow retry fields
+  // Shadow retry fields (deprecated)
   model?: string;
   main_model?: string;
-  trigger?: string;
   internal?: boolean;
   // Ultimate model fields
   ultimate_model?: string;
   original_model?: string;
   hash?: string;
+  // Race retry fields (new)
+  models?: string[];           // For race_started
+  request_index?: number;      // For race_spawn
+  type?: string;               // Request type: main, second, fallback
+  trigger?: string;            // Spawn trigger: idle_timeout, main_error
+  winner_index?: number;       // For race_winner_selected
+  winner_type?: string;        // main, second, fallback
+  winner_model?: string;       // Model ID of winner
+  duration_ms?: number;        // Race duration in milliseconds
+  buffer_bytes?: number;       // Winner's buffer size
+  total_attempts?: number;     // For race_all_failed
 }
 
 // Repair detail for tool repair events

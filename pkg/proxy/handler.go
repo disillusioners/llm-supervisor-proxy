@@ -372,7 +372,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	// Unified Race Retry Design (Parallel Race)
 	log.Printf("[RACE] Parallel race retry started for request %s", rc.reqID)
-	coordinator := newRaceCoordinator(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList)
+	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()

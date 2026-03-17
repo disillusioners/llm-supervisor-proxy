@@ -95,6 +95,26 @@ const getEventMessage = (event: Event): string => {
     }
     case 'ultimate_model_failed':
       return `Ultimate model failed: ${event.data?.ultimate_model || '?'} - ${event.data?.error || 'Unknown error'}`;
+    // Race retry events
+    case 'race_started': {
+      const models = event.data?.models?.join(', ') || '?';
+      return `Race started with models: ${models}`;
+    }
+    case 'race_spawn': {
+      const d = event.data;
+      const trigger = d?.trigger ? ` (${d.trigger})` : '';
+      return `Spawned ${d?.type || '?'} request #${d?.request_index ?? '?'}: ${d?.model || '?'}${trigger}`;
+    }
+    case 'race_winner_selected': {
+      const d = event.data;
+      const duration = d?.duration_ms ? ` in ${d.duration_ms}ms` : '';
+      const bytes = d?.buffer_bytes ? ` (${(d.buffer_bytes / 1024).toFixed(1)}KB)` : '';
+      return `Winner: ${d?.winner_type || '?'} request #${d?.winner_index ?? '?'} (${d?.winner_model || '?'})${duration}${bytes}`;
+    }
+    case 'race_all_failed': {
+      const d = event.data;
+      return `All ${d?.total_attempts || '?'} race requests failed after ${d?.duration_ms || '?'}ms`;
+    }
     default:
       return `Event: ${event.type}`;
   }
@@ -146,6 +166,15 @@ const getEventColor = (type: EventType): string => {
     case 'ultimate_model_triggered':
       return 'text-pink-400';
     case 'ultimate_model_failed':
+      return 'text-red-400';
+    // Race retry events
+    case 'race_started':
+      return 'text-cyan-400';
+    case 'race_spawn':
+      return 'text-blue-400';
+    case 'race_winner_selected':
+      return 'text-green-400';
+    case 'race_all_failed':
       return 'text-red-400';
     default:
       return 'text-gray-400';
@@ -216,6 +245,15 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'ULTIMATE_MODEL';
     case 'ultimate_model_failed':
       return 'ULTIMATE_MODEL_FAILED';
+    // Race retry events
+    case 'race_started':
+      return 'RACE_STARTED';
+    case 'race_spawn':
+      return 'RACE_SPAWN';
+    case 'race_winner_selected':
+      return 'RACE_WINNER';
+    case 'race_all_failed':
+      return 'RACE_ALL_FAILED';
     default:
       return String(type).toUpperCase();
   }
