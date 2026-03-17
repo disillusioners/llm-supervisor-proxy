@@ -73,7 +73,11 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	}
 
 	if isStream {
-		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel)
+		// Detect provider for normalization context
+		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
+		normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
+		normalizers.GetRegistry().ResetAll(normCtx)
+		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx)
 	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel)
 }
@@ -171,13 +175,18 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 }
 
 // handleInternalStream handles streaming requests for internal providers
-func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string) error {
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return err
 	}
 
 	upstreamReq.MarkStreaming()
+
+	// Track state for proper streaming format
+	firstChunk := true
+	nextToolCallIndex := 0
+	seenToolCallIDs := make(map[string]int)
 
 	for event := range eventCh {
 		// Check for context cancellation
@@ -190,80 +199,138 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 		switch event.Type {
 		case "content":
 			// Write SSE data event
-			chunk := providers.ChatCompletionResponse{
-				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   internalModel,
-				Choices: []providers.Choice{
-					{
-						Index: 0,
-						Delta: &providers.ChatMessage{
-							Role:    "assistant",
-							Content: event.Content,
+			// OpenAI streaming format: role is only present in FIRST chunk
+			// Use map to control exactly what gets serialized (avoid zero-value string issue)
+			var data []byte
+			if firstChunk {
+				// First chunk includes role
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"role":    "assistant",
+								"content": event.Content,
+							},
 						},
 					},
-				},
+				}
+				data, _ = json.Marshal(chunk)
+			} else {
+				// Subsequent chunks: NO role field at all (not even empty string)
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"content": event.Content,
+							},
+						},
+					},
+				}
+				data, _ = json.Marshal(chunk)
 			}
-			data, _ := json.Marshal(chunk)
 			line := fmt.Sprintf("data: %s\n", data)
-			if !upstreamReq.buffer.Add([]byte(line)) {
+			// Apply normalization to ensure consistent format
+			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName([]byte(line), normCtx)
+			if modified {
+				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
+			}
+			if !upstreamReq.buffer.Add(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded")
 			}
+			firstChunk = false
 
 		case "tool_call":
 			// Write tool_call delta
+			// Must include index field for each tool call (required for streaming)
+			// Use map to control exactly what gets serialized
 			if len(event.ToolCalls) > 0 {
-				tc := event.ToolCalls[0]
-				chunk := providers.ChatCompletionResponse{
-					ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-					Object:  "chat.completion.chunk",
-					Created: time.Now().Unix(),
-					Model:   internalModel,
-					Choices: []providers.Choice{
+				toolCalls := make([]map[string]interface{}, len(event.ToolCalls))
+				for i, tc := range event.ToolCalls {
+					// Assign index based on tool call ID if seen before, otherwise use next available
+					var index int
+					if tc.ID != "" {
+						if idx, seen := seenToolCallIDs[tc.ID]; seen {
+							index = idx
+						} else {
+							index = nextToolCallIndex
+							seenToolCallIDs[tc.ID] = index
+							nextToolCallIndex++
+						}
+					} else {
+						// No ID, use position-based index
+						index = i
+					}
+					toolCalls[i] = map[string]interface{}{
+						"index": index,
+						"id":    tc.ID,
+						"type":  tc.Type,
+						"function": map[string]interface{}{
+							"name":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+						},
+					}
+				}
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
 						{
-							Index: 0,
-							Delta: &providers.ChatMessage{
-								ToolCalls: []providers.ToolCall{
-									{
-										ID:   tc.ID,
-										Type: tc.Type,
-										Function: providers.ToolCallFunction{
-											Name:      tc.Function.Name,
-											Arguments: tc.Function.Arguments,
-										},
-									},
-								},
+							"index": 0,
+							"delta": map[string]interface{}{
+								"tool_calls": toolCalls,
 							},
 						},
 					},
 				}
 				data, _ := json.Marshal(chunk)
 				line := fmt.Sprintf("data: %s\n", data)
-				if !upstreamReq.buffer.Add([]byte(line)) {
+				// Apply normalization to ensure consistent format
+				normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName([]byte(line), normCtx)
+				if modified {
+					log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
+				}
+				if !upstreamReq.buffer.Add(normalizedLine) {
 					return fmt.Errorf("buffer limit exceeded")
 				}
 			}
 
 		case "thinking":
 			// Write thinking/reasoning content
-			chunk := providers.ChatCompletionResponse{
-				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   internalModel,
-				Choices: []providers.Choice{
+			// Use map to control exactly what gets serialized
+			chunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
 					{
-						Index: 0,
-						Delta: &providers.ChatMessage{
-							Content: event.Content,
+						"index": 0,
+						"delta": map[string]interface{}{
+							"content": event.Content,
 						},
 					},
 				},
 			}
 			data, _ := json.Marshal(chunk)
 			line := fmt.Sprintf("data: %s\n", data)
-			if !upstreamReq.buffer.Add([]byte(line)) {
+			// Apply normalization to ensure consistent format
+			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName([]byte(line), normCtx)
+			if modified {
+				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
+			}
+			if !upstreamReq.buffer.Add(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded")
 			}
 
