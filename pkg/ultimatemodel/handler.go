@@ -229,10 +229,9 @@ func (h *Handler) Execute(
 		return err
 	}
 
-	// On success: clear retry counter but keep hash in cache
-	// This prevents immediate re-triggering of ultimate model for same content
-	h.hashCache.ClearRetryCount(hash)
-
+	// Success - keep retry counter to enforce max retry limit
+	// The retry counter tracks ALL ultimate model invocations for this hash
+	// It is only cleared when: hash is evicted from buffer, hash is explicitly removed, or cache is reset
 	return nil
 }
 
