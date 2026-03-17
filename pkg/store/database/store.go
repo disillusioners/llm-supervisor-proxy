@@ -139,6 +139,9 @@ func (m *ConfigManager) Load() error {
 		}
 	}
 
+	// Apply environment variable overrides (env > database > defaults)
+	cfg = config.ApplyEnvOverrides(cfg)
+
 	m.cfg = cfg
 	return nil
 }

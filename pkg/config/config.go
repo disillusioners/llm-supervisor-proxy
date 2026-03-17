@@ -63,28 +63,28 @@ func (d Duration) Duration() time.Duration {
 
 // Config holds all application configuration
 type Config struct {
-	Version                 string              `json:"version"`
-	UpstreamURL             string              `json:"upstream_url"`
-	UpstreamCredentialID    string              `json:"upstream_credential_id,omitempty"`
-	Port                    int                 `json:"port"`
-	IdleTimeout             Duration            `json:"idle_timeout"`
-	StreamDeadline          Duration            `json:"stream_deadline"`    // Max buffer caching time for race retry - flush buffer to client after this, winner is the one with most content
-	MaxGenerationTime       Duration            `json:"max_generation_time"`
-	MaxRequestTime          Duration            `json:"max_request_time"` // Absolute hard timeout for entire request (including all retries)
-	MaxStreamBufferSize     int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
-	BufferStorageDir        string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
-	BufferMaxStorageMB      int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
-	SSEHeartbeatEnabled     bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
-	LoopDetection           LoopDetectionConfig `json:"loop_detection"`
-	ToolRepair              toolrepair.Config   `json:"tool_repair"`
-	UltimateModel           UltimateModelConfig `json:"ultimate_model"`
-	UpdatedAt               string              `json:"updated_at"` // ISO8601 string for readability
+	Version              string              `json:"version"`
+	UpstreamURL          string              `json:"upstream_url"`
+	UpstreamCredentialID string              `json:"upstream_credential_id,omitempty"`
+	Port                 int                 `json:"port"`
+	IdleTimeout          Duration            `json:"idle_timeout"`
+	StreamDeadline       Duration            `json:"stream_deadline"` // Max buffer caching time for race retry - flush buffer to client after this, winner is the one with most content
+	MaxGenerationTime    Duration            `json:"max_generation_time"`
+	MaxRequestTime       Duration            `json:"max_request_time"`       // Absolute hard timeout for entire request (including all retries)
+	MaxStreamBufferSize  int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
+	BufferStorageDir     string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
+	BufferMaxStorageMB   int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
+	SSEHeartbeatEnabled  bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
+	LoopDetection        LoopDetectionConfig `json:"loop_detection"`
+	ToolRepair           toolrepair.Config   `json:"tool_repair"`
+	UltimateModel        UltimateModelConfig `json:"ultimate_model"`
+	UpdatedAt            string              `json:"updated_at"` // ISO8601 string for readability
 
 	// Race Retry (Redesign)
-	RaceRetryEnabled    bool `json:"race_retry_enabled"`
-	RaceParallelOnIdle  bool `json:"race_parallel_on_idle"`
-	RaceMaxParallel     int  `json:"race_max_parallel"`
-	RaceMaxBufferBytes  int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
+	RaceRetryEnabled   bool `json:"race_retry_enabled"`
+	RaceParallelOnIdle bool `json:"race_parallel_on_idle"`
+	RaceMaxParallel    int  `json:"race_max_parallel"`
+	RaceMaxBufferBytes int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
 }
 
 // ManagerInterface defines the interface for config management
@@ -142,18 +142,18 @@ type UltimateModelConfig struct {
 
 // Defaults - used when env not set and file doesn't exist
 var Defaults = Config{
-	Version:                 ConfigVersion,
-	UpstreamURL:             "http://localhost:4001",
-	UpstreamCredentialID:    "",
-	Port:                    4321,
-	IdleTimeout:             Duration(60 * time.Second),
-	StreamDeadline:          Duration(110 * time.Second), // Max buffer caching time for race retry - winner is the one with most content
-	MaxGenerationTime:       Duration(300 * time.Second),
-	MaxRequestTime:          Duration(600 * time.Second), // 10 minutes absolute hard limit
-	MaxStreamBufferSize:     10 * 1024 * 1024, // 10MB default
-	BufferStorageDir:        "",               // Empty means use default data directory
-	BufferMaxStorageMB:      100,              // 100MB default
-	SSEHeartbeatEnabled:     false,            // Disable heartbeat by default
+	Version:              ConfigVersion,
+	UpstreamURL:          "http://localhost:4001",
+	UpstreamCredentialID: "",
+	Port:                 4321,
+	IdleTimeout:          Duration(60 * time.Second),
+	StreamDeadline:       Duration(110 * time.Second), // Max buffer caching time for race retry - winner is the one with most content
+	MaxGenerationTime:    Duration(300 * time.Second),
+	MaxRequestTime:       Duration(600 * time.Second), // 10 minutes absolute hard limit
+	MaxStreamBufferSize:  10 * 1024 * 1024,            // 10MB default
+	BufferStorageDir:     "",                          // Empty means use default data directory
+	BufferMaxStorageMB:   100,                         // 100MB default
+	SSEHeartbeatEnabled:  false,                       // Disable heartbeat by default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -298,7 +298,7 @@ func (m *Manager) Load() error {
 	}
 
 	// Step 3: Apply env overrides (env > file > defaults)
-	cfg = m.applyEnvOverrides(cfg)
+	cfg = applyEnvOverrides(cfg)
 
 	// Step 4: If no file exists, create one for user convenience
 	if _, err := os.Stat(m.filePath); os.IsNotExist(err) {
@@ -313,8 +313,18 @@ func (m *Manager) Load() error {
 	return nil
 }
 
+// ApplyEnvOverrides applies env vars on top of config (env wins always)
+// This is exported so database-backed ConfigManager can also use it
+func ApplyEnvOverrides(cfg Config) Config {
+	return applyEnvOverrides(cfg)
+}
+
 // applyEnvOverrides applies env vars on top of config (env wins always)
-func (m *Manager) applyEnvOverrides(cfg Config) Config {
+func applyEnvOverrides(cfg Config) Config {
+	v := os.Getenv("APPLY_ENV_OVERRIDES")
+	if v == "" {
+		return cfg
+	}
 	// Only apply if env var exists AND is non-empty
 	if v := os.Getenv("UPSTREAM_URL"); v != "" {
 		cfg.UpstreamURL = v
@@ -429,7 +439,7 @@ func (m *Manager) Save(cfg Config) (*SaveResult, error) {
 	}
 
 	// Re-apply env overrides to in-memory config (env always wins)
-	m.config = m.applyEnvOverrides(cfg)
+	m.config = applyEnvOverrides(cfg)
 
 	// Publish config update event if event bus is wired
 	if m.eventBus != nil {

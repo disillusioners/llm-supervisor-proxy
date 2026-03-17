@@ -85,8 +85,15 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 // executeExternalRequest handles requests to external upstream (LiteLLM, etc.)
 func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
 	// 1. Prepare upstream request
+	// Check for test upstream header (for testing with mock servers)
+	upstreamURL := cfg.UpstreamURL
+	if testUpstream := originalReq.Header.Get("X-LLMProxy-Test-Upstream"); testUpstream != "" {
+		upstreamURL = testUpstream
+		log.Printf("[DEBUG] Using test upstream URL: %s", upstreamURL)
+	}
+	
 	// Set the target URL to upstream
-	u, err := url.Parse(cfg.UpstreamURL)
+	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return fmt.Errorf("invalid upstream URL: %w", err)
 	}

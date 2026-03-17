@@ -441,6 +441,65 @@ func TestPostgreSQLModelsManager(t *testing.T) {
 	}
 }
 
+func TestConfigManager_EnvOverrides(t *testing.T) {
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Save a config to the database
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	cfg := cfgMgr.Get()
+	cfg.UpstreamURL = "http://database-value:4001"
+	cfg.Port = 5000
+	cfg.RaceRetryEnabled = false
+	if _, err := cfgMgr.Save(cfg); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Set environment variables to override database values
+	os.Setenv("UPSTREAM_URL", "http://env-override:9999")
+	os.Setenv("PORT", "8888")
+	os.Setenv("RACE_RETRY_ENABLED", "true")
+	defer func() {
+		os.Unsetenv("UPSTREAM_URL")
+		os.Unsetenv("PORT")
+		os.Unsetenv("RACE_RETRY_ENABLED")
+	}()
+
+	// Create a new config manager to test loading with env overrides
+	cfgMgr2, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create second config manager: %v", err)
+	}
+
+	// Verify env overrides are applied
+	loadedCfg := cfgMgr2.Get()
+	if loadedCfg.UpstreamURL != "http://env-override:9999" {
+		t.Errorf("Expected UpstreamURL to be overridden by env to 'http://env-override:9999', got: %s", loadedCfg.UpstreamURL)
+	}
+	if loadedCfg.Port != 8888 {
+		t.Errorf("Expected Port to be overridden by env to 8888, got: %d", loadedCfg.Port)
+	}
+	if !loadedCfg.RaceRetryEnabled {
+		t.Errorf("Expected RaceRetryEnabled to be overridden by env to true, got: %v", loadedCfg.RaceRetryEnabled)
+	}
+}
+
 func TestPostgreSQLBooleanHandling(t *testing.T) {
 	store := skipIfNoPostgreSQL(t)
 	defer store.Close()

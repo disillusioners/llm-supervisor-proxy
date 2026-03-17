@@ -9,7 +9,13 @@
 //
 // Usage:
 //
-//	go run test/mock_llm_race.go [port]
+//	go run test/mock_llm_race.go [options]
+//
+// Options:
+//
+//	-port string       Port to listen on (default "4001")
+//	-idle-pause int    Pause duration in seconds for idle-timeout test (default 10)
+//	-deadline-interval Interval between tokens in seconds for deadline test (default 3)
 //
 // Default port: 4001
 
@@ -24,6 +30,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+)
+
+var (
+	flagIdlePause       = flag.Int("idle-pause", 10, "Pause duration in seconds for idle-timeout test")
+	flagDeadlineInterval = flag.Int("deadline-interval", 3, "Interval between tokens in seconds for deadline test")
 )
 
 func main() {
@@ -129,10 +140,10 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 	flusher.Flush()
 
 	// Scenario 1: Idle timeout test
-	// Send a few tokens, then pause for longer than typical idle timeout (60s default)
+	// Send a few tokens, then pause for longer than idle timeout
 	// The proxy should spawn parallel requests when this happens
 	if strings.Contains(prompt, "mock-idle-timeout") {
-		log.Printf("[%s] Simulating IDLE TIMEOUT scenario", model)
+		log.Printf("[%s] Simulating IDLE TIMEOUT scenario (pause=%ds)", model, *flagIdlePause)
 		tokens := []string{"Hello", " from", " idle-timeout", " test."}
 
 		// Send initial tokens
@@ -143,14 +154,14 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Now pause for a long time (simulating idle)
-		// The proxy's idle timeout is typically 60s, so we pause for 90s
+		// Now pause for a configurable time (simulating idle)
+		// The proxy should detect idle timeout and spawn parallel requests
 		// During this pause, the proxy should:
 		// 1. Detect idle timeout
 		// 2. Spawn parallel requests (second + fallback)
 		// 3. NOT cancel this request (it should continue)
-		log.Printf("[%s] Starting LONG PAUSE (90 seconds) to trigger idle timeout...", model)
-		pauseDuration := 90 * time.Second
+		pauseDuration := time.Duration(*flagIdlePause) * time.Second
+		log.Printf("[%s] Starting LONG PAUSE (%v) to trigger idle timeout...", model, pauseDuration)
 
 		// Use select with context to allow early termination
 		select {
@@ -177,14 +188,14 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 	}
 
 	// Scenario 2: Streaming deadline test
-	// Stream continuously but slowly, exceeding MaxGenerationTime (300s default)
+	// Stream continuously but slowly, exceeding MaxGenerationTime
 	// The proxy should pick the best buffer when deadline is reached
 	if strings.Contains(prompt, "mock-streaming-deadline") {
-		log.Printf("[%s] Simulating STREAMING DEADLINE scenario", model)
+		log.Printf("[%s] Simulating STREAMING DEADLINE scenario (interval=%ds)", model, *flagDeadlineInterval)
 
-		// Stream for a very long time (longer than typical MaxGenerationTime of 300s)
-		// Send tokens every 10 seconds for 400 seconds
-		for i := 0; i < 40; i++ {
+		// Stream slowly with configurable interval
+		// Send tokens every flagDeadlineInterval seconds for a long time
+		for i := 0; i < 100; i++ {
 			select {
 			case <-r.Context().Done():
 				log.Printf("[%s] Context cancelled at iteration %d", model, i)
@@ -197,8 +208,8 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 			flusher.Flush()
 			log.Printf("[%s] Sent token %d: '%s'", model, i, token)
 
-			// Sleep 10 seconds between tokens
-			time.Sleep(10 * time.Second)
+			// Sleep with configurable interval
+			time.Sleep(time.Duration(*flagDeadlineInterval) * time.Second)
 		}
 
 		fmt.Fprintf(w, "data: [DONE]\n\n")
