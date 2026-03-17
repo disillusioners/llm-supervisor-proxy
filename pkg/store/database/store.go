@@ -46,6 +46,7 @@ type dbConfigRow struct {
 	UpstreamCredentialID    string
 	Port                    int64
 	IdleTimeoutMs           int64
+	StreamDeadlineMs        int64
 	MaxGenerationTimeMs     int64
 
 	MaxStreamBufferSize     int64
@@ -78,6 +79,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.UpstreamCredentialID,
 		&dbCfg.Port,
 		&dbCfg.IdleTimeoutMs,
+		&dbCfg.StreamDeadlineMs,
 		&dbCfg.MaxGenerationTimeMs,
 
 		&dbCfg.MaxStreamBufferSize,
@@ -104,6 +106,7 @@ func (m *ConfigManager) Load() error {
 	cfg.UpstreamCredentialID = dbCfg.UpstreamCredentialID
 	cfg.Port = int(dbCfg.Port)
 	cfg.IdleTimeout = config.Duration(time.Duration(dbCfg.IdleTimeoutMs) * time.Millisecond)
+	cfg.StreamDeadline = config.Duration(time.Duration(dbCfg.StreamDeadlineMs) * time.Millisecond)
 	cfg.MaxGenerationTime = config.Duration(time.Duration(dbCfg.MaxGenerationTimeMs) * time.Millisecond)
 
 	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
@@ -192,6 +195,7 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		merged.UpstreamCredentialID,
 		merged.Port,
 		time.Duration(merged.IdleTimeout).Milliseconds(),
+		time.Duration(merged.StreamDeadline).Milliseconds(),
 		time.Duration(merged.MaxGenerationTime).Milliseconds(),
 
 		merged.MaxStreamBufferSize,
@@ -246,6 +250,10 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// IdleTimeout: 0 means not sent (0 is invalid per validation)
 	if incoming.IdleTimeout != 0 {
 		result.IdleTimeout = incoming.IdleTimeout
+	}
+	// StreamDeadline: 0 means not sent
+	if incoming.StreamDeadline != 0 {
+		result.StreamDeadline = incoming.StreamDeadline
 	}
 	// MaxGenerationTime: 0 means not sent
 	if incoming.MaxGenerationTime != 0 {
