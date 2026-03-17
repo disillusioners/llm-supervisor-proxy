@@ -69,11 +69,6 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Debug log for MiniMax requests to help diagnose compatibility issues
-	if p.baseURL == "https://api.minimax.io/v1" {
-		log.Printf("[DEBUG] MiniMax ChatCompletion request body:\n%s", string(body))
-	}
-
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -150,11 +145,6 @@ func (p *OpenAIProvider) StreamChatCompletion(ctx context.Context, req *ChatComp
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Debug log for MiniMax requests to help diagnose compatibility issues
-	if p.baseURL == "https://api.minimax.io/v1" {
-		log.Printf("[DEBUG] MiniMax StreamChatCompletion request body:\n%s", string(body))
-	}
-
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -224,21 +214,6 @@ func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionReq
 	msg := apiErr.Error.Message
 	if msg == "" {
 		msg = string(body)
-	}
-
-	// Debug log for MiniMax errors to help diagnose compatibility issues
-	if p.baseURL == "https://api.minimax.io/v1" {
-		log.Printf("[DEBUG] MiniMax error response (status %d): %s", resp.StatusCode, string(body))
-		// Log request messages summary for debugging tool_call_id issues
-		if req != nil {
-			for i, m := range req.Messages {
-				if m.Role == "tool" {
-					log.Printf("[DEBUG] MiniMax request message[%d]: role=%s, tool_call_id=%s", i, m.Role, m.ToolCallID)
-				} else if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-					log.Printf("[DEBUG] MiniMax request message[%d]: role=%s, tool_calls=%d (ids: %v)", i, m.Role, len(m.ToolCalls), getToolCallIDs(m.ToolCalls))
-				}
-			}
-		}
 	}
 
 	// Determine if retryable based on status code
