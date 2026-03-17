@@ -358,6 +358,27 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			}
 
 		case "done":
+			// Write final chunk with finish_reason before [DONE]
+			// This is required by OpenAI streaming format - clients expect finish_reason in the last chunk
+			finalChunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]interface{}{},
+						"finish_reason": "stop",
+					},
+				},
+			}
+			finalData, _ := json.Marshal(finalChunk)
+			finalLine := fmt.Sprintf("data: %s\n", finalData)
+			if !upstreamReq.buffer.Add([]byte(finalLine)) {
+				return fmt.Errorf("buffer limit exceeded")
+			}
+
 			// Write [DONE] marker
 			if !upstreamReq.buffer.Add([]byte("data: [DONE]\n")) {
 				return fmt.Errorf("buffer limit exceeded")
