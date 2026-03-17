@@ -117,6 +117,29 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 	}
 	upstreamReq.Host = u.Host
 
+	// If UpstreamCredentialID is configured, resolve the credential and set auth header
+	// This allows the proxy to authenticate with external upstream providers
+	// using a different token than what the client provided
+	if cfg.UpstreamCredentialID != "" && cfg.ModelsConfig != nil {
+		// Remove all auth headers first to avoid conflicts
+		upstreamReq.Header.Del("Authorization")
+		upstreamReq.Header.Del("X-API-Key")
+		upstreamReq.Header.Del("x-api-key")
+		upstreamReq.Header.Del("api-key")
+
+		// Resolve credential
+		cred := cfg.ModelsConfig.GetCredential(cfg.UpstreamCredentialID)
+		if cred != nil {
+			apiKey := cred.ResolveAPIKey()
+			if apiKey != "" {
+				upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+				log.Printf("[DEBUG] Race attempt %d: using upstream credential %s for authentication", req.id, cfg.UpstreamCredentialID)
+			}
+		} else {
+			log.Printf("[WARN] Race attempt %d: upstream credential %s not found", req.id, cfg.UpstreamCredentialID)
+		}
+	}
+
 	log.Printf("[DEBUG] Race attempt %d calling: %s (Host: %s)", req.id, upstreamReq.URL.String(), upstreamReq.Host)
 
 	client := &http.Client{
