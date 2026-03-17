@@ -167,6 +167,29 @@ func (h *Handler) handleInternalStream(
 			flusher.Flush()
 
 		case "done":
+			// Write finish chunk with finish_reason before [DONE]
+			// This is required by OpenAI streaming format - clients expect finish_reason in the last chunk
+			// Use the finish_reason from the event (e.g., "tool_calls" for tool calls, "stop" for normal completion)
+			finishReason := event.FinishReason
+			if finishReason == "" {
+				finishReason = "stop"
+			}
+			finalChunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]interface{}{},
+						"finish_reason": finishReason,
+					},
+				},
+			}
+			finalData, _ := json.Marshal(finalChunk)
+			fmt.Fprintf(w, "data: %s\n\n", finalData)
+
 			// Write [DONE] marker
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
