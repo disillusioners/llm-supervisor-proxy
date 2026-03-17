@@ -2,7 +2,7 @@
 
 # Test script for Race Retry functionality - Internal Path
 # Tests idle timeout spawning and stream deadline behavior using internal models
-# Maximum runtime: 35 seconds
+# Maximum runtime: 30 seconds
 #
 # This test uses an "internal" model configuration that bypasses the external
 # UPSTREAM_URL and calls the mock server directly via internal_base_url.
@@ -24,8 +24,8 @@ MOCK_PID=""
 PROXY_PID=""
 TIMER_PID=""
 
-# Hard timeout: kill everything after 35 seconds
-HARD_TIMEOUT=35
+# Hard timeout: kill everything after 30 seconds
+HARD_TIMEOUT=30
 
 cleanup_all() {
     echo -e "\n${YELLOW}Cleaning up all processes...${NC}"
