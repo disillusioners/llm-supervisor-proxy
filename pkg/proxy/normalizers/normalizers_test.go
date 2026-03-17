@@ -221,35 +221,6 @@ func TestRegistry(t *testing.T) {
 	if !r.IsEnabled("fix_empty_role") {
 		t.Error("Expected fix_empty_role to be enabled")
 	}
-
-	// Test provider overrides
-	r.SetProviderOverride("zhipu", map[string]bool{
-		"fix_empty_role":      true,
-		"fix_tool_call_index": true,
-	})
-
-	enabled := r.GetEnabledForProvider("zhipu")
-	if !enabled["fix_empty_role"] || !enabled["fix_tool_call_index"] {
-		t.Error("Expected both normalizers enabled for zhipu")
-	}
-}
-
-func TestNormalize_Disabled(t *testing.T) {
-	// Save original state
-	originalEnabled := globalEnabled
-
-	// Disable global normalizer
-	globalEnabled = false
-
-	// Test that normalization is skipped
-	input := []byte(`data: {"delta": {"role": ""}}`)
-	got, mod := Normalize(input, "zhipu", "test-request")
-	if string(got) != string(input) || mod {
-		t.Error("Expected no modification when disabled")
-	}
-
-	// Restore
-	globalEnabled = originalEnabled
 }
 
 func TestNormalize_EmptyLine(t *testing.T) {
@@ -281,22 +252,10 @@ func TestNormalize_EmptyLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save original state
-			origEnabled := globalEnabled
-			globalEnabled = true // Enable for this test
-
 			got, mod := Normalize([]byte(tt.input), "test", "req")
 			if string(got) != tt.output || mod != tt.mod {
 				t.Errorf("Normalize() = (%s, %v), want (%s, %v)", string(got), mod, tt.output, tt.mod)
 			}
-
-			// Restore
-			globalEnabled = origEnabled
 		})
 	}
-}
-
-// SetProviderOverride is a helper to set provider override (not in registry interface)
-func (r *Registry) SetProviderOverride(provider string, enabled map[string]bool) {
-	r.SetProviderOverrides(provider, enabled)
 }
