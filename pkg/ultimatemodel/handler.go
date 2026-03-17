@@ -2,6 +2,8 @@ package ultimatemodel
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -9,6 +11,15 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
+
+// ShouldTriggerResult contains the result of ShouldTrigger check
+type ShouldTriggerResult struct {
+	Triggered      bool   // True if ultimate model should be used
+	Hash           string // The computed hash
+	RetryExhausted bool   // True if max retries exceeded (after increment)
+	CurrentRetry   int    // Current retry count (after increment)
+	MaxRetries     int    // Configured max retries
+}
 
 // Handler manages ultimate model requests.
 // It detects duplicate requests via message hash and triggers
@@ -40,17 +51,17 @@ func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterf
 // 1. Ultimate model is configured (non-empty ModelID)
 // 2. This request hash was already in cache (duplicate)
 //
-// Uses atomic StoreAndCheck to prevent race conditions.
-// Returns (triggered, hash) where hash is the computed message hash.
-func (h *Handler) ShouldTrigger(messages []map[string]interface{}) (bool, string) {
+// IMPORTANT: This method atomically increments the retry counter when triggered.
+// This prevents TOCTOU race condition between check and increment.
+func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTriggerResult {
 	cfg := h.config.Get()
 	if cfg.UltimateModel.ModelID == "" {
-		return false, ""
+		return ShouldTriggerResult{Triggered: false}
 	}
 
 	// Handle empty messages
 	if len(messages) == 0 {
-		return false, ""
+		return ShouldTriggerResult{Triggered: false}
 	}
 
 	// Generate hash from messages (role + content only)
@@ -59,8 +70,33 @@ func (h *Handler) ShouldTrigger(messages []map[string]interface{}) (bool, string
 	// StoreAndCheck: atomic store-first, returns true if was already present
 	wasDuplicate := h.hashCache.StoreAndCheck(hash)
 
-	// Trigger if this was a duplicate
-	return wasDuplicate, hash
+	if !wasDuplicate {
+		return ShouldTriggerResult{Triggered: false, Hash: hash}
+	}
+
+	// Get max retries config
+	maxRetries := cfg.UltimateModel.MaxRetries
+	if maxRetries <= 0 {
+		// MaxRetries=0 means unlimited - don't track retries
+		return ShouldTriggerResult{
+			Triggered:      true,
+			Hash:           hash,
+			RetryExhausted: false,
+			CurrentRetry:   0,
+			MaxRetries:     0,
+		}
+	}
+
+	// ATOMIC increment and check - prevents race condition
+	newCount, exhausted := h.hashCache.IncrementAndCheckRetry(hash, maxRetries)
+
+	return ShouldTriggerResult{
+		Triggered:      true,
+		Hash:           hash,
+		RetryExhausted: exhausted,
+		CurrentRetry:   newCount,
+		MaxRetries:     maxRetries,
+	}
 }
 
 // GetModelID returns the configured ultimate model ID
@@ -80,9 +116,67 @@ func (h *Handler) OnConfigChange(event events.Event) {
 	}
 }
 
+// SendRetryExhaustedError sends a JSON stream error response.
+// This uses HTTP 200 with SSE error format to make streaming clients stop gracefully.
+func (h *Handler) SendRetryExhaustedError(
+	w http.ResponseWriter,
+	hash string,
+	currentRetry int,
+	maxRetries int,
+	isStream bool,
+) error {
+	// Safely extract hash prefix (defensive against short/empty hashes)
+	hashPrefix := hash
+	if len(hash) > 8 {
+		hashPrefix = hash[:8]
+	}
+
+	errorResp := map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": fmt.Sprintf(
+				"Ultimate model retry limit exceeded (attempt %d of %d max). Hash: %s...",
+				currentRetry, maxRetries, hashPrefix,
+			),
+			"type": "ultimate_model_retry_exhausted",
+			"code": "exhausted",
+			"hash": hash,
+		},
+	}
+
+	errorJSON, err := json.Marshal(errorResp)
+	if err != nil {
+		// Fallback to static error message if marshaling fails
+		errorJSON = []byte(`{"error":{"message":"Ultimate model retry limit exceeded","type":"ultimate_model_retry_exhausted","code":"exhausted"}}`)
+	}
+
+	// Set headers based on response type FIRST
+	if isStream {
+		// SSE format for streaming requests
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
+		fmt.Fprintf(w, "data: %s\n\n", string(errorJSON))
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	} else {
+		// Regular JSON response for non-streaming
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
+		w.Write(errorJSON)
+	}
+
+	// Flush if possible
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	return nil
+}
+
 // Execute handles request with ultimate model - RAW PROXY
 // No retry, no fallback, no loop detection, no buffering.
-// On failure, removes hash from cache to prevent infinite retry loop.
+// On failure: KEEPS retry counter to enforce max retry limit.
+// On success: clears retry counter but keeps hash in cache.
 func (h *Handler) Execute(
 	parentCtx context.Context,
 	w http.ResponseWriter,
@@ -98,8 +192,8 @@ func (h *Handler) Execute(
 	// Get model config from DATABASE
 	modelCfg := h.modelsMgr.GetModel(modelID)
 	if modelCfg == nil {
-		// Remove hash to prevent infinite retry loop
-		h.hashCache.Remove(hash)
+		// Model not found - this is a config error, clear everything
+		h.hashCache.Remove(hash) // Also clears retry counter
 		return &ultimateModelError{
 			message:  "ultimate model not found in database",
 			internal: false,
@@ -129,11 +223,15 @@ func (h *Handler) Execute(
 	}
 
 	if err != nil {
-		// Remove hash on failure to prevent infinite retry loop
-		h.hashCache.Remove(hash)
+		// On failure: KEEP retry counter to enforce limit
+		// DON'T remove hash - client can retry until MaxRetries exhausted
 		log.Printf("[UltimateModel] Error executing with %s: %v", modelID, err)
 		return err
 	}
+
+	// On success: clear retry counter but keep hash in cache
+	// This prevents immediate re-triggering of ultimate model for same content
+	h.hashCache.ClearRetryCount(hash)
 
 	return nil
 }

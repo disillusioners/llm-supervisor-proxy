@@ -300,10 +300,44 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 
-			if triggered, hash := h.ultimateHandler.ShouldTrigger(msgMaps); triggered {
+			result := h.ultimateHandler.ShouldTrigger(msgMaps)
+			if result.Triggered {
+				// Check if retry limit exhausted
+				if result.RetryExhausted {
+					log.Printf("[UltimateModel] Retry limit exhausted for hash=%s (attempt %d/%d)",
+						result.Hash[:8], result.CurrentRetry, result.MaxRetries)
+
+					// Determine if streaming
+					isStream := false
+					if stream, ok := rc.requestBody["stream"].(bool); ok {
+						isStream = stream
+					}
+
+					// Update request log
+					rc.reqLog.Status = "failed"
+					rc.reqLog.Error = fmt.Sprintf("Ultimate model retry limit exceeded (attempt %d/%d)", result.CurrentRetry, result.MaxRetries)
+					rc.reqLog.EndTime = time.Now()
+					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					rc.reqLog.UltimateModelUsed = true
+					rc.reqLog.UltimateModelID = h.ultimateHandler.GetModelID()
+					h.store.Add(rc.reqLog)
+
+					// Publish event
+					h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
+						"id":            rc.reqID,
+						"hash":          result.Hash[:8],
+						"current_retry": result.CurrentRetry,
+						"max_retries":   result.MaxRetries,
+					})
+
+					// Send error response (HTTP 200 with JSON stream error)
+					h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentRetry, result.MaxRetries, isStream)
+					return
+				}
+
 				ultimateModelID := h.ultimateHandler.GetModelID()
-				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s...",
-					ultimateModelID, hash[:8])
+				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
+					ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
 				// Update request log with ultimate model info
 				rc.reqLog.UltimateModelUsed = true
@@ -316,12 +350,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					"id":             rc.reqID,
 					"ultimate_model": ultimateModelID,
 					"original_model": rc.reqLog.Model,
-					"hash":           hash[:8],
+					"hash":           result.Hash[:8],
+					"current_retry":  result.CurrentRetry,
+					"max_retries":    result.MaxRetries,
 				})
 
 				// Execute with ultimate model (raw proxy, no retry/fallback)
 				// The Execute method determines streaming from requestBody["stream"]
-				err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, hash, &rc.headersSent)
+				err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
 				if err != nil {
 					log.Printf("[UltimateModel] Error: %v", err)
 					rc.reqLog.Status = "failed"

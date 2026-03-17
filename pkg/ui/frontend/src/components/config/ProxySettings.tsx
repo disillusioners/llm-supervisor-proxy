@@ -18,6 +18,7 @@ interface ProxySettingsProps {
   // Ultimate model fields
   ultimateModelId: string;
   ultimateModelMaxHash: number;
+  ultimateModelMaxRetries: number;
   // Handlers
   onUpstreamUrlChange: (value: string) => void;
   onUpstreamCredentialIdChange: (value: string) => void;
@@ -31,6 +32,7 @@ interface ProxySettingsProps {
   onRaceMaxBufferBytesChange: (value: number) => void;
   onUltimateModelIdChange: (value: string) => void;
   onUltimateModelMaxHashChange: (value: number) => void;
+  onUltimateModelMaxRetriesChange: (value: number) => void;
   onApply: () => Promise<void>;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
 }
@@ -51,6 +53,7 @@ export function ProxySettings({
   raceMaxBufferBytes,
   ultimateModelId,
   ultimateModelMaxHash,
+  ultimateModelMaxRetries,
   onUpstreamUrlChange,
   onUpstreamCredentialIdChange,
   onPortChange,
@@ -63,6 +66,7 @@ export function ProxySettings({
   onRaceMaxBufferBytesChange,
   onUltimateModelIdChange,
   onUltimateModelMaxHashChange,
+  onUltimateModelMaxRetriesChange,
   onApply,
   setStatus,
 }: ProxySettingsProps) {
@@ -318,7 +322,7 @@ export function ProxySettings({
         </div>
 
         {/* Max Hash Cache Size */}
-        <div>
+        <div class="mb-3">
           <label class="block text-sm font-medium text-gray-300 mb-1">Max Hash Cache Size</label>
           <input
             type="number"
@@ -332,6 +336,41 @@ export function ProxySettings({
           <p class="text-xs text-gray-500 mt-1">
             Maximum number of request hashes to remember for duplicate detection.
             Uses circular buffer (oldest removed when full).
+          </p>
+        </div>
+
+        {/* Max Retries */}
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Ultimate Model Max Retries</label>
+          <input
+            type="number"
+            value={ultimateModelMaxRetries}
+            onInput={(e) => {
+              const val = parseInt((e.target as HTMLInputElement).value) || 0;
+              // Allow 0-100 to match backend validation
+              if (val >= 0 && val <= 100) {
+                onUltimateModelMaxRetriesChange(val);
+              }
+            }}
+            class={`w-full px-3 py-2 bg-gray-800 border rounded text-white ${
+              ultimateModelMaxRetries < 0 || ultimateModelMaxRetries > 100 ? 'border-red-500' :
+              ultimateModelMaxRetries > 10 ? 'border-yellow-500' : 'border-gray-700'
+            }`}
+            min="0"
+            max="100"
+          />
+          {ultimateModelMaxRetries < 0 && (
+            <p class="text-red-500 text-xs mt-1">Value cannot be negative</p>
+          )}
+          {ultimateModelMaxRetries > 100 && (
+            <p class="text-red-500 text-xs mt-1">Value cannot exceed 100</p>
+          )}
+          {ultimateModelMaxRetries > 10 && ultimateModelMaxRetries <= 100 && (
+            <p class="text-yellow-500 text-xs mt-1">⚠️ High values may cause long retry loops</p>
+          )}
+          <p class="text-xs text-gray-500 mt-1">
+            Maximum number of times the ultimate model can be retried for the same request hash.
+            Set to 0 to disable retry limit (not recommended).
           </p>
         </div>
       </div>

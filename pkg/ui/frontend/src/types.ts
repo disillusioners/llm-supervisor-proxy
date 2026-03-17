@@ -48,6 +48,7 @@ export interface ToolRepairConfig {
 export interface UltimateModelConfig {
   model_id: string;
   max_hash: number;
+  max_retries: number;  // Max ultimate model retries per hash (default: 2)
 }
 
 export interface AppConfig {
@@ -195,6 +196,7 @@ export type EventType =
   | 'shadow_retry_lost'
   | 'ultimate_model_triggered'
   | 'ultimate_model_failed'
+  | 'ultimate_model_retry_exhausted'
   | 'internal_error';
 
 export interface EventData {
@@ -242,6 +244,8 @@ export interface EventData {
   ultimate_model?: string;
   original_model?: string;
   hash?: string;
+  current_retry?: number;  // For ultimate_model_retry_exhausted event
+  max_retries?: number;    // For ultimate_model_retry_exhausted event
   // Race retry fields (new)
   models?: string[];           // For race_started
   request_index?: number;      // For race_spawn

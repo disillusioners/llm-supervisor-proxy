@@ -83,6 +83,7 @@ export function SettingsPage({
   // Ultimate model state
   const [ultimateModelId, setUltimateModelId] = useState('');
   const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
+  const [ultimateModelMaxRetries, setUltimateModelMaxRetries] = useState(2);
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -113,6 +114,7 @@ export function SettingsPage({
       // Ultimate model sync
       setUltimateModelId(config.ultimate_model?.model_id || '');
       setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
+      setUltimateModelMaxRetries(config.ultimate_model?.max_retries ?? 2);
     }
   }, [config]);
 
@@ -148,6 +150,7 @@ export function SettingsPage({
         ultimate_model: {
           model_id: ultimateModelId,
           max_hash: ultimateModelMaxHash,
+          max_retries: ultimateModelMaxRetries,
         },
       });
 
@@ -338,6 +341,7 @@ export function SettingsPage({
               raceMaxBufferBytes={raceMaxBufferBytes}
               ultimateModelId={ultimateModelId}
               ultimateModelMaxHash={ultimateModelMaxHash}
+              ultimateModelMaxRetries={ultimateModelMaxRetries}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
@@ -350,6 +354,7 @@ export function SettingsPage({
               onRaceMaxBufferBytesChange={setRaceMaxBufferBytes}
               onUltimateModelIdChange={setUltimateModelId}
               onUltimateModelMaxHashChange={setUltimateModelMaxHash}
+              onUltimateModelMaxRetriesChange={setUltimateModelMaxRetries}
               onApply={handleApplyProxy}
               setStatus={setStatusWrapper}
             />

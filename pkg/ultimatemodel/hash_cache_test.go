@@ -211,3 +211,191 @@ func TestHashCacheGetStats(t *testing.T) {
 		t.Errorf("Count should be 2, got %d", count)
 	}
 }
+
+func TestHashCache_IncrementAndCheckRetry(t *testing.T) {
+	cache := NewHashCache(100)
+	hash := "test-hash-123"
+	maxRetries := 2
+
+	// First increment: count=1, not exhausted
+	newCount, exhausted := cache.IncrementAndCheckRetry(hash, maxRetries)
+	if newCount != 1 {
+		t.Errorf("Expected count=1, got %d", newCount)
+	}
+	if exhausted {
+		t.Error("Should not be exhausted on first increment")
+	}
+
+	// Second increment: count=2, not exhausted (2 <= 2)
+	newCount, exhausted = cache.IncrementAndCheckRetry(hash, maxRetries)
+	if newCount != 2 {
+		t.Errorf("Expected count=2, got %d", newCount)
+	}
+	if exhausted {
+		t.Error("Should not be exhausted on second increment (2 <= 2)")
+	}
+
+	// Third increment: count=3, exhausted (3 > 2)
+	newCount, exhausted = cache.IncrementAndCheckRetry(hash, maxRetries)
+	if newCount != 3 {
+		t.Errorf("Expected count=3, got %d", newCount)
+	}
+	if !exhausted {
+		t.Error("Should be exhausted on third increment (3 > 2)")
+	}
+}
+
+func TestHashCache_GetRetryCount(t *testing.T) {
+	cache := NewHashCache(100)
+	hash := "test-hash-123"
+
+	// Non-existent hash should return 0
+	if count := cache.GetRetryCount(hash); count != 0 {
+		t.Errorf("Expected count=0 for non-existent hash, got %d", count)
+	}
+
+	// After increment, should return the count
+	cache.IncrementAndCheckRetry(hash, 5)
+	cache.IncrementAndCheckRetry(hash, 5)
+	if count := cache.GetRetryCount(hash); count != 2 {
+		t.Errorf("Expected count=2, got %d", count)
+	}
+}
+
+func TestHashCache_ClearRetryCount(t *testing.T) {
+	cache := NewHashCache(100)
+	hash := "test-hash-123"
+
+	// Increment a few times
+	cache.IncrementAndCheckRetry(hash, 5)
+	cache.IncrementAndCheckRetry(hash, 5)
+
+	// Clear the counter
+	cache.ClearRetryCount(hash)
+
+	// Should be back to 0
+	if count := cache.GetRetryCount(hash); count != 0 {
+		t.Errorf("Expected count=0 after clear, got %d", count)
+	}
+}
+
+func TestHashCache_RemoveClearsRetryCounter(t *testing.T) {
+	cache := NewHashCache(100)
+	hash := "test-hash-123"
+
+	// Store and increment
+	cache.StoreAndCheck(hash)
+	cache.IncrementAndCheckRetry(hash, 5)
+	cache.IncrementAndCheckRetry(hash, 5)
+
+	// Remove the hash
+	cache.Remove(hash)
+
+	// Retry counter should be cleared
+	if count := cache.GetRetryCount(hash); count != 0 {
+		t.Errorf("Expected count=0 after remove, got %d", count)
+	}
+}
+
+func TestHashCache_ResetClearsAllRetryCounters(t *testing.T) {
+	cache := NewHashCache(100)
+
+	// Store and increment multiple hashes
+	hash1 := "hash-1"
+	hash2 := "hash-2"
+	cache.StoreAndCheck(hash1)
+	cache.StoreAndCheck(hash2)
+	cache.IncrementAndCheckRetry(hash1, 5)
+	cache.IncrementAndCheckRetry(hash2, 5)
+
+	// Reset
+	cache.Reset()
+
+	// All counters should be cleared
+	if count := cache.GetRetryCount(hash1); count != 0 {
+		t.Errorf("Expected hash1 count=0 after reset, got %d", count)
+	}
+	if count := cache.GetRetryCount(hash2); count != 0 {
+		t.Errorf("Expected hash2 count=0 after reset, got %d", count)
+	}
+}
+
+func TestHashCache_RetryCounterCleanedOnEviction(t *testing.T) {
+	// Test that retry counter is cleaned up when hash is evicted from circular buffer
+	cache := NewHashCache(3) // Small buffer to force eviction
+
+	// Store hashes and increment retry counters
+	hash1 := "hash-1"
+	hash2 := "hash-2"
+	hash3 := "hash-3"
+	hash4 := "hash-4" // This will cause eviction
+
+	cache.StoreAndCheck(hash1)
+	cache.IncrementAndCheckRetry(hash1, 10)
+	cache.IncrementAndCheckRetry(hash1, 10)
+
+	cache.StoreAndCheck(hash2)
+	cache.IncrementAndCheckRetry(hash2, 10)
+
+	cache.StoreAndCheck(hash3)
+	cache.IncrementAndCheckRetry(hash3, 10)
+
+	// Verify retry counters exist
+	if count := cache.GetRetryCount(hash1); count != 2 {
+		t.Errorf("Expected hash1 count=2, got %d", count)
+	}
+
+	// Store hash4 - this should evict hash1 and clean up its retry counter
+	cache.StoreAndCheck(hash4)
+
+	// hash1's retry counter should be cleaned up
+	if count := cache.GetRetryCount(hash1); count != 0 {
+		t.Errorf("Expected hash1 count=0 after eviction, got %d", count)
+	}
+
+	// hash2, hash3, hash4 should still have their counters
+	if count := cache.GetRetryCount(hash2); count != 1 {
+		t.Errorf("Expected hash2 count=1, got %d", count)
+	}
+	if count := cache.GetRetryCount(hash3); count != 1 {
+		t.Errorf("Expected hash3 count=1, got %d", count)
+	}
+}
+
+func TestHashCache_ConcurrentRetryCounter(t *testing.T) {
+	cache := NewHashCache(100)
+	hash := "test-hash-123"
+	maxRetries := 2
+
+	var wg sync.WaitGroup
+	results := make([]bool, 10) // exhausted results
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			newCount, exhausted := cache.IncrementAndCheckRetry(hash, maxRetries)
+			results[idx] = exhausted
+			t.Logf("Request %d: count=%d, exhausted=%v", idx, newCount, exhausted)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify exactly (10 - maxRetries) requests see exhausted=true
+	// With maxRetries=2, first 2 succeed, remaining 8 are exhausted
+	exhaustedCount := 0
+	for _, ex := range results {
+		if ex {
+			exhaustedCount++
+		}
+	}
+	if exhaustedCount != 10-maxRetries {
+		t.Errorf("Expected %d exhausted, got %d", 10-maxRetries, exhaustedCount)
+	}
+
+	// Final count should be 10
+	if count := cache.GetRetryCount(hash); count != 10 {
+		t.Errorf("Expected final count=10, got %d", count)
+	}
+}

@@ -9,12 +9,14 @@ import (
 // HashCache is a circular buffer of request hashes.
 // It stores hashes of message content to detect duplicate requests.
 // When a duplicate is detected, the ultimate model is triggered.
+// Also tracks retry counts per hash for the ultimate model retry limit feature.
 type HashCache struct {
-	mu     sync.RWMutex
-	hashes []string // circular buffer
-	size   int      // max capacity
-	head   int      // next write position
-	count  int      // current count
+	mu           sync.RWMutex
+	hashes       []string        // circular buffer
+	size         int             // max capacity
+	head         int             // next write position
+	count        int             // current count
+	retryCounter map[string]int  // hash -> retry count for ultimate model
 }
 
 // NewHashCache creates a new hash cache with the given max size.
@@ -24,10 +26,11 @@ func NewHashCache(maxSize int) *HashCache {
 		maxSize = 100
 	}
 	return &HashCache{
-		hashes: make([]string, maxSize),
-		size:   maxSize,
-		head:   0,
-		count:  0,
+		hashes:       make([]string, maxSize),
+		size:         maxSize,
+		head:         0,
+		count:        0,
+		retryCounter: make(map[string]int),
 	}
 }
 
@@ -50,6 +53,15 @@ func (c *HashCache) StoreAndCheck(hash string) bool {
 		}
 	}
 
+	// If buffer is full, clean up the evicted hash's retry counter
+	// This prevents memory leak in retryCounter map
+	if c.count >= c.size {
+		evictedHash := c.hashes[c.head]
+		if evictedHash != "" {
+			delete(c.retryCounter, evictedHash)
+		}
+	}
+
 	// Store hash in circular buffer
 	c.hashes[c.head] = hash
 	c.head = (c.head + 1) % c.size
@@ -61,7 +73,7 @@ func (c *HashCache) StoreAndCheck(hash string) bool {
 }
 
 // Remove removes a hash from the cache.
-// This is used when the ultimate model fails to prevent infinite retry loops.
+// This also clears the retry counter for the hash.
 // If the hash is not found, this is a no-op.
 func (c *HashCache) Remove(hash string) {
 	c.mu.Lock()
@@ -75,9 +87,12 @@ func (c *HashCache) Remove(hash string) {
 			c.count--
 			c.head = (c.head - 1 + c.size) % c.size
 			c.hashes[c.count] = "" // Clear the last element
-			return
+			break
 		}
 	}
+
+	// Also clear retry counter
+	delete(c.retryCounter, hash)
 }
 
 // Reset clears all hashes from the cache.
@@ -89,6 +104,34 @@ func (c *HashCache) Reset() {
 	c.hashes = make([]string, c.size)
 	c.head = 0
 	c.count = 0
+	c.retryCounter = make(map[string]int) // Clear all retry counters
+}
+
+// IncrementAndCheckRetry atomically increments and checks if limit exceeded.
+// This prevents TOCTOU race condition between check and increment.
+// Returns (newCount, exhausted) where exhausted=true if newCount > maxRetries.
+func (c *HashCache) IncrementAndCheckRetry(hash string, maxRetries int) (newCount int, exhausted bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.retryCounter[hash]++
+	newCount = c.retryCounter[hash]
+	return newCount, newCount > maxRetries
+}
+
+// GetRetryCount returns the current retry count for a hash.
+// Returns 0 if hash not found in retry counter.
+func (c *HashCache) GetRetryCount(hash string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.retryCounter[hash]
+}
+
+// ClearRetryCount removes the retry counter for a hash.
+// Called when ultimate model succeeds or when hash is removed.
+func (c *HashCache) ClearRetryCount(hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.retryCounter, hash)
 }
 
 // HashMessages generates a consistent hash from chat completion messages.
