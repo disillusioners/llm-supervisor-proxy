@@ -15,8 +15,8 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
-
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // executeRequest performs the actual HTTP call to upstream
@@ -553,6 +553,15 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 		return fmt.Errorf("read error: %w", err)
 	}
 
+	// Apply tool repair to non-streaming JSON response if enabled
+	if cfg.ToolRepair.Enabled {
+		repairedBody, repaired := repairToolCallArgumentsInNonStreamingResponse(body, cfg.ToolRepair)
+		if repaired {
+			body = repairedBody
+			log.Printf("[TOOL-REPAIR] Race attempt %d: repaired malformed tool_call arguments in non-streaming response", req.id)
+		}
+	}
+
 	// Add as single chunk (the non-streaming JSON response)
 	if !req.buffer.Add(body) {
 		return fmt.Errorf("buffer limit exceeded")
@@ -568,9 +577,208 @@ func getNormalizerDescription(normalizerName string) string {
 		return "Fixed empty role field in delta (changed to 'assistant')"
 	case "fix_tool_call_index":
 		return "Added missing index field to tool_calls"
+	case "tool_call_arguments_repair":
+		return "Repaired malformed JSON in tool_call arguments"
 	default:
 		return "Normalized stream chunk"
 	}
+}
+
+// getKeys returns the keys of a map as a slice
+func getKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// repairToolCallArgumentsInNonStreamingResponse repairs malformed JSON in tool_call arguments
+// within a non-streaming JSON response. Returns the (potentially modified) body and whether it was modified.
+func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepair.Config) ([]byte, bool) {
+	if !config.Enabled {
+		return body, false
+	}
+
+	repairer := toolrepair.NewRepairer(&config)
+
+	// Try to parse as JSON
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return body, false
+	}
+
+	// Navigate to choices[].message.tool_calls
+	choices, ok := resp["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return body, false
+	}
+
+	modified := false
+
+	for _, choice := range choices {
+		choiceMap, ok := choice.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		message, ok := choiceMap["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		toolCalls, ok := message["tool_calls"].([]interface{})
+		if !ok || len(toolCalls) == 0 {
+			continue
+		}
+
+		// Process each tool call
+		for _, tc := range toolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Get function object
+			fn, ok := tcMap["function"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Get arguments string
+			args, ok := fn["arguments"].(string)
+			if !ok || args == "" {
+				continue
+			}
+
+			// Check if arguments are already valid JSON
+			var js interface{}
+			if json.Unmarshal([]byte(args), &js) == nil {
+				continue
+			}
+
+			// Attempt repair
+			result := repairer.RepairArguments(args, "")
+			if result.Success && result.Repaired != args {
+				fn["arguments"] = result.Repaired
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return body, false
+	}
+
+	// Marshal back to JSON
+	repaired, err := json.Marshal(resp)
+	if err != nil {
+		return body, false
+	}
+
+	return repaired, true
+}
+
+// repairToolCallArgumentsInChunk repairs malformed JSON in tool_call arguments within an SSE chunk
+// Returns the (potentially modified) chunk and whether it was modified
+func repairToolCallArgumentsInChunk(line []byte, config toolrepair.Config) ([]byte, bool) {
+	if !config.Enabled {
+		return line, false
+	}
+
+	repairer := toolrepair.NewRepairer(&config)
+
+	// Skip non-data lines
+	lineStr := strings.TrimSpace(string(line))
+	if lineStr == "" || lineStr == "data: [DONE]" || lineStr == "[DONE]" {
+		return line, false
+	}
+
+	// Strip "data: " prefix if present
+	data := line
+	hasDataPrefix := strings.HasPrefix(lineStr, "data: ")
+	if hasDataPrefix {
+		data = []byte(strings.TrimPrefix(lineStr, "data: "))
+	}
+
+	// Try to parse as JSON
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return line, false
+	}
+
+	// Navigate to choices[0].delta.tool_calls
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return line, false
+	}
+
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return line, false
+	}
+
+	delta, ok := choice["delta"].(map[string]interface{})
+	if !ok {
+		return line, false
+	}
+
+	toolCalls, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(toolCalls) == 0 {
+		return line, false
+	}
+
+	modified := false
+
+	// Process each tool call
+	for _, tc := range toolCalls {
+		tcMap, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Get function object
+		fn, ok := tcMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Get arguments string
+		args, ok := fn["arguments"].(string)
+		if !ok || args == "" {
+			continue
+		}
+
+		// Check if arguments are already valid JSON
+		var js interface{}
+		if json.Unmarshal([]byte(args), &js) == nil {
+			continue
+		}
+
+		// Attempt repair
+		result := repairer.RepairArguments(args, "")
+		if result.Success && result.Repaired != args {
+			fn["arguments"] = result.Repaired
+			modified = true
+		}
+	}
+
+	if !modified {
+		return line, false
+	}
+
+	// Marshal back to JSON
+	normalized, err := json.Marshal(chunk)
+	if err != nil {
+		return line, false
+	}
+
+	// Re-add "data: " prefix if it was present
+	if hasDataPrefix {
+		return []byte("data: " + string(normalized)), true
+	}
+
+	return normalized, true
 }
 
 // handleStreamingResponse handles SSE streaming responses
@@ -660,6 +868,28 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 							"description": description,
 						},
 					})
+				}
+			}
+
+			// Apply tool repair to fix malformed JSON in tool_call arguments
+			if cfg.ToolRepair.Enabled {
+				repairedLine, repaired := repairToolCallArgumentsInChunk(normalizedLine, cfg.ToolRepair)
+				if repaired {
+					normalizedLine = repairedLine
+					log.Printf("[TOOL-REPAIR] Race attempt %d: repaired malformed tool_call arguments", req.id)
+
+					// Publish event to frontend if event bus is available
+					if cfg.EventBus != nil {
+						cfg.EventBus.Publish(events.Event{
+							Type:      "tool_repair",
+							Timestamp: time.Now().Unix(),
+							Data: map[string]interface{}{
+								"id":          fmt.Sprintf("%d", req.id),
+								"provider":    provider,
+								"description": "Repaired malformed JSON in tool_call arguments",
+							},
+						})
+					}
 				}
 			}
 
