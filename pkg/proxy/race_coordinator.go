@@ -155,9 +155,14 @@ func (c *raceCoordinator) manage() {
 			c.mu.Lock()
 			
 			// Check for winner eligibility
+			// IMPORTANT: Winner is only selected when request is COMPLETED (received [DONE] signal)
+			// BUG FIX: Previously selected winner when IsStreaming() was true, which caused
+			// premature winner selection when request finishes within idle timeout.
+			// The correct behavior: buffer > wait till DONE > select winner
 			if c.winner == nil {
 				for i, req := range c.requests {
-					if req.IsStreaming() || req.IsDone() && req.GetError() == nil {
+					// Only select winner when request is fully completed with [DONE] signal
+					if req.IsCompleted() && req.GetError() == nil {
 						// We found a potential winner!
 						// Preference: earlier requests (lower index)
 						if c.winner == nil || i < c.winnerIdx {

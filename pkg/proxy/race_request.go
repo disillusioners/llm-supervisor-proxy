@@ -136,6 +136,13 @@ func (r *upstreamRequest) IsDone() bool {
 	return r.status == statusCompleted || r.status == statusFailed
 }
 
+// IsCompleted returns true only if the request completed successfully (received [DONE])
+func (r *upstreamRequest) IsCompleted() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.status == statusCompleted
+}
+
 func (r *upstreamRequest) IsStreaming() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

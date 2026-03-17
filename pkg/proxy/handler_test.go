@@ -651,7 +651,7 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 		configOpts: []func(*config.Config){
 			func(c *config.Config) {
 				c.IdleTimeout = config.Duration(500 * time.Millisecond) // Fast timeout for test
-				c.RaceRetryEnabled = false // Disable race retry for this legacy test
+				c.RaceRetryEnabled = true // Race retry is always enabled now
 				c.MaxGenerationTime = config.Duration(10 * time.Second)
 			},
 		},
@@ -662,16 +662,17 @@ func TestMockLLM_HangWithIdleTimeout(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// With TTFB fix: headers sent immediately (status 200)
-			// When stream hangs mid-way, SSE error is sent instead of HTTP error
-			if rr.Code != http.StatusOK {
-				t.Errorf("expected status 200 (headers sent immediately), got %d", rr.Code)
+			// With race retry: winner is only selected when request completes with [DONE]
+			// If the request hangs (idle timeout), no winner is selected and all requests fail
+			// Result: HTTP error 504 (Gateway Timeout) instead of SSE error
+			if rr.Code != http.StatusGatewayTimeout {
+				t.Errorf("expected status 504 (Gateway Timeout), got %d", rr.Code)
 			}
 
-			// Response should contain error event since stream failed after headers sent
+			// Response should contain error message
 			respBody := rr.Body.String()
-			if !strings.Contains(respBody, "error") {
-				t.Errorf("expected response to contain error event, got: %s", respBody)
+			if !strings.Contains(respBody, "error") && !strings.Contains(respBody, "failed") {
+				t.Errorf("expected response to contain error message, got: %s", respBody)
 			}
 		},
 	})
