@@ -18,7 +18,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Test configuration
-MOCK_PORT=4002
+MOCK_PORT=4001
 PROXY_PORT=4322
 MOCK_PID=""
 PROXY_PID=""
@@ -68,12 +68,9 @@ echo -e "${BLUE}   Race Retry Internal Path Tests    ${NC}"
 echo -e "${BLUE}   (Max runtime: ${HARD_TIMEOUT}s)         ${NC}"
 echo -e "${BLUE}======================================${NC}"
 
-# Clear ports first
-pkill -f "mock_llm_race.go" 2>/dev/null || true
-pkill -f "cmd/main.go" 2>/dev/null || true
-lsof -ti :$MOCK_PORT | xargs kill -9 2>/dev/null || true
-lsof -ti :$PROXY_PORT | xargs kill -9 2>/dev/null || true
-sleep 1
+# Clean ports first (source the clean_ports script)
+source "$SCRIPT_DIR/test_mock_clean_ports.sh" "$PROXY_PORT" "$MOCK_PORT"
+clean_ports "$PROXY_PORT" "$MOCK_PORT"
 
 # Start mock LLM server with short timeouts for testing (different port from external test)
 echo -e "\n${YELLOW}[1/7] Starting Mock LLM Race Server (port $MOCK_PORT)...${NC}"

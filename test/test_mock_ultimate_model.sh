@@ -18,8 +18,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Test configuration
-MOCK_PORT=4003
-PROXY_PORT=4323
+MOCK_PORT=4001
+PROXY_PORT=4322
 MOCK_PID=""
 PROXY_PID=""
 TIMER_PID=""
@@ -68,26 +68,9 @@ echo -e "${BLUE}   Ultimate Model Internal Path Tests ${NC}"
 echo -e "${BLUE}   (Max runtime: ${HARD_TIMEOUT}s)         ${NC}"
 echo -e "${BLUE}======================================${NC}"
 
-# Clear ports first - kill any processes using our ports
-echo -e "\n${YELLOW}[0/5] Cleaning up ports before starting...${NC}"
-lsof -ti :$MOCK_PORT | xargs kill -9 2>/dev/null || true
-lsof -ti :$PROXY_PORT | xargs kill -9 2>/dev/null || true
-pkill -f "mock_llm" 2>/dev/null || true
-pkill -f "cmd/main.go" 2>/dev/null || true
-sleep 2
-
-# Double-check ports are free
-if lsof -i :$MOCK_PORT >/dev/null 2>&1; then
-    echo -e "${RED}ERROR: Port $MOCK_PORT is still in use${NC}"
-    lsof -i :$MOCK_PORT
-    exit 1
-fi
-if lsof -i :$PROXY_PORT >/dev/null 2>&1; then
-    echo -e "${RED}ERROR: Port $PROXY_PORT is still in use${NC}"
-    lsof -i :$PROXY_PORT
-    exit 1
-fi
-echo -e "${GREEN}Ports are free${NC}"
+# Clean ports first (source the clean_ports script)
+source "$SCRIPT_DIR/test_mock_clean_ports.sh" "$PROXY_PORT" "$MOCK_PORT"
+clean_ports "$PROXY_PORT" "$MOCK_PORT"
 
 # Start mock LLM server (use mock_llm_race.go which supports -port flag)
 echo -e "\n${YELLOW}[1/5] Starting Mock LLM Server (port $MOCK_PORT)...${NC}"
