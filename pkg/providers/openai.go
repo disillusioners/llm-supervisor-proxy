@@ -264,14 +264,16 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		}
 
 		// Only process data lines
-		if !strings.HasPrefix(line, "data: ") {
+		// Use "data:" prefix (without space) to handle variations like "data: [DONE]", "data:[DONE]", "data:  [DONE]"
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		// Extract data after "data:" prefix, trimming any whitespace
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
 		// Check for stream end
-		if data == "[DONE]" {
+		if strings.HasPrefix(data, "[DONE]") {
 			if lastResponse != nil {
 				// Convert accumulated tool calls to Message.ToolCalls for the final response
 				if len(accumulatedToolCalls) > 0 {
