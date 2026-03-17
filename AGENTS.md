@@ -89,9 +89,9 @@ Key configuration via environment variables (highest precedence):
 |----------|---------|-------------|
 | `UPSTREAM_URL` | `http://localhost:4001` | LLM provider URL |
 | `PORT` | `4321` | Proxy listening port |
-| `IDLE_TIMEOUT` | `60s` | Max wait between tokens |
-| `MAX_GENERATION_TIME` | `300s` | Hard request time limit per attempt |
-| `MAX_REQUEST_TIME` | `600s` | **Absolute hard timeout for entire request** (covers all retries) |
+| `IDLE_TIMEOUT` | `60s` | Max wait between tokens before spawning parallel requests |
+| `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming |
+| `MAX_GENERATION_TIME` | `300s` | **Absolute hard timeout** for entire request lifecycle |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only) |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string |

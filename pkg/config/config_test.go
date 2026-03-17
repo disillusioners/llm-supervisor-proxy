@@ -575,6 +575,7 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	configPath := filepath.Join(tempDir, "config.json")
 
 	// Set env vars BEFORE loading
+	os.Setenv("APPLY_ENV_OVERRIDES", "1")
 	os.Setenv("UPSTREAM_URL", "http://envoverride:1234")
 	os.Setenv("PORT", "9000")
 	os.Setenv("IDLE_TIMEOUT", "30s")
@@ -582,6 +583,7 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	os.Setenv("RACE_RETRY_ENABLED", "true")
 	os.Setenv("RACE_MAX_PARALLEL", "5")
 	defer func() {
+		os.Unsetenv("APPLY_ENV_OVERRIDES")
 		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("IDLE_TIMEOUT")
@@ -754,8 +756,12 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 	configPath := filepath.Join(tempDir, "config.json")
 
 	// Set env override
+	os.Setenv("APPLY_ENV_OVERRIDES", "1")
 	os.Setenv("UPSTREAM_URL", "http://envoverride:1234")
-	defer os.Unsetenv("UPSTREAM_URL")
+	defer func() {
+		os.Unsetenv("APPLY_ENV_OVERRIDES")
+		os.Unsetenv("UPSTREAM_URL")
+	}()
 
 	m := &Manager{
 		filePath: configPath,

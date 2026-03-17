@@ -197,8 +197,9 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request)
 func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*config.Config)) *config.Manager {
 	t.Helper()
 
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("UPSTREAM_URL", upstreamURL)
-	t.Setenv("MAX_REQUEST_TIME", "10s")
+	t.Setenv("MAX_GENERATION_TIME", "10s")
 
 	mgr, err := config.NewManager()
 	if err != nil {

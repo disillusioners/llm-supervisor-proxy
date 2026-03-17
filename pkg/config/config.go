@@ -68,9 +68,8 @@ type Config struct {
 	UpstreamCredentialID string              `json:"upstream_credential_id,omitempty"`
 	Port                 int                 `json:"port"`
 	IdleTimeout          Duration            `json:"idle_timeout"`
-	StreamDeadline       Duration            `json:"stream_deadline"` // Max buffer caching time for race retry - flush buffer to client after this, winner is the one with most content
-	MaxGenerationTime    Duration            `json:"max_generation_time"`
-	MaxRequestTime       Duration            `json:"max_request_time"`       // Absolute hard timeout for entire request (including all retries)
+	StreamDeadline       Duration            `json:"stream_deadline"`        // Time limit before picking best buffer and continuing streaming (default: 110s)
+	MaxGenerationTime    Duration            `json:"max_generation_time"`    // Absolute hard timeout for entire request lifecycle (default: 300s)
 	MaxStreamBufferSize  int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
 	BufferStorageDir     string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB   int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
@@ -96,7 +95,6 @@ type ManagerInterface interface {
 	GetIdleTimeout() time.Duration
 	GetStreamDeadline() time.Duration
 	GetMaxGenerationTime() time.Duration
-	GetMaxRequestTime() time.Duration
 	GetMaxStreamBufferSize() int
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
@@ -147,9 +145,8 @@ var Defaults = Config{
 	UpstreamCredentialID: "",
 	Port:                 4321,
 	IdleTimeout:          Duration(60 * time.Second),
-	StreamDeadline:       Duration(110 * time.Second), // Max buffer caching time for race retry - winner is the one with most content
-	MaxGenerationTime:    Duration(300 * time.Second),
-	MaxRequestTime:       Duration(600 * time.Second), // 10 minutes absolute hard limit
+	StreamDeadline:       Duration(110 * time.Second), // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime:    Duration(300 * time.Second), // Absolute hard timeout for entire request lifecycle
 	MaxStreamBufferSize:  10 * 1024 * 1024,            // 10MB default
 	BufferStorageDir:     "",                          // Empty means use default data directory
 	BufferMaxStorageMB:   100,                         // 100MB default
@@ -217,16 +214,6 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxGenerationTime < Duration(time.Second) {
 		return errors.New("max_generation_time must be at least 1s")
-	}
-	// MaxRequestTime validation: 0 means use default (MaxGenerationTime * 2)
-	// Only validate if explicitly set to non-zero
-	if c.MaxRequestTime != 0 {
-		if c.MaxRequestTime < Duration(time.Second) {
-			return errors.New("max_request_time must be at least 1s")
-		}
-		if c.MaxRequestTime < c.MaxGenerationTime {
-			return errors.New("max_request_time must be >= max_generation_time")
-		}
 	}
 	if c.MaxStreamBufferSize < 0 {
 		return errors.New("max_stream_buffer_size cannot be negative")
@@ -350,11 +337,6 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.MaxGenerationTime = Duration(d)
-		}
-	}
-	if v := os.Getenv("MAX_REQUEST_TIME"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			cfg.MaxRequestTime = Duration(d)
 		}
 	}
 	if v := os.Getenv("LOOP_DETECTION_ENABLED"); v != "" {
@@ -535,13 +517,6 @@ func (m *Manager) GetMaxGenerationTime() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxGenerationTime.Duration()
-}
-
-// GetMaxRequestTime returns the absolute max request time (hard limit for all attempts)
-func (m *Manager) GetMaxRequestTime() time.Duration {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.MaxRequestTime.Duration()
 }
 
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes

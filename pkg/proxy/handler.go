@@ -30,17 +30,12 @@ type Config struct {
 // Clone returns a snapshot of the current config values
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
-	// MaxRequestTime defaults to MaxGenerationTime * 2 if not set
-	maxRequestTime := cfg.MaxRequestTime.Duration()
-	if maxRequestTime == 0 {
-		maxRequestTime = cfg.MaxGenerationTime.Duration() * 2
-	}
 	return ConfigSnapshot{
 		UpstreamURL:             cfg.UpstreamURL,
 		UpstreamCredentialID:    cfg.UpstreamCredentialID,
 		IdleTimeout:             cfg.IdleTimeout.Duration(),
+		StreamDeadline:          cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
-		MaxRequestTime:          maxRequestTime,
 		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
 		ModelsConfig:            c.ModelsConfig,
 		LoopDetection:           cfg.LoopDetection,
@@ -58,8 +53,8 @@ type ConfigSnapshot struct {
 	UpstreamURL             string
 	UpstreamCredentialID    string
 	IdleTimeout             time.Duration
-	MaxGenerationTime       time.Duration
-	MaxRequestTime          time.Duration
+	StreamDeadline          time.Duration // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime       time.Duration // Absolute hard timeout for entire request lifecycle
 	MaxStreamBufferSize     int
 	ModelsConfig            models.ModelsConfigInterface
 	LoopDetection           config.LoopDetectionConfig

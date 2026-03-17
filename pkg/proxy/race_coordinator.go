@@ -142,10 +142,16 @@ func (c *raceCoordinator) manage() {
 	defer ticker.Stop()
 
 	// STREAMING DEADLINE TIMER
-	// Per the unified race retry design, when MaxGenerationTime is reached,
-	// we pick the best buffer and continue streaming it until complete.
-	streamDeadlineTimer := time.NewTimer(time.Duration(c.cfg.MaxGenerationTime))
+	// When StreamDeadline is reached, pick the best buffer and continue streaming.
+	// This allows us to start streaming to the client even if the upstream hasn't finished.
+	streamDeadlineTimer := time.NewTimer(c.cfg.StreamDeadline)
 	defer streamDeadlineTimer.Stop()
+
+	// HARD DEADLINE TIMER
+	// When MaxGenerationTime is reached, forcefully terminate all requests.
+	// This is the absolute hard timeout for the entire request lifecycle.
+	hardDeadlineTimer := time.NewTimer(c.cfg.MaxGenerationTime)
+	defer hardDeadlineTimer.Stop()
 
 	// Track when we started monitoring for idle
 	idleCheckStart := time.Now()
@@ -160,6 +166,11 @@ func (c *raceCoordinator) manage() {
 		case <-streamDeadlineTimer.C:
 			// Streaming deadline reached - pick best buffer and continue streaming
 			c.handleStreamingDeadline()
+			return
+		case <-hardDeadlineTimer.C:
+			// Hard deadline reached - force end everything
+			log.Printf("[RACE] Hard deadline reached after %v, forcing end", time.Since(c.startTime))
+			c.handleHardDeadline()
 			return
 		case <-ticker.C:
 			c.mu.Lock()
@@ -296,10 +307,10 @@ func (c *raceCoordinator) manage() {
 	}
 }
 
-// handleStreamingDeadline picks the best buffer when MaxGenerationTime is reached
+// handleStreamingDeadline picks the best buffer when StreamDeadline is reached
 // Per the unified race retry design:
 // - Pick the request with the most content (best candidate to continue)
-// - DON'T cancel the winner - let it continue streaming until complete or hardDeadline
+// - DON'T cancel the winner - let it continue streaming until complete or hard deadline
 // - Cancel only the other requests
 func (c *raceCoordinator) handleStreamingDeadline() {
 	c.mu.Lock()
@@ -367,6 +378,31 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 		c.onceDone.Do(func() { close(c.done) })
 		c.onceStream.Do(func() { close(c.streamCh) })
 	}
+}
+
+// handleHardDeadline forcefully terminates all requests when MaxGenerationTime is reached
+// This is the absolute hard timeout - no requests are allowed to continue past this point.
+func (c *raceCoordinator) handleHardDeadline() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	log.Printf("[RACE] Hard deadline reached, cancelling all requests")
+
+	// Publish race_hard_deadline event
+	c.publishEvent("race_hard_deadline", map[string]interface{}{
+		"duration_ms": time.Since(c.startTime).Milliseconds(),
+	})
+
+	// Cancel ALL requests immediately (including winner if any)
+	for _, req := range c.requests {
+		if req != nil {
+			req.Cancel()
+		}
+	}
+
+	// Signal done
+	c.onceDone.Do(func() { close(c.done) })
+	c.onceStream.Do(func() { close(c.streamCh) })
 }
 
 func (c *raceCoordinator) cancelAll() {

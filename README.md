@@ -73,9 +73,9 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
 | `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
-| `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before considering the stream hung. |
-| `MAX_GENERATION_TIME` | `300s` | Hard limit for the entire request lifecycle. |
-| `MAX_REQUEST_TIME` | `600s` | **Absolute hard timeout for entire request** (covers all retries). |
+| `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
+| `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming. |
+| `MAX_GENERATION_TIME` | `300s` | **Absolute hard timeout** for entire request lifecycle. |
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
 | `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses (keeps connections alive during buffering). |

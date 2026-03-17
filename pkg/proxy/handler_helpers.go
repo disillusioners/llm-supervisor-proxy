@@ -29,10 +29,6 @@ type requestContext struct {
 	reqLog    *store.RequestLog
 	modelList []string
 
-	// Hard deadline for the entire request (absolute timeout across all retries)
-	// This ensures the server will never serve a connection longer than MaxRequestTime
-	hardDeadline time.Time
-
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 

@@ -116,15 +116,8 @@ func (h *Handler) Execute(
 		isStream = stream
 	}
 
-	// Apply MaxRequestTime timeout using context
-	maxRequestTime := cfg.MaxRequestTime.Duration()
-	if maxRequestTime == 0 {
-		// Default to MaxGenerationTime * 2 if not set
-		maxRequestTime = cfg.MaxGenerationTime.Duration() * 2
-	}
-
-	// Create a context with deadline
-	ctx, cancel := context.WithTimeout(parentCtx, maxRequestTime)
+	// Apply MaxGenerationTime as the absolute hard timeout
+	ctx, cancel := context.WithTimeout(parentCtx, cfg.MaxGenerationTime.Duration())
 	defer cancel()
 
 	// Route to internal or external handler
