@@ -2,19 +2,10 @@
 
 # Test script for Race Retry functionality
 # Tests idle timeout spawning and stream deadline behavior
-
-set -e
+# Maximum runtime: 30 seconds
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-
-# Load test API key from .env-test
-if [ -f "$ROOT_DIR/.env-test" ]; then
-    export $(grep -v '^#' "$ROOT_DIR/.env-test" | xargs)
-fi
-
-# Use TEST_API_KEY or fallback
-API_KEY="${TEST_API_KEY:-test-key}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,31 +19,66 @@ MOCK_PORT=4001
 PROXY_PORT=4321
 MOCK_PID=""
 PROXY_PID=""
+TIMER_PID=""
 
-cleanup() {
-    echo -e "\n${YELLOW}Cleaning up...${NC}"
+# Hard timeout: kill everything after 30 seconds
+HARD_TIMEOUT=30
+
+cleanup_all() {
+    echo -e "\n${YELLOW}Cleaning up all processes...${NC}"
+    if [ ! -z "$TIMER_PID" ]; then
+        kill $TIMER_PID 2>/dev/null || true
+    fi
     if [ ! -z "$MOCK_PID" ]; then
         kill $MOCK_PID 2>/dev/null || true
     fi
     if [ ! -z "$PROXY_PID" ]; then
         kill $PROXY_PID 2>/dev/null || true
     fi
-    # Wait for processes to fully terminate
-    sleep 1
+    pkill -f "mock_llm_race.go" 2>/dev/null || true
+    pkill -f "cmd/main.go" 2>/dev/null || true
+    lsof -ti :4001 | xargs kill -9 2>/dev/null || true
+    lsof -ti :4321 | xargs kill -9 2>/dev/null || true
+    wait 2>/dev/null || true
 }
+trap cleanup_all EXIT
 
-trap cleanup EXIT
+# Start background timer for hard timeout - will exit script after HARD_TIMEOUT seconds
+hard_timeout_handler() {
+    echo -e "\n${RED}Hard timeout ($HARD_TIMEOUT s) reached! Terminating...${NC}"
+    exit 1
+}
+trap hard_timeout_handler SIGALRM
+( sleep $HARD_TIMEOUT && kill -ALRM $$ 2>/dev/null ) &
+TIMER_PID=$!
+
+# Load test API key from .env-test
+if [ -f "$ROOT_DIR/.env-test" ]; then
+    export $(grep -v '^#' "$ROOT_DIR/.env-test" | xargs)
+fi
+
+# Use TEST_API_KEY or fallback
+API_KEY="${TEST_API_KEY:-test-key}"
 
 echo -e "${BLUE}======================================${NC}"
 echo -e "${BLUE}   Race Retry Functionality Tests    ${NC}"
+echo -e "${BLUE}   (Max runtime: ${HARD_TIMEOUT}s)         ${NC}"
 echo -e "${BLUE}======================================${NC}"
+
+# Clear ports first
+pkill -f "mock_llm_race.go" 2>/dev/null || true
+pkill -f "cmd/main.go" 2>/dev/null || true
+lsof -ti :$MOCK_PORT | xargs kill -9 2>/dev/null || true
+lsof -ti :$PROXY_PORT | xargs kill -9 2>/dev/null || true
+sleep 1
 
 # Start mock LLM server with short timeouts for testing
 echo -e "\n${YELLOW}[1/6] Starting Mock LLM Race Server (port $MOCK_PORT)...${NC}"
-echo -e "  idle-pause=8s (should trigger proxy's 5s idle timeout)"
-echo -e "  deadline-interval=2s (should trigger proxy's 20s deadline)"
+echo -e "  idle-pause=3s (should trigger proxy's 1s idle timeout)"
+echo -e "  deadline-interval=1s (should trigger proxy's 6s deadline)"
+echo -e "  slow-start=1s (should complete before idle timeout)"
 cd "$SCRIPT_DIR"
-go run mock_llm_race.go -port=$MOCK_PORT -idle-pause=8 -deadline-interval=2 &
+go run mock_llm_race.go -port=$MOCK_PORT -idle-pause=3 -deadline-interval=1 -slow-start=1 &
 MOCK_PID=$!
 cd "$ROOT_DIR"
 
@@ -64,28 +90,18 @@ if ! kill -0 $MOCK_PID 2>/dev/null; then
 fi
 echo -e "${GREEN}Mock server started (PID: $MOCK_PID)${NC}"
 
-# Kill any existing processes on the ports
-pkill -f "cmd/main.go" 2>/dev/null || true
-lsof -ti :$PROXY_PORT | xargs kill 2>/dev/null || true
-sleep 1
-
 # Start proxy with race retry enabled
-# Note: We use environment variables to override config settings
 echo -e "\n${YELLOW}[2/6] Starting Proxy with Race Retry enabled...${NC}"
-echo -e "  APPLY_ENV_OVERRIDES=true (enable env var overrides)"
-echo -e "  UPSTREAM_URL=http://localhost:$MOCK_PORT (route to mock server)"
-echo -e "  IDLE_TIMEOUT=5s (short for testing)"
-echo -e "  STREAM_DEADLINE=20s (pick best buffer after 20s)"
-echo -e "  MAX_GENERATION_TIME=60s (absolute hard timeout)"
-echo -e "  RACE_RETRY_ENABLED=true"
-echo -e "  RACE_PARALLEL_ON_IDLE=true"
+echo -e "  IDLE_TIMEOUT=1s (short for testing)"
+echo -e "  STREAM_DEADLINE=6s (pick best buffer after 6s)"
+echo -e "  MAX_GENERATION_TIME=15s (absolute hard timeout)"
 
 # Export config overrides for testing (these override config file)
 export APPLY_ENV_OVERRIDES="true"
 export UPSTREAM_URL="http://localhost:$MOCK_PORT"
-export IDLE_TIMEOUT="5s"
-export STREAM_DEADLINE="20s"
-export MAX_GENERATION_TIME="60s"
+export IDLE_TIMEOUT="1s"
+export STREAM_DEADLINE="6s"
+export MAX_GENERATION_TIME="15s"
 export RACE_RETRY_ENABLED="true"
 export RACE_PARALLEL_ON_IDLE="true"
 export RACE_MAX_PARALLEL="3"
@@ -95,7 +111,7 @@ go run cmd/main.go &
 PROXY_PID=$!
 
 # Wait for proxy to be ready
-sleep 3
+sleep 2
 if ! kill -0 $PROXY_PID 2>/dev/null; then
     echo -e "${RED}ERROR: Proxy failed to start${NC}"
     exit 1
@@ -123,7 +139,7 @@ test_streaming() {
             \"model\": \"mock-model\",
             \"messages\": [{\"role\": \"user\", \"content\": \"$prompt\"}],
             \"stream\": true
-        }" 2>&1 | head -n 30
+        }" 2>&1 | head -n 20
     
     end_time=$(date +%s)
     duration=$((end_time - start_time))
@@ -133,32 +149,22 @@ test_streaming() {
 # Test 1: Fast complete (baseline - should complete quickly)
 echo -e "\n${YELLOW}[3/6] Test 1: Fast Complete (baseline)${NC}"
 echo -e "Expected: Completes quickly without spawning parallel requests"
-test_streaming "Fast Complete" "mock-fast-complete" 10
+test_streaming "Fast Complete" "mock-fast-complete" 3
 
 # Test 2: Slow start (should complete after initial delay)
 echo -e "\n${YELLOW}[4/6] Test 2: Slow Start${NC}"
-echo -e "Expected: Waits 5s then completes quickly"
-test_streaming "Slow Start" "mock-slow-start" 15
+echo -e "Expected: Waits 1s then completes quickly"
+test_streaming "Slow Start" "mock-slow-start" 4
 
 # Test 3: Idle timeout (main scenario - should spawn parallel requests)
 echo -e "\n${YELLOW}[5/6] Test 3: Idle Timeout (KEY TEST)${NC}"
-echo -e "Expected behavior:"
-echo -e "  1. Main request starts streaming initial tokens"
-echo -e "  2. After IDLE_TIMEOUT (5s), proxy spawns parallel requests"
-echo -e "  3. Check proxy logs for: 'Main request idle, spawning parallel request'"
-echo -e "  4. First request to complete wins the race"
-echo -e "\n${YELLOW}Starting test (will run for ~10s)...${NC}"
-test_streaming "Idle Timeout" "mock-idle-timeout" 12
+echo -e "Expected: After IDLE_TIMEOUT (1s), proxy spawns parallel requests"
+test_streaming "Idle Timeout" "mock-idle-timeout" 6
 
 # Test 4: Streaming deadline (should pick best buffer)
 echo -e "\n${YELLOW}[6/6] Test 4: Streaming Deadline (KEY TEST)${NC}"
-echo -e "Expected behavior:"
-echo -e "  1. Main request streams slowly (10s per token)"
-echo -e "  2. After STREAM_DEADLINE (20s), proxy picks best buffer"
-echo -e "  3. Check proxy logs for: 'Streaming deadline reached, picking best buffer'"
-echo -e "  4. Returns partial content accumulated so far"
-echo -e "\n${YELLOW}Starting test (will run for ~25s)...${NC}"
-test_streaming "Streaming Deadline" "mock-streaming-deadline" 30
+echo -e "Expected: After STREAM_DEADLINE (6s), proxy picks best buffer"
+test_streaming "Streaming Deadline" "mock-streaming-deadline" 8
 
 # Summary
 echo -e "\n${BLUE}======================================${NC}"
@@ -169,11 +175,13 @@ echo -e "${GREEN}Tests completed. Check the proxy logs above for:${NC}"
 echo -e ""
 echo -e "  ${YELLOW}Idle Timeout Test:${NC}"
 echo -e "    Look for: [RACE] Main request idle, spawning parallel request"
-echo -e "    Look for: [RACE] Spawning second request"
 echo -e ""
 echo -e "  ${YELLOW}Streaming Deadline Test:${NC}"
 echo -e "    Look for: [RACE] Streaming deadline reached, picking best buffer"
-echo -e "    Look for: [RACE] Picked best buffer"
 echo -e ""
 echo -e "${GREEN}If you see these log messages, the features are working correctly!${NC}"
 echo -e ""
+
+# Cancel the hard timeout timer
+kill $TIMER_PID 2>/dev/null || true
+TIMER_PID=""

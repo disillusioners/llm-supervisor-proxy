@@ -33,8 +33,9 @@ import (
 )
 
 var (
-	flagIdlePause       = flag.Int("idle-pause", 10, "Pause duration in seconds for idle-timeout test")
+	flagIdlePause        = flag.Int("idle-pause", 10, "Pause duration in seconds for idle-timeout test")
 	flagDeadlineInterval = flag.Int("deadline-interval", 3, "Interval between tokens in seconds for deadline test")
+	flagSlowStart        = flag.Int("slow-start", 5, "Delay before first token in seconds for slow-start test")
 )
 
 func main() {
@@ -249,11 +250,11 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 	// Scenario 5: Slow start then fast complete
 	// Wait before sending first token, then complete quickly
 	if strings.Contains(prompt, "mock-slow-start") {
-		log.Printf("[%s] Simulating SLOW START scenario", model)
+		log.Printf("[%s] Simulating SLOW START scenario (delay=%ds)", model, *flagSlowStart)
 
-		// Wait 5 seconds before starting
+		// Wait configurable seconds before starting
 		select {
-		case <-time.After(5 * time.Second):
+		case <-time.After(time.Duration(*flagSlowStart) * time.Second):
 			log.Printf("[%s] Slow start wait finished", model)
 		case <-r.Context().Done():
 			log.Printf("[%s] Context cancelled during slow start", model)
