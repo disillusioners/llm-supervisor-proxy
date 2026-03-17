@@ -163,10 +163,10 @@ export function ModelsTab({
                       <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
                         {escapeHtml(model.id)}
                       </p>
-                      {model.fallback_chain.length > 0 && (
+                      {(model.fallback_chain ?? []).length > 0 && (
                         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
                           <span class="text-xs text-gray-500 font-medium">FALLBACKS:</span>
-                          {model.fallback_chain.map(fb => (
+                          {(model.fallback_chain ?? []).map(fb => (
                             <span class="text-xs bg-gray-600 text-gray-200 px-1.5 py-0.5 rounded">
                               {escapeHtml(fb)}
                             </span>

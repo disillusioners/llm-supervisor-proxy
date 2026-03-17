@@ -10,7 +10,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/fe/api': 'http://localhost:4321',
+      '/fe/api': 'http://localhost:4123',
     },
   },
 });
