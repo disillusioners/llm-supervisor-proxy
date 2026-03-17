@@ -48,6 +48,12 @@ func NormalizeWithContext(line []byte, ctx *NormalizeContext) ([]byte, bool) {
 	return defaultRegistry.Normalize(line, ctx)
 }
 
+// NormalizeWithContextAndName applies normalization and returns which normalizer made the modification
+// Returns (normalizedLine, wasModified, normalizerName)
+func NormalizeWithContextAndName(line []byte, ctx *NormalizeContext) ([]byte, bool, string) {
+	return defaultRegistry.NormalizeWithName(line, ctx)
+}
+
 // NewContext creates a new normalization context for a request
 func NewContext(provider, requestID string) *NormalizeContext {
 	return &NormalizeContext{

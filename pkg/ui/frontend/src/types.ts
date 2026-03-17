@@ -174,6 +174,8 @@ export type EventType =
   | 'loop_interrupted'
   | 'tool_repair'
   | 'stream_chunk_deadline'
+  // Stream normalize events (new)
+  | 'stream_normalize'
   | 'client_disconnected'
   | 'client_disconnected_during_retry'
   | 'client_disconnected_during_scan'
@@ -220,6 +222,10 @@ export interface EventData {
   // Stream chunk deadline fields
   deadline?: string;
   elapsed?: string;
+  // Stream normalize fields
+  normalizer?: string;
+  provider?: string;
+  description?: string;
   // Tool repair fields
   total_tool_calls?: number;
   repaired?: number;

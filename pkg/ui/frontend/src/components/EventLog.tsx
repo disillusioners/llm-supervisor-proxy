@@ -71,6 +71,11 @@ const getEventMessage = (event: Event): string => {
       return 'Client disconnected during internal request';
     case 'stream_chunk_deadline':
       return `Stream chunk deadline reached - flushing buffer (${event.data?.buffer_size || 0} bytes, deadline: ${event.data?.deadline || '?'}, elapsed: ${event.data?.elapsed || '?'})`;
+    case 'stream_normalize': {
+      const d = event.data;
+      const provider = d?.provider ? ` [${d.provider}]` : '';
+      return `Stream normalized${provider}: ${d?.description || d?.normalizer || 'unknown fix'}`;
+    }
     case 'shadow_retry_started': {
       const d = event.data;
       const trigger = d?.trigger ? ` (${d.trigger})` : '';
@@ -167,6 +172,9 @@ const getEventColor = (type: EventType): string => {
       return 'text-pink-400';
     case 'ultimate_model_failed':
       return 'text-red-400';
+    // Stream normalize events
+    case 'stream_normalize':
+      return 'text-amber-400';
     // Race retry events
     case 'race_started':
       return 'text-cyan-400';
@@ -233,6 +241,8 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'CLIENT_DISCONNECTED_INTERNAL';
     case 'stream_chunk_deadline':
       return 'STREAM_CHUNK_DEADLINE';
+    case 'stream_normalize':
+      return 'STREAM_NORMALIZE';
     case 'shadow_retry_started':
       return 'SHADOW_RETRY_STARTED';
     case 'shadow_retry_won':

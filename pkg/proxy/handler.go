@@ -24,6 +24,7 @@ import (
 type Config struct {
 	ConfigMgr    config.ManagerInterface      // Config manager for dynamic updates
 	ModelsConfig models.ModelsConfigInterface // Models config for fallback chains
+	EventBus     *events.Bus                  // Event bus for publishing events
 }
 
 // Clone returns a snapshot of the current config values
@@ -49,6 +50,7 @@ func (c *Config) Clone() ConfigSnapshot {
 		RaceParallelOnIdle:      cfg.RaceParallelOnIdle,
 		RaceMaxParallel:         cfg.RaceMaxParallel,
 		RaceMaxBufferBytes:      cfg.RaceMaxBufferBytes,
+		EventBus:                c.EventBus,
 	}
 }
 
@@ -70,6 +72,9 @@ type ConfigSnapshot struct {
 	RaceMaxParallel    int
 	RaceMaxBufferBytes int
 	ModelID            string // Primary model for this request
+
+	// Event Bus for publishing events during request handling
+	EventBus *events.Bus
 }
 
 type Handler struct {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
@@ -418,6 +419,18 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 	return nil
 }
 
+// getNormalizerDescription returns a human-readable description of what a normalizer fixes
+func getNormalizerDescription(normalizerName string) string {
+	switch normalizerName {
+	case "fix_empty_role":
+		return "Fixed empty role field in delta (changed to 'assistant')"
+	case "fix_tool_call_index":
+		return "Added missing index field to tool_calls"
+	default:
+		return "Normalized stream chunk"
+	}
+}
+
 // handleStreamingResponse handles SSE streaming responses
 func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
@@ -476,9 +489,24 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			}
 
 			// Apply normalization to fix malformed chunks
-			normalizedLine, modified := normalizers.NormalizeWithContext(line, normCtx)
+			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName(line, normCtx)
 			if modified {
-				log.Printf("[DEBUG] Race attempt %d: normalized malformed stream chunk", req.id)
+				log.Printf("[DEBUG] Race attempt %d: normalized malformed stream chunk by %s", req.id, normalizerName)
+
+				// Publish event to frontend if event bus is available
+				if cfg.EventBus != nil {
+					description := getNormalizerDescription(normalizerName)
+					cfg.EventBus.Publish(events.Event{
+						Type:      "stream_normalize",
+						Timestamp: time.Now().Unix(),
+						Data: map[string]interface{}{
+							"id":          fmt.Sprintf("%d", req.id),
+							"normalizer":  normalizerName,
+							"provider":    provider,
+							"description": description,
+						},
+					})
+				}
 			}
 
 			// Add chunk to buffer

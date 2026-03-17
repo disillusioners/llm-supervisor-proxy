@@ -83,6 +83,7 @@ func main() {
 	proxyConfig := &proxy.Config{
 		ConfigMgr:    configMgr,
 		ModelsConfig: modelsConfig,
+		EventBus:     bus,
 	}
 
 	// Initialize Token Store

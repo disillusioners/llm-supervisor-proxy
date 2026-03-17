@@ -115,3 +115,45 @@ func (r *Registry) ListNormalizers() []string {
 	}
 	return names
 }
+
+// NormalizeWithName applies all enabled normalizers and returns which one modified the output
+// Returns (normalizedLine, wasModified, normalizerName)
+func (r *Registry) NormalizeWithName(line []byte, ctx *NormalizeContext) ([]byte, bool, string) {
+	// Get the enabled set
+	r.mu.RLock()
+	enabled := make(map[string]bool)
+	for name, isEnabled := range r.enabled {
+		enabled[name] = isEnabled
+	}
+	normalizers := make(map[string]StreamNormalizer)
+	for name, n := range r.normalizers {
+		normalizers[name] = n
+	}
+	r.mu.RUnlock()
+
+	modified := false
+	result := line
+	modifierName := ""
+
+	// Apply each enabled normalizer in sequence
+	for name, isEnabled := range enabled {
+		if !isEnabled {
+			continue
+		}
+
+		normalizer := normalizers[name]
+		if normalizer == nil {
+			continue
+		}
+
+		newResult, wasModified := normalizer.Normalize(result, ctx)
+		if wasModified && !modified {
+			// Only record the first normalizer that modifies the output
+			modified = true
+			modifierName = name
+		}
+		result = newResult
+	}
+
+	return result, modified, modifierName
+}

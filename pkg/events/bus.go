@@ -64,6 +64,14 @@ type StreamChunkDeadlineEvent struct {
 	Elapsed    string `json:"elapsed"`     // Time since request start
 }
 
+// StreamNormalizeEvent represents a stream normalization event when a malformed chunk is fixed
+type StreamNormalizeEvent struct {
+	RequestID   string `json:"request_id"`
+	Normalizer  string `json:"normalizer"`  // Name of the normalizer that fixed the chunk
+	Provider    string `json:"provider"`    // Upstream provider (e.g., glm-5)
+	Description string `json:"description"` // Description of what was fixed
+}
+
 type Bus struct {
 	mu          sync.RWMutex
 	subscribers []chan Event
