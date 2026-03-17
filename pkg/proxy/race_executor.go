@@ -87,11 +87,7 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 	// 1. Prepare upstream request
 	// Check for test upstream header (for testing with mock servers)
 	upstreamURL := cfg.UpstreamURL
-	if testUpstream := originalReq.Header.Get("X-LLMProxy-Test-Upstream"); testUpstream != "" {
-		upstreamURL = testUpstream
-		log.Printf("[DEBUG] Using test upstream URL: %s", upstreamURL)
-	}
-	
+
 	// Set the target URL to upstream
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
@@ -587,7 +583,7 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 		if readTimeout < 30*time.Second {
 			readTimeout = 30 * time.Second // Minimum 30s
 		}
-		
+
 		readDone := make(chan struct{})
 		go func() {
 			line, readErr = reader.ReadBytes('\n')

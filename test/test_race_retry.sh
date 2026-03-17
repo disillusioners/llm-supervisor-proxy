@@ -70,17 +70,18 @@ lsof -ti :$PROXY_PORT | xargs kill 2>/dev/null || true
 sleep 1
 
 # Start proxy with race retry enabled
-# Note: We use the existing config file but override specific settings via env vars
-# The test upstream URL is passed via X-LLMProxy-Test-Upstream header in requests
+# Note: We use environment variables to override config settings
 echo -e "\n${YELLOW}[2/6] Starting Proxy with Race Retry enabled...${NC}"
-echo -e "  Using existing config file (proxy will use default upstream)"
-echo -e "  Test requests will use X-LLMProxy-Test-Upstream header to route to mock"
+echo -e "  APPLY_ENV_OVERRIDES=true (enable env var overrides)"
+echo -e "  UPSTREAM_URL=http://localhost:$MOCK_PORT (route to mock server)"
 echo -e "  IDLE_TIMEOUT=5s (short for testing)"
 echo -e "  MAX_GENERATION_TIME=20s (short for testing)"
 echo -e "  RACE_RETRY_ENABLED=true"
 echo -e "  RACE_PARALLEL_ON_IDLE=true"
 
 # Export config overrides for testing (these override config file)
+export APPLY_ENV_OVERRIDES="true"
+export UPSTREAM_URL="http://localhost:$MOCK_PORT"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export MAX_REQUEST_TIME="60s"
@@ -113,11 +114,10 @@ test_streaming() {
     
     start_time=$(date +%s)
     
-    # Use X-LLMProxy-Test-Upstream header to route to mock server
+    # Request goes to proxy which routes to UPSTREAM_URL (mock server)
     curl -N -s --max-time "$max_time" "http://localhost:$PROXY_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
-        -H "X-LLMProxy-Test-Upstream: http://localhost:$MOCK_PORT" \
         -d "{
             \"model\": \"mock-model\",
             \"messages\": [{\"role\": \"user\", \"content\": \"$prompt\"}],
