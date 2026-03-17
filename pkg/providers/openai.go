@@ -255,6 +255,74 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 	// Accumulate tool calls during streaming (index -> accumulated data)
 	accumulatedToolCalls := make(map[int]*ToolCall)
 
+	// sendDoneEvent sends the done event with the final response
+	// This is called when we see [DONE] or when stream ends with a finish_reason
+	sendDoneEvent := func() {
+		if lastResponse != nil {
+			// Convert accumulated tool calls to Message.ToolCalls for the final response
+			if len(accumulatedToolCalls) > 0 {
+				// Ensure Message exists
+				if lastResponse.Choices[0].Message == nil {
+					lastResponse.Choices[0].Message = &ChatMessage{
+						Role: "assistant",
+					}
+				}
+
+				// Convert accumulated tool calls to sorted slice
+				maxIndex := 0
+				for idx := range accumulatedToolCalls {
+					if idx > maxIndex {
+						maxIndex = idx
+					}
+				}
+
+				toolCalls := make([]ToolCall, maxIndex+1)
+				for idx, tc := range accumulatedToolCalls {
+					toolCalls[idx] = *tc
+				}
+				lastResponse.Choices[0].Message.ToolCalls = toolCalls
+			}
+
+			// Repair tool calls in the final response
+			if p.repairer != nil && lastResponse.Choices[0].Message != nil {
+				toolCalls := lastResponse.Choices[0].Message.ToolCalls
+				if len(toolCalls) > 0 {
+					// Convert tool calls to repair data
+					toolCallsData := make([]toolrepair.ToolCallData, len(toolCalls))
+					for j, tc := range toolCalls {
+						toolCallsData[j] = toolrepair.ToolCallData{
+							ID:        tc.ID,
+							Type:      tc.Type,
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						}
+					}
+
+					// Repair tool calls
+					repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData, p.eventCallback)
+					if stats.Repaired > 0 || stats.Failed > 0 {
+						log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
+							stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)
+					}
+
+					// Update with repaired data
+					for j, rc := range repairedCalls {
+						lastResponse.Choices[0].Message.ToolCalls[j].Function.Arguments = rc.Arguments
+					}
+				}
+			}
+
+			eventCh <- StreamEvent{
+				Type:     "done",
+				Response: lastResponse,
+			}
+		} else {
+			eventCh <- StreamEvent{
+				Type: "done",
+			}
+		}
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -272,71 +340,9 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		// Extract data after "data:" prefix, trimming any whitespace
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
-		// Check for stream end
+		// Check for stream end marker
 		if strings.HasPrefix(data, "[DONE]") {
-			if lastResponse != nil {
-				// Convert accumulated tool calls to Message.ToolCalls for the final response
-				if len(accumulatedToolCalls) > 0 {
-					// Ensure Message exists
-					if lastResponse.Choices[0].Message == nil {
-						lastResponse.Choices[0].Message = &ChatMessage{
-							Role: "assistant",
-						}
-					}
-
-					// Convert accumulated tool calls to sorted slice
-					maxIndex := 0
-					for idx := range accumulatedToolCalls {
-						if idx > maxIndex {
-							maxIndex = idx
-						}
-					}
-
-					toolCalls := make([]ToolCall, maxIndex+1)
-					for idx, tc := range accumulatedToolCalls {
-						toolCalls[idx] = *tc
-					}
-					lastResponse.Choices[0].Message.ToolCalls = toolCalls
-				}
-
-				// Repair tool calls in the final response
-				if p.repairer != nil && lastResponse.Choices[0].Message != nil {
-					toolCalls := lastResponse.Choices[0].Message.ToolCalls
-					if len(toolCalls) > 0 {
-						// Convert tool calls to repair data
-						toolCallsData := make([]toolrepair.ToolCallData, len(toolCalls))
-						for j, tc := range toolCalls {
-							toolCallsData[j] = toolrepair.ToolCallData{
-								ID:        tc.ID,
-								Type:      tc.Type,
-								Name:      tc.Function.Name,
-								Arguments: tc.Function.Arguments,
-							}
-						}
-
-						// Repair tool calls
-						repairedCalls, stats := p.repairer.RepairToolCallsData(toolCallsData, p.eventCallback)
-						if stats.Repaired > 0 || stats.Failed > 0 {
-							log.Printf("[TOOL-REPAIR] total=%d repaired=%d failed=%d duration=%v",
-								stats.TotalToolCalls, stats.Repaired, stats.Failed, stats.Duration)
-						}
-
-						// Update with repaired data
-						for j, rc := range repairedCalls {
-							lastResponse.Choices[0].Message.ToolCalls[j].Function.Arguments = rc.Arguments
-						}
-					}
-				}
-
-				eventCh <- StreamEvent{
-					Type:     "done",
-					Response: lastResponse,
-				}
-			} else {
-				eventCh <- StreamEvent{
-					Type: "done",
-				}
-			}
+			sendDoneEvent()
 			return
 		}
 
@@ -406,7 +412,17 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 		return
 	}
 
-	// If we reach here without seeing [DONE], the stream ended prematurely.
+	// If we reach here without seeing [DONE], check if we received a finish_reason.
+	// Some providers (like MiniMax) don't send [DONE] marker but close the connection
+	// after sending finish_reason. In this case, treat it as a successful completion.
+	if lastResponse != nil && len(lastResponse.Choices) > 0 && lastResponse.Choices[0].FinishReason != "" {
+		log.Printf("[PROVIDER] Stream ended without [DONE] marker but has finish_reason=%s, treating as complete",
+			lastResponse.Choices[0].FinishReason)
+		sendDoneEvent()
+		return
+	}
+
+	// If we reach here without [DONE] and without finish_reason, the stream ended prematurely.
 	// This can happen if the upstream closes the connection unexpectedly.
 	// Send an error event to signal the stream was incomplete.
 	eventCh <- StreamEvent{

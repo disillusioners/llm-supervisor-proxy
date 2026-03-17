@@ -649,6 +649,105 @@ func TestOpenAIProvider_ToolRepair_Streaming(t *testing.T) {
 	}
 }
 
+// TestOpenAIProvider_StreamChatCompletion_NoDoneMarker tests streaming without [DONE] marker
+// Some providers (like MiniMax) don't send [DONE] but close connection after finish_reason
+func TestOpenAIProvider_StreamChatCompletion_NoDoneMarker(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		// Send SSE events WITHOUT [DONE] marker (like MiniMax)
+		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n"))
+		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n"))
+		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		// No [DONE] marker - connection just closes
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIProvider("test-key", server.URL)
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+		Stream:   true,
+	}
+
+	eventCh, err := provider.StreamChatCompletion(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var events []StreamEvent
+	for event := range eventCh {
+		events = append(events, event)
+	}
+
+	// Should have at least 2 content events and 1 done event
+	if len(events) < 3 {
+		t.Errorf("expected at least 3 events, got %d", len(events))
+	}
+
+	// Check first event is content
+	if events[0].Type != "content" {
+		t.Errorf("expected first event type 'content', got %q", events[0].Type)
+	}
+	if events[0].Content != "Hello" {
+		t.Errorf("expected content 'Hello', got %q", events[0].Content)
+	}
+
+	// Check last event is done (not error)
+	lastEvent := events[len(events)-1]
+	if lastEvent.Type != "done" {
+		t.Errorf("expected last event type 'done', got %q (stream without [DONE] should use finish_reason)", lastEvent.Type)
+	}
+
+	// Should NOT have error event
+	for _, e := range events {
+		if e.Type == "error" {
+			t.Errorf("unexpected error event: %v", e.Error)
+		}
+	}
+}
+
+// TestOpenAIProvider_StreamChatCompletion_NoDoneNoFinishReason tests streaming without [DONE] and without finish_reason
+// This should result in an error since the stream ended prematurely
+func TestOpenAIProvider_StreamChatCompletion_NoDoneNoFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		// Send SSE events WITHOUT [DONE] marker and WITHOUT finish_reason
+		w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n"))
+		// Connection closes without finish_reason or [DONE]
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIProvider("test-key", server.URL)
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+		Stream:   true,
+	}
+
+	eventCh, err := provider.StreamChatCompletion(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var events []StreamEvent
+	for event := range eventCh {
+		events = append(events, event)
+	}
+
+	// Should have content event and error event
+	if len(events) < 2 {
+		t.Errorf("expected at least 2 events, got %d", len(events))
+	}
+
+	// Check last event is error (stream ended prematurely)
+	lastEvent := events[len(events)-1]
+	if lastEvent.Type != "error" {
+		t.Errorf("expected last event type 'error', got %q (stream without [DONE] and finish_reason should error)", lastEvent.Type)
+	}
+}
+
 // TestOpenAIProvider_ToolRepair_StreamingToolCalls tests that tool call deltas are sent as events
 func TestOpenAIProvider_ToolRepair_StreamingToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
