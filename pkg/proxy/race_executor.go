@@ -72,6 +72,13 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to convert request: %w", err)
 	}
 
+	// Debug log the converted request for MiniMax and other internal providers
+	// This helps diagnose compatibility issues like missing tool_call_id
+	if provider == "minimax" {
+		logReq, _ := json.MarshalIndent(providerReq, "", "  ")
+		log.Printf("[DEBUG] MiniMax request for attempt %d:\n%s", req.id, string(logReq))
+	}
+
 	if isStream {
 		// Detect provider for normalization context
 		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
@@ -413,7 +420,7 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 	req.Model = model
 
 	if messages, ok := body["messages"].([]interface{}); ok {
-		for _, m := range messages {
+		for msgIdx, m := range messages {
 			if msg, ok := m.(map[string]interface{}); ok {
 				chatMsg := providers.ChatMessage{}
 				if role, ok := msg["role"].(string); ok {
@@ -470,6 +477,18 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 							}
 							chatMsg.ToolCalls[i] = toolCall
 						}
+					}
+				}
+				// Handle tool_call_id for tool role messages (required by MiniMax and other providers)
+				if toolCallID, ok := msg["tool_call_id"].(string); ok {
+					chatMsg.ToolCallID = toolCallID
+				}
+				// Debug log for tool role messages to diagnose MiniMax compatibility issues
+				if chatMsg.Role == "tool" {
+					if chatMsg.ToolCallID == "" {
+						log.Printf("[WARN] Message[%d] has role='tool' but missing tool_call_id - this may cause MiniMax API error", msgIdx)
+					} else {
+						log.Printf("[DEBUG] Message[%d] has role='tool' with tool_call_id=%s", msgIdx, chatMsg.ToolCallID)
 					}
 				}
 				req.Messages = append(req.Messages, chatMsg)

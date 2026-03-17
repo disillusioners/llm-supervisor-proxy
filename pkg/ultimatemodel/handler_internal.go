@@ -273,7 +273,7 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 	}
 
 	if messages, ok := body["messages"].([]interface{}); ok {
-		for _, m := range messages {
+		for msgIdx, m := range messages {
 			if msg, ok := m.(map[string]interface{}); ok {
 				chatMsg := providers.ChatMessage{}
 				if role, ok := msg["role"].(string); ok {
@@ -330,6 +330,18 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 							}
 							chatMsg.ToolCalls[i] = toolCall
 						}
+					}
+				}
+				// Handle tool_call_id for tool role messages (required by MiniMax and other providers)
+				if toolCallID, ok := msg["tool_call_id"].(string); ok {
+					chatMsg.ToolCallID = toolCallID
+				}
+				// Debug log for tool role messages to diagnose MiniMax compatibility issues
+				if chatMsg.Role == "tool" {
+					if chatMsg.ToolCallID == "" {
+						log.Printf("[WARN] UltimateModel: Message[%d] has role='tool' but missing tool_call_id - this may cause MiniMax API error", msgIdx)
+					} else {
+						log.Printf("[DEBUG] UltimateModel: Message[%d] has role='tool' with tool_call_id=%s", msgIdx, chatMsg.ToolCallID)
 					}
 				}
 				req.Messages = append(req.Messages, chatMsg)
