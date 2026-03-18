@@ -392,6 +392,13 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if finishReason == "" {
 				finishReason = "stop"
 			}
+
+			// Validate finish_reason
+			validReasons := map[string]bool{"stop": true, "tool_calls": true, "length": true, "content_filter": true}
+			if !validReasons[finishReason] {
+				log.Printf("[WARN] Invalid finish_reason: %s, defaulting to 'stop'", finishReason)
+				finishReason = "stop"
+			}
 			finalChunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				"object":  "chat.completion.chunk",

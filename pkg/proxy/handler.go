@@ -596,7 +596,36 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
 				if i < len(rc.toolCallArgBuilders) {
-					rc.accumulatedToolCalls[i].Function.Arguments = rc.toolCallArgBuilders[i].String()
+					args := rc.toolCallArgBuilders[i].String()
+					rc.accumulatedToolCalls[i].Function.Arguments = args
+
+					// Validate JSON arguments
+					if args != "" {
+						var js interface{}
+						if err := json.Unmarshal([]byte(args), &js); err != nil {
+							log.Printf("[WARN] Tool call[%d] has invalid JSON arguments: %v (args length: %d)",
+								i, err, len(args))
+						}
+					}
+				}
+			}
+
+			// Check for duplicate tool call IDs
+			seenIDs := make(map[string]int)
+			for i, tc := range rc.accumulatedToolCalls {
+				if tc.ID != "" {
+					if firstIdx, exists := seenIDs[tc.ID]; exists {
+						log.Printf("[WARN] Duplicate tool call ID '%s' at indices %d and %d", tc.ID, firstIdx, i)
+					} else {
+						seenIDs[tc.ID] = i
+					}
+				}
+			}
+
+			// Validate function names are present
+			for i, tc := range rc.accumulatedToolCalls {
+				if tc.Function.Name == "" {
+					log.Printf("[WARN] Tool call[%d] has empty function name", i)
 				}
 			}
 

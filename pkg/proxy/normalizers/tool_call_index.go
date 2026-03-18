@@ -60,8 +60,18 @@ func (n *FixMissingToolCallIndexNormalizer) Normalize(line []byte, ctx *Normaliz
 		return line, false
 	}
 
-	// Navigate to delta.tool_calls
-	delta, ok := chunk["delta"].(map[string]interface{})
+	// Navigate to choices[0].delta.tool_calls
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return line, false
+	}
+
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return line, false
+	}
+
+	delta, ok := choice["delta"].(map[string]interface{})
 	if !ok {
 		return line, false
 	}
@@ -88,7 +98,26 @@ func (n *FixMissingToolCallIndexNormalizer) Normalize(line []byte, ctx *Normaliz
 		// Get the tool call ID
 		id, hasID := tcMap["id"].(string)
 		if !hasID || id == "" {
-			// No ID, can't track - assign index based on position in array
+			// No ID - try to match by function name if available
+			// This handles the case where the same tool call is streamed across chunks
+			// without IDs but with consistent function names
+			if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok && name != "" {
+					// Use function name as pseudo-ID
+					pseudoID := "__fn__" + name
+					if idx, seen := ctx.SeenToolCallIDs[pseudoID]; seen {
+						tcMap["index"] = idx
+					} else {
+						idx := len(ctx.SeenToolCallIDs)
+						ctx.SeenToolCallIDs[pseudoID] = idx
+						tcMap["index"] = idx
+					}
+					modified = true
+					continue
+				}
+			}
+
+			// Fallback: assign index based on position in array
 			tcMap["index"] = i
 			modified = true
 			continue

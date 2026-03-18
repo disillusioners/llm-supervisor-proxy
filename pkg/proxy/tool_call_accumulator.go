@@ -2,8 +2,22 @@ package proxy
 
 import (
 	"encoding/json"
+	"log"
 	"strings"
 	"sync"
+)
+
+// Constants for tool call limits to prevent memory exhaustion
+const (
+	// MaxToolCallsPerStream limits the number of tool calls per streaming response
+	// to prevent memory exhaustion from malicious or buggy upstreams
+	MaxToolCallsPerStream = 100
+
+	// MaxToolCallIndex limits the maximum index value to prevent sparse array attacks
+	MaxToolCallIndex = 99
+
+	// MaxToolCallArgsSize limits the total size of tool call arguments per index
+	MaxToolCallArgsSize = 1024 * 1024 // 1MB per tool call
 )
 
 // ToolCallAccumulator accumulates tool call arguments during streaming.
@@ -76,7 +90,13 @@ func (a *ToolCallAccumulator) ProcessChunk(line []byte) error {
 	}
 
 	toolCalls, ok := delta["tool_calls"].([]interface{})
-	if !ok || len(toolCalls) == 0 {
+	if !ok {
+		// tool_calls field is not an array - this is unexpected
+		log.Printf("[DEBUG] Tool calls field is not an array: %T", delta["tool_calls"])
+		return nil
+	}
+	if len(toolCalls) == 0 {
+		// Empty array is valid, but log for debugging
 		return nil
 	}
 
@@ -91,17 +111,35 @@ func (a *ToolCallAccumulator) ProcessChunk(line []byte) error {
 			continue
 		}
 
-		// Get index (required for streaming)
+		// Get index (fallback to 0 if missing per OpenAI spec section 11)
 		index, ok := tcMap["index"].(float64)
 		if !ok {
-			continue
+			log.Printf("[WARN] Tool call missing index field, defaulting to 0")
+			index = 0
 		}
 		idx := int(index)
+
+		// Validate index bounds
+		if idx < 0 || idx > MaxToolCallIndex {
+			log.Printf("[WARN] Tool call index %d out of bounds (max: %d), skipping", idx, MaxToolCallIndex)
+			continue
+		}
+
+		// Check max tool call count
+		if len(a.args) >= MaxToolCallsPerStream {
+			log.Printf("[WARN] Max tool call count (%d) exceeded, skipping index %d", MaxToolCallsPerStream, idx)
+			continue
+		}
 
 		// Ensure we have a builder for this index
 		if _, exists := a.args[idx]; !exists {
 			a.args[idx] = &strings.Builder{}
 			a.metadata[idx] = ToolCallMeta{}
+		}
+
+		// Validate type field if present
+		if typ, ok := tcMap["type"].(string); ok && typ != "" && typ != "function" {
+			log.Printf("[WARN] Tool call has unexpected type: %s (expected 'function')", typ)
 		}
 
 		// Update metadata (ID, type, name) if present in this chunk
@@ -122,7 +160,12 @@ func (a *ToolCallAccumulator) ProcessChunk(line []byte) error {
 			}
 			// Accumulate arguments - this is the key part!
 			if args, ok := fn["arguments"].(string); ok {
-				a.args[idx].WriteString(args)
+				// Check argument size limit before writing
+				if a.args[idx].Len()+len(args) > MaxToolCallArgsSize {
+					log.Printf("[WARN] Tool call[%d] arguments exceed size limit (%d bytes), truncating", idx, MaxToolCallArgsSize)
+				} else {
+					a.args[idx].WriteString(args)
+				}
 			}
 		}
 

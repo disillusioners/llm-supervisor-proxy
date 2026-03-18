@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"strings"
 )
 
@@ -103,10 +104,11 @@ func repairChunkArgs(chunk []byte, repairedArgs map[int]string) []byte {
 			continue
 		}
 
-		// Get index
+		// Get index (fallback to 0 if missing)
 		index, ok := tcMap["index"].(float64)
 		if !ok {
-			continue
+			log.Printf("[WARN] Tool call missing index in buffer rewrite, defaulting to 0")
+			index = 0
 		}
 		idx := int(index)
 

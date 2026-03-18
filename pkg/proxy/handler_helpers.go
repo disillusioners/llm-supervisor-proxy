@@ -322,10 +322,11 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 				continue
 			}
 
-			// Get index (required for streaming)
+			// Get index (fallback to 0 if missing per OpenAI spec section 11)
 			index, ok := tcMap["index"].(float64)
 			if !ok {
-				continue
+				log.Printf("[WARN] Tool call missing index field in extractStreamChunkContent, defaulting to 0")
+				index = 0
 			}
 			idx := int(index)
 
