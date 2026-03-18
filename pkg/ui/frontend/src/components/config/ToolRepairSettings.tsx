@@ -10,6 +10,7 @@ interface ToolRepairSettingsProps {
 }
 
 const AVAILABLE_STRATEGIES = [
+  { id: 'trim_trailing_garbage', label: 'Trim Trailing Garbage', description: 'Removes trailing garbage after complete JSON objects' },
   { id: 'extract_json', label: 'Extract JSON', description: 'Extracts JSON from mixed text content' },
   { id: 'library_repair', label: 'Library Repair', description: 'Uses jsonrepair library to fix common issues' },
   { id: 'remove_reasoning', label: 'Remove Reasoning', description: 'Strips reasoning leakage patterns from JSON' },

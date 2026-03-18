@@ -72,13 +72,6 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to convert request: %w", err)
 	}
 
-	// Debug log the converted request for MiniMax and other internal providers
-	// This helps diagnose compatibility issues like missing tool_call_id
-	if provider == "minimax" {
-		logReq, _ := json.MarshalIndent(providerReq, "", "  ")
-		log.Printf("[DEBUG] MiniMax request for attempt %d:\n%s", req.id, string(logReq))
-	}
-
 	if isStream {
 		// Detect provider for normalization context
 		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
