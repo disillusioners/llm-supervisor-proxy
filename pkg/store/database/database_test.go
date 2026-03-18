@@ -472,10 +472,12 @@ func TestConfigManager_EnvOverrides(t *testing.T) {
 	}
 
 	// Set environment variables to override database values
+	os.Setenv("APPLY_ENV_OVERRIDES", "true")
 	os.Setenv("UPSTREAM_URL", "http://env-override:9999")
 	os.Setenv("PORT", "8888")
 	os.Setenv("RACE_RETRY_ENABLED", "true")
 	defer func() {
+		os.Unsetenv("APPLY_ENV_OVERRIDES")
 		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("RACE_RETRY_ENABLED")

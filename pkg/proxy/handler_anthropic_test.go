@@ -218,6 +218,7 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 	t.Helper()
 	upstream := httptest.NewServer(upstreamHandler)
 
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 
 	mgr, err := config.NewManager()
