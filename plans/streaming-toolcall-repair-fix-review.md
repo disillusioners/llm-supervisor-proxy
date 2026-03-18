@@ -1,112 +1,76 @@
-# Plan: Fix Streaming Tool Call Repair
+# Plan Review: Fix Streaming Tool Call Repair
 
-> **Status:** Ready for Implementation
-> **Original Plan:** Streaming tool call repair fix
-> **Review:** See [`streaming-toolcall-repair-fix-review.md`](streaming-toolcall-repair-fix-review.md) for detailed analysis
-> **Last Updated:** 2026-03-18
+## Executive Summary
 
-## Problem Statement
+The plan correctly identifies the core problem: **per-chunk repair is fundamentally broken** because tool call arguments are incrementally streamed across multiple chunks. The proposed solution (accumulate → repair → rewrite) is architecturally sound.
 
-The current tool call repair design is **broken for streaming responses** because it attempts to repair each SSE chunk individually, but tool call arguments are **incrementally streamed** across multiple chunks.
-
-### Current Behavior (Broken)
-
-```
-Chunk 1: {"delta": {"tool_calls": [{"function": {"arguments": "{"}}]}}         ← Repair attempts: "{" (invalid, can't fix)
-Chunk 2: {"delta": {"tool_calls": [{"function": {"arguments": "\"location\":"}}]}} ← Repair attempts: "\"location\":" (invalid)
-Chunk 3: {"delta": {"tool_calls": [{"function": {"arguments": " \"Paris\""}]}}    ← Repair attempts: " \"Paris\"" (invalid)
-Chunk 4: {"delta": {"tool_calls": [{"function": {"arguments": "}"}}]}}           ← Repair attempts: "}" (invalid)
-```
-
-Each chunk contains **partial JSON** that cannot be meaningfully repaired in isolation.
-
-### Expected Behavior
-
-```
-1. Accumulate: "{" + "\"location\":" + " \"Paris\"" + "}" = "{\"location\": \"Paris\"}"
-2. Repair: Fix the complete accumulated JSON (ONLY if before stream deadline)
-3. Reconstruct: Rewrite chunks with repaired arguments
-```
-
-### Important Constraint
-
-**Tool repair only applies BEFORE stream deadline is reached.**
-
-After the stream deadline (`STREAM_DEADLINE` config), the proxy releases the buffer to the client immediately - no repair is attempted. This ensures:
-- Low latency for the common case (stream completes quickly)
-- No repair overhead after deadline (client already waiting too long)
-- Graceful degradation: malformed JSON is better than timeout
+However, after reviewing the codebase, I've identified several areas where the plan can be improved for better integration with existing code and simpler implementation.
 
 ---
 
-## Architecture Analysis
+## Current Implementation Analysis
 
-### What Works
+### What Already Exists
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Non-streaming repair | ✅ Works | [`repairToolCallArgumentsInNonStreamingResponse()`](pkg/proxy/race_executor.go:608) handles complete JSON |
-| Tool call accumulation | ✅ Exists | [`handler_helpers.go:317-362`](pkg/proxy/handler_helpers.go:317) accumulates args via `toolCallArgBuilders` |
-| Stream buffering | ✅ Exists | Race retry buffers entire stream before sending to client |
+| Component | Location | Status |
+|-----------|----------|--------|
+| Tool call accumulation | [`handler_helpers.go:317-362`](pkg/proxy/handler_helpers.go:317) | ✅ Already accumulates via `toolCallArgBuilders` |
+| Stream buffering | [`stream_buffer.go`](pkg/proxy/stream_buffer.go) | ✅ Stores all chunks |
+| Non-streaming repair | [`race_executor.go:608`](pkg/proxy/race_executor.go:608) | ✅ Works correctly |
+| Per-chunk repair (broken) | [`race_executor.go:694`](pkg/proxy/race_executor.go:694) | ❌ Broken for streaming |
+| Normalizer repair (broken) | [`normalizers/tool_call_repair.go`](pkg/proxy/normalizers/tool_call_repair.go) | ❌ Same issue |
 
-### What's Broken
+### Key Insight: Existing Accumulation Pattern
 
-| Component | Issue |
-|-----------|-------|
-| [`repairToolCallArgumentsInChunk()`](pkg/proxy/race_executor.go:694) | Repairs partial JSON per-chunk |
-| [`ToolCallArgumentsRepairNormalizer`](pkg/proxy/normalizers/tool_call_repair.go:53) | Same issue - per-chunk repair |
+The codebase already has a working accumulation pattern in [`extractStreamChunkContent()`](pkg/proxy/handler_helpers.go:286):
 
----
+```go
+// toolCallArgBuilders tracks the arguments string per index (avoids += memory trap)
+toolCallArgBuilders []*strings.Builder
 
-## Solution Design
-
-### Key Insight
-
-The proxy **already buffers the entire stream** for race retry. We can leverage this to:
-
-1. **Accumulate** tool call arguments during streaming (already done)
-2. **After stream completes**, repair the accumulated arguments
-3. **Rewrite** the buffered chunks with repaired arguments
-4. **Send** repaired chunks to client
-
-### Flow Diagram
-
-```mermaid
-flowchart TD
-    subgraph Streaming Phase
-        A[SSE Chunks from Upstream] --> B[Parse each chunk]
-        B --> C[Accumulate tool_call args per index]
-        C --> D[Store chunk in buffer]
-        D --> E{More chunks?}
-        E -->|Yes| A
-        E -->|No - stream done| F
-    end
-    
-    subgraph Decision - Stream Deadline Check
-        F[Stream complete] --> G{Before stream deadline?}
-        G -->|No - deadline passed| H[Send buffer as-is - NO REPAIR]
-        G -->|Yes - still time| I
-    end
-    
-    subgraph Repair Phase - Only Before Deadline
-        I{Has tool_calls?} -->|No| J[Send buffer as-is]
-        I -->|Yes| K[Repair accumulated args]
-        K --> L{Repair success?}
-        L -->|Yes| M[Rewrite buffer chunks with repaired args]
-        L -->|No| N[Keep original args]
-        M --> J
-        N --> J
-    end
-    
-    subgraph Output
-        H --> O[Send buffer to client]
-        J --> O
-    end
+// In extraction:
+if args, ok := fn["arguments"].(string); ok {
+    (*toolCallArgBuilders)[idx].WriteString(args)
+}
 ```
 
+**Recommendation:** Leverage this existing pattern rather than creating a new `ToolCallAccumulator` struct.
+
 ---
 
-## Implementation Plan (Enhanced)
+## Issues with Current Plan
+
+### Issue 1: Redundant Accumulator Design
+
+The plan proposes a new `ToolCallAccumulator` struct, but:
+- `handler_helpers.go` already has `toolCallArgBuilders` that does this
+- The existing pattern is well-tested and memory-efficient
+- Adding a second accumulator would create confusion and duplication
+
+### Issue 2: Unclear Integration Point
+
+The plan doesn't clearly specify WHERE post-stream repair should happen:
+- `handleStreamingResponse()` doesn't have access to start time or deadline
+- The coordinator manages deadlines, not the executor
+- Need to pass these parameters through the call chain
+
+### Issue 3: Buffer Rewriting Complexity
+
+The plan proposes `rewriteBufferWithRepairedArgs()` but:
+- `streamBuffer` is append-only by design
+- Rewriting requires either creating a new buffer or modifying in-place
+- Both approaches have tradeoffs not fully explored
+
+### Issue 4: Missing Internal Stream Handling
+
+The plan mentions [`handleInternalStream()`](pkg/proxy/race_executor.go:211) needs the same treatment, but:
+- Internal streaming has its own chunk construction logic
+- Tool repair is already called per-chunk at line 340
+- Needs same post-stream accumulation approach
+
+---
+
+## Improved Implementation Plan
 
 ### Phase 1: Create Lightweight Accumulator Wrapper
 
@@ -134,21 +98,38 @@ type ToolCallMeta struct {
 
 // ProcessChunk extracts and accumulates tool calls from a streaming chunk
 // This is a side-effect - the chunk is passed through unchanged
-func (a *ToolCallAccumulator) ProcessChunk(line []byte) error
+func (a *ToolCallAccumulator) ProcessChunk(line []byte) error {
+    // Parse line as SSE data
+    // Extract tool_calls from delta
+    // For each tool_call:
+    //   - Get index
+    //   - Accumulate arguments to builder
+    //   - Store metadata (id, type, name) if present
+}
 
 // GetAccumulatedArgs returns all accumulated arguments
 // Returns map[index]completeArgsString
-func (a *ToolCallAccumulator) GetAccumulatedArgs() map[int]string
+func (a *ToolCallAccumulator) GetAccumulatedArgs() map[int]string {
+    a.mu.Lock()
+    defer a.mu.Unlock()
+    
+    result := make(map[int]string)
+    for idx, builder := range a.args {
+        result[idx] = builder.String()
+    }
+    return result
+}
 
 // HasToolCalls returns true if any tool calls were accumulated
-func (a *ToolCallAccumulator) HasToolCalls() bool
+func (a *ToolCallAccumulator) HasToolCalls() bool {
+    return len(a.args) > 0
+}
 ```
 
-**Why this is better than original plan:**
+**Why this is better:**
 - Lightweight wrapper, not a complete reimplementation
 - Thread-safe for potential parallel access
 - Returns simple map for easy repair processing
-- Leverages existing patterns from `handler_helpers.go`
 
 ### Phase 2: Modify Streaming Handlers
 
@@ -174,6 +155,10 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
             // ... existing normalization and buffering ...
             
             // REMOVE: Per-chunk repair (lines 884-904)
+            // if cfg.ToolRepair.Enabled {
+            //     repairedLine, repaired := repairToolCallArgumentsInChunk(normalizedLine, cfg.ToolRepair)
+            //     ...
+            // }
         }
         
         // ... rest of loop ...
@@ -243,7 +228,86 @@ func hasToolCalls(chunk []byte) bool {
 }
 
 // repairChunkArgs repairs tool call arguments in a single chunk
-func repairChunkArgs(chunk []byte, repairedArgs map[int]string) []byte
+func repairChunkArgs(chunk []byte, repairedArgs map[int]string) []byte {
+    // Strip newline if present
+    chunk = bytes.TrimSuffix(chunk, []byte("\n"))
+    
+    // Strip "data: " prefix if present
+    var prefix []byte
+    if bytes.HasPrefix(chunk, []byte("data: ")) {
+        prefix = []byte("data: ")
+        chunk = bytes.TrimPrefix(chunk, prefix)
+    }
+    
+    // Parse JSON
+    var obj map[string]interface{}
+    if err := json.Unmarshal(chunk, &obj); err != nil {
+        return chunk // Can't parse, return as-is
+    }
+    
+    // Navigate to choices[0].delta.tool_calls
+    choices, ok := obj["choices"].([]interface{})
+    if !ok || len(choices) == 0 {
+        return chunk
+    }
+    
+    choice, ok := choices[0].(map[string]interface{})
+    if !ok {
+        return chunk
+    }
+    
+    delta, ok := choice["delta"].(map[string]interface{})
+    if !ok {
+        return chunk
+    }
+    
+    toolCalls, ok := delta["tool_calls"].([]interface{})
+    if !ok {
+        return chunk
+    }
+    
+    modified := false
+    for _, tc := range toolCalls {
+        tcMap, ok := tc.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        
+        // Get index
+        index, ok := tcMap["index"].(float64)
+        if !ok {
+            continue
+        }
+        idx := int(index)
+        
+        // Check if we have repaired args for this index
+        if repaired, has := repairedArgs[idx]; has {
+            if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+                if origArgs, _ := fn["arguments"].(string); origArgs != repaired {
+                    fn["arguments"] = repaired
+                    modified = true
+                }
+            }
+        }
+    }
+    
+    if !modified {
+        return chunk
+    }
+    
+    // Re-serialize
+    newChunk, err := json.Marshal(obj)
+    if err != nil {
+        return chunk
+    }
+    
+    // Re-add prefix
+    if len(prefix) > 0 {
+        newChunk = append(prefix, newChunk...)
+    }
+    
+    return newChunk
+}
 ```
 
 **Key Design Decisions:**
@@ -300,10 +364,11 @@ func repairAccumulatedArgs(accumulated map[int]string, config toolrepair.Config)
 2. **`pkg/proxy/normalizers/tool_call_repair.go`:**
    - Mark as **DEPRECATED** with clear comment
    - Keep file but add warning that it's broken for streaming
+   - Consider adding compile-time warning or metric
 
 ---
 
-## Edge Cases
+## Edge Cases Handling
 
 | Case | Handling | Location |
 |------|----------|----------|
@@ -356,6 +421,11 @@ func repairAccumulatedArgs(accumulated map[int]string, config toolrepair.Config)
 
 Add to config:
 ```go
+type ConfigSnapshot struct {
+    // ...
+    ToolRepair ToolRepairConfig `json:"tool_repair"`
+}
+
 type ToolRepairConfig struct {
     Enabled           bool   `json:"enabled"`
     StreamingRepairV2 bool   `json:"streaming_repair_v2"` // New feature flag
@@ -386,18 +456,7 @@ type ToolRepairConfig struct {
 
 ---
 
-## Summary
-
-| Aspect | Current | Proposed |
-|--------|---------|----------|
-| Repair timing | Per-chunk (broken) | Post-stream (correct) |
-| Repair input | Partial JSON | Complete accumulated JSON |
-| Buffer handling | Modify in-place | Rewrite after repair |
-| Complexity | Low (but broken) | Medium (but correct) |
-
----
-
-## Files Changed Summary
+## Summary of Changes
 
 | File | Action | Lines Changed |
 |------|--------|---------------|
@@ -412,78 +471,35 @@ type ToolRepairConfig struct {
 
 ---
 
-## Implementation Checklist
+## Open Questions Resolved
 
-### Step 1: Create ToolCallAccumulator
-- [ ] Create `pkg/proxy/tool_call_accumulator.go`
-- [ ] Implement `ToolCallAccumulator` struct with `sync.Mutex`, `args map[int]*strings.Builder`, `metadata map[int]ToolCallMeta`
-- [ ] Implement `NewToolCallAccumulator()` constructor
-- [ ] Implement `ProcessChunk(line []byte) error` - parse SSE chunk, extract tool_calls, accumulate by index
-- [ ] Implement `GetAccumulatedArgs() map[int]string` - return accumulated args per index
-- [ ] Implement `HasToolCalls() bool` - return true if any tool calls accumulated
+1. **Performance impact:** Acceptable. Only rewrite when tool calls detected, quick string check before JSON parsing.
 
-### Step 2: Create Buffer Rewriter
-- [ ] Create `pkg/proxy/buffer_rewriter.go`
-- [ ] Implement `rewriteBufferWithRepairedArgs(oldBuffer *streamBuffer, repairedArgs map[int]string) *streamBuffer`
-- [ ] Implement `hasToolCalls(chunk []byte) bool` - quick string check
-- [ ] Implement `repairChunkArgs(chunk []byte, repairedArgs map[int]string) []byte` - parse, replace args, re-serialize
+2. **Error handling:** Send original buffer on rewrite failure (graceful degradation).
 
-### Step 3: Modify handleStreamingResponse()
-- [ ] Add `accumulator := NewToolCallAccumulator()` at start (after line 810)
-- [ ] Add `streamStartTime := time.Now()` at start
-- [ ] Add `accumulator.ProcessChunk(line)` before normalization (around line 863)
-- [ ] **REMOVE** per-chunk repair code (lines 884-904)
-- [ ] Add post-stream repair logic after `sawDone` check (before line 931)
-- [ ] Add `isPastDeadline(startTime time.Time, deadline Duration) bool` helper
-
-### Step 4: Modify handleInternalStream()
-- [ ] Add `accumulator := NewToolCallAccumulator()` at start (after line 217)
-- [ ] Add `streamStartTime := time.Now()` at start
-- [ ] Add `accumulator.ProcessChunk()` for each tool_call chunk (around line 331)
-- [ ] **REMOVE** per-chunk repair code (lines 339-345)
-- [ ] Add post-stream repair logic after "done" event (before return at line 411)
-
-### Step 5: Add repairAccumulatedArgs()
-- [ ] Add `repairAccumulatedArgs(accumulated map[int]string, config toolrepair.Config) map[int]string` to race_executor.go
-
-### Step 6: Deprecate Old Code
-- [ ] Add deprecation comment to `repairToolCallArgumentsInChunk()` (lines 692-792)
-- [ ] Add deprecation comment to `ToolCallArgumentsRepairNormalizer` in `normalizers/tool_call_repair.go`
-
-### Step 7: Add Unit Tests
-- [ ] Create `pkg/proxy/tool_call_accumulator_test.go`
-- [ ] Create `pkg/proxy/buffer_rewriter_test.go`
-- [ ] Add tests per testing strategy above
-
-### Step 8: Integration Testing
-- [ ] Test with mock LLM returning malformed tool call arguments
-- [ ] Verify repair happens before deadline
-- [ ] Verify repair skipped after deadline
-- [ ] Test multiple tool calls in single stream
+3. **Fixer model integration:** Yes, works on accumulated args. Already supported by `toolrepair.Repairer`.
 
 ---
 
-## Key Code Locations (Reference)
+## Comparison: Original Plan vs Improved Plan
 
-| Location | Description |
-|----------|-------------|
-| [`race_executor.go:694-792`](pkg/proxy/race_executor.go:694) | `repairToolCallArgumentsInChunk()` - TO BE REMOVED |
-| [`race_executor.go:884-904`](pkg/proxy/race_executor.go:884) | Per-chunk repair call in `handleStreamingResponse()` - TO BE REMOVED |
-| [`race_executor.go:339-345`](pkg/proxy/race_executor.go:339) | Per-chunk repair call in `handleInternalStream()` - TO BE REMOVED |
-| [`race_executor.go:799`](pkg/proxy/race_executor.go:799) | `handleStreamingResponse()` start - ADD accumulator here |
-| [`race_executor.go:211`](pkg/proxy/race_executor.go:211) | `handleInternalStream()` start - ADD accumulator here |
-| [`handler_helpers.go:317-362`](pkg/proxy/handler_helpers.go:317) | Existing accumulation pattern - REFERENCE for implementation |
-| [`stream_buffer.go:99-134`](pkg/proxy/stream_buffer.go:99) | `GetChunksFrom()` - USE in buffer rewriter |
-| [`normalizers/tool_call_repair.go`](pkg/proxy/normalizers/tool_call_repair.go) | `ToolCallArgumentsRepairNormalizer` - TO BE DEPRECATED |
+| Aspect | Original Plan | Improved Plan |
+|--------|---------------|---------------|
+| Accumulator | New struct from scratch | Lightweight wrapper, reuses patterns |
+| Integration point | Unclear | Explicit function modification |
+| Buffer rewrite | Single function | Modular with helper functions |
+| Error handling | Not specified | Graceful degradation at each step |
+| Feature flag | Not mentioned | `StreamingRepairV2` flag |
+| Testing | Basic list | Comprehensive unit + integration |
+| Migration | 4 phases | 4 phases with feature flag |
 
 ---
 
-## Verification Steps
+## Recommendation
 
-After implementation, verify:
-
-1. **Build succeeds:** `make build`
-2. **Tests pass:** `go test ./pkg/proxy/...`
-3. **No regression:** Existing tool call tests still pass
-4. **New functionality:** Malformed tool call args in streaming are repaired
-5. **Deadline respected:** Repair skipped when stream completes after deadline
+**Proceed with the improved plan.** It:
+1. Leverages existing code patterns
+2. Has clearer integration points
+3. Includes comprehensive error handling
+4. Provides safe migration path with feature flag
+5. Has detailed testing strategy
