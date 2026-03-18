@@ -84,7 +84,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
 		normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
 		normalizers.GetRegistry().ResetAll(normCtx)
-		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair)
+		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline)
 	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel)
 }
@@ -208,7 +208,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 }
 
 // handleInternalStream handles streaming requests for internal providers
-func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config) error {
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return err
@@ -220,6 +220,12 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 	firstChunk := true
 	nextToolCallIndex := 0
 	seenToolCallIDs := make(map[string]int)
+
+	// NEW: Create accumulator for tool call arguments
+	// Tool call arguments are streamed incrementally, so we must accumulate
+	// before repairing (which requires complete JSON)
+	accumulator := NewToolCallAccumulator()
+	streamStartTime := time.Now()
 
 	for event := range eventCh {
 		// Check for context cancellation
@@ -329,20 +335,21 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				}
 				data, _ := json.Marshal(chunk)
 				line := fmt.Sprintf("data: %s\n", data)
+
+				// NEW: Accumulate tool call arguments before normalization
+				// This is needed because tool call args are streamed incrementally
+				if err := accumulator.ProcessChunk([]byte(line)); err != nil {
+					log.Printf("[DEBUG] Race attempt %d (internal): failed to accumulate chunk: %v", upstreamReq.id, err)
+				}
+
 				// Apply normalization to ensure consistent format
 				normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName([]byte(line), normCtx)
 				if modified {
 					log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 				}
 
-				// Apply tool repair if enabled
-				if toolRepairConfig.Enabled {
-					repairedLine, repaired := repairToolCallArgumentsInChunk(normalizedLine, toolRepairConfig)
-					if repaired {
-						normalizedLine = repairedLine
-						log.Printf("[TOOL-REPAIR] Race attempt %d (internal): repaired malformed tool_call arguments", upstreamReq.id)
-					}
-				}
+				// REMOVED: Per-chunk tool repair (was here)
+				// Tool repair now happens post-stream (after accumulation is complete)
 
 				if !upstreamReq.buffer.Add(normalizedLine) {
 					return fmt.Errorf("buffer limit exceeded")
@@ -408,6 +415,29 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if !upstreamReq.buffer.Add([]byte("data: [DONE]\n")) {
 				return fmt.Errorf("buffer limit exceeded")
 			}
+
+			// NEW: Post-stream tool call repair
+			// Only attempt repair if:
+			// 1. We have accumulated tool calls
+			// 2. Repair is enabled in config
+			// 3. We're still within the stream deadline (for latency reasons)
+			if accumulator.HasToolCalls() && toolRepairConfig.Enabled {
+				streamElapsed := time.Since(streamStartTime)
+				if streamElapsed < streamDeadline {
+					// Repair accumulated arguments
+					repairedArgs := repairAccumulatedArgs(accumulator.GetAccumulatedArgs(), toolRepairConfig)
+					if len(repairedArgs) > 0 {
+						// Rewrite buffer with repaired arguments
+						upstreamReq.buffer = rewriteBufferWithRepairedArgs(upstreamReq.buffer, repairedArgs)
+						log.Printf("[TOOL-REPAIR] Race attempt %d (internal): repaired %d tool_call arguments after stream completion",
+							upstreamReq.id, len(repairedArgs))
+					}
+				} else {
+					log.Printf("[TOOL-REPAIR] Race attempt %d (internal): stream completed after deadline (%v > %v), skipping repair for latency",
+						upstreamReq.id, streamElapsed, streamDeadline)
+				}
+			}
+
 			return nil
 
 		case "error":
@@ -689,8 +719,17 @@ func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepai
 	return repaired, true
 }
 
-// repairToolCallArgumentsInChunk repairs malformed JSON in tool_call arguments within an SSE chunk
-// Returns the (potentially modified) chunk and whether it was modified
+// repairToolCallArgumentsInChunk repairs malformed JSON in tool_call arguments within an SSE chunk.
+// Returns the (potentially modified) chunk and whether it was modified.
+//
+// DEPRECATED: This function is broken for streaming responses because tool call arguments
+// are incrementally streamed across multiple chunks. Per-chunk repair cannot work because
+// each chunk contains partial JSON that cannot be meaningfully repaired in isolation.
+//
+// Use repairAccumulatedArgs() instead, which repairs tool call arguments AFTER the stream
+// completes (when all chunks have been accumulated into complete JSON).
+//
+// This function is kept for backward compatibility but is no longer used in the streaming path.
 func repairToolCallArgumentsInChunk(line []byte, config toolrepair.Config) ([]byte, bool) {
 	if !config.Enabled {
 		return line, false
@@ -791,6 +830,44 @@ func repairToolCallArgumentsInChunk(line []byte, config toolrepair.Config) ([]by
 	return normalized, true
 }
 
+// repairAccumulatedArgs repairs accumulated tool call arguments after the stream completes.
+// Returns a map of index -> repaired arguments (only includes indices that were repaired).
+// This is the correct approach for streaming because tool call arguments are incrementally
+// streamed across multiple chunks, so repair can only happen on complete JSON.
+func repairAccumulatedArgs(accumulated map[int]string, config toolrepair.Config) map[int]string {
+	if !config.Enabled {
+		return nil
+	}
+
+	repairer := toolrepair.NewRepairer(&config)
+	repaired := make(map[int]string)
+
+	for idx, args := range accumulated {
+		// Skip empty arguments
+		if args == "" {
+			continue
+		}
+
+		// Check if already valid JSON - no repair needed
+		var js interface{}
+		if json.Unmarshal([]byte(args), &js) == nil {
+			continue // Already valid
+		}
+
+		// Attempt repair
+		result := repairer.RepairArguments(args, "")
+		if result.Success && result.Repaired != args {
+			repaired[idx] = result.Repaired
+			log.Printf("[TOOL-REPAIR] Repaired tool_call[%d] arguments: %d -> %d bytes",
+				idx, len(args), len(result.Repaired))
+		} else if !result.Success {
+			log.Printf("[WARN] Tool repair failed for tool_call[%d], using original args", idx)
+		}
+	}
+
+	return repaired
+}
+
 // handleStreamingResponse handles SSE streaming responses
 // IMPORTANT: This function does NOT return error on idle timeout.
 // Per the unified race retry design, the main request should continue streaming
@@ -808,6 +885,12 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 
 	// Reset normalizer state for this new stream to avoid state leakage
 	normalizers.GetRegistry().ResetAll(normCtx)
+
+	// NEW: Create accumulator for tool call arguments
+	// Tool call arguments are streamed incrementally, so we must accumulate
+	// before repairing (which requires complete JSON)
+	accumulator := NewToolCallAccumulator()
+	streamStartTime := time.Now()
 
 	for {
 		// Set idle timeout for reading
@@ -860,6 +943,12 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 				line = line[:len(line)-1]
 			}
 
+			// NEW: Accumulate tool call arguments before normalization
+			// This is needed because tool call args are streamed incrementally
+			if err := accumulator.ProcessChunk(line); err != nil {
+				log.Printf("[DEBUG] Race attempt %d: failed to accumulate chunk: %v", req.id, err)
+			}
+
 			// Apply normalization to fix malformed chunks
 			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName(line, normCtx)
 			if modified {
@@ -881,27 +970,10 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 				}
 			}
 
-			// Apply tool repair to fix malformed JSON in tool_call arguments
-			if cfg.ToolRepair.Enabled {
-				repairedLine, repaired := repairToolCallArgumentsInChunk(normalizedLine, cfg.ToolRepair)
-				if repaired {
-					normalizedLine = repairedLine
-					log.Printf("[TOOL-REPAIR] Race attempt %d: repaired malformed tool_call arguments", req.id)
-
-					// Publish event to frontend if event bus is available
-					if cfg.EventBus != nil {
-						cfg.EventBus.Publish(events.Event{
-							Type:      "tool_repair",
-							Timestamp: time.Now().Unix(),
-							Data: map[string]interface{}{
-								"id":          fmt.Sprintf("%d", req.id),
-								"provider":    provider,
-								"description": "Repaired malformed JSON in tool_call arguments",
-							},
-						})
-					}
-				}
-			}
+			// REMOVED: Per-chunk tool repair (was here)
+			// Tool repair now happens post-stream (after accumulation is complete)
+			// This is because tool call arguments are incrementally streamed
+			// and repair requires complete JSON
 
 			// Add chunk to buffer
 			if !req.buffer.Add(normalizedLine) {
@@ -931,5 +1003,41 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 	if !sawDone {
 		return fmt.Errorf("upstream closed connection prematurely")
 	}
+
+	// NEW: Post-stream tool call repair
+	// Only attempt repair if:
+	// 1. We have accumulated tool calls
+	// 2. Repair is enabled in config
+	// 3. We're still within the stream deadline (for latency reasons)
+	if accumulator.HasToolCalls() && cfg.ToolRepair.Enabled {
+		streamElapsed := time.Since(streamStartTime)
+		if streamElapsed < cfg.StreamDeadline {
+			// Repair accumulated arguments
+			repairedArgs := repairAccumulatedArgs(accumulator.GetAccumulatedArgs(), cfg.ToolRepair)
+			if len(repairedArgs) > 0 {
+				// Rewrite buffer with repaired arguments
+				req.buffer = rewriteBufferWithRepairedArgs(req.buffer, repairedArgs)
+				log.Printf("[TOOL-REPAIR] Race attempt %d: repaired %d tool_call arguments after stream completion",
+					req.id, len(repairedArgs))
+
+				// Publish event to frontend if event bus is available
+				if cfg.EventBus != nil {
+					cfg.EventBus.Publish(events.Event{
+						Type:      "tool_repair",
+						Timestamp: time.Now().Unix(),
+						Data: map[string]interface{}{
+							"id":          fmt.Sprintf("%d", req.id),
+							"provider":    provider,
+							"description": fmt.Sprintf("Repaired %d malformed JSON in tool_call arguments (post-stream)", len(repairedArgs)),
+						},
+					})
+				}
+			}
+		} else {
+			log.Printf("[TOOL-REPAIR] Race attempt %d: stream completed after deadline (%v > %v), skipping repair for latency",
+				req.id, streamElapsed, cfg.StreamDeadline)
+		}
+	}
+
 	return nil
 }

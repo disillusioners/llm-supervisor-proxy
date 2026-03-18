@@ -11,8 +11,15 @@ import (
 // using the toolrepair package. This normalizer processes streaming chunks and
 // fixes JSON issues like missing quotes, trailing commas, embedded text, etc.
 //
+// DEPRECATED: This normalizer is broken for streaming responses because tool call
+// arguments are incrementally streamed across multiple chunks. Per-chunk repair cannot
+// work because each chunk contains partial JSON that cannot be meaningfully repaired.
+//
 // Note: This normalizer requires a config to be set via SetConfig before use.
 // It is NOT enabled by default and must be added to the registry dynamically.
+//
+// The proxy now uses post-stream repair (accumulate → repair → rewrite) instead.
+// See pkg/proxy/tool_call_accumulator.go and pkg/proxy/buffer_rewriter.go
 type ToolCallArgumentsRepairNormalizer struct {
 	config *toolrepair.Config
 }
