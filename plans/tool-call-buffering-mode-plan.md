@@ -51,6 +51,69 @@ data: {"tool_calls":[{"id":"call_y","type":"function","index":1,"function":{"nam
 
 ---
 
+## Design Decisions
+
+> **Note:** These decisions were made during code review to clarify implementation details.
+
+### 1. Component Strategy: Keep `ToolCallBuffer` and `ToolCallAccumulator` Separate
+
+Both components serve different purposes and should coexist:
+
+| Component | Purpose | When Used |
+|-----------|---------|-----------|
+| `ToolCallAccumulator` | Post-stream analysis, loop detection, logging | Always (after stream ends) |
+| `ToolCallBuffer` | Pre-stream emission, client compatibility | When feature enabled (default) |
+
+**Rationale:**
+- `ToolCallAccumulator` is used for analyzing completed tool calls after the stream ends
+- `ToolCallBuffer` is used for buffering during streaming to emit complete tool calls
+- They operate at different stages of the request lifecycle
+- No code duplication concern - different data flows
+
+### 2. Config Naming: `TOOL_CALL_BUFFER_DISABLED`
+
+The environment variable uses a negative naming convention:
+- **Default behavior:** Feature is ENABLED (no env var needed)
+- **To disable:** Set `TOOL_CALL_BUFFER_DISABLED=true`
+
+**Rationale:**
+- Follows existing pattern in codebase (e.g., `LOOP_DETECTION_SHADOW_MODE`)
+- Makes "secure by default" behavior explicit
+- Users must explicitly opt-out of buffering
+
+### 3. Ordering: Accept Reordering of Content vs Tool Calls
+
+The implementation accepts that content and tool calls may be reordered:
+- Content chunks pass through immediately
+- Tool calls are emitted only when complete
+
+**Example reordering:**
+```
+Original order:  content → tool[0] frag1 → tool[0] frag2 → content
+Emitted order:   content → content → tool[0] complete
+```
+
+**Rationale:**
+- Weak clients cannot parse partial JSON regardless of ordering
+- Complete tool calls are more important than strict ordering
+- Most clients process content and tool calls independently
+
+### 4. Repair Relationship: Per-ToolCall Repair
+
+Repair is performed as each tool call becomes complete, not at stream end:
+
+```
+Tool[0] becomes complete → validate → repair if needed → emit
+Tool[1] becomes complete → validate → repair if needed → emit
+```
+
+**Rationale:**
+- Earlier repair = earlier emission = lower latency
+- Each tool call is independent
+- Failed repair on one doesn't block others
+
+---
+
 ## Architecture
 
 ### Current Flow
@@ -96,7 +159,7 @@ type ToolCallBuilder struct {
 ### Behavior
 
 1. **Content chunks**: Pass through immediately (no buffering)
-2. **Tool call chunks**: 
+2. **Tool call chunks**:
    - Extract fragment by index
    - Accumulate arguments string
    - Check if JSON is now valid
@@ -104,6 +167,55 @@ type ToolCallBuilder struct {
    - If not: continue buffering
 
 3. **Stream end**: Flush all remaining buffered tool calls (complete or not)
+
+### Relationship with ToolCallAccumulator
+
+Both `ToolCallBuffer` and `ToolCallAccumulator` coexist in the system, serving different purposes:
+
+```
+                    ┌─────────────────────────────────────────────────────┐
+                    │                    REQUEST FLOW                      │
+                    └─────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         STREAMING PHASE                                      │
+│                                                                              │
+│   Upstream ──▶ Normalizer ──▶ ToolCallBuffer ──▶ Buffer ──▶ Client          │
+│                                     │                                        │
+│                                     ▼                                        │
+│                           Buffer fragments                                   │
+│                           Emit when complete                                 │
+│                           (Pre-emission processing)                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         POST-STREAM PHASE                                    │
+│                                                                              │
+│   Buffer ──▶ ToolCallAccumulator ──▶ Loop Detection / Logging               │
+│                    │                                                         │
+│                    ▼                                                         │
+│              Reconstruct tool calls                                          │
+│              Analyze patterns                                                │
+│              (Post-emission analysis)                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Differences:**
+
+| Aspect | ToolCallBuffer | ToolCallAccumulator |
+|---------|---------------|---------------------|
+| **Stage** | During streaming | After stream ends |
+| **Purpose** | Client compatibility | Analysis & detection |
+| **Output** | Modified SSE chunks | Reconstructed tool calls |
+| **Enabled** | By default (opt-out) | Always |
+| **Consumers** | Downstream client | Loop detection, logging |
+
+**Why Both Are Needed:**
+- `ToolCallBuffer` ensures weak clients receive complete, parseable tool calls
+- `ToolCallAccumulator` provides the full tool call data for system analysis
+- Neither can replace the other without losing functionality
 
 ---
 
@@ -125,6 +237,12 @@ import (
     "strings"
     "sync"
     "time"
+)
+
+// Index bounds constants for safety
+const (
+    MaxToolCallsPerStream = 100  // Maximum number of tool calls per stream
+    MaxToolCallIndex      = 99   // Maximum valid tool call index (0-99)
 )
 
 // ToolCallBuffer buffers tool call fragments until complete JSON is formed
@@ -232,6 +350,16 @@ func (b *ToolCallBuffer) processToolCallChunk(chunk map[string]interface{}, tool
         }
         idx := int(index)
         
+        // FIX #3: Index bounds validation - prevent invalid indices
+        if idx < 0 || idx > MaxToolCallIndex {
+            continue  // Skip invalid indices
+        }
+        
+        // FIX #3: Limit total number of tool calls per stream
+        if len(b.builders) >= MaxToolCallsPerStream {
+            continue  // Skip if too many tool calls
+        }
+        
         // Get or create builder
         builder, exists := b.builders[idx]
         if !exists {
@@ -255,9 +383,12 @@ func (b *ToolCallBuffer) processToolCallChunk(chunk map[string]interface{}, tool
             if args, ok := fn["arguments"].(string); ok {
                 // Check size limit
                 if b.totalSize+int64(len(args)) > b.maxSize {
-                    // Buffer overflow - emit what we have
+                    // FIX #2: Buffer overflow - emit what we have, then reset builder
                     toEmit = append(toEmit, idx)
-                    continue
+                    // Reset builder for this index to accept new data
+                    b.builders[idx] = &ToolCallBuilder{}
+                    builder = b.builders[idx]
+                    // Fall through to add the current fragment
                 }
                 builder.Arguments.WriteString(args)
                 b.totalSize += int64(len(args))
@@ -326,7 +457,8 @@ func (b *ToolCallBuffer) emitToolCall(idx int) []byte {
     }
     
     data, _ := json.Marshal(chunk)
-    return []byte("data: " + string(data))
+    // FIX #1: Add trailing newline for proper SSE format
+    return []byte("data: " + string(data) + "\n")
 }
 
 // Flush emits all remaining buffered tool calls (called on stream end)
@@ -378,7 +510,25 @@ Environment variables:
 - `TOOL_CALL_BUFFER_DISABLED=false` (default: false, meaning feature is ENABLED)
 - `TOOL_CALL_BUFFER_MAX_SIZE=1048576` (default: 1MB)
 
-#### 2.2 Race Executor Integration
+#### 2.2 Environment Variable Parsing
+
+**File:** `pkg/config/config.go`
+
+Add to `applyEnvOverrides()`:
+
+```go
+// Tool call buffer configuration
+if v := os.Getenv("TOOL_CALL_BUFFER_DISABLED"); v != "" {
+    cfg.ToolCallBufferDisabled = strings.ToLower(v) == "true"
+}
+if v := os.Getenv("TOOL_CALL_BUFFER_MAX_SIZE"); v != "" {
+    if size, err := strconv.ParseInt(v, 10, 64); err == nil && size > 0 {
+        cfg.ToolCallBufferMaxSize = size
+    }
+}
+```
+
+#### 2.3 Race Executor Integration
 
 **File:** `pkg/proxy/race_executor.go`
 
@@ -595,6 +745,104 @@ func TestToolCallBuffer_Flush(t *testing.T) {
     chunks := buffer.Flush()
     if len(chunks) != 1 {
         t.Errorf("Flush should emit buffered tool call, got %d chunks", len(chunks))
+    }
+}
+
+// FIX #2 & #3: Test buffer overflow with reset behavior
+func TestToolCallBuffer_BufferOverflow(t *testing.T) {
+    // Create buffer with very small limit (10 bytes)
+    buffer := NewToolCallBuffer(10, "gpt-4", "test-123")
+    
+    // Add first fragment - should fit
+    chunks := buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"12345"}}]}}]}`
+    ))
+    // Should not emit (incomplete JSON)
+    if len(chunks) != 0 {
+        t.Errorf("Should not emit incomplete, got %d chunks", len(chunks))
+    }
+    
+    // Add second fragment - triggers overflow, emits incomplete, resets, adds new data
+    chunks = buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"67890"}}]}}]}`
+    ))
+    // Should emit the first fragment (overflow triggers emission)
+    if len(chunks) != 1 {
+        t.Errorf("Should emit on overflow, got %d chunks", len(chunks))
+    }
+}
+
+// FIX #3: Test index bounds validation
+func TestToolCallBuffer_IndexBoundsValidation(t *testing.T) {
+    buffer := NewToolCallBuffer(1024*1024, "gpt-4", "test-123")
+    
+    // Test negative index - should be ignored
+    chunks := buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":-1,"function":{"arguments":"{}"}}]}}]}`
+    ))
+    if len(chunks) != 0 {
+        t.Errorf("Negative index should be ignored, got %d chunks", len(chunks))
+    }
+    
+    // Test index > MaxToolCallIndex (99) - should be ignored
+    chunks = buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":100,"function":{"arguments":"{}"}}]}}]}`
+    ))
+    if len(chunks) != 0 {
+        t.Errorf("Index > 99 should be ignored, got %d chunks", len(chunks))
+    }
+    
+    // Test valid index 0 - should be processed
+    chunks = buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`
+    ))
+    if len(chunks) != 1 {
+        t.Errorf("Valid index 0 should emit complete JSON, got %d chunks", len(chunks))
+    }
+}
+
+// FIX #3: Test max tool calls limit
+func TestToolCallBuffer_MaxToolCallsLimit(t *testing.T) {
+    buffer := NewToolCallBuffer(1024*1024, "gpt-4", "test-123")
+    
+    // Add 100 tool calls (the maximum)
+    for i := 0; i < 100; i++ {
+        buffer.ProcessChunk([]byte(fmt.Sprintf(
+            `data: {"choices":[{"delta":{"tool_calls":[{"index":%d,"id":"call_%d","type":"function","function":{"name":"test","arguments":"{}"}}]}}]}`,
+            i, i,
+        )))
+    }
+    
+    // Try to add 101st tool call - should be ignored
+    chunks := buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":100,"function":{"arguments":"{}"}}]}}]}`
+    ))
+    if len(chunks) != 0 {
+        t.Errorf("Tool call beyond max should be ignored, got %d chunks", len(chunks))
+    }
+}
+
+// FIX #1: Test SSE output format (trailing newline)
+func TestToolCallBuffer_SSEOutputFormat(t *testing.T) {
+    buffer := NewToolCallBuffer(1024*1024, "gpt-4", "test-123")
+    
+    chunks := buffer.ProcessChunk([]byte(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`
+    ))
+    
+    if len(chunks) != 1 {
+        t.Fatalf("Expected 1 chunk, got %d", len(chunks))
+    }
+    
+    // Verify trailing newline
+    output := string(chunks[0])
+    if !strings.HasSuffix(output, "\n") {
+        t.Errorf("SSE output must end with newline, got: %q", output)
+    }
+    
+    // Verify data: prefix
+    if !strings.HasPrefix(output, "data: ") {
+        t.Errorf("SSE output must start with 'data: ', got: %q", output)
     }
 }
 ```
