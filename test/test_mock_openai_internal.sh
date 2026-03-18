@@ -110,9 +110,16 @@ echo -e "${GREEN}Proxy started (PID: $PROXY_PID)${NC}"
 echo -e "\n${YELLOW}[3/8] Configuring internal mock model via API...${NC}"
 
 # Delete model first (must be done before credential), then credential
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-openai-model" 2>/dev/null || true
+# Retry deletion in case of race conditions from previous test runs
+for i in 1 2 3; do
+    curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-openai-model" 2>/dev/null || true
+    sleep 0.3
+done
 sleep 0.5
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-openai-cred" 2>/dev/null || true
+for i in 1 2 3; do
+    curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-openai-cred" 2>/dev/null || true
+    sleep 0.3
+done
 sleep 1
 
 CREDENTIAL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/credentials" \
@@ -265,10 +272,12 @@ assert_contains "$OUTPUT5" '"finish_reason":"tool_calls"' "finish_reason=tool_ca
 assert_contains "$OUTPUT5" "data: \[DONE\]" "DONE marker present"
 
 # Test 6: Streaming tool call with malformed JSON arguments
-# Note: Tool repair in streaming mode processes each chunk individually.
+# Note: Tool repair now happens POST-STREAM (after accumulation is complete).
 # The mock server sends chunks with partial malformed JSON like: {loc, ation:, etc.
-# Tool repair attempts to fix each chunk, and the stream completes successfully.
-echo -e "\n${YELLOW}[9/9] Test 6: Streaming Tool Call with Malformed JSON (Tool Repair)${NC}"
+# These chunks are accumulated, and after the stream completes, the complete malformed
+# JSON {location: "San Francisco", unit: "celsius"} is repaired to valid JSON
+# {"location": "San Francisco", "unit": "celsius"} (quotes added around keys).
+echo -e "\n${YELLOW}[9/9] Test 6: Streaming Tool Call with Malformed JSON (Post-Stream Tool Repair)${NC}"
 OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -283,13 +292,15 @@ assert_contains "$OUTPUT6" 'get_weather' "Tool name present"
 assert_contains "$OUTPUT6" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 assert_contains "$OUTPUT6" "data: \[DONE\]" "DONE marker present"
 
-# Verify that tool repair was attempted by checking for the presence of San Francisco in the response
-# (The repair doesn't change partial chunks, but the stream should complete successfully)
-if echo "$OUTPUT6" | grep -q 'San'; then
-    echo -e "  ${GREEN}✓${NC} Tool repair: stream contains expected content (San)"
+# Verify that post-stream tool repair was applied.
+# The malformed JSON {location: "San Francisco"} should be repaired to {"location": "San Francisco"}
+# Note: In the SSE stream, JSON arguments are escaped, so we look for the escaped form.
+# The repair adds quotes around unquoted keys like location -> \"location\"
+if echo "$OUTPUT6" | grep -q '\\"location\\"'; then
+    echo -e "  ${GREEN}✓${NC} Tool repair: found properly quoted key (malformed JSON was repaired)"
     ((TESTS_PASSED++))
 else
-    echo -e "  ${RED}✗${NC} Tool repair: stream missing expected content (San)"
+    echo -e "  ${RED}✗${NC} Tool repair: missing quoted key (repair may not have been applied)"
     ((TESTS_FAILED++))
 fi
 
@@ -313,7 +324,7 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo -e "  ${YELLOW}✓${NC} Multiple tool calls in sequence"
     echo -e "  ${YELLOW}✓${NC} Reasoning content (DeepSeek-style)"
     echo -e "  ${YELLOW}✓${NC} Reasoning + tool call combination"
-    echo -e "  ${YELLOW}✓${NC} Tool repair streaming (malformed JSON chunks processed)"
+    echo -e "  ${YELLOW}✓${NC} Post-stream tool repair (malformed JSON repaired after stream completes)"
     exit 0
 else
     echo -e "${RED}Some tests failed. Check the output above for details.${NC}"
