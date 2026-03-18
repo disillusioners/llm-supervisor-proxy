@@ -23,6 +23,8 @@
 //	mock-error-500: Return 500 error
 //	mock-error-timeout: Timeout (sleep)
 //	mock-non-stream: Force non-streaming response
+//	mock-tool-malformed: Tool call with malformed JSON arguments (missing quotes)
+//	mock-tool-malformed-stream: Streaming tool call with malformed JSON arguments
 package main
 
 import (
@@ -148,7 +150,29 @@ func handleNonStreamOpenAI(w http.ResponseWriter, model, prompt string) {
 	}
 
 	// Handle tool call scenarios
-	if strings.Contains(prompt, "mock-tool-single") {
+	if strings.Contains(prompt, "mock-tool-malformed") {
+		// Tool call with malformed JSON arguments (missing quotes, unquoted keys)
+		response["choices"] = []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": "",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":   "call_malformed_123",
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "get_weather",
+								"arguments": `{location: "San Francisco", unit: "celsius"}`, // Malformed: missing quotes around key
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		}
+	} else if strings.Contains(prompt, "mock-tool-single") {
 		response["choices"] = []map[string]interface{}{
 			{
 				"index": 0,
@@ -210,6 +234,28 @@ func handleNonStreamOpenAI(w http.ResponseWriter, model, prompt string) {
 				"finish_reason": "stop",
 			},
 		}
+	} else if strings.Contains(prompt, "mock-tool-malformed") {
+		// Tool call with malformed JSON arguments (missing quotes around keys)
+		response["choices"] = []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": "",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":   "call_malformed_123",
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "get_weather",
+								"arguments": `{location: "San Francisco", unit: "celsius"}`, // Malformed: missing quotes around keys
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		}
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -232,6 +278,8 @@ func handleStreamOpenAI(w http.ResponseWriter, r *http.Request, model, prompt st
 	flusher.Flush()
 
 	switch {
+	case strings.Contains(prompt, "mock-tool-malformed-stream"):
+		handleStreamingMalformedToolCall(w, flusher, model)
 	case strings.Contains(prompt, "mock-tool-stream"):
 		handleStreamingToolCall(w, flusher, model)
 	case strings.Contains(prompt, "mock-tool-multi-stream"):
@@ -264,6 +312,48 @@ func handleNormalStream(w http.ResponseWriter, flusher http.Flusher, model strin
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 	log.Println("[OpenAI-Mock] Normal stream completed")
+}
+
+func handleStreamingMalformedToolCall(w http.ResponseWriter, flusher http.Flusher, model string) {
+	log.Println("[OpenAI-Mock] Streaming tool call with malformed JSON arguments")
+
+	// First, send text chunks
+	textTokens := []string{"Let", " me", " check", " the", " weather", "."}
+	for _, token := range textTokens {
+		chunk := createOpenAIChunkSimple(model, token)
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		flusher.Flush()
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// Send tool call chunks with malformed JSON (missing quotes around keys)
+	toolCallID := "call_malformed_stream_123"
+
+	// Chunk 1: Tool call starts with name
+	tc1 := createToolCallChunk(model, toolCallID, 0, "get_weather", "")
+	fmt.Fprintf(w, "data: %s\n\n", tc1)
+	flusher.Flush()
+	time.Sleep(50 * time.Millisecond)
+
+	// Chunk 2: Arguments streaming - MALFORMED JSON (missing quotes around keys)
+	// This simulates an LLM that outputs: {location: "San Francisco", unit: "celsius"}
+	// instead of: {"location": "San Francisco", "unit": "celsius"}
+	malformedArgParts := []string{`{loc`, `ation:`, ` "`, `San`, ` Fran`, `cisco`, `", `, ` unit:`, ` "`, `celsius`, `"}`}
+	for _, part := range malformedArgParts {
+		tc := createToolCallChunk(model, toolCallID, 0, "", part)
+		fmt.Fprintf(w, "data: %s\n\n", tc)
+		flusher.Flush()
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// Final chunk with finish_reason
+	final := createToolCallFinalChunk(model, toolCallID, 0)
+	fmt.Fprintf(w, "data: %s\n\n", final)
+	flusher.Flush()
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+	log.Println("[OpenAI-Mock] Streaming malformed tool call completed")
 }
 
 func handleStreamingToolCall(w http.ResponseWriter, flusher http.Flusher, model string) {

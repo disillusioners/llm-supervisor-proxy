@@ -84,7 +84,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
 		normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
 		normalizers.GetRegistry().ResetAll(normCtx)
-		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx)
+		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair)
 	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel)
 }
@@ -208,7 +208,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 }
 
 // handleInternalStream handles streaming requests for internal providers
-func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext) error {
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return err
@@ -334,6 +334,16 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				if modified {
 					log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 				}
+
+				// Apply tool repair if enabled
+				if toolRepairConfig.Enabled {
+					repairedLine, repaired := repairToolCallArgumentsInChunk(normalizedLine, toolRepairConfig)
+					if repaired {
+						normalizedLine = repairedLine
+						log.Printf("[TOOL-REPAIR] Race attempt %d (internal): repaired malformed tool_call arguments", upstreamReq.id)
+					}
+				}
+
 				if !upstreamReq.buffer.Add(normalizedLine) {
 					return fmt.Errorf("buffer limit exceeded")
 				}
