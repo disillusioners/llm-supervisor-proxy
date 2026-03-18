@@ -4,6 +4,85 @@
 
 When streaming tool calls from LLM providers (especially non-OpenAI providers like MiniMax), the JSON arguments for tool calls can be split across multiple SSE chunks. This causes `AI_JSONParseError` when the parser attempts to parse each chunk as a complete JSON object.
 
+## Root Cause Analysis: Spec vs Provider Bug
+
+### Does the OpenAI Spec Cover This?
+
+**Yes** — The spec in [`docs/openai-streaming-tool-calls-spec.md`](openai-streaming-tool-calls-spec.md) clearly states:
+
+- **Section 4**: `function.arguments` are "partial strings" that concatenate
+- **Section 8**: Reconstruction algorithm shows `args += delta.function.arguments`
+- **Section 9**: "Arguments not valid JSON until the end" — only parse after completion
+
+### Does Our Proxy Follow the Spec?
+
+**Yes** — Our [`ToolCallAccumulator`](../pkg/proxy/tool_call_accumulator.go) correctly:
+
+1. **Groups by index** (line 115-120): Uses `index` field to identify tool calls
+2. **Accumulates arguments** (line 167): `a.args[idx].WriteString(args)`
+3. **Ignores empty fields** (lines 149-159): Only updates metadata if non-empty
+
+```go
+// From tool_call_accumulator.go:162-169
+if args, ok := fn["arguments"].(string); ok {
+    if a.args[idx].Len()+len(args) > MaxToolCallArgsSize {
+        log.Printf("[WARN] Tool call[%d] arguments exceed size limit...")
+    } else {
+        a.args[idx].WriteString(args)  // ✅ Correct accumulation
+    }
+}
+```
+
+### Is This a Provider Bug?
+
+**YES — This is a MiniMax provider bug.**
+
+Looking at the actual chunks:
+
+| Chunk | arguments value |
+|-------|-----------------|
+| 1 | `"{\"include\": \"*.go\", \"pattern\": \"event.*log|EventLog|event_log\"}"` |
+| 2 | `"\"}"` |
+
+**Chunk 1 is already complete valid JSON!** Then Chunk 2 adds `"\"}"` as garbage.
+
+**Concatenated result:**
+```
+{"include": "*.go", "pattern": "event.*log|EventLog|event_log"}"}
+                                                    ^^^^ EXTRA!
+```
+
+### What a Spec-Compliant Provider Would Do
+
+| Approach | Example |
+|----------|---------|
+| **Single chunk** | Send complete JSON, no more chunks with arguments |
+| **Proper split** | `{"` → `include` → `": "*.go"` → `, "pattern": "..."` → `}` |
+
+MiniMax did **neither** — it sent complete JSON then added garbage characters.
+
+### Spec Section 11 Warning
+
+The spec already warns about this in Section 11:
+
+> Not all "OpenAI-compatible" APIs follow this spec
+
+| Provider | Issue |
+|----------|-------|
+| Gemini (compat) | missing `index` |
+| Ollama | sometimes no `id` |
+| **MiniMax** | **sends garbage after complete JSON** ← NEW |
+
+### Conclusion
+
+| Question | Answer |
+|----------|--------|
+| Does the spec cover this? | ✅ Yes — arguments should concatenate correctly |
+| Does our proxy follow spec? | ✅ Yes — we accumulate correctly |
+| Is this a provider bug? | ✅ **Yes — MiniMax is sending malformed chunks** |
+
+The proxy is **not at fault**. MiniMax is emitting invalid streaming behavior that violates the OpenAI streaming specification.
+
 ### Error Example
 
 ```
@@ -258,8 +337,145 @@ Different providers (like MiniMax) are less strict than OpenAI and may:
 | Later chunk corrupts JSON | Empty fields overwrite valid data | Ignore empty overwrites |
 | Premature parsing | Parse before stream complete | Parse only after completion |
 
+## Mitigation Strategies for Provider Bugs
+
+Since some providers emit malformed streaming data, the proxy can implement additional defenses:
+
+### 1. JSON Completion Detection
+
+Detect when arguments are already complete JSON and stop accumulating:
+
+```go
+func isCompleteJSON(s string) bool {
+    // Fast path: try to parse
+    var tmp interface{}
+    return json.Unmarshal([]byte(s), &tmp) == nil
+}
+
+// In accumulation loop:
+if isCompleteJSON(a.args[idx].String()) {
+    // Already complete - ignore additional chunks for this index
+    log.Printf("[WARN] Provider sent extra data after complete JSON, ignoring")
+    continue
+}
+```
+
+### 2. Trailing Garbage Removal
+
+If accumulated JSON fails to parse, attempt repair:
+
+```go
+func repairTrailingGarbage(s string) string {
+    // Find last valid JSON object close
+    depth := 0
+    lastValidEnd := -1
+    
+    for i, ch := range s {
+        if ch == '{' {
+            depth++
+        } else if ch == '}' {
+            depth--
+            if depth == 0 {
+                lastValidEnd = i + 1
+            }
+        }
+    }
+    
+    if lastValidEnd > 0 && lastValidEnd < len(s) {
+        log.Printf("[WARN] Trimming trailing garbage from JSON")
+        return s[:lastValidEnd]
+    }
+    return s
+}
+```
+
+### 3. Provider-Specific Normalizers
+
+Create normalizers for known-buggy providers:
+
+```go
+type StreamNormalizer interface {
+    Normalize(chunk []byte) []byte
+}
+
+type MiniMaxNormalizer struct{}
+
+func (n *MiniMaxNormalizer) Normalize(chunk []byte) []byte {
+    // Handle MiniMax-specific quirks:
+    // 1. Extra closing after complete JSON
+    // 2. Empty field overwrites
+    // etc.
+}
+```
+
+### 4. Validation Before Execution
+
+Always validate tool call arguments before executing:
+
+```go
+func ValidateToolCallArgs(args string) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    err := json.Unmarshal([]byte(args), &result)
+    if err != nil {
+        // Try repair first
+        repaired := repairTrailingGarbage(args)
+        if json.Unmarshal([]byte(repaired), &result) == nil {
+            log.Printf("[WARN] Tool call args repaired successfully")
+            return result, nil
+        }
+        return nil, fmt.Errorf("invalid tool call arguments: %w", err)
+    }
+    return result, nil
+}
+```
+
+## Implementation Status
+
+The mitigations described in this document have been implemented:
+
+### 1. JSON Completion Detection ✅
+
+Location: [`pkg/proxy/tool_call_accumulator.go`](../pkg/proxy/tool_call_accumulator.go)
+
+The `ToolCallAccumulator` now tracks which tool call indices have complete JSON arguments and ignores additional chunks for those indices:
+
+```go
+// In ToolCallAccumulator struct:
+completeIdx map[int]bool // tracks indices that have complete JSON
+
+// In ProcessChunk():
+if a.completeIdx[idx] {
+    log.Printf("[WARN] Provider sent extra data after complete JSON for tool_call[%d], ignoring %d bytes", idx, len(args))
+    continue
+}
+```
+
+### 2. Trailing Garbage Removal Strategy ✅
+
+Location: [`pkg/toolrepair/strategies.go`](../pkg/toolrepair/strategies.go)
+
+New `trim_trailing_garbage` strategy that removes trailing garbage after complete JSON objects:
+
+```go
+func trimTrailingGarbage(input string) (string, error) {
+    // Tracks brace depth, respecting string literals and escape sequences
+    // Returns the valid JSON prefix when trailing garbage is detected
+}
+```
+
+This strategy is now included in the default repair configuration:
+```go
+Strategies: []string{"trim_trailing_garbage", "extract_json", "library_repair", "remove_reasoning"}
+```
+
+### Test Coverage
+
+- [`pkg/proxy/tool_call_accumulator_test.go`](../pkg/proxy/tool_call_accumulator_test.go): Tests for complete JSON detection and garbage ignoring
+- [`pkg/toolrepair/repair_test.go`](../pkg/toolrepair/repair_test.go): Tests for the trailing garbage removal strategy
+
 ## Related Documentation
 
 - [`docs/openai-streaming-tool-calls-spec.md`](openai-streaming-tool-calls-spec.md) — OpenAI streaming specification
 - [`docs/streaming-toolcall-implementation-issues.md`](streaming-toolcall-implementation-issues.md) — Implementation issues
 - [`plans/streaming-toolcall-repair-fix.md`](../plans/streaming-toolcall-repair-fix.md) — Repair implementation plan
+- [`plans/stream-normalizer-module-plan.md`](../plans/stream-normalizer-module-plan.md) — Stream normalizer architecture

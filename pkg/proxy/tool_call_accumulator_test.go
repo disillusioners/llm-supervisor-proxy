@@ -354,3 +354,146 @@ func TestToolCallAccumulator_ConcatenatedChunks(t *testing.T) {
 	// Log to show the test works
 	t.Logf("Successfully processed concatenated chunks: %s -> 2 separate chunks", concatenatedInput)
 }
+
+// TestToolCallAccumulator_CompleteJSONDetection tests the MiniMax provider bug
+// where complete JSON is sent in one chunk, then garbage characters follow.
+// The accumulator should detect complete JSON and ignore subsequent chunks.
+func TestToolCallAccumulator_CompleteJSONDetection(t *testing.T) {
+	accumulator := NewToolCallAccumulator()
+
+	// Chunk 1: Complete, valid JSON arguments
+	chunk1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"grep","arguments":"{\"include\": \"*.go\", \"pattern\": \"event.*log\"}"}}]}}]}`
+
+	// Chunk 2: Garbage that MiniMax sends after complete JSON (should be ignored)
+	chunk2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}`
+
+	// Process chunk 1 (complete JSON)
+	err := accumulator.ProcessChunk([]byte(chunk1))
+	if err != nil {
+		t.Errorf("ProcessChunk(chunk1) returned unexpected error: %v", err)
+	}
+
+	// Process chunk 2 (garbage - should be ignored because JSON is already complete)
+	err = accumulator.ProcessChunk([]byte(chunk2))
+	if err != nil {
+		t.Errorf("ProcessChunk(chunk2) returned unexpected error: %v", err)
+	}
+
+	args := accumulator.GetAccumulatedArgs()
+	if len(args) != 1 {
+		t.Errorf("GetAccumulatedArgs() returned %d entries, expected 1", len(args))
+	}
+
+	// The arguments should be the complete JSON from chunk 1, NOT corrupted by chunk 2
+	expected := `{"include": "*.go", "pattern": "event.*log"}`
+	if args[0] != expected {
+		t.Errorf("Accumulated args[0] = %q, expected %q", args[0], expected)
+	}
+
+	// Verify the accumulator detected complete JSON
+	accumulator.mu.Lock()
+	complete := accumulator.completeIdx[0]
+	accumulator.mu.Unlock()
+
+	if !complete {
+		t.Error("Expected index 0 to be marked as complete JSON")
+	}
+}
+
+// TestToolCallAccumulator_PartialThenComplete tests normal incremental streaming
+// where JSON is built up over multiple chunks, then becomes complete.
+func TestToolCallAccumulator_PartialThenComplete(t *testing.T) {
+	accumulator := NewToolCallAccumulator()
+
+	// Incremental chunks that build up to complete JSON
+	chunks := []string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"key\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":" \"value\""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}`,
+	}
+
+	for i, chunk := range chunks {
+		err := accumulator.ProcessChunk([]byte(chunk))
+		if err != nil {
+			t.Errorf("ProcessChunk(%d) returned unexpected error: %v", i, err)
+		}
+	}
+
+	args := accumulator.GetAccumulatedArgs()
+	expected := `{"key": "value"}`
+	if args[0] != expected {
+		t.Errorf("Accumulated args[0] = %q, expected %q", args[0], expected)
+	}
+
+	// After complete JSON, the index should be marked as complete
+	accumulator.mu.Lock()
+	complete := accumulator.completeIdx[0]
+	accumulator.mu.Unlock()
+
+	if !complete {
+		t.Error("Expected index 0 to be marked as complete JSON after final chunk")
+	}
+}
+
+// TestToolCallAccumulator_GarbageIgnoredAfterComplete tests that once JSON is complete,
+// additional chunks with garbage are ignored.
+func TestToolCallAccumulator_GarbageIgnoredAfterComplete(t *testing.T) {
+	accumulator := NewToolCallAccumulator()
+
+	// Send complete JSON
+	completeChunk := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"test\": \"value\"}"}}]}}]}`
+	err := accumulator.ProcessChunk([]byte(completeChunk))
+	if err != nil {
+		t.Errorf("ProcessChunk(complete) returned unexpected error: %v", err)
+	}
+
+	// Try to send garbage after complete JSON
+	garbageChunks := []string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"extra"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"data"}}]}}]}`,
+	}
+
+	for i, chunk := range garbageChunks {
+		err := accumulator.ProcessChunk([]byte(chunk))
+		if err != nil {
+			t.Errorf("ProcessChunk(garbage %d) returned unexpected error: %v", i, err)
+		}
+	}
+
+	args := accumulator.GetAccumulatedArgs()
+	// Should still be the original complete JSON, not corrupted
+	expected := `{"test": "value"}`
+	if args[0] != expected {
+		t.Errorf("Accumulated args[0] = %q, expected %q (garbage should be ignored)", args[0], expected)
+	}
+}
+
+// TestIsCompleteJSON tests the isCompleteJSON helper function
+func TestIsCompleteJSON(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"", false},
+		{"{}", true},
+		{"[]", true},
+		{`{"key": "value"}`, true},
+		{`{"nested": {"key": "value"}}`, true},
+		{`{"array": [1, 2, 3]}`, true},
+		{"{", false},
+		{"}", false},
+		{`{"key":`, false},
+		{`{"key": "value"}`, true},
+		{`{"key": "value"}"}`, false}, // trailing garbage
+		{`{"include": "*.go", "pattern": "event.*log"}"}`, false}, // MiniMax bug example
+	}
+
+	for _, tt := range tests {
+		result := isCompleteJSON(tt.input)
+		if result != tt.expected {
+			t.Errorf("isCompleteJSON(%q) = %v, expected %v", tt.input, result, tt.expected)
+		}
+	}
+}

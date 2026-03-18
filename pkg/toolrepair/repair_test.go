@@ -693,3 +693,145 @@ func TestEventCallback(t *testing.T) {
 		_, _ = repairer.RepairToolCallsData(toolCalls, callback)
 	})
 }
+
+func TestTrimTrailingGarbage(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:    "already valid JSON",
+			input:   `{"key": "value"}`,
+			want:    `{"key": "value"}`,
+			wantErr: false,
+		},
+		{
+			name:    "MiniMax bug: trailing garbage after complete JSON",
+			input:   `{"include": "*.go", "pattern": "event.*log"}"}`,
+			want:    `{"include": "*.go", "pattern": "event.*log"}`,
+			wantErr: false,
+		},
+		{
+			name:    "trailing extra characters",
+			input:   `{"test": "value"}extra`,
+			want:    `{"test": "value"}`,
+			wantErr: false,
+		},
+		{
+			name:    "trailing double closing",
+			input:   `{"a": 1}}"`,
+			want:    `{"a": 1}`,
+			wantErr: false,
+		},
+		{
+			name:    "nested object with trailing garbage",
+			input:   `{"outer": {"inner": "value"}}garbage`,
+			want:    `{"outer": {"inner": "value"}}`,
+			wantErr: false,
+		},
+		{
+			name:    "empty object",
+			input:   `{}`,
+			want:    `{}`,
+			wantErr: false,
+		},
+		{
+			name:    "incomplete JSON returns original",
+			input:   `{"key":`,
+			want:    `{"key":`,
+			wantErr: false,
+		},
+		{
+			name:    "JSON with string containing braces",
+			input:   `{"pattern": "a{1,3}"}`,
+			want:    `{"pattern": "a{1,3}"}`,
+			wantErr: false,
+		},
+		{
+			name:    "JSON with string containing braces and trailing garbage",
+			input:   `{"pattern": "a{1,3}"}extra`,
+			want:    `{"pattern": "a{1,3}"}`,
+			wantErr: false,
+		},
+		{
+			name:    "JSON with escaped quotes",
+			input:   `{"text": "He said \"hello\""}`,
+			want:    `{"text": "He said \"hello\""}`,
+			wantErr: false,
+		},
+		{
+			name:    "JSON with escaped quotes and trailing garbage",
+			input:   `{"text": "He said \"hello\""}"}`,
+			want:    `{"text": "He said \"hello\""}`,
+			wantErr: false,
+		},
+		{
+			name:    "empty string",
+			input:   "",
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name:    "whitespace only",
+			input:   "   ",
+			want:    "",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := trimTrailingGarbage(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("trimTrailingGarbage() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("trimTrailingGarbage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepairWithTrailingGarbageStrategy(t *testing.T) {
+	// Test that the trim_trailing_garbage strategy is applied correctly
+	config := &Config{
+		Enabled:    true,
+		Strategies: []string{"trim_trailing_garbage"},
+	}
+	repairer := NewRepairer(config)
+
+	tests := []struct {
+		name         string
+		arguments    string
+		wantSuccess  bool
+		wantRepaired string
+	}{
+		{
+			name:         "MiniMax bug example",
+			arguments:    `{"include": "*.go", "pattern": "event.*log"}"}`,
+			wantSuccess:  true,
+			wantRepaired: `{"include": "*.go", "pattern": "event.*log"}`,
+		},
+		{
+			name:         "already valid",
+			arguments:    `{"valid": true}`,
+			wantSuccess:  true,
+			wantRepaired: `{"valid": true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := repairer.RepairArguments(tt.arguments, "test")
+			if result.Success != tt.wantSuccess {
+				t.Errorf("Success = %v, want %v", result.Success, tt.wantSuccess)
+			}
+			if result.Repaired != tt.wantRepaired {
+				t.Errorf("Repaired = %v, want %v", result.Repaired, tt.wantRepaired)
+			}
+		})
+	}
+}

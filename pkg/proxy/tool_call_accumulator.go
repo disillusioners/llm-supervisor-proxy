@@ -7,6 +7,17 @@ import (
 	"sync"
 )
 
+// isCompleteJSON checks if a string is valid, complete JSON.
+// This is used to detect when tool call arguments are already complete
+// and additional chunks should be ignored (provider bug mitigation).
+func isCompleteJSON(s string) bool {
+	if s == "" {
+		return false
+	}
+	var tmp interface{}
+	return json.Unmarshal([]byte(s), &tmp) == nil
+}
+
 // Constants for tool call limits to prevent memory exhaustion
 const (
 	// MaxToolCallsPerStream limits the number of tool calls per streaming response
@@ -26,10 +37,16 @@ const (
 //
 // This mirrors the pattern from handler_helpers.go but is designed for use
 // in race_executor.go for the streaming response path.
+//
+// Provider Bug Mitigation:
+// Some providers (like MiniMax) send complete JSON in one chunk, then send
+// garbage characters in subsequent chunks. We track which indices have
+// complete JSON and ignore additional chunks for those indices.
 type ToolCallAccumulator struct {
-	mu       sync.Mutex
-	args     map[int]*strings.Builder
-	metadata map[int]ToolCallMeta
+	mu            sync.Mutex
+	args          map[int]*strings.Builder
+	metadata      map[int]ToolCallMeta
+	completeIdx   map[int]bool // tracks indices that have complete JSON
 }
 
 // ToolCallMeta holds metadata about a tool call (ID, type, name).
@@ -42,8 +59,9 @@ type ToolCallMeta struct {
 // NewToolCallAccumulator creates a new ToolCallAccumulator.
 func NewToolCallAccumulator() *ToolCallAccumulator {
 	return &ToolCallAccumulator{
-		args:     make(map[int]*strings.Builder),
-		metadata: make(map[int]ToolCallMeta),
+		args:        make(map[int]*strings.Builder),
+		metadata:    make(map[int]ToolCallMeta),
+		completeIdx: make(map[int]bool),
 	}
 }
 
@@ -160,11 +178,28 @@ func (a *ToolCallAccumulator) ProcessChunk(line []byte) error {
 			}
 			// Accumulate arguments - this is the key part!
 			if args, ok := fn["arguments"].(string); ok {
+				// PROVIDER BUG MITIGATION (MiniMax, etc.):
+				// Check if this index already has complete JSON.
+				// Some providers send complete JSON in one chunk, then send
+				// garbage characters in subsequent chunks (e.g., `"{\"include\": \"*.go\"}"` then `"\"}"`).
+				// We detect this and ignore additional chunks for indices with complete JSON.
+				if a.completeIdx[idx] {
+					log.Printf("[WARN] Provider sent extra data after complete JSON for tool_call[%d], ignoring %d bytes", idx, len(args))
+					continue
+				}
+
 				// Check argument size limit before writing
 				if a.args[idx].Len()+len(args) > MaxToolCallArgsSize {
 					log.Printf("[WARN] Tool call[%d] arguments exceed size limit (%d bytes), truncating", idx, MaxToolCallArgsSize)
 				} else {
 					a.args[idx].WriteString(args)
+
+					// Check if the accumulated arguments are now complete JSON
+					accumulated := a.args[idx].String()
+					if isCompleteJSON(accumulated) {
+						a.completeIdx[idx] = true
+						log.Printf("[DEBUG] Tool call[%d] arguments are complete JSON (%d bytes)", idx, len(accumulated))
+					}
 				}
 			}
 		}

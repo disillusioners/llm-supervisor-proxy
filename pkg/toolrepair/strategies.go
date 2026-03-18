@@ -45,6 +45,8 @@ func getStrategy(name string) Strategy {
 		return libraryRepair
 	case "remove_reasoning":
 		return removeReasoningLeakage
+	case "trim_trailing_garbage":
+		return trimTrailingGarbage
 	default:
 		return nil
 	}
@@ -112,6 +114,67 @@ func removeReasoningLeakage(input string) (string, error) {
 	}
 
 	return result, nil
+}
+
+// trimTrailingGarbage removes trailing garbage after a complete JSON object.
+// This handles provider bugs (like MiniMax) where complete JSON is followed by
+// extra characters like `"\"}"` that corrupt the JSON.
+//
+// Example:
+//   Input:  `{"include": "*.go", "pattern": "event.*log"}"}`
+//   Output: `{"include": "*.go", "pattern": "event.*log"}`
+func trimTrailingGarbage(input string) (string, error) {
+	input = strings.TrimSpace(input)
+
+	// If already valid, return as-is
+	if isValidJSON(input) {
+		return input, nil
+	}
+
+	// Find the last valid JSON object close by tracking brace depth
+	depth := 0
+	lastValidEnd := -1
+	inString := false
+	escape := false
+
+	for i, ch := range input {
+		// Handle string literals and escape sequences
+		if escape {
+			escape = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escape = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+
+		// Only track depth outside of strings
+		if !inString {
+			if ch == '{' {
+				depth++
+			} else if ch == '}' {
+				depth--
+				if depth == 0 {
+					lastValidEnd = i + 1
+				}
+			}
+		}
+	}
+
+	// If we found a valid JSON object boundary and there's trailing content
+	if lastValidEnd > 0 && lastValidEnd < len(input) {
+		extracted := input[:lastValidEnd]
+		if isValidJSON(extracted) {
+			return extracted, nil
+		}
+	}
+
+	// Return original if we can't repair
+	return input, nil
 }
 
 // validateBasicSchema performs basic schema validation
