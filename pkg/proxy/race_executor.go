@@ -943,13 +943,10 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 				line = line[:len(line)-1]
 			}
 
-			// NEW: Accumulate tool call arguments before normalization
-			// This is needed because tool call args are streamed incrementally
-			if err := accumulator.ProcessChunk(line); err != nil {
-				log.Printf("[DEBUG] Race attempt %d: failed to accumulate chunk: %v", req.id, err)
-			}
-
-			// Apply normalization to fix malformed chunks
+			// IMPORTANT: Apply normalization FIRST before accumulation
+			// This fixes issues like concatenated JSON chunks from providers like MiniMax
+			// Example malformed input:  data: {...} {...}
+			// Fixed output:             data: {...}\ndata: {...}
 			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName(line, normCtx)
 			if modified {
 				log.Printf("[DEBUG] Race attempt %d: normalized malformed stream chunk by %s", req.id, normalizerName)
@@ -967,6 +964,28 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 							"description": description,
 						},
 					})
+				}
+			}
+
+			// After normalization, we may have multiple lines (if concatenated chunks were split)
+			// Process each line separately for accumulation
+			normalizedStr := string(normalizedLine)
+			var linesToProcess []string
+			if strings.Contains(normalizedStr, "\n") {
+				// Multiple lines from split - process each one
+				linesToProcess = strings.Split(normalizedStr, "\n")
+			} else {
+				// Single line
+				linesToProcess = []string{normalizedStr}
+			}
+
+			// Accumulate tool call arguments from each normalized line
+			for _, lineToProcess := range linesToProcess {
+				if lineToProcess == "" {
+					continue
+				}
+				if err := accumulator.ProcessChunk([]byte(lineToProcess)); err != nil {
+					log.Printf("[DEBUG] Race attempt %d: failed to accumulate chunk: %v", req.id, err)
 				}
 			}
 
