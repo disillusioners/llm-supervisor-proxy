@@ -18,6 +18,7 @@ func init() {
 		// Register all normalizers (both enabled by default)
 		defaultRegistry.Register(NewFixEmptyRoleNormalizer())
 		defaultRegistry.Register(NewFixMissingToolCallIndexNormalizer())
+		defaultRegistry.Register(NewSplitConcatenatedChunksNormalizer())
 	})
 }
 
