@@ -78,11 +78,18 @@ func NewToolCallBuffer(maxSize int64, modelID, requestID string) *ToolCallBuffer
 
 // NewToolCallBufferWithRepair creates a buffer with repair capabilities.
 // If repairConfig is nil or disabled, behaves like NewToolCallBuffer.
+//
+// NOTE: LLM-based repair (FixerModel) is intentionally NOT enabled here.
+// The Fixer would need to be created and set via repairer.SetFixer(), but
+// this is disabled for streaming to avoid latency from LLM round-trips.
+// Only library-based strategies (extract_json, library_repair, etc.) are used.
+// See pkg/toolrepair/fixer.go for the LLM fixer implementation if needed in future.
 func NewToolCallBufferWithRepair(maxSize int64, modelID, requestID string, repairConfig *toolrepair.Config) *ToolCallBuffer {
 	b := NewToolCallBuffer(maxSize, modelID, requestID)
 	if repairConfig != nil && repairConfig.Enabled {
 		b.repairConfig = repairConfig
 		b.repairer = toolrepair.NewRepairer(repairConfig)
+		// LLM fixer intentionally NOT set - see comment above
 	}
 	return b
 }
