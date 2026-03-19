@@ -533,8 +533,6 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 				if chatMsg.Role == "tool" {
 					if chatMsg.ToolCallID == "" {
 						log.Printf("[WARN] Message[%d] has role='tool' but missing tool_call_id - this may cause MiniMax API error", msgIdx)
-					} else {
-						log.Printf("[DEBUG] Message[%d] has role='tool' with tool_call_id=%s", msgIdx, chatMsg.ToolCallID)
 					}
 				}
 				req.Messages = append(req.Messages, chatMsg)
