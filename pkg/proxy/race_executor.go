@@ -195,7 +195,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 
 	// Add as single chunk
 	if !upstreamReq.buffer.Add(data) {
-		return fmt.Errorf("buffer limit exceeded")
+		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
 	}
 
 	return nil
@@ -285,7 +285,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
 			if !upstreamReq.buffer.Add(normalizedLine) {
-				return fmt.Errorf("buffer limit exceeded")
+				return fmt.Errorf("buffer limit exceeded: content chunk for model %s", internalModel)
 			}
 			firstChunk = false
 
@@ -355,7 +355,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				// Add all chunks to buffer
 				for _, chunk := range chunksToEmit {
 					if !upstreamReq.buffer.Add(chunk) {
-						return fmt.Errorf("buffer limit exceeded")
+						return fmt.Errorf("buffer limit exceeded: tool_call chunk for model %s", internalModel)
 					}
 				}
 			}
@@ -385,7 +385,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
 			if !upstreamReq.buffer.Add(normalizedLine) {
-				return fmt.Errorf("buffer limit exceeded")
+				return fmt.Errorf("buffer limit exceeded: thinking chunk for model %s", internalModel)
 			}
 
 		case "done":
@@ -436,12 +436,12 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			finalData, _ := json.Marshal(finalChunk)
 			finalLine := fmt.Sprintf("data: %s\n", finalData)
 			if !upstreamReq.buffer.Add([]byte(finalLine)) {
-				return fmt.Errorf("buffer limit exceeded")
+				return fmt.Errorf("buffer limit exceeded: final chunk for model %s", internalModel)
 			}
 
 			// Write [DONE] marker
 			if !upstreamReq.buffer.Add([]byte("data: [DONE]\n")) {
-				return fmt.Errorf("buffer limit exceeded")
+				return fmt.Errorf("buffer limit exceeded: done marker for model %s", internalModel)
 			}
 
 			return nil
@@ -608,7 +608,7 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 
 	// Add as single chunk (the non-streaming JSON response)
 	if !req.buffer.Add(body) {
-		return fmt.Errorf("buffer limit exceeded")
+		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", req.modelID)
 	}
 
 	return nil
@@ -849,7 +849,7 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			// Add all chunks to buffer
 			for _, chunk := range chunksToEmit {
 				if !req.buffer.Add(chunk) {
-					return fmt.Errorf("buffer limit exceeded")
+					return fmt.Errorf("buffer limit exceeded: streaming tool_call chunk for model %s", req.modelID)
 				}
 			}
 
