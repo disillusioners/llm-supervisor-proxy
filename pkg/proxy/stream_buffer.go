@@ -20,10 +20,10 @@ type streamBuffer struct {
 }
 
 const (
-	// MEMORY TRAP FIX: Reduced from 50MB to 5MB per buffer
-	// With 3 parallel requests, max ~15MB per client request
-	// LLM responses rarely exceed a few megabytes
-	defaultMaxBufferBytes = 5 * 1024 * 1024 // 5MB default limit
+	// MEMORY TRAP FIX: Increased from 5MB to 15MB per buffer
+	// With 3 parallel requests, max ~45MB per client request
+	// Modern LLM responses (especially with thinking content) can exceed 10MB
+	defaultMaxBufferBytes = 5242880 // 5MB default limit
 )
 
 func newStreamBuffer(maxBytes int64) *streamBuffer {

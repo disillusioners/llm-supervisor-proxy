@@ -201,7 +201,7 @@ var Defaults = Config{
 	RaceRetryEnabled:       false,
 	RaceParallelOnIdle:     true,
 	RaceMaxParallel:        3,
-	RaceMaxBufferBytes:     5 * 1024 * 1024, // 5MB limit
+	RaceMaxBufferBytes:     5242880, // 5MB limit
 	ToolCallBufferDisabled: false,           // Buffering ENABLED by default
 	ToolCallBufferMaxSize:  1024 * 1024,     // 1MB default
 	// Raw Upstream Response Logging
