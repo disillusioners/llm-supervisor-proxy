@@ -33,7 +33,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Enabled:                 true,
 		Strategies:              []string{"trim_trailing_garbage", "extract_json", "library_repair", "remove_reasoning"},
-		MaxArgumentsSize:        10 * 1024, // 10KB
+		MaxArgumentsSize:        100 * 1024, // 100KB
 		MaxToolCallsPerResponse: 8,
 		LogOriginal:             false,
 		LogRepaired:             true,

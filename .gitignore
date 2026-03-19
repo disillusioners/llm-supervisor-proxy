@@ -32,3 +32,4 @@ k8s/secrets/
 .env*
 *.log
 proxy_debug*
+pkg/store/database/config.db

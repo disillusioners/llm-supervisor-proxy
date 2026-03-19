@@ -186,7 +186,7 @@ var Defaults = Config{
 	ToolRepair: toolrepair.Config{
 		Enabled:                 true,
 		Strategies:              []string{"extract_json", "library_repair", "remove_reasoning"},
-		MaxArgumentsSize:        20 * 1024, // 20KB
+		MaxArgumentsSize:        100 * 1024, // 100KB
 		MaxToolCallsPerResponse: 10,
 		LogOriginal:             false,
 		LogRepaired:             true,
