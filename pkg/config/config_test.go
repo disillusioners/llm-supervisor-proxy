@@ -399,6 +399,46 @@ func TestConfig_Validate(t *testing.T) {
 			wantError: true,
 			errorMsg:  "race_max_buffer_bytes cannot be negative",
 		},
+		{
+			name: "race_max_buffer_bytes too small",
+			cfg: Config{
+				UpstreamURL:        "http://localhost:4001",
+				Port:               8089,
+				IdleTimeout:        Duration(10 * time.Second),
+				StreamDeadline:     Duration(110 * time.Second),
+				MaxGenerationTime:  Duration(180 * time.Second),
+				RaceMaxParallel:    3,
+				RaceMaxBufferBytes: 1,
+			},
+			wantError: true,
+			errorMsg:  "race_max_buffer_bytes must be at least 65536 bytes (64KB) or 0 for unlimited",
+		},
+		{
+			name: "race_max_buffer_bytes zero allowed",
+			cfg: Config{
+				UpstreamURL:        "http://localhost:4001",
+				Port:               8089,
+				IdleTimeout:        Duration(10 * time.Second),
+				StreamDeadline:     Duration(110 * time.Second),
+				MaxGenerationTime:  Duration(180 * time.Second),
+				RaceMaxParallel:    3,
+				RaceMaxBufferBytes: 0,
+			},
+			wantError: false,
+		},
+		{
+			name: "race_max_buffer_bytes at minimum",
+			cfg: Config{
+				UpstreamURL:        "http://localhost:4001",
+				Port:               8089,
+				IdleTimeout:        Duration(10 * time.Second),
+				StreamDeadline:     Duration(110 * time.Second),
+				MaxGenerationTime:  Duration(180 * time.Second),
+				RaceMaxParallel:    3,
+				RaceMaxBufferBytes: 65536,
+			},
+			wantError: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -958,14 +998,14 @@ func TestManager_ConcurrentGetWhileSave(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-			cfg := Config{
-				UpstreamURL:       "http://localhost:4001",
-				Port:              8089 + j,
-				IdleTimeout:       Duration(10 * time.Second),
-				StreamDeadline:    Duration(110 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-				RaceMaxParallel:   3,
-			}
+				cfg := Config{
+					UpstreamURL:       "http://localhost:4001",
+					Port:              8089 + j,
+					IdleTimeout:       Duration(10 * time.Second),
+					StreamDeadline:    Duration(110 * time.Second),
+					MaxGenerationTime: Duration(180 * time.Second),
+					RaceMaxParallel:   3,
+				}
 				_, _ = m.Save(cfg)
 			}
 		}()

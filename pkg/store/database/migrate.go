@@ -33,6 +33,7 @@ var migrations = []migration{
 	{"009", "009_add_ultimate_model.up"},
 	{"010", "010_add_race_retry.up"},
 	{"011", "011_add_stream_deadline.up"},
+	{"012", "012_fix_race_max_buffer_bytes.up"},
 }
 
 // RunMigrations executes database schema migrations

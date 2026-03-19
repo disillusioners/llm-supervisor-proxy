@@ -246,6 +246,9 @@ func (c *Config) Validate() error {
 	if c.RaceMaxBufferBytes < 0 {
 		return errors.New("race_max_buffer_bytes cannot be negative")
 	}
+	if c.RaceMaxBufferBytes > 0 && c.RaceMaxBufferBytes < 65536 {
+		return errors.New("race_max_buffer_bytes must be at least 65536 bytes (64KB) or 0 for unlimited")
+	}
 	if c.UltimateModel.MaxRetries < 0 {
 		return errors.New("ultimate_model.max_retries cannot be negative")
 	}

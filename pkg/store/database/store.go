@@ -117,7 +117,12 @@ func (m *ConfigManager) Load() error {
 	cfg.RaceRetryEnabled = isDbBoolTrue(dbCfg.RaceRetryEnabled)
 	cfg.RaceParallelOnIdle = isDbBoolTrue(dbCfg.RaceParallelOnIdle)
 	cfg.RaceMaxParallel = int(dbCfg.RaceMaxParallel)
-	cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
+	// Use default if database value is invalid (too small)
+	if dbCfg.RaceMaxBufferBytes >0 && dbCfg.RaceMaxBufferBytes <65536 {
+		cfg.RaceMaxBufferBytes = config.Defaults.RaceMaxBufferBytes
+	} else {
+		cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
+	}
 
 	// Parse loop detection JSON
 	if dbCfg.LoopDetectionJSON != "" && dbCfg.LoopDetectionJSON != "{}" {
