@@ -96,6 +96,7 @@ export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export RACE_RETRY_ENABLED="false"
 export LOOP_DETECTION_ENABLED="false"
+export TOOL_CALL_BUFFER_DISABLED="true"
 
 go run cmd/main.go &
 PROXY_PID=$!
