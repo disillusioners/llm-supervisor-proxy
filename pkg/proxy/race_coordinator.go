@@ -36,15 +36,15 @@ type raceCoordinator struct {
 	req     *http.Request
 	rawBody []byte
 
-	requests   []*upstreamRequest
-	models     []string
-	winner     *upstreamRequest
-	winnerIdx  int
+	requests    []*upstreamRequest
+	models      []string
+	winner      *upstreamRequest
+	winnerIdx   int
 	failedCount int
 
 	done     chan struct{} // Closed when a winner is found and finished, or all failed
 	streamCh chan struct{} // Signals when streaming can start
-	
+
 	onceStream sync.Once
 	onceDone   sync.Once
 
@@ -66,19 +66,19 @@ func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req 
 		models = []string{cfg.ModelID}
 	}
 	return &raceCoordinator{
-		baseCtx:          ctx,
-		cfg:              cfg,
-		req:              req,
-		rawBody:          rawBody,
-		models:           models,
-		requests:         make([]*upstreamRequest, 0, len(models)),
-		winnerIdx:        -1,
+		baseCtx:       ctx,
+		cfg:           cfg,
+		req:           req,
+		rawBody:       rawBody,
+		models:        models,
+		requests:      make([]*upstreamRequest, 0, len(models)),
+		winnerIdx:     -1,
 		done:          make(chan struct{}),
 		streamCh:      make(chan struct{}),
 		startTime:     time.Now(),
 		spawnTriggers: make([]spawnTriggerInfo, 0),
 		eventBus:      eventBus,
-		requestID:        requestID,
+		requestID:     requestID,
 	}
 }
 
@@ -101,12 +101,12 @@ func (c *raceCoordinator) publishEvent(eventType string, data map[string]interfa
 // Start initiates the race
 func (c *raceCoordinator) Start() {
 	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
-	
+
 	// Publish race_started event
 	c.publishEvent("race_started", map[string]interface{}{
 		"models": c.models,
 	})
-	
+
 	// 1. Spawn main request (no trigger - it's the initial request)
 	c.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
@@ -142,7 +142,7 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		"type":          string(mType),
 		"trigger":       string(triggerInfo.trigger),
 	}
-	
+
 	// Add detailed error information if this spawn was triggered by an error
 	if triggerInfo.trigger == triggerMainError {
 		eventData["trigger_reason"] = triggerInfo.errorMessage
@@ -194,7 +194,7 @@ func (c *raceCoordinator) manage() {
 			return
 		case <-ticker.C:
 			c.mu.Lock()
-			
+
 			// Check for winner eligibility
 			// IMPORTANT: Winner is only selected when request is COMPLETED (received [DONE] signal)
 			// BUG FIX: Previously selected winner when IsStreaming() was true, which caused
@@ -209,22 +209,22 @@ func (c *raceCoordinator) manage() {
 						if c.winner == nil || i < c.winnerIdx {
 							c.winner = req
 							c.winnerIdx = i
-							
+
 							// Enhanced logging with timing and buffer stats
 							elapsed := time.Since(c.startTime)
 							bufferLen := req.buffer.TotalLen()
 							log.Printf("[RACE] Winner selected: request %d (%s, %s) after %v, buffer=%d bytes",
 								i, req.modelType, req.modelID, elapsed.Round(time.Millisecond), bufferLen)
-							
+
 							// Publish race_winner_selected event
 							c.publishEvent("race_winner_selected", map[string]interface{}{
-								"winner_index":  c.winnerIdx,
-								"winner_type":   string(c.winner.modelType),
-								"winner_model":  c.winner.modelID,
-								"duration_ms":   elapsed.Milliseconds(),
-								"buffer_bytes":  bufferLen,
+								"winner_index": c.winnerIdx,
+								"winner_type":  string(c.winner.modelType),
+								"winner_model": c.winner.modelID,
+								"duration_ms":  elapsed.Milliseconds(),
+								"buffer_bytes": bufferLen,
 							})
-							
+
 							c.onceStream.Do(func() { close(c.streamCh) })
 						}
 					}
@@ -321,7 +321,7 @@ func (c *raceCoordinator) manage() {
 				}
 				if allFailed {
 					log.Printf("[RACE] All requests failed")
-					
+
 					// Collect all error details
 					errors := make([]map[string]interface{}, 0, len(c.requests))
 					for _, r := range c.requests {
@@ -334,21 +334,21 @@ func (c *raceCoordinator) manage() {
 							})
 						}
 					}
-					
+
 					// Publish race_all_failed event with detailed error info
 					c.publishEvent("race_all_failed", map[string]interface{}{
 						"total_attempts": len(c.requests),
 						"duration_ms":    time.Since(c.startTime).Milliseconds(),
 						"errors":         errors,
 					})
-					
+
 					c.mu.Unlock()
 					c.onceDone.Do(func() { close(c.done) })
 					c.onceStream.Do(func() { close(c.streamCh) })
 					return
 				}
 			}
-			
+
 			c.mu.Unlock()
 		}
 	}
@@ -386,17 +386,17 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 	if best != nil && bestLen > 0 {
 		c.winner = best
 		c.winnerIdx = best.id
-		
+
 		log.Printf("[RACE] Picked best buffer: request %d (%s, %s) with %d bytes",
 			best.id, best.modelType, best.modelID, bestLen)
 
 		// Publish race_deadline_pick event
 		c.publishEvent("race_deadline_pick", map[string]interface{}{
-			"winner_index":  c.winnerIdx,
-			"winner_type":   string(best.modelType),
-			"winner_model":  best.modelID,
-			"buffer_bytes":  bestLen,
-			"duration_ms":   time.Since(c.startTime).Milliseconds(),
+			"winner_index": c.winnerIdx,
+			"winner_type":  string(best.modelType),
+			"winner_model": best.modelID,
+			"buffer_bytes": bestLen,
+			"duration_ms":  time.Since(c.startTime).Milliseconds(),
 		})
 
 		// Signal that streaming can start
@@ -415,13 +415,13 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 	} else {
 		// No content at all - all failed or no requests started
 		log.Printf("[RACE] Streaming deadline reached, no content available")
-		
+
 		c.publishEvent("race_all_failed", map[string]interface{}{
 			"total_attempts": len(c.requests),
 			"duration_ms":    time.Since(c.startTime).Milliseconds(),
 			"reason":         "streaming_deadline_no_content",
 		})
-		
+
 		c.onceDone.Do(func() { close(c.done) })
 		c.onceStream.Do(func() { close(c.streamCh) })
 	}
@@ -476,7 +476,7 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	if err != nil {
 		req.MarkFailed(err)
 		log.Printf("[RACE] Request %d failed: %v", req.id, err)
-		
+
 		// Publish race_request_failed event with detailed error info
 		c.publishEvent("race_request_failed", map[string]interface{}{
 			"request_index": req.id,
@@ -554,14 +554,14 @@ func (c *raceCoordinator) GetCommonFailureStatus() int {
 
 // RaceStats contains statistics about a completed race
 type RaceStats struct {
-	TotalRequests   int            `json:"total_requests"`
-	WinnerType      string         `json:"winner_type"`
-	WinnerModel     string         `json:"winner_model"`
-	WinnerIndex     int            `json:"winner_index"`
-	Duration        time.Duration  `json:"duration"`
-	SpawnTriggers   []string       `json:"spawn_triggers"`
-	FailedCount     int            `json:"failed_count"`
-	WinnerBufferLen int64          `json:"winner_buffer_bytes"`
+	TotalRequests   int           `json:"total_requests"`
+	WinnerType      string        `json:"winner_type"`
+	WinnerModel     string        `json:"winner_model"`
+	WinnerIndex     int           `json:"winner_index"`
+	Duration        time.Duration `json:"duration"`
+	SpawnTriggers   []string      `json:"spawn_triggers"`
+	FailedCount     int           `json:"failed_count"`
+	WinnerBufferLen int64         `json:"winner_buffer_bytes"`
 }
 
 // GetStats returns statistics about the race for logging/metrics
@@ -589,4 +589,41 @@ func (c *raceCoordinator) GetStats() RaceStats {
 	}
 
 	return stats
+}
+
+// GetRequestStatuses returns the status of each upstream request type (main, second, fallback)
+// Status values: "success" (completed), "failed" (error), "not_started" (never spawned or cancelled)
+func (c *raceCoordinator) GetRequestStatuses() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	statuses := make(map[string]string)
+	// Initialize all as not_started
+	statuses["main"] = "not_started"
+	statuses["second"] = "not_started"
+	statuses["fallback"] = "not_started"
+
+	for _, req := range c.requests {
+		var status string
+		switch req.GetStatus() {
+		case statusCompleted:
+			status = "success"
+		case statusFailed:
+			status = "failed"
+		default:
+			// pending, running, streaming - treat as not_started (cancelled or in-progress)
+			status = "not_started"
+		}
+
+		switch req.modelType {
+		case modelTypeMain:
+			statuses["main"] = status
+		case modelTypeSecond:
+			statuses["second"] = status
+		case modelTypeFallback:
+			statuses["fallback"] = status
+		}
+	}
+
+	return statuses
 }

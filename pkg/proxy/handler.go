@@ -475,6 +475,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
+
+	// Capture upstream request statuses for UI display
+	statuses := coordinator.GetRequestStatuses()
+	rc.reqLog.UpstreamRequests = store.UpstreamRequestStatus{
+		Main:     statuses["main"],
+		Second:   statuses["second"],
+		Fallback: statuses["fallback"],
+	}
+
 	if winner != nil {
 		defer func() {
 			if winner.cancel != nil {

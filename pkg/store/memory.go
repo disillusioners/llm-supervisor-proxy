@@ -23,6 +23,13 @@ type Message struct {
 	Thinking  string     `json:"thinking,omitempty"` // For reasoning_content
 }
 
+// UpstreamRequestStatus tracks the status of parallel upstream requests
+type UpstreamRequestStatus struct {
+	Main     string `json:"main"`     // "success", "failed", "not_started"
+	Second   string `json:"second"`   // "success", "failed", "not_started"
+	Fallback string `json:"fallback"` // "success", "failed", "not_started"
+}
+
 type RequestLog struct {
 	ID        string    `json:"id"`
 	Status    string    `json:"status"` // "pending", "running", "completed", "failed", "retrying"
@@ -49,6 +56,9 @@ type RequestLog struct {
 
 	// Application tag for grouping requests
 	AppTag string `json:"app_tag,omitempty"` // Value from x-proxy-app header
+
+	// Upstream request status tracking (for race retry)
+	UpstreamRequests UpstreamRequestStatus `json:"upstream_requests,omitempty"`
 }
 
 type RequestStore struct {

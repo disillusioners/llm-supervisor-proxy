@@ -131,6 +131,12 @@ export interface ToolCall {
   };
 }
 
+export interface UpstreamRequestStatus {
+  main: 'success' | 'failed' | 'not_started';
+  second: 'success' | 'failed' | 'not_started';
+  fallback: 'success' | 'failed' | 'not_started';
+}
+
 export interface Request {
   id: string;
   model: string;
@@ -151,6 +157,8 @@ export interface Request {
   ultimate_model_id?: string;
   // Application tag for grouping/filtering
   app_tag?: string;
+  // Upstream request status tracking (for race retry)
+  upstream_requests?: UpstreamRequestStatus;
 }
 
 export interface RequestDetail extends Request {
