@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -1456,3 +1457,205 @@ func (r *trackingResponseRecorder) Write(b []byte) (int, error) {
 // With race retry, the coordinator waits for a winner before sending headers,
 // so if all requests fail before a winner is selected, an HTTP error is returned
 // (not SSE error after headers sent).
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Raw Response Logging Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestSaveRawResponse_SavesToFile(t *testing.T) {
+	// Create temp buffer store directory
+	tmpDir := t.TempDir()
+	bufStore, err := bufferstore.New(tmpDir, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create buffer store: %v", err)
+	}
+
+	// Create handler with buffer store
+	cfg := &Config{
+		ConfigMgr:    newTestManagerWithConfig(t, "http://localhost:4001"),
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+
+	// Create a buffer with some data
+	buffer := newStreamBuffer(1024 * 1024)
+	buffer.Add([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n"))
+	buffer.Add([]byte("data: {\"choices\":[{\"delta\":{\"content\":\" World\"}}]}\n"))
+	buffer.Add([]byte("data: [DONE]\n"))
+	buffer.Close(nil)
+
+	// Call saveRawResponse
+	requestID := "test-req-123"
+	rawBody := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+
+	h.saveRawResponse(requestID, buffer, rawBody, 1024)
+
+	// Verify file was saved
+	content, err := bufStore.Get(requestID + "-response")
+	if err != nil {
+		t.Errorf("failed to get saved response: %v", err)
+	}
+	if len(content) == 0 {
+		t.Error("expected non-empty response content")
+	}
+
+	// Verify request body was saved
+	reqContent, err := bufStore.Get(requestID + "-request")
+	if err != nil {
+		t.Errorf("failed to get saved request: %v", err)
+	}
+	if string(reqContent) != string(rawBody) {
+		t.Errorf("request body mismatch: got %s", string(reqContent))
+	}
+}
+
+func TestSaveRawResponse_SkipsWhenTooLarge(t *testing.T) {
+	// Create temp buffer store directory
+	tmpDir := t.TempDir()
+	bufStore, err := bufferstore.New(tmpDir, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create buffer store: %v", err)
+	}
+
+	// Create handler with buffer store
+	cfg := &Config{
+		ConfigMgr:    newTestManagerWithConfig(t, "http://localhost:4001"),
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+
+	// Create a buffer with data larger than limit
+	buffer := newStreamBuffer(1024 * 1024)
+	largeContent := strings.Repeat("x", 2000) // 2KB > 1KB limit
+	buffer.Add([]byte("data: " + largeContent + "\n"))
+	buffer.Close(nil)
+
+	// Call saveRawResponse with 1KB limit
+	h.saveRawResponse("test-req", buffer, []byte("request"), 1) // 1KB limit
+
+	// Verify NO file was saved
+	_, err = bufStore.Get("test-req-response")
+	if err == nil {
+		t.Error("expected file not to be saved when response is too large")
+	}
+}
+
+func TestSaveRawResponse_SkipsWhenBufferEmpty(t *testing.T) {
+	// Create temp buffer store directory
+	tmpDir := t.TempDir()
+	bufStore, err := bufferstore.New(tmpDir, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create buffer store: %v", err)
+	}
+
+	// Create handler with buffer store
+	cfg := &Config{
+		ConfigMgr:    newTestManagerWithConfig(t, "http://localhost:4001"),
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+
+	// Create an empty buffer
+	buffer := newStreamBuffer(1024 * 1024)
+	buffer.Close(nil)
+
+	// Call saveRawResponse
+	h.saveRawResponse("test-req", buffer, []byte("request"), 1024)
+
+	// Verify NO file was saved
+	_, err = bufStore.Get("test-req-response")
+	if err == nil {
+		t.Error("expected file not to be saved when buffer is empty")
+	}
+}
+
+func TestSaveRawResponse_NilBufferStore(t *testing.T) {
+	// Create handler WITHOUT buffer store
+	cfg := &Config{
+		ConfigMgr:    newTestManagerWithConfig(t, "http://localhost:4001"),
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, events.NewBus(), reqStore, nil, nil)
+
+	// Create a buffer with data
+	buffer := newStreamBuffer(1024 * 1024)
+	buffer.Add([]byte("data: test\n"))
+	buffer.Close(nil)
+
+	// Should not panic
+	h.saveRawResponse("test-req", buffer, []byte("request"), 1024)
+}
+
+func TestSaveRawResponse_NilBuffer(t *testing.T) {
+	// Create temp buffer store directory
+	tmpDir := t.TempDir()
+	bufStore, err := bufferstore.New(tmpDir, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create buffer store: %v", err)
+	}
+
+	// Create handler with buffer store
+	cfg := &Config{
+		ConfigMgr:    newTestManagerWithConfig(t, "http://localhost:4001"),
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+
+	// Should not panic with nil buffer
+	h.saveRawResponse("test-req", nil, []byte("request"), 1024)
+}
+
+func TestGetAllRawBytes_ReturnsAllChunks(t *testing.T) {
+	buffer := newStreamBuffer(1024 * 1024)
+
+	// Add some chunks
+	buffer.Add([]byte("chunk1"))
+	buffer.Add([]byte("chunk2"))
+	buffer.Add([]byte("chunk3"))
+	buffer.Close(nil)
+
+	// Get all raw bytes
+	raw := buffer.GetAllRawBytes()
+
+	// Should contain all chunks with newlines
+	expected := "chunk1\nchunk2\nchunk3\n"
+	if string(raw) != expected {
+		t.Errorf("expected %q, got %q", expected, string(raw))
+	}
+}
+
+func TestGetAllRawBytes_SkipsPrunedChunks(t *testing.T) {
+	buffer := newStreamBuffer(1024 * 1024)
+
+	// Add some chunks
+	buffer.Add([]byte("chunk1"))
+	buffer.Add([]byte("chunk2"))
+	buffer.Add([]byte("chunk3"))
+
+	// Prune first two chunks (sets them to nil)
+	buffer.Prune(2)
+
+	// Add another chunk after pruning
+	buffer.Add([]byte("chunk4"))
+	buffer.Close(nil)
+
+	// Get all raw bytes
+	raw := buffer.GetAllRawBytes()
+
+	// Pruned chunks (1 and 2) should be skipped, only 3 and 4 included
+	// Note: Prune sets chunks[0] and chunks[1] to nil, so they are skipped
+	expected := "chunk3\nchunk4\n"
+	if string(raw) != expected {
+		t.Errorf("expected %q, got %q", expected, string(raw))
+	}
+}

@@ -639,11 +639,18 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if flusher != nil {
 				flusher.Flush()
 			}
-			buffer.Prune(readIndex)
 
 			// If stream failed, send error event to client
 			if err := buffer.Err(); err != nil {
 				log.Printf("[ERROR] Stream buffer closed with error: %v", err)
+
+				// Log raw response on error BEFORE pruning (prune sets chunks to nil)
+				if rc.conf.LogRawUpstreamOnError {
+					go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+				}
+
+				// Now safe to prune (after capturing raw response)
+				buffer.Prune(readIndex)
 
 				// Mark this request as failed so ultimate model can be triggered on retry
 				if h.ultimateHandler != nil {
@@ -662,13 +669,16 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if flusher != nil {
 					flusher.Flush()
 				}
-
-				// Log raw response on error if enabled
-				if rc.conf.LogRawUpstreamOnError {
-					go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
-				}
 				return
 			}
+
+			// Log raw response on success BEFORE pruning (prune sets chunks to nil)
+			if rc.conf.LogRawUpstreamResponse {
+				go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+			}
+
+			// Now safe to prune (after capturing raw response)
+			buffer.Prune(readIndex)
 
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
