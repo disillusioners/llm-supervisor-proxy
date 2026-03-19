@@ -121,6 +121,14 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 	// Initialize ultimate model handler
 	h.ultimateHandler = ultimatemodel.NewHandler(config.ConfigMgr, config.ModelsConfig, bus)
 
+	// Wire up tool call buffer configuration for ultimate model handler
+	cfg := config.ConfigMgr.Get()
+	h.ultimateHandler.SetToolCallBufferConfig(
+		cfg.ToolCallBufferMaxSize,
+		cfg.ToolCallBufferDisabled,
+		&cfg.ToolRepair,
+	)
+
 	return h
 }
 

@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
 // executeExternal handles requests to external upstream (proxy mode)
@@ -99,7 +101,7 @@ func (h *Handler) executeExternal(
 
 	if isStream {
 		// Stream response directly
-		return h.streamResponse(w, resp)
+		return h.streamResponse(w, resp, modelCfg.ID)
 	}
 
 	// Non-streaming: copy body directly
@@ -109,7 +111,7 @@ func (h *Handler) executeExternal(
 }
 
 // streamResponse streams the upstream response directly to client
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response) error {
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string) error {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -119,6 +121,23 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response) err
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
+	}
+
+	// Create tool call buffer (same pattern as handleInternalStream)
+	var toolCallBuffer *toolcall.ToolCallBuffer
+	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
+		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
+			h.toolCallBufferMaxSize,
+			modelID,
+			"ultimate-external",
+			h.toolRepairConfig,
+		)
+	} else if !h.toolCallBufferDisabled {
+		toolCallBuffer = toolcall.NewToolCallBuffer(
+			h.toolCallBufferMaxSize,
+			modelID,
+			"ultimate-external",
+		)
 	}
 
 	reader := bufio.NewReader(resp.Body)
@@ -131,9 +150,34 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response) err
 			return fmt.Errorf("error reading stream: %w", err)
 		}
 
-		// Write line directly
-		fmt.Fprint(w, line)
+		// Process through tool call buffer
+		var chunksToEmit [][]byte
+		if toolCallBuffer != nil {
+			chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+		} else {
+			chunksToEmit = [][]byte{[]byte(line)}
+		}
+
+		// Write all chunks
+		for _, chunk := range chunksToEmit {
+			w.Write(chunk)
+		}
 		flusher.Flush()
+	}
+
+	// Flush remaining buffered tool calls at stream end
+	if toolCallBuffer != nil {
+		flushChunks := toolCallBuffer.Flush()
+		for _, chunk := range flushChunks {
+			w.Write(chunk)
+		}
+
+		// Log repair stats if any repairs occurred
+		stats := toolCallBuffer.GetRepairStats()
+		if stats.Attempted > 0 {
+			log.Printf("[TOOL-BUFFER] UltimateModel External: Repair stats: attempted=%d, success=%d, failed=%d",
+				stats.Attempted, stats.Successful, stats.Failed)
+		}
 	}
 
 	return nil
