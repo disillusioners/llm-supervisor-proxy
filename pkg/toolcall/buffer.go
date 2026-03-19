@@ -1,24 +1,32 @@
-package proxy
+package toolcall
 
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
-// ToolCallBuffer buffers tool call fragments until complete JSON is formed.
-// It sits between the normalizer and the stream buffer, intercepting tool call
-// chunks and emitting them only when the arguments form valid JSON.
-type ToolCallBuffer struct {
-	mu        sync.Mutex
-	builders  map[int]*ToolCallBuilder
-	totalSize int64
-	maxSize   int64
-	modelID   string
-	requestID string
+// Constants for tool call limits to prevent memory exhaustion
+const (
+	// MaxToolCallsPerStream limits the number of tool calls per streaming response
+	// to prevent memory exhaustion from malicious or buggy upstreams
+	MaxToolCallsPerStream = 100
+
+	// MaxToolCallIndex limits the maximum index value to prevent sparse array attacks
+	MaxToolCallIndex = 99
+)
+
+// RepairStats tracks repair statistics for the buffer
+type RepairStats struct {
+	Attempted  int
+	Successful int
+	Failed     int
 }
 
 // ToolCallBuilder accumulates fragments for a single tool call.
@@ -30,6 +38,29 @@ type ToolCallBuilder struct {
 	hasEmitted bool
 }
 
+// ToolCallBuffer buffers tool call fragments until complete JSON is formed.
+// It sits between the normalizer and the stream buffer, intercepting tool call
+// chunks and emitting them only when the arguments form valid JSON.
+// When configured with a repairer, it will attempt to repair malformed JSON
+// before emitting complete tool calls.
+type ToolCallBuffer struct {
+	mu        sync.Mutex
+	builders  map[int]*ToolCallBuilder
+	totalSize int64
+	maxSize   int64
+	modelID   string
+	requestID string
+
+	// Tool repair integration
+	repairConfig *toolrepair.Config
+	repairer     *toolrepair.Repairer
+	repairStats  RepairStats
+
+	// streamingStrategy controls repair behavior for streaming
+	// "library_only" avoids LLM-based repair to prevent latency
+	streamingStrategy string
+}
+
 // NewToolCallBuffer creates a new tool call buffer.
 // If maxSize is <= 0, defaults to 1MB.
 func NewToolCallBuffer(maxSize int64, modelID, requestID string) *ToolCallBuffer {
@@ -37,18 +68,30 @@ func NewToolCallBuffer(maxSize int64, modelID, requestID string) *ToolCallBuffer
 		maxSize = 1024 * 1024 // Default 1MB
 	}
 	return &ToolCallBuffer{
-		builders:  make(map[int]*ToolCallBuilder),
-		maxSize:   maxSize,
-		modelID:   modelID,
-		requestID: requestID,
+		builders:          make(map[int]*ToolCallBuilder),
+		maxSize:           maxSize,
+		modelID:           modelID,
+		requestID:         requestID,
+		streamingStrategy: "library_only", // Default for streaming
 	}
+}
+
+// NewToolCallBufferWithRepair creates a buffer with repair capabilities.
+// If repairConfig is nil or disabled, behaves like NewToolCallBuffer.
+func NewToolCallBufferWithRepair(maxSize int64, modelID, requestID string, repairConfig *toolrepair.Config) *ToolCallBuffer {
+	b := NewToolCallBuffer(maxSize, modelID, requestID)
+	if repairConfig != nil && repairConfig.Enabled {
+		b.repairConfig = repairConfig
+		b.repairer = toolrepair.NewRepairer(repairConfig)
+	}
+	return b
 }
 
 // ProcessChunk processes a normalized SSE chunk.
 // Returns: chunks to emit (may be empty if buffering, or multiple if flushing).
 // - Non-tool-call chunks pass through immediately
 // - Tool call fragments are buffered until they form valid JSON
-// - Complete tool calls are emitted immediately
+// - Complete tool calls are emitted immediately (repaired if needed)
 func (b *ToolCallBuffer) ProcessChunk(line []byte) [][]byte {
 	lineStr := strings.TrimSpace(string(line))
 
@@ -100,10 +143,9 @@ func (b *ToolCallBuffer) ProcessChunk(line []byte) [][]byte {
 // It accumulates fragments by index and emits when arguments form valid JSON.
 func (b *ToolCallBuffer) processToolCallChunk(toolCalls []interface{}, hasPrefix bool) [][]byte {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	var chunks [][]byte
-	var toEmit []int
+	var toEmit []emitRequest
 
 	for _, tc := range toolCalls {
 		tcMap, ok := tc.(map[string]interface{})
@@ -118,12 +160,12 @@ func (b *ToolCallBuffer) processToolCallChunk(toolCalls []interface{}, hasPrefix
 		}
 		idx := int(index)
 
-		// FIX #3: Index bounds validation - prevent invalid indices
+		// Index bounds validation - prevent invalid indices
 		if idx < 0 || idx > MaxToolCallIndex {
 			continue // Skip invalid indices
 		}
 
-		// FIX #3: Limit total number of tool calls per stream
+		// Limit total number of tool calls per stream
 		if len(b.builders) >= MaxToolCallsPerStream {
 			continue // Skip if too many tool calls
 		}
@@ -151,9 +193,10 @@ func (b *ToolCallBuffer) processToolCallChunk(toolCalls []interface{}, hasPrefix
 			if args, ok := fn["arguments"].(string); ok {
 				// Check size limit
 				if b.totalSize+int64(len(args)) > b.maxSize {
-					// FIX #2: Buffer overflow - emit what we have BEFORE resetting
+					// Buffer overflow - emit what we have BEFORE resetting
 					if !builder.hasEmitted && builder.Arguments.Len() > 0 {
-						chunks = append(chunks, b.emitToolCall(idx))
+						argsCopy := builder.Arguments.String()
+						toEmit = append(toEmit, emitRequest{idx: idx, args: argsCopy, builder: builder})
 						builder.hasEmitted = true
 					}
 					// Reset builder for this index to accept new data
@@ -167,22 +210,37 @@ func (b *ToolCallBuffer) processToolCallChunk(toolCalls []interface{}, hasPrefix
 		}
 
 		// Check if this tool call is now complete (valid JSON)
-		if b.isComplete(idx) && !builder.hasEmitted {
-			toEmit = append(toEmit, idx)
+		if b.isCompleteLocked(idx) && !builder.hasEmitted {
+			argsCopy := builder.Arguments.String()
+			toEmit = append(toEmit, emitRequest{idx: idx, args: argsCopy, builder: builder})
 		}
 	}
 
-	// Emit complete tool calls
-	for _, idx := range toEmit {
-		chunks = append(chunks, b.emitToolCall(idx))
-		b.builders[idx].hasEmitted = true
+	b.mu.Unlock()
+
+	// Emit complete tool calls OUTSIDE the mutex lock
+	// This is critical - repair operations can be slow
+	for _, req := range toEmit {
+		chunk := b.emitToolCall(req.idx, req.args, req.builder)
+		chunks = append(chunks, chunk)
+		b.mu.Lock()
+		req.builder.hasEmitted = true
+		b.mu.Unlock()
 	}
 
 	return chunks
 }
 
-// isComplete checks if tool call arguments form valid JSON.
-func (b *ToolCallBuffer) isComplete(idx int) bool {
+// emitRequest holds data needed for emission outside the mutex lock
+type emitRequest struct {
+	idx     int
+	args    string
+	builder *ToolCallBuilder
+}
+
+// isCompleteLocked checks if tool call arguments form valid JSON.
+// Must be called with b.mu held.
+func (b *ToolCallBuffer) isCompleteLocked(idx int) bool {
 	builder, exists := b.builders[idx]
 	if !exists {
 		return false
@@ -198,9 +256,27 @@ func (b *ToolCallBuffer) isComplete(idx int) bool {
 }
 
 // emitToolCall creates a complete SSE chunk for a tool call.
-// FIX #1: Includes trailing newline for proper SSE format.
-func (b *ToolCallBuffer) emitToolCall(idx int) []byte {
-	builder := b.builders[idx]
+// This is called OUTSIDE the mutex lock to allow slow repair operations.
+func (b *ToolCallBuffer) emitToolCall(idx int, args string, builder *ToolCallBuilder) []byte {
+	// Repair arguments if needed - OUTSIDE mutex lock
+	if b.repairer != nil && args != "" {
+		// Check if already valid JSON
+		var js interface{}
+		if json.Unmarshal([]byte(args), &js) != nil {
+			// Not valid JSON - attempt repair
+			b.repairStats.Attempted++
+
+			result := b.repairer.RepairArguments(args, builder.Name)
+			if result.Success {
+				args = result.Repaired
+				b.repairStats.Successful++
+				log.Printf("[TOOL-BUFFER] Repaired tool_call[%d] arguments during streaming (tool: %s)", idx, builder.Name)
+			} else {
+				b.repairStats.Failed++
+				log.Printf("[WARN] Tool repair failed for tool_call[%d] (tool: %s), emitting original", idx, builder.Name)
+			}
+		}
+	}
 
 	chunk := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -218,7 +294,7 @@ func (b *ToolCallBuffer) emitToolCall(idx int) []byte {
 							"type":  builder.Type,
 							"function": map[string]interface{}{
 								"name":      builder.Name,
-								"arguments": builder.Arguments.String(),
+								"arguments": args,
 							},
 						},
 					},
@@ -228,7 +304,7 @@ func (b *ToolCallBuffer) emitToolCall(idx int) []byte {
 	}
 
 	data, _ := json.Marshal(chunk)
-	// FIX #1: Add trailing newline for proper SSE format
+	// Add trailing newline for proper SSE format
 	return []byte("data: " + string(data) + "\n")
 }
 
@@ -236,7 +312,6 @@ func (b *ToolCallBuffer) emitToolCall(idx int) []byte {
 // This ensures that even incomplete tool calls are emitted at stream end.
 func (b *ToolCallBuffer) Flush() [][]byte {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	// Get sorted indices for consistent ordering
 	indices := make([]int, 0, len(b.builders))
@@ -245,14 +320,40 @@ func (b *ToolCallBuffer) Flush() [][]byte {
 	}
 	sort.Ints(indices)
 
-	var chunks [][]byte
+	// Collect data for emission
+	var toEmit []emitRequest
 	for _, idx := range indices {
 		builder := b.builders[idx]
 		if !builder.hasEmitted {
-			chunks = append(chunks, b.emitToolCall(idx))
-			builder.hasEmitted = true
+			argsCopy := builder.Arguments.String()
+			toEmit = append(toEmit, emitRequest{idx: idx, args: argsCopy, builder: builder})
 		}
 	}
 
+	b.mu.Unlock()
+
+	// Emit outside mutex lock
+	var chunks [][]byte
+	for _, req := range toEmit {
+		chunk := b.emitToolCall(req.idx, req.args, req.builder)
+		chunks = append(chunks, chunk)
+		b.mu.Lock()
+		req.builder.hasEmitted = true
+		b.mu.Unlock()
+	}
+
 	return chunks
+}
+
+// GetRepairStats returns the repair statistics.
+// Thread-safe.
+func (b *ToolCallBuffer) GetRepairStats() RepairStats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.repairStats
+}
+
+// HasRepairer returns true if this buffer has repair capabilities.
+func (b *ToolCallBuffer) HasRepairer() bool {
+	return b.repairer != nil
 }

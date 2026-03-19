@@ -10,6 +10,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // ShouldTriggerResult contains the result of ShouldTrigger check
@@ -29,6 +30,11 @@ type Handler struct {
 	modelsMgr models.ModelsConfigInterface // Database-backed
 	hashCache *HashCache
 	eventBus  *events.Bus
+
+	// Tool call buffer configuration
+	toolCallBufferMaxSize  int64             // Max size for tool call buffer
+	toolCallBufferDisabled bool              // Disable tool call buffering
+	toolRepairConfig       *toolrepair.Config // Tool repair config for buffer
 }
 
 // NewHandler creates a new ultimate model handler
@@ -116,6 +122,13 @@ func (h *Handler) MarkFailed(messages []map[string]interface{}) string {
 // GetModelID returns the configured ultimate model ID
 func (h *Handler) GetModelID() string {
 	return h.config.Get().UltimateModel.ModelID
+}
+
+// SetToolCallBufferConfig sets the tool call buffer configuration
+func (h *Handler) SetToolCallBufferConfig(maxSize int64, disabled bool, repairConfig *toolrepair.Config) {
+	h.toolCallBufferMaxSize = maxSize
+	h.toolCallBufferDisabled = disabled
+	h.toolRepairConfig = repairConfig
 }
 
 // OnConfigChange handles config change events.

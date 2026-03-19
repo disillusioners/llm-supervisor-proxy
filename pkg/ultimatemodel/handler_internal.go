@@ -10,6 +10,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
 // executeInternal handles requests to internal providers (bypassing upstream)
@@ -87,6 +88,26 @@ func (h *Handler) handleInternalStream(
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
+	}
+
+	// Create tool call buffer with integrated repair
+	// This replaces the separate accumulator + post-stream repair pattern
+	// Repair happens during streaming when tool calls are emitted
+	var toolCallBuffer *toolcall.ToolCallBuffer
+	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
+		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			"ultimate",
+			h.toolRepairConfig,
+		)
+	} else if !h.toolCallBufferDisabled {
+		// Buffer without repair (repair disabled)
+		toolCallBuffer = toolcall.NewToolCallBuffer(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			"ultimate",
+		)
 	}
 
 	// Track state for proper streaming format
@@ -186,7 +207,22 @@ func (h *Handler) handleInternalStream(
 					},
 				}
 				data, _ := json.Marshal(chunk)
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				line := fmt.Sprintf("data: %s\n\n", data)
+
+				// Process through tool call buffer (if enabled)
+				// The buffer accumulates tool call fragments, repairs when complete, and emits
+				// Non-tool-call chunks pass through immediately
+				var chunksToEmit [][]byte
+				if toolCallBuffer != nil {
+					chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+				} else {
+					chunksToEmit = [][]byte{[]byte(line)}
+				}
+
+				// Write all chunks to client
+				for _, chunk := range chunksToEmit {
+					w.Write(chunk)
+				}
 				flusher.Flush()
 			}
 
@@ -212,6 +248,21 @@ func (h *Handler) handleInternalStream(
 			flusher.Flush()
 
 		case "done":
+			// Flush any remaining buffered tool calls with repair
+			if toolCallBuffer != nil {
+				flushChunks := toolCallBuffer.Flush()
+				for _, chunk := range flushChunks {
+					w.Write(chunk)
+				}
+
+				// Log repair stats if any repairs occurred
+				stats := toolCallBuffer.GetRepairStats()
+				if stats.Attempted > 0 {
+					log.Printf("[TOOL-BUFFER] UltimateModel: Repair stats: attempted=%d, success=%d, failed=%d",
+						stats.Attempted, stats.Successful, stats.Failed)
+				}
+			}
+
 			// Write finish chunk with finish_reason before [DONE]
 			// This is required by OpenAI streaming format - clients expect finish_reason in the last chunk
 			// Use the finish_reason from the event (e.g., "tool_calls" for tool calls, "stop" for normal completion)

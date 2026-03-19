@@ -80,7 +80,7 @@ func TestFixMissingToolCallIndexNormalizer(t *testing.T) {
 	}{
 		{
 			name:    "tool_calls without index",
-			input:   `data: {"delta": {"tool_calls": [{"id": "call_1", "type": "function"}]}}`,
+			input:   `data: {"choices": [{"delta": {"tool_calls": [{"id": "call_1", "type": "function"}]}}]}`,
 			wantMod: true,
 			checkFn: func(t *testing.T, output string, modified bool) {
 				// Should contain "index":0
@@ -91,7 +91,7 @@ func TestFixMissingToolCallIndexNormalizer(t *testing.T) {
 		},
 		{
 			name:    "tool_calls with index",
-			input:   `data: {"delta": {"tool_calls": [{"index": 0, "id": "call_1"}]}}`,
+			input:   `data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1"}]}}]}`,
 			wantMod: false,
 			checkFn: func(t *testing.T, output string, modified bool) {
 				// Should remain unchanged
@@ -102,7 +102,7 @@ func TestFixMissingToolCallIndexNormalizer(t *testing.T) {
 		},
 		{
 			name:    "no tool_calls",
-			input:   `data: {"delta": {"content": "hello"}}`,
+			input:   `data: {"choices": [{"delta": {"content": "hello"}}]}`,
 			wantMod: false,
 			checkFn: func(t *testing.T, output string, modified bool) {
 				// Should remain unchanged
@@ -118,7 +118,7 @@ func TestFixMissingToolCallIndexNormalizer(t *testing.T) {
 		},
 		{
 			name:    "tool_call without ID uses position",
-			input:   `data: {"delta": {"tool_calls": [{"type": "function"}]}}`,
+			input:   `data: {"choices": [{"delta": {"tool_calls": [{"type": "function"}]}}]}`,
 			wantMod: true,
 			checkFn: func(t *testing.T, output string, modified bool) {
 				// Should contain index 0 (based on position)
@@ -158,7 +158,7 @@ func TestFixMissingToolCallIndexNormalizer_Stateful(t *testing.T) {
 	ctx := &NormalizeContext{}
 
 	// First chunk - call_1
-	line1 := `data: {"delta": {"tool_calls": [{"id": "call_1", "type": "function"}]}}`
+	line1 := `data: {"choices": [{"delta": {"tool_calls": [{"id": "call_1", "type": "function"}]}}]}`
 	got1, mod1 := n.Normalize([]byte(line1), ctx)
 	if !mod1 {
 		t.Error("Expected first chunk to be modified")
@@ -169,7 +169,7 @@ func TestFixMissingToolCallIndexNormalizer_Stateful(t *testing.T) {
 	}
 
 	// Second chunk - call_1 (same ID)
-	line2 := `data: {"delta": {"tool_calls": [{"id": "call_1", "function": {"arguments": "test"}}]}}`
+	line2 := `data: {"choices": [{"delta": {"tool_calls": [{"id": "call_1", "function": {"arguments": "test"}}]}}]}`
 	got2, mod2 := n.Normalize([]byte(line2), ctx)
 	if !mod2 {
 		t.Error("Expected second chunk to be modified")
@@ -180,7 +180,7 @@ func TestFixMissingToolCallIndexNormalizer_Stateful(t *testing.T) {
 	}
 
 	// Third chunk - call_2 (new ID)
-	line3 := `data: {"delta": {"tool_calls": [{"id": "call_2", "type": "function"}]}}`
+	line3 := `data: {"choices": [{"delta": {"tool_calls": [{"id": "call_2", "type": "function"}]}}]}`
 	got3, mod3 := n.Normalize([]byte(line3), ctx)
 	if !mod3 {
 		t.Error("Expected third chunk to be modified")

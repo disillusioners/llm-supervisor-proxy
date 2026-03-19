@@ -104,81 +104,91 @@ Streaming Phase:
 
 This MUST be done first to avoid circular dependencies when `ultimatemodel` package needs to use `ToolCallBuffer`.
 
-- [ ] **P0.1** Create directory `pkg/toolcall/`
-- [ ] **P0.2** Create `pkg/toolcall/buffer.go` - Move `ToolCallBuffer`, `ToolCallBuilder`, constants from `pkg/proxy/tool_call_buffer.go`
-- [ ] **P0.3** Create `pkg/toolcall/buffer_test.go` - Move tests from `pkg/proxy/tool_call_buffer_test.go`
-- [ ] **P0.4** Update imports in `pkg/proxy/race_executor.go` to use `pkg/toolcall`
-- [ ] **P0.5** Update imports in `pkg/proxy/internal_handler.go` to use `pkg/toolcall`
-- [ ] **P0.6** Verify no circular dependencies with `pkg/ultimatemodel` by running `go build ./...`
+- [x] **P0.1** Create directory `pkg/toolcall/`
+- [x] **P0.2** Create `pkg/toolcall/buffer.go` - Move `ToolCallBuffer`, `ToolCallBuilder`, constants from `pkg/proxy/tool_call_buffer.go`
+- [x] **P0.3** Create `pkg/toolcall/buffer_test.go` - Move tests from `pkg/proxy/tool_call_buffer_test.go`
+- [x] **P0.4** Update imports in `pkg/proxy/race_executor.go` to use `pkg/toolcall`
+- [x] **P0.5** Update imports in `pkg/proxy/internal_handler.go` to use `pkg/toolcall`
+- [x] **P0.6** Verify no circular dependencies with `pkg/ultimatemodel` by running `go build ./...`
 
 ### Phase 1: Enhance ToolCallBuffer with Repair
 
-- [ ] **P1.1** Add `RepairConfig`, `repairer`, `repairStats` fields to `ToolCallBuffer` struct in `pkg/toolcall/buffer.go`
-- [ ] **P1.2** Add `RepairStats` struct with `Attempted`, `Successful`, `Failed` fields
-- [ ] **P1.3** Add `NewToolCallBufferWithRepair()` constructor that accepts `*toolrepair.Config`
-- [ ] **P1.4** Add `StreamingStrategy` field to enforce library-only repair for streaming (avoid LLM latency)
-- [ ] **P1.5** Modify `emitToolCall()` to repair before emitting - **CRITICAL: Perform repair OUTSIDE mutex lock**
-- [ ] **P1.6** Add `GetRepairStats()` method
-- [ ] **P1.7** Add unit tests for repair integration in `pkg/toolcall/buffer_test.go`
+- [x] **P1.1** Add `RepairConfig`, `repairer`, `repairStats` fields to `ToolCallBuffer` struct in `pkg/toolcall/buffer.go`
+- [x] **P1.2** Add `RepairStats` struct with `Attempted`, `Successful`, `Failed` fields
+- [x] **P1.3** Add `NewToolCallBufferWithRepair()` constructor that accepts `*toolrepair.Config`
+- [x] **P1.4** Add `StreamingStrategy` field to enforce library-only repair for streaming (avoid LLM latency)
+- [x] **P1.5** Modify `emitToolCall()` to repair before emitting - **CRITICAL: Perform repair OUTSIDE mutex lock**
+- [x] **P1.6** Add `GetRepairStats()` method
+- [x] **P1.7** Add unit tests for repair integration in `pkg/toolcall/buffer_test.go`
 
 ### Phase 2a: Update External Path - race_executor.go
 
-- [ ] **P2a.1** In `handleStreamingResponse()`: Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
-- [ ] **P2a.2** Remove post-stream `rewriteBufferWithRepairedArgs()` call
-- [ ] **P2a.3** Remove `repairAccumulatedArgs()` call
-- [ ] **P2a.4** Add repair stats logging at stream completion
-- [ ] **P2a.5** Update existing tests and add integration tests
+- [x] **P2a.1** In `handleStreamingResponse()`: Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
+- [x] **P2a.2** Remove post-stream `rewriteBufferWithRepairedArgs()` call
+- [x] **P2a.3** Remove `repairAccumulatedArgs()` call
+- [x] **P2a.4** Add repair stats logging at stream completion
+- [x] **P2a.5** Update existing tests and add integration tests
 
 ### Phase 2b: Update Internal Race Path - race_executor.go
 
-- [ ] **P2b.1** In `handleInternalStream()`: Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
-- [ ] **P2b.2** Remove post-stream repair logic
-- [ ] **P2b.3** Process tool_call events through the buffer
-- [ ] **P2b.4** Flush remaining chunks at "done" event
-- [ ] **P2b.5** Add repair stats logging
-- [ ] **P2b.6** Update and add integration tests
+- [x] **P2b.1** In `handleInternalStream()`: Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
+- [x] **P2b.2** Remove post-stream repair logic
+- [x] **P2b.3** Process tool_call events through the buffer
+- [x] **P2b.4** Flush remaining chunks at "done" event
+- [x] **P2b.5** Add repair stats logging
+- [x] **P2b.6** Update and add integration tests
 
 ### Phase 2c: Update Direct Internal Path - internal_handler.go
 
-- [ ] **P2c.1** Add `toolCallBufferMaxSize` field to `InternalHandler` struct
-- [ ] **P2c.2** Add `toolRepairConfig` field to `InternalHandler` struct
-- [ ] **P2c.3** Add `SetToolCallBufferConfig(maxSize int64, repairConfig *toolrepair.Config)` setter
-- [ ] **P2c.4** In `handleStream()`: Create `ToolCallBuffer` with repair config
-- [ ] **P2c.5** Intercept tool_call events and process through buffer
-- [ ] **P2c.6** Buffer tool call chunks until complete, then emit repaired
-- [ ] **P2c.7** Flush remaining buffered tool calls at "done" event
-- [ ] **P2c.8** Add tests in `pkg/proxy/internal_handler_test.go`
+- [x] **P2c.1** Add `toolCallBufferMaxSize` field to `InternalHandler` struct
+- [x] **P2c.2** Add `toolRepairConfig` field to `InternalHandler` struct
+- [x] **P2c.3** Add `SetToolCallBufferConfig(maxSize int64, repairConfig *toolrepair.Config)` setter
+- [x] **P2c.4** In `handleStream()`: Create `ToolCallBuffer` with repair config
+- [x] **P2c.5** Intercept tool_call events and process through buffer
+- [x] **P2c.6** Buffer tool call chunks until complete, then emit repaired
+- [x] **P2c.7** Flush remaining buffered tool calls at "done" event
+- [x] **P2c.8** Add tests in `pkg/proxy/internal_handler_test.go`
 
 ### Phase 2d: Update UltimateModel Internal Path
 
-- [ ] **P2d.1** Add `toolCallBufferMaxSize` field to `Handler` struct in `pkg/ultimatemodel/handler_internal.go`
-- [ ] **P2d.2** Add `toolRepairConfig` field to `Handler` struct
-- [ ] **P2d.3** Import `pkg/toolcall` - no circular dependency after Phase 0
-- [ ] **P2d.4** In `handleInternalStream()`: Create `ToolCallBuffer` with repair config
-- [ ] **P2d.5** Intercept tool_call events and process through buffer
-- [ ] **P2d.6** Flush remaining buffered tool calls at "done" event
-- [ ] **P2d.7** Add tests in `pkg/ultimatemodel/handler_internal_test.go`
+- [x] **P2d.1** Add `toolCallBufferMaxSize` field to `Handler` struct in `pkg/ultimatemodel/handler_internal.go`
+- [x] **P2d.2** Add `toolRepairConfig` field to `Handler` struct
+- [x] **P2d.3** Import `pkg/toolcall` - no circular dependency after Phase 0
+- [x] **P2d.4** In `handleInternalStream()`: Create `ToolCallBuffer` with repair config
+- [x] **P2d.5** Intercept tool_call events and process through buffer
+- [x] **P2d.6** Flush remaining buffered tool calls at "done" event
+- [x] **P2d.7** Add tests in `pkg/ultimatemodel/handler_internal_test.go`
 
 ### Phase 3: Cleanup
 
-- [ ] **P3.1** Delete `pkg/proxy/tool_call_accumulator.go`
-- [ ] **P3.2** Delete `pkg/proxy/tool_call_accumulator_test.go`
-- [ ] **P3.3** Delete `pkg/proxy/buffer_rewriter.go` (confirmed: only used for tool repair)
-- [ ] **P3.4** Delete `pkg/proxy/buffer_rewriter_test.go`
-- [ ] **P3.5** Remove `repairAccumulatedArgs()` from `race_executor.go`
-- [ ] **P3.6** Remove deprecated `repairToolCallArgumentsInChunk()` from `race_executor.go`
-- [ ] **P3.7** Delete original `pkg/proxy/tool_call_buffer.go` (moved to `pkg/toolcall/`)
-- [ ] **P3.8** Delete original `pkg/proxy/tool_call_buffer_test.go` (moved to `pkg/toolcall/`)
+- [x] **P3.1** Delete `pkg/proxy/tool_call_accumulator.go`
+- [x] **P3.2** Delete `pkg/proxy/tool_call_accumulator_test.go`
+- [x] **P3.3** Delete `pkg/proxy/buffer_rewriter.go` (confirmed: only used for tool repair)
+- [x] **P3.4** Delete `pkg/proxy/buffer_rewriter_test.go`
+- [x] **P3.5** Remove `repairAccumulatedArgs()` from `race_executor.go`
+- [x] **P3.6** Remove deprecated `repairToolCallArgumentsInChunk()` from `race_executor.go`
+- [x] **P3.7** Delete original `pkg/proxy/tool_call_buffer.go` (moved to `pkg/toolcall/`)
+- [x] **P3.8** Delete original `pkg/proxy/tool_call_buffer_test.go` (moved to `pkg/toolcall/`)
 
 ### Phase 4: Final Testing
+ - [x] **P4.1** Run all unit tests: `go test ./...` ✓
+- [x] **P4.2** Run integration tests with mock LLM
+- [x] **P4.3** Test with malformed tool call JSON - verify repair works
+- [x] **P4.4** Verify repair stats logging appears correctly
+- [x] **P4.5** Verify no memory leaks with long-running stream and many tool calls
+- [x] **P4.6** Run frontend build: `cd pkg/ui/frontend && npm run build`
+- [x] **P4.7** Run full build: `make all` ✓
 
-- [ ] **P4.1** Run all unit tests: `go test ./...`
-- [ ] **P4.2** Run integration tests with mock LLM
-- [ ] **P4.3** Test with malformed tool call JSON - verify repair works
-- [ ] **P4.4** Verify repair stats logging appears correctly
-- [ ] **P4.5** Verify no memory leaks with long-running stream and many tool calls
-- [ ] **P4.6** Run frontend build: `cd pkg/ui/frontend && npm run build`
-- [ ] **P4.7** Run full build: `make all`
+- [x] **P3.1** Delete `pkg/proxy/tool_call_accumulator.go` ✓
+- [x] **P3.2** Delete `pkg/proxy/tool_call_accumulator_test.go` ✓
+- [x] **P3.3** Delete `pkg/proxy/buffer_rewriter.go` (confirmed: only used for tool repair) ✓
+- [x] **P3.4** Delete `pkg/proxy/buffer_rewriter_test.go` ✓
+- [x] **P3.5** Remove `repairAccumulatedArgs()` from `race_executor.go` ✓
+- [x] **P3.6** Remove deprecated `repairToolCallArgumentsInChunk()` from `race_executor.go` ✓
+- [x] **P3.7** Delete original `pkg/proxy/tool_call_buffer.go` (moved to `pkg/toolcall/`) ✓
+- [x] **P3.8** Delete original `pkg/proxy/tool_call_buffer_test.go` (moved to `pkg/toolcall/`) ✓
+
+
 
 ---
 

@@ -12,6 +12,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -23,6 +24,11 @@ type InternalHandler struct {
 	requestID     string                         // Optional: request ID for buffer naming
 	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
+
+	// Tool call buffer configuration
+	toolCallBufferMaxSize   int64            // Max size for tool call buffer
+	toolCallBufferDisabled  bool             // Disable tool call buffering
+	toolRepairConfig        *toolrepair.Config // Tool repair config for buffer
 }
 
 // NewInternalHandler creates a new internal handler for a model
@@ -41,6 +47,13 @@ func (h *InternalHandler) SetDebugContext(bufferStore *bufferstore.BufferStore, 
 func (h *InternalHandler) SetRepairer(repairer *toolrepair.Repairer, callback toolrepair.RepairEventCallback) {
 	h.repairer = repairer
 	h.eventCallback = callback
+}
+
+// SetToolCallBufferConfig sets the tool call buffer configuration
+func (h *InternalHandler) SetToolCallBufferConfig(maxSize int64, disabled bool, repairConfig *toolrepair.Config) {
+	h.toolCallBufferMaxSize = maxSize
+	h.toolCallBufferDisabled = disabled
+	h.toolRepairConfig = repairConfig
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -120,6 +133,26 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 		return fmt.Errorf("streaming not supported")
 	}
 
+	// Create tool call buffer with integrated repair
+	// This replaces the separate accumulator + post-stream repair pattern
+	// Repair happens during streaming when tool calls are emitted
+	var toolCallBuffer *toolcall.ToolCallBuffer
+	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
+		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			h.requestID,
+			h.toolRepairConfig,
+		)
+	} else if !h.toolCallBufferDisabled {
+		// Buffer without repair (repair disabled)
+		toolCallBuffer = toolcall.NewToolCallBuffer(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			h.requestID,
+		)
+	}
+
 	for event := range eventCh {
 		logger.Debugf("[DEBUG INTERNAL] Received event: type=%s, content=%.100s", event.Type, event.Content)
 		switch event.Type {
@@ -163,11 +196,41 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				},
 			}
 			data, _ := json.Marshal(chunk)
+			line := fmt.Sprintf("data: %s\n\n", data)
 			logger.Debugf("[DEBUG INTERNAL] Writing tool_call chunk: %s", string(data))
-			fmt.Fprintf(w, "data: %s\n\n", data)
+
+			// Process through tool call buffer (if enabled)
+			// The buffer accumulates tool call fragments, repairs when complete, and emits
+			// Non-tool-call chunks pass through immediately
+			var chunksToEmit [][]byte
+			if toolCallBuffer != nil {
+				chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+			} else {
+				chunksToEmit = [][]byte{[]byte(line)}
+			}
+
+			// Write all chunks to client
+			for _, chunk := range chunksToEmit {
+				w.Write(chunk)
+			}
 			flusher.Flush()
 
 		case "done":
+			// Flush any remaining buffered tool calls with repair
+			if toolCallBuffer != nil {
+				flushChunks := toolCallBuffer.Flush()
+				for _, chunk := range flushChunks {
+					w.Write(chunk)
+				}
+
+				// Log repair stats if any repairs occurred
+				stats := toolCallBuffer.GetRepairStats()
+				if stats.Attempted > 0 {
+					log.Printf("[TOOL-BUFFER] InternalHandler: Repair stats: attempted=%d, success=%d, failed=%d",
+						stats.Attempted, stats.Successful, stats.Failed)
+				}
+			}
+
 			// Write finish chunk
 			finishReason := event.FinishReason
 			if finishReason == "" {

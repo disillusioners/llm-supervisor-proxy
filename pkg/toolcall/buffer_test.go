@@ -1,10 +1,12 @@
-package proxy
+package toolcall
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 // extractToolCallArgs extracts the arguments string from a tool call chunk at the given index
@@ -514,5 +516,273 @@ func TestToolCallBuffer_BufferOverflowWithCompleteJSON(t *testing.T) {
 	// Should emit immediately (complete JSON)
 	if len(chunks) != 1 {
 		t.Errorf("Second complete JSON should emit immediately, got %d chunks", len(chunks))
+	}
+}
+
+// === REPAIR INTEGRATION TESTS ===
+
+// TestToolCallBufferWithRepair_ValidJSON tests that valid JSON passes through unchanged
+func TestToolCallBufferWithRepair_ValidJSON(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled:    true,
+		Strategies: []string{"library_repair"},
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// Complete valid JSON should emit immediately and unchanged
+	input := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"test","arguments":"{\"key\":\"value\"}"}}]}}]}`
+	chunks := buffer.ProcessChunk([]byte(input))
+
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk, got %d", len(chunks))
+	}
+
+	// Verify arguments are unchanged
+	var obj map[string]interface{}
+	data := strings.TrimPrefix(string(chunks[0]), "data: ")
+	data = strings.TrimSuffix(data, "\n")
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		t.Fatalf("Invalid JSON: %v", err)
+	}
+
+	args := extractToolCallArgs(obj, 0)
+	expectedArgs := `{"key":"value"}`
+	if args != expectedArgs {
+		t.Errorf("Valid JSON should be unchanged: got %q, want %q", args, expectedArgs)
+	}
+
+	// Verify no repairs were attempted
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 0 {
+		t.Errorf("Should not attempt repair for valid JSON, got %d attempts", stats.Attempted)
+	}
+}
+
+// TestToolCallBufferWithRepair_MalformedJSON tests repair of malformed JSON
+func TestToolCallBufferWithRepair_MalformedJSON(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled:    true,
+		Strategies: []string{"library_repair"},
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// Send malformed JSON in two fragments
+	// Fragment 1: {key: (missing quotes)
+	frag1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"test","arguments":"{key: "}}]}}]}`
+	chunks := buffer.ProcessChunk([]byte(frag1))
+	if len(chunks) != 0 {
+		t.Errorf("Should buffer incomplete fragment, got %d chunks", len(chunks))
+	}
+
+	// Fragment 2: completes the JSON but still malformed (not valid JSON)
+	// The buffer won't emit automatically because it's not valid JSON
+	frag2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"value}"}}]}}]}`
+	chunks = buffer.ProcessChunk([]byte(frag2))
+	// Not emitted yet because {key: value} is not valid JSON
+	if len(chunks) != 0 {
+		t.Logf("Warning: expected 0 chunks (malformed JSON not complete), got %d", len(chunks))
+	}
+
+	// Flush to force emission of buffered tool calls (this triggers repair)
+	chunks = buffer.Flush()
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk after flush, got %d", len(chunks))
+	}
+
+	// Verify the arguments were repaired
+	var obj map[string]interface{}
+	data := strings.TrimPrefix(string(chunks[0]), "data: ")
+	data = strings.TrimSuffix(data, "\n")
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		t.Fatalf("Invalid JSON in output: %v", err)
+	}
+
+	args := extractToolCallArgs(obj, 0)
+	// The repaired JSON should be valid
+	var parsedArgs map[string]interface{}
+	if err := json.Unmarshal([]byte(args), &parsedArgs); err != nil {
+		t.Errorf("Repaired arguments should be valid JSON: %v (args: %s)", err, args)
+	}
+
+	// Verify repair was attempted
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 1 {
+		t.Errorf("Should have attempted 1 repair, got %d", stats.Attempted)
+	}
+	if stats.Successful != 1 {
+		t.Errorf("Should have 1 successful repair, got %d", stats.Successful)
+	}
+}
+
+// TestToolCallBufferWithRepair_Disabled tests that disabled repair doesn't affect output
+func TestToolCallBufferWithRepair_Disabled(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled: false,
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// Send malformed JSON
+	frag1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{key: "}}]}}]}`
+	buffer.ProcessChunk([]byte(frag1))
+
+	frag2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"value}"}}]}}]}`
+	buffer.ProcessChunk([]byte(frag2))
+
+	// Flush to force emission (malformed JSON won't auto-emit)
+	chunks := buffer.Flush()
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk after flush, got %d", len(chunks))
+	}
+
+	// Verify the arguments are unchanged (malformed)
+	var obj map[string]interface{}
+	data := strings.TrimPrefix(string(chunks[0]), "data: ")
+	data = strings.TrimSuffix(data, "\n")
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		t.Fatalf("Invalid JSON in output: %v", err)
+	}
+
+	args := extractToolCallArgs(obj, 0)
+	expectedArgs := "{key: value}" // Original malformed JSON
+	if args != expectedArgs {
+		t.Errorf("Disabled repair should not change args: got %q, want %q", args, expectedArgs)
+	}
+
+	// Verify no repairs were attempted
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 0 {
+		t.Errorf("Should not attempt repair when disabled, got %d attempts", stats.Attempted)
+	}
+}
+
+// TestToolCallBufferWithRepair_NilConfig tests behavior with nil config
+func TestToolCallBufferWithRepair_NilConfig(t *testing.T) {
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", nil)
+
+	// Should behave like a buffer without repair
+	if buffer.HasRepairer() {
+		t.Error("Should not have repairer with nil config")
+	}
+
+	// Send valid JSON
+	input := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`
+	chunks := buffer.ProcessChunk([]byte(input))
+
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk, got %d", len(chunks))
+	}
+}
+
+// TestToolCallBufferWithRepair_TrailingComma tests repair of trailing comma
+func TestToolCallBufferWithRepair_TrailingComma(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled:    true,
+		Strategies: []string{"library_repair"},
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// JSON with trailing comma (malformed)
+	frag1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"key\":\"value\", "}}]}}]}`
+	buffer.ProcessChunk([]byte(frag1))
+
+	frag2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}`
+	buffer.ProcessChunk([]byte(frag2))
+
+	// Flush to force emission (malformed JSON won't auto-emit)
+	chunks := buffer.Flush()
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk after flush, got %d", len(chunks))
+	}
+
+	// Verify the arguments were repaired
+	var obj map[string]interface{}
+	data := strings.TrimPrefix(string(chunks[0]), "data: ")
+	data = strings.TrimSuffix(data, "\n")
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		t.Fatalf("Invalid JSON in output: %v", err)
+	}
+
+	args := extractToolCallArgs(obj, 0)
+	// The repaired JSON should be valid
+	var parsedArgs map[string]interface{}
+	if err := json.Unmarshal([]byte(args), &parsedArgs); err != nil {
+		t.Errorf("Repaired arguments should be valid JSON: %v (args: %s)", err, args)
+	}
+
+	// Verify repair stats
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 1 || stats.Successful != 1 {
+		t.Errorf("Expected 1 successful repair, got attempted=%d, successful=%d", stats.Attempted, stats.Successful)
+	}
+}
+
+// TestToolCallBufferWithRepair_MultipleToolCalls tests repair of multiple tool calls
+func TestToolCallBufferWithRepair_MultipleToolCalls(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled:    true,
+		Strategies: []string{"library_repair"},
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// Tool call 0: valid JSON
+	tc0 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","function":{"name":"valid","arguments":"{\"a\":1}"}}]}}]}`
+	chunks := buffer.ProcessChunk([]byte(tc0))
+	if len(chunks) != 1 {
+		t.Errorf("Tool call 0 should emit immediately, got %d chunks", len(chunks))
+	}
+
+	// Tool call 1: malformed JSON
+	tc1Frag1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_1","function":{"name":"invalid","arguments":"{key: "}}]}}]}`
+	buffer.ProcessChunk([]byte(tc1Frag1))
+
+	tc1Frag2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"value}"}}]}}]}`
+	buffer.ProcessChunk([]byte(tc1Frag2))
+	// Tool call 1 won't auto-emit because it's malformed
+
+	// Flush to force emission
+	chunks = buffer.Flush()
+	if len(chunks) != 1 {
+		t.Errorf("Tool call 1 should emit after flush, got %d chunks", len(chunks))
+	}
+
+	// Verify repair stats: 1 attempted (tool call 1), 0 for tool call 0 (valid)
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 1 {
+		t.Errorf("Expected 1 repair attempt, got %d", stats.Attempted)
+	}
+}
+
+// TestToolCallBuffer_GetRepairStats tests repair stats tracking
+func TestToolCallBuffer_GetRepairStats(t *testing.T) {
+	config := &toolrepair.Config{
+		Enabled:    true,
+		Strategies: []string{"library_repair"},
+	}
+	buffer := NewToolCallBufferWithRepair(1024*1024, "gpt-4", "test", config)
+
+	// Initial stats should be zero
+	stats := buffer.GetRepairStats()
+	if stats.Attempted != 0 || stats.Successful != 0 || stats.Failed != 0 {
+		t.Errorf("Initial stats should be zero: %+v", stats)
+	}
+
+	// Process a malformed tool call
+	frag1 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{bad: "}}]}}]}`
+	buffer.ProcessChunk([]byte(frag1))
+
+	frag2 := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"json}"}}]}}]}`
+	buffer.ProcessChunk([]byte(frag2))
+
+	// Flush to force emission and repair
+	buffer.Flush()
+
+	// Stats should reflect the repair
+	stats = buffer.GetRepairStats()
+	if stats.Attempted != 1 {
+		t.Errorf("Expected 1 attempt, got %d", stats.Attempted)
+	}
+	// Either successful or failed
+	if stats.Successful+stats.Failed != 1 {
+		t.Errorf("Expected successful+failed = 1, got successful=%d, failed=%d", stats.Successful, stats.Failed)
 	}
 }
