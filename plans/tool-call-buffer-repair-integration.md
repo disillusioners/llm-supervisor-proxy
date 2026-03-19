@@ -54,6 +54,48 @@ Streaming Phase:
 
 ## Implementation Plan
 
+### Phase 0: Move ToolCallBuffer to Shared Package (REQUIRED)
+
+To avoid circular dependencies when `ultimatemodel` package needs to use `ToolCallBuffer`:
+
+**Create:** `pkg/toolcall/buffer.go`
+
+```go
+package toolcall
+
+import (
+    "sync"
+    "github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
+)
+
+// ToolCallBuffer accumulates tool call fragments and emits complete tool calls
+// with optional JSON repair when complete.
+type ToolCallBuffer struct {
+    mu              sync.Mutex
+    builders        map[int]*ToolCallBuilder
+    totalSize       int64
+    maxSize         int64
+    modelID         string
+    requestID       string
+    
+    // Tool repair integration
+    repairConfig    *toolrepair.Config
+    repairer        *toolrepair.Repairer
+    repairStats     RepairStats
+}
+
+// ... rest of the implementation ...
+```
+
+**Files to create:**
+- `pkg/toolcall/buffer.go` - Move from `pkg/proxy/tool_call_buffer.go`
+- `pkg/toolcall/buffer_test.go` - Move from `pkg/proxy/tool_call_buffer_test.go`
+
+**Files to update imports:**
+- `pkg/proxy/race_executor.go`
+- `pkg/proxy/internal_handler.go`
+- `pkg/ultimatemodel/handler_internal.go`
+
 ### Phase 1: Enhance ToolCallBuffer
 
 #### 1.1 Add ToolRepair Integration
@@ -133,9 +175,11 @@ func NewToolCallBufferWithRepair(maxSize int64, modelID, requestID string, repai
 }
 ```
 
-### Phase 2: Update race_executor.go
+### Phase 2: Update race_executor.go (External Path)
 
-#### 2.1 Remove ToolCallAccumulator Usage
+#### 2.1 Remove ToolCallAccumulator Usage in handleStreamingResponse()
+
+**File:** `pkg/proxy/race_executor.go` - `handleStreamingResponse()` function
 
 **Before:**
 ```go
@@ -162,8 +206,8 @@ if accumulator.HasToolCalls() && cfg.ToolRepair.Enabled {
 var toolCallBuffer *ToolCallBuffer
 if !cfg.ToolCallBufferDisabled {
     toolCallBuffer = NewToolCallBufferWithRepair(
-        cfg.ToolCallBufferMaxSize, 
-        req.modelID, 
+        cfg.ToolCallBufferMaxSize,
+        req.modelID,
         fmt.Sprintf("%d", req.id),
         &cfg.ToolRepair,  // Pass repair config
     )
@@ -187,6 +231,299 @@ if toolCallBuffer != nil {
     }
 }
 ```
+
+### Phase 2b: Update race_executor.go (Internal Path)
+
+#### 2b.1 Add ToolCallBuffer to handleInternalStream()
+
+**File:** `pkg/proxy/race_executor.go` - `handleInternalStream()` function (lines 203-460)
+
+**Current State:**
+- Uses `ToolCallAccumulator` for accumulation (line 220)
+- Has post-stream repair logic (lines 424-444)
+- Does NOT use `ToolCallBuffer` (explicitly noted in comment at lines 223-226)
+
+**Why it was excluded:**
+```go
+// NOTE: Tool call buffering is NOT applied to internal streams because:
+// 1. Internal providers (Anthropic, etc.) generate well-formed streaming output
+// 2. The tool call buffer is specifically for weak external upstream clients
+// 3. Internal path converts provider-specific format to OpenAI format directly
+```
+
+**However**, tool call arguments can still be malformed even from internal providers (e.g., Anthropic can generate invalid JSON). The repair logic should be integrated.
+
+**Proposed Change:**
+
+```go
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration) error {
+    eventCh, err := provider.StreamChatCompletion(ctx, req)
+    if err != nil {
+        return err
+    }
+
+    upstreamReq.MarkStreaming()
+
+    // Track state for proper streaming format
+    firstChunk := true
+    nextToolCallIndex := 0
+    seenToolCallIDs := make(map[string]int)
+
+    // NEW: Create tool call buffer with repair integration
+    // Even internal providers can generate malformed JSON in tool call arguments
+    var toolCallBuffer *ToolCallBuffer
+    toolCallBufferMaxSize := int64(5 * 1024 * 1024) // 5MB default
+    toolCallBuffer = NewToolCallBufferWithRepair(
+        toolCallBufferMaxSize,
+        internalModel,
+        fmt.Sprintf("%d", upstreamReq.id),
+        &toolRepairConfig,
+    )
+    streamStartTime := time.Now()
+
+    for event := range eventCh {
+        // ... existing event handling ...
+
+        case "tool_call":
+            if len(event.ToolCalls) > 0 {
+                // ... build toolCalls chunk ...
+                
+                // NEW: Process through tool call buffer with repair
+                // The buffer will accumulate fragments and repair when complete
+                chunksToEmit := toolCallBuffer.ProcessChunk([]byte(line))
+                for _, chunk := range chunksToEmit {
+                    if !upstreamReq.buffer.Add(chunk) {
+                        return fmt.Errorf("buffer limit exceeded")
+                    }
+                }
+            }
+
+        case "done":
+            // ... write final chunk and [DONE] ...
+
+            // NEW: Flush any remaining buffered tool calls
+            flushChunks := toolCallBuffer.Flush()
+            for _, chunk := range flushChunks {
+                if !upstreamReq.buffer.Add(chunk) {
+                    log.Printf("[WARN] Race attempt %d (internal): failed to flush tool call chunk", upstreamReq.id)
+                }
+            }
+
+            // Log repair stats
+            stats := toolCallBuffer.GetRepairStats()
+            if stats.Attempted > 0 {
+                log.Printf("[TOOL-BUFFER] Race attempt %d (internal): Repair stats: attempted=%d, success=%d, failed=%d",
+                    upstreamReq.id, stats.Attempted, stats.Successful, stats.Failed)
+            }
+
+            return nil
+        }
+    }
+    // ...
+}
+```
+
+**Key Changes:**
+1. Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
+2. Process tool_call events through the buffer
+3. Flush remaining chunks at "done" event
+4. Remove post-stream `rewriteBufferWithRepairedArgs()` call (no longer needed)
+
+### Phase 2c: Update internal_handler.go
+
+#### 2c.1 Add ToolCallBuffer to InternalHandler
+
+**File:** `pkg/proxy/internal_handler.go`
+
+**Current State:**
+- Has `SetRepairer()` method (lines 40-44)
+- Repairer is passed to `OpenAIProvider` (lines 72-77)
+- NO `ToolCallBuffer` or `ToolCallAccumulator` in streaming path
+- Tool call chunks are written directly to client without buffering
+
+**Problem:**
+- If internal provider returns malformed tool call JSON, it goes directly to client
+- The `SetRepairer()` is only used by the provider internally, not for stream repair
+
+**Proposed Change:**
+
+```go
+// Add to InternalHandler struct
+type InternalHandler struct {
+    config        *models.ModelConfig
+    resolver      models.ModelsConfigInterface
+    bufferStore   *bufferstore.BufferStore
+    requestID     string
+    repairer      *toolrepair.Repairer
+    eventCallback toolrepair.RepairEventCallback
+    
+    // NEW: Tool call buffer config
+    toolCallBufferMaxSize int64
+    toolRepairConfig      *toolrepair.Config
+}
+
+// Add setter for tool call buffer config
+func (h *InternalHandler) SetToolCallBufferConfig(maxSize int64, repairConfig *toolrepair.Config) {
+    h.toolCallBufferMaxSize = maxSize
+    h.toolRepairConfig = repairConfig
+}
+
+// Update handleStream() to use ToolCallBuffer
+func (h *InternalHandler) handleStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
+    eventCh, err := provider.StreamChatCompletion(ctx, req)
+    if err != nil {
+        return err
+    }
+
+    // ... SSE headers ...
+
+    // NEW: Create tool call buffer with repair
+    var toolCallBuffer *ToolCallBuffer
+    if h.toolCallBufferMaxSize > 0 {
+        toolCallBuffer = NewToolCallBufferWithRepair(
+            h.toolCallBufferMaxSize,
+            internalModel,
+            h.requestID,
+            h.toolRepairConfig,
+        )
+    }
+
+    for event := range eventCh {
+        switch event.Type {
+        // ... content case ...
+
+        case "tool_call":
+            if len(event.ToolCalls) > 0 {
+                // ... build chunk ...
+                
+                // NEW: Process through tool call buffer
+                if toolCallBuffer != nil {
+                    chunksToEmit := toolCallBuffer.ProcessChunk(data)
+                    for _, chunk := range chunksToEmit {
+                        fmt.Fprintf(w, "data: %s\n\n", chunk)
+                        flusher.Flush()
+                    }
+                } else {
+                    // Fallback: emit directly
+                    fmt.Fprintf(w, "data: %s\n\n", data)
+                    flusher.Flush()
+                }
+            }
+
+        case "done":
+            // NEW: Flush remaining buffered tool calls
+            if toolCallBuffer != nil {
+                flushChunks := toolCallBuffer.Flush()
+                for _, chunk := range flushChunks {
+                    fmt.Fprintf(w, "data: %s\n\n", chunk)
+                    flusher.Flush()
+                }
+            }
+            
+            // ... write final chunk and [DONE] ...
+            return nil
+        }
+    }
+    // ...
+}
+```
+
+### Phase 2d: Update ultimatemodel/handler_internal.go
+
+#### 2d.1 Add ToolCallBuffer to UltimateModel Internal Path
+
+**File:** `pkg/ultimatemodel/handler_internal.go`
+
+**Current State:**
+- NO `ToolCallAccumulator`
+- NO `ToolCallBuffer`
+- NO repair logic
+- Tool call chunks written directly to client
+
+**Problem:**
+- UltimateModel internal path has no tool call repair at all
+- Malformed JSON goes directly to client
+
+**Proposed Change:**
+
+```go
+// Add to Handler struct or pass via parameters
+type Handler struct {
+    // ... existing fields ...
+    
+    // NEW: Tool call buffer config
+    toolCallBufferMaxSize int64
+    toolRepairConfig      *toolrepair.Config
+}
+
+// Update handleInternalStream()
+func (h *Handler) handleInternalStream(
+    ctx context.Context,
+    provider providers.Provider,
+    req *providers.ChatCompletionRequest,
+    w http.ResponseWriter,
+    internalModel string,
+) error {
+    eventCh, err := provider.StreamChatCompletion(ctx, req)
+    if err != nil {
+        return err
+    }
+
+    // ... SSE headers ...
+
+    // NEW: Create tool call buffer with repair
+    var toolCallBuffer *proxy.ToolCallBuffer
+    if h.toolCallBufferMaxSize > 0 && h.toolRepairConfig != nil {
+        toolCallBuffer = proxy.NewToolCallBufferWithRepair(
+            h.toolCallBufferMaxSize,
+            internalModel,
+            "", // request ID not available here
+            h.toolRepairConfig,
+        )
+    }
+
+    for event := range eventCh {
+        switch event.Type {
+        // ... content and thinking cases ...
+
+        case "tool_call":
+            if len(event.ToolCalls) > 0 {
+                // ... build chunk ...
+                
+                // NEW: Process through tool call buffer
+                if toolCallBuffer != nil {
+                    chunksToEmit := toolCallBuffer.ProcessChunk(data)
+                    for _, chunk := range chunksToEmit {
+                        fmt.Fprintf(w, "data: %s\n\n", chunk)
+                        flusher.Flush()
+                    }
+                } else {
+                    fmt.Fprintf(w, "data: %s\n\n", data)
+                    flusher.Flush()
+                }
+            }
+
+        case "done":
+            // NEW: Flush remaining buffered tool calls
+            if toolCallBuffer != nil {
+                flushChunks := toolCallBuffer.Flush()
+                for _, chunk := range flushChunks {
+                    fmt.Fprintf(w, "data: %s\n\n", chunk)
+                    flusher.Flush()
+                }
+            }
+            
+            // ... write final chunk and [DONE] ...
+            return nil
+        }
+    }
+    // ...
+}
+```
+
+**Note:** This requires importing `proxy.ToolCallBuffer` which may create a circular dependency. Consider:
+1. Moving `ToolCallBuffer` to a shared package (e.g., `pkg/toolcall/buffer.go`)
+2. Or duplicating the buffer logic in `ultimatemodel` package
 
 ### Phase 3: Cleanup
 
@@ -251,20 +588,41 @@ func TestToolCallBuffer_RepairOnEmit(t *testing.T) {
 
 ## Migration Strategy
 
-### Option A: Feature Flag (Recommended)
+### Direct Replacement (Selected Approach)
 
-Add `TOOL_CALL_REPAIR_STREAMING=true` (default: false for now)
+Remove old code immediately and replace with new implementation across all streaming paths.
 
-1. If true: Use new ToolCallBuffer with repair
-2. If false: Use old ToolCallAccumulator + post-stream repair
+**Implementation Order:**
 
-This allows gradual rollout and A/B testing.
+1. **Phase 1:** Enhance `ToolCallBuffer` with repair integration
+   - Add `NewToolCallBufferWithRepair()` constructor
+   - Add repair logic in `emitToolCall()`
+   - Add `GetRepairStats()` method
 
-### Option B: Direct Replacement
+2. **Phase 2a:** Update external path (`handleStreamingResponse()`)
+   - Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
+   - Remove post-stream repair logic
 
-Remove old code immediately and replace with new implementation.
+3. **Phase 2b:** Update internal race path (`handleInternalStream()`)
+   - Replace `ToolCallAccumulator` with `ToolCallBufferWithRepair`
+   - Remove post-stream repair logic
 
-**Risk:** If issues arise, no fallback.
+4. **Phase 2c:** Update direct internal path (`internal_handler.go`)
+   - Add `ToolCallBuffer` integration
+   - Add config setters
+
+5. **Phase 2d:** Update UltimateModel internal path
+   - Move `ToolCallBuffer` to shared package `pkg/toolcall/` to avoid circular dependency
+   - Add `ToolCallBuffer` integration
+
+6. **Phase 3:** Cleanup
+   - Delete `tool_call_accumulator.go` and tests
+   - Remove deprecated functions from `race_executor.go`
+   - Evaluate `buffer_rewriter.go` for removal
+
+7. **Phase 4:** Update tests
+   - Add repair integration tests
+   - Update existing tests for new behavior
 
 ## Impact Analysis
 
@@ -273,16 +631,52 @@ Remove old code immediately and replace with new implementation.
 | Component | Change |
 |-----------|--------|
 | `tool_call_buffer.go` | Add repair integration |
-| `race_executor.go` | Remove accumulator, simplify flow |
+| `race_executor.go` - `handleStreamingResponse()` | Remove accumulator, simplify flow (external path) |
+| `race_executor.go` - `handleInternalStream()` | Replace accumulator with ToolCallBuffer (internal path) |
+| `internal_handler.go` | Add ToolCallBuffer integration |
+| `ultimatemodel/handler_internal.go` | Add ToolCallBuffer integration |
 | `tool_call_accumulator.go` | DELETE |
 | `buffer_rewriter.go` | Evaluate for removal |
 | Tests | Update for new behavior |
+
+### Streaming Paths Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           REQUEST FLOW PATHS                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. EXTERNAL PATH (race_executor.go)                                        │
+│     Client → Handler → RaceCoordinator → executeExternalRequest             │
+│                    ↓                                                        │
+│     handleStreamingResponse() → ToolCallBuffer → StreamBuffer → Client      │
+│                                                                             │
+│  2. INTERNAL PATH - Race Retry (race_executor.go)                           │
+│     Client → Handler → RaceCoordinator → executeInternalRequest             │
+│                    ↓                                                        │
+│     handleInternalStream() → ToolCallBuffer → StreamBuffer → Client         │
+│                                                                             │
+│  3. INTERNAL PATH - Direct (internal_handler.go)                            │
+│     Client → InternalHandler → Provider → handleStream()                    │
+│                    ↓                                                        │
+│     handleStream() → ToolCallBuffer → SSE Response → Client                 │
+│                                                                             │
+│  4. INTERNAL PATH - UltimateModel (ultimatemodel/handler_internal.go)       │
+│     Client → UltimateModel → executeInternal() → handleInternalStream()     │
+│                    ↓                                                        │
+│     handleInternalStream() → ToolCallBuffer → SSE Response → Client         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Behavior Changes
 
 | Scenario | Before | After |
 |----------|--------|-------|
-| Malformed JSON in tool call | Client receives malformed → post-stream repair | Client receives repaired immediately |
+| Malformed JSON in tool call (external) | Client receives malformed → post-stream repair | Client receives repaired immediately |
+| Malformed JSON in tool call (internal race) | Post-stream buffer rewrite | Client receives repaired immediately |
+| Malformed JSON in tool call (internal direct) | **No repair** - client receives malformed | Client receives repaired immediately |
+| Malformed JSON in tool call (ultimate model) | **No repair** - client receives malformed | Client receives repaired immediately |
 | Repair failure | Original args in buffer | Original args emitted (same result) |
 | Memory usage | Double accumulation (buffer + accumulator) | Single accumulation |
 | Latency | Post-stream repair delay | Real-time repair during streaming |
@@ -304,18 +698,29 @@ Remove old code immediately and replace with new implementation.
    - Option 1: Add to existing events
    - Option 2: New metric endpoint
 
+4. **Circular Dependency (IMPORTANT):** `ultimatemodel/handler_internal.go` needs `ToolCallBuffer` from `pkg/proxy`
+   - Option 1: Move `ToolCallBuffer` to a shared package (e.g., `pkg/toolcall/buffer.go`)
+   - Option 2: Create an interface that both packages can use
+   - Option 3: Duplicate the buffer logic in `ultimatemodel` package (not recommended)
+   - **Recommendation:** Option 1 - Move to shared package to avoid code duplication
+
 ## Estimated Changes
 
 | File | Type | Lines Changed |
 |------|------|---------------|
 | `pkg/proxy/tool_call_buffer.go` | Modify | ~50 |
-| `pkg/proxy/race_executor.go` | Modify | ~100 (net reduction) |
+| `pkg/proxy/race_executor.go` - `handleStreamingResponse()` | Modify | ~50 (net reduction) |
+| `pkg/proxy/race_executor.go` - `handleInternalStream()` | Modify | ~50 (net reduction) |
+| `pkg/proxy/internal_handler.go` | Modify | ~80 |
+| `pkg/ultimatemodel/handler_internal.go` | Modify | ~80 |
 | `pkg/proxy/tool_call_accumulator.go` | DELETE | -258 |
 | `pkg/proxy/tool_call_accumulator_test.go` | DELETE | -500 |
 | `pkg/proxy/buffer_rewriter.go` | Evaluate | TBD |
 | `pkg/proxy/tool_call_buffer_test.go` | Modify | ~100 |
+| `pkg/proxy/internal_handler_test.go` | Add | ~100 (new tests) |
+| `pkg/ultimatemodel/handler_internal_test.go` | Add | ~100 (new tests) |
 
-**Net result:** ~500 fewer lines of code, simpler architecture
+**Net result:** ~200 fewer lines of code, simpler architecture, complete coverage of all streaming paths
 
 ## Conclusion
 
