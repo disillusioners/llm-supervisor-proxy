@@ -1,5 +1,25 @@
 # Tool Call Buffering Mode - Implementation Plan
 
+## Implementation Status: ✅ COMPLETE
+
+**Completed:** 2026-03-19
+
+### Summary of Changes:
+1. **Core Buffering Logic** (`pkg/proxy/tool_call_buffer.go`) - Pre-existing
+2. **Configuration** (`pkg/config/config.go`) - Added `ToolCallBufferDisabled` and `ToolCallBufferMaxSize` fields
+3. **Config Interface** (`pkg/config/config.go`) - Added getter methods to `ManagerInterface`
+4. **Database ConfigManager** (`pkg/store/database/store.go`) - Added getter implementations
+5. **Handler Config Snapshot** (`pkg/proxy/handler.go`) - Added fields to `ConfigSnapshot`
+6. **External Streaming Integration** (`pkg/proxy/race_executor.go`) - Integrated `ToolCallBuffer` in `handleStreamingResponse()`
+7. **Internal Streaming** (`pkg/proxy/race_executor.go`) - Added comment explaining why buffering is not needed for internal streams
+8. **Tests** (`pkg/proxy/tool_call_buffer_test.go`) - All tests passing
+
+### Configuration:
+- `TOOL_CALL_BUFFER_DISABLED=true` - Set to disable buffering (default: false, meaning enabled)
+- `TOOL_CALL_BUFFER_MAX_SIZE=1048576` - Max buffer size in bytes (default: 1MB)
+
+---
+
 ## Problem Statement
 
 Some LLM clients have weak streaming parsers that cannot handle incremental tool call fragments. They expect:

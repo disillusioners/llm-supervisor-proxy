@@ -84,6 +84,10 @@ type Config struct {
 	RaceParallelOnIdle bool `json:"race_parallel_on_idle"`
 	RaceMaxParallel    int  `json:"race_max_parallel"`
 	RaceMaxBufferBytes int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
+
+	// Tool Call Buffering (for weak streaming clients)
+	ToolCallBufferDisabled bool  `json:"tool_call_buffer_disabled"` // When true, tool calls are streamed as-is (for clients that can handle partial JSON)
+	ToolCallBufferMaxSize  int64 `json:"tool_call_buffer_max_size"` // Max bytes to buffer per request (default: 1MB)
 }
 
 // ManagerInterface defines the interface for config management
@@ -105,6 +109,8 @@ type ManagerInterface interface {
 	GetRaceParallelOnIdle() bool
 	GetRaceMaxParallel() int
 	GetRaceMaxBufferBytes() int
+	GetToolCallBufferDisabled() bool
+	GetToolCallBufferMaxSize() int64
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -184,10 +190,12 @@ var Defaults = Config{
 		MaxHash:    100,
 		MaxRetries: 2, // Default: allow 2 retries
 	},
-	RaceRetryEnabled:   false,
-	RaceParallelOnIdle: true,
-	RaceMaxParallel:    3,
-	RaceMaxBufferBytes: 5 * 1024 * 1024, // 5MB limit
+	RaceRetryEnabled:       false,
+	RaceParallelOnIdle:     true,
+	RaceMaxParallel:        3,
+	RaceMaxBufferBytes:     5 * 1024 * 1024, // 5MB limit
+	ToolCallBufferDisabled: false,           // Buffering ENABLED by default
+	ToolCallBufferMaxSize:  1024 * 1024,     // 1MB default
 }
 
 // Validate ensures config values are valid before saving
@@ -383,6 +391,15 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("RACE_MAX_BUFFER_BYTES"); v != "" {
 		if r, err := strconv.ParseInt(v, 10, 64); err == nil && r >= 0 {
 			cfg.RaceMaxBufferBytes = int(r)
+		}
+	}
+	// Tool call buffer configuration
+	if v := os.Getenv("TOOL_CALL_BUFFER_DISABLED"); v != "" {
+		cfg.ToolCallBufferDisabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("TOOL_CALL_BUFFER_MAX_SIZE"); v != "" {
+		if r, err := strconv.ParseInt(v, 10, 64); err == nil && r > 0 {
+			cfg.ToolCallBufferMaxSize = r
 		}
 	}
 	return cfg
@@ -600,6 +617,20 @@ func (m *Manager) GetRaceMaxBufferBytes() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.RaceMaxBufferBytes
+}
+
+// GetToolCallBufferDisabled returns whether tool call buffering is disabled
+func (m *Manager) GetToolCallBufferDisabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ToolCallBufferDisabled
+}
+
+// GetToolCallBufferMaxSize returns the max bytes to buffer for tool calls per request
+func (m *Manager) GetToolCallBufferMaxSize() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ToolCallBufferMaxSize
 }
 
 // IsReadOnly returns true if the config file cannot be written

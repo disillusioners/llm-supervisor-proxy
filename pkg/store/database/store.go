@@ -462,6 +462,20 @@ func (m *ConfigManager) GetRaceMaxBufferBytes() int {
 	return m.cfg.RaceMaxBufferBytes
 }
 
+// GetToolCallBufferDisabled returns whether tool call buffering is disabled
+func (m *ConfigManager) GetToolCallBufferDisabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.ToolCallBufferDisabled
+}
+
+// GetToolCallBufferMaxSize returns the max size for tool call buffer
+func (m *ConfigManager) GetToolCallBufferMaxSize() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.ToolCallBufferMaxSize
+}
+
 // IsReadOnly returns true if the config cannot be written
 func (m *ConfigManager) IsReadOnly() bool {
 	m.mu.RLock()

@@ -31,21 +31,23 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		UpstreamURL:             cfg.UpstreamURL,
-		UpstreamCredentialID:    cfg.UpstreamCredentialID,
-		IdleTimeout:             cfg.IdleTimeout.Duration(),
-		StreamDeadline:          cfg.StreamDeadline.Duration(),
-		MaxGenerationTime:       cfg.MaxGenerationTime.Duration(),
-		MaxStreamBufferSize:     cfg.MaxStreamBufferSize,
-		ModelsConfig:            c.ModelsConfig,
-		LoopDetection:           cfg.LoopDetection,
-		ToolRepair:              cfg.ToolRepair,
-		SSEHeartbeatEnabled:     cfg.SSEHeartbeatEnabled,
-		RaceRetryEnabled:        cfg.RaceRetryEnabled,
-		RaceParallelOnIdle:      cfg.RaceParallelOnIdle,
-		RaceMaxParallel:         cfg.RaceMaxParallel,
-		RaceMaxBufferBytes:      cfg.RaceMaxBufferBytes,
-		EventBus:                c.EventBus,
+		UpstreamURL:              cfg.UpstreamURL,
+		UpstreamCredentialID:     cfg.UpstreamCredentialID,
+		IdleTimeout:              cfg.IdleTimeout.Duration(),
+		StreamDeadline:           cfg.StreamDeadline.Duration(),
+		MaxGenerationTime:        cfg.MaxGenerationTime.Duration(),
+		MaxStreamBufferSize:      cfg.MaxStreamBufferSize,
+		ModelsConfig:             c.ModelsConfig,
+		LoopDetection:            cfg.LoopDetection,
+		ToolRepair:               cfg.ToolRepair,
+		SSEHeartbeatEnabled:      cfg.SSEHeartbeatEnabled,
+		RaceRetryEnabled:         cfg.RaceRetryEnabled,
+		RaceParallelOnIdle:       cfg.RaceParallelOnIdle,
+		RaceMaxParallel:          cfg.RaceMaxParallel,
+		RaceMaxBufferBytes:       cfg.RaceMaxBufferBytes,
+		ToolCallBufferDisabled:   cfg.ToolCallBufferDisabled,
+		ToolCallBufferMaxSize:    cfg.ToolCallBufferMaxSize,
+		EventBus:                 c.EventBus,
 	}
 }
 
@@ -67,6 +69,10 @@ type ConfigSnapshot struct {
 	RaceMaxParallel    int
 	RaceMaxBufferBytes int
 	ModelID            string // Primary model for this request
+
+	// Tool Call Buffering
+	ToolCallBufferDisabled bool
+	ToolCallBufferMaxSize  int64
 
 	// Event Bus for publishing events during request handling
 	EventBus *events.Bus

@@ -220,6 +220,11 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 	accumulator := NewToolCallAccumulator()
 	streamStartTime := time.Now()
 
+	// NOTE: Tool call buffering is NOT applied to internal streams because:
+	// 1. Internal providers (Anthropic, etc.) generate well-formed streaming output
+	// 2. The tool call buffer is specifically for weak external upstream clients
+	// 3. Internal path converts provider-specific format to OpenAI format directly
+
 	for event := range eventCh {
 		// Check for context cancellation
 		select {
@@ -886,7 +891,14 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 	// Reset normalizer state for this new stream to avoid state leakage
 	normalizers.GetRegistry().ResetAll(normCtx)
 
-	// NEW: Create accumulator for tool call arguments
+	// Create tool call buffer for weak streaming clients (enabled by default)
+	// This buffers tool call fragments until they form valid JSON before emitting
+	var toolCallBuffer *ToolCallBuffer
+	if !cfg.ToolCallBufferDisabled {
+		toolCallBuffer = NewToolCallBuffer(cfg.ToolCallBufferMaxSize, req.modelID, fmt.Sprintf("%d", req.id))
+	}
+
+	// Create accumulator for tool call arguments
 	// Tool call arguments are streamed incrementally, so we must accumulate
 	// before repairing (which requires complete JSON)
 	accumulator := NewToolCallAccumulator()
@@ -994,9 +1006,20 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			// This is because tool call arguments are incrementally streamed
 			// and repair requires complete JSON
 
-			// Add chunk to buffer
-			if !req.buffer.Add(normalizedLine) {
-				return fmt.Errorf("buffer limit exceeded")
+			// Process through tool call buffer (if enabled)
+			// This buffers tool call fragments until they form valid JSON before emitting
+			var chunksToEmit [][]byte
+			if toolCallBuffer != nil {
+				chunksToEmit = toolCallBuffer.ProcessChunk(normalizedLine)
+			} else {
+				chunksToEmit = [][]byte{normalizedLine}
+			}
+
+			// Add all chunks to buffer
+			for _, chunk := range chunksToEmit {
+				if !req.buffer.Add(chunk) {
+					return fmt.Errorf("buffer limit exceeded")
+				}
 			}
 
 			// Check for stream error chunk (e.g., from LiteLLM)
@@ -1021,6 +1044,21 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 
 	if !sawDone {
 		return fmt.Errorf("upstream closed connection prematurely")
+	}
+
+	// Flush any remaining buffered tool calls (if tool call buffer is enabled)
+	// This ensures complete tool call chunks are emitted before post-stream processing
+	if toolCallBuffer != nil {
+		flushChunks := toolCallBuffer.Flush()
+		for _, chunk := range flushChunks {
+			if !req.buffer.Add(chunk) {
+				log.Printf("[WARN] Race attempt %d: failed to add flushed tool call chunk (buffer limit exceeded)", req.id)
+				break
+			}
+		}
+		if len(flushChunks) > 0 {
+			log.Printf("[DEBUG] Race attempt %d: flushed %d buffered tool call chunks at stream end", req.id, len(flushChunks))
+		}
 	}
 
 	// NEW: Post-stream tool call repair
