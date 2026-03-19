@@ -1,4 +1,4 @@
-import type { Credential, Model } from '../../types';
+import type { Credential, Model, AppConfig } from '../../types';
 
 interface ProxySettingsProps {
   upstreamUrl: string;
@@ -19,6 +19,10 @@ interface ProxySettingsProps {
   ultimateModelId: string;
   ultimateModelMaxHash: number;
   ultimateModelMaxRetries: number;
+  // Raw response logging fields
+  logRawUpstreamResponse: boolean;
+  logRawUpstreamOnError: boolean;
+  logRawUpstreamMaxKB: number;
   // Handlers
   onUpstreamUrlChange: (value: string) => void;
   onUpstreamCredentialIdChange: (value: string) => void;
@@ -33,6 +37,9 @@ interface ProxySettingsProps {
   onUltimateModelIdChange: (value: string) => void;
   onUltimateModelMaxHashChange: (value: number) => void;
   onUltimateModelMaxRetriesChange: (value: number) => void;
+  onLogRawUpstreamResponseChange: (value: boolean) => void;
+  onLogRawUpstreamOnErrorChange: (value: boolean) => void;
+  onLogRawUpstreamMaxKBChange: (value: number) => void;
   onApply: () => Promise<void>;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
 }
@@ -54,6 +61,9 @@ export function ProxySettings({
   ultimateModelId,
   ultimateModelMaxHash,
   ultimateModelMaxRetries,
+  logRawUpstreamResponse,
+  logRawUpstreamOnError,
+  logRawUpstreamMaxKB,
   onUpstreamUrlChange,
   onUpstreamCredentialIdChange,
   onPortChange,
@@ -67,6 +77,9 @@ export function ProxySettings({
   onUltimateModelIdChange,
   onUltimateModelMaxHashChange,
   onUltimateModelMaxRetriesChange,
+  onLogRawUpstreamResponseChange,
+  onLogRawUpstreamOnErrorChange,
+  onLogRawUpstreamMaxKBChange,
   onApply,
   setStatus,
 }: ProxySettingsProps) {
@@ -371,6 +384,79 @@ export function ProxySettings({
           <p class="text-xs text-gray-500 mt-1">
             Maximum number of times the ultimate model can be retried for the same request hash.
             Set to 0 to disable retry limit (not recommended).
+          </p>
+        </div>
+      </div>
+
+      {/* Debug & Logging Section */}
+      <div class="border-t border-gray-700 pt-4 mt-4">
+        <h3 class="text-sm font-medium text-gray-200 mb-3">Debug & Logging</h3>
+        <p class="text-xs text-gray-400 mb-3">
+          Save raw upstream responses to files for debugging. Requires buffer_storage_dir to be configured.
+        </p>
+
+        {/* Log Successful Responses */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Log Successful Responses</label>
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onLogRawUpstreamResponseChange(!logRawUpstreamResponse)}
+              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                logRawUpstreamResponse ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                logRawUpstreamResponse ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+            <span class="text-sm text-gray-400">
+              {logRawUpstreamResponse ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">
+            Save raw upstream responses for successful requests.
+          </p>
+        </div>
+
+        {/* Log Failed Responses */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Log Failed Responses</label>
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onLogRawUpstreamOnErrorChange(!logRawUpstreamOnError)}
+              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                logRawUpstreamOnError ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                logRawUpstreamOnError ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+            <span class="text-sm text-gray-400">
+              {logRawUpstreamOnError ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">
+            Save raw upstream responses for failed/error requests.
+          </p>
+        </div>
+
+        {/* Max Response Size */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Max Response Size (KB)</label>
+          <input
+            type="number"
+            value={logRawUpstreamMaxKB}
+            onInput={(e) => onLogRawUpstreamMaxKBChange(parseInt((e.target as HTMLInputElement).value) || 1024)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="1024"
+            min="1"
+            max="102400"
+          />
+          <p class="text-xs text-gray-500 mt-1">
+            Maximum response size to log. Larger responses are skipped. Default: 1024 KB (1 MB)
           </p>
         </div>
       </div>

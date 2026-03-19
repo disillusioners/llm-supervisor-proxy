@@ -88,6 +88,11 @@ type Config struct {
 	// Tool Call Buffering (for weak streaming clients)
 	ToolCallBufferDisabled bool  `json:"tool_call_buffer_disabled"` // When true, tool calls are streamed as-is (for clients that can handle partial JSON)
 	ToolCallBufferMaxSize  int64 `json:"tool_call_buffer_max_size"` // Max bytes to buffer per request (default: 1MB)
+
+	// Raw Upstream Response Logging
+	LogRawUpstreamResponse bool `json:"log_raw_upstream_response"` // Log successful upstream responses (default: false)
+	LogRawUpstreamOnError  bool `json:"log_raw_upstream_on_error"` // Log failed/error upstream responses (default: false)
+	LogRawUpstreamMaxKB    int  `json:"log_raw_upstream_max_kb"`   // Max KB per response (default: 1024)
 }
 
 // ManagerInterface defines the interface for config management
@@ -111,6 +116,9 @@ type ManagerInterface interface {
 	GetRaceMaxBufferBytes() int
 	GetToolCallBufferDisabled() bool
 	GetToolCallBufferMaxSize() int64
+	GetLogRawUpstreamResponse() bool
+	GetLogRawUpstreamOnError() bool
+	GetLogRawUpstreamMaxKB() int
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -196,6 +204,10 @@ var Defaults = Config{
 	RaceMaxBufferBytes:     5 * 1024 * 1024, // 5MB limit
 	ToolCallBufferDisabled: false,           // Buffering ENABLED by default
 	ToolCallBufferMaxSize:  1024 * 1024,     // 1MB default
+	// Raw Upstream Response Logging
+	LogRawUpstreamResponse: false, // Disabled by default
+	LogRawUpstreamOnError:  false, // Disabled by default
+	LogRawUpstreamMaxKB:    1024,  // 1MB default
 }
 
 // Validate ensures config values are valid before saving
@@ -239,6 +251,15 @@ func (c *Config) Validate() error {
 	}
 	if c.UltimateModel.MaxRetries > 100 {
 		return errors.New("ultimate_model.max_retries cannot exceed 100")
+	}
+	if (c.LogRawUpstreamResponse || c.LogRawUpstreamOnError) && c.BufferStorageDir == "" {
+		// Use default data directory
+		userConfigDir, err := os.UserConfigDir()
+		if err != nil {
+			return errors.New("buffer_storage_dir is required when raw response logging is enabled")
+		}
+		defaultDir := filepath.Join(userConfigDir, "llm-supervisor-proxy", "buffers")
+		c.BufferStorageDir = defaultDir
 	}
 	return nil
 }
@@ -631,6 +652,27 @@ func (m *Manager) GetToolCallBufferMaxSize() int64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.ToolCallBufferMaxSize
+}
+
+// GetLogRawUpstreamResponse returns whether to log successful upstream responses
+func (m *Manager) GetLogRawUpstreamResponse() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.LogRawUpstreamResponse
+}
+
+// GetLogRawUpstreamOnError returns whether to log failed/error upstream responses
+func (m *Manager) GetLogRawUpstreamOnError() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.LogRawUpstreamOnError
+}
+
+// GetLogRawUpstreamMaxKB returns the max KB per response to log
+func (m *Manager) GetLogRawUpstreamMaxKB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.LogRawUpstreamMaxKB
 }
 
 // IsReadOnly returns true if the config file cannot be written

@@ -31,37 +31,40 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		UpstreamURL:              cfg.UpstreamURL,
-		UpstreamCredentialID:     cfg.UpstreamCredentialID,
-		IdleTimeout:              cfg.IdleTimeout.Duration(),
-		StreamDeadline:           cfg.StreamDeadline.Duration(),
-		MaxGenerationTime:        cfg.MaxGenerationTime.Duration(),
-		MaxStreamBufferSize:      cfg.MaxStreamBufferSize,
-		ModelsConfig:             c.ModelsConfig,
-		LoopDetection:            cfg.LoopDetection,
-		ToolRepair:               cfg.ToolRepair,
-		SSEHeartbeatEnabled:      cfg.SSEHeartbeatEnabled,
-		RaceRetryEnabled:         cfg.RaceRetryEnabled,
-		RaceParallelOnIdle:       cfg.RaceParallelOnIdle,
-		RaceMaxParallel:          cfg.RaceMaxParallel,
-		RaceMaxBufferBytes:       cfg.RaceMaxBufferBytes,
-		ToolCallBufferDisabled:   cfg.ToolCallBufferDisabled,
-		ToolCallBufferMaxSize:    cfg.ToolCallBufferMaxSize,
-		EventBus:                 c.EventBus,
+		UpstreamURL:            cfg.UpstreamURL,
+		UpstreamCredentialID:   cfg.UpstreamCredentialID,
+		IdleTimeout:            cfg.IdleTimeout.Duration(),
+		StreamDeadline:         cfg.StreamDeadline.Duration(),
+		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
+		MaxStreamBufferSize:    cfg.MaxStreamBufferSize,
+		ModelsConfig:           c.ModelsConfig,
+		LoopDetection:          cfg.LoopDetection,
+		ToolRepair:             cfg.ToolRepair,
+		SSEHeartbeatEnabled:    cfg.SSEHeartbeatEnabled,
+		RaceRetryEnabled:       cfg.RaceRetryEnabled,
+		RaceParallelOnIdle:     cfg.RaceParallelOnIdle,
+		RaceMaxParallel:        cfg.RaceMaxParallel,
+		RaceMaxBufferBytes:     cfg.RaceMaxBufferBytes,
+		ToolCallBufferDisabled: cfg.ToolCallBufferDisabled,
+		ToolCallBufferMaxSize:  cfg.ToolCallBufferMaxSize,
+		LogRawUpstreamResponse: cfg.LogRawUpstreamResponse,
+		LogRawUpstreamOnError:  cfg.LogRawUpstreamOnError,
+		LogRawUpstreamMaxKB:    cfg.LogRawUpstreamMaxKB,
+		EventBus:               c.EventBus,
 	}
 }
 
 type ConfigSnapshot struct {
-	UpstreamURL             string
-	UpstreamCredentialID    string
-	IdleTimeout             time.Duration
-	StreamDeadline          time.Duration // Time limit before picking best buffer and continuing streaming
-	MaxGenerationTime       time.Duration // Absolute hard timeout for entire request lifecycle
-	MaxStreamBufferSize     int
-	ModelsConfig            models.ModelsConfigInterface
-	LoopDetection           config.LoopDetectionConfig
-	ToolRepair              toolrepair.Config
-	SSEHeartbeatEnabled     bool
+	UpstreamURL          string
+	UpstreamCredentialID string
+	IdleTimeout          time.Duration
+	StreamDeadline       time.Duration // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime    time.Duration // Absolute hard timeout for entire request lifecycle
+	MaxStreamBufferSize  int
+	ModelsConfig         models.ModelsConfigInterface
+	LoopDetection        config.LoopDetectionConfig
+	ToolRepair           toolrepair.Config
+	SSEHeartbeatEnabled  bool
 
 	// Race Retry
 	RaceRetryEnabled   bool
@@ -73,6 +76,11 @@ type ConfigSnapshot struct {
 	// Tool Call Buffering
 	ToolCallBufferDisabled bool
 	ToolCallBufferMaxSize  int64
+
+	// Raw Upstream Response Logging
+	LogRawUpstreamResponse bool
+	LogRawUpstreamOnError  bool
+	LogRawUpstreamMaxKB    int
 
 	// Event Bus for publishing events during request handling
 	EventBus *events.Bus
@@ -124,6 +132,55 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 			Data:      data,
 		})
 	}
+}
+
+// saveRawResponse saves the raw upstream response to disk and emits an event.
+// This is a best-effort operation - errors are logged but don't fail the request.
+// Should be called in a goroutine to avoid blocking the response.
+func (h *Handler) saveRawResponse(requestID string, buffer *streamBuffer, rawRequestBody []byte, maxKB int) {
+	if h.bufferStore == nil || buffer == nil {
+		return
+	}
+
+	rawBytes := buffer.GetAllRawBytes()
+	maxBytes := int64(maxKB) * 1024
+
+	// Skip if too large
+	if int64(len(rawBytes)) > maxBytes {
+		log.Printf("[RAW-LOG] Response too large: %d > %d limit (request=%s)",
+			len(rawBytes), maxBytes, requestID)
+		return
+	}
+
+	// Skip if empty
+	if len(rawBytes) == 0 {
+		return
+	}
+
+	// Save response
+	bufferID := fmt.Sprintf("%s-response", requestID)
+	if err := h.bufferStore.Save(bufferID, rawBytes); err != nil {
+		log.Printf("[RAW-LOG] Failed to save response: %v (request=%s)", err, requestID)
+		return
+	}
+
+	// Save request body (for correlation) - optional but useful for debugging
+	var requestBodyID string
+	if len(rawRequestBody) > 0 && int64(len(rawRequestBody)) <= maxBytes {
+		requestBodyID = fmt.Sprintf("%s-request", requestID)
+		if err := h.bufferStore.Save(requestBodyID, rawRequestBody); err != nil {
+			log.Printf("[RAW-LOG] Failed to save request body: %v (request=%s)", err, requestID)
+			requestBodyID = "" // Clear on error
+		}
+	}
+
+	// Emit event
+	h.publishEvent("response_logged", map[string]interface{}{
+		"id":              requestID,
+		"buffer_id":       bufferID,
+		"request_body_id": requestBodyID,
+		"size_bytes":      len(rawBytes),
+	})
 }
 
 // HandleModels returns the list of available models in OpenAI-compatible format.
@@ -596,9 +653,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if flusher != nil {
 					flusher.Flush()
 				}
+
+				// Log raw response on error if enabled
+				if rc.conf.LogRawUpstreamOnError {
+					go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+				}
 				return
 			}
-			
+
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
 				if i < len(rc.toolCallArgBuilders) {
@@ -653,13 +715,18 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			rc.reqLog.Duration = time.Since(rc.startTime).String()
 			rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
 			h.store.Add(rc.reqLog)
-			
+
 			h.publishEvent("request_completed", map[string]interface{}{
 				"id":       rc.reqID,
 				"model":    winner.GetModelID(),
 				"duration": rc.reqLog.Duration,
 				"race":     true,
 			})
+
+			// Log raw response on success if enabled
+			if rc.conf.LogRawUpstreamResponse {
+				go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+			}
 			return
 		case <-ticker.C:
 			// Safety backup if notification missed
@@ -683,6 +750,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 		}
 	}
 }
+
 // handleNonStreamResult sends a single JSON response from the winner's buffer
 func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) {
 	buffer := winner.GetBuffer()
@@ -691,6 +759,19 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	select {
 	case <-buffer.Done():
 	case <-rc.baseCtx.Done():
+		return
+	}
+
+	// Check for buffer error
+	if err := buffer.Err(); err != nil {
+		// Log raw response on error if enabled
+		if rc.conf.LogRawUpstreamOnError {
+			go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(fmt.Sprintf(`{"error": {"message": "Upstream error: %v", "type": "upstream_error"}}`, err)))
 		return
 	}
 
@@ -749,4 +830,9 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		"duration": rc.reqLog.Duration,
 		"race":     true,
 	})
+
+	// Log raw response on success if enabled
+	if rc.conf.LogRawUpstreamResponse {
+		go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+	}
 }

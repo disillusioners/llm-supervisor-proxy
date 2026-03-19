@@ -8,15 +8,15 @@ import (
 // streamBuffer is a thread-safe, bounded buffer for SSE chunks
 // Uses notification pattern to avoid blocking writer or corrupting stream
 type streamBuffer struct {
-	mu         sync.RWMutex
-	chunks     [][]byte      // All chunks (protected by mu)
-	done       chan struct{} // Closed when stream completes
-	notifyCh   chan struct{} // Capacity 1 - signals new data available
-	err        error         // Final error (if any)
-	totalLen   int64         // Total bytes buffered (atomic access)
-	maxBytes   int64         // Maximum bytes to buffer (memory protection)
-	overflow   bool          // True if maxBytes exceeded
-	completed  int32         // Atomic: 1 when stream done
+	mu        sync.RWMutex
+	chunks    [][]byte      // All chunks (protected by mu)
+	done      chan struct{} // Closed when stream completes
+	notifyCh  chan struct{} // Capacity 1 - signals new data available
+	err       error         // Final error (if any)
+	totalLen  int64         // Total bytes buffered (atomic access)
+	maxBytes  int64         // Maximum bytes to buffer (memory protection)
+	overflow  bool          // True if maxBytes exceeded
+	completed int32         // Atomic: 1 when stream done
 }
 
 const (
@@ -172,4 +172,20 @@ func (sb *streamBuffer) Err() error {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 	return sb.err
+}
+
+// GetAllRawBytes returns all buffered chunks as a single byte slice.
+// Thread-safe for concurrent access. Used for raw response logging.
+func (sb *streamBuffer) GetAllRawBytes() []byte {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+
+	// Pre-allocate with known total size
+	result := make([]byte, 0, sb.totalLen)
+	for _, chunk := range sb.chunks {
+		if chunk != nil {
+			result = append(result, chunk...)
+		}
+	}
+	return result
 }

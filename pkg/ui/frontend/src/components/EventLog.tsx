@@ -48,6 +48,11 @@ const getEventMessage = (event: Event): string => {
       return `Error: ${event.data?.error || 'Unknown error'}`;
     case 'request_completed':
       return 'Request completed successfully.';
+    case 'response_logged': {
+      const d = event.data;
+      const size = d?.size_bytes ? ` (${(d.size_bytes / 1024).toFixed(1)} KB)` : '';
+      return `Raw response logged${size}`;
+    }
     case 'loop_detected': {
       const d = event.data;
       const mode = d?.shadow_mode ? ' [shadow]' : '';
@@ -131,6 +136,8 @@ const getEventColor = (type: EventType): string => {
       return 'text-blue-400';
     case 'request_completed':
       return 'text-green-400';
+    case 'response_logged':
+      return 'text-cyan-400';
     case 'retry_attempt':
       return 'text-purple-400';
     case 'fallback_triggered':
@@ -195,6 +202,8 @@ const getEventTypeLabel = (type: EventType): string => {
       return 'REQUEST_STARTED';
     case 'request_completed':
       return 'REQUEST_COMPLETED';
+    case 'response_logged':
+      return 'RESPONSE_LOGGED';
     case 'retry_attempt':
       return 'RETRY_ATTEMPT';
     case 'error_max_upstream_error_retries':
@@ -346,6 +355,16 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
                       class="text-blue-400 hover:underline ml-1"
                     >
                       [View Request]
+                    </a>
+                  )}
+                  {event.type === 'response_logged' && event.data?.buffer_id && (
+                    <a
+                      href={`/fe/api/buffers/${event.data.buffer_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-blue-400 hover:underline ml-1"
+                    >
+                      [View Response]
                     </a>
                   )}
                 </span>

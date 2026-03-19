@@ -68,6 +68,10 @@ export interface AppConfig {
   tool_repair: ToolRepairConfig;
   ultimate_model: UltimateModelConfig;
   updated_at: string;
+  // Raw upstream response logging
+  log_raw_upstream_response?: boolean;
+  log_raw_upstream_on_error?: boolean;
+  log_raw_upstream_max_kb?: number;
   // Deprecated - kept for backward compatibility with older backend versions
   max_upstream_error_retries?: number;
   max_idle_retries?: number;
@@ -158,6 +162,7 @@ export interface RequestDetail extends Request {
 export type EventType =
   | 'request_started'
   | 'request_completed'
+  | 'response_logged'
   | 'retry_attempt'
   | 'error_max_upstream_error_retries'
   | 'timeout_idle'
@@ -246,6 +251,9 @@ export interface EventData {
   hash?: string;
   current_retry?: number;  // For ultimate_model_retry_exhausted event
   max_retries?: number;    // For ultimate_model_retry_exhausted event
+  // Response logging fields
+  request_body_id?: string; // Correlation ID for request body
+  size_bytes?: number;      // Size of logged response
   // Race retry fields (new)
   models?: string[];           // For race_started
   request_index?: number;      // For race_spawn

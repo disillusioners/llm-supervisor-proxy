@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -41,23 +42,23 @@ func NewConfigManager(store *Store, eventBus *events.Bus) (*ConfigManager, error
 
 // dbConfigRow represents a row from the configs table
 type dbConfigRow struct {
-	Version                 string
-	UpstreamURL             string
-	UpstreamCredentialID    string
-	Port                    int64
-	IdleTimeoutMs           int64
-	StreamDeadlineMs        int64
-	MaxGenerationTimeMs     int64
+	Version              string
+	UpstreamURL          string
+	UpstreamCredentialID string
+	Port                 int64
+	IdleTimeoutMs        int64
+	StreamDeadlineMs     int64
+	MaxGenerationTimeMs  int64
 
-	MaxStreamBufferSize     int64
-	LoopDetectionJSON       string
-	ToolRepairJSON          string
-	UltimateModelJSON       string
-	UpdatedAt               string
-	RaceRetryEnabled        interface{}
-	RaceParallelOnIdle      interface{}
-	RaceMaxParallel         int64
-	RaceMaxBufferBytes      int64
+	MaxStreamBufferSize int64
+	LoopDetectionJSON   string
+	ToolRepairJSON      string
+	UltimateModelJSON   string
+	UpdatedAt           string
+	RaceRetryEnabled    interface{}
+	RaceParallelOnIdle  interface{}
+	RaceMaxParallel     int64
+	RaceMaxBufferBytes  int64
 }
 
 // Load initializes configuration from database
@@ -146,89 +147,6 @@ func (m *ConfigManager) Load() error {
 	return nil
 }
 
-// Save persists configuration to database
-func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.readOnly {
-		return nil, fmt.Errorf("config is read-only")
-	}
-
-	// Merge incoming config with existing config to preserve fields not sent by frontend
-	merged := mergeConfig(m.cfg, cfg)
-
-	// Validate the merged config, not the partial incoming config
-	if err := merged.Validate(); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
-	}
-
-	result := &config.SaveResult{}
-	if m.cfg.Port != merged.Port {
-		result.RestartRequired = true
-		result.ChangedFields = append(result.ChangedFields, "port")
-	}
-
-	merged.Version = config.ConfigVersion
-	merged.UpdatedAt = time.Now().Format(time.RFC3339)
-
-	// Serialize loop detection
-	loopDetectionJSON, err := json.Marshal(merged.LoopDetection)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize loop detection: %w", err)
-	}
-
-	// Serialize tool repair
-	toolRepairJSON, err := json.Marshal(merged.ToolRepair)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize tool repair: %w", err)
-	}
-
-	// Serialize ultimate model
-	ultimateModelJSON, err := json.Marshal(merged.UltimateModel)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize ultimate model: %w", err)
-	}
-
-	// Update database using dialect-aware query
-	query := m.qb.UpdateConfig()
-	_, err = m.store.DB.ExecContext(context.Background(), query,
-		merged.Version,
-		merged.UpstreamURL,
-		merged.UpstreamCredentialID,
-		merged.Port,
-		time.Duration(merged.IdleTimeout).Milliseconds(),
-		time.Duration(merged.StreamDeadline).Milliseconds(),
-		time.Duration(merged.MaxGenerationTime).Milliseconds(),
-
-		merged.MaxStreamBufferSize,
-		string(loopDetectionJSON),
-		string(toolRepairJSON),
-		string(ultimateModelJSON),
-		merged.UpdatedAt,
-		m.qb.BooleanLiteral(merged.RaceRetryEnabled),
-		m.qb.BooleanLiteral(merged.RaceParallelOnIdle),
-		int64(merged.RaceMaxParallel),
-		int64(merged.RaceMaxBufferBytes),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to save config to database: %w", err)
-	}
-
-	m.cfg = merged
-
-	// Publish event if event bus is wired
-	if m.eventBus != nil {
-		m.eventBus.Publish(events.Event{
-			Type:      "config.updated",
-			Timestamp: time.Now().Unix(),
-			Data:      m.cfg,
-		})
-	}
-
-	return result, nil
-}
-
 // mergeConfig merges incoming config with existing config, preserving values
 // for fields that weren't sent by the frontend. The frontend sends either:
 // - Proxy settings only (no loop_detection)
@@ -291,6 +209,15 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// Ultimate model: check if ultimate model config was provided
 	if isUltimateModelProvided(incoming.UltimateModel) {
 		result.UltimateModel = incoming.UltimateModel
+	}
+
+	// Raw upstream response logging: check if any field was set
+	if incoming.LogRawUpstreamResponse || incoming.LogRawUpstreamOnError || incoming.LogRawUpstreamMaxKB != 0 {
+		result.LogRawUpstreamResponse = incoming.LogRawUpstreamResponse
+		result.LogRawUpstreamOnError = incoming.LogRawUpstreamOnError
+		if incoming.LogRawUpstreamMaxKB != 0 {
+			result.LogRawUpstreamMaxKB = incoming.LogRawUpstreamMaxKB
+		}
 	}
 
 	return result
@@ -411,8 +338,6 @@ func (m *ConfigManager) GetBufferMaxStorageMB() int {
 	return m.cfg.BufferMaxStorageMB
 }
 
-
-
 // GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses
 func (m *ConfigManager) GetSSEHeartbeatEnabled() bool {
 	m.mu.RLock()
@@ -474,6 +399,117 @@ func (m *ConfigManager) GetToolCallBufferMaxSize() int64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.ToolCallBufferMaxSize
+}
+
+// GetLogRawUpstreamResponse returns whether to log successful upstream responses
+func (m *ConfigManager) GetLogRawUpstreamResponse() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.LogRawUpstreamResponse
+}
+
+// GetLogRawUpstreamOnError returns whether to log failed/error upstream responses
+func (m *ConfigManager) GetLogRawUpstreamOnError() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.LogRawUpstreamOnError
+}
+
+// GetLogRawUpstreamMaxKB returns the max KB per response to log
+func (m *ConfigManager) GetLogRawUpstreamMaxKB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.LogRawUpstreamMaxKB
+}
+
+// Save persists configuration to database and updates in-memory state
+func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.readOnly {
+		return nil, errors.New("config is read-only")
+	}
+
+	// Merge incoming config with existing config to preserve fields not sent by frontend
+	merged := mergeConfig(m.cfg, cfg)
+
+	// Validate the merged config, not the partial incoming config
+	if err := merged.Validate(); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Detect changes that require restart
+	result := &config.SaveResult{}
+	if m.cfg.Port != merged.Port {
+		result.RestartRequired = true
+		result.ChangedFields = append(result.ChangedFields, "port")
+	}
+
+	// Set metadata
+	merged.Version = config.ConfigVersion
+	merged.UpdatedAt = time.Now().Format(time.RFC3339)
+
+	// Marshal nested configs to JSON
+	loopDetectionJSON, err := json.Marshal(merged.LoopDetection)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize loop detection: %w", err)
+	}
+	toolRepairJSON, err := json.Marshal(merged.ToolRepair)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize tool repair: %w", err)
+	}
+	ultimateModelJSON, err := json.Marshal(merged.UltimateModel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize ultimate model: %w", err)
+	}
+
+	// Convert durations to milliseconds
+	idleTimeoutMs := time.Duration(merged.IdleTimeout).Milliseconds()
+	streamDeadlineMs := time.Duration(merged.StreamDeadline).Milliseconds()
+	maxGenerationTimeMs := time.Duration(merged.MaxGenerationTime).Milliseconds()
+
+	// Update config in database using dialect-aware query
+	query := m.qb.UpdateConfig()
+	_, err = m.store.DB.ExecContext(context.Background(), query,
+		merged.Version,
+		merged.UpstreamURL,
+		merged.UpstreamCredentialID,
+		merged.Port,
+		idleTimeoutMs,
+		streamDeadlineMs,
+		maxGenerationTimeMs,
+		merged.MaxStreamBufferSize,
+		string(loopDetectionJSON),
+		string(toolRepairJSON),
+		string(ultimateModelJSON),
+		merged.UpdatedAt,
+		m.qb.BooleanLiteral(merged.SSEHeartbeatEnabled),
+		m.qb.BooleanLiteral(merged.RaceRetryEnabled),
+		m.qb.BooleanLiteral(merged.RaceParallelOnIdle),
+		merged.RaceMaxParallel,
+		merged.RaceMaxBufferBytes,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save config to database: %w", err)
+	}
+
+	// Apply environment variable overrides (env always wins)
+	merged = config.ApplyEnvOverrides(merged)
+
+	// Update in-memory config
+	m.cfg = merged
+
+	// Publish config update event if event bus is wired
+	if m.eventBus != nil {
+		m.eventBus.Publish(events.Event{
+			Type:      "config.updated",
+			Timestamp: time.Now().Unix(),
+			Data:      merged,
+		})
+	}
+
+	return result, nil
 }
 
 // IsReadOnly returns true if the config cannot be written

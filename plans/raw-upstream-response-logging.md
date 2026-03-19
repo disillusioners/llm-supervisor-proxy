@@ -299,22 +299,41 @@ Add Debug & Logging section:
 | Sensitive data | Document that raw responses may contain PII |
 | Concurrent access | BufferStore already has mutex; streamBuffer has RLock |
 
+## Limitations
+
+### Ultimate Model Responses Not Logged
+The ultimate model execution path (`pkg/ultimatemodel/handler.go`) writes directly to the `http.ResponseWriter` without using the buffering system. This means:
+
+- **Ultimate model responses are NOT captured** by this logging feature
+- To add ultimate model logging would require wrapping the ResponseWriter
+- This is intentional: ultimate model is a "raw proxy" bypass designed for minimal overhead
+
+### Coverage Summary
+
+| Request Path | Logs Success | Logs Error |
+|--------------|--------------|------------|
+| `streamResult` (streaming) | ✅ | ✅ |
+| `handleNonStreamResult` (non-streaming) | ✅ | ✅ |
+| Ultimate model | ❌ | ❌ |
+
 ## Todo List
 
 ### Backend:
-- [ ] Add config fields to `pkg/config/config.go` with defaults and validation
-- [ ] Add `GetAllRawBytes()` method to `pkg/proxy/stream_buffer.go`
-- [ ] Add `rawBody` to `requestContext` in `pkg/proxy/handler.go`
-- [ ] Add `saveRawResponse()` method to `pkg/proxy/handler.go`
-- [ ] Add call sites in `streamResult()` for success and error paths
-- [ ] Add call sites in `handleNonStreamResult()` for success and error paths
-- [ ] Run `go build ./...` to verify compilation
+- [x] Add config fields to `pkg/config/config.go` with defaults and validation
+- [x] Add `GetAllRawBytes()` method to `pkg/proxy/stream_buffer.go`
+- [x] Add `rawBody` to `requestContext` in `pkg/proxy/handler.go`
+- [x] Add `saveRawResponse()` method to `pkg/proxy/handler.go`
+- [x] Add call sites in `streamResult()` for success and error paths
+- [x] Add call sites in `handleNonStreamResult()` for success and error paths
+- [x] Add nil buffer check in `saveRawResponse()`
+- [x] Run `go build ./...` to verify compilation
 
 ### Frontend:
-- [ ] Add `response_logged` to event types in `pkg/ui/frontend/src/types.ts`
-- [ ] Handle `response_logged` in `pkg/ui/frontend/src/components/EventLog.tsx`
-- [ ] Add Debug & Logging section to `pkg/ui/frontend/src/components/Settings.tsx`
-- [ ] Run `npm run build` in frontend directory
+- [x] Add `response_logged` to event types in `pkg/ui/frontend/src/types.ts`
+- [x] Handle `response_logged` in `pkg/ui/frontend/src/components/EventLog.tsx`
+- [x] Add Debug & Logging section to `pkg/ui/frontend/src/components/ProxySettings.tsx`
+- [x] Add state management to `pkg/ui/frontend/src/components/SettingsPage.tsx`
+- [x] Run `npm run build` in frontend directory
 
 ### Testing:
 - [ ] Test with logging disabled (default) - no events, no files

@@ -84,6 +84,10 @@ export function SettingsPage({
   const [ultimateModelId, setUltimateModelId] = useState('');
   const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
   const [ultimateModelMaxRetries, setUltimateModelMaxRetries] = useState(2);
+  // Raw response logging state
+  const [logRawUpstreamResponse, setLogRawUpstreamResponse] = useState(false);
+  const [logRawUpstreamOnError, setLogRawUpstreamOnError] = useState(false);
+  const [logRawUpstreamMaxKB, setLogRawUpstreamMaxKB] = useState(1024);
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -115,6 +119,10 @@ export function SettingsPage({
       setUltimateModelId(config.ultimate_model?.model_id || '');
       setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
       setUltimateModelMaxRetries(config.ultimate_model?.max_retries ?? 2);
+      // Raw response logging sync
+      setLogRawUpstreamResponse(config.log_raw_upstream_response ?? false);
+      setLogRawUpstreamOnError(config.log_raw_upstream_on_error ?? false);
+      setLogRawUpstreamMaxKB(config.log_raw_upstream_max_kb ?? 1024);
     }
   }, [config]);
 
@@ -152,6 +160,10 @@ export function SettingsPage({
           max_hash: ultimateModelMaxHash,
           max_retries: ultimateModelMaxRetries,
         },
+        // Raw response logging
+        log_raw_upstream_response: logRawUpstreamResponse,
+        log_raw_upstream_on_error: logRawUpstreamOnError,
+        log_raw_upstream_max_kb: logRawUpstreamMaxKB,
       });
 
       // Show success message, and also show restart warning if required
@@ -342,6 +354,9 @@ export function SettingsPage({
               ultimateModelId={ultimateModelId}
               ultimateModelMaxHash={ultimateModelMaxHash}
               ultimateModelMaxRetries={ultimateModelMaxRetries}
+              logRawUpstreamResponse={logRawUpstreamResponse}
+              logRawUpstreamOnError={logRawUpstreamOnError}
+              logRawUpstreamMaxKB={logRawUpstreamMaxKB}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
@@ -355,6 +370,9 @@ export function SettingsPage({
               onUltimateModelIdChange={setUltimateModelId}
               onUltimateModelMaxHashChange={setUltimateModelMaxHash}
               onUltimateModelMaxRetriesChange={setUltimateModelMaxRetries}
+              onLogRawUpstreamResponseChange={setLogRawUpstreamResponse}
+              onLogRawUpstreamOnErrorChange={setLogRawUpstreamOnError}
+              onLogRawUpstreamMaxKBChange={setLogRawUpstreamMaxKB}
               onApply={handleApplyProxy}
               setStatus={setStatusWrapper}
             />
