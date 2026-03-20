@@ -19,8 +19,17 @@ const (
 	ErrorCodeUnavailable = "unavailable"
 )
 
-// OpenCodeErrorResponse is the OpenCode-compatible error format
-type OpenCodeErrorResponse struct {
+// OpenAIErrorResponse is the OpenAI-compatible error format.
+// Used for OpenAI endpoint responses.
+// Format: {"error": {"type": "...", "code": "...", "message": "..."}}
+type OpenAIErrorResponse struct {
+	Error ErrorDetails `json:"error"`
+}
+
+// AnthropicErrorResponse is the Anthropic-compatible error format.
+// Used for Anthropic endpoint responses (HTTP errors, not SSE).
+// Format: {"type": "error", "error": {"type": "...", "message": "..."}}
+type AnthropicErrorResponse struct {
 	Type  string       `json:"type"` // Always "error"
 	Error ErrorDetails `json:"error"`
 }
@@ -31,9 +40,22 @@ type ErrorDetails struct {
 	Message string `json:"message"`
 }
 
-// NewOpenCodeError creates a new OpenCode-compatible error response
-func NewOpenCodeError(errorType, code, message string) OpenCodeErrorResponse {
-	return OpenCodeErrorResponse{
+// NewOpenAIError creates a new OpenAI-compatible error response.
+// OpenAI format has NO "type" field at root level.
+func NewOpenAIError(errorType, code, message string) OpenAIErrorResponse {
+	return OpenAIErrorResponse{
+		Error: ErrorDetails{
+			Type:    errorType,
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+// NewAnthropicError creates a new Anthropic-compatible error response.
+// Anthropic format HAS "type": "error" at root level.
+func NewAnthropicError(errorType, code, message string) AnthropicErrorResponse {
+	return AnthropicErrorResponse{
 		Type: "error",
 		Error: ErrorDetails{
 			Type:    errorType,
@@ -42,6 +64,13 @@ func NewOpenCodeError(errorType, code, message string) OpenCodeErrorResponse {
 		},
 	}
 }
+
+// Backward compatibility aliases
+// Deprecated: Use NewOpenAIError instead for OpenAI endpoint
+var NewOpenCodeError = NewOpenAIError
+
+// Deprecated: Use OpenAIErrorResponse instead for OpenAI endpoint
+type OpenCodeErrorResponse = OpenAIErrorResponse
 
 // IsContextOverflowError checks if an error indicates context window overflow.
 // OpenCode checks these patterns BEFORE retry logic to trigger compaction instead.

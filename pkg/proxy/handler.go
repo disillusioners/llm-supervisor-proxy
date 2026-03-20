@@ -283,28 +283,29 @@ func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 func (h *Handler) sendAuthError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(models.NewOpenCodeError(
+	json.NewEncoder(w).Encode(models.NewOpenAIError(
 		models.ErrorTypeAuthenticationError,
 		"",
 		"Invalid or expired API key",
 	))
 }
 
-// sendError sends a JSON error response in OpenCode-compatible format
+// sendError sends a JSON error response in OpenAI-compatible format
 func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, errorCode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(models.NewOpenCodeError(errType, errorCode, message))
+	json.NewEncoder(w).Encode(models.NewOpenAIError(errType, errorCode, message))
 }
 
 // sendSSEError sends an error as an SSE event to the client.
 // This is used when a streaming error occurs after headers have been sent,
 // so we can't send a regular HTTP error response.
+// OpenAI format: data: {"error":{"type":"...","message":"..."}}
 func (h *Handler) sendSSEError(w http.ResponseWriter, errType, message string) {
-	errResp := models.NewOpenCodeError(errType, "", message)
+	errResp := models.NewOpenAIError(errType, "", message)
 	data, _ := json.Marshal(errResp)
-	errorEvent := fmt.Sprintf("event: error\ndata: %s\n\n", string(data))
-	w.Write([]byte(errorEvent))
+	// OpenAI streaming error format: just data, no custom event type
+	fmt.Fprintf(w, "data: %s\n\n", string(data))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -680,8 +681,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					}
 				}
 
-				// Send OpenCode-compatible error response
-				errResp := models.NewOpenCodeError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
+				// Send OpenAI-compatible error response
+				errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
 				data, _ := json.Marshal(errResp)
 				fmt.Fprintf(w, "data: %s\n\n", string(data))
 				if flusher != nil {
@@ -811,7 +812,7 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		errResp := models.NewOpenCodeError(models.ErrorTypeUpstreamError, "", fmt.Sprintf("Upstream error: %v", err))
+		errResp := models.NewOpenAIError(models.ErrorTypeUpstreamError, "", fmt.Sprintf("Upstream error: %v", err))
 		data, _ := json.Marshal(errResp)
 		w.Write(data)
 		return

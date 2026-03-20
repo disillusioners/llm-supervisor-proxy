@@ -144,7 +144,7 @@ test_streaming() {
     echo -e "\n${YELLOW}Duration: ${duration}s${NC}"
 }
 
-# Function to test error response and verify OpenCode-compatible format
+# Function to test error response and verify OpenAI-compatible format
 test_error_response() {
     local test_name="$1"
     local prompt="$2"
@@ -185,18 +185,26 @@ test_error_response() {
     echo "$response"
     echo ""
     
-    # Verify OpenCode-compatible error format
+    # Verify OpenAI-compatible error format
     local success=true
     
-    # Check for type:"error" at root level
-    if echo "$response" | grep -q '"type":"error"'; then
-        echo -e "${GREEN}✓ Has root type:\"error\"${NC}"
+    # Check for "error" object at root level (OpenAI format)
+    if echo "$response" | grep -q '"error":{'; then
+        echo -e "${GREEN}✓ Has \"error\" object at root (OpenAI format)${NC}"
     else
-        echo -e "${RED}✗ Missing root type:\"error\"${NC}"
+        echo -e "${RED}✗ Missing \"error\" object at root${NC}"
         success=false
     fi
     
-    # Check for expected error.type
+    # Should NOT have "type":"error" at root for OpenAI endpoint
+    if echo "$response" | grep -q '"type":"error"'; then
+        echo -e "${RED}✗ Has wrong \"type\":\"error\" at root (Anthropic format, not OpenAI)${NC}"
+        success=false
+    else
+        echo -e "${GREEN}✓ No \"type\":\"error\" at root (correct OpenAI format)${NC}"
+    fi
+    
+    # Check for expected error.type inside error object
     if echo "$response" | grep -q "\"type\":\"$expected_type\""; then
         echo -e "${GREEN}✓ Has error.type:\"$expected_type\"${NC}"
     else
@@ -216,7 +224,7 @@ test_error_response() {
     
     # Return test result
     if [ "$success" = "true" ]; then
-        echo -e "${GREEN}✓ PASS: OpenCode-compatible error format verified${NC}"
+        echo -e "${GREEN}✓ PASS: OpenAI-compatible error format verified${NC}"
         return 0
     else
         echo -e "${RED}✗ FAIL: Error format mismatch${NC}"
@@ -272,10 +280,10 @@ echo -e ""
 echo -e "  ${YELLOW}Streaming Deadline Test:${NC}"
 echo -e "    Look for: [RACE] Streaming deadline reached, picking best buffer"
 echo -e ""
-echo -e "  ${YELLOW}OpenCode Error Format Tests:${NC}"
-echo -e "    ✓ Rate Limit: type:\"rate_limit\", code:\"rate_limit\""
-echo -e "    ✓ Context Overflow: type:\"context_length_exceeded\" (no code)"
-echo -e "    ✓ Upstream Unavailable: type:\"upstream_error\", code:\"unavailable\""
+echo -e "  ${YELLOW}OpenAI Error Format Tests:${NC}"
+echo -e "    ✓ Rate Limit: {\"error\":{\"type\":\"rate_limit\",\"code\":\"rate_limit\"}}"
+echo -e "    ✓ Context Overflow: {\"error\":{\"type\":\"context_length_exceeded\"}}"
+echo -e "    ✓ Upstream Unavailable: {\"error\":{\"type\":\"upstream_error\",\"code\":\"unavailable\"}}"
 echo -e ""
 echo -e "${GREEN}If you see these log messages, the features are working correctly!${NC}"
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestNewOpenCodeError(t *testing.T) {
+func TestNewOpenAIError(t *testing.T) {
 	tests := []struct {
 		name      string
 		errorType string
@@ -41,8 +41,50 @@ func TestNewOpenCodeError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := NewOpenCodeError(tt.errorType, tt.code, tt.message)
+			err := NewOpenAIError(tt.errorType, tt.code, tt.message)
 
+			// OpenAI format does NOT have Type at root
+			if err.Error.Type != tt.errorType {
+				t.Errorf("Expected Error.Type to be '%s', got '%s'", tt.errorType, err.Error.Type)
+			}
+
+			if err.Error.Message != tt.message {
+				t.Errorf("Expected Error.Message to be '%s', got '%s'", tt.message, err.Error.Message)
+			}
+
+			if err.Error.Code != tt.code {
+				t.Errorf("Expected Error.Code to be '%s', got '%s'", tt.code, err.Error.Code)
+			}
+		})
+	}
+}
+
+func TestNewAnthropicError(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorType string
+		code      string
+		message   string
+	}{
+		{
+			name:      "rate limit error with code",
+			errorType: ErrorTypeRateLimit,
+			code:      ErrorCodeRateLimit,
+			message:   "All models rate limited",
+		},
+		{
+			name:      "error without code",
+			errorType: ErrorTypeUpstreamError,
+			code:      "",
+			message:   "Upstream connection failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := NewAnthropicError(tt.errorType, tt.code, tt.message)
+
+			// Anthropic format HAS Type at root
 			if err.Type != "error" {
 				t.Errorf("Expected Type to be 'error', got '%s'", err.Type)
 			}
@@ -62,8 +104,8 @@ func TestNewOpenCodeError(t *testing.T) {
 	}
 }
 
-func TestOpenCodeErrorResponseJSON(t *testing.T) {
-	errResp := NewOpenCodeError(
+func TestOpenAIErrorResponseJSON(t *testing.T) {
+	errResp := NewOpenAIError(
 		ErrorTypeRateLimit,
 		ErrorCodeRateLimit,
 		"All models rate limited",
@@ -76,12 +118,17 @@ func TestOpenCodeErrorResponseJSON(t *testing.T) {
 
 	jsonStr := string(data)
 
-	// Must have type:"error" at root
-	if !contains(jsonStr, `"type":"error"`) {
-		t.Errorf("Expected JSON to contain '\"type\":\"error\"' at root, got: %s", jsonStr)
+	// OpenAI format: NO "type":"error" at root level
+	if contains(jsonStr, `"type":"error"`) {
+		t.Errorf("OpenAI format should NOT have '\"type\":\"error\"' at root, got: %s", jsonStr)
 	}
 
-	// Must have error.type
+	// Must have error object at root
+	if !contains(jsonStr, `"error":{`) {
+		t.Errorf("Expected JSON to contain '\"error\":{' at root, got: %s", jsonStr)
+	}
+
+	// Must have error.type inside error object
 	if !contains(jsonStr, `"type":"rate_limit"`) {
 		t.Errorf("Expected JSON to contain '\"type\":\"rate_limit\"', got: %s", jsonStr)
 	}
@@ -97,8 +144,48 @@ func TestOpenCodeErrorResponseJSON(t *testing.T) {
 	}
 }
 
-func TestOpenCodeErrorWithoutCode(t *testing.T) {
-	errResp := NewOpenCodeError(
+func TestAnthropicErrorResponseJSON(t *testing.T) {
+	errResp := NewAnthropicError(
+		ErrorTypeRateLimit,
+		ErrorCodeRateLimit,
+		"All models rate limited",
+	)
+
+	data, err := json.Marshal(errResp)
+	if err != nil {
+		t.Fatalf("Failed to marshal error: %v", err)
+	}
+
+	jsonStr := string(data)
+
+	// Anthropic format: HAS "type":"error" at root level
+	if !contains(jsonStr, `"type":"error"`) {
+		t.Errorf("Anthropic format should have '\"type\":\"error\"' at root, got: %s", jsonStr)
+	}
+
+	// Must have error object
+	if !contains(jsonStr, `"error":{`) {
+		t.Errorf("Expected JSON to contain '\"error\":{', got: %s", jsonStr)
+	}
+
+	// Must have error.type inside error object
+	if !contains(jsonStr, `"type":"rate_limit"`) {
+		t.Errorf("Expected JSON to contain '\"type\":\"rate_limit\"', got: %s", jsonStr)
+	}
+
+	// Must have error.code for retry detection
+	if !contains(jsonStr, `"code":"rate_limit"`) {
+		t.Errorf("Expected JSON to contain '\"code\":\"rate_limit\"', got: %s", jsonStr)
+	}
+
+	// Must have message
+	if !contains(jsonStr, `"message":"All models rate limited"`) {
+		t.Errorf("Expected JSON to contain message, got: %s", jsonStr)
+	}
+}
+
+func TestOpenAIErrorWithoutCode(t *testing.T) {
+	errResp := NewOpenAIError(
 		ErrorTypeUpstreamError,
 		"", // No code
 		"Connection failed",
@@ -111,12 +198,42 @@ func TestOpenCodeErrorWithoutCode(t *testing.T) {
 
 	jsonStr := string(data)
 
-	// Should have type:"error" at root
-	if !contains(jsonStr, `"type":"error"`) {
-		t.Errorf("Expected JSON to contain '\"type\":\"error\"' at root, got: %s", jsonStr)
+	// OpenAI format: NO type:"error" at root
+	if contains(jsonStr, `"type":"error"`) {
+		t.Errorf("OpenAI format should NOT have '\"type\":\"error\"' at root, got: %s", jsonStr)
 	}
 
-	// Should have error.type
+	// Should have error.type inside error object
+	if !contains(jsonStr, `"type":"upstream_error"`) {
+		t.Errorf("Expected JSON to contain '\"type\":\"upstream_error\"', got: %s", jsonStr)
+	}
+
+	// Code field should be omitted when empty (omitempty)
+	if contains(jsonStr, `"code":""`) {
+		t.Errorf("Expected empty code to be omitted, got: %s", jsonStr)
+	}
+}
+
+func TestAnthropicErrorWithoutCode(t *testing.T) {
+	errResp := NewAnthropicError(
+		ErrorTypeUpstreamError,
+		"", // No code
+		"Connection failed",
+	)
+
+	data, err := json.Marshal(errResp)
+	if err != nil {
+		t.Fatalf("Failed to marshal error: %v", err)
+	}
+
+	jsonStr := string(data)
+
+	// Anthropic format: HAS type:"error" at root
+	if !contains(jsonStr, `"type":"error"`) {
+		t.Errorf("Anthropic format should have '\"type\":\"error\"' at root, got: %s", jsonStr)
+	}
+
+	// Should have error.type inside error object
 	if !contains(jsonStr, `"type":"upstream_error"`) {
 		t.Errorf("Expected JSON to contain '\"type\":\"upstream_error\"', got: %s", jsonStr)
 	}

@@ -123,8 +123,8 @@ func (a *OpenAIAdapter) SetStreamHeaders(w http.ResponseWriter) {
 func (a *OpenAIAdapter) WriteError(w http.ResponseWriter, errorType, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
+	// OpenAI format: NO "type" at root level
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"type": "error",
 		"error": map[string]string{
 			"type":    errorType,
 			"message": message,
@@ -138,8 +138,8 @@ func (a *OpenAIAdapter) WriteStreamError(w http.ResponseWriter, errorType, messa
 
 // WriteStreamErrorWithCode sends a streaming error with optional code field
 func (a *OpenAIAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorType, code, message string) {
+	// OpenAI format: NO "type" at root level
 	errorResp := map[string]interface{}{
-		"type": "error",
 		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
@@ -159,8 +159,8 @@ func (a *OpenAIAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorTyp
 func (a *OpenAIAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, code, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
+	// OpenAI format: NO "type" at root level
 	errorResp := map[string]interface{}{
-		"type": "error",
 		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
