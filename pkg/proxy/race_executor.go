@@ -604,8 +604,8 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 
 // handleNonStreamingResponse reads a non-streaming JSON response
 func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest) error {
-	// Read entire body
-	body, err := io.ReadAll(resp.Body)
+	// Limit body size to 10MB to prevent unbounded memory consumption
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return fmt.Errorf("read error: %w", err)
 	}

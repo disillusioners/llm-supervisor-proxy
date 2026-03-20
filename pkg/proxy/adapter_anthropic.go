@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
@@ -238,13 +239,15 @@ func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessa
 			content = c
 		case []interface{}:
 			// Extract text from content blocks
+			var sb strings.Builder
 			for _, block := range c {
 				if bm, ok := block.(map[string]interface{}); ok {
 					if t, ok := bm["text"].(string); ok {
-						content += t
+						sb.WriteString(t)
 					}
 				}
 			}
+			content = sb.String()
 		}
 		result = append(result, store.Message{
 			Role:    msg.Role,

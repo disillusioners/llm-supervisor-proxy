@@ -5,6 +5,7 @@ package translator
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // TranslateRequest translates an Anthropic request to OpenAI format.
@@ -210,19 +211,19 @@ func translateContent(content interface{}) interface{} {
 		}
 
 		// Text-only content - flatten to string
-		var result string
+		var sb strings.Builder
 		for _, block := range c {
 			if translated := translateContentBlock(block); translated != nil {
 				if textObj, ok := translated.(map[string]interface{}); ok {
 					if textObj["type"] == "text" {
 						if text, ok := textObj["text"].(string); ok {
-							result += text
+							sb.WriteString(text)
 						}
 					}
 				}
 			}
 		}
-		return result
+		return sb.String()
 
 	case []ContentBlock:
 		// Check if we have multimodal content (images, etc.)
@@ -251,7 +252,7 @@ func translateContent(content interface{}) interface{} {
 		}
 
 		// Text-only content - flatten to string
-		var result string
+		var sb strings.Builder
 		for _, block := range c {
 			if block.Type == "tool_result" {
 				continue
@@ -260,13 +261,13 @@ func translateContent(content interface{}) interface{} {
 				if textObj, ok := translated.(map[string]interface{}); ok {
 					if textObj["type"] == "text" {
 						if text, ok := textObj["text"].(string); ok {
-							result += text
+							sb.WriteString(text)
 						}
 					}
 				}
 			}
 		}
-		return result
+		return sb.String()
 
 	default:
 		return fmt.Sprintf("%v", c)
@@ -303,13 +304,15 @@ func extractToolResults(content interface{}) []toolResultInfo {
 						tr.Content = contentStr
 					} else if contentArr, ok := bm["content"].([]interface{}); ok {
 						// Content can be array of text blocks
+						var sb strings.Builder
 						for _, item := range contentArr {
 							if itemMap, ok := item.(map[string]interface{}); ok {
 								if text, ok := itemMap["text"].(string); ok {
-									tr.Content += text
+									sb.WriteString(text)
 								}
 							}
 						}
+						tr.Content = sb.String()
 					}
 					results = append(results, tr)
 				}
@@ -325,13 +328,15 @@ func extractToolResults(content interface{}) []toolResultInfo {
 				case string:
 					tr.Content = cont
 				case []interface{}:
+					var sb strings.Builder
 					for _, item := range cont {
 						if itemMap, ok := item.(map[string]interface{}); ok {
 							if text, ok := itemMap["text"].(string); ok {
-								tr.Content += text
+								sb.WriteString(text)
 							}
 						}
 					}
+					tr.Content = sb.String()
 				}
 				results = append(results, tr)
 			}
@@ -343,7 +348,7 @@ func extractToolResults(content interface{}) []toolResultInfo {
 
 // extractNonToolResultContent extracts text content that is NOT tool_result
 func extractNonToolResultContent(content interface{}) string {
-	var result string
+	var sb strings.Builder
 
 	switch c := content.(type) {
 	case string:
@@ -355,7 +360,7 @@ func extractNonToolResultContent(content interface{}) string {
 					// Only extract text blocks, skip tool_result
 					if blockType == "text" {
 						if text, ok := bm["text"].(string); ok {
-							result += text
+							sb.WriteString(text)
 						}
 					}
 				}
@@ -364,12 +369,12 @@ func extractNonToolResultContent(content interface{}) string {
 	case []ContentBlock:
 		for _, block := range c {
 			if block.Type == "text" {
-				result += block.Text
+				sb.WriteString(block.Text)
 			}
 		}
 	}
 
-	return result
+	return sb.String()
 }
 
 // extractToolUses extracts all tool_use blocks from content
@@ -420,7 +425,7 @@ func extractToolUses(content interface{}) []toolUseInfo {
 
 // extractTextContentOnly extracts only text content, excluding tool_use and tool_result
 func extractTextContentOnly(content interface{}) string {
-	var result string
+	var sb strings.Builder
 
 	switch c := content.(type) {
 	case string:
@@ -430,7 +435,7 @@ func extractTextContentOnly(content interface{}) string {
 			if bm, ok := block.(map[string]interface{}); ok {
 				if blockType, ok := bm["type"].(string); ok && blockType == "text" {
 					if text, ok := bm["text"].(string); ok {
-						result += text
+						sb.WriteString(text)
 					}
 				}
 			}
@@ -438,12 +443,12 @@ func extractTextContentOnly(content interface{}) string {
 	case []ContentBlock:
 		for _, block := range c {
 			if block.Type == "text" {
-				result += block.Text
+				sb.WriteString(block.Text)
 			}
 		}
 	}
 
-	return result
+	return sb.String()
 }
 
 // translateContentBlock translates a single content block from Anthropic to OpenAI format.
@@ -597,17 +602,21 @@ func translateToolResultInMessage(toolResult ContentBlock) map[string]interface{
 		content = c
 	case []interface{}:
 		// Array of content blocks - extract text
+		var sb strings.Builder
 		for _, item := range c {
 			if textBlock, ok := item.(map[string]interface{}); ok {
 				if text, ok := textBlock["text"].(string); ok {
-					content += text
+					sb.WriteString(text)
 				}
 			}
 		}
+		content = sb.String()
 	case []ContentBlock:
+		var sb strings.Builder
 		for _, block := range c {
-			content += block.Text
+			sb.WriteString(block.Text)
 		}
+		content = sb.String()
 	default:
 		content = fmt.Sprintf("%v", toolResult.Content)
 	}
@@ -666,27 +675,27 @@ func TranslateSystem(system interface{}) string {
 
 	case []interface{}:
 		// Array of content blocks - flatten to single string
-		var result string
+		var sb strings.Builder
 		for _, item := range s {
 			switch item := item.(type) {
 			case string:
-				result += item
+				sb.WriteString(item)
 			case map[string]interface{}:
 				if text, ok := item["text"].(string); ok {
-					result += text
+					sb.WriteString(text)
 				}
 			case ContentBlock:
-				result += item.Text
+				sb.WriteString(item.Text)
 			}
 		}
-		return result
+		return sb.String()
 
 	case []ContentBlock:
-		var result string
+		var sb strings.Builder
 		for _, block := range s {
-			result += block.Text
+			sb.WriteString(block.Text)
 		}
-		return result
+		return sb.String()
 
 	default:
 		return fmt.Sprintf("%v", system)

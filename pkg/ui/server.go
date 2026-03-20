@@ -711,13 +711,15 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 			responseText = c
 		case []interface{}:
 			// Flatten array content to string
+			var sb strings.Builder
 			for _, part := range c {
 				if partMap, ok := part.(map[string]interface{}); ok {
 					if text, ok := partMap["text"].(string); ok {
-						responseText += text
+						sb.WriteString(text)
 					}
 				}
 			}
+			responseText = sb.String()
 		}
 	}
 

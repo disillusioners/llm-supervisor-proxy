@@ -14,8 +14,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // requestContext holds all mutable state for a single request lifecycle.
 // It is passed through the sub-functions to avoid huge parameter lists.
@@ -80,8 +78,6 @@ type requestContext struct {
 	streamingNonRetryable bool
 }
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helper functions (no Handler receiver)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,13 +121,15 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 					content = c
 				case []interface{}:
 					// Flatten array content to string for storage
+					var sb strings.Builder
 					for _, part := range c {
 						if partMap, ok := part.(map[string]interface{}); ok {
 							if text, ok := partMap["text"].(string); ok {
-								content += text
+								sb.WriteString(text)
 							}
 						}
 					}
+					content = sb.String()
 				}
 
 				// Extract tool_calls if present (for assistant messages)
@@ -439,8 +437,6 @@ func normalizeStreamChunk(data []byte, rc *requestContext) []byte {
 	}
 	return normalized
 }
-
-
 
 // extractToolCallActions extracts tool call actions from an SSE chunk's raw JSON.
 // Returns nil if no tool_calls are present in the chunk.

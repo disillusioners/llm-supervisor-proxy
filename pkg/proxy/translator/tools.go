@@ -4,6 +4,7 @@ package translator
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,11 +216,11 @@ func extractTextFromBlocks(blocks []ContentBlock) string {
 		return ""
 	}
 
-	var text string
+	var sb strings.Builder
 	for _, block := range blocks {
 		if block.Type == "text" {
-			text += block.Text
+			sb.WriteString(block.Text)
 		}
 	}
-	return text
+	return sb.String()
 }

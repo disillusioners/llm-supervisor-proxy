@@ -219,7 +219,7 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 	} else {
 		success = h.doAnthropicRequest(w, arc, currentModel)
 	}
-	
+
 	return success
 }
 
@@ -420,7 +420,7 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 
 // handleAnthropicNonStreamResponse handles a non-streaming response
 func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		log.Printf("Failed to read Anthropic upstream response: %v", err)
 		return false
@@ -730,13 +730,15 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 			content = c
 		case []interface{}:
 			// Extract text from content blocks
+			var sb strings.Builder
 			for _, block := range c {
 				if bm, ok := block.(map[string]interface{}); ok {
 					if t, ok := bm["text"].(string); ok {
-						content += t
+						sb.WriteString(t)
 					}
 				}
 			}
+			content = sb.String()
 		}
 		result = append(result, store.Message{
 			Role:    msg.Role,

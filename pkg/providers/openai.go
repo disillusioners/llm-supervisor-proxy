@@ -200,7 +200,8 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 // handleError converts HTTP error response to ProviderError
 // If bufferStore is configured, saves the request to a file for debugging
 func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionRequest) *ProviderError {
-	body, _ := io.ReadAll(resp.Body)
+	// Limit body size to 10MB to prevent unbounded memory consumption
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 
 	var apiErr struct {
 		Error struct {
@@ -263,6 +264,7 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 
 	// Accumulate tool calls during streaming (index -> accumulated data)
 	accumulatedToolCalls := make(map[int]*ToolCall)
+	argumentsBuilders := make(map[int]*strings.Builder)
 
 	// sendDoneEvent sends the done event with the final response
 	// This is called when we see [DONE] or when stream ends with a finish_reason
@@ -274,6 +276,13 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				if lastResponse.Choices[0].Message == nil {
 					lastResponse.Choices[0].Message = &ChatMessage{
 						Role: "assistant",
+					}
+				}
+
+				// Extract built argument strings before copying
+				for idx, sb := range argumentsBuilders {
+					if tc, ok := accumulatedToolCalls[idx]; ok {
+						tc.Function.Arguments = sb.String()
 					}
 				}
 
@@ -412,7 +421,10 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 							accumulatedToolCalls[index].Function.Name = tc.Function.Name
 						}
 						if tc.Function.Arguments != "" {
-							accumulatedToolCalls[index].Function.Arguments += tc.Function.Arguments
+							if argumentsBuilders[index] == nil {
+								argumentsBuilders[index] = &strings.Builder{}
+							}
+							argumentsBuilders[index].WriteString(tc.Function.Arguments)
 						}
 					}
 
