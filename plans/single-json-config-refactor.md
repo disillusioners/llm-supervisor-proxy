@@ -21,6 +21,38 @@ updated_at
 loop_detection_json, tool_repair_json, ultimate_model_json
 ```
 
+### Complete Config Struct Fields
+
+The [`Config`](pkg/config/config.go:65) struct contains all fields that should be stored in JSON. Note that some fields are currently **missing** from the database schema:
+
+| Field | JSON Key | Currently in DB | Notes |
+|-------|----------|-----------------|-------|
+| `Version` | `version` | ✅ Yes | |
+| `UpstreamURL` | `upstream_url` | ✅ Yes | |
+| `UpstreamCredentialID` | `upstream_credential_id` | ✅ Yes | |
+| `Port` | `port` | ✅ Yes | |
+| `IdleTimeout` | `idle_timeout` | ✅ Yes (as ms) | Will use duration format |
+| `StreamDeadline` | `stream_deadline` | ✅ Yes (as ms) | Will use duration format |
+| `MaxGenerationTime` | `max_generation_time` | ✅ Yes (as ms) | Will use duration format |
+| `MaxStreamBufferSize` | `max_stream_buffer_size` | ✅ Yes | |
+| `BufferStorageDir` | `buffer_storage_dir` | ❌ **Missing** | ENV-only currently |
+| `BufferMaxStorageMB` | `buffer_max_storage_mb` | ❌ **Missing** | ENV-only currently |
+| `SSEHeartbeatEnabled` | `sse_heartbeat_enabled` | ✅ Yes | |
+| `LoopDetection` | `loop_detection` | ✅ Yes (JSON) | |
+| `ToolRepair` | `tool_repair` | ✅ Yes (JSON) | |
+| `UltimateModel` | `ultimate_model` | ✅ Yes (JSON) | |
+| `RaceRetryEnabled` | `race_retry_enabled` | ✅ Yes | |
+| `RaceParallelOnIdle` | `race_parallel_on_idle` | ✅ Yes | |
+| `RaceMaxParallel` | `race_max_parallel` | ✅ Yes | |
+| `RaceMaxBufferBytes` | `race_max_buffer_bytes` | ✅ Yes | |
+| `ToolCallBufferDisabled` | `tool_call_buffer_disabled` | ❌ **Missing** | ENV-only currently |
+| `ToolCallBufferMaxSize` | `tool_call_buffer_max_size` | ❌ **Missing** | ENV-only currently |
+| `LogRawUpstreamResponse` | `log_raw_upstream_response` | ✅ Yes | |
+| `LogRawUpstreamOnError` | `log_raw_upstream_on_error` | ✅ Yes | |
+| `LogRawUpstreamMaxKB` | `log_raw_upstream_max_kb` | ✅ Yes | |
+
+**Benefit of JSON approach**: The 5 missing fields will automatically be included without requiring a migration.
+
 ## Proposed Solution
 
 Replace all individual columns with a **single `config_json` column** that stores the entire configuration as JSON.
@@ -99,6 +131,18 @@ CREATE TABLE configs (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 ```
+
+> ⚠️ **IMPORTANT: Data Loss Warning**
+>
+> This migration uses `DROP TABLE` which will **destroy all existing configuration**. This is acceptable because:
+> - The project has not yet reached production release
+> - Early adopters can reconfigure via the UI after migration
+> - ENV variables can be used to restore critical settings
+>
+> **Before production release**, this migration should be replaced with a data-preserving approach that:
+> 1. Reads existing column values
+> 2. Marshals them to JSON format
+> 3. Inserts into the new `config_json` column
 
 ### Phase 2: Code Refactoring
 
@@ -190,13 +234,154 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 }
 ```
 
-#### Task 2.5: Remove merge functions
-Delete the complex `mergeConfig()`, `isLoopDetectionProvided()`, `isToolRepairProvided()`, etc. functions since the frontend will send complete config objects.
+#### Task 2.5: Handle Frontend Partial Updates
+
+**Current Frontend Behavior:**
+The frontend currently sends partial config objects:
+- Proxy settings page sends: `upstream_url`, `port`, timeouts, race_retry fields (no `loop_detection`)
+- Loop detection page sends: `loop_detection` object only (no proxy settings)
+- Tool repair page sends: `tool_repair` object only
+
+**Solution: Keep Merge Logic (Simplified)**
+
+Since the frontend sends partial configs, we need to merge with existing config. However, the JSON approach simplifies this:
+
+```go
+// Save persists configuration to database
+func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    // Start with existing config (already loaded from DB)
+    merged := m.cfg
+
+    // Merge non-zero fields from incoming config
+    if cfg.UpstreamURL != "" {
+        merged.UpstreamURL = cfg.UpstreamURL
+    }
+    if cfg.Port != 0 {
+        merged.Port = cfg.Port
+    }
+    if cfg.IdleTimeout != 0 {
+        merged.IdleTimeout = cfg.IdleTimeout
+    }
+    if cfg.StreamDeadline != 0 {
+        merged.StreamDeadline = cfg.StreamDeadline
+    }
+    if cfg.MaxGenerationTime != 0 {
+        merged.MaxGenerationTime = cfg.MaxGenerationTime
+    }
+    if cfg.MaxStreamBufferSize != 0 {
+        merged.MaxStreamBufferSize = cfg.MaxStreamBufferSize
+    }
+    
+    // Boolean fields: always update (false is a valid value)
+    merged.SSEHeartbeatEnabled = cfg.SSEHeartbeatEnabled
+    merged.RaceRetryEnabled = cfg.RaceRetryEnabled
+    merged.RaceParallelOnIdle = cfg.RaceParallelOnIdle
+    merged.LogRawUpstreamResponse = cfg.LogRawUpstreamResponse
+    merged.LogRawUpstreamOnError = cfg.LogRawUpstreamOnError
+    
+    // Integer fields with 0 as valid value
+    if cfg.RaceMaxParallel != 0 {
+        merged.RaceMaxParallel = cfg.RaceMaxParallel
+    }
+    if cfg.RaceMaxBufferBytes != 0 {
+        merged.RaceMaxBufferBytes = cfg.RaceMaxBufferBytes
+    }
+    if cfg.LogRawUpstreamMaxKB != 0 {
+        merged.LogRawUpstreamMaxKB = cfg.LogRawUpstreamMaxKB
+    }
+    
+    // Previously missing fields (now included in JSON)
+    if cfg.BufferStorageDir != "" {
+        merged.BufferStorageDir = cfg.BufferStorageDir
+    }
+    if cfg.BufferMaxStorageMB != 0 {
+        merged.BufferMaxStorageMB = cfg.BufferMaxStorageMB
+    }
+    merged.ToolCallBufferDisabled = cfg.ToolCallBufferDisabled // Boolean
+    if cfg.ToolCallBufferMaxSize != 0 {
+        merged.ToolCallBufferMaxSize = cfg.ToolCallBufferMaxSize
+    }
+    
+    // Nested configs: check if any field was provided
+    if isLoopDetectionProvided(cfg.LoopDetection) {
+        merged.LoopDetection = cfg.LoopDetection
+    }
+    if isToolRepairProvided(cfg.ToolRepair) {
+        merged.ToolRepair = cfg.ToolRepair
+    }
+    if isUltimateModelProvided(cfg.UltimateModel) {
+        merged.UltimateModel = cfg.UltimateModel
+    }
+
+    // Validate merged config
+    if err := merged.Validate(); err != nil {
+        return nil, fmt.Errorf("validation failed: %w", err)
+    }
+
+    // Marshal to JSON and save
+    configJSON, err := json.Marshal(merged)
+    if err != nil {
+        return nil, fmt.Errorf("failed to serialize config: %w", err)
+    }
+
+    // Save to database
+    query := m.qb.UpdateConfig()
+    _, err = m.store.DB.ExecContext(..., string(configJSON))
+    if err != nil {
+        return nil, fmt.Errorf("failed to save config: %w", err)
+    }
+
+    // Apply ENV overrides to in-memory config
+    m.cfg = config.ApplyEnvOverrides(merged)
+
+    return &config.SaveResult{}, nil
+}
+```
+
+**Helper functions to detect provided nested configs:**
+
+```go
+// isLoopDetectionProvided checks if loop detection config was explicitly provided
+func isLoopDetectionProvided(ld config.LoopDetectionConfig) bool {
+    return ld.MessageWindow != 0 ||
+        ld.ActionWindow != 0 ||
+        ld.ExactMatchCount != 0 ||
+        ld.SimilarityThreshold != 0 ||
+        ld.MinTokensForSimHash != 0 ||
+        ld.ActionRepeatCount != 0 ||
+        ld.OscillationCount != 0 ||
+        ld.MinTokensForAnalysis != 0 ||
+        ld.ThinkingMinTokens != 0 ||
+        ld.TrigramThreshold != 0 ||
+        ld.MaxCycleLength != 0 ||
+        ld.ReasoningTrigramThreshold != 0 ||
+        len(ld.ReasoningModelPatterns) > 0
+}
+
+// isToolRepairProvided checks if tool repair config was explicitly provided
+func isToolRepairProvided(tr toolrepair.Config) bool {
+    return len(tr.Strategies) > 0 ||
+        tr.MaxArgumentsSize != 0 ||
+        tr.MaxToolCallsPerResponse != 0 ||
+        tr.FixerModel != "" ||
+        tr.FixerTimeout != 0
+}
+
+// isUltimateModelProvided checks if ultimate model config was explicitly provided
+func isUltimateModelProvided(um config.UltimateModelConfig) bool {
+    return um.ModelID != "" || um.MaxHash != 0
+}
+```
+
+**Note:** The existing helper functions in [`store.go`](pkg/store/database/store.go:250-310) can be reused.
 
 ### Phase 3: ENV Override Refinement
 
 #### Task 3.1: Update ApplyEnvOverrides
-Modify the function to only override fields where the ENV var is explicitly set (not empty):
+Modify the function to only override fields where the ENV var is explicitly set (not empty). Also add support for the previously missing fields:
 
 ```go
 func ApplyEnvOverrides(cfg Config) Config {
@@ -209,11 +394,114 @@ func ApplyEnvOverrides(cfg Config) Config {
     if v := os.Getenv("UPSTREAM_URL"); v != "" {
         cfg.UpstreamURL = v
     }
-    // ... etc
+    if v := os.Getenv("UPSTREAM_CREDENTIAL_ID"); v != "" {
+        cfg.UpstreamCredentialID = v
+    }
+    if v := os.Getenv("PORT"); v != "" {
+        if port, err := strconv.Atoi(v); err == nil && port > 0 && port <= 65535 {
+            cfg.Port = port
+        }
+    }
+    if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
+        if d, err := time.ParseDuration(v); err == nil && d > 0 {
+            cfg.IdleTimeout = Duration(d)
+        }
+    }
+    if v := os.Getenv("STREAM_DEADLINE"); v != "" {
+        if d, err := time.ParseDuration(v); err == nil && d > 0 {
+            cfg.StreamDeadline = Duration(d)
+        }
+    }
+    if v := os.Getenv("MAX_GENERATION_TIME"); v != "" {
+        if d, err := time.ParseDuration(v); err == nil && d > 0 {
+            cfg.MaxGenerationTime = Duration(d)
+        }
+    }
+    if v := os.Getenv("SSE_HEARTBEAT_ENABLED"); v != "" {
+        cfg.SSEHeartbeatEnabled = v == "true" || v == "1"
+    }
+    
+    // Race retry
+    if v := os.Getenv("RACE_RETRY_ENABLED"); v != "" {
+        cfg.RaceRetryEnabled = v == "true" || v == "1"
+    }
+    if v := os.Getenv("RACE_PARALLEL_ON_IDLE"); v != "" {
+        cfg.RaceParallelOnIdle = v == "true" || v == "1"
+    }
+    if v := os.Getenv("RACE_MAX_PARALLEL"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r > 0 {
+            cfg.RaceMaxParallel = r
+        }
+    }
+    if v := os.Getenv("RACE_MAX_BUFFER_BYTES"); v != "" {
+        if r, err := strconv.ParseInt(v, 10, 64); err == nil && r >= 0 {
+            cfg.RaceMaxBufferBytes = int(r)
+        }
+    }
+    
+    // Loop detection
+    if v := os.Getenv("LOOP_DETECTION_ENABLED"); v != "" {
+        cfg.LoopDetection.Enabled = v == "true" || v == "1"
+    }
+    if v := os.Getenv("LOOP_DETECTION_SHADOW_MODE"); v != "" {
+        cfg.LoopDetection.ShadowMode = v == "true" || v == "1"
+    }
+    
+    // Ultimate model
+    if v := os.Getenv("ULTIMATE_MODEL_ID"); v != "" {
+        cfg.UltimateModel.ModelID = v
+    }
+    if v := os.Getenv("ULTIMATE_MODEL_MAX_HASH"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r > 0 {
+            cfg.UltimateModel.MaxHash = r
+        }
+    }
+    if v := os.Getenv("ULTIMATE_MODEL_MAX_RETRIES"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r >= 0 {
+            cfg.UltimateModel.MaxRetries = r
+        }
+    }
+    
+    // Raw upstream response logging
+    if v := os.Getenv("LOG_RAW_UPSTREAM_RESPONSE"); v != "" {
+        cfg.LogRawUpstreamResponse = v == "true" || v == "1"
+    }
+    if v := os.Getenv("LOG_RAW_UPSTREAM_ON_ERROR"); v != "" {
+        cfg.LogRawUpstreamOnError = v == "true" || v == "1"
+    }
+    if v := os.Getenv("LOG_RAW_UPSTREAM_MAX_KB"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r > 0 {
+            cfg.LogRawUpstreamMaxKB = r
+        }
+    }
+    
+    // Previously missing fields - now supported
+    if v := os.Getenv("BUFFER_STORAGE_DIR"); v != "" {
+        cfg.BufferStorageDir = v
+    }
+    if v := os.Getenv("BUFFER_MAX_STORAGE_MB"); v != "" {
+        if r, err := strconv.Atoi(v); err == nil && r > 0 {
+            cfg.BufferMaxStorageMB = r
+        }
+    }
+    if v := os.Getenv("TOOL_CALL_BUFFER_DISABLED"); v != "" {
+        cfg.ToolCallBufferDisabled = v == "true" || v == "1"
+    }
+    if v := os.Getenv("TOOL_CALL_BUFFER_MAX_SIZE"); v != "" {
+        if r, err := strconv.ParseInt(v, 10, 64); err == nil && r > 0 {
+            cfg.ToolCallBufferMaxSize = r
+        }
+    }
 
     return cfg
 }
 ```
+
+**Note:** The existing [`applyEnvOverrides()`](pkg/config/config.go:350) function already handles most fields. The new fields to add are:
+- `BUFFER_STORAGE_DIR`
+- `BUFFER_MAX_STORAGE_MB`
+- `TOOL_CALL_BUFFER_DISABLED`
+- `TOOL_CALL_BUFFER_MAX_SIZE`
 
 ### Phase 4: Testing
 
