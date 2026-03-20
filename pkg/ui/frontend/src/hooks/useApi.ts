@@ -16,6 +16,10 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
     throw new Error(err.error || 'Request failed');
   }
+  // Handle 204 No Content - return empty object for void responses
+  if (res.status === 204) {
+    return {} as T;
+  }
   return res.json();
 }
 
