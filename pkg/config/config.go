@@ -421,6 +421,11 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("BUFFER_STORAGE_DIR"); v != "" {
 		cfg.BufferStorageDir = v
 	}
+	if v := os.Getenv("BUFFER_MAX_STORAGE_MB"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
+			cfg.BufferMaxStorageMB = r
+		}
+	}
 	// Tool call buffer configuration
 	if v := os.Getenv("TOOL_CALL_BUFFER_DISABLED"); v != "" {
 		cfg.ToolCallBufferDisabled = v == "true" || v == "1"

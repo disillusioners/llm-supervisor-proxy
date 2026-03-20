@@ -40,31 +40,6 @@ func NewConfigManager(store *Store, eventBus *events.Bus) (*ConfigManager, error
 	return cm, nil
 }
 
-// dbConfigRow represents a row from the configs table
-type dbConfigRow struct {
-	Version              string
-	UpstreamURL          string
-	UpstreamCredentialID string
-	Port                 int64
-	IdleTimeoutMs        int64
-	StreamDeadlineMs     int64
-	MaxGenerationTimeMs  int64
-
-	MaxStreamBufferSize    int64
-	LoopDetectionJSON      string
-	ToolRepairJSON         string
-	UltimateModelJSON      string
-	UpdatedAt              string
-	SSEHeartbeatEnabled    interface{}
-	RaceRetryEnabled       interface{}
-	RaceParallelOnIdle     interface{}
-	RaceMaxParallel        int64
-	RaceMaxBufferBytes     int64
-	LogRawUpstreamResponse interface{}
-	LogRawUpstreamOnError  interface{}
-	LogRawUpstreamMaxKB    int64
-}
-
 // Load initializes configuration from database
 func (m *ConfigManager) Load() error {
 	m.mu.Lock()
@@ -73,94 +48,24 @@ func (m *ConfigManager) Load() error {
 	// Start with defaults
 	cfg := config.Defaults
 
-	// Load from database using dialect-aware query
-	query := m.qb.GetConfig()
-	row := m.store.DB.QueryRowContext(context.Background(), query)
-
-	var dbCfg dbConfigRow
-	err := row.Scan(
-		&dbCfg.Version,
-		&dbCfg.UpstreamURL,
-		&dbCfg.UpstreamCredentialID,
-		&dbCfg.Port,
-		&dbCfg.IdleTimeoutMs,
-		&dbCfg.StreamDeadlineMs,
-		&dbCfg.MaxGenerationTimeMs,
-
-		&dbCfg.MaxStreamBufferSize,
-		&dbCfg.LoopDetectionJSON,
-		&dbCfg.ToolRepairJSON,
-		&dbCfg.UltimateModelJSON,
-		&dbCfg.UpdatedAt,
-		&dbCfg.SSEHeartbeatEnabled,
-		&dbCfg.RaceRetryEnabled,
-		&dbCfg.RaceParallelOnIdle,
-		&dbCfg.RaceMaxParallel,
-		&dbCfg.RaceMaxBufferBytes,
-		&dbCfg.LogRawUpstreamResponse,
-		&dbCfg.LogRawUpstreamOnError,
-		&dbCfg.LogRawUpstreamMaxKB,
-	)
+	// Try to load from database using the new config_json column
+	var configJSON string
+	err := m.store.DB.QueryRowContext(context.Background(), m.qb.SelectConfig()).Scan(&configJSON)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No config in DB, use defaults with ENV overrides
+			cfg = config.ApplyEnvOverrides(cfg)
 			m.cfg = cfg
 			return nil
 		}
-		return fmt.Errorf("failed to load config from database: %w", err)
+		return fmt.Errorf("failed to query config: %w", err)
 	}
 
-	// Map database config to struct
-	cfg.Version = dbCfg.Version
-	cfg.UpstreamURL = dbCfg.UpstreamURL
-	cfg.UpstreamCredentialID = dbCfg.UpstreamCredentialID
-	cfg.Port = int(dbCfg.Port)
-	cfg.IdleTimeout = config.Duration(time.Duration(dbCfg.IdleTimeoutMs) * time.Millisecond)
-	cfg.StreamDeadline = config.Duration(time.Duration(dbCfg.StreamDeadlineMs) * time.Millisecond)
-	cfg.MaxGenerationTime = config.Duration(time.Duration(dbCfg.MaxGenerationTimeMs) * time.Millisecond)
-
-	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
-	cfg.UpdatedAt = dbCfg.UpdatedAt
-
-	// SSE heartbeat
-	cfg.SSEHeartbeatEnabled = isDbBoolTrue(dbCfg.SSEHeartbeatEnabled)
-
-	// Race retry
-	cfg.RaceRetryEnabled = isDbBoolTrue(dbCfg.RaceRetryEnabled)
-	cfg.RaceParallelOnIdle = isDbBoolTrue(dbCfg.RaceParallelOnIdle)
-	cfg.RaceMaxParallel = int(dbCfg.RaceMaxParallel)
-	// Use default if database value is invalid (too small)
-	if dbCfg.RaceMaxBufferBytes > 0 && dbCfg.RaceMaxBufferBytes < 65536 {
-		cfg.RaceMaxBufferBytes = config.Defaults.RaceMaxBufferBytes
-	} else {
-		cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
-	}
-
-	// Raw upstream response logging
-	cfg.LogRawUpstreamResponse = isDbBoolTrue(dbCfg.LogRawUpstreamResponse)
-	cfg.LogRawUpstreamOnError = isDbBoolTrue(dbCfg.LogRawUpstreamOnError)
-	if dbCfg.LogRawUpstreamMaxKB > 0 {
-		cfg.LogRawUpstreamMaxKB = int(dbCfg.LogRawUpstreamMaxKB)
-	}
-
-	// Parse loop detection JSON
-	if dbCfg.LoopDetectionJSON != "" && dbCfg.LoopDetectionJSON != "{}" {
-		if err := json.Unmarshal([]byte(dbCfg.LoopDetectionJSON), &cfg.LoopDetection); err != nil {
-			cfg.LoopDetection = config.Defaults.LoopDetection
-		}
-	}
-
-	// Parse tool repair JSON
-	if dbCfg.ToolRepairJSON != "" && dbCfg.ToolRepairJSON != "{}" {
-		if err := json.Unmarshal([]byte(dbCfg.ToolRepairJSON), &cfg.ToolRepair); err != nil {
-			cfg.ToolRepair = *toolrepair.DefaultConfig()
-		}
-	}
-
-	// Parse ultimate model JSON
-	if dbCfg.UltimateModelJSON != "" && dbCfg.UltimateModelJSON != "{}" {
-		if err := json.Unmarshal([]byte(dbCfg.UltimateModelJSON), &cfg.UltimateModel); err != nil {
-			cfg.UltimateModel = config.Defaults.UltimateModel
-		}
+	// Unmarshal JSON into config
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		// Corrupted JSON - use defaults
+		log.Printf("Warning: failed to unmarshal config JSON: %v, using defaults", err)
+		cfg = config.Defaults
 	}
 
 	// Apply environment variable overrides (env > database > defaults)
@@ -484,49 +389,14 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	merged.Version = config.ConfigVersion
 	merged.UpdatedAt = time.Now().Format(time.RFC3339)
 
-	// Marshal nested configs to JSON
-	loopDetectionJSON, err := json.Marshal(merged.LoopDetection)
+	// Marshal entire config to JSON
+	configJSON, err := json.Marshal(merged)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize loop detection: %w", err)
-	}
-	toolRepairJSON, err := json.Marshal(merged.ToolRepair)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize tool repair: %w", err)
-	}
-	ultimateModelJSON, err := json.Marshal(merged.UltimateModel)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize ultimate model: %w", err)
+		return nil, fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Convert durations to milliseconds
-	idleTimeoutMs := time.Duration(merged.IdleTimeout).Milliseconds()
-	streamDeadlineMs := time.Duration(merged.StreamDeadline).Milliseconds()
-	maxGenerationTimeMs := time.Duration(merged.MaxGenerationTime).Milliseconds()
-
-	// Update config in database using dialect-aware query
-	query := m.qb.UpdateConfig()
-	_, err = m.store.DB.ExecContext(context.Background(), query,
-		merged.Version,
-		merged.UpstreamURL,
-		merged.UpstreamCredentialID,
-		merged.Port,
-		idleTimeoutMs,
-		streamDeadlineMs,
-		maxGenerationTimeMs,
-		merged.MaxStreamBufferSize,
-		string(loopDetectionJSON),
-		string(toolRepairJSON),
-		string(ultimateModelJSON),
-		merged.UpdatedAt,
-		m.qb.BooleanLiteral(merged.SSEHeartbeatEnabled),
-		m.qb.BooleanLiteral(merged.RaceRetryEnabled),
-		m.qb.BooleanLiteral(merged.RaceParallelOnIdle),
-		merged.RaceMaxParallel,
-		merged.RaceMaxBufferBytes,
-		m.qb.BooleanLiteral(merged.LogRawUpstreamResponse),
-		m.qb.BooleanLiteral(merged.LogRawUpstreamOnError),
-		merged.LogRawUpstreamMaxKB,
-	)
+	// Upsert config to database using the new config_json column
+	_, err = m.store.DB.ExecContext(context.Background(), m.qb.UpsertConfig(), string(configJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to save config to database: %w", err)
 	}

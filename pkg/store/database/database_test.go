@@ -747,3 +747,494 @@ func TestLogRawUpstreamPersistence(t *testing.T) {
 	t.Logf("Log raw upstream settings persisted correctly: response=%v, on_error=%v, max_kb=%d",
 		cfg3.LogRawUpstreamResponse, cfg3.LogRawUpstreamOnError, cfg3.LogRawUpstreamMaxKB)
 }
+
+// TestConfigManager_EmptyDatabase tests Load() with empty database
+// Should return default config with ENV overrides applied
+func TestConfigManager_EmptyDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Should return defaults
+	cfg := cfgMgr.Get()
+	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
+		t.Errorf("Expected default UpstreamURL %s, got %s", config.Defaults.UpstreamURL, cfg.UpstreamURL)
+	}
+	if cfg.Port != config.Defaults.Port {
+		t.Errorf("Expected default Port %d, got %d", config.Defaults.Port, cfg.Port)
+	}
+	if cfg.IdleTimeout != config.Defaults.IdleTimeout {
+		t.Errorf("Expected default IdleTimeout %v, got %v", config.Defaults.IdleTimeout, cfg.IdleTimeout)
+	}
+}
+
+// TestConfigManager_ValidJSON tests Load() with valid JSON in database
+// Should unmarshal correctly and apply ENV overrides on top
+func TestConfigManager_ValidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Insert valid JSON directly into database (UPDATE because migrations already insert a row)
+	validJSON := `{
+		"version": "1.0",
+		"upstream_url": "http://json-test:4001",
+		"port": 5555,
+		"idle_timeout": "45s",
+		"stream_deadline": "110s",
+		"max_generation_time": "200s",
+		"race_retry_enabled": true,
+		"race_parallel_on_idle": false,
+		"race_max_parallel": 5,
+		"race_max_buffer_bytes": 3000000,
+		"loop_detection": {
+			"enabled": true,
+			"shadow_mode": false,
+			"message_window": 20
+		}
+	}`
+
+	_, err = store.DB.ExecContext(context.Background(),
+		"UPDATE configs SET config_json = ?, updated_at = datetime('now') WHERE id = 1",
+		validJSON)
+	if err != nil {
+		t.Fatalf("Failed to update test JSON: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	cfg := cfgMgr.Get()
+	if cfg.UpstreamURL != "http://json-test:4001" {
+		t.Errorf("Expected UpstreamURL 'http://json-test:4001', got %s", cfg.UpstreamURL)
+	}
+	if cfg.Port != 5555 {
+		t.Errorf("Expected Port 5555, got %d", cfg.Port)
+	}
+	if cfg.IdleTimeout != config.Duration(45*time.Second) {
+		t.Errorf("Expected IdleTimeout 45s, got %v", cfg.IdleTimeout)
+	}
+	if !cfg.RaceRetryEnabled {
+		t.Errorf("Expected RaceRetryEnabled true, got %v", cfg.RaceRetryEnabled)
+	}
+	if cfg.RaceMaxParallel != 5 {
+		t.Errorf("Expected RaceMaxParallel 5, got %d", cfg.RaceMaxParallel)
+	}
+	if cfg.LoopDetection.MessageWindow != 20 {
+		t.Errorf("Expected LoopDetection.MessageWindow 20, got %d", cfg.LoopDetection.MessageWindow)
+	}
+}
+
+// TestConfigManager_InvalidJSON tests Load() with invalid JSON in database
+// Should fall back to defaults (corruption recovery)
+func TestConfigManager_InvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Insert invalid JSON directly into database (UPDATE because migrations already insert a row)
+	invalidJSON := `{this is not valid json`
+
+	_, err = store.DB.ExecContext(context.Background(),
+		"UPDATE configs SET config_json = ?, updated_at = datetime('now') WHERE id = 1",
+		invalidJSON)
+	if err != nil {
+		t.Fatalf("Failed to update invalid JSON: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Should fall back to defaults
+	cfg := cfgMgr.Get()
+	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
+		t.Errorf("Expected default UpstreamURL after corruption, got %s", cfg.UpstreamURL)
+	}
+	if cfg.Port != config.Defaults.Port {
+		t.Errorf("Expected default Port after corruption, got %d", cfg.Port)
+	}
+}
+
+// TestConfigManager_PartialUpdate tests Save() with partial config
+// Should merge with existing config and not overwrite unspecified fields
+func TestConfigManager_PartialUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// First, save a complete config with non-default values
+	fullCfg := cfgMgr.Get()
+	fullCfg.UpstreamURL = "http://initial:4001"
+	fullCfg.Port = 7777
+	fullCfg.RaceRetryEnabled = true
+	fullCfg.RaceMaxParallel = 10
+	fullCfg.LoopDetection.MessageWindow = 25
+	fullCfg.LoopDetection.ShadowMode = false
+
+	_, err = cfgMgr.Save(fullCfg)
+	if err != nil {
+		t.Fatalf("Failed to save initial config: %v", err)
+	}
+
+	// Now save a partial config (only changing UpstreamURL)
+	// IMPORTANT: We only set UpstreamURL and required duration fields.
+	// We do NOT set RaceMaxParallel because that would trigger isRaceRetryProvided()
+	// which would then copy all race retry fields (including RaceRetryEnabled=false).
+	// The merge logic only merges race retry if it detects race retry was "provided".
+	partialCfg := config.Config{
+		UpstreamURL: "http://updated:4001",
+	}
+	// Set only the required duration fields for validation (these are always sent by frontend)
+	partialCfg.IdleTimeout = fullCfg.IdleTimeout
+	partialCfg.StreamDeadline = fullCfg.StreamDeadline
+	partialCfg.MaxGenerationTime = fullCfg.MaxGenerationTime
+
+	_, err = cfgMgr.Save(partialCfg)
+	if err != nil {
+		t.Fatalf("Failed to save partial config: %v", err)
+	}
+
+	// Verify merge behavior
+	loadedCfg := cfgMgr.Get()
+
+	// UpstreamURL should be updated
+	if loadedCfg.UpstreamURL != "http://updated:4001" {
+		t.Errorf("Expected UpstreamURL 'http://updated:4001', got %s", loadedCfg.UpstreamURL)
+	}
+
+	// Port should be preserved from previous config
+	if loadedCfg.Port != 7777 {
+		t.Errorf("Expected Port 7777 (preserved), got %d", loadedCfg.Port)
+	}
+
+	// RaceRetryEnabled should be preserved (not overwritten to false)
+	// This works because we didn't set RaceMaxParallel in the partial config
+	if !loadedCfg.RaceRetryEnabled {
+		t.Errorf("Expected RaceRetryEnabled true (preserved), got %v", loadedCfg.RaceRetryEnabled)
+	}
+
+	// RaceMaxParallel should be preserved
+	if loadedCfg.RaceMaxParallel != 10 {
+		t.Errorf("Expected RaceMaxParallel 10 (preserved), got %d", loadedCfg.RaceMaxParallel)
+	}
+
+	// LoopDetection.MessageWindow should be preserved
+	if loadedCfg.LoopDetection.MessageWindow != 25 {
+		t.Errorf("Expected LoopDetection.MessageWindow 25 (preserved), got %d", loadedCfg.LoopDetection.MessageWindow)
+	}
+
+	// LoopDetection.ShadowMode should be preserved
+	if loadedCfg.LoopDetection.ShadowMode {
+		t.Errorf("Expected LoopDetection.ShadowMode false (preserved), got %v", loadedCfg.LoopDetection.ShadowMode)
+	}
+}
+
+// TestConfigManager_EnvOverridePrecedence tests that ENV variables override database values
+func TestConfigManager_EnvOverridePrecedence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Update config with specific values in database (migrations already insert a row)
+	dbJSON := `{
+		"version": "1.0",
+		"upstream_url": "http://database:4001",
+		"port": 6000,
+		"idle_timeout": "30s",
+		"stream_deadline": "110s",
+		"max_generation_time": "200s",
+		"race_retry_enabled": false,
+		"race_max_parallel": 3
+	}`
+
+	_, err = store.DB.ExecContext(context.Background(),
+		"UPDATE configs SET config_json = ?, updated_at = datetime('now') WHERE id = 1",
+		dbJSON)
+	if err != nil {
+		t.Fatalf("Failed to update test JSON: %v", err)
+	}
+
+	// Set ENV overrides
+	os.Setenv("APPLY_ENV_OVERRIDES", "true")
+	os.Setenv("UPSTREAM_URL", "http://env-override:9999")
+	os.Setenv("PORT", "8888")
+	os.Setenv("RACE_RETRY_ENABLED", "true")
+	os.Setenv("RACE_MAX_PARALLEL", "7")
+	defer func() {
+		os.Unsetenv("APPLY_ENV_OVERRIDES")
+		os.Unsetenv("UPSTREAM_URL")
+		os.Unsetenv("PORT")
+		os.Unsetenv("RACE_RETRY_ENABLED")
+		os.Unsetenv("RACE_MAX_PARALLEL")
+	}()
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	cfg := cfgMgr.Get()
+
+	// ENV should override database values
+	if cfg.UpstreamURL != "http://env-override:9999" {
+		t.Errorf("Expected UpstreamURL from ENV 'http://env-override:9999', got %s", cfg.UpstreamURL)
+	}
+	if cfg.Port != 8888 {
+		t.Errorf("Expected Port from ENV 8888, got %d", cfg.Port)
+	}
+	if !cfg.RaceRetryEnabled {
+		t.Errorf("Expected RaceRetryEnabled from ENV true, got %v", cfg.RaceRetryEnabled)
+	}
+	if cfg.RaceMaxParallel != 7 {
+		t.Errorf("Expected RaceMaxParallel from ENV 7, got %d", cfg.RaceMaxParallel)
+	}
+
+	// idle_timeout should come from database (no ENV override for this specific test)
+	if cfg.IdleTimeout != config.Duration(30*time.Second) {
+		t.Errorf("Expected IdleTimeout from database 30s, got %v", cfg.IdleTimeout)
+	}
+}
+
+// TestConfigManager_JSONRoundtrip tests that all fields serialize/deserialize correctly
+// This test verifies JSON marshaling/unmarshaling by directly inserting JSON into the database
+// and checking that all fields are correctly loaded.
+func TestConfigManager_JSONRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Create a comprehensive JSON config with all fields set to non-default values
+	// This tests the JSON unmarshaling path directly
+	configJSON := `{
+		"version": "1.0",
+		"upstream_url": "http://roundtrip:4001",
+		"upstream_credential_id": "cred-123",
+		"port": 9999,
+		"idle_timeout": "45s",
+		"stream_deadline": "120s",
+		"max_generation_time": "250s",
+		"max_stream_buffer_size": 20971520,
+		"buffer_storage_dir": "/tmp/test-buffers",
+		"buffer_max_storage_mb": 200,
+		"sse_heartbeat_enabled": true,
+		"loop_detection": {
+			"enabled": false,
+			"shadow_mode": false,
+			"message_window": 15,
+			"action_window": 20,
+			"exact_match_count": 4,
+			"similarity_threshold": 0.9,
+			"min_tokens_for_simhash": 20,
+			"action_repeat_count": 5,
+			"oscillation_count": 6,
+			"min_tokens_for_analysis": 30,
+			"thinking_min_tokens": 150,
+			"trigram_threshold": 0.4,
+			"max_cycle_length": 6,
+			"reasoning_model_patterns": ["o1", "o3"],
+			"reasoning_trigram_threshold": 0.2
+		},
+		"race_retry_enabled": true,
+		"race_parallel_on_idle": false,
+		"race_max_parallel": 8,
+		"race_max_buffer_bytes": 4000000,
+		"tool_call_buffer_disabled": true,
+		"tool_call_buffer_max_size": 2097152,
+		"log_raw_upstream_response": false,
+		"log_raw_upstream_on_error": true,
+		"log_raw_upstream_max_kb": 2048,
+		"ultimate_model": {
+			"model_id": "ultimate-model",
+			"max_hash": 200,
+			"max_retries": 5
+		}
+	}`
+
+	// Update the database with our test JSON
+	_, err = store.DB.ExecContext(context.Background(),
+		"UPDATE configs SET config_json = ?, updated_at = datetime('now') WHERE id = 1",
+		configJSON)
+	if err != nil {
+		t.Fatalf("Failed to update test JSON: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	loadedCfg := cfgMgr.Get()
+
+	// Verify core fields
+	if loadedCfg.UpstreamURL != "http://roundtrip:4001" {
+		t.Errorf("UpstreamURL mismatch: got %s, want http://roundtrip:4001", loadedCfg.UpstreamURL)
+	}
+	if loadedCfg.UpstreamCredentialID != "cred-123" {
+		t.Errorf("UpstreamCredentialID mismatch: got %s, want cred-123", loadedCfg.UpstreamCredentialID)
+	}
+	if loadedCfg.Port != 9999 {
+		t.Errorf("Port mismatch: got %d, want 9999", loadedCfg.Port)
+	}
+	if loadedCfg.IdleTimeout != config.Duration(45*time.Second) {
+		t.Errorf("IdleTimeout mismatch: got %v, want 45s", loadedCfg.IdleTimeout)
+	}
+	if loadedCfg.StreamDeadline != config.Duration(120*time.Second) {
+		t.Errorf("StreamDeadline mismatch: got %v, want 120s", loadedCfg.StreamDeadline)
+	}
+	if loadedCfg.MaxGenerationTime != config.Duration(250*time.Second) {
+		t.Errorf("MaxGenerationTime mismatch: got %v, want 250s", loadedCfg.MaxGenerationTime)
+	}
+	if loadedCfg.MaxStreamBufferSize != 20971520 {
+		t.Errorf("MaxStreamBufferSize mismatch: got %d, want 20971520", loadedCfg.MaxStreamBufferSize)
+	}
+	if loadedCfg.BufferStorageDir != "/tmp/test-buffers" {
+		t.Errorf("BufferStorageDir mismatch: got %s, want /tmp/test-buffers", loadedCfg.BufferStorageDir)
+	}
+	if loadedCfg.BufferMaxStorageMB != 200 {
+		t.Errorf("BufferMaxStorageMB mismatch: got %d, want 200", loadedCfg.BufferMaxStorageMB)
+	}
+	if !loadedCfg.SSEHeartbeatEnabled {
+		t.Errorf("SSEHeartbeatEnabled mismatch: got %v, want true", loadedCfg.SSEHeartbeatEnabled)
+	}
+
+	// Verify race retry fields
+	if !loadedCfg.RaceRetryEnabled {
+		t.Errorf("RaceRetryEnabled mismatch: got %v, want true", loadedCfg.RaceRetryEnabled)
+	}
+	if loadedCfg.RaceParallelOnIdle {
+		t.Errorf("RaceParallelOnIdle mismatch: got %v, want false", loadedCfg.RaceParallelOnIdle)
+	}
+	if loadedCfg.RaceMaxParallel != 8 {
+		t.Errorf("RaceMaxParallel mismatch: got %d, want 8", loadedCfg.RaceMaxParallel)
+	}
+	if loadedCfg.RaceMaxBufferBytes != 4000000 {
+		t.Errorf("RaceMaxBufferBytes mismatch: got %d, want 4000000", loadedCfg.RaceMaxBufferBytes)
+	}
+
+	// Verify tool call buffer fields
+	if !loadedCfg.ToolCallBufferDisabled {
+		t.Errorf("ToolCallBufferDisabled mismatch: got %v, want true", loadedCfg.ToolCallBufferDisabled)
+	}
+	if loadedCfg.ToolCallBufferMaxSize != 2097152 {
+		t.Errorf("ToolCallBufferMaxSize mismatch: got %d, want 2097152", loadedCfg.ToolCallBufferMaxSize)
+	}
+
+	// Verify log raw upstream fields
+	if loadedCfg.LogRawUpstreamResponse {
+		t.Errorf("LogRawUpstreamResponse mismatch: got %v, want false", loadedCfg.LogRawUpstreamResponse)
+	}
+	if !loadedCfg.LogRawUpstreamOnError {
+		t.Errorf("LogRawUpstreamOnError mismatch: got %v, want true", loadedCfg.LogRawUpstreamOnError)
+	}
+	if loadedCfg.LogRawUpstreamMaxKB != 2048 {
+		t.Errorf("LogRawUpstreamMaxKB mismatch: got %d, want 2048", loadedCfg.LogRawUpstreamMaxKB)
+	}
+
+	// Verify loop detection fields
+	if loadedCfg.LoopDetection.Enabled {
+		t.Errorf("LoopDetection.Enabled mismatch: got %v, want false", loadedCfg.LoopDetection.Enabled)
+	}
+	if loadedCfg.LoopDetection.ShadowMode {
+		t.Errorf("LoopDetection.ShadowMode mismatch: got %v, want false", loadedCfg.LoopDetection.ShadowMode)
+	}
+	if loadedCfg.LoopDetection.MessageWindow != 15 {
+		t.Errorf("LoopDetection.MessageWindow mismatch: got %d, want 15", loadedCfg.LoopDetection.MessageWindow)
+	}
+	if loadedCfg.LoopDetection.ActionWindow != 20 {
+		t.Errorf("LoopDetection.ActionWindow mismatch: got %d, want 20", loadedCfg.LoopDetection.ActionWindow)
+	}
+	if loadedCfg.LoopDetection.SimilarityThreshold != 0.9 {
+		t.Errorf("LoopDetection.SimilarityThreshold mismatch: got %v, want 0.9", loadedCfg.LoopDetection.SimilarityThreshold)
+	}
+	if loadedCfg.LoopDetection.ThinkingMinTokens != 150 {
+		t.Errorf("LoopDetection.ThinkingMinTokens mismatch: got %d, want 150", loadedCfg.LoopDetection.ThinkingMinTokens)
+	}
+	if len(loadedCfg.LoopDetection.ReasoningModelPatterns) != 2 {
+		t.Errorf("LoopDetection.ReasoningModelPatterns mismatch: got %v, want [o1 o3]", loadedCfg.LoopDetection.ReasoningModelPatterns)
+	}
+
+	// Verify ultimate model fields
+	if loadedCfg.UltimateModel.ModelID != "ultimate-model" {
+		t.Errorf("UltimateModel.ModelID mismatch: got %s, want ultimate-model", loadedCfg.UltimateModel.ModelID)
+	}
+	if loadedCfg.UltimateModel.MaxHash != 200 {
+		t.Errorf("UltimateModel.MaxHash mismatch: got %d, want 200", loadedCfg.UltimateModel.MaxHash)
+	}
+	if loadedCfg.UltimateModel.MaxRetries != 5 {
+		t.Errorf("UltimateModel.MaxRetries mismatch: got %d, want 5", loadedCfg.UltimateModel.MaxRetries)
+	}
+}

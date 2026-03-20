@@ -65,91 +65,17 @@ func IntToBoolean(v int64) bool {
 	return v != 0
 }
 
-// UpsertConfig returns the appropriate upsert syntax for inserting/updating config
+// UpsertConfig returns a query to insert or replace the config JSON
 func (q *QueryBuilder) UpsertConfig() string {
 	if q.dialect == PostgreSQL {
-		return `INSERT INTO configs (id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, stream_deadline_ms, max_generation_time_ms,
-			max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
-			sse_heartbeat_enabled, race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes,
-			log_raw_upstream_response, log_raw_upstream_on_error, log_raw_upstream_max_kb)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-			ON CONFLICT (id) DO UPDATE SET
-				version = EXCLUDED.version,
-				upstream_url = EXCLUDED.upstream_url,
-				upstream_credential_id = EXCLUDED.upstream_credential_id,
-				port = EXCLUDED.port,
-				idle_timeout_ms = EXCLUDED.idle_timeout_ms,
-				stream_deadline_ms = EXCLUDED.stream_deadline_ms,
-				max_generation_time_ms = EXCLUDED.max_generation_time_ms,
-				max_stream_buffer_size = EXCLUDED.max_stream_buffer_size,
-				loop_detection_json = EXCLUDED.loop_detection_json,
-				tool_repair_json = EXCLUDED.tool_repair_json,
-				ultimate_model_json = EXCLUDED.ultimate_model_json,
-				updated_at = EXCLUDED.updated_at,
-				sse_heartbeat_enabled = EXCLUDED.sse_heartbeat_enabled,
-				race_retry_enabled = EXCLUDED.race_retry_enabled,
-				race_parallel_on_idle = EXCLUDED.race_parallel_on_idle,
-				race_max_parallel = EXCLUDED.race_max_parallel,
-				race_max_buffer_bytes = EXCLUDED.race_max_buffer_bytes,
-				log_raw_upstream_response = EXCLUDED.log_raw_upstream_response,
-				log_raw_upstream_on_error = EXCLUDED.log_raw_upstream_on_error,
-				log_raw_upstream_max_kb = EXCLUDED.log_raw_upstream_max_kb`
+		return `INSERT INTO configs (id, config_json) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET config_json = $1, updated_at = NOW()`
 	}
-	return `INSERT OR REPLACE INTO configs (id, version, upstream_url, upstream_credential_id, port, idle_timeout_ms, stream_deadline_ms, max_generation_time_ms,
-		max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
-		sse_heartbeat_enabled, race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes,
-		log_raw_upstream_response, log_raw_upstream_on_error, log_raw_upstream_max_kb)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	return `INSERT OR REPLACE INTO configs (id, config_json, updated_at) VALUES (1, ?, datetime('now'))`
 }
 
-// UpdateConfig returns the appropriate UPDATE query for config
-func (q *QueryBuilder) UpdateConfig() string {
-	if q.dialect == PostgreSQL {
-		return `UPDATE configs SET
-			version = $1,
-			upstream_url = $2,
-			upstream_credential_id = $3,
-			port = $4,
-			idle_timeout_ms = $5,
-			stream_deadline_ms = $6,
-			max_generation_time_ms = $7,
-			max_stream_buffer_size = $8,
-			loop_detection_json = $9,
-			tool_repair_json = $10,
-			ultimate_model_json = $11,
-			updated_at = $12,
-			sse_heartbeat_enabled = $13,
-			race_retry_enabled = $14,
-			race_parallel_on_idle = $15,
-			race_max_parallel = $16,
-			race_max_buffer_bytes = $17,
-			log_raw_upstream_response = $18,
-			log_raw_upstream_on_error = $19,
-			log_raw_upstream_max_kb = $20
-		WHERE id = 1`
-	}
-	return `UPDATE configs SET
-			version = ?,
-			upstream_url = ?,
-			upstream_credential_id = ?,
-			port = ?,
-			idle_timeout_ms = ?,
-			stream_deadline_ms = ?,
-			max_generation_time_ms = ?,
-			max_stream_buffer_size = ?,
-			loop_detection_json = ?,
-			tool_repair_json = ?,
-			ultimate_model_json = ?,
-			updated_at = ?,
-			sse_heartbeat_enabled = ?,
-			race_retry_enabled = ?,
-			race_parallel_on_idle = ?,
-			race_max_parallel = ?,
-			race_max_buffer_bytes = ?,
-			log_raw_upstream_response = ?,
-			log_raw_upstream_on_error = ?,
-			log_raw_upstream_max_kb = ?
-		WHERE id = 1`
+// SelectConfig returns a query to select the config JSON
+func (q *QueryBuilder) SelectConfig() string {
+	return `SELECT config_json FROM configs WHERE id = 1`
 }
 
 // InsertModel returns the appropriate INSERT query for a model
@@ -261,11 +187,3 @@ func (q *QueryBuilder) GetEnabledModels() string {
 	FROM models WHERE enabled = 1 ORDER BY name`
 }
 
-// GetConfig returns the appropriate SELECT query for config
-func (q *QueryBuilder) GetConfig() string {
-	return `SELECT version, upstream_url, upstream_credential_id, port, idle_timeout_ms, stream_deadline_ms, max_generation_time_ms,
-		max_stream_buffer_size, loop_detection_json, tool_repair_json, ultimate_model_json, updated_at,
-		sse_heartbeat_enabled, race_retry_enabled, race_parallel_on_idle, race_max_parallel, race_max_buffer_bytes,
-		log_raw_upstream_response, log_raw_upstream_on_error, log_raw_upstream_max_kb
-		FROM configs WHERE id = 1`
-}
