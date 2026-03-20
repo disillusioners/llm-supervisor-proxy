@@ -420,6 +420,8 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				log.Printf("[WARN] Invalid finish_reason: %s, defaulting to 'stop'", finishReason)
 				finishReason = "stop"
 			}
+
+			// Build final chunk - include usage if available from the done event
 			finalChunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				"object":  "chat.completion.chunk",
@@ -433,6 +435,17 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 					},
 				},
 			}
+
+			// Inject usage from the full response if available
+			// This is critical for clients to track token usage for streaming responses
+			if event.Response != nil && event.Response.Usage.PromptTokens > 0 {
+				finalChunk["usage"] = map[string]int{
+					"prompt_tokens":     event.Response.Usage.PromptTokens,
+					"completion_tokens": event.Response.Usage.CompletionTokens,
+					"total_tokens":      event.Response.Usage.TotalTokens,
+				}
+			}
+
 			finalData, _ := json.Marshal(finalChunk)
 			finalLine := fmt.Sprintf("data: %s\n", finalData)
 			if !upstreamReq.buffer.Add([]byte(finalLine)) {

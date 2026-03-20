@@ -23,6 +23,13 @@ type Message struct {
 	Thinking  string     `json:"thinking,omitempty"` // For reasoning_content
 }
 
+// Usage tracks token usage statistics for a request
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // UpstreamRequestStatus tracks the status of parallel upstream requests
 type UpstreamRequestStatus struct {
 	Main     string `json:"main"`     // "success", "failed", "not_started"
@@ -40,6 +47,9 @@ type RequestLog struct {
 	Messages  []Message `json:"messages"` // Full conversation including assistant response
 	Retries   int       `json:"retries"`
 	Error     string    `json:"error,omitempty"`
+
+	// Token usage tracking
+	Usage *Usage `json:"usage,omitempty"` // Final usage from the winning response
 
 	// Fallback tracking
 	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model

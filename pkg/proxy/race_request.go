@@ -25,6 +25,13 @@ const (
 	statusFailed    upstreamStatus = "failed"
 )
 
+// TokenUsage represents token usage from an upstream response
+type TokenUsage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
 // upstreamRequest represents a single attempt to an upstream provider
 type upstreamRequest struct {
 	mu sync.RWMutex
@@ -42,14 +49,17 @@ type upstreamRequest struct {
 	attempts int                // Number of HTTP retries (for connectivity)
 
 	// Timing
-	startTime      time.Time
-	firstByteTime  time.Time
-	completionTime time.Time
+	startTime        time.Time
+	firstByteTime    time.Time
+	completionTime   time.Time
 	lastActivityTime time.Time // Last time we received data (for idle detection)
 
 	// Stats
 	totalChunks int
 	totalBytes  int64
+
+	// Token usage (extracted from non-streaming responses)
+	usage *TokenUsage
 }
 
 func newUpstreamRequest(id int, mType upstreamModelType, modelID string, maxBuffer int) *upstreamRequest {
@@ -182,11 +192,25 @@ func (r *upstreamRequest) IsIdle(idleTimeout time.Duration) bool {
 	lastActivity := r.lastActivityTime
 	status := r.status
 	r.mu.RUnlock()
-	
+
 	// Only consider idle if we're streaming (have received at least some data)
 	// and haven't received data for idleTimeout duration
 	if status != statusStreaming {
 		return false
 	}
 	return time.Since(lastActivity) > idleTimeout
+}
+
+// SetUsage sets the token usage for this request
+func (r *upstreamRequest) SetUsage(usage *TokenUsage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.usage = usage
+}
+
+// GetUsage returns the token usage for this request
+func (r *upstreamRequest) GetUsage() *TokenUsage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.usage
 }

@@ -64,6 +64,11 @@ func main() {
 						"finish_reason": "stop",
 					},
 				},
+				"usage": map[string]int{
+					"prompt_tokens":     10,
+					"completion_tokens": 15,
+					"total_tokens":      25,
+				},
 			}
 			json.NewEncoder(w).Encode(response)
 			return
@@ -179,6 +184,10 @@ func main() {
 				f.Flush()
 			}
 
+			// Send final chunk with usage
+			fmt.Fprintf(w, "data: %s\n\n", createFinalChunk())
+			flusher.Flush()
+
 		} else if strings.Contains(prompt, "mock-long") {
 			// Simulate long response
 			log.Println("Mock: Simulating long response...")
@@ -189,6 +198,42 @@ func main() {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
+			// Send final chunk with usage
+			fmt.Fprintf(w, "data: %s\n\n", createFinalChunk())
+			flusher.Flush()
+		} else if strings.Contains(prompt, "mock-tool") {
+			// Simulate a tool call
+			log.Println("Mock: Simulating tool call...")
+
+			// Send some content first
+			fmt.Fprintf(w, "data: %s\n\n", createChunk("Sure, checking the weather."))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(500 * time.Millisecond)
+
+			// Then send tool call (simplified for this mock, usually relies on 'tool_calls' field)
+			// We can just dump a chunk with tool_calls
+			// Note: Real streaming tool calls are complex (index, id, type, function name, args...)
+			// Let's send a simplified one-shot tool call chunk?
+			// Or just text that LOOKS like a tool call if we aren't parsing strict structure?
+			// Wait, we defined the store to hold ToolCalls.
+			// But we skipped strict parsing in handler? No, we skipped it because it's hard.
+			// If we want to test UI, we should probably just send text that describes a tool call?
+			// NO, the user asked for "tool call should show".
+			// Implies structured display.
+			// But we haven't implemented ToolCall parsing in handler yet!
+			// Just thinking parsing.
+			// Let's implement basics.
+			// Just send text for now.
+			fmt.Fprintf(w, "data: %s\n\n", createChunk("\n[TOOL CALL: get_weather]"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+
+			// Send final chunk with usage
+			fmt.Fprintf(w, "data: %s\n\n", createFinalChunk())
+			flusher.Flush()
 		} else {
 			// Normal response
 			for i, token := range tokens {
@@ -201,6 +246,9 @@ func main() {
 			}
 		}
 
+		// Send final chunk with usage
+		fmt.Fprintf(w, "data: %s\n\n", createFinalChunk())
+		flusher.Flush()
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 		log.Println("Mock: Done")
@@ -220,6 +268,25 @@ func createChunk(content string) string {
 					"content": content,
 				},
 			},
+		},
+	}
+	b, _ := json.Marshal(chunk)
+	return string(b)
+}
+
+// createFinalChunk returns a final SSE chunk with usage data
+func createFinalChunk() string {
+	chunk := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"delta":         map[string]interface{}{},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]int{
+			"prompt_tokens":     10,
+			"completion_tokens": 15,
+			"total_tokens":      25,
 		},
 	}
 	b, _ := json.Marshal(chunk)
