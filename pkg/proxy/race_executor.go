@@ -187,6 +187,10 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 func handleInternalNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string) error {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
+		// Extract HTTP status from ProviderError if available
+		if providerErr, ok := err.(*providers.ProviderError); ok && providerErr.StatusCode > 0 {
+			upstreamReq.SetHTTPStatus(providerErr.StatusCode)
+		}
 		return err
 	}
 
@@ -208,6 +212,10 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
+		// Extract HTTP status from ProviderError if available
+		if providerErr, ok := err.(*providers.ProviderError); ok && providerErr.StatusCode > 0 {
+			upstreamReq.SetHTTPStatus(providerErr.StatusCode)
+		}
 		return err
 	}
 

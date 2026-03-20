@@ -86,6 +86,32 @@ func main() {
 
 		log.Printf("Mock: Model=%s, Stream=%v, Prompt preview=%s", model, isStream, truncate(prompt, 50))
 
+		// For error scenarios, return HTTP error immediately (don't use SSE streaming)
+		// This ensures the proxy correctly detects the HTTP status code
+		if strings.Contains(prompt, "mock-rate-limit-error") || strings.Contains(prompt, "mock-rate-limit-http") {
+			log.Printf("[%s] Simulating RATE LIMIT ERROR (429)", model)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit"}}`))
+			return
+		}
+
+		if strings.Contains(prompt, "mock-context-overflow") {
+			log.Printf("[%s] Simulating CONTEXT OVERFLOW ERROR", model)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"Context window exceeded - maximum context length is 8192 tokens","type":"context_length_exceeded"}}`))
+			return
+		}
+
+		if strings.Contains(prompt, "mock-upstream-unavailable") {
+			log.Printf("[%s] Simulating UPSTREAM UNAVAILABLE (502)", model)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(`{"error":{"message":"Upstream service unavailable","type":"upstream_error"}}`))
+			return
+		}
+
 		if !isStream {
 			handleNonStream(w, model, prompt)
 			return
@@ -104,7 +130,6 @@ func main() {
 func handleNonStream(w http.ResponseWriter, model, prompt string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
 	response := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 		"object":  "chat.completion",
