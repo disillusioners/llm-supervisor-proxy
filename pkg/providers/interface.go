@@ -28,7 +28,7 @@ type ChatCompletionRequest struct {
 	Temperature      *float64               `json:"temperature,omitempty"`
 	TopP             *float64               `json:"top_p,omitempty"`
 	N                *int                   `json:"n,omitempty"`
-	Stream           bool                   `json:"stream,omitempty"`
+	Stream           bool                   `json:"stream"`
 	Stop             interface{}            `json:"stop,omitempty"` // string or []string
 	PresencePenalty  *float64               `json:"presence_penalty,omitempty"`
 	FrequencyPenalty *float64               `json:"frequency_penalty,omitempty"`
