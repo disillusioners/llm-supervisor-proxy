@@ -644,11 +644,11 @@ func (m *ModelsManager) Save() error {
 func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.ModelConfig, error) {
 	rows, err := m.store.DB.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return nil, err
+		return []models.ModelConfig{}, err
 	}
 	defer rows.Close()
 
-	var result []models.ModelConfig
+	result := make([]models.ModelConfig, 0)
 	for rows.Next() {
 		var dbModel dbModelRow
 		err := rows.Scan(
@@ -767,7 +767,7 @@ func (m *ModelsManager) GetModels() []models.ModelConfig {
 
 	result, err := m.scanModels(m.qb.GetAllModels())
 	if err != nil {
-		return nil
+		return []models.ModelConfig{}
 	}
 	return result
 }
@@ -779,7 +779,7 @@ func (m *ModelsManager) GetEnabledModels() []models.ModelConfig {
 
 	result, err := m.scanModels(m.qb.GetEnabledModels())
 	if err != nil {
-		return nil
+		return []models.ModelConfig{}
 	}
 	return result
 }
