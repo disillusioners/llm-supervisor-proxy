@@ -1,9 +1,18 @@
 import { FunctionComponent } from 'preact';
 import { route } from 'preact-router';
-import { useVersion } from '../hooks/useApi';
+import { useVersion, useRam } from '../hooks/useApi';
+
+// Format bytes to human-readable string (e.g., "45.2 MB" or "1.2 GB")
+function formatRam(mb: number): string {
+  if (mb >= 1024) {
+    return (mb / 1024).toFixed(1) + ' GB';
+  }
+  return mb.toFixed(1) + ' MB';
+}
 
 const Header: FunctionComponent = () => {
   const { version } = useVersion();
+  const { allocMB } = useRam();
 
   const handleOpenSettings = () => {
     route('/ui/settings');
@@ -32,9 +41,10 @@ const Header: FunctionComponent = () => {
         <h1 class="text-xl font-bold tracking-wide">LLM Supervisor Proxy</h1>
       </div>
 
-      {/* Right side: Version + System Active indicator + Settings button */}
+      {/* Right side: Version + RAM + System Active indicator + Settings button */}
       <div class="text-sm text-gray-400 flex items-center space-x-4">
         <span class="px-2 py-1 bg-gray-700 rounded text-xs font-mono text-gray-300">v{version}</span>
+        <span class="px-2 py-1 bg-gray-700 rounded text-xs font-mono text-gray-300">{formatRam(allocMB)}</span>
         <div class="flex items-center space-x-2">
           <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
           <span>System Active</span>

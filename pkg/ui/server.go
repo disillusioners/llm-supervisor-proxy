@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 
 	// API at /fe/api
 	mux.HandleFunc("/fe/api/version", s.handleVersion)
+	mux.HandleFunc("/fe/api/ram", s.handleRam)
 	mux.HandleFunc("/fe/api/config", s.handleConfig)
 	mux.HandleFunc("/fe/api/models", s.handleModels)
 	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
@@ -138,6 +140,26 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
+}
+
+func (s *Server) handleRam(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	// Alloc is bytes of allocated heap objects (current usage)
+	allocBytes := m.Alloc
+	allocMB := float64(allocBytes) / 1024 / 1024
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"alloc_bytes": allocBytes,
+		"alloc_mb":    allocMB,
+	})
 }
 
 func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
