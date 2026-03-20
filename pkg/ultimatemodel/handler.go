@@ -32,8 +32,8 @@ type Handler struct {
 	eventBus  *events.Bus
 
 	// Tool call buffer configuration
-	toolCallBufferMaxSize  int64             // Max size for tool call buffer
-	toolCallBufferDisabled bool              // Disable tool call buffering
+	toolCallBufferMaxSize  int64              // Max size for tool call buffer
+	toolCallBufferDisabled bool               // Disable tool call buffering
 	toolRepairConfig       *toolrepair.Config // Tool repair config for buffer
 }
 
@@ -158,22 +158,26 @@ func (h *Handler) SendRetryExhaustedError(
 		hashPrefix = hash[:8]
 	}
 
+	message := fmt.Sprintf(
+		"Ultimate model retry limit exceeded (attempt %d of %d max). Hash: %s...",
+		currentRetry, maxRetries, hashPrefix,
+	)
+
+	// Build OpenCode-compatible error response
 	errorResp := map[string]interface{}{
+		"type": "error",
 		"error": map[string]interface{}{
-			"message": fmt.Sprintf(
-				"Ultimate model retry limit exceeded (attempt %d of %d max). Hash: %s...",
-				currentRetry, maxRetries, hashPrefix,
-			),
-			"type": "ultimate_model_retry_exhausted",
-			"code": "exhausted",
-			"hash": hash,
+			"type":    "ultimate_model_retry_exhausted",
+			"code":    "exhausted",
+			"message": message,
+			"hash":    hash,
 		},
 	}
 
 	errorJSON, err := json.Marshal(errorResp)
 	if err != nil {
 		// Fallback to static error message if marshaling fails
-		errorJSON = []byte(`{"error":{"message":"Ultimate model retry limit exceeded","type":"ultimate_model_retry_exhausted","code":"exhausted"}}`)
+		errorJSON = []byte(`{"type":"error","error":{"type":"ultimate_model_retry_exhausted","code":"exhausted","message":"Ultimate model retry limit exceeded"}}`)
 	}
 
 	// Set headers based on response type FIRST

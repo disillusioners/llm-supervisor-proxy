@@ -283,31 +283,27 @@ func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 func (h *Handler) sendAuthError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]string{
-		"error":   "invalid_api_key",
-		"message": "Invalid or expired API key",
-	})
+	json.NewEncoder(w).Encode(models.NewOpenCodeError(
+		models.ErrorTypeAuthenticationError,
+		"",
+		"Invalid or expired API key",
+	))
 }
 
-// sendError sends a JSON error response in OpenAI format
-func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, param string) {
+// sendError sends a JSON error response in OpenCode-compatible format
+func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, errorCode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": map[string]interface{}{
-			"message": message,
-			"type":    errType,
-			"param":   param,
-			"code":    nil,
-		},
-	})
+	json.NewEncoder(w).Encode(models.NewOpenCodeError(errType, errorCode, message))
 }
 
 // sendSSEError sends an error as an SSE event to the client.
 // This is used when a streaming error occurs after headers have been sent,
 // so we can't send a regular HTTP error response.
-func (h *Handler) sendSSEError(w http.ResponseWriter, message string) {
-	errorEvent := fmt.Sprintf("event: error\ndata: {\"error\": %q}\n\n", message)
+func (h *Handler) sendSSEError(w http.ResponseWriter, errType, message string) {
+	errResp := models.NewOpenCodeError(errType, "", message)
+	data, _ := json.Marshal(errResp)
+	errorEvent := fmt.Sprintf("event: error\ndata: %s\n\n", string(data))
 	w.Write([]byte(errorEvent))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -448,7 +444,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						}
 					} else {
 						// Headers already sent (streaming) - send SSE error
-						h.sendSSEError(w, err.Error())
+						h.sendSSEError(w, models.ErrorTypeUpstreamError, err.Error())
 					}
 					return
 				}
@@ -527,15 +523,18 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
-		statusCode := http.StatusBadGateway // Default 502
-		// Check if all requests failed with same HTTP status
-		if commonStatus := coordinator.GetCommonFailureStatus(); commonStatus != 0 {
-			statusCode = commonStatus
+		// Get final error info from coordinator (OpenCode-compatible format)
+		// First check if stream deadline fired with no content (specific timeout message)
+		var errInfo FinalErrorInfo
+		if deadlineErr := coordinator.GetStreamDeadlineError(); deadlineErr != nil {
+			errInfo = *deadlineErr
+		} else {
+			errInfo = coordinator.GetFinalErrorInfo()
 		}
 
 		// Log failure
 		rc.reqLog.Status = "failed"
-		rc.reqLog.Error = "All upstream models failed"
+		rc.reqLog.Error = errInfo.Message
 		rc.reqLog.EndTime = time.Now()
 		rc.reqLog.Duration = time.Since(rc.startTime).String()
 		h.store.Add(rc.reqLog)
@@ -545,7 +544,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			"error": rc.reqLog.Error,
 		})
 
-		h.sendError(w, statusCode, "All upstream models failed", "server_error", "")
+		h.sendError(w, errInfo.HTTPStatus, errInfo.Message, errInfo.ErrorType, errInfo.ErrorCode)
 		return
 	}
 }
@@ -681,7 +680,10 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					}
 				}
 
-				fmt.Fprintf(w, "data: {\"error\": {\"message\": \"Streaming error: %v\", \"type\": \"server_error\"}}\n\n", err)
+				// Send OpenCode-compatible error response
+				errResp := models.NewOpenCodeError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
+				data, _ := json.Marshal(errResp)
+				fmt.Fprintf(w, "data: %s\n\n", string(data))
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -809,7 +811,9 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte(fmt.Sprintf(`{"error": {"message": "Upstream error: %v", "type": "upstream_error"}}`, err)))
+		errResp := models.NewOpenCodeError(models.ErrorTypeUpstreamError, "", fmt.Sprintf("Upstream error: %v", err))
+		data, _ := json.Marshal(errResp)
+		w.Write(data)
 		return
 	}
 

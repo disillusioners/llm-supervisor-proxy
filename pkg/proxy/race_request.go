@@ -60,6 +60,9 @@ type upstreamRequest struct {
 
 	// Token usage (extracted from non-streaming responses)
 	usage *TokenUsage
+
+	// HTTP status code from upstream (0 if not an HTTP error)
+	httpStatusCode int
 }
 
 func newUpstreamRequest(id int, mType upstreamModelType, modelID string, maxBuffer int) *upstreamRequest {
@@ -213,4 +216,18 @@ func (r *upstreamRequest) GetUsage() *TokenUsage {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.usage
+}
+
+// SetHTTPStatus sets the HTTP status code from upstream
+func (r *upstreamRequest) SetHTTPStatus(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.httpStatusCode = code
+}
+
+// GetHTTPStatus returns the HTTP status code
+func (r *upstreamRequest) GetHTTPStatus() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.httpStatusCode
 }

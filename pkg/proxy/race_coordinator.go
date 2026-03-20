@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
 // spawnTrigger indicates why parallel requests are being spawned
@@ -55,6 +56,9 @@ type raceCoordinator struct {
 	// Event publishing
 	eventBus  *events.Bus
 	requestID string
+
+	// Stream deadline error info (set when stream deadline fires with no content)
+	streamDeadlineError *FinalErrorInfo
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string) *raceCoordinator {
@@ -416,6 +420,11 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 		// No content at all - all failed or no requests started
 		log.Printf("[RACE] Streaming deadline reached, no content available")
 
+		// Build error info for the handler to use
+		errInfo := c.getFinalErrorInfoLocked()
+		errInfo.Message = "Request timeout - no response received"
+		c.streamDeadlineError = &errInfo
+
 		c.publishEvent("race_all_failed", map[string]interface{}{
 			"total_attempts": len(c.requests),
 			"duration_ms":    time.Since(c.startTime).Milliseconds(),
@@ -525,7 +534,19 @@ func (c *raceCoordinator) GetCommonFailureStatus() int {
 			return 0 // Not failed yet or didn't fail
 		}
 
-		// Parse status text like "upstream returned error: 429 Too Many Requests"
+		// First check if we have the HTTP status stored
+		httpStatus := req.GetHTTPStatus()
+		if httpStatus >= 400 {
+			// Use the stored HTTP status directly
+			if commonStatus == 0 {
+				commonStatus = httpStatus
+			} else if commonStatus != httpStatus {
+				return 0 // Mismatch
+			}
+			continue
+		}
+
+		// Fallback: Parse status text like "upstream returned error: 429 Too Many Requests"
 		errStr := err.Error()
 		var status int
 		if strings.Contains(errStr, "upstream returned error: ") {
@@ -626,4 +647,285 @@ func (c *raceCoordinator) GetRequestStatuses() map[string]string {
 	}
 
 	return statuses
+}
+
+// GetStreamDeadlineError returns the error info if stream deadline fired with no content
+func (c *raceCoordinator) GetStreamDeadlineError() *FinalErrorInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.streamDeadlineError
+}
+
+// FinalErrorInfo contains information for building the final error response
+type FinalErrorInfo struct {
+	HTTPStatus int    // HTTP status code to return
+	ErrorType  string // Error type (e.g., "rate_limit", "upstream_error")
+	ErrorCode  string // Error code for retry detection (e.g., "rate_limit", "unavailable")
+	Message    string // Human-readable error message
+}
+
+// GetFinalErrorInfo builds the final error info based on all failed requests.
+// This implements the OpenCode-compatible error format with proper rate_limit detection.
+// Key rules:
+// - Rate limit code is only added after ALL models are exhausted with 429
+// - Context overflow errors never get rate_limit code (triggers compaction instead)
+// - HTTP 503 maps to type "too_many_requests" with code "unavailable"
+func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if len(c.requests) == 0 {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadGateway,
+			ErrorType:  models.ErrorTypeServerError,
+			ErrorCode:  "",
+			Message:    "No upstream requests were made",
+		}
+	}
+
+	// Collect all failed requests and their errors
+	var failedRequests []*upstreamRequest
+	var lastError error
+	anyModel429 := false
+	allModelsExhausted := true
+	hasContextOverflow := false
+
+	for _, req := range c.requests {
+		err := req.GetError()
+		if err != nil {
+			failedRequests = append(failedRequests, req)
+			lastError = err
+
+			// Check for 429 rate limit
+			if req.GetHTTPStatus() == http.StatusTooManyRequests {
+				anyModel429 = true
+			}
+
+			// Check for context overflow
+			if models.IsContextOverflowError(err) {
+				hasContextOverflow = true
+			}
+		} else {
+			// A request succeeded (shouldn't happen if we're building error, but check)
+			allModelsExhausted = false
+		}
+	}
+
+	// If no errors, this shouldn't be called
+	if lastError == nil {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadGateway,
+			ErrorType:  models.ErrorTypeServerError,
+			ErrorCode:  "",
+			Message:    "Unknown error",
+		}
+	}
+
+	// Determine HTTP status from common status
+	httpStatus := c.getCommonFailureStatusLocked()
+
+	// Build error message
+	message := "All upstream models failed"
+	if lastError != nil {
+		message = lastError.Error()
+	}
+
+	// CRITICAL: Never add rate_limit code to context overflow errors
+	// OpenCode checks context overflow BEFORE retry logic to trigger compaction
+	if hasContextOverflow {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadRequest,
+			ErrorType:  models.ErrorTypeContextOverflow,
+			ErrorCode:  "", // No code - let OpenCode trigger compaction
+			Message:    message,
+		}
+	}
+
+	// Determine error type and code based on HTTP status
+	var errType string
+	var errCode string
+
+	switch httpStatus {
+	case http.StatusTooManyRequests: // 429
+		// Only add rate_limit code if ALL models exhausted
+		// If we have working models, no need to signal retry
+		if allModelsExhausted && anyModel429 {
+			errType = models.ErrorTypeRateLimit
+			errCode = models.ErrorCodeRateLimit
+			message = "All models rate limited"
+		} else {
+			errType = models.ErrorTypeRateLimit
+			// No code if fallback worked (but this shouldn't happen since all failed)
+			errCode = ""
+		}
+	case http.StatusBadGateway: // 502
+		errType = models.ErrorTypeUpstreamError
+		errCode = models.ErrorCodeUnavailable
+	case http.StatusServiceUnavailable: // 503
+		errType = models.ErrorTypeTooManyRequests
+		errCode = models.ErrorCodeUnavailable
+	case http.StatusGatewayTimeout: // 504
+		errType = models.ErrorTypeUpstreamError
+		errCode = ""
+	default:
+		errType = models.ErrorTypeServerError
+		errCode = ""
+	}
+
+	return FinalErrorInfo{
+		HTTPStatus: httpStatus,
+		ErrorType:  errType,
+		ErrorCode:  errCode,
+		Message:    message,
+	}
+}
+
+// getFinalErrorInfoLocked is the internal version of GetFinalErrorInfo that assumes lock is held
+func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
+	if len(c.requests) == 0 {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadGateway,
+			ErrorType:  models.ErrorTypeServerError,
+			ErrorCode:  "",
+			Message:    "No upstream requests were made",
+		}
+	}
+
+	// Collect all failed requests and their errors
+	var failedRequests []*upstreamRequest
+	var lastError error
+	anyModel429 := false
+	allModelsExhausted := true
+	hasContextOverflow := false
+
+	for _, req := range c.requests {
+		err := req.GetError()
+		if err != nil {
+			failedRequests = append(failedRequests, req)
+			lastError = err
+
+			// Check for 429 rate limit
+			if req.GetHTTPStatus() == http.StatusTooManyRequests {
+				anyModel429 = true
+			}
+
+			// Check for context overflow
+			if models.IsContextOverflowError(err) {
+				hasContextOverflow = true
+			}
+		} else {
+			allModelsExhausted = false
+		}
+	}
+
+	if lastError == nil {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadGateway,
+			ErrorType:  models.ErrorTypeServerError,
+			ErrorCode:  "",
+			Message:    "Unknown error",
+		}
+	}
+
+	httpStatus := c.getCommonFailureStatusLocked()
+
+	message := "All upstream models failed"
+	if lastError != nil {
+		message = lastError.Error()
+	}
+
+	if hasContextOverflow {
+		return FinalErrorInfo{
+			HTTPStatus: http.StatusBadRequest,
+			ErrorType:  models.ErrorTypeContextOverflow,
+			ErrorCode:  "",
+			Message:    message,
+		}
+	}
+
+	var errType string
+	var errCode string
+
+	switch httpStatus {
+	case http.StatusTooManyRequests:
+		if allModelsExhausted && anyModel429 {
+			errType = models.ErrorTypeRateLimit
+			errCode = models.ErrorCodeRateLimit
+			message = "All models rate limited"
+		} else {
+			errType = models.ErrorTypeRateLimit
+			errCode = ""
+		}
+	case http.StatusBadGateway:
+		errType = models.ErrorTypeUpstreamError
+		errCode = models.ErrorCodeUnavailable
+	case http.StatusServiceUnavailable:
+		errType = models.ErrorTypeTooManyRequests
+		errCode = models.ErrorCodeUnavailable
+	case http.StatusGatewayTimeout:
+		errType = models.ErrorTypeUpstreamError
+		errCode = ""
+	default:
+		errType = models.ErrorTypeServerError
+		errCode = ""
+	}
+
+	return FinalErrorInfo{
+		HTTPStatus: httpStatus,
+		ErrorType:  errType,
+		ErrorCode:  errCode,
+		Message:    message,
+	}
+}
+
+// getCommonFailureStatusLocked is the internal version of GetCommonFailureStatus that assumes lock is held
+func (c *raceCoordinator) getCommonFailureStatusLocked() int {
+	if len(c.requests) == 0 {
+		return 0
+	}
+
+	var commonStatus int
+	for _, req := range c.requests {
+		err := req.GetError()
+		if err == nil {
+			return 0 // Not failed yet or didn't fail
+		}
+
+		// First check if we have the HTTP status stored
+		httpStatus := req.GetHTTPStatus()
+		if httpStatus >= 400 {
+			// Use the stored HTTP status directly
+			if commonStatus == 0 {
+				commonStatus = httpStatus
+			} else if commonStatus != httpStatus {
+				return 0 // Mismatch
+			}
+			continue
+		}
+
+		// Fallback: Parse status text
+		errStr := err.Error()
+		var status int
+		if strings.Contains(errStr, "upstream returned error: ") {
+			fmt.Sscanf(errStr, "upstream returned error: %d", &status)
+		} else if strings.Contains(errStr, "idle timeout") || strings.Contains(errStr, "context") || strings.Contains(errStr, "timeout") {
+			status = http.StatusGatewayTimeout
+		} else if strings.Contains(errStr, "buffer limit") {
+			status = http.StatusRequestEntityTooLarge
+		} else {
+			status = http.StatusBadGateway
+		}
+
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+
+		if commonStatus == 0 {
+			commonStatus = status
+		} else if commonStatus != status {
+			return 0 // Mismatch
+		}
+	}
+
+	return commonStatus
 }

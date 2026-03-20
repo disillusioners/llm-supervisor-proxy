@@ -124,6 +124,7 @@ func (a *OpenAIAdapter) WriteError(w http.ResponseWriter, errorType, message str
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"type": "error",
 		"error": map[string]string{
 			"type":    errorType,
 			"message": message,
@@ -132,14 +133,41 @@ func (a *OpenAIAdapter) WriteError(w http.ResponseWriter, errorType, message str
 }
 
 func (a *OpenAIAdapter) WriteStreamError(w http.ResponseWriter, errorType, message string) {
-	errorResp, _ := json.Marshal(map[string]interface{}{
-		"error": map[string]string{
+	a.WriteStreamErrorWithCode(w, errorType, "", message)
+}
+
+// WriteStreamErrorWithCode sends a streaming error with optional code field
+func (a *OpenAIAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorType, code, message string) {
+	errorResp := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
 		},
-	})
-	fmt.Fprintf(w, "data: %s\n\n", string(errorResp))
+	}
+	if code != "" {
+		errorResp["error"].(map[string]interface{})["code"] = code
+	}
+	eventBytes, _ := json.Marshal(errorResp)
+	fmt.Fprintf(w, "data: %s\n\n", string(eventBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// WriteErrorWithCode sends a non-streaming error with optional code field
+func (a *OpenAIAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, code, message string, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	errorResp := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    errorType,
+			"message": message,
+		},
+	}
+	if code != "" {
+		errorResp["error"].(map[string]interface{})["code"] = code
+	}
+	json.NewEncoder(w).Encode(errorResp)
 }

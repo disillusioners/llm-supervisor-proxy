@@ -159,6 +159,9 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 	req.resp = resp
 
+	// Track HTTP status code for error type detection
+	req.SetHTTPStatus(resp.StatusCode)
+
 	// 3. Check for immediate error
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("upstream returned error: %s", resp.Status)
