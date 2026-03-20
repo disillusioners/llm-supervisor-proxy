@@ -83,17 +83,19 @@ sqlc generate
 
 ## Environment Variables
 
-Key configuration via environment variables (highest precedence):
+Environment variables can override configuration values when `APPLY_ENV_OVERRIDES=true` is set. See Configuration section for precedence rules.
+
+### Core Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UPSTREAM_URL` | `http://localhost:4001` | LLM provider URL |
+| `UPSTREAM_CREDENTIAL_ID` | *(empty)* | Credential ID for upstream provider |
 | `PORT` | `4321` | Proxy listening port |
 | `IDLE_TIMEOUT` | `60s` | Max wait between tokens before spawning parallel requests |
 | `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming |
 | `MAX_GENERATION_TIME` | `300s` | **Absolute hard timeout** for entire request lifecycle |
-| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
-| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only) |
+| `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string |
 
 ### Race Retry Configuration
@@ -104,6 +106,43 @@ Key configuration via environment variables (highest precedence):
 | `RACE_PARALLEL_ON_IDLE` | `true` | Spawn parallel requests on idle timeout |
 | `RACE_MAX_PARALLEL` | `3` | Max parallel requests (main + second + fallback) |
 | `RACE_MAX_BUFFER_BYTES` | `5242880` | Max bytes per request buffer (5MB) |
+
+### Buffer Storage Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUFFER_STORAGE_DIR` | *(empty)* | Directory for buffer content files (defaults to user config dir) |
+| `BUFFER_MAX_STORAGE_MB` | `100` | Max total storage for buffers in MB |
+
+### Tool Call Buffer Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOOL_CALL_BUFFER_DISABLED` | `false` | Disable tool call buffering (for clients that handle partial JSON) |
+| `TOOL_CALL_BUFFER_MAX_SIZE` | `1048576` | Max bytes per tool call buffer (1MB) |
+
+### Loop Detection Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
+| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption) |
+
+### Ultimate Model Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ULTIMATE_MODEL_ID` | *(empty)* | Model ID for duplicate request handling |
+| `ULTIMATE_MODEL_MAX_HASH` | `100` | Max hashes in circular buffer |
+| `ULTIMATE_MODEL_MAX_RETRIES` | `2` | Max ultimate model retries per hash |
+
+### Raw Upstream Response Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_RAW_UPSTREAM_RESPONSE` | `false` | Log successful upstream responses |
+| `LOG_RAW_UPSTREAM_ON_ERROR` | `false` | Log failed/error upstream responses |
+| `LOG_RAW_UPSTREAM_MAX_KB` | `1024` | Max KB per response to log |
 
 ---
 
@@ -330,10 +369,32 @@ For full design details, see [`plans/unified-race-retry-design.md`](plans/unifie
 ## Key Patterns
 
 ### Configuration
-- Precedence: Environment variables > Config file > Defaults
+
+Configuration is stored as a single JSON blob in the database, making schema migrations unnecessary when adding new fields.
+
+**Configuration Precedence:**
+```
+DB JSON value → ENV override (if APPLY_ENV_OVERRIDES=true) → Default hardcoded
+```
+
+**Key Points:**
+- The `configs` table uses a single `config_json` column (TEXT for SQLite, JSONB for PostgreSQL)
+- Adding new config fields requires only updating the [`Config`](pkg/config/config.go:65) struct and [`Defaults`](pkg/config/config.go:157)
+- No database migration needed for new configuration fields
+- Set `APPLY_ENV_OVERRIDES=true` to allow environment variables to override DB values
 - Validate before saving
 - Use atomic writes with temp files
 - Backup before overwriting
+
+**Schema (configs table):**
+```sql
+CREATE TABLE configs (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    config_json TEXT NOT NULL DEFAULT '{}',  -- JSONB for PostgreSQL
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
 
 ### HTTP Handlers
 - Use interfaces for testability
@@ -350,19 +411,19 @@ For full design details, see [`plans/unified-race-retry-design.md`](plans/unifie
 - Uses `embed.FS` to embed SQL files at compile time
 - Tracked via `schema_migrations` table (version, applied_at)
 - Dialect-specific directories: `migrations/sqlite/` and `migrations/postgres/`
-- Naming convention: `NNN_description.up.sql` (e.g., `007_add_field.up.sql`)
+- Naming convention: `NNN_description.up.sql` (e.g., `017_config_json.up.sql`)
 
 **Adding a new migration:**
 1. Create SQL files in both dialect directories:
    ```bash
-   # SQLite: pkg/store/database/migrations/sqlite/007_add_field.up.sql
-   # PostgreSQL: pkg/store/database/migrations/postgres/007_add_field.up.sql
+   # SQLite: pkg/store/database/migrations/sqlite/018_description.up.sql
+   # PostgreSQL: pkg/store/database/migrations/postgres/018_description.up.sql
    ```
 2. Register in `pkg/store/database/migrate.go`:
    ```go
    var migrations = []migration{
        // ... existing
-       {"007", "007_add_field.up"},
+       {"018", "018_description.up"},
    }
    ```
 3. Run `go build ./...` to embed new files

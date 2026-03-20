@@ -72,6 +72,14 @@ export interface AppConfig {
   log_raw_upstream_response?: boolean;
   log_raw_upstream_on_error?: boolean;
   log_raw_upstream_max_kb?: number;
+  // Stream buffer configuration
+  max_stream_buffer_size?: number;
+  buffer_storage_dir?: string;
+  buffer_max_storage_mb?: number;
+  // SSE and tool call buffer configuration
+  sse_heartbeat_enabled?: boolean;
+  tool_call_buffer_disabled?: boolean;
+  tool_call_buffer_max_size?: number;
   // Deprecated - kept for backward compatibility with older backend versions
   max_upstream_error_retries?: number;
   max_idle_retries?: number;
