@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import type { RequestDetail as RequestDetailType } from '../types';
-import { escapeHtml, escapeHtmlLight, generateCurlCommand } from '../utils/helpers';
+import { escapeHtml, escapeHtmlLight, generateCurlCommand, parseThinkTags } from '../utils/helpers';
 
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -490,7 +490,7 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
 }
 
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
-  const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
+  const [expandedThoughts, setExpandedThoughts] = useState<Set<number | string>>(new Set());
   const [showModal, setShowModal] = useState(false);
   const [showCurlModal, setShowCurlModal] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -605,59 +605,107 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
         class="flex-1 overflow-y-auto min-h-0 p-4 monitor-font text-sm"
       >
         <div class="space-y-3">
-          {detail.messages.map((message, index) => (
-            <div key={index}>
-              {/* Message Bubble */}
-              <div
-                class={`p-3 rounded-lg ${message.role === 'user'
-                  ? 'bg-gray-700 ml-0 mr-8'
-                  : message.role === 'assistant'
-                    ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
-                    : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
-                  }`}
-              >
-                <div class="text-xs text-gray-500 mb-1 uppercase">
-                  {message.role}
-                </div>
-                <div class="text-gray-200">
-                  <CollapsibleText text={message.content} role={message.role} />
-                </div>
-              </div>
+          {detail.messages.map((message, index) => {
+            // Parse inline think tags for assistant messages
+            const parsed = message.role === 'assistant' 
+              ? parseThinkTags(message.content)
+              : { thinking: [], content: message.content };
 
-              {/* Thinking - Collapsible */}
-              {message.thinking && (
-                <details 
-                  class="ml-8 mr-0 mt-1"
-                  open={expandedThoughts.has(index)}
-                >
-                  <summary
-                    class="cursor-pointer text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      toggleThought(index);
-                    }}
-                  >
-                    <span class={`transform transition-transform ${expandedThoughts.has(index) ? 'rotate-90' : ''}`}>
-                      ▶
-                    </span>
-                    Thinking
-                  </summary>
-                  <div class="mt-2 p-3 bg-amber-950/40 border border-amber-500/30 rounded text-amber-200/90 text-xs">
-                    <CollapsibleText text={message.thinking} role="assistant" />
+            return (
+              <div key={index}>
+                {/* Inline Think Tags - Visually distinct from separate thinking field */}
+                {parsed.thinking.length > 0 && (
+                  <div class="ml-8 mr-0 mt-1 space-y-2">
+                    {parsed.thinking.map((thinkContent, thinkIndex) => (
+                      <details 
+                        key={thinkIndex}
+                        class="bg-slate-800/50 border border-slate-500/30 rounded-lg overflow-hidden"
+                        open={expandedThoughts.has(`inline-${index}-${thinkIndex}`)}
+                      >
+                        <summary
+                          class="cursor-pointer text-xs text-slate-400 hover:text-slate-300 flex items-center gap-2 p-2 bg-slate-800/70"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            const key = `inline-${index}-${thinkIndex}`;
+                            if (expandedThoughts.has(key)) {
+                              expandedThoughts.delete(key);
+                            } else {
+                              expandedThoughts.add(key);
+                            }
+                            setExpandedThoughts(new Set(expandedThoughts));
+                          }}
+                        >
+                          <span class={`transform transition-transform ${expandedThoughts.has(`inline-${index}-${thinkIndex}`) ? 'rotate-90' : ''}`}>
+                            ▶
+                          </span>
+                          <span class="text-slate-500">[</span>
+                          <span class="flex items-center gap-1">
+                            <span>💭</span>
+                            <span>reasoning</span>
+                          </span>
+                          <span class="text-slate-500">]</span>
+                        </summary>
+                        <div class="p-3 text-xs text-slate-300/80 font-mono whitespace-pre-wrap">
+                          <CollapsibleText text={thinkContent} role="assistant" />
+                        </div>
+                      </details>
+                    ))}
                   </div>
-                </details>
-              )}
+                )}
 
-              {/* Tool Calls */}
-              {message.tool_calls && message.tool_calls.length > 0 && (
-                <div class="ml-8 mr-0 mt-2 space-y-2">
-                  {message.tool_calls.map((toolCall, tcIndex) => (
-                    <ToolCallDisplay key={toolCall.id || tcIndex} toolCall={toolCall} />
-                  ))}
+                {/* Message Bubble */}
+                <div
+                  class={`p-3 rounded-lg ${message.role === 'user'
+                    ? 'bg-gray-700 ml-0 mr-8'
+                    : message.role === 'assistant'
+                      ? 'bg-blue-900/40 ml-8 mr-0 border border-blue-500/30'
+                      : 'bg-gray-800 mx-4 border border-dashed border-gray-600 italic'
+                    }`}
+                >
+                  <div class="text-xs text-gray-500 mb-1 uppercase">
+                    {message.role}
+                  </div>
+                  <div class="text-gray-200">
+                    <CollapsibleText text={parsed.content} role={message.role} />
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
+
+                {/* Separate Thinking Field - Distinct styling from inline tags */}
+                {message.thinking && (
+                  <details 
+                    class="ml-8 mr-0 mt-1"
+                    open={expandedThoughts.has(index)}
+                  >
+                    <summary
+                      class="cursor-pointer text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        toggleThought(index);
+                      }}
+                    >
+                      <span class={`transform transition-transform ${expandedThoughts.has(index) ? 'rotate-90' : ''}`}>
+                        ▶
+                      </span>
+                      <span>🧠</span>
+                      <span>Thinking</span>
+                    </summary>
+                    <div class="mt-2 p-3 bg-amber-950/40 border border-amber-500/30 rounded text-amber-200/90 text-xs">
+                      <CollapsibleText text={message.thinking} role="assistant" />
+                    </div>
+                  </details>
+                )}
+
+                {/* Tool Calls */}
+                {message.tool_calls && message.tool_calls.length > 0 && (
+                  <div class="ml-8 mr-0 mt-2 space-y-2">
+                    {message.tool_calls.map((toolCall, tcIndex) => (
+                      <ToolCallDisplay key={toolCall.id || tcIndex} toolCall={toolCall} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
         </div>
       </div>

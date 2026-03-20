@@ -127,3 +127,30 @@ export function generateCurlCommand(
   -H 'Authorization: Bearer YOUR_API_KEY' \\
   -d '${jsonBody}'`;
 }
+
+// Parse think tags from content and extract thinking
+export interface ParsedContent {
+  thinking: string[];  // Array of extracted think tag contents
+  content: string;     // Content with think tags removed
+}
+
+const THINK_TAG_REGEX = /<think>([\s\S]*?)<\/think>/gi;
+
+export function parseThinkTags(content: string | undefined | null): ParsedContent {
+  if (!content) {
+    return { thinking: [], content: '' };
+  }
+
+  const thinking: string[] = [];
+  let match;
+
+  // Extract all think tags
+  while ((match = THINK_TAG_REGEX.exec(content)) !== null) {
+    thinking.push(match[1].trim());
+  }
+
+  // Remove think tags from content
+  const cleanContent = content.replace(THINK_TAG_REGEX, '').trim();
+
+  return { thinking, content: cleanContent };
+}
