@@ -35,6 +35,9 @@ var migrations = []migration{
 	{"011", "011_add_stream_deadline.up"},
 	{"012", "012_fix_race_max_buffer_bytes.up"},
 	{"013", "013_add_sse_heartbeat.up"},
+	{"014", "014_add_log_upstream_response.up"},
+	{"015", "015_add_log_upstream_on_error.up"},
+	{"016", "016_add_log_upstream_max_kb.up"},
 }
 
 // RunMigrations executes database schema migrations

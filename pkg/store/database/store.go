@@ -50,16 +50,19 @@ type dbConfigRow struct {
 	StreamDeadlineMs     int64
 	MaxGenerationTimeMs  int64
 
-	MaxStreamBufferSize int64
-	LoopDetectionJSON   string
-	ToolRepairJSON      string
-	UltimateModelJSON   string
-	UpdatedAt           string
-	SSEHeartbeatEnabled interface{}
-	RaceRetryEnabled    interface{}
-	RaceParallelOnIdle  interface{}
-	RaceMaxParallel     int64
-	RaceMaxBufferBytes  int64
+	MaxStreamBufferSize    int64
+	LoopDetectionJSON      string
+	ToolRepairJSON         string
+	UltimateModelJSON      string
+	UpdatedAt              string
+	SSEHeartbeatEnabled    interface{}
+	RaceRetryEnabled       interface{}
+	RaceParallelOnIdle     interface{}
+	RaceMaxParallel        int64
+	RaceMaxBufferBytes     int64
+	LogRawUpstreamResponse interface{}
+	LogRawUpstreamOnError  interface{}
+	LogRawUpstreamMaxKB    int64
 }
 
 // Load initializes configuration from database
@@ -94,6 +97,9 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.RaceParallelOnIdle,
 		&dbCfg.RaceMaxParallel,
 		&dbCfg.RaceMaxBufferBytes,
+		&dbCfg.LogRawUpstreamResponse,
+		&dbCfg.LogRawUpstreamOnError,
+		&dbCfg.LogRawUpstreamMaxKB,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -127,6 +133,13 @@ func (m *ConfigManager) Load() error {
 		cfg.RaceMaxBufferBytes = config.Defaults.RaceMaxBufferBytes
 	} else {
 		cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
+	}
+
+	// Raw upstream response logging
+	cfg.LogRawUpstreamResponse = isDbBoolTrue(dbCfg.LogRawUpstreamResponse)
+	cfg.LogRawUpstreamOnError = isDbBoolTrue(dbCfg.LogRawUpstreamOnError)
+	if dbCfg.LogRawUpstreamMaxKB > 0 {
+		cfg.LogRawUpstreamMaxKB = int(dbCfg.LogRawUpstreamMaxKB)
 	}
 
 	// Parse loop detection JSON
@@ -510,6 +523,9 @@ func (m *ConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 		m.qb.BooleanLiteral(merged.RaceParallelOnIdle),
 		merged.RaceMaxParallel,
 		merged.RaceMaxBufferBytes,
+		m.qb.BooleanLiteral(merged.LogRawUpstreamResponse),
+		m.qb.BooleanLiteral(merged.LogRawUpstreamOnError),
+		merged.LogRawUpstreamMaxKB,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save config to database: %w", err)

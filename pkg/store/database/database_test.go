@@ -670,3 +670,80 @@ func TestRaceRetryPersistence(t *testing.T) {
 	// Verify we didn't break defaults (restore original)
 	t.Logf("Initial max_parallel was %d, now is %d (should be 7)", initialMaxParallel, cfg3.RaceMaxParallel)
 }
+
+func TestLogRawUpstreamPersistence(t *testing.T) {
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Get initial config
+	cfg := cfgMgr.Get()
+
+	// Save with custom log_raw_upstream settings
+	cfg.LogRawUpstreamResponse = true
+	cfg.LogRawUpstreamOnError = true
+	cfg.LogRawUpstreamMaxKB = 2048
+
+	_, err = cfgMgr.Save(cfg)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Verify in same session
+	cfg2 := cfgMgr.Get()
+	if cfg2.LogRawUpstreamResponse != true {
+		t.Errorf("Same session: LogRawUpstreamResponse = %v, want true", cfg2.LogRawUpstreamResponse)
+	}
+	if cfg2.LogRawUpstreamOnError != true {
+		t.Errorf("Same session: LogRawUpstreamOnError = %v, want true", cfg2.LogRawUpstreamOnError)
+	}
+
+	// Now simulate restart - create NEW config manager
+	store2, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create second SQLite connection: %v", err)
+	}
+	defer store2.Close()
+
+	cfgMgr2, err := NewConfigManager(store2, bus)
+	if err != nil {
+		t.Fatalf("Failed to create second config manager: %v", err)
+	}
+
+	// Load from database (simulating restart)
+	if err := cfgMgr2.Load(); err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	cfg3 := cfgMgr2.Get()
+
+	// Check all log_raw_upstream fields persisted
+	if cfg3.LogRawUpstreamResponse != true {
+		t.Errorf("After restart: LogRawUpstreamResponse = %v, want true", cfg3.LogRawUpstreamResponse)
+	}
+	if cfg3.LogRawUpstreamOnError != true {
+		t.Errorf("After restart: LogRawUpstreamOnError = %v, want true", cfg3.LogRawUpstreamOnError)
+	}
+	if cfg3.LogRawUpstreamMaxKB != 2048 {
+		t.Errorf("After restart: LogRawUpstreamMaxKB = %d, want 2048", cfg3.LogRawUpstreamMaxKB)
+	}
+
+	t.Logf("Log raw upstream settings persisted correctly: response=%v, on_error=%v, max_kb=%d",
+		cfg3.LogRawUpstreamResponse, cfg3.LogRawUpstreamOnError, cfg3.LogRawUpstreamMaxKB)
+}
