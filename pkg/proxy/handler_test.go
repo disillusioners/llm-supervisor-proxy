@@ -1486,11 +1486,15 @@ func TestSaveRawResponse_SavesToFile(t *testing.T) {
 	buffer.Add([]byte("data: [DONE]\n"))
 	buffer.Close(nil)
 
+	// Capture bytes before calling
+	rawBytes := buffer.GetAllRawBytes()
+	_ = rawBytes // Bytes captured but not used directly since we're passing to saveRawResponse
+
 	// Call saveRawResponse
 	requestID := "test-req-123"
 	rawBody := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
 
-	h.saveRawResponse(requestID, buffer, rawBody, 1024)
+	h.saveRawResponse(requestID, rawBytes, rawBody, 1024)
 
 	// Verify file was saved
 	content, err := bufStore.Get(requestID + "-response")
@@ -1535,7 +1539,8 @@ func TestSaveRawResponse_SkipsWhenTooLarge(t *testing.T) {
 	buffer.Close(nil)
 
 	// Call saveRawResponse with 1KB limit
-	h.saveRawResponse("test-req", buffer, []byte("request"), 1) // 1KB limit
+	rawBytes := buffer.GetAllRawBytes()
+	h.saveRawResponse("test-req", rawBytes, []byte("request"), 1) // 1KB limit
 
 	// Verify NO file was saved
 	_, err = bufStore.Get("test-req-response")
@@ -1565,8 +1570,9 @@ func TestSaveRawResponse_SkipsWhenBufferEmpty(t *testing.T) {
 	buffer := newStreamBuffer(1024 * 1024)
 	buffer.Close(nil)
 
-	// Call saveRawResponse
-	h.saveRawResponse("test-req", buffer, []byte("request"), 1024)
+	// Call saveRawResponse with empty bytes
+	rawBytes := buffer.GetAllRawBytes()
+	h.saveRawResponse("test-req", rawBytes, []byte("request"), 1024)
 
 	// Verify NO file was saved
 	_, err = bufStore.Get("test-req-response")
@@ -1590,8 +1596,9 @@ func TestSaveRawResponse_NilBufferStore(t *testing.T) {
 	buffer.Add([]byte("data: test\n"))
 	buffer.Close(nil)
 
-	// Should not panic
-	h.saveRawResponse("test-req", buffer, []byte("request"), 1024)
+	// Should not panic - bufferStore is nil
+	rawBytes := buffer.GetAllRawBytes()
+	h.saveRawResponse("test-req", rawBytes, []byte("request"), 1024)
 }
 
 func TestSaveRawResponse_NilBuffer(t *testing.T) {

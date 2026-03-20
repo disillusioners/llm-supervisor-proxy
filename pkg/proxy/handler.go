@@ -145,23 +145,20 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 // saveRawResponse saves the raw upstream response to disk and emits an event.
 // This is a best-effort operation - errors are logged but don't fail the request.
 // Should be called in a goroutine to avoid blocking the response.
-func (h *Handler) saveRawResponse(requestID string, buffer *streamBuffer, rawRequestBody []byte, maxKB int) {
-	if h.bufferStore == nil || buffer == nil {
+func (h *Handler) saveRawResponse(requestID string, rawBytes []byte, rawRequestBody []byte, maxKB int) {
+	if h.bufferStore == nil {
+		return
+	}
+	if len(rawBytes) == 0 {
 		return
 	}
 
-	rawBytes := buffer.GetAllRawBytes()
 	maxBytes := int64(maxKB) * 1024
 
 	// Skip if too large
 	if int64(len(rawBytes)) > maxBytes {
 		log.Printf("[RAW-LOG] Response too large: %d > %d limit (request=%s)",
 			len(rawBytes), maxBytes, requestID)
-		return
-	}
-
-	// Skip if empty
-	if len(rawBytes) == 0 {
 		return
 	}
 
@@ -558,6 +555,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	buffer := winner.GetBuffer()
 	readIndex := 0
 
+	// Capture raw bytes BEFORE any pruning happens - this is the complete response
+	if rc.conf.LogRawUpstreamResponse {
+		if buf := winner.GetBuffer(); buf != nil {
+			capturedBytes := buf.GetAllRawBytes()
+			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+		}
+	}
+
 	// Set headers if not already sent
 	if !rc.headersSent {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -652,9 +657,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if err := buffer.Err(); err != nil {
 				log.Printf("[ERROR] Stream buffer closed with error: %v", err)
 
-				// Log raw response on error BEFORE pruning (prune sets chunks to nil)
+				// Log raw response on error
 				if rc.conf.LogRawUpstreamOnError {
-					go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+					if buf := winner.GetBuffer(); buf != nil {
+						capturedBytes := buf.GetAllRawBytes()
+						go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+					}
 				}
 
 				// Now safe to prune (after capturing raw response)
@@ -680,9 +688,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				return
 			}
 
-			// Log raw response on success BEFORE pruning (prune sets chunks to nil)
+			// Log raw response on success - capture bytes BEFORE final pruning
 			if rc.conf.LogRawUpstreamResponse {
-				go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+				if buf := winner.GetBuffer(); buf != nil {
+					capturedBytes := buf.GetAllRawBytes()
+					go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+				}
 			}
 
 			// Now safe to prune (after capturing raw response)
@@ -750,10 +761,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				"race":     true,
 			})
 
-			// Log raw response on success if enabled
-			if rc.conf.LogRawUpstreamResponse {
-				go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
-			}
+			// Log raw response on success if enabled - we capture at beginning of streamResult
 			return
 		case <-ticker.C:
 			// Safety backup if notification missed
@@ -791,9 +799,12 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 
 	// Check for buffer error
 	if err := buffer.Err(); err != nil {
-		// Log raw response on error if enabled
+		// Log raw response on error if enabled - capture bytes before returning
 		if rc.conf.LogRawUpstreamOnError {
-			go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+			if buf := winner.GetBuffer(); buf != nil {
+				capturedBytes := buf.GetAllRawBytes()
+				go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -858,8 +869,11 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		"race":     true,
 	})
 
-	// Log raw response on success if enabled
+	// Log raw response on success if enabled - capture bytes before returning
 	if rc.conf.LogRawUpstreamResponse {
-		go h.saveRawResponse(rc.reqID, winner.GetBuffer(), rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+		if buf := winner.GetBuffer(); buf != nil {
+			capturedBytes := buf.GetAllRawBytes()
+			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
+		}
 	}
 }

@@ -201,9 +201,9 @@ var Defaults = Config{
 	RaceRetryEnabled:       false,
 	RaceParallelOnIdle:     true,
 	RaceMaxParallel:        3,
-	RaceMaxBufferBytes:     5242880, // 5MB limit
-	ToolCallBufferDisabled: false,           // Buffering ENABLED by default
-	ToolCallBufferMaxSize:  1024 * 1024,     // 1MB default
+	RaceMaxBufferBytes:     5242880,     // 5MB limit
+	ToolCallBufferDisabled: false,       // Buffering ENABLED by default
+	ToolCallBufferMaxSize:  1024 * 1024, // 1MB default
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -417,6 +417,10 @@ func applyEnvOverrides(cfg Config) Config {
 			cfg.RaceMaxBufferBytes = int(r)
 		}
 	}
+	// Buffer storage configuration
+	if v := os.Getenv("BUFFER_STORAGE_DIR"); v != "" {
+		cfg.BufferStorageDir = v
+	}
 	// Tool call buffer configuration
 	if v := os.Getenv("TOOL_CALL_BUFFER_DISABLED"); v != "" {
 		cfg.ToolCallBufferDisabled = v == "true" || v == "1"
@@ -424,6 +428,18 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("TOOL_CALL_BUFFER_MAX_SIZE"); v != "" {
 		if r, err := strconv.ParseInt(v, 10, 64); err == nil && r > 0 {
 			cfg.ToolCallBufferMaxSize = r
+		}
+	}
+	// Raw upstream response logging configuration
+	if v := os.Getenv("LOG_RAW_UPSTREAM_RESPONSE"); v != "" {
+		cfg.LogRawUpstreamResponse = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LOG_RAW_UPSTREAM_ON_ERROR"); v != "" {
+		cfg.LogRawUpstreamOnError = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LOG_RAW_UPSTREAM_MAX_KB"); v != "" {
+		if r, err := strconv.Atoi(v); err == nil && r > 0 {
+			cfg.LogRawUpstreamMaxKB = r
 		}
 	}
 	return cfg
