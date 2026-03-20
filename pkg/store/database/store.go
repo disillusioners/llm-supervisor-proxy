@@ -55,6 +55,7 @@ type dbConfigRow struct {
 	ToolRepairJSON      string
 	UltimateModelJSON   string
 	UpdatedAt           string
+	SSEHeartbeatEnabled interface{}
 	RaceRetryEnabled    interface{}
 	RaceParallelOnIdle  interface{}
 	RaceMaxParallel     int64
@@ -88,6 +89,7 @@ func (m *ConfigManager) Load() error {
 		&dbCfg.ToolRepairJSON,
 		&dbCfg.UltimateModelJSON,
 		&dbCfg.UpdatedAt,
+		&dbCfg.SSEHeartbeatEnabled,
 		&dbCfg.RaceRetryEnabled,
 		&dbCfg.RaceParallelOnIdle,
 		&dbCfg.RaceMaxParallel,
@@ -113,12 +115,15 @@ func (m *ConfigManager) Load() error {
 	cfg.MaxStreamBufferSize = int(dbCfg.MaxStreamBufferSize)
 	cfg.UpdatedAt = dbCfg.UpdatedAt
 
+	// SSE heartbeat
+	cfg.SSEHeartbeatEnabled = isDbBoolTrue(dbCfg.SSEHeartbeatEnabled)
+
 	// Race retry
 	cfg.RaceRetryEnabled = isDbBoolTrue(dbCfg.RaceRetryEnabled)
 	cfg.RaceParallelOnIdle = isDbBoolTrue(dbCfg.RaceParallelOnIdle)
 	cfg.RaceMaxParallel = int(dbCfg.RaceMaxParallel)
 	// Use default if database value is invalid (too small)
-	if dbCfg.RaceMaxBufferBytes >0 && dbCfg.RaceMaxBufferBytes <65536 {
+	if dbCfg.RaceMaxBufferBytes > 0 && dbCfg.RaceMaxBufferBytes < 65536 {
 		cfg.RaceMaxBufferBytes = config.Defaults.RaceMaxBufferBytes
 	} else {
 		cfg.RaceMaxBufferBytes = int(dbCfg.RaceMaxBufferBytes)
@@ -192,8 +197,9 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	}
 
 	// Race retry
-	// We check RaceMaxParallel/RaceMaxBufferBytes as indicators if the race part was sent
-	if incoming.RaceMaxParallel != 0 {
+	// Check if any race retry field was provided (not just RaceMaxParallel)
+	// We check multiple fields to detect if race_retry was intentionally sent
+	if isRaceRetryProvided(incoming) {
 		result.RaceRetryEnabled = incoming.RaceRetryEnabled
 		result.RaceParallelOnIdle = incoming.RaceParallelOnIdle
 		result.RaceMaxParallel = incoming.RaceMaxParallel
@@ -270,6 +276,16 @@ func isToolRepairProvided(tr toolrepair.Config) bool {
 // All fields from incoming are copied (frontend sends complete tool_repair object)
 func mergeToolRepairConfig(existing, incoming toolrepair.Config) toolrepair.Config {
 	return incoming
+}
+
+// isRaceRetryProvided checks if race retry config was explicitly provided
+// by looking for any non-zero field values (excluding booleans which default to false)
+// This is similar to isLoopDetectionProvided and isToolRepairProvided patterns
+func isRaceRetryProvided(cfg config.Config) bool {
+	return cfg.RaceMaxParallel != 0 ||
+		cfg.RaceMaxBufferBytes != 0 ||
+		cfg.RaceRetryEnabled || // booleans are also checked since true is a valid intentional value
+		cfg.RaceParallelOnIdle
 }
 
 // isUltimateModelProvided checks if ultimate model config was explicitly provided

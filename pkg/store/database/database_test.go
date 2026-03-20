@@ -591,3 +591,82 @@ func TestPostgreSQLBooleanHandling(t *testing.T) {
 		}
 	}
 }
+
+func TestRaceRetryPersistence(t *testing.T) {
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Get initial config
+	cfg := cfgMgr.Get()
+	initialMaxParallel := cfg.RaceMaxParallel
+
+	// Save with custom race retry settings
+	cfg.RaceRetryEnabled = true
+	cfg.RaceParallelOnIdle = true
+	cfg.RaceMaxParallel = 7
+	cfg.RaceMaxBufferBytes = 2000000
+
+	_, err = cfgMgr.Save(cfg)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Verify in same session
+	cfg2 := cfgMgr.Get()
+	if cfg2.RaceMaxParallel != 7 {
+		t.Errorf("Same session: RaceMaxParallel = %d, want 7", cfg2.RaceMaxParallel)
+	}
+
+	// Now simulate restart - create NEW config manager
+	store2, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create second SQLite connection: %v", err)
+	}
+	defer store2.Close()
+
+	cfgMgr2, err := NewConfigManager(store2, bus)
+	if err != nil {
+		t.Fatalf("Failed to create second config manager: %v", err)
+	}
+
+	// Load from database (simulating restart)
+	if err := cfgMgr2.Load(); err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	cfg3 := cfgMgr2.Get()
+
+	// Check all race retry fields persisted
+	if cfg3.RaceRetryEnabled != true {
+		t.Errorf("After restart: RaceRetryEnabled = %v, want true", cfg3.RaceRetryEnabled)
+	}
+	if cfg3.RaceParallelOnIdle != true {
+		t.Errorf("After restart: RaceParallelOnIdle = %v, want true", cfg3.RaceParallelOnIdle)
+	}
+	if cfg3.RaceMaxParallel != 7 {
+		t.Errorf("After restart: RaceMaxParallel = %d, want 7", cfg3.RaceMaxParallel)
+	}
+	if cfg3.RaceMaxBufferBytes != 2000000 {
+		t.Errorf("After restart: RaceMaxBufferBytes = %d, want 2000000", cfg3.RaceMaxBufferBytes)
+	}
+
+	// Verify we didn't break defaults (restore original)
+	t.Logf("Initial max_parallel was %d, now is %d (should be 7)", initialMaxParallel, cfg3.RaceMaxParallel)
+}
