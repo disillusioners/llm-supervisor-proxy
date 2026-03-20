@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
@@ -164,6 +165,15 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 	// 3. Check for immediate error
 	if resp.StatusCode >= 400 {
+		// Read response body for error details
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		bodyStr := string(bodyBytes)
+
+		// Check if the response body contains context overflow patterns
+		if models.IsContextOverflowError(fmt.Errorf("%s", bodyStr)) {
+			return fmt.Errorf("upstream returned error: %s - %s", resp.Status, bodyStr)
+		}
+
 		return fmt.Errorf("upstream returned error: %s", resp.Status)
 	}
 
