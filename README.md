@@ -7,35 +7,41 @@ A production-ready OpenAI-compatible proxy server that sits between your autonom
 ## 🚀 Features
 
 ### Core Reliability
--   **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
--   **Parallel Race Retry**: When a request hangs or fails, spawns parallel requests (same model + fallback) and races them to completion. First successful response wins.
--   **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
--   **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
-    > ⚠️ **Note**: For streaming requests, retry only occurs before headers are sent (e.g., on 5xx errors). Once streaming begins, mid-stream failures send an SSE error event to the client instead of retrying.
+- **Heartbeat Monitoring**: Detects if the token stream hangs for more than `IDLE_TIMEOUT` (default: 60s).
+- **Parallel Race Retry**: When a request hangs or fails, spawns parallel requests (same model + fallback) and races them to completion. First successful response wins.
+- **Smart Resume**: When retrying after a hang, it appends the partial generation to the prompt and asks the LLM to "Continue exactly where you stopped", minimizing wasted compute and latency.
+- **Streaming Passthrough**: Fully supports Server-Sent Events (SSE) for real-time token streaming.
+- **Stream Normalizers**: Automatically fixes common streaming issues like missing role fields, missing tool call indices, and concatenated chunks.
 
 ### Loop Detection & Recovery
--   **Loop Detection**: Detects when LLMs enter repetitive patterns (identical responses, similar content, repeated tool calls, circular action workflows, stagnating progress). Optionally interrupts the stream and retries with sanitized context.
+- **Loop Detection**: Detects when LLMs enter repetitive patterns (identical responses, similar content, repeated tool calls, circular action workflows, stagnating progress). Optionally interrupts the stream and retries with sanitized context.
+- **6 Detection Strategies**: Exact match, SimHash similarity, action patterns, oscillation detection, trigram analysis, and stagnation detection.
 
 ### Multi-Provider Support
--   **Multiple LLM Providers**: Works with OpenAI, Anthropic, Azure OpenAI, Google Gemini, Zhipu/GLM, MiniMax, and ZAI out of the box.
--   **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
--   **Credential Management**: Store encrypted API keys and configure per-model credentials. Supports environment variable expansion (`${API_KEY}`) for secure secret management.
+- **Multiple LLM Providers**: Works with OpenAI, Anthropic, Azure OpenAI, Google Gemini, Zhipu/GLM, MiniMax, and ZAI out of the box.
+- **Model Fallback Chains**: Automatically switches to a fallback model if the primary model fails or hangs.
+- **Credential Management**: Store encrypted API keys and configure per-model credentials. Supports environment variable expansion (`${API_KEY}`) for secure secret management.
 
 ### Tool Call Handling
--   **Automatic Tool Call Repair**: Repairs malformed JSON in LLM tool call arguments using multiple strategies (extraction, library repair, reasoning removal, or LLM-based fixing).
+- **Automatic Tool Call Repair**: Repairs malformed JSON in LLM tool call arguments using multiple strategies (extraction, library repair, reasoning removal, or LLM-based fixing).
+- **Tool Call Buffering**: Buffers tool call fragments until valid JSON is formed. Designed for streaming clients that cannot handle partial JSON.
 
 ### Authentication & Security
--   **API Token Authentication**: Token-based authentication with `sk-` prefix tokens, expiration dates, and secure SHA-256 hashing.
+- **API Token Authentication**: Token-based authentication with `sk-` prefix tokens, expiration dates, and secure SHA-256 hashing.
+
+### Raw Response Logging
+- **Upstream Response Logging**: Save raw upstream responses to disk for debugging and auditing.
+- **Configurable Storage**: Set directory and max storage limits for buffer files.
 
 ### Deployment & Monitoring
--   **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
--   **Kubernetes Ready**: Helm chart with OAuth2 proxy integration, PostgreSQL support, and long-running request handling (3600s timeout for streaming).
+- **Web UI Dashboard**: Real-time monitoring of requests, event logs, and configuration management.
+- **Kubernetes Ready**: Helm chart with OAuth2 proxy integration, PostgreSQL support, and long-running request handling (3600s timeout for streaming).
 
 ## 🛠️ Installation
 
 ### Prerequisites
--   Go 1.24+
--   Node.js 18+ (required for building the frontend)
+- Go 1.24+
+- Node.js 18+ (required for building the frontend)
 
 ### Build & Install
 
@@ -62,22 +68,20 @@ sudo make install
 ## ⚙️ Configuration
 
 The proxy uses a three-tier configuration system with the following precedence:
-1.  **Environment Variables** (Highest)
-2.  **Database Storage** (SQLite / PostgreSQL)
-3.  **Defaults** (Lowest)
+1. **Environment Variables** (Highest, when `APPLY_ENV_OVERRIDES=true`)
+2. **Database Storage** (SQLite / PostgreSQL)
+3. **Defaults** (Lowest)
 
-### Environment Variables
+### Core Configuration
 
 | Variable | Default | Description |
-| :--- | :--- | :--- |
+|----------|---------|-------------|
 | `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
 | `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
 | `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming. |
 | `MAX_GENERATION_TIME` | `300s` | **Absolute hard timeout** for entire request lifecycle. |
-| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
-| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
 | `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses (keeps connections alive during buffering). |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
 | `INTERNAL_ENCRYPTION_KEY` | *(empty)* | Base64-encoded 32-byte key for encrypting stored API keys. |
@@ -87,7 +91,7 @@ The proxy uses a three-tier configuration system with the following precedence:
 The proxy uses a **parallel race retry** mechanism for maximum reliability:
 
 | Variable | Default | Description |
-| :--- | :--- | :--- |
+|----------|---------|-------------|
 | `RACE_RETRY_ENABLED` | `false` | Enable parallel race retry (recommended: `true`). |
 | `RACE_PARALLEL_ON_IDLE` | `true` | Spawn parallel requests when main request hits idle timeout. |
 | `RACE_MAX_PARALLEL` | `3` | Max parallel requests (main + second + fallback). |
@@ -107,12 +111,78 @@ The proxy uses a **parallel race retry** mechanism for maximum reliability:
 - Better success rate (multiple attempts running simultaneously)
 - Preserved progress (main request continues even after idle timeout)
 
+### Buffer Storage Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUFFER_STORAGE_DIR` | *(empty)* | Directory for buffer content files (defaults to user config dir). |
+| `BUFFER_MAX_STORAGE_MB` | `100` | Max total storage for buffers in MB. |
+
+### Tool Call Buffer Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOOL_CALL_BUFFER_DISABLED` | `false` | Disable tool call buffering (for clients that handle partial JSON). |
+| `TOOL_CALL_BUFFER_MAX_SIZE` | `1048576` | Max bytes per tool call buffer (1MB default). |
+
+### Raw Upstream Response Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_RAW_UPSTREAM_RESPONSE` | `false` | Log successful upstream responses. |
+| `LOG_RAW_UPSTREAM_ON_ERROR` | `false` | Log failed/error upstream responses. |
+| `LOG_RAW_UPSTREAM_MAX_KB` | `1024` | Max KB per response to log. |
+
+### Ultimate Model Configuration
+
+For handling duplicate requests with a designated high-priority model:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ULTIMATE_MODEL_ID` | *(empty)* | Model ID for duplicate request handling. |
+| `ULTIMATE_MODEL_MAX_HASH` | `100` | Max hashes in circular buffer. |
+| `ULTIMATE_MODEL_MAX_RETRIES` | `2` | Max ultimate model retries per hash. |
+
+### Loop Detection Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection. |
+| `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption). |
+
+Advanced loop detection parameters (via Web UI or database config):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MessageWindow` | `10` | Sliding window size for message analysis. |
+| `ActionWindow` | `15` | Action window size for tool call analysis. |
+| `ExactMatchCount` | `3` | Identical messages to trigger detection. |
+| `SimilarityThreshold` | `0.85` | SimHash similarity threshold (0.0-1.0). |
+| `MinTokensForSimHash` | `15` | Min tokens before SimHash applies. |
+| `ActionRepeatCount` | `3` | Consecutive identical actions to trigger. |
+| `OscillationCount` | `4` | A→B→A→B cycles to trigger. |
+| `ThinkingMinTokens` | `100` | Min thinking tokens before trigram analysis. |
+| `TrigramThreshold` | `0.3` | Trigram repetition ratio threshold. |
+| `ReasoningModelPatterns` | `["o1", "o3", "deepseek-r1"]` | Patterns for reasoning models. |
+| `ReasoningTrigramThreshold` | `0.15` | More forgiving threshold for reasoning models. |
+
+### Tool Repair Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOOL_REPAIR_ENABLED` | `true` | Enable tool repair. |
+| `TOOL_REPAIR_STRATEGIES` | *(multi)* | Repair strategies to use. |
+| `TOOL_REPAIR_MAX_ARGUMENTS_SIZE` | `100KB` | Max tool arguments size. |
+| `TOOL_REPAIR_MAX_TOOL_CALLS` | `10` | Max tool calls per response. |
+| `TOOL_REPAIR_FIXER_MODEL` | *(empty)* | LLM model for fixing (optional). |
+| `TOOL_REPAIR_FIXER_TIMEOUT` | `25s` | Fixer request timeout. |
+
 ### Database Storage
 
 The application uses a database for persisting configurations and fallback models:
 
-*   **Local Development (SQLite)**: Used automatically by default. The database is created at `~/.config/llm-supervisor-proxy/config.db`.
-*   **Production (PostgreSQL)**: Enabled by setting the `DATABASE_URL` environment variable.
+- **Local Development (SQLite)**: Used automatically by default. The database is created at `~/.config/llm-supervisor-proxy/config.db`.
+- **Production (PostgreSQL)**: Enabled by setting the `DATABASE_URL` environment variable.
 
 *Note: If you are upgrading from an older version, your existing `config.json` and `models.json` files will be automatically migrated to the database.*
 
@@ -120,21 +190,21 @@ For full database details and rollback procedures, see [`docs/database-migration
 
 ## 🏃 Usage
 
-1.  **Start your LLM Provider** (e.g., LiteLLM) on port 4001.
-2.  **Start the Supervisor Proxy**:
-    ```bash
-    llm-supervisor-proxy
-    ```
-3.  **Point your Agent** to the Proxy (port 4321):
-    ```bash
-    curl -X POST http://localhost:4321/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -d '{
-        "model": "gpt-4",
-        "messages": [{"role": "user", "content": "Write a long story about a space pirate."}],
-        "stream": true
-      }'
-    ```
+1. **Start your LLM Provider** (e.g., LiteLLM) on port 4001.
+2. **Start the Supervisor Proxy**:
+   ```bash
+   llm-supervisor-proxy
+   ```
+3. **Point your Agent** to the Proxy (port 4321):
+   ```bash
+   curl -X POST http://localhost:4321/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "gpt-4",
+       "messages": [{"role": "user", "content": "Write a long story about a space pirate."}],
+       "stream": true
+     }'
+   ```
 
 ## 🖥️ Web UI
 
@@ -196,6 +266,29 @@ When LLMs output malformed JSON in tool call arguments, the proxy can automatica
 | `fixer_model` | Uses a separate LLM to repair malformed JSON |
 
 Configure via the Web UI under Tool Repair settings.
+
+## 🛡️ Tool Call Buffering
+
+For streaming clients that cannot handle partial JSON in tool call arguments:
+
+- **Enabled by default** - Buffers fragments until valid JSON is formed
+- **Emits complete tool calls** - Only when arguments are fully parsed
+- **Configurable max size** - Default 1MB per request
+
+Disable if your client handles partial JSON:
+```bash
+export TOOL_CALL_BUFFER_DISABLED=true
+```
+
+## 📊 Stream Normalizers
+
+Automatically fixes common streaming issues:
+
+| Normalizer | Fixes |
+|------------|-------|
+| `FixEmptyRoleNormalizer` | Missing role field in streaming chunks |
+| `FixMissingToolCallIndexNormalizer` | Missing tool call indices |
+| `SplitConcatenatedChunksNormalizer` | Merged SSE chunks |
 
 ## 🔑 Credential Management
 
@@ -278,26 +371,37 @@ For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detect
 .
 ├── cmd/main.go              # Entry point
 ├── pkg/
-│   ├── ui/
-│   │   ├── server.go        # UI server + API handlers
-│   │   ├── static/          # Built frontend (embedded)
-│   │   └── frontend/        # Preact frontend source
-│   ├── proxy/               # Core proxy logic & retry handling
-│   ├── providers/           # LLM provider adapters (OpenAI, Anthropic, etc.)
-│   ├── loopdetection/       # Loop detection strategies & recovery
-│   ├── toolrepair/          # Automatic tool call JSON repair
 │   ├── auth/                # API token authentication
+│   ├── bufferstore/         # Persistent buffer storage for raw response logging
+│   ├── config/              # Configuration management
+│   ├── crypto/              # Encryption utilities
 │   ├── events/              # Event bus for SSE updates
+│   ├── handlers/            # HTTP handlers
+│   ├── internal/            # Internal implementation details
+│   ├── logger/               # Logging utilities
+│   ├── loopdetection/       # Loop detection strategies & recovery
 │   ├── models/              # Model, fallback & credential management
-│   ├── bufferstore/         # Persistent stream buffering
+│   ├── providers/           # LLM provider adapters (OpenAI, Anthropic)
+│   ├── proxy/               # Core proxy logic & race retry
+│   │   ├── normalizers/     # Stream normalization
+│   │   ├── race_coordinator.go  # Race retry coordinator
+│   │   ├── race_executor.go      # Request execution
+│   │   ├── race_request.go      # Request state
+│   │   └── stream_buffer.go     # Thread-safe buffer
 │   ├── store/               # In-memory storage & SQLite/PostgreSQL Database
-│   │   ├── database/        # DB Connection, migrations, sqlc queries
-│   │   └── database/sqlc/   # sqlc query definitions
-│   └── config/              # App-wide configuration management
+│   │   └── database/        # DB Connection, migrations, sqlc queries
+│   │       └── sqlc/        # sqlc query definitions
+│   ├── supervisor/          # Idle timeout monitoring
+│   ├── toolcall/            # Tool call buffering
+│   ├── toolrepair/          # Automatic tool call JSON repair
+│   ├── ultimatemodel/       # Ultimate model for duplicate requests
+│   └── ui/                  # Web UI
+│       └── frontend/        # Preact frontend source
 ├── k8s/                     # Kubernetes Helm chart & manifests
 │   ├── templates/           # Helm templates
 │   └── values.yaml          # Default values
 ├── docs/                    # Design docs & implementation details
+├── plans/                   # Design proposals & reviews
 └── LICENSE                  # MIT License
 ```
 
