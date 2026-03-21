@@ -229,25 +229,27 @@ export function useVersion() {
 export function useRam() {
   const [allocMB, setAllocMB] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchRam = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ alloc_bytes: number; alloc_mb: number }>('/ram');
+      setAllocMB(data.alloc_mb);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to fetch RAM');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchRam = async () => {
-      try {
-        const data = await apiFetch<{ alloc_bytes: number; alloc_mb: number }>('/ram');
-        setAllocMB(data.alloc_mb);
-      } catch (e) {
-        console.error('Failed to fetch RAM:', e);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchRam();
     const interval = setInterval(fetchRam, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchRam]);
 
-  return { allocMB, loading };
+  return { allocMB, loading, error };
 }
 
 // Tokens API

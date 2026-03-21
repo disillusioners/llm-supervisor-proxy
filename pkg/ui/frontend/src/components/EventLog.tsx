@@ -10,273 +10,189 @@ interface EventLogProps {
   containerRef: Ref<HTMLDivElement>;
 }
 
+// Pre-computed maps for O(1) lookups instead of O(n) switch evaluation on every render
+const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
+  request_started: () => 'Processing new request...',
+  timeout_idle: (e) => `Idle timeout detected (${e.data?.timeout || 'unknown'})`,
+  retry_attempt: (e) => `Retrying request (Attempt ${e.data?.attempt || '?'})`,
+  error_max_upstream_error_retries: (e) => `Max retries exceeded${e.data?.error ? ` - ${e.data.error}` : ''}`,
+  upstream_error: (e) => `Upstream request failed: ${e.data?.error || 'Unknown error'}`,
+  upstream_error_status: (e) => `Upstream returned HTTP ${e.data?.status || '?'}`,
+  upstream_error_status_retry: (e) => `Retry failed with HTTP ${e.data?.status || '?'} (headers already sent)`,
+  stream_error: (e) => `Stream error: ${e.data?.error || 'Unknown error'}`,
+  stream_error_chunk: (e) => {
+    const rawPreview = e.data?.raw_data ? ` | Raw: ${e.data.raw_data}` : '';
+    return `Stream error chunk detected: ${e.data?.error || 'Unknown error'}${rawPreview}`;
+  },
+  stream_error_after_headers: (e) => {
+    const bufInfo = e.data?.buffer_size ? ` (buffer: ${e.data.buffer_size} bytes)` : '';
+    return `Stream error after headers: ${e.data?.error || 'Unknown error'}${bufInfo}`;
+  },
+  error_deadline_exceeded: () => 'Generation deadline exceeded',
+  stream_ended_unexpectedly: () => 'Stream ended unexpectedly without [DONE]',
+  fallback_triggered: (e) => `Fallback: ${e.data?.from_model || '?'} -> ${e.data?.to_model || '?'}`,
+  all_models_failed: () => 'All models failed after retries',
+  error: (e) => `Error: ${e.data?.error || 'Unknown error'}`,
+  request_completed: () => 'Request completed successfully.',
+  response_logged: (e) => {
+    const size = e.data?.size_bytes ? ` (${(e.data.size_bytes / 1024).toFixed(1)} KB)` : '';
+    return `Raw response logged${size}`;
+  },
+  loop_detected: (e) => {
+    const mode = e.data?.shadow_mode ? ' [shadow]' : '';
+    return `Loop detected${mode}: ${e.data?.strategy || '?'} (${e.data?.severity || '?'}) - ${e.data?.evidence || 'No details'}`;
+  },
+  loop_interrupted: (e) => `Loop interrupted: ${e.data?.strategy || '?'} - ${e.data?.evidence || 'Stream stopped, retrying with sanitized context'}`,
+  client_disconnected: () => 'Client disconnected',
+  client_disconnected_during_retry: (e) => `Client disconnected during retry (Attempt ${e.data?.attempt || '?'})`,
+  client_disconnected_during_scan: (e) => `Client disconnected during stream scan (buffer: ${e.data?.buffer_size || 0} bytes)`,
+  client_disconnected_during_buffering: (e) => `Client disconnected during buffering (buffer: ${e.data?.buffer_size || 0} bytes)`,
+  client_disconnected_during_stream: () => 'Client disconnected during stream read',
+  client_disconnected_during_internal: () => 'Client disconnected during internal request',
+  stream_chunk_deadline: (e) => `Stream chunk deadline reached - flushing buffer (${e.data?.buffer_size || 0} bytes, deadline: ${e.data?.deadline || '?'}, elapsed: ${e.data?.elapsed || '?'})`,
+  stream_normalize: (e) => {
+    const provider = e.data?.provider ? ` [${e.data.provider}]` : '';
+    return `Stream normalized${provider}: ${e.data?.description || e.data?.normalizer || 'unknown fix'}`;
+  },
+  shadow_retry_started: (e) => {
+    const trigger = e.data?.trigger ? ` (${e.data.trigger})` : '';
+    return `Shadow retry started: ${e.data?.model || '?'} vs ${e.data?.main_model || 'main'}${trigger}`;
+  },
+  shadow_retry_won: (e) => {
+    const dur = e.data?.duration ? ` in ${e.data.duration}` : '';
+    return `Shadow retry won: ${e.data?.model || '?'} completed faster than ${e.data?.main_model || 'main'}${dur}`;
+  },
+  shadow_retry_failed: (e) => `Shadow retry failed: ${e.data?.model || '?'} - ${e.data?.error || 'Unknown error'}`,
+  shadow_retry_lost: (e) => {
+    const dur = e.data?.duration ? ` after ${e.data.duration}` : '';
+    return `Shadow retry lost: ${e.data?.main_model || 'main'} completed before ${e.data?.model || '?'}${dur}`;
+  },
+  ultimate_model_triggered: (e) => {
+    const hash = e.data?.hash ? ` (${e.data.hash.substring(0, 8)}...)` : '';
+    return `Ultimate model triggered: ${e.data?.original_model || '?'} -> ${e.data?.ultimate_model || '?'}${hash}`;
+  },
+  ultimate_model_failed: (e) => `Ultimate model failed: ${e.data?.ultimate_model || '?'} - ${e.data?.error || 'Unknown error'}`,
+  race_started: (e) => `Race started with models: ${e.data?.models?.join(', ') || '?'}`,
+  race_spawn: (e) => {
+    const trigger = e.data?.trigger ? ` (${e.data.trigger})` : '';
+    return `Spawned ${e.data?.type || '?'} request #${e.data?.request_index ?? '?'}: ${e.data?.model || '?'}${trigger}`;
+  },
+  race_winner_selected: (e) => {
+    const duration = e.data?.duration_ms ? ` in ${e.data.duration_ms}ms` : '';
+    const bytes = e.data?.buffer_bytes ? ` (${(e.data.buffer_bytes / 1024).toFixed(1)}KB)` : '';
+    return `Winner: ${e.data?.winner_type || '?'} request #${e.data?.winner_index ?? '?'} (${e.data?.winner_model || '?'})${duration}${bytes}`;
+  },
+  race_all_failed: (e) => `All ${e.data?.total_attempts || '?'} race requests failed after ${e.data?.duration_ms || '?'}ms`,
+  tool_repair: (e) => {
+    const d = e.data;
+    const repaired = d?.repaired ?? 0;
+    const failed = d?.failed ?? 0;
+    const total = d?.total_tool_calls ?? 0;
+    const strategies = d?.strategies_used?.join(', ') || 'none';
+    return `Tool repair: ${repaired}/${total} repaired, ${failed} failed (strategies: ${strategies})`;
+  },
+  ultimate_model_retry_exhausted: (e) => {
+    const d = e.data;
+    return `Ultimate model retries exhausted: ${d?.current_retry || '?'}/${d?.max_retries || '?'}`;
+  },
+  internal_error: (e) => `Internal error: ${e.data?.error || 'Unknown error'}`,
+};
+
+const EVENT_COLORS: Record<EventType, string> = {
+  request_started: 'text-blue-400',
+  request_completed: 'text-green-400',
+  response_logged: 'text-cyan-400',
+  retry_attempt: 'text-purple-400',
+  fallback_triggered: 'text-orange-400',
+  error_max_upstream_error_retries: 'text-red-400',
+  all_models_failed: 'text-red-400',
+  error: 'text-red-400',
+  timeout_idle: 'text-yellow-400',
+  error_deadline_exceeded: 'text-yellow-400',
+  upstream_error: 'text-yellow-400',
+  upstream_error_status: 'text-yellow-400',
+  upstream_error_status_retry: 'text-yellow-400',
+  stream_error: 'text-yellow-400',
+  stream_error_chunk: 'text-yellow-400',
+  stream_error_after_headers: 'text-yellow-400',
+  stream_ended_unexpectedly: 'text-yellow-400',
+  client_disconnected: 'text-yellow-400',
+  client_disconnected_during_retry: 'text-yellow-400',
+  client_disconnected_during_scan: 'text-yellow-400',
+  client_disconnected_during_buffering: 'text-yellow-400',
+  client_disconnected_during_stream: 'text-yellow-400',
+  client_disconnected_during_internal: 'text-yellow-400',
+  stream_chunk_deadline: 'text-yellow-400',
+  loop_detected: 'text-amber-400',
+  loop_interrupted: 'text-red-300',
+  shadow_retry_started: 'text-cyan-400',
+  shadow_retry_won: 'text-green-400',
+  shadow_retry_failed: 'text-red-400',
+  shadow_retry_lost: 'text-gray-400',
+  ultimate_model_triggered: 'text-pink-400',
+  ultimate_model_failed: 'text-red-400',
+  stream_normalize: 'text-amber-400',
+  race_started: 'text-cyan-400',
+  race_spawn: 'text-blue-400',
+  race_winner_selected: 'text-green-400',
+  race_all_failed: 'text-red-400',
+  tool_repair: 'text-amber-400',
+  ultimate_model_retry_exhausted: 'text-red-400',
+  internal_error: 'text-red-400',
+};
+
+const EVENT_TYPE_LABELS: Record<EventType, string> = {
+  request_started: 'REQUEST_STARTED',
+  request_completed: 'REQUEST_COMPLETED',
+  response_logged: 'RESPONSE_LOGGED',
+  retry_attempt: 'RETRY_ATTEMPT',
+  error_max_upstream_error_retries: 'MAX_RETRIES_EXCEEDED',
+  upstream_error: 'UPSTREAM_ERROR',
+  upstream_error_status: 'UPSTREAM_STATUS',
+  upstream_error_status_retry: 'RETRY_STATUS_ERROR',
+  stream_error: 'STREAM_ERROR',
+  stream_error_chunk: 'STREAM_ERROR_CHUNK',
+  stream_error_after_headers: 'STREAM_ERROR_AFTER_HEADERS',
+  error_deadline_exceeded: 'DEADLINE_EXCEEDED',
+  stream_ended_unexpectedly: 'UNEXPECTED_EOF',
+  fallback_triggered: 'FALLBACK',
+  all_models_failed: 'ALL_MODELS_FAILED',
+  timeout_idle: 'TIMEOUT_IDLE',
+  error: 'ERROR',
+  loop_detected: 'LOOP_DETECTED',
+  loop_interrupted: 'LOOP_INTERRUPTED',
+  client_disconnected: 'CLIENT_DISCONNECTED',
+  client_disconnected_during_retry: 'CLIENT_DISCONNECTED',
+  client_disconnected_during_scan: 'CLIENT_DISCONNECTED_SCAN',
+  client_disconnected_during_buffering: 'CLIENT_DISCONNECTED_BUFFERING',
+  client_disconnected_during_stream: 'CLIENT_DISCONNECTED_STREAM',
+  client_disconnected_during_internal: 'CLIENT_DISCONNECTED_INTERNAL',
+  stream_chunk_deadline: 'STREAM_CHUNK_DEADLINE',
+  stream_normalize: 'STREAM_NORMALIZE',
+  shadow_retry_started: 'SHADOW_RETRY_STARTED',
+  shadow_retry_won: 'SHADOW_RETRY_WON',
+  shadow_retry_failed: 'SHADOW_RETRY_FAILED',
+  shadow_retry_lost: 'SHADOW_RETRY_LOST',
+  ultimate_model_triggered: 'ULTIMATE_MODEL',
+  ultimate_model_failed: 'ULTIMATE_MODEL_FAILED',
+  race_started: 'RACE_STARTED',
+  race_spawn: 'RACE_SPAWN',
+  race_winner_selected: 'RACE_WINNER',
+  race_all_failed: 'RACE_ALL_FAILED',
+  tool_repair: 'TOOL_REPAIR',
+  ultimate_model_retry_exhausted: 'ULTIMATE_RETRY_EXHAUSTED',
+  internal_error: 'INTERNAL_ERROR',
+};
+
+// Fast O(1) lookup helpers - no more switch statements
 const getEventMessage = (event: Event): string => {
-  switch (event.type) {
-    case 'request_started':
-      return 'Processing new request...';
-    case 'timeout_idle':
-      return `Idle timeout detected (${event.data?.timeout || 'unknown'})`;
-    case 'retry_attempt':
-      return `Retrying request (Attempt ${event.data?.attempt || '?'})`;
-    case 'error_max_upstream_error_retries':
-      return `Max retries exceeded${event.data?.error ? ` - ${event.data.error}` : ''}`;
-    case 'upstream_error':
-      return `Upstream request failed: ${event.data?.error || 'Unknown error'}`;
-    case 'upstream_error_status':
-      return `Upstream returned HTTP ${event.data?.status || '?'}`;
-    case 'upstream_error_status_retry':
-      return `Retry failed with HTTP ${event.data?.status || '?'} (headers already sent)`;
-    case 'stream_error':
-      return `Stream error: ${event.data?.error || 'Unknown error'}`;
-    case 'stream_error_chunk': {
-      const rawPreview = event.data?.raw_data ? ` | Raw: ${event.data.raw_data}` : '';
-      return `Stream error chunk detected: ${event.data?.error || 'Unknown error'}${rawPreview}`;
-    }
-    case 'stream_error_after_headers': {
-      const bufInfo = event.data?.buffer_size ? ` (buffer: ${event.data.buffer_size} bytes)` : '';
-      return `Stream error after headers: ${event.data?.error || 'Unknown error'}${bufInfo}`;
-    }
-    case 'error_deadline_exceeded':
-      return 'Generation deadline exceeded';
-    case 'stream_ended_unexpectedly':
-      return 'Stream ended unexpectedly without [DONE]';
-    case 'fallback_triggered':
-      return `Fallback: ${event.data?.from_model || '?'} -> ${event.data?.to_model || '?'}`;
-    case 'all_models_failed':
-      return 'All models failed after retries';
-    case 'error':
-      return `Error: ${event.data?.error || 'Unknown error'}`;
-    case 'request_completed':
-      return 'Request completed successfully.';
-    case 'response_logged': {
-      const d = event.data;
-      const size = d?.size_bytes ? ` (${(d.size_bytes / 1024).toFixed(1)} KB)` : '';
-      return `Raw response logged${size}`;
-    }
-    case 'loop_detected': {
-      const d = event.data;
-      const mode = d?.shadow_mode ? ' [shadow]' : '';
-      return `Loop detected${mode}: ${d?.strategy || '?'} (${d?.severity || '?'}) - ${d?.evidence || 'No details'}`;
-    }
-    case 'loop_interrupted': {
-      const d = event.data;
-      return `Loop interrupted: ${d?.strategy || '?'} - ${d?.evidence || 'Stream stopped, retrying with sanitized context'}`;
-    }
-    case 'client_disconnected':
-      return 'Client disconnected';
-    case 'client_disconnected_during_retry':
-      return `Client disconnected during retry (Attempt ${event.data?.attempt || '?'})`;
-    case 'client_disconnected_during_scan':
-      return `Client disconnected during stream scan (buffer: ${event.data?.buffer_size || 0} bytes)`;
-    case 'client_disconnected_during_buffering':
-      return `Client disconnected during buffering (buffer: ${event.data?.buffer_size || 0} bytes)`;
-    case 'client_disconnected_during_stream':
-      return 'Client disconnected during stream read';
-    case 'client_disconnected_during_internal':
-      return 'Client disconnected during internal request';
-    case 'stream_chunk_deadline':
-      return `Stream chunk deadline reached - flushing buffer (${event.data?.buffer_size || 0} bytes, deadline: ${event.data?.deadline || '?'}, elapsed: ${event.data?.elapsed || '?'})`;
-    case 'stream_normalize': {
-      const d = event.data;
-      const provider = d?.provider ? ` [${d.provider}]` : '';
-      return `Stream normalized${provider}: ${d?.description || d?.normalizer || 'unknown fix'}`;
-    }
-    case 'shadow_retry_started': {
-      const d = event.data;
-      const trigger = d?.trigger ? ` (${d.trigger})` : '';
-      return `Shadow retry started: ${d?.model || '?'} vs ${d?.main_model || 'main'}${trigger}`;
-    }
-    case 'shadow_retry_won': {
-      const d = event.data;
-      const dur = d?.duration ? ` in ${d.duration}` : '';
-      return `Shadow retry won: ${d?.model || '?'} completed faster than ${d?.main_model || 'main'}${dur}`;
-    }
-    case 'shadow_retry_failed':
-      return `Shadow retry failed: ${event.data?.model || '?'} - ${event.data?.error || 'Unknown error'}`;
-    case 'shadow_retry_lost': {
-      const d = event.data;
-      const dur = d?.duration ? ` after ${d.duration}` : '';
-      return `Shadow retry lost: ${d?.main_model || 'main'} completed before ${d?.model || '?'}${dur}`;
-    }
-    case 'ultimate_model_triggered': {
-      const d = event.data;
-      const hash = d?.hash ? ` (${d.hash.substring(0, 8)}...)` : '';
-      return `Ultimate model triggered: ${d?.original_model || '?'} -> ${d?.ultimate_model || '?'}${hash}`;
-    }
-    case 'ultimate_model_failed':
-      return `Ultimate model failed: ${event.data?.ultimate_model || '?'} - ${event.data?.error || 'Unknown error'}`;
-    // Race retry events
-    case 'race_started': {
-      const models = event.data?.models?.join(', ') || '?';
-      return `Race started with models: ${models}`;
-    }
-    case 'race_spawn': {
-      const d = event.data;
-      const trigger = d?.trigger ? ` (${d.trigger})` : '';
-      return `Spawned ${d?.type || '?'} request #${d?.request_index ?? '?'}: ${d?.model || '?'}${trigger}`;
-    }
-    case 'race_winner_selected': {
-      const d = event.data;
-      const duration = d?.duration_ms ? ` in ${d.duration_ms}ms` : '';
-      const bytes = d?.buffer_bytes ? ` (${(d.buffer_bytes / 1024).toFixed(1)}KB)` : '';
-      return `Winner: ${d?.winner_type || '?'} request #${d?.winner_index ?? '?'} (${d?.winner_model || '?'})${duration}${bytes}`;
-    }
-    case 'race_all_failed': {
-      const d = event.data;
-      return `All ${d?.total_attempts || '?'} race requests failed after ${d?.duration_ms || '?'}ms`;
-    }
-    default:
-      return `Event: ${event.type}`;
-  }
+  const handler = EVENT_MESSAGES[event.type];
+  return handler ? handler(event) : `Event: ${event.type}`;
 };
 
-const getEventColor = (type: EventType): string => {
-  switch (type) {
-    case 'request_started':
-      return 'text-blue-400';
-    case 'request_completed':
-      return 'text-green-400';
-    case 'response_logged':
-      return 'text-cyan-400';
-    case 'retry_attempt':
-      return 'text-purple-400';
-    case 'fallback_triggered':
-      return 'text-orange-400';
-    case 'error_max_upstream_error_retries':
-    case 'all_models_failed':
-    case 'error':
-      return 'text-red-400';
-    case 'timeout_idle':
-    case 'error_deadline_exceeded':
-    case 'upstream_error':
-    case 'upstream_error_status':
-    case 'upstream_error_status_retry':
-    case 'stream_error':
-    case 'stream_error_chunk':
-    case 'stream_error_after_headers':
-    case 'stream_ended_unexpectedly':
-    case 'client_disconnected':
-    case 'client_disconnected_during_retry':
-    case 'client_disconnected_during_scan':
-    case 'client_disconnected_during_buffering':
-    case 'client_disconnected_during_stream':
-    case 'client_disconnected_during_internal':
-    case 'stream_chunk_deadline':
-      return 'text-yellow-400';
-    case 'loop_detected':
-      return 'text-amber-400';
-    case 'loop_interrupted':
-      return 'text-red-300';
-    case 'shadow_retry_started':
-      return 'text-cyan-400';
-    case 'shadow_retry_won':
-      return 'text-green-400';
-    case 'shadow_retry_failed':
-      return 'text-red-400';
-    case 'shadow_retry_lost':
-      return 'text-gray-400';
-    case 'ultimate_model_triggered':
-      return 'text-pink-400';
-    case 'ultimate_model_failed':
-      return 'text-red-400';
-    // Stream normalize events
-    case 'stream_normalize':
-      return 'text-amber-400';
-    // Race retry events
-    case 'race_started':
-      return 'text-cyan-400';
-    case 'race_spawn':
-      return 'text-blue-400';
-    case 'race_winner_selected':
-      return 'text-green-400';
-    case 'race_all_failed':
-      return 'text-red-400';
-    default:
-      return 'text-gray-400';
-  }
-};
+const getEventColor = (type: EventType): string => EVENT_COLORS[type] || 'text-gray-400';
 
-const getEventTypeLabel = (type: EventType): string => {
-  switch (type) {
-    case 'request_started':
-      return 'REQUEST_STARTED';
-    case 'request_completed':
-      return 'REQUEST_COMPLETED';
-    case 'response_logged':
-      return 'RESPONSE_LOGGED';
-    case 'retry_attempt':
-      return 'RETRY_ATTEMPT';
-    case 'error_max_upstream_error_retries':
-      return 'MAX_RETRIES_EXCEEDED';
-    case 'upstream_error':
-      return 'UPSTREAM_ERROR';
-    case 'upstream_error_status':
-      return 'UPSTREAM_STATUS';
-    case 'upstream_error_status_retry':
-      return 'RETRY_STATUS_ERROR';
-    case 'stream_error':
-      return 'STREAM_ERROR';
-    case 'stream_error_chunk':
-      return 'STREAM_ERROR_CHUNK';
-    case 'stream_error_after_headers':
-      return 'STREAM_ERROR_AFTER_HEADERS';
-    case 'error_deadline_exceeded':
-      return 'DEADLINE_EXCEEDED';
-    case 'stream_ended_unexpectedly':
-      return 'UNEXPECTED_EOF';
-    case 'fallback_triggered':
-      return 'FALLBACK';
-    case 'all_models_failed':
-      return 'ALL_MODELS_FAILED';
-    case 'timeout_idle':
-      return 'TIMEOUT_IDLE';
-    case 'error':
-      return 'ERROR';
-    case 'loop_detected':
-      return 'LOOP_DETECTED';
-    case 'loop_interrupted':
-      return 'LOOP_INTERRUPTED';
-    case 'client_disconnected':
-      return 'CLIENT_DISCONNECTED';
-    case 'client_disconnected_during_retry':
-      return 'CLIENT_DISCONNECTED';
-    case 'client_disconnected_during_scan':
-      return 'CLIENT_DISCONNECTED_SCAN';
-    case 'client_disconnected_during_buffering':
-      return 'CLIENT_DISCONNECTED_BUFFERING';
-    case 'client_disconnected_during_stream':
-      return 'CLIENT_DISCONNECTED_STREAM';
-    case 'client_disconnected_during_internal':
-      return 'CLIENT_DISCONNECTED_INTERNAL';
-    case 'stream_chunk_deadline':
-      return 'STREAM_CHUNK_DEADLINE';
-    case 'stream_normalize':
-      return 'STREAM_NORMALIZE';
-    case 'shadow_retry_started':
-      return 'SHADOW_RETRY_STARTED';
-    case 'shadow_retry_won':
-      return 'SHADOW_RETRY_WON';
-    case 'shadow_retry_failed':
-      return 'SHADOW_RETRY_FAILED';
-    case 'shadow_retry_lost':
-      return 'SHADOW_RETRY_LOST';
-    case 'ultimate_model_triggered':
-      return 'ULTIMATE_MODEL';
-    case 'ultimate_model_failed':
-      return 'ULTIMATE_MODEL_FAILED';
-    // Race retry events
-    case 'race_started':
-      return 'RACE_STARTED';
-    case 'race_spawn':
-      return 'RACE_SPAWN';
-    case 'race_winner_selected':
-      return 'RACE_WINNER';
-    case 'race_all_failed':
-      return 'RACE_ALL_FAILED';
-    default:
-      return String(type).toUpperCase();
-  }
-};
+const getEventTypeLabel = (type: EventType): string => EVENT_TYPE_LABELS[type] || String(type).toUpperCase();
 
 export const EventLog: FunctionComponent<EventLogProps> = ({
   events,

@@ -92,6 +92,10 @@ function DashboardRoute({
         refetchRequests(tag);
     }, [refetchRequests]);
 
+    const handleRefreshRequests = useCallback(() => {
+        refetchRequests(selectedAppTag || '');
+    }, [refetchRequests, selectedAppTag]);
+
     return (
         <div class="h-screen flex flex-col bg-gray-900">
             {/* Header */}
@@ -104,7 +108,7 @@ function DashboardRoute({
                     requests={requests}
                     selectedId={selectedRequestId}
                     onSelect={handleSelectRequest}
-                    onRefresh={() => refetchRequests(selectedAppTag || '')}
+                    onRefresh={handleRefreshRequests}
                     loading={requestsLoading}
                     appTags={appTags}
                     selectedAppTag={selectedAppTag}

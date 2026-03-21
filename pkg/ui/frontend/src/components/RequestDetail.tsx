@@ -1,30 +1,61 @@
-import { useState, useRef, useEffect } from 'preact/hooks';
+import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
+import { memo } from 'preact/compat';
+
+import DOMPurify from 'dompurify';
+import { marked } from 'marked';
+
 import type { RequestDetail as RequestDetailType } from '../types';
 import { escapeHtml, escapeHtmlLight, generateCurlCommand, parseThinkTags } from '../utils/helpers';
-
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 
 interface RequestDetailProps {
   detail: RequestDetailType | null;
   loading: boolean;
 }
 
-// Tool Call Display Component - Collapsible with formatted arguments
-function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; arguments: string } } }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [parsedArgs, setParsedArgs] = useState<unknown>(null);
-  const [parseError, setParseError] = useState(false);
+// Memoized markdown parser cache with LRU eviction
+const markdownCache = new Map<string, string>();
+const MAX_CACHE_SIZE = 100;
 
-  // Parse arguments on mount
-  useEffect(() => {
+function getCachedHtml(text: string): string {
+  const cached = markdownCache.get(text);
+  if (cached !== undefined) {
+    // Move to end (most recently used) - Map maintains insertion order
+    markdownCache.delete(text);
+    markdownCache.set(text, cached);
+    return cached;
+  }
+
+  if (markdownCache.size >= MAX_CACHE_SIZE) {
+    // Remove oldest (first) entry
+    const oldest = markdownCache.keys().next().value;
+    if (oldest) markdownCache.delete(oldest);
+  }
+
+  const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
+  markdownCache.set(text, html);
+  return html;
+}
+
+const MarkdownContent = memo(function MarkdownContent({ text }: { text: string }) {
+  const html = getCachedHtml(text);
+  return (
+    <div
+      class="prose prose-invert prose-sm max-w-none"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
+
+// Tool Call Display Component - Collapsible with formatted arguments
+const ToolCallDisplay = memo(function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; arguments: string } } }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Parse arguments with useMemo to avoid double-render from useEffect
+  const { parsedArgs, parseError } = useMemo(() => {
     try {
-      const parsed = JSON.parse(toolCall.function.arguments);
-      setParsedArgs(parsed);
-      setParseError(false);
+      return { parsedArgs: JSON.parse(toolCall.function.arguments), parseError: false };
     } catch {
-      setParsedArgs(null);
-      setParseError(true);
+      return { parsedArgs: null, parseError: true };
     }
   }, [toolCall.function.arguments]);
 
@@ -47,9 +78,9 @@ function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; a
         <div class="flex items-center gap-2">
           {parsedArgs && !parseError && (
             <span class="text-xs text-purple-400/70">
-              {Array.isArray(parsedArgs) 
-                ? `${parsedArgs.length} args` 
-                : typeof parsedArgs === 'object' 
+              {Array.isArray(parsedArgs)
+                ? `${parsedArgs.length} args`
+                : typeof parsedArgs === 'object'
                   ? `${Object.keys(parsedArgs).length} keys`
                   : ''}
             </span>
@@ -61,7 +92,7 @@ function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; a
       </button>
 
       {/* Arguments - Collapsible */}
-      <div 
+      <div
         class={`overflow-hidden transition-all duration-300 ease-in-out ${
           isExpanded ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
         }`}
@@ -83,16 +114,16 @@ function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; a
       </div>
     </div>
   );
-}
+});
 
 // Collapsible JSON viewer component
-function JsonViewer({ 
-  data, 
-  depth = 0, 
-  defaultExpanded = true 
-}: { 
-  data: unknown; 
-  depth?: number; 
+const JsonViewer = memo(function JsonViewer({
+  data,
+  depth = 0,
+  defaultExpanded = true,
+}: {
+  data: unknown;
+  depth?: number;
   defaultExpanded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded || depth < 2);
@@ -120,7 +151,7 @@ function JsonViewer({
 
     return (
       <span>
-        <button 
+        <button
           onClick={() => setExpanded(!expanded)}
           class="text-gray-400 hover:text-gray-200 mr-1 text-xs"
         >
@@ -148,7 +179,7 @@ function JsonViewer({
 
     return (
       <span>
-        <button 
+        <button
           onClick={() => setExpanded(!expanded)}
           class="text-gray-400 hover:text-gray-200 mr-1 text-xs"
         >
@@ -171,7 +202,7 @@ function JsonViewer({
   }
 
   return <span class="text-gray-400">{String(data)}</span>;
-}
+});
 
 // Modal for displaying cURL command
 function CurlModal({ 
@@ -423,17 +454,7 @@ function AdvancedInfoModal({
   );
 }
 
-function MarkdownContent({ text }: { text: string }) {
-  const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
-  return (
-    <div
-      class="prose prose-invert prose-sm max-w-none"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
-}
-
-function CollapsibleText({ text, role }: { text: string; role?: string }) {
+const CollapsibleText = memo(function CollapsibleText({ text, role }: { text: string; role?: string }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const lines = text ? text.split('\n') : [];
 
@@ -447,10 +468,11 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
         <MarkdownContent text={text} />
         <button
           onClick={() => setIsExpanded(false)}
-          class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${role === 'user'
-            ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
-            : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
-            }`}
+          class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${
+            role === 'user'
+              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+          }`}
         >
           Collapse
         </button>
@@ -472,10 +494,11 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
         <div class={`h-px flex-1 ${role === 'user' ? 'bg-gray-600' : 'bg-blue-800/50'}`}></div>
         <button
           onClick={() => setIsExpanded(true)}
-          class={`mx-3 text-xs px-3 py-1 rounded border transition-colors flex-shrink-0 ${role === 'user'
-            ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
-            : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
-            }`}
+          class={`mx-3 text-xs px-3 py-1 rounded border transition-colors flex-shrink-0 ${
+            role === 'user'
+              ? 'text-gray-300 hover:text-white bg-gray-600/50 border-gray-500/50'
+              : 'text-blue-400 hover:text-blue-300 bg-blue-900/20 border-blue-500/30'
+          }`}
         >
           ... Show {hiddenCount} hidden lines ...
         </button>
@@ -487,7 +510,7 @@ function CollapsibleText({ text, role }: { text: string; role?: string }) {
       </div>
     </div>
   );
-}
+});
 
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number | string>>(new Set());
