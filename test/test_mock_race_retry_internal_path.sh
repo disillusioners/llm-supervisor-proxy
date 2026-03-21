@@ -164,6 +164,42 @@ else
     exit 1
 fi
 
+# Create fallback mock model that uses the same mock server
+echo -e "\n${YELLOW}[x/x] Creating fallback mock model...${NC}"
+FALLBACK_MODEL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "id": "mock-model-fallback",
+        "name": "Mock Model Fallback",
+        "enabled": true,
+        "internal": true,
+        "credential_id": "mock-internal-cred",
+        "internal_base_url": "http://localhost:'$MOCK_PORT'/v1",
+        "internal_model": "mock-model"
+    }')
+
+if echo "$FALLBACK_MODEL_RESPONSE" | grep -q '"id"'; then
+    echo -e "${GREEN}Fallback model created successfully${NC}"
+else
+    echo -e "${RED}Failed to create fallback model: $FALLBACK_MODEL_RESPONSE${NC}"
+fi
+
+# Update the main model to have fallback chain pointing to fallback model
+echo -e "\n${YELLOW}[x/x] Updating model fallback chain...${NC}"
+curl -s -X PUT "http://localhost:$PROXY_PORT/fe/api/models/mock-internal-model" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "id": "mock-internal-model",
+        "name": "Mock Internal Model",
+        "enabled": true,
+        "internal": true,
+        "credential_id": "mock-internal-cred",
+        "internal_base_url": "http://localhost:'$MOCK_PORT'/v1",
+        "internal_model": "mock-model",
+        "fallback_chain": ["mock-model-fallback"]
+    }' > /dev/null
+echo -e "${GREEN}Fallback chain updated${NC}"
+
 # Function to make a streaming request and show results
 test_streaming() {
     local test_name="$1"
@@ -296,6 +332,48 @@ test_streaming "Slow Start" "mock-slow-start" 4
 echo -e "\n${YELLOW}[6/7] Test 3: Idle Timeout (KEY TEST)${NC}"
 echo -e "Expected: After IDLE_TIMEOUT (1s), proxy spawns parallel requests"
 test_streaming "Idle Timeout" "mock-idle-timeout" 6
+
+# Test 3b: Idle timeout with fallback (KEY TEST - verifies both second AND fallback spawn)
+echo -e "\n${YELLOW}[6b/7] Test 3b: Idle Timeout with Fallback (KEY TEST - BOTH second AND fallback)${NC}"
+echo -e "Expected: After IDLE_TIMEOUT (1s), proxy spawns BOTH second (same model) AND fallback (different model)"
+echo -e "This test verifies the race coordinator uses fallback chain correctly on idle timeout."
+test_streaming_with_fallback "Idle Timeout with Fallback" "mock-idle-timeout" 8
+
+# Function to test streaming with fallback and verify both requests spawned
+test_streaming_with_fallback() {
+    local test_name="$1"
+    local prompt="$2"
+    local max_time="$3"
+    
+    echo -e "\n${BLUE}=== Test: $test_name ===${NC}"
+    echo -e "Prompt: $prompt"
+    echo -e "Model: mock-internal-model (with fallback to mock-model-fallback)"
+    echo -e "Max time: ${max_time}s"
+    echo -e ""
+    echo -e "${YELLOW}NOTE: Watch proxy logs for these key messages:${NC}"
+    echo -e "  ✓ [RACE] Starting race coordinator with 2 models"
+    echo -e "  ✓ [RACE] Main request idle, spawning parallel request"
+    echo -e "  ✓ [RACE] Spawning second request (id=1, model=..., trigger=idle_timeout)"
+    echo -e "  ✓ [RACE] Spawning fallback request (id=2, model=..., trigger=idle_timeout)"
+    echo -e ""
+    echo -e "Response:"
+    
+    start_time=$(date +%s)
+    
+    # Request goes to proxy - model has fallback chain configured
+    curl -N -s --max-time "$max_time" "http://localhost:$PROXY_PORT/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -d "{
+            \"model\": \"mock-internal-model\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"$prompt\"}],
+            \"stream\": true
+        }" 2>&1 | head -n 20
+    
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    echo -e "\n${YELLOW}Duration: ${duration}s${NC}"
+}
 
 # Test 4: Streaming deadline (should pick best buffer)
 echo -e "\n${YELLOW}[7/7] Test 4: Streaming Deadline (KEY TEST)${NC}"

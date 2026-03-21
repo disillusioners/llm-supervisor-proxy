@@ -127,25 +127,28 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	defer c.mu.Unlock()
 
 	idx := len(c.requests)
-	if idx >= len(c.models) {
-		log.Printf("[RACE] Cannot spawn more requests: reached max models (%d)", len(c.models))
-		return
-	}
 
-	// Assign model based on request type, not sequential index
+	// Assign model based on request type
 	var modelID string
 	switch mType {
 	case modelTypeMain:
-		modelID = c.models[0]
-	case modelTypeSecond:
-		modelID = c.models[0] // Retry with same model as main
-	case modelTypeFallback:
-		if len(c.models) > 1 {
-			modelID = c.models[1] // Use first fallback model
-		} else {
-			log.Printf("[RACE] Cannot spawn fallback: no fallback models available")
+		if idx >= len(c.models) {
+			log.Printf("[RACE] Cannot spawn main: only %d model(s) available", len(c.models))
 			return
 		}
+		modelID = c.models[0]
+	case modelTypeSecond:
+		if idx >= len(c.models) {
+			log.Printf("[RACE] Cannot spawn second: only %d model(s) available", len(c.models))
+			return
+		}
+		modelID = c.models[0]
+	case modelTypeFallback:
+		if len(c.models) < 2 {
+			log.Printf("[RACE] Cannot spawn fallback: only %d model(s) available", len(c.models))
+			return
+		}
+		modelID = c.models[1]
 	}
 
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
