@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'preact/hooks';
 import type { Event } from '../types';
 
 // Configuration constants
@@ -125,9 +125,11 @@ function subscribe(callback: (data: Event) => void, onStateChange?: (state: Conn
 
 export function useEvents(selectedRequestId: string | null, autoScroll: boolean) {
   const [eventsMap, setEventsMap] = useState<Record<string, Event[]>>({});
-  const [displayedEvents, setDisplayedEvents] = useState<Event[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const containerRef = useRef<HTMLDivElement | null>(null);
+  
+  // Track key count with ref to avoid Object.keys() on every event
+  const keyCountRef = useRef(0);
 
   useEffect(() => {
     const handleEvent = (data: Event) => {
@@ -135,6 +137,8 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
       const reqId = data.data?.id || data.data?.request_id;
       if (reqId) {
         setEventsMap((prev) => {
+          const isNewKey = !(reqId in prev);
+          
           const requestEvents = [...(prev[reqId] || []), data];
           
           // Limit events per request
@@ -148,11 +152,17 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
           };
           
           // Prune old request IDs if map grows too large
-          const keys = Object.keys(updated);
-          if (keys.length > MAX_REQUESTS_IN_MAP) {
-            const toRemove = keys.length - MAX_REQUESTS_IN_MAP;
-            for (let i = 0; i < toRemove; i++) {
-              delete updated[keys[i]];
+          // Only check when we add a new key to avoid Object.keys() on every event
+          if (isNewKey) {
+            keyCountRef.current++;
+            if (keyCountRef.current > MAX_REQUESTS_IN_MAP) {
+              // Delete oldest keys - O(k) where k is small
+              const toRemove = keyCountRef.current - MAX_REQUESTS_IN_MAP;
+              const keys = Object.keys(updated);
+              for (let i = 0; i < toRemove; i++) {
+                delete updated[keys[i]];
+              }
+              keyCountRef.current = MAX_REQUESTS_IN_MAP;
             }
           }
           
@@ -164,13 +174,10 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
     return subscribe(handleEvent, setConnectionState);
   }, []);
 
-  // Update displayed events when selection changes
-  useEffect(() => {
-    if (selectedRequestId && eventsMap[selectedRequestId]) {
-      setDisplayedEvents(eventsMap[selectedRequestId]);
-    } else {
-      setDisplayedEvents([]);
-    }
+  // Derive displayedEvents with useMemo instead of state
+  const displayedEvents = useMemo(() => {
+    if (!selectedRequestId) return [];
+    return eventsMap[selectedRequestId] || [];
   }, [selectedRequestId, eventsMap]);
 
   // Auto-scroll when new events arrive
@@ -182,11 +189,15 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
 
   const clearEvents = useCallback(() => {
     if (selectedRequestId) {
-      setEventsMap((prev) => ({
-        ...prev,
-        [selectedRequestId]: [],
-      }));
-      setDisplayedEvents([]);
+      setEventsMap((prev) => {
+        const updated = {
+          ...prev,
+          [selectedRequestId]: [],
+        };
+        // Sync ref count with actual key count
+        keyCountRef.current = Object.keys(updated).length;
+        return updated;
+      });
     }
   }, [selectedRequestId]);
 
