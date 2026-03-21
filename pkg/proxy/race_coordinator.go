@@ -132,7 +132,22 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		return
 	}
 
-	modelID := c.models[idx]
+	// Assign model based on request type, not sequential index
+	var modelID string
+	switch mType {
+	case modelTypeMain:
+		modelID = c.models[0]
+	case modelTypeSecond:
+		modelID = c.models[0] // Retry with same model as main
+	case modelTypeFallback:
+		if len(c.models) > 1 {
+			modelID = c.models[1] // Use first fallback model
+		} else {
+			log.Printf("[RACE] Cannot spawn fallback: no fallback models available")
+			return
+		}
+	}
+
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
 	c.requests = append(c.requests, req)
 	c.spawnTriggers = append(c.spawnTriggers, triggerInfo)
@@ -256,17 +271,13 @@ func (c *raceCoordinator) manage() {
 
 				shouldSpawn := false
 				var triggerInfo spawnTriggerInfo
-				nextType := modelTypeSecond
-				if len(c.requests) >= 2 {
-					nextType = modelTypeFallback
-				}
 
 				if running < c.cfg.RaceMaxParallel {
-					// Case 1: Latest request failed
+					// Case 1: Latest request failed - spawn fallback directly (skip retry with same model)
 					latestReq := c.requests[len(c.requests)-1]
 					if latestReq.IsDone() && latestReq.GetError() != nil {
 						errMsg := latestReq.GetError().Error()
-						log.Printf("[RACE] Latest request %d failed: %s, spawning next attempt", latestReq.id, errMsg)
+						log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, errMsg)
 						shouldSpawn = true
 						triggerInfo = spawnTriggerInfo{
 							trigger:       triggerMainError,
@@ -309,7 +320,22 @@ func (c *raceCoordinator) manage() {
 
 				if shouldSpawn {
 					c.mu.Unlock()
-					c.spawn(nextType, triggerInfo)
+
+					if triggerInfo.trigger == triggerIdleTimeout {
+						// On idle timeout: spawn both second AND fallback together
+						c.spawn(modelTypeSecond, triggerInfo)
+						if len(c.models) > 1 {
+							c.spawn(modelTypeFallback, triggerInfo)
+						}
+					} else {
+						// On error: spawn fallback directly (skip retry with same model)
+						if len(c.models) > 1 {
+							c.spawn(modelTypeFallback, triggerInfo)
+						} else {
+							log.Printf("[RACE] Main failed but no fallback available")
+						}
+					}
+
 					c.mu.Lock()
 				}
 			}
