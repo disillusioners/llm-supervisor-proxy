@@ -247,6 +247,14 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			fmt.Sprintf("%d", upstreamReq.id),
 			&toolRepairConfig,
 		)
+	} else {
+		// Buffer without repair (repair disabled)
+		// This is still needed to accumulate chunked tool call arguments
+		toolCallBuffer = toolcall.NewToolCallBuffer(
+			5*1024*1024, // 5MB default
+			internalModel,
+			fmt.Sprintf("%d", upstreamReq.id),
+		)
 	}
 
 	for event := range eventCh {
@@ -317,20 +325,26 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if len(event.ToolCalls) > 0 {
 				toolCalls := make([]map[string]interface{}, len(event.ToolCalls))
 				for i, tc := range event.ToolCalls {
-					// Assign index based on tool call ID if seen before, otherwise use next available
-					var index int
-					if tc.ID != "" {
-						if idx, seen := seenToolCallIDs[tc.ID]; seen {
-							index = idx
-						} else {
-							index = nextToolCallIndex
-							seenToolCallIDs[tc.ID] = index
-							nextToolCallIndex++
-						}
-					} else {
-						// No ID, use position-based index
+					// Use the index from the tool call delta directly.
+					// The provider (OpenAI) already assigns correct indices based on the upstream response.
+					// Reassigning indices here causes mismatches when arguments chunks don't have IDs.
+					index := tc.Index
+					if index == 0 && tc.ID == "" && tc.Function.Name == "" {
+						// Fallback: if index is 0 but this is actually position-based (no ID, no name),
+						// use position-based index as a last resort
 						index = i
 					}
+
+					// Track seen IDs for debugging/logging purposes only
+					if tc.ID != "" {
+						if _, seen := seenToolCallIDs[tc.ID]; !seen {
+							seenToolCallIDs[tc.ID] = index
+							if index >= nextToolCallIndex {
+								nextToolCallIndex = index + 1
+							}
+						}
+					}
+
 					toolCalls[i] = map[string]interface{}{
 						"index": index,
 						"id":    tc.ID,

@@ -197,21 +197,21 @@ assert_contains "$OUTPUT1" "search_code" "Tool call 2: search_code present"
 assert_contains "$OUTPUT1" "calculate" "Tool call 3: calculate present"
 assert_contains "$OUTPUT1" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 
-# Verify argument values
-# get_weather should have Tokyo
-if echo "$OUTPUT1" | grep -q '"location".*Tokyo'; then
+# Verify argument values (handle escaped JSON - arguments contain \"key\" not "key")
+# get_weather should have Tokyo (matches both "location" and \"location\")
+if echo "$OUTPUT1" | grep -qE 'location.*Tokyo'; then
     echo -e "  ${GREEN}✓${NC} Argument check: get_weather has location=Tokyo"
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: get_weather missing location=Tokyo"
     echo -e "  ${YELLOW}DEBUG: Tool calls in response:${NC}"
     echo "$OUTPUT1" | grep -o '"tool_calls":\[^\]*' | head -5 || true
-    echo "$OUTPUT1" | grep -E '"(location|query|expression)"' | head -10 || true
+    echo "$OUTPUT1" | grep -E '(location|query|expression)' | head -10 || true
     ((TESTS_FAILED++))
 fi
 
 # search_code should have query="authentication"
-if echo "$OUTPUT1" | grep -q '"query".*authentication'; then
+if echo "$OUTPUT1" | grep -qE 'query.*authentication'; then
     echo -e "  ${GREEN}✓${NC} Argument check: search_code has query=authentication"
     ((TESTS_PASSED++))
 else
@@ -222,7 +222,7 @@ else
 fi
 
 # calculate should have expression="123 * 456"
-if echo "$OUTPUT1" | grep -q '"expression".*123'; then
+if echo "$OUTPUT1" | grep -qE 'expression.*123'; then
     echo -e "  ${GREEN}✓${NC} Argument check: calculate has expression=123 * 456"
     ((TESTS_PASSED++))
 else
@@ -248,7 +248,8 @@ assert_contains "$OUTPUT2" "Tokyo" "Location argument present"
 assert_contains "$OUTPUT2" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 
 # Verify argument is complete valid JSON (not fragmented)
-if echo "$OUTPUT2" | grep -q '"location".*"Tokyo"'; then
+# Handle escaped JSON - arguments contain \"key\" not "key"
+if echo "$OUTPUT2" | grep -qE 'location.*Tokyo'; then
     echo -e "  ${GREEN}✓${NC} Argument check: location has valid JSON with Tokyo"
     ((TESTS_PASSED++))
 else
@@ -273,8 +274,8 @@ assert_contains "$OUTPUT3" "get_weather" "Tool call present"
 assert_contains "$OUTPUT3" "Tokyo" "Location argument present"
 assert_contains "$OUTPUT3" '"finish_reason":"tool_calls"' "finish_reason=tool_calls"
 
-# Verify complete JSON arguments
-if echo "$OUTPUT3" | grep -q '"location".*"Tokyo"'; then
+# Verify complete JSON arguments (handle escaped JSON)
+if echo "$OUTPUT3" | grep -qE 'location.*Tokyo'; then
     echo -e "  ${GREEN}✓${NC} Argument check: location has valid JSON with Tokyo"
     ((TESTS_PASSED++))
 else
@@ -284,7 +285,7 @@ else
     ((TESTS_FAILED++))
 fi
 
-if echo "$OUTPUT3" | grep -q '"unit".*"celsius"'; then
+if echo "$OUTPUT3" | grep -qE 'unit.*celsius'; then
     echo -e "  ${GREEN}✓${NC} Argument check: unit has celsius"
     ((TESTS_PASSED++))
 else
