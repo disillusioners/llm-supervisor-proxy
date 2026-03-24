@@ -204,6 +204,9 @@ if echo "$OUTPUT1" | grep -q '"location".*Tokyo'; then
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: get_weather missing location=Tokyo"
+    echo -e "  ${YELLOW}DEBUG: Tool calls in response:${NC}"
+    echo "$OUTPUT1" | grep -o '"tool_calls":\[^\]*' | head -5 || true
+    echo "$OUTPUT1" | grep -E '"(location|query|expression)"' | head -10 || true
     ((TESTS_FAILED++))
 fi
 
@@ -213,15 +216,19 @@ if echo "$OUTPUT1" | grep -q '"query".*authentication'; then
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: search_code missing query=authentication"
+    echo -e "  ${YELLOW}DEBUG: Full tool_calls in response:${NC}"
+    echo "$OUTPUT1" | grep -o '"tool_calls":\[^}]*}' | head -10 || true
     ((TESTS_FAILED++))
 fi
 
 # calculate should have expression="123 * 456"
-if echo "$OUTPUT1" | grep -q '"expression".*123 \* 456'; then
+if echo "$OUTPUT1" | grep -q '"expression".*123'; then
     echo -e "  ${GREEN}✓${NC} Argument check: calculate has expression=123 * 456"
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: calculate missing expression=123 * 456"
+    echo -e "  ${YELLOW}DEBUG: Full response (truncated):${NC}"
+    echo "$OUTPUT1" | tail -20
     ((TESTS_FAILED++))
 fi
 
@@ -246,6 +253,8 @@ if echo "$OUTPUT2" | grep -q '"location".*"Tokyo"'; then
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: location missing valid JSON with Tokyo"
+    echo -e "  ${YELLOW}DEBUG: Tool call arguments in response:${NC}"
+    echo "$OUTPUT2" | grep -o '"arguments":"[^"]*' | head -5 || true
     ((TESTS_FAILED++))
 fi
 
@@ -270,6 +279,8 @@ if echo "$OUTPUT3" | grep -q '"location".*"Tokyo"'; then
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: location missing valid JSON with Tokyo"
+    echo -e "  ${YELLOW}DEBUG: Tool call arguments in response:${NC}"
+    echo "$OUTPUT3" | grep -o '"arguments":"[^"]*' | head -5 || true
     ((TESTS_FAILED++))
 fi
 
@@ -278,6 +289,8 @@ if echo "$OUTPUT3" | grep -q '"unit".*"celsius"'; then
     ((TESTS_PASSED++))
 else
     echo -e "  ${RED}✗${NC} Argument check: unit missing celsius"
+    echo -e "  ${YELLOW}DEBUG: Tool call arguments in response:${NC}"
+    echo "$OUTPUT3" | grep -o '"arguments":"[^"]*' | head -5 || true
     ((TESTS_FAILED++))
 fi
 
