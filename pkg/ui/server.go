@@ -36,6 +36,12 @@ type Model struct {
 	InternalModel   string `json:"internal_model,omitempty"`
 	// Stream buffering deadline
 	ReleaseStreamChunkDeadline models.Duration `json:"release_stream_chunk_deadline,omitempty"`
+	// Peak hour auto-switch fields
+	PeakHourEnabled  bool   `json:"peak_hour_enabled"`
+	PeakHourStart    string `json:"peak_hour_start"`
+	PeakHourEnd      string `json:"peak_hour_end"`
+	PeakHourTimezone string `json:"peak_hour_timezone"`
+	PeakHourModel    string `json:"peak_hour_model"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -373,6 +379,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				InternalBaseURL:            mc.InternalBaseURL,
 				InternalModel:              mc.InternalModel,
 				ReleaseStreamChunkDeadline: mc.ReleaseStreamChunkDeadline,
+				PeakHourEnabled:            mc.PeakHourEnabled,
+				PeakHourStart:              mc.PeakHourStart,
+				PeakHourEnd:                mc.PeakHourEnd,
+				PeakHourTimezone:           mc.PeakHourTimezone,
+				PeakHourModel:              mc.PeakHourModel,
 			}
 		}
 
@@ -399,6 +410,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate peak hour requires internal upstream
+		if newModel.PeakHourEnabled && !newModel.Internal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "peak_hour_enabled requires internal upstream to be enabled",
+			})
+			return
+		}
+
 		// Generate ID if not provided
 		if newModel.ID == "" {
 			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
@@ -416,6 +437,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			InternalBaseURL:            newModel.InternalBaseURL,
 			InternalModel:              newModel.InternalModel,
 			ReleaseStreamChunkDeadline: newModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:            newModel.PeakHourEnabled,
+			PeakHourStart:              newModel.PeakHourStart,
+			PeakHourEnd:                newModel.PeakHourEnd,
+			PeakHourTimezone:           newModel.PeakHourTimezone,
+			PeakHourModel:              newModel.PeakHourModel,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -472,6 +498,16 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate peak hour requires internal upstream
+		if updatedModel.PeakHourEnabled && !updatedModel.Internal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "peak_hour_enabled requires internal upstream to be enabled",
+			})
+			return
+		}
+
 		// Keep the same ID
 		updatedModel.ID = id
 
@@ -487,6 +523,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			InternalBaseURL:            updatedModel.InternalBaseURL,
 			InternalModel:              updatedModel.InternalModel,
 			ReleaseStreamChunkDeadline: updatedModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:            updatedModel.PeakHourEnabled,
+			PeakHourStart:              updatedModel.PeakHourStart,
+			PeakHourEnd:                updatedModel.PeakHourEnd,
+			PeakHourTimezone:           updatedModel.PeakHourTimezone,
+			PeakHourModel:              updatedModel.PeakHourModel,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {

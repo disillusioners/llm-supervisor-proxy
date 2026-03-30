@@ -1238,3 +1238,331 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 		t.Errorf("UltimateModel.MaxRetries mismatch: got %d, want 5", loadedCfg.UltimateModel.MaxRetries)
 	}
 }
+
+// =============================================================================
+// Integration tests for ModelsManager.ResolveInternalConfig() with peak hours
+// =============================================================================
+
+// setupModelsManagerForPeakHour creates a ModelsManager with a test credential and returns it
+func setupModelsManagerForPeakHour(t *testing.T) (*ModelsManager, func()) {
+	t.Helper()
+
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		store.Close()
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Create models manager
+	modelsMgr, err := NewModelsManager(store)
+	if err != nil {
+		store.Close()
+		t.Fatalf("Failed to create models manager: %v", err)
+	}
+
+	// Add a test credential
+	testCred := models.CredentialConfig{
+		ID:       "peak-hour-test-cred",
+		Provider: "openai",
+		APIKey:   "test-api-key-for-peak-hours",
+	}
+	if err := modelsMgr.AddCredential(testCred); err != nil {
+		store.Close()
+		t.Fatalf("Failed to add credential: %v", err)
+	}
+
+	cleanup := func() {
+		store.Close()
+	}
+
+	return modelsMgr, cleanup
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourInsideWindow tests that
+// ResolveInternalConfig returns the peak-hour model when inside the window.
+func TestModelsManager_ResolveInternalConfig_PeakHourInsideWindow(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Add model with 24-hour peak window
+	testModel := models.ModelConfig{
+		ID:               "peak-inside-test",
+		Name:             "Peak Inside Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "peak-hour-test-cred",
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  true,
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Resolve - should return peak model since window is 00:00-23:59
+	provider, apiKey, baseURL, model, ok := modelsMgr.ResolveInternalConfig("peak-inside-test")
+
+	if !ok {
+		t.Fatal("Expected ResolveInternalConfig to return ok=true")
+	}
+
+	if provider != "openai" {
+		t.Errorf("Expected provider 'openai', got '%s'", provider)
+	}
+
+	if apiKey != "test-api-key-for-peak-hours" {
+		t.Errorf("Expected apiKey with decrypted value, got '%s'", apiKey)
+	}
+
+	// Key assertion: model should be peak-hour model
+	if model != "peak-db-model" {
+		t.Errorf("Expected model 'peak-db-model' (peak hour active), got '%s'", model)
+	}
+
+	_ = baseURL
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("peak-inside-test")
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow tests that
+// ResolveInternalConfig returns the normal model when outside the peak window.
+func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Add model with narrow peak window (00:00-01:00 UTC)
+	testModel := models.ModelConfig{
+		ID:               "peak-outside-test",
+		Name:             "Peak Outside Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "peak-hour-test-cred",
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  true,
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "01:00",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// At 12:00 UTC, we're outside the 00:00-01:00 window
+	_, _, _, model, ok := modelsMgr.ResolveInternalConfig("peak-outside-test")
+
+	if !ok {
+		t.Fatal("Expected ResolveInternalConfig to return ok=true")
+	}
+
+	// Key assertion: model should be normal internal model
+	if model != "normal-db-model" {
+		t.Errorf("Expected model 'normal-db-model' (outside peak window), got '%s'", model)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("peak-outside-test")
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourDisabled tests that
+// ResolveInternalConfig returns the normal model when peak hours are disabled.
+func TestModelsManager_ResolveInternalConfig_PeakHourDisabled(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Add model with peak hours disabled
+	testModel := models.ModelConfig{
+		ID:               "peak-disabled-test",
+		Name:             "Peak Disabled Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "peak-hour-test-cred",
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  false, // Disabled
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Even at 12:00 UTC, peak hours are disabled
+	_, _, _, model, ok := modelsMgr.ResolveInternalConfig("peak-disabled-test")
+
+	if !ok {
+		t.Fatal("Expected ResolveInternalConfig to return ok=true")
+	}
+
+	if model != "normal-db-model" {
+		t.Errorf("Expected model 'normal-db-model' (peak hours disabled), got '%s'", model)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("peak-disabled-test")
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight tests cross-midnight
+// peak hour windows in the DB-backed implementation.
+func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Test with cross-midnight window 23:00-05:00
+	modelID := "cross-midnight-peak-test"
+	testModel := models.ModelConfig{
+		ID:               modelID,
+		Name:             "Cross Midnight Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "peak-hour-test-cred",
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  true,
+		PeakHourStart:    "23:00",
+		PeakHourEnd:      "05:00",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// At 09:50 UTC, we're outside 23:00-05:00 (cross-midnight)
+	_, _, _, model, ok := modelsMgr.ResolveInternalConfig(modelID)
+
+	if !ok {
+		t.Fatal("Expected ResolveInternalConfig to return ok=true")
+	}
+
+	// At 09:XX UTC, outside cross-midnight window 23:00-05:00
+	if model != "normal-db-model" {
+		t.Errorf("Expected model 'normal-db-model' (09:XX UTC outside cross-midnight window), got '%s'", model)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel(modelID)
+
+	// Test with a normal window that includes current time: 08:00-12:00
+	modelID2 := "normal-window-peak-test"
+	testModel2 := models.ModelConfig{
+		ID:               modelID2,
+		Name:             "Normal Window Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "peak-hour-test-cred",
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  true,
+		PeakHourStart:    "08:00",
+		PeakHourEnd:      "12:00",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel2); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// At 09:50 UTC, inside normal window 08:00-12:00
+	_, _, _, model2, ok2 := modelsMgr.ResolveInternalConfig(modelID2)
+
+	if !ok2 {
+		t.Fatal("Expected ResolveInternalConfig to return ok=true")
+	}
+
+	// At 09:XX UTC, inside normal window 08:00-12:00
+	if model2 != "peak-db-model" {
+		t.Errorf("Expected model 'peak-db-model' (09:XX UTC inside normal window 08:00-12:00), got '%s'", model2)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel(modelID2)
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourNonInternal tests that peak hours
+// are ignored for non-internal models in the DB-backed implementation.
+func TestModelsManager_ResolveInternalConfig_PeakHourNonInternal(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Add non-internal model with peak hours enabled
+	testModel := models.ModelConfig{
+		ID:               "non-internal-peak-test",
+		Name:             "Non Internal Peak Test",
+		Enabled:          true,
+		Internal:         false, // Not internal
+		PeakHourEnabled:  true,
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Non-internal models return ok=false
+	_, _, _, _, ok := modelsMgr.ResolveInternalConfig("non-internal-peak-test")
+	if ok {
+		t.Error("Expected ResolveInternalConfig to return ok=false for non-internal model")
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("non-internal-peak-test")
+}
+
+// TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential tests that
+// ResolveInternalConfig returns ok=false when the credential doesn't exist.
+func TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	// Add model with non-existent credential
+	testModel := models.ModelConfig{
+		ID:               "missing-cred-peak-test",
+		Name:             "Missing Credential Test",
+		Enabled:          true,
+		Internal:         true,
+		CredentialID:     "nonexistent-credential", // Doesn't exist
+		InternalModel:    "normal-db-model",
+		PeakHourEnabled:  true,
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
+		PeakHourTimezone: "+0",
+		PeakHourModel:    "peak-db-model",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	_, _, _, _, ok := modelsMgr.ResolveInternalConfig("missing-cred-peak-test")
+	if ok {
+		t.Error("Expected ResolveInternalConfig to return ok=false when credential missing")
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("missing-cred-peak-test")
+}
+
+// TestModelsManager_ResolveInternalConfig_NonExistentModel tests that
+// ResolveInternalConfig returns ok=false for non-existent models.
+func TestModelsManager_ResolveInternalConfig_NonExistentModel(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
+	defer cleanup()
+
+	_, _, _, _, ok := modelsMgr.ResolveInternalConfig("totally-nonexistent-model")
+	if ok {
+		t.Error("Expected ResolveInternalConfig to return ok=false for non-existent model")
+	}
+}

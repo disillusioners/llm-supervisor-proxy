@@ -1211,7 +1211,15 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 		baseURL = cred.BaseURL
 	}
 
-	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
+	// Determine actual model: check peak hour first
+	actualModel := modelConfig.InternalModel
+	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
+		log.Printf("peak hour active for model %s: using %s instead of %s",
+			modelConfig.ID, peakModel, modelConfig.InternalModel)
+		actualModel = peakModel
+	}
+
+	return provider, cred.APIKey, baseURL, actualModel, true
 }
 
 // isDbBoolTrue converts a database value (bool or int64) to boolean
