@@ -39,6 +39,7 @@ var migrations = []migration{
 	{"015", "015_add_log_upstream_on_error.up"},
 	{"016", "016_add_log_upstream_max_kb.up"},
 	{"017", "017_config_json.up"},
+	{"018", "018_add_peak_hours.up"},
 }
 
 // RunMigrations executes database schema migrations

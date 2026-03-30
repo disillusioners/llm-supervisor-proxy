@@ -449,6 +449,12 @@ type dbModelRow struct {
 	CredentialID    string      // Reference to credential
 	InternalBaseURL string      // Base URL override (optional)
 	InternalModel   string
+	// Peak hour configuration
+	PeakHourEnabled  interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	PeakHourStart    string
+	PeakHourEnd      string
+	PeakHourTimezone string
+	PeakHourModel    string
 }
 
 // dbCredentialRow represents a row from the credentials table
@@ -476,6 +482,18 @@ func (r *dbModelRow) isEnabled() bool {
 // isInternal converts the Internal field to bool
 func (r *dbModelRow) isInternal() bool {
 	switch v := r.Internal.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	default:
+		return false
+	}
+}
+
+// isPeakHourEnabled converts the PeakHourEnabled field to bool
+func (r *dbModelRow) isPeakHourEnabled() bool {
+	switch v := r.PeakHourEnabled.(type) {
 	case bool:
 		return v
 	case int64:
@@ -534,6 +552,11 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.CredentialID,
 			&dbModel.InternalBaseURL,
 			&dbModel.InternalModel,
+			&dbModel.PeakHourEnabled,
+			&dbModel.PeakHourStart,
+			&dbModel.PeakHourEnd,
+			&dbModel.PeakHourTimezone,
+			&dbModel.PeakHourModel,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
@@ -548,6 +571,11 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			CredentialID:               dbModel.CredentialID,
 			InternalBaseURL:            dbModel.InternalBaseURL,
 			InternalModel:              dbModel.InternalModel,
+			PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+			PeakHourStart:              dbModel.PeakHourStart,
+			PeakHourEnd:                dbModel.PeakHourEnd,
+			PeakHourTimezone:           dbModel.PeakHourTimezone,
+			PeakHourModel:              dbModel.PeakHourModel,
 		}
 
 		// Parse fallback chain
@@ -577,13 +605,17 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
-		coalesce(internal_base_url, ''), coalesce(internal_model, '')
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+		peak_hour_enabled, peak_hour_start, peak_hour_end,
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
-			coalesce(internal_base_url, ''), coalesce(internal_model, '')
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+			peak_hour_enabled, peak_hour_start, peak_hour_end,
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -601,6 +633,11 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.CredentialID,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
+		&dbModel.PeakHourEnabled,
+		&dbModel.PeakHourStart,
+		&dbModel.PeakHourEnd,
+		&dbModel.PeakHourTimezone,
+		&dbModel.PeakHourModel,
 	)
 	if err != nil {
 		return nil
@@ -615,6 +652,11 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		CredentialID:               dbModel.CredentialID,
 		InternalBaseURL:            dbModel.InternalBaseURL,
 		InternalModel:              dbModel.InternalModel,
+		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+		PeakHourStart:              dbModel.PeakHourStart,
+		PeakHourEnd:                dbModel.PeakHourEnd,
+		PeakHourTimezone:           dbModel.PeakHourTimezone,
+		PeakHourModel:              dbModel.PeakHourModel,
 	}
 
 	// Parse fallback chain
@@ -676,6 +718,11 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.CredentialID,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
+		&dbModel.PeakHourEnabled,
+		&dbModel.PeakHourStart,
+		&dbModel.PeakHourEnd,
+		&dbModel.PeakHourTimezone,
+		&dbModel.PeakHourModel,
 	)
 	if err != nil {
 		return nil
@@ -717,6 +764,11 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.CredentialID,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
+		&dbModel.PeakHourEnabled,
+		&dbModel.PeakHourStart,
+		&dbModel.PeakHourEnd,
+		&dbModel.PeakHourTimezone,
+		&dbModel.PeakHourModel,
 	)
 	if err != nil {
 		return nil
@@ -749,7 +801,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
@@ -772,6 +824,11 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.InternalBaseURL,
 		model.InternalModel,
 		releaseStreamChunkDeadlineMs,
+		m.qb.BooleanLiteral(model.PeakHourEnabled),
+		model.PeakHourStart,
+		model.PeakHourEnd,
+		model.PeakHourTimezone,
+		model.PeakHourModel,
 	)
 	return err
 }
@@ -795,7 +852,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -817,6 +874,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.InternalBaseURL,
 		model.InternalModel,
 		releaseStreamChunkDeadlineMs,
+		m.qb.BooleanLiteral(model.PeakHourEnabled),
+		model.PeakHourStart,
+		model.PeakHourEnd,
+		model.PeakHourTimezone,
+		model.PeakHourModel,
 		modelID,
 	)
 	return err
@@ -831,7 +893,7 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}

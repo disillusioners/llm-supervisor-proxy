@@ -94,6 +94,13 @@ type ModelConfig struct {
 	// This prevents clients with idle chunk detection from dropping the connection.
 	// Example: "1m50s" (110 seconds). Set to 0 or omit to disable this feature.
 	ReleaseStreamChunkDeadline Duration `json:"release_stream_chunk_deadline,omitempty"`
+
+	// PeakHourConfig controls automatic model switching during peak hours.
+	PeakHourEnabled  bool   `json:"peak_hour_enabled,omitempty"`
+	PeakHourStart    string `json:"peak_hour_start,omitempty"`    // HH:MM format (local time)
+	PeakHourEnd      string `json:"peak_hour_end,omitempty"`      // HH:MM format (local time)
+	PeakHourTimezone string `json:"peak_hour_timezone,omitempty"` // UTC offset like +7, -5, +5.5
+	PeakHourModel    string `json:"peak_hour_model,omitempty"`    // Upstream model name during peak hours
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.
@@ -484,6 +491,46 @@ func (mc *ModelsConfig) Validate() error {
 			}
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+			}
+		}
+
+		// Validate peak hour configuration
+		if model.PeakHourEnabled {
+			// Peak hours require internal upstream
+			if !model.Internal {
+				return fmt.Errorf("model %s: peak_hour_enabled requires internal to be true", model.ID)
+			}
+
+			// All peak hour fields must be provided
+			if model.PeakHourStart == "" {
+				return fmt.Errorf("model %s: peak_hour_start is required when peak_hour_enabled is true", model.ID)
+			}
+			if model.PeakHourEnd == "" {
+				return fmt.Errorf("model %s: peak_hour_end is required when peak_hour_enabled is true", model.ID)
+			}
+			if model.PeakHourTimezone == "" {
+				return fmt.Errorf("model %s: peak_hour_timezone is required when peak_hour_enabled is true", model.ID)
+			}
+			if model.PeakHourModel == "" {
+				return fmt.Errorf("model %s: peak_hour_model is required when peak_hour_enabled is true", model.ID)
+			}
+
+			// Validate HH:MM format for start and end
+			if err := validateTimeFormat(model.PeakHourStart); err != nil {
+				return fmt.Errorf("model %s: invalid peak_hour_start: %w", model.ID, err)
+			}
+			if err := validateTimeFormat(model.PeakHourEnd); err != nil {
+				return fmt.Errorf("model %s: invalid peak_hour_end: %w", model.ID, err)
+			}
+
+			// Validate UTC offset
+			if err := validateUTCOffset(model.PeakHourTimezone); err != nil {
+				return fmt.Errorf("model %s: invalid peak_hour_timezone: %w", model.ID, err)
+			}
+
+			// Reject same start and end times (would create empty or full-day window)
+			if model.PeakHourStart == model.PeakHourEnd {
+				return fmt.Errorf("model %s: peak_hour_start and peak_hour_end cannot be the same", model.ID)
 			}
 		}
 	}
