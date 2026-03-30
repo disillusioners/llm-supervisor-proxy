@@ -84,6 +84,11 @@ export function ModelsTab({
           internal_base_url: data.internal_base_url,
           internal_model: data.internal_model,
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
+          peak_hour_enabled: data.peak_hour_enabled,
+          peak_hour_start: data.peak_hour_start,
+          peak_hour_end: data.peak_hour_end,
+          peak_hour_timezone: data.peak_hour_timezone,
+          peak_hour_model: data.peak_hour_model,
         });
         setStatus({ type: 'success', message: 'Model updated successfully' });
       }
