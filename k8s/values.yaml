@@ -54,13 +54,13 @@ env:
 
 # Go runtime memory limit (should be ~80-90% of memory limit)
 # Defaults to resources.limits.memory if not set
-goMemLimit: "2300MiB"
+goMemLimit: "1800MiB"
 
 # Resources
 resources:
   limits:
     cpu: "1"
-    memory: 2.5Gi
+    memory: 2Gi
   requests:
     cpu: 100m
     memory: 128Mi

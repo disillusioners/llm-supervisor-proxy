@@ -163,7 +163,7 @@ func (q *QueryBuilder) GetModelByID() string {
 			coalesce(release_stream_chunk_deadline, 0), 
 			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-			peak_hour_enabled, peak_hour_start, peak_hour_end,
+			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 		FROM models WHERE id = $1`
 	}
@@ -171,7 +171,7 @@ func (q *QueryBuilder) GetModelByID() string {
 		coalesce(release_stream_chunk_deadline, 0),
 		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-		peak_hour_enabled, peak_hour_start, peak_hour_end,
+		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 	FROM models WHERE id = ?`
 }
@@ -183,7 +183,7 @@ func (q *QueryBuilder) GetAllModels() string {
             coalesce(release_stream_chunk_deadline, 0),
             coalesce(internal, false), coalesce(credential_id, ''),
             coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-            peak_hour_enabled, peak_hour_start, peak_hour_end,
+            peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
             coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
         FROM models ORDER BY name`
 	}
@@ -191,7 +191,7 @@ func (q *QueryBuilder) GetAllModels() string {
         coalesce(release_stream_chunk_deadline, 0),
         coalesce(internal, 0), coalesce(credential_id, ''),
         coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-        peak_hour_enabled, peak_hour_start, peak_hour_end,
+        peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
         coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
     FROM models ORDER BY name`
 }
@@ -203,7 +203,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 			coalesce(release_stream_chunk_deadline, 0),
 			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-			peak_hour_enabled, peak_hour_start, peak_hour_end,
+			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 		FROM models WHERE enabled = true ORDER BY name`
 	}
@@ -211,7 +211,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 		coalesce(release_stream_chunk_deadline, 0),
 		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-		peak_hour_enabled, peak_hour_start, peak_hour_end,
+		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
 	FROM models WHERE enabled = 1 ORDER BY name`
 }

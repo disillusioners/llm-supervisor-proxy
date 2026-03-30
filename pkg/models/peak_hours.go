@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,7 +46,7 @@ func parseTime(s string) (h, m int, err error) {
 	if s == "" {
 		return 0, 0, fmt.Errorf("time string cannot be empty")
 	}
-	if err := validateTimeFormat(s); err != nil {
+	if err := ValidateTimeFormat(s); err != nil {
 		return 0, 0, err
 	}
 
@@ -77,8 +78,8 @@ func isWithinWindow(current, start, end int) bool {
 	return current >= start || current < end
 }
 
-// validateTimeFormat validates that a string is in HH:MM format with valid values.
-func validateTimeFormat(s string) error {
+// ValidateTimeFormat validates that a string is in HH:MM format with valid values.
+func ValidateTimeFormat(s string) error {
 	if s == "" {
 		return nil // Empty is allowed (optional field)
 	}
@@ -108,8 +109,8 @@ func validateTimeFormat(s string) error {
 	return nil
 }
 
-// validateUTCOffset validates that a string is a valid UTC offset.
-func validateUTCOffset(s string) error {
+// ValidateUTCOffset validates that a string is a valid UTC offset.
+func ValidateUTCOffset(s string) error {
 	if s == "" {
 		return nil // Empty is allowed
 	}
@@ -142,7 +143,7 @@ func timeToMinutes(h, m int) int {
 // - Model is not internal (peak hours only apply to internal upstream)
 // - Current time is outside the peak hour window
 // - PeakHourModel is empty
-func (m *ModelConfig) ResolvePeakHourModel() string {
+func (m *ModelConfig) ResolvePeakHourModel(now time.Time) string {
 	// Check if peak hours are enabled
 	if !m.PeakHourEnabled {
 		return ""
@@ -179,10 +180,8 @@ func (m *ModelConfig) ResolvePeakHourModel() string {
 	startMinutes := timeToMinutes(startH, startM)
 	endMinutes := timeToMinutes(endH, endM)
 
-	// Calculate current local time
-	now := time.Now().UTC()
-	// Apply UTC offset to get local time minutes
-	offsetMinutes := int(utcOffset * 60)
+	// Calculate current local time using the provided time
+	offsetMinutes := int(math.Round(utcOffset * 60))
 	currentMinutes := (now.Hour()*60 + now.Minute() + offsetMinutes) % (24 * 60)
 	if currentMinutes < 0 {
 		currentMinutes += 24 * 60

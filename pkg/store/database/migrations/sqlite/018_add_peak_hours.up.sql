@@ -5,7 +5,7 @@
 -- peak_hour_enabled: Whether peak hour switching is enabled (0/1 for SQLite)
 -- peak_hour_start: Start time in HH:MM format (e.g., "09:00")
 -- peak_hour_end: End time in HH:MM format (e.g., "17:00")
--- peak_hour_timezone: Timezone identifier (e.g., "America/New_York", "UTC")
+-- peak_hour_timezone: UTC offset in hours (e.g., "+7", "-5", "+5.5")
 -- peak_hour_model: Model ID to switch to during peak hours
 
 ALTER TABLE models ADD COLUMN peak_hour_enabled INTEGER NOT NULL DEFAULT 0;

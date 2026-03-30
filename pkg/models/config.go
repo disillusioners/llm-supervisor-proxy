@@ -516,15 +516,15 @@ func (mc *ModelsConfig) Validate() error {
 			}
 
 			// Validate HH:MM format for start and end
-			if err := validateTimeFormat(model.PeakHourStart); err != nil {
+			if err := ValidateTimeFormat(model.PeakHourStart); err != nil {
 				return fmt.Errorf("model %s: invalid peak_hour_start: %w", model.ID, err)
 			}
-			if err := validateTimeFormat(model.PeakHourEnd); err != nil {
+			if err := ValidateTimeFormat(model.PeakHourEnd); err != nil {
 				return fmt.Errorf("model %s: invalid peak_hour_end: %w", model.ID, err)
 			}
 
 			// Validate UTC offset
-			if err := validateUTCOffset(model.PeakHourTimezone); err != nil {
+			if err := ValidateUTCOffset(model.PeakHourTimezone); err != nil {
 				return fmt.Errorf("model %s: invalid peak_hour_timezone: %w", model.ID, err)
 			}
 

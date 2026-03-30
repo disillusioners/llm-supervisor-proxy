@@ -171,9 +171,9 @@ func TestValidateTimeFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateTimeFormat(tt.input)
+			err := ValidateTimeFormat(tt.input)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateTimeFormat(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				t.Errorf("ValidateTimeFormat(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
 		})
 	}
@@ -210,9 +210,9 @@ func TestValidateUTCOffset(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateUTCOffset(tt.input)
+			err := ValidateUTCOffset(tt.input)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateUTCOffset(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				t.Errorf("ValidateUTCOffset(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
 		})
 	}
@@ -223,6 +223,7 @@ func TestValidateUTCOffset(t *testing.T) {
 // =============================================================================
 
 func TestResolvePeakHourModel(t *testing.T) {
+	testTime := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name string
 		m    ModelConfig
@@ -289,91 +290,246 @@ func TestResolvePeakHourModel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.m.ResolvePeakHourModel()
+			got := tt.m.ResolvePeakHourModel(testTime)
 			if got != tt.want {
-				t.Errorf("ResolvePeakHourModel() = %v, want %v", got, tt.want)
+				t.Errorf("ResolvePeakHourModel(%v) = %v, want %v", testTime, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestResolvePeakHourModelWindow tests the window logic with a mocked time
+// TestResolvePeakHourModelWindow tests the window logic with specific test times
 func TestResolvePeakHourModelWindow(t *testing.T) {
-	// We'll test the window logic by using a very narrow window (1 minute)
-	// and checking the boundary behavior
-
 	tests := []struct {
-		name           string
-		windowStart    string
-		windowEnd      string
-		timezoneOffset string
-		checkHour      int // Hour in UTC to check
-		checkMinute    int // Minute in UTC to check
-		shouldBeInPeak bool
+		name     string
+		model    ModelConfig
+		testTime time.Time
+		want     string
 	}{
-		// UTC+7 window 09:00-17:00 local = 02:00-10:00 UTC
-		{"UTC+7 within window UTC", "09:00", "17:00", "+7", 5, 0, true},    // 12:00 local
-		{"UTC+7 outside window UTC", "09:00", "17:00", "+7", 11, 0, false}, // 18:00 local
+		// Normal window: 13:00-18:00 UTC (+0)
+		{
+			name: "normal window inside",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 15, 0, 0, 0, time.UTC),
+			want:     "peak_model",
+		},
+		{
+			name: "normal window start boundary",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 13, 0, 0, 0, time.UTC),
+			want:     "peak_model",
+		},
+		{
+			name: "normal window end boundary",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 18, 0, 0, 0, time.UTC),
+			want:     "",
+		},
+		{
+			name: "normal window outside",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+			want:     "",
+		},
 
-		// UTC-5 window 09:00-17:00 local = 14:00-22:00 UTC
-		{"UTC-5 within window UTC", "09:00", "17:00", "-5", 15, 0, true},   // 10:00 local
-		{"UTC-5 outside window UTC", "09:00", "17:00", "-5", 12, 0, false}, // 07:00 local
+		// Cross-midnight window: 22:00-06:00 UTC (+0)
+		{
+			name: "cross-midnight inside before midnight",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "22:00",
+				PeakHourEnd:      "06:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 23, 0, 0, 0, time.UTC),
+			want:     "peak_model",
+		},
+		{
+			name: "cross-midnight inside after midnight",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "22:00",
+				PeakHourEnd:      "06:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 3, 0, 0, 0, time.UTC),
+			want:     "peak_model",
+		},
+		{
+			name: "cross-midnight start boundary",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "22:00",
+				PeakHourEnd:      "06:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 22, 0, 0, 0, time.UTC),
+			want:     "peak_model",
+		},
+		{
+			name: "cross-midnight end boundary",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "22:00",
+				PeakHourEnd:      "06:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 6, 0, 0, 0, time.UTC),
+			want:     "",
+		},
+		{
+			name: "cross-midnight outside",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "22:00",
+				PeakHourEnd:      "06:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC),
+			want:     "",
+		},
 
-		// +5.5 offset (India)
-		{"UTC+5.5 within window", "09:00", "17:00", "+5.5", 4, 30, true},    // 10:00 local
-		{"UTC+5.5 outside window", "09:00", "17:00", "+5.5", 11, 30, false}, // 17:00 local
+		// Timezone tests
+		{
+			name: "positive timezone +7: 13:00-18:00 local, test at 08:00 UTC",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+7",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 8, 0, 0, 0, time.UTC), // 15:00 local
+			want:     "peak_model",
+		},
+		{
+			name: "negative timezone -5: 13:00-18:00 local, test at 18:00 UTC",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "-5",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 18, 0, 0, 0, time.UTC), // 13:00 local
+			want:     "peak_model",
+		},
+		{
+			name: "fractional timezone +5.5: 13:00-18:00 local, test at 08:30 UTC",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+5.5",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 8, 30, 0, 0, time.UTC), // 14:00 local
+			want:     "peak_model",
+		},
 
-		// Cross-midnight: 22:00-06:00 local
-		// UTC+7: 15:00-23:00 UTC
-		{"cross-midnight before midnight local UTC", "22:00", "06:00", "+7", 20, 0, true}, // 03:00 local
-		{"cross-midnight after midnight local UTC", "22:00", "06:00", "+7", 22, 59, true}, // 05:59 local (within 22:00-06:00)
-		{"cross-midnight outside UTC", "22:00", "06:00", "+7", 10, 0, false},              // 17:00 local
+		// Disabled/Invalid cases
+		{
+			name: "disabled",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  false,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 15, 0, 0, 0, time.UTC),
+			want:     "",
+		},
+		{
+			name: "non-internal",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         false,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "peak_model",
+			},
+			testTime: time.Date(2024, 1, 15, 15, 0, 0, 0, time.UTC),
+			want:     "",
+		},
+		{
+			name: "empty peak model",
+			model: ModelConfig{
+				ID:               "test",
+				Internal:         true,
+				PeakHourEnabled:  true,
+				PeakHourStart:    "13:00",
+				PeakHourEnd:      "18:00",
+				PeakHourTimezone: "+0",
+				PeakHourModel:    "",
+			},
+			testTime: time.Date(2024, 1, 15, 15, 0, 0, 0, time.UTC),
+			want:     "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a model with the test configuration (used for documentation)
-			_ = ModelConfig{
-				ID:               "test",
-				Internal:         true,
-				PeakHourEnabled:  true,
-				PeakHourStart:    tt.windowStart,
-				PeakHourEnd:      tt.windowEnd,
-				PeakHourTimezone: tt.timezoneOffset,
-				PeakHourModel:    "test-peak-model",
-			}
-
-			// Mock the current time by checking the calculation
-			utcOffset, err := parseUTCOffset(tt.timezoneOffset)
-			if err != nil {
-				t.Fatalf("Failed to parse timezone offset: %v", err)
-			}
-
-			// Calculate local minutes from the check time
-			checkMinutes := tt.checkHour*60 + tt.checkMinute
-			offsetMinutes := int(utcOffset * 60)
-			localMinutes := (checkMinutes + offsetMinutes) % (24 * 60)
-			if localMinutes < 0 {
-				localMinutes += 24 * 60
-			}
-
-			// Parse window times
-			startH, startM, err := parseTime(tt.windowStart)
-			if err != nil {
-				t.Fatalf("Failed to parse start time: %v", err)
-			}
-			endH, endM, err := parseTime(tt.windowEnd)
-			if err != nil {
-				t.Fatalf("Failed to parse end time: %v", err)
-			}
-
-			startMinutes := startH*60 + startM
-			endMinutes := endH*60 + endM
-
-			expected := isWithinWindow(localMinutes, startMinutes, endMinutes)
-			if expected != tt.shouldBeInPeak {
-				t.Errorf("Window calculation: localMinutes=%d, start=%d, end=%d, expectedInWindow=%v, actual=%v",
-					localMinutes, startMinutes, endMinutes, tt.shouldBeInPeak, expected)
+			got := tt.model.ResolvePeakHourModel(tt.testTime)
+			if got != tt.want {
+				t.Errorf("ResolvePeakHourModel(%v) = %v, want %v", tt.testTime, got, tt.want)
 			}
 		})
 	}
@@ -693,7 +849,7 @@ func TestResolvePeakHourModelIntegration(t *testing.T) {
 		PeakHourModel:    "always-peak",
 	}
 
-	got := model.ResolvePeakHourModel()
+	got := model.ResolvePeakHourModel(time.Now().UTC())
 	if got != "always-peak" {
 		t.Errorf("ResolvePeakHourModel() = %v, want always-peak (24-hour window should always be active)", got)
 	}
@@ -716,7 +872,7 @@ func BenchmarkResolvePeakHourModel(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = model // use model
+		_ = model.ResolvePeakHourModel(time.Now())
 	}
 }
 
@@ -726,6 +882,3 @@ func BenchmarkIsWithinWindow(b *testing.B) {
 		_ = isWithinWindow(720, 540, 1020) // 12:00 in 09:00-17:00 window
 	}
 }
-
-// Ensure time package is used (to avoid unused import error)
-var _ = time.Now
