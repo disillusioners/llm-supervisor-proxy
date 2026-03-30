@@ -567,6 +567,8 @@ func (m *ModelConfig) GetInternalConfig() (credentialID, provider, baseURL, mode
 // credentials. It returns the provider, apiKey, baseURL, and model name.
 // The provider comes from the credential. The baseURL is taken from the model if specified, otherwise from the credential.
 func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
+	log.Printf("[PEAK-DBG] ResolveInternalConfig ENTRY: modelID=%q", modelID)
+
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
@@ -580,16 +582,22 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 	}
 
 	if modelConfig == nil || !modelConfig.Internal {
+		log.Printf("[PEAK-DBG] ResolveInternalConfig: modelConfig=%v, Internal=%v", modelConfig != nil, modelConfig != nil && modelConfig.Internal)
 		return "", "", "", "", false
 	}
 
+	log.Printf("[PEAK-DBG] ResolveInternalConfig: found modelConfig, ID=%q, PeakHourEnabled=%v, InternalModel=%q, PeakHourModel=%q",
+		modelConfig.ID, modelConfig.PeakHourEnabled, modelConfig.InternalModel, modelConfig.PeakHourModel)
+
 	// Get credential
 	if mc.Credentials == nil {
+		log.Printf("[PEAK-DBG] ResolveInternalConfig: Credentials is nil")
 		return "", "", "", "", false
 	}
 
 	cred := mc.Credentials.GetCredential(modelConfig.CredentialID)
 	if cred == nil {
+		log.Printf("[PEAK-DBG] ResolveInternalConfig: credential %q not found", modelConfig.CredentialID)
 		return "", "", "", "", false
 	}
 
@@ -604,12 +612,18 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 
 	// Determine actual model: check peak hour first
 	actualModel := modelConfig.InternalModel
+	log.Printf("[PEAK-DBG] ResolveInternalConfig: before peak check, actualModel=%q", actualModel)
+
 	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
 		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
 			modelConfig.ID, peakModel, modelConfig.InternalModel)
+		log.Printf("[PEAK-DBG] ResolveInternalConfig: peak hour SUBSTITUTED %q -> %q", actualModel, peakModel)
 		actualModel = peakModel
+	} else {
+		log.Printf("[PEAK-DBG] ResolveInternalConfig: no peak hour active, using internalModel=%q", actualModel)
 	}
 
+	log.Printf("[PEAK-DBG] ResolveInternalConfig EXIT: returning model=%q", actualModel)
 	return provider, cred.APIKey, baseURL, actualModel, true
 }
 

@@ -162,11 +162,15 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 
 // buildModelList constructs [originalModel, fallback1, fallback2, ...] from config.
 func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterface) []string {
+	log.Printf("[PEAK-DBG] buildModelList ENTRY: originalModel=%q", originalModel)
+
 	var allModels []string
 	if modelsConfig != nil {
 		fallbackChain := modelsConfig.GetFallbackChain(originalModel)
+		log.Printf("[PEAK-DBG] buildModelList: GetFallbackChain(%q) = %v", originalModel, fallbackChain)
 		if len(fallbackChain) > 0 {
 			allModels = fallbackChain[1:]
+			log.Printf("[PEAK-DBG] buildModelList: fallbackChain[1:] = %v (fallback models)", allModels)
 		}
 	}
 	if allModels == nil {
@@ -174,6 +178,7 @@ func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterf
 	}
 	modelList := []string{originalModel}
 	modelList = append(modelList, allModels...)
+	log.Printf("[PEAK-DBG] buildModelList EXIT: modelList=%v (original=%q + fallbacks=%v)", modelList, originalModel, allModels)
 	return modelList
 }
 

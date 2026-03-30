@@ -27,11 +27,14 @@ import (
 func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
 	req.MarkStarted()
 
+	log.Printf("[PEAK-DBG] executeRequest ENTRY: req.modelID=%q, req.modelType=%v", req.modelID, req.modelType)
+
 	// Check if this model uses internal upstream
 	// Note: ModelsConfig may be nil in tests, so check first
 	if cfg.ModelsConfig != nil {
 		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
 		log.Printf("[FALLBACK-DEBUG] executeRequest: req.modelID=%q, modelConfig=%v, Internal=%v", req.modelID, modelConfig != nil, modelConfig != nil && modelConfig.Internal)
+		log.Printf("[PEAK-DBG] executeRequest: modelConfig found, Internal=%v, modelID=%q", modelConfig != nil && modelConfig.Internal, req.modelID)
 		if modelConfig != nil && modelConfig.Internal {
 			return executeInternalRequest(ctx, cfg, rawBody, req)
 		}
@@ -46,6 +49,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// Resolve internal config (including credential lookup)
 	provider, apiKey, baseURL, internalModel, ok := cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
 	log.Printf("[FALLBACK-DEBUG] ResolveInternalConfig(%q) => provider=%q, internalModel=%q, ok=%v", req.modelID, provider, internalModel, ok)
+	log.Printf("[PEAK-DBG] executeInternalRequest: req.modelID=%q -> ResolveInternalConfig returned internalModel=%q, ok=%v", req.modelID, internalModel, ok)
 	if !ok {
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
 	}
