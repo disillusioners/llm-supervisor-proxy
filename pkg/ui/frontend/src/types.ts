@@ -111,6 +111,12 @@ export interface Model {
   internal_model?: string;     // Actual model name at provider
   // Release stream chunk deadline
   release_stream_chunk_deadline?: string; // Duration string (e.g., "1m50s", "2m30s")
+  // Peak hour configuration
+  peak_hour_enabled?: boolean;
+  peak_hour_start?: string;        // 'HH:MM' format
+  peak_hour_end?: string;          // 'HH:MM' format
+  peak_hour_timezone?: string;     // UTC offset string like '+7', '-5', '+5.5'
+  peak_hour_model?: string;        // Alternative upstream model name
 }
 
 export interface ApiToken {
