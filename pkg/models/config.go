@@ -605,7 +605,7 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 	// Determine actual model: check peak hour first
 	actualModel := modelConfig.InternalModel
 	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
-		log.Printf("peak hour active for model %s: using %s instead of %s",
+		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
 			modelConfig.ID, peakModel, modelConfig.InternalModel)
 		actualModel = peakModel
 	}

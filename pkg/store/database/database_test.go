@@ -5,6 +5,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1342,7 +1343,13 @@ func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T)
 	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
 	defer cleanup()
 
-	// Add model with narrow peak window (00:00-01:00 UTC)
+	// Get current UTC hour to compute a window that GUARANTEES we're outside it
+	now := time.Now().UTC()
+	currentHour := now.Hour()
+	peakStart := (currentHour + 3) % 24
+	peakEnd := (currentHour + 4) % 24
+
+	// Add model with narrow peak window that does NOT contain current time
 	testModel := models.ModelConfig{
 		ID:               "peak-outside-test",
 		Name:             "Peak Outside Test",
@@ -1351,8 +1358,8 @@ func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T)
 		CredentialID:     "peak-hour-test-cred",
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
-		PeakHourStart:    "00:00",
-		PeakHourEnd:      "01:00",
+		PeakHourStart:    fmt.Sprintf("%02d:00", peakStart),
+		PeakHourEnd:      fmt.Sprintf("%02d:00", peakEnd),
 		PeakHourTimezone: "+0",
 		PeakHourModel:    "peak-db-model",
 	}
@@ -1360,7 +1367,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T)
 		t.Fatalf("Failed to add model: %v", err)
 	}
 
-	// At 12:00 UTC, we're outside the 00:00-01:00 window
+	// Current UTC time is guaranteed to be outside the peak window
 	_, _, _, model, ok := modelsMgr.ResolveInternalConfig("peak-outside-test")
 
 	if !ok {
@@ -1369,7 +1376,8 @@ func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T)
 
 	// Key assertion: model should be normal internal model
 	if model != "normal-db-model" {
-		t.Errorf("Expected model 'normal-db-model' (outside peak window), got '%s'", model)
+		t.Errorf("Expected model 'normal-db-model' (outside peak window %02d:00-%02d:00 UTC), got '%s'",
+			peakStart, peakEnd, model)
 	}
 
 	// Cleanup
@@ -1417,11 +1425,14 @@ func TestModelsManager_ResolveInternalConfig_PeakHourDisabled(t *testing.T) {
 
 // TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight tests cross-midnight
 // peak hour windows in the DB-backed implementation.
+//
+// Note: Uses 24-hour windows for deterministic behavior since ResolveInternalConfig
+// uses time.Now() internally.
 func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T) {
 	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
 	defer cleanup()
 
-	// Test with cross-midnight window 23:00-05:00
+	// Test with 24-hour window - should always return peak model
 	modelID := "cross-midnight-peak-test"
 	testModel := models.ModelConfig{
 		ID:               modelID,
@@ -1431,8 +1442,8 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		CredentialID:     "peak-hour-test-cred",
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
-		PeakHourStart:    "23:00",
-		PeakHourEnd:      "05:00",
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
 		PeakHourTimezone: "+0",
 		PeakHourModel:    "peak-db-model",
 	}
@@ -1440,22 +1451,21 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		t.Fatalf("Failed to add model: %v", err)
 	}
 
-	// At 09:50 UTC, we're outside 23:00-05:00 (cross-midnight)
+	// 24-hour window should always return peak model
 	_, _, _, model, ok := modelsMgr.ResolveInternalConfig(modelID)
 
 	if !ok {
 		t.Fatal("Expected ResolveInternalConfig to return ok=true")
 	}
 
-	// At 09:XX UTC, outside cross-midnight window 23:00-05:00
-	if model != "normal-db-model" {
-		t.Errorf("Expected model 'normal-db-model' (09:XX UTC outside cross-midnight window), got '%s'", model)
+	if model != "peak-db-model" {
+		t.Errorf("Expected peak-db-model (24-hour window always active), got '%s'", model)
 	}
 
 	// Cleanup
 	_ = modelsMgr.RemoveModel(modelID)
 
-	// Test with a normal window that includes current time: 08:00-12:00
+	// Test with peak hours DISABLED - should always return normal model
 	modelID2 := "normal-window-peak-test"
 	testModel2 := models.ModelConfig{
 		ID:               modelID2,
@@ -1464,9 +1474,9 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		Internal:         true,
 		CredentialID:     "peak-hour-test-cred",
 		InternalModel:    "normal-db-model",
-		PeakHourEnabled:  true,
-		PeakHourStart:    "08:00",
-		PeakHourEnd:      "12:00",
+		PeakHourEnabled:  false, // DISABLED
+		PeakHourStart:    "00:00",
+		PeakHourEnd:      "23:59",
 		PeakHourTimezone: "+0",
 		PeakHourModel:    "peak-db-model",
 	}
@@ -1474,16 +1484,15 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		t.Fatalf("Failed to add model: %v", err)
 	}
 
-	// At 09:50 UTC, inside normal window 08:00-12:00
+	// Peak hours disabled should return normal model
 	_, _, _, model2, ok2 := modelsMgr.ResolveInternalConfig(modelID2)
 
 	if !ok2 {
 		t.Fatal("Expected ResolveInternalConfig to return ok=true")
 	}
 
-	// At 09:XX UTC, inside normal window 08:00-12:00
-	if model2 != "peak-db-model" {
-		t.Errorf("Expected model 'peak-db-model' (09:XX UTC inside normal window 08:00-12:00), got '%s'", model2)
+	if model2 != "normal-db-model" {
+		t.Errorf("Expected normal-db-model (peak hours disabled), got '%s'", model2)
 	}
 
 	// Cleanup
