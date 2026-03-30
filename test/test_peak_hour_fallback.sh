@@ -114,6 +114,7 @@ export RACE_RETRY_ENABLED="true"
 export RACE_PARALLEL_ON_IDLE="false"
 export RACE_MAX_PARALLEL="2"
 export LOOP_DETECTION_ENABLED="false"
+export ULTIMATE_MODEL_ID=""
 
 go run cmd/main.go &
 PROXY_PID=$!
@@ -129,10 +130,17 @@ echo -e "${GREEN}Proxy started (PID: $PROXY_PID)${NC}"
 # Configure models via API
 echo -e "\n${YELLOW}[3/5] Configuring models via API...${NC}"
 
-# Create credential
+# Create credential (delete first to ensure clean state)
 echo -e "${CYAN}Creating credential...${NC}"
 curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/test-cred" 2>/dev/null || true
-sleep 0.3
+sleep 0.5
+
+# Also delete any test models that might use this credential
+curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-peak" 2>/dev/null || true
+curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-fallback-no-peak" 2>/dev/null || true
+curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-fallback-with-peak" 2>/dev/null || true
+curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-normal" 2>/dev/null || true
+sleep 0.5
 
 CREDENTIAL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/credentials" \
     -H "Content-Type: application/json" \
@@ -147,15 +155,22 @@ if echo "$CREDENTIAL_RESPONSE" | grep -q '"id"'; then
     echo -e "${GREEN}Credential created successfully${NC}"
 else
     echo -e "${RED}Failed to create credential: $CREDENTIAL_RESPONSE${NC}"
-    exit 1
+    # Try updating instead of creating
+    CREDENTIAL_RESPONSE=$(curl -s -X PUT "http://localhost:$PROXY_PORT/fe/api/credentials/test-cred" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"id\": \"test-cred\",
+            \"provider\": \"openai\",
+            \"api_key\": \"mock-api-key\",
+            \"base_url\": \"http://localhost:$MOCK_PORT/v1\"
+        }")
+    if echo "$CREDENTIAL_RESPONSE" | grep -q '"id"'; then
+        echo -e "${GREEN}Credential updated successfully${NC}"
+    else
+        echo -e "${RED}Failed to update credential: $CREDENTIAL_RESPONSE${NC}"
+        exit 1
+    fi
 fi
-
-# Delete existing models
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-peak" 2>/dev/null || true
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-fallback-no-peak" 2>/dev/null || true
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-fallback-with-peak" 2>/dev/null || true
-curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/test-normal" 2>/dev/null || true
-sleep 0.3
 
 # Create test-fallback-no-peak (NO peak hour)
 echo -e "${CYAN}Creating test-fallback-no-peak...${NC}"

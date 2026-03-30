@@ -165,7 +165,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       setFormData({
         id: initialData.id,
         name: initialData.name,
-        fallback_chain: initialData.fallback_chain.join(', '),
+        fallback_chain: (initialData.fallback_chain ?? []).join(', '),
         truncate_params: truncateParams,
         internal: initialData.internal ?? false,
         credential_id: initialData.credential_id ?? '',
