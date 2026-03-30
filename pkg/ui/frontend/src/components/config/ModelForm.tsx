@@ -615,7 +615,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                     {/* Timezone Selector */}
                     <div>
                       <label class="block text-sm font-medium text-gray-300 mb-1">
-                        Timezone Offset <span class="text-red-400">*</span>
+                        Timezone Offset
                       </label>
                       <select
                         value={formData.peak_hour_timezone}

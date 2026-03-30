@@ -144,6 +144,9 @@ func timeToMinutes(h, m int) int {
 // - Current time is outside the peak hour window
 // - PeakHourModel is empty
 func (m *ModelConfig) ResolvePeakHourModel(now time.Time) string {
+	// Use UTC for all time calculations to ensure consistency
+	now = now.UTC()
+
 	// Check if peak hours are enabled
 	if !m.PeakHourEnabled {
 		return ""
