@@ -31,6 +31,7 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 	// Note: ModelsConfig may be nil in tests, so check first
 	if cfg.ModelsConfig != nil {
 		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		log.Printf("[FALLBACK-DEBUG] executeRequest: req.modelID=%q, modelConfig=%v, Internal=%v", req.modelID, modelConfig != nil, modelConfig != nil && modelConfig.Internal)
 		if modelConfig != nil && modelConfig.Internal {
 			return executeInternalRequest(ctx, cfg, rawBody, req)
 		}
@@ -44,6 +45,7 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest) error {
 	// Resolve internal config (including credential lookup)
 	provider, apiKey, baseURL, internalModel, ok := cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+	log.Printf("[FALLBACK-DEBUG] ResolveInternalConfig(%q) => provider=%q, internalModel=%q, ok=%v", req.modelID, provider, internalModel, ok)
 	if !ok {
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
 	}

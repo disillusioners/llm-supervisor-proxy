@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -78,6 +79,18 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	h.store.Add(reqLog)
 
 	modelList := buildModelList(originalModel, conf.ModelsConfig)
+
+	log.Printf("[FALLBACK-DEBUG] buildModelList result: originalModel=%q, modelList=%v, ModelsConfig=%v", originalModel, modelList, conf.ModelsConfig != nil)
+	if conf.ModelsConfig != nil {
+		fc := conf.ModelsConfig.GetFallbackChain(originalModel)
+		log.Printf("[FALLBACK-DEBUG] GetFallbackChain(%q) = %v", originalModel, fc)
+		m := conf.ModelsConfig.GetModel(originalModel)
+		if m != nil {
+			log.Printf("[FALLBACK-DEBUG] GetModel(%q) found: ID=%q, Internal=%v, InternalModel=%q, FallbackChain=%v", originalModel, m.ID, m.Internal, m.InternalModel, m.FallbackChain)
+		} else {
+			log.Printf("[FALLBACK-DEBUG] GetModel(%q) returned nil — MODEL NOT FOUND IN CONFIG!", originalModel)
+		}
+	}
 
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
 	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
