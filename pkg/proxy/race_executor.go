@@ -43,9 +43,24 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 // executeInternalRequest handles requests to internal providers (bypassing external upstream)
 func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest) error {
 	// Resolve internal config (including credential lookup)
+	// IMPORTANT: Peak hour substitution is intentionally NOT applied to fallback models.
+	// Peak hour is designed to handle primary model capacity during peak times,
+	// not to also affect fallback models. Fallback models should use their
+	// configured InternalModel directly without peak-hour substitution.
 	provider, apiKey, baseURL, internalModel, ok := cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
 	if !ok {
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
+	}
+
+	// For fallback requests, skip peak hour substitution and use the configured fallback model directly
+	// This ensures fallback models aren't affected by peak hour settings from the primary model
+	if req.modelType == modelTypeFallback {
+		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		if modelConfig != nil {
+			log.Printf("[DEBUG] Race attempt %d: fallback model %s - using configured InternalModel=%s (peak hour skipped for fallback)",
+				req.id, req.modelID, modelConfig.InternalModel)
+			internalModel = modelConfig.InternalModel
+		}
 	}
 
 	// Create provider client
