@@ -7,18 +7,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestStreamBuffer(t *testing.T) {
 	buffer := newStreamBuffer(100)
-	
+
 	line1 := []byte("data: hello")
 	if !buffer.Add(line1) {
 		t.Errorf("Failed to add line1")
 	}
-	
+
 	chunks, nextIdx := buffer.GetChunksFrom(0)
 	if len(chunks) != 1 || string(chunks[0]) != "data: hello\n" {
 		t.Errorf("Unexpected chunks: %v", chunks)
@@ -26,18 +27,18 @@ func TestStreamBuffer(t *testing.T) {
 	if nextIdx != 1 {
 		t.Errorf("Unexpected nextIdx: %d", nextIdx)
 	}
-	
+
 	// Test pruning
 	buffer.Prune(1)
-	
+
 	line2 := []byte("data: world")
 	buffer.Add(line2)
-	
+
 	chunks, nextIdx = buffer.GetChunksFrom(1)
 	if len(chunks) != 1 || string(chunks[0]) != "data: world\n" {
 		t.Errorf("Unexpected chunks after prune: %v", chunks)
 	}
-	
+
 	// Test limit
 	longLine := []byte(strings.Repeat("a", 101))
 	if buffer.Add(longLine) {
@@ -106,10 +107,10 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 
 func TestRaceCoordinator_Retry(t *testing.T) {
 	// Setup mock upstream that fails for first request and succeeds for second
-	callCount := 0
+	var callCount int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount == 1 {
+		count := atomic.AddInt64(&callCount, 1)
+		if count == 1 {
 			// First request hangs then fails
 			time.Sleep(200 * time.Millisecond)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -137,7 +138,7 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	
+
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
 	// Provide two models so the coordinator can spawn a second request when the first fails
@@ -214,7 +215,7 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		// Read the request body to check which model is being used
 		body := make([]byte, 100)
 		r.Body.Read(body)
-		
+
 		if callCount == 1 {
 			// First request (main) fails
 			time.Sleep(100 * time.Millisecond)
@@ -237,14 +238,14 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		RaceMaxParallel:    3,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        50 * time.Millisecond, // Fast idle timeout
-		StreamDeadline:     5 * time.Second,        // Time limit before picking best buffer
-		MaxGenerationTime:  5 * time.Second,        // Add streaming deadline
+		StreamDeadline:     5 * time.Second,       // Time limit before picking best buffer
+		MaxGenerationTime:  5 * time.Second,       // Add streaming deadline
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	
+
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
@@ -288,7 +289,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	
+
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
@@ -297,7 +298,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
-	
+
 	// All requests failed, so no winner
 	if winner != nil {
 		t.Errorf("Expected no winner when all requests fail, got winner with id=%d", winner.id)
@@ -314,7 +315,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 // cancels all running requests
 func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 	requestCancelled := make(chan bool, 3)
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Slow response - will be cancelled
 		select {
@@ -340,7 +341,7 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
@@ -378,7 +379,7 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 		callCount++
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		
+
 		if callCount == 1 {
 			// First request sends too much data (will overflow buffer)
 			for i := 0; i < 100; i++ {
@@ -406,7 +407,7 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	
+
 	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
@@ -428,10 +429,10 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 // TestStreamBuffer_ConcurrentReadWrite verifies thread-safety of stream buffer
 func TestStreamBuffer_ConcurrentReadWrite(t *testing.T) {
 	buffer := newStreamBuffer(10000)
-	
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	
+
 	// Writer goroutine
 	go func() {
 		defer wg.Done()
@@ -442,7 +443,7 @@ func TestStreamBuffer_ConcurrentReadWrite(t *testing.T) {
 		}
 		buffer.Close(nil)
 	}()
-	
+
 	// Reader goroutine
 	go func() {
 		defer wg.Done()
@@ -453,7 +454,7 @@ func TestStreamBuffer_ConcurrentReadWrite(t *testing.T) {
 				readIndex = nextIdx
 				buffer.Prune(readIndex)
 			}
-			
+
 			if buffer.IsComplete() {
 				// Read any remaining chunks
 				chunks, _ = buffer.GetChunksFrom(readIndex)
@@ -462,18 +463,18 @@ func TestStreamBuffer_ConcurrentReadWrite(t *testing.T) {
 				}
 				return
 			}
-			
+
 			time.Sleep(time.Microsecond)
 		}
 	}()
-	
+
 	// Wait with timeout
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
-	
+
 	select {
 	case <-done:
 		// Success
