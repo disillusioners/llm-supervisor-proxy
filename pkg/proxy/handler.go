@@ -93,12 +93,12 @@ type Handler struct {
 	store           *store.RequestStore
 	client          *http.Client
 	bufferStore     *bufferstore.BufferStore
-	tokenStore      *auth.TokenStore
+	tokenStore      auth.TokenStoreInterface
 	ultimateHandler *ultimatemodel.Handler
 	counter         *usage.Counter
 }
 
-func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore, counter *usage.Counter) *Handler {
+func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore auth.TokenStoreInterface, counter *usage.Counter) *Handler {
 	h := &Handler{
 		config: config,
 		bus:    bus,

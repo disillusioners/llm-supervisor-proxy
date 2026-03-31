@@ -62,11 +62,11 @@ type Server struct {
 	modelsConfig models.ModelsConfigInterface // Models config
 	store        *store.RequestStore
 	bufferStore  *bufferstore.BufferStore
-	tokenStore   *auth.TokenStore
+	tokenStore   auth.TokenStoreInterface
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Server {
+func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore auth.TokenStoreInterface) *Server {
 	return &Server{
 		bus:          bus,
 		configMgr:    configMgr,

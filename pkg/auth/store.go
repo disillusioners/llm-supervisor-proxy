@@ -15,6 +15,18 @@ type TokenStore struct {
 	dialect database.Dialect
 }
 
+// TokenStoreInterface defines the interface for token operations
+// This allows for mocking in tests
+type TokenStoreInterface interface {
+	ValidateToken(ctx context.Context, plaintext string) (*AuthToken, error)
+	CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string) (string, *AuthToken, error)
+	DeleteToken(ctx context.Context, id string) error
+	ListTokens(ctx context.Context) ([]AuthToken, error)
+}
+
+// Ensure TokenStore implements TokenStoreInterface at compile time
+var _ TokenStoreInterface = (*TokenStore)(nil)
+
 // NewTokenStore creates a new token store
 func NewTokenStore(db *sql.DB, dialect database.Dialect) *TokenStore {
 	return &TokenStore{db: db, dialect: dialect}
