@@ -354,7 +354,8 @@ func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 
 	// Create a copy for validation
 	testConfig := &ModelsConfig{
-		Models: append([]ModelConfig{}, mc.Models...),
+		Models:      append([]ModelConfig{}, mc.Models...),
+		Credentials: mc.Credentials,
 	}
 	testConfig.Models = append(testConfig.Models, model)
 

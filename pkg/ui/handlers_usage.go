@@ -11,6 +11,7 @@ import (
 
 // UsageDataRow represents a row in the usage data array
 type UsageDataRow struct {
+	TokenID          string `json:"token_id"`
 	TokenName        string `json:"token_name"`
 	HourBucket       string `json:"hour_bucket"`
 	RequestCount     int    `json:"request_count"`
@@ -164,13 +165,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if tokenID != "" {
 		// Query with token_id filter
 		if dialect == database.PostgreSQL {
-			query = `SELECT coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.token_id = $1 AND u.hour_bucket >= $2 AND u.hour_bucket <= $3
 				ORDER BY u.hour_bucket`
 		} else {
-			query = `SELECT coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.token_id = ? AND u.hour_bucket >= ? AND u.hour_bucket <= ?
@@ -180,13 +181,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Query without token_id filter (all tokens)
 		if dialect == database.PostgreSQL {
-			query = `SELECT coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.hour_bucket >= $1 AND u.hour_bucket <= $2
 				ORDER BY u.hour_bucket`
 		} else {
-			query = `SELECT coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.hour_bucket >= ? AND u.hour_bucket <= ?
@@ -207,7 +208,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var row UsageDataRow
-		if err := rows.Scan(&row.TokenName, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
+		if err := rows.Scan(&row.TokenID, &row.TokenName, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
 			http.Error(w, "Failed to scan usage row", http.StatusInternalServerError)
 			return
 		}
