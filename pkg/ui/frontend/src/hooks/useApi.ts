@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary } from '../types';
 
 const API_BASE = '/fe/api';
 
@@ -359,4 +359,65 @@ export async function getProviders(): Promise<Provider[]> {
   const res = await fetch('/fe/api/providers');
   if (!res.ok) throw new Error('Failed to fetch providers');
   return res.json();
+}
+
+// Usage API
+export function useUsage() {
+  const [usageData, setUsageData] = useState<UsageResponse | null>(null);
+  const [usageTokens, setUsageTokens] = useState<UsageToken[]>([]);
+  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchUsage = useCallback(async (params: {
+    token_id?: string;
+    from?: string;
+    to?: string;
+    view?: 'hourly' | 'daily';
+  }) => {
+    try {
+      setLoading(true);
+      setError(null);
+      const qs = new URLSearchParams();
+      if (params.token_id) qs.set('token_id', params.token_id);
+      if (params.from) qs.set('from', params.from);
+      if (params.to) qs.set('to', params.to);
+      if (params.view) qs.set('view', params.view);
+      const data = await apiFetch<UsageResponse>('/usage?' + qs.toString());
+      setUsageData(data);
+      return data;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to fetch usage');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchTokens = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ tokens: UsageToken[] }>('/usage/tokens');
+      setUsageTokens(data.tokens || []);
+    } catch (e) {
+      // silently fail - tokens list is not critical
+    }
+  }, []);
+
+  const fetchSummary = useCallback(async (from?: string, to?: string) => {
+    try {
+      const qs = new URLSearchParams();
+      if (from) qs.set('from', from);
+      if (to) qs.set('to', to);
+      const data = await apiFetch<UsageSummary>('/usage/summary?' + qs.toString());
+      setSummary(data);
+      return data;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to fetch summary');
+      return null;
+    }
+  }, []);
+
+  useEffect(() => { fetchTokens(); }, [fetchTokens]);
+
+  return { usageData, usageTokens, summary, loading, error, fetchUsage, fetchTokens, fetchSummary };
 }

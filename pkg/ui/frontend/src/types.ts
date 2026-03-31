@@ -309,3 +309,44 @@ export interface AppState {
   autoScroll: boolean;
   showConfig: boolean;
 }
+
+export interface HourlyUsageRow {
+  hour_bucket: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface UsageResponse {
+  token_id?: string;
+  from: string;
+  to: string;
+  view: 'hourly' | 'daily';
+  data: HourlyUsageRow[];
+  totals: HourlyUsageRow;
+}
+
+export interface UsageToken {
+  token_id: string;
+  name: string;
+}
+
+export interface UsageSummary {
+  from: string;
+  to: string;
+  tokens: {
+    token_id: string;
+    name: string;
+    total_requests: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_tokens: number;
+  }[];
+  grand_total: {
+    total_requests: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_tokens: number;
+  };
+}

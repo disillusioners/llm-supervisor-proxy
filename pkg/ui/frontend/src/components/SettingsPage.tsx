@@ -9,6 +9,7 @@ import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
+import { UsageTab } from './usage/UsageTab';
 import { ToastContainer, type ToastData } from './Toast';
 
 interface SettingsPageProps {
@@ -24,7 +25,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -330,6 +331,15 @@ export function SettingsPage({
           >
             Tokens
           </button>
+          <button
+            class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'usage'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+            }`}
+            onClick={() => setActiveTab('usage')}
+          >
+            📊 Usage
+          </button>
         </div>
       </div>
 
@@ -430,6 +440,10 @@ export function SettingsPage({
                 />
               )}
             </>
+          )}
+
+          {activeTab === 'usage' && (
+            <UsageTab />
           )}
         </div>
 
