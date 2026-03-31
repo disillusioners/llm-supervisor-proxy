@@ -518,17 +518,8 @@ func TestCountingHooks_IntegrationStyle(t *testing.T) {
 
 	// This simulates one of the three counting points in handler.go
 	if tokenID != "" && mock != nil {
-		promptTokens := usage.PromptTokens
-		completionTokens := usage.CompletionTokens
-		totalTokens := usage.TotalTokens
-
-		// Goroutine pattern from handler.go
-		go func() {
-			_ = mock.Increment(context.Background(), tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens)
-		}()
-
-		// Give goroutine time to execute
-		time.Sleep(10 * time.Millisecond)
+		// Direct call to mock (not testing concurrency here)
+		_ = mock.Increment(context.Background(), tokenID, hourBucket, 1, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 	}
 
 	if !mock.IncrementCalled {
