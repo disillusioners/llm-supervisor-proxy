@@ -98,7 +98,7 @@ func main() {
 	}
 
 	// Initialize UI Server
-	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore)
+	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore, dbStore)
 	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler

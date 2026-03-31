@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // Model represents a model with its fallback chain
@@ -63,10 +64,11 @@ type Server struct {
 	store        *store.RequestStore
 	bufferStore  *bufferstore.BufferStore
 	tokenStore   auth.TokenStoreInterface
+	dbStore      *database.Store
 	mu           sync.Mutex
 }
 
-func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore auth.TokenStoreInterface) *Server {
+func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *proxy.Config, modelsConfig models.ModelsConfigInterface, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore auth.TokenStoreInterface, dbStore *database.Store) *Server {
 	return &Server{
 		bus:          bus,
 		configMgr:    configMgr,
@@ -75,6 +77,7 @@ func NewServer(bus *events.Bus, configMgr config.ManagerInterface, proxyConfig *
 		store:        store,
 		bufferStore:  bufferStore,
 		tokenStore:   tokenStore,
+		dbStore:      dbStore,
 	}
 }
 
@@ -141,6 +144,10 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/credentials/", s.handleCredentialDetail)
 	// Provider list
 	mux.HandleFunc("/fe/api/providers", s.handleProviders)
+	// Usage API
+	mux.HandleFunc("/fe/api/usage", s.handleUsage)
+	mux.HandleFunc("/fe/api/usage/tokens", s.handleUsageTokens)
+	mux.HandleFunc("/fe/api/usage/summary", s.handleUsageSummary)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
