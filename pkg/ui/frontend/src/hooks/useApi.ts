@@ -387,6 +387,7 @@ export function useUsage() {
       setUsageData(data);
       return data;
     } catch (e) {
+      setUsageData(null);
       setError(e instanceof Error ? e.message : 'Failed to fetch usage');
       return null;
     } finally {
@@ -412,6 +413,7 @@ export function useUsage() {
       setSummary(data);
       return data;
     } catch (e) {
+      setSummary(null);
       setError(e instanceof Error ? e.message : 'Failed to fetch summary');
       return null;
     }

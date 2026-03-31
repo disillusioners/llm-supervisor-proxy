@@ -3,6 +3,13 @@ import { useUsage } from '../../hooks/useApi';
 import { UsageSummaryCards } from './UsageSummaryCards';
 import { UsageTable } from './UsageTable';
 
+function toHourFormat(d: Date): string {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0') + 'T' +
+    String(d.getHours()).padStart(2, '0');
+}
+
 type DateRange = '24h' | '7d' | '30d' | 'custom';
 
 export function UsageTab() {
@@ -17,25 +24,25 @@ export function UsageTab() {
   // Calculate date range boundaries
   const { from, to } = useMemo(() => {
     const now = new Date();
-    const toIso = now.toISOString();
+    const toFormatted = toHourFormat(now);
 
     switch (dateRange) {
       case '24h': {
         const fromDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        return { from: fromDate.toISOString(), to: toIso };
+        return { from: toHourFormat(fromDate), to: toFormatted };
       }
       case '7d': {
         const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        return { from: fromDate.toISOString(), to: toIso };
+        return { from: toHourFormat(fromDate), to: toFormatted };
       }
       case '30d': {
         const fromDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        return { from: fromDate.toISOString(), to: toIso };
+        return { from: toHourFormat(fromDate), to: toFormatted };
       }
       case 'custom': {
         const fromDate = customFrom ? new Date(customFrom) : new Date(now.getTime() - 24 * 60 * 60 * 1000);
         const toDate = customTo ? new Date(customTo) : now;
-        return { from: fromDate.toISOString(), to: toDate.toISOString() };
+        return { from: toHourFormat(fromDate), to: toHourFormat(toDate) };
       }
     }
   }, [dateRange, customFrom, customTo]);
@@ -54,11 +61,11 @@ export function UsageTab() {
   const handleDateRangeChange = (range: DateRange) => {
     setDateRange(range);
     if (range === 'custom') {
-      // Initialize custom dates to last 24h range
+      // Initialize custom dates to last 24h range (datetime-local format: YYYY-MM-DDTHH)
       const now = new Date();
       const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-      setCustomTo(now.toISOString().split('T')[0]);
-      setCustomFrom(yesterday.toISOString().split('T')[0]);
+      setCustomTo(toHourFormat(now).slice(0, 16));
+      setCustomFrom(toHourFormat(yesterday).slice(0, 16));
     }
   };
 
@@ -116,7 +123,7 @@ export function UsageTab() {
             <div>
               <label class="block text-sm text-gray-400 mb-1">From</label>
               <input
-                type="date"
+                type="datetime-local"
                 value={customFrom}
                 onChange={(e) => setCustomFrom((e.target as HTMLInputElement).value)}
                 class="bg-gray-700 border border-gray-600 text-gray-100 rounded-md px-3 py-2 text-sm"
@@ -125,7 +132,7 @@ export function UsageTab() {
             <div>
               <label class="block text-sm text-gray-400 mb-1">To</label>
               <input
-                type="date"
+                type="datetime-local"
                 value={customTo}
                 onChange={(e) => setCustomTo((e.target as HTMLInputElement).value)}
                 class="bg-gray-700 border border-gray-600 text-gray-100 rounded-md px-3 py-2 text-sm"

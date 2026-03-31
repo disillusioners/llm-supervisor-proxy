@@ -1,9 +1,9 @@
-import type { HourlyUsageRow } from '../../types';
+import type { HourlyUsageRow, UsageTotals } from '../../types';
 import { formatTokenCount, formatHourBucket } from '../../utils/helpers';
 
 interface UsageTableProps {
   data: HourlyUsageRow[];
-  totals: HourlyUsageRow | null;
+  totals: UsageTotals | null;
   loading: boolean;
   view: 'hourly' | 'daily';
   onViewChange: (view: 'hourly' | 'daily') => void;

@@ -311,7 +311,16 @@ export interface AppState {
 }
 
 export interface HourlyUsageRow {
+  token_name: string;
+  token_id: string;
   hour_bucket: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface UsageTotals {
   request_count: number;
   prompt_tokens: number;
   completion_tokens: number;
@@ -324,12 +333,23 @@ export interface UsageResponse {
   to: string;
   view: 'hourly' | 'daily';
   data: HourlyUsageRow[];
-  totals: HourlyUsageRow;
+  totals: UsageTotals;
 }
 
 export interface UsageToken {
   token_id: string;
   name: string;
+  total_requests: number;
+  total_tokens: number;
+}
+
+export interface UsageGrandTotal {
+  total_requests: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  peak_hour?: string;
+  peak_hour_requests?: number;
 }
 
 export interface UsageSummary {
@@ -343,10 +363,5 @@ export interface UsageSummary {
     total_completion_tokens: number;
     total_tokens: number;
   }[];
-  grand_total: {
-    total_requests: number;
-    total_prompt_tokens: number;
-    total_completion_tokens: number;
-    total_tokens: number;
-  };
+  grand_total: UsageGrandTotal;
 }
