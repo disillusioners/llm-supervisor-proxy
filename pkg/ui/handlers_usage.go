@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -78,6 +78,41 @@ type UsageSummaryResponse struct {
 	GrandTotal GrandTotal           `json:"grand_total"`
 }
 
+// validateDateRange validates the from/to date range and returns an error message if invalid.
+// The format should be "2006-01-02T15" or "2006-01-02T15:04" (e.g., "2024-03-15T14" or "2024-03-15T14:30").
+func validateDateRange(from, to string) string {
+	// Try parsing with hour-only format first
+	fromTime, err := time.Parse("2006-01-02T15", from)
+	if err != nil {
+		// Try parsing with minute format
+		fromTime, err = time.Parse("2006-01-02T15:04", from)
+		if err != nil {
+			return fmt.Sprintf("invalid 'from' date format: %s (expected YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM)", from)
+		}
+	}
+	toTime, err := time.Parse("2006-01-02T15", to)
+	if err != nil {
+		// Try parsing with minute format
+		toTime, err = time.Parse("2006-01-02T15:04", to)
+		if err != nil {
+			return fmt.Sprintf("invalid 'to' date format: %s (expected YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM)", to)
+		}
+	}
+
+	// Check for inverted range
+	if fromTime.After(toTime) {
+		return "'from' date must be before or equal to 'to' date"
+	}
+
+	// Check max range (1 year)
+	maxDuration := 365 * 24 * time.Hour
+	if toTime.Sub(fromTime) > maxDuration {
+		return "date range cannot exceed 1 year"
+	}
+
+	return ""
+}
+
 // handleUsage handles GET /fe/api/usage
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -112,6 +147,14 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		from = now.Add(-24 * time.Hour).Format("2006-01-02T15")
 	}
 
+	// Validate date range if provided
+	if fromStr != "" || toStr != "" {
+		if errMsg := validateDateRange(from, to); errMsg != "" {
+			http.Error(w, errMsg, http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Build query with dialect-aware placeholders
 	var query string
 	var args []interface{}
@@ -121,7 +164,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if tokenID != "" {
 		// Query with token_id filter
 		if dialect == database.PostgreSQL {
-			query = `SELECT t.name, u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			query = `SELECT coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.token_id = $1 AND u.hour_bucket >= $2 AND u.hour_bucket <= $3
@@ -285,6 +328,14 @@ func (s *Server) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		from = now.Add(-24 * time.Hour).Format("2006-01-02T15")
 	}
 
+	// Validate date range if provided
+	if fromStr != "" || toStr != "" {
+		if errMsg := validateDateRange(from, to); errMsg != "" {
+			http.Error(w, errMsg, http.StatusBadRequest)
+			return
+		}
+	}
+
 	dialect := s.dbStore.Dialect
 
 	// Build query for per-token summary
@@ -404,10 +455,8 @@ func (s *Server) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		grandTotal.PeakHour = peakHour
 		grandTotal.PeakHourRequests = peakHourRequests
-	} else if err != sql.ErrNoRows {
-		// Log but don't fail - peak hour is optional
-		// Only fail if it's a real error (not just no rows)
 	}
+	// Peak hour is optional - errors are silently ignored
 
 	// Ensure tokens is not nil
 	if tokens == nil {
