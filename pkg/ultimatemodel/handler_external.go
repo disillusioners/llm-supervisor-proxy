@@ -179,8 +179,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		)
 	}
 
-	// Buffer chunks to extract usage from the last one
-	var lastChunk []byte
+	// Collect all data lines with JSON for reverse-scan usage extraction
+	var dataLines [][]byte
 
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -192,8 +192,15 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
 
-		// Track last chunk for usage extraction
-		lastChunk = []byte(line)
+		// Collect data lines for reverse-scan usage extraction
+		if bytes.HasPrefix([]byte(line), []byte("data: ")) {
+			data := bytes.TrimPrefix([]byte(line), []byte("data: "))
+			// Only collect non-empty, non-[DONE] lines
+			dataStr := string(data)
+			if dataStr != "[DONE]\n" && dataStr != "[DONE]" && dataStr != "\n" && dataStr != "" {
+				dataLines = append(dataLines, data)
+			}
+		}
 
 		// Process through tool call buffer
 		var chunksToEmit [][]byte
@@ -225,16 +232,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 	}
 
-	// Extract usage from the last SSE chunk
+	// Extract usage by reverse-scanning collected data lines (same pattern as handler.go's streamResult)
 	var usage *store.Usage
-	if lastChunk != nil {
-		// Parse "data: ..." format
-		data := string(lastChunk)
-		if len(data) > 6 && data[:6] == "data: " {
-			data = data[6:]
-		}
-		if data != "[DONE]\n" && data != "[DONE]" {
-			usage = extractUsageFromChunk([]byte(data))
+	for i := len(dataLines) - 1; i >= 0; i-- {
+		if usage = extractUsageFromChunk(dataLines[i]); usage != nil {
+			break
 		}
 	}
 
