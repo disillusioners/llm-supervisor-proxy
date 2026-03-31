@@ -260,7 +260,7 @@ func (s *Server) handleUsageTokens(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT u.token_id, coalesce(t.name, ''), SUM(u.request_count), SUM(u.total_tokens)
 		FROM token_hourly_usage u
 		LEFT JOIN auth_tokens t ON u.token_id = t.id
-		GROUP BY u.token_id
+		GROUP BY u.token_id, t.name
 		ORDER BY u.token_id`
 
 	rows, err := s.dbStore.DB.QueryContext(ctx, query)
