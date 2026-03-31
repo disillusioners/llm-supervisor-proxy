@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
@@ -25,14 +26,14 @@ func (h *Handler) executeExternal(
 	requestBody map[string]interface{},
 	modelCfg *models.ModelConfig,
 	isStream bool,
-) error {
+) (*store.Usage, error) {
 	cfg := h.config.Get()
 	var _ config.Config = cfg // Ensure config package is used
 
 	// Get upstream URL from config
 	upstreamURL := cfg.UpstreamURL
 	if upstreamURL == "" {
-		return fmt.Errorf("upstream URL not configured")
+		return nil, fmt.Errorf("upstream URL not configured")
 	}
 
 	// Prepare request body with model ID override
@@ -49,13 +50,13 @@ func (h *Handler) executeExternal(
 	// Marshal request body
 	bodyBytes, err := json.Marshal(bodyCopy)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	// Create upstream request
 	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstreamURL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("failed to create upstream request: %w", err)
+		return nil, fmt.Errorf("failed to create upstream request: %w", err)
 	}
 
 	// Copy headers from original request
@@ -82,14 +83,14 @@ func (h *Handler) executeExternal(
 
 	resp, err := client.Do(upstreamReq)
 	if err != nil {
-		return fmt.Errorf("upstream request failed: %w", err)
+		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Check response status
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Copy response headers
@@ -104,14 +105,52 @@ func (h *Handler) executeExternal(
 		return h.streamResponse(w, resp, modelCfg.ID)
 	}
 
-	// Non-streaming: copy body directly
+	// Non-streaming: read body, extract usage, then copy to response
+	bodyBytes, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Extract usage from response
+	usage := extractUsageFromResponse(bodyBytes)
+
+	// Write response
 	w.WriteHeader(resp.StatusCode)
-	_, err = io.Copy(w, resp.Body)
-	return err
+	_, err = w.Write(bodyBytes)
+	return usage, err
+}
+
+// extractUsageFromResponse parses usage data from a non-streaming response body.
+func extractUsageFromResponse(body []byte) *store.Usage {
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil
+	}
+
+	usageData, ok := resp["usage"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	var promptTokens, completionTokens, totalTokens int
+	if v, ok := usageData["prompt_tokens"].(float64); ok {
+		promptTokens = int(v)
+	}
+	if v, ok := usageData["completion_tokens"].(float64); ok {
+		completionTokens = int(v)
+	}
+	if v, ok := usageData["total_tokens"].(float64); ok {
+		totalTokens = int(v)
+	}
+	return &store.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+	}
 }
 
 // streamResponse streams the upstream response directly to client
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string) error {
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string) (*store.Usage, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -120,7 +159,7 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return fmt.Errorf("streaming not supported")
+		return nil, fmt.Errorf("streaming not supported")
 	}
 
 	// Create tool call buffer (same pattern as handleInternalStream)
@@ -140,6 +179,9 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		)
 	}
 
+	// Buffer chunks to extract usage from the last one
+	var lastChunk []byte
+
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -147,8 +189,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("error reading stream: %w", err)
+			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
+
+		// Track last chunk for usage extraction
+		lastChunk = []byte(line)
 
 		// Process through tool call buffer
 		var chunksToEmit [][]byte
@@ -180,5 +225,45 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 	}
 
-	return nil
+	// Extract usage from the last SSE chunk
+	var usage *store.Usage
+	if lastChunk != nil {
+		// Parse "data: ..." format
+		data := string(lastChunk)
+		if len(data) > 6 && data[:6] == "data: " {
+			data = data[6:]
+		}
+		if data != "[DONE]\n" && data != "[DONE]" {
+			usage = extractUsageFromChunk([]byte(data))
+		}
+	}
+
+	return usage, nil
+}
+
+// extractUsageFromChunk parses usage data from an SSE chunk JSON payload.
+func extractUsageFromChunk(data []byte) *store.Usage {
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return nil
+	}
+	usageData, ok := chunk["usage"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	var promptTokens, completionTokens, totalTokens int
+	if v, ok := usageData["prompt_tokens"].(float64); ok {
+		promptTokens = int(v)
+	}
+	if v, ok := usageData["completion_tokens"].(float64); ok {
+		completionTokens = int(v)
+	}
+	if v, ok := usageData["total_tokens"].(float64); ok {
+		totalTokens = int(v)
+	}
+	return &store.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -208,6 +209,7 @@ func (h *Handler) SendRetryExhaustedError(
 // No retry, no fallback, no loop detection, no buffering.
 // On failure: KEEPS retry counter to enforce max retry limit.
 // On success: clears retry counter but keeps hash in cache.
+// Returns usage statistics extracted from the response.
 func (h *Handler) Execute(
 	parentCtx context.Context,
 	w http.ResponseWriter,
@@ -216,7 +218,7 @@ func (h *Handler) Execute(
 	originalModelID string,
 	hash string,
 	headersSent *bool,
-) error {
+) (*store.Usage, error) {
 	cfg := h.config.Get()
 	modelID := cfg.UltimateModel.ModelID
 
@@ -225,7 +227,7 @@ func (h *Handler) Execute(
 	if modelCfg == nil {
 		// Model not found - this is a config error, clear everything
 		h.hashCache.Remove(hash) // Also clears retry counter
-		return &ultimateModelError{
+		return nil, &ultimateModelError{
 			message:  "ultimate model not found in database",
 			internal: false,
 		}
@@ -246,24 +248,25 @@ func (h *Handler) Execute(
 	defer cancel()
 
 	// Route to internal or external handler
+	var usage *store.Usage
 	var err error
 	if modelCfg.Internal {
-		err = h.executeInternal(ctx, w, requestBody, modelCfg, isStream)
+		usage, err = h.executeInternal(ctx, w, requestBody, modelCfg, isStream)
 	} else {
-		err = h.executeExternal(ctx, w, r, requestBody, modelCfg, isStream)
+		usage, err = h.executeExternal(ctx, w, r, requestBody, modelCfg, isStream)
 	}
 
 	if err != nil {
 		// On failure: KEEP retry counter to enforce limit
 		// DON'T remove hash - client can retry until MaxRetries exhausted
 		log.Printf("[UltimateModel] Error executing with %s: %v", modelID, err)
-		return err
+		return nil, err
 	}
 
 	// On success: clear retry counter but keep hash in cache
 	// This prevents immediate re-triggering of ultimate model for same content
 	h.hashCache.ClearRetryCount(hash)
-	return nil
+	return usage, nil
 }
 
 // ultimateModelError is an error type for ultimate model errors

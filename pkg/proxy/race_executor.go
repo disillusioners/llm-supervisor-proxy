@@ -488,7 +488,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 
 			// Inject usage from the full response if available
 			// This is critical for clients to track token usage for streaming responses
-			if event.Response != nil && event.Response.Usage.PromptTokens > 0 {
+			if event.Response != nil && (event.Response.Usage.PromptTokens > 0 || event.Response.Usage.CompletionTokens > 0 || event.Response.Usage.TotalTokens > 0) {
 				finalChunk["usage"] = map[string]int{
 					"prompt_tokens":     event.Response.Usage.PromptTokens,
 					"completion_tokens": event.Response.Usage.CompletionTokens,

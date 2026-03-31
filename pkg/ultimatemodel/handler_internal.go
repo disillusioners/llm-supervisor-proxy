@@ -10,6 +10,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
@@ -21,23 +22,23 @@ func (h *Handler) executeInternal(
 	requestBody map[string]interface{},
 	modelCfg *models.ModelConfig,
 	isStream bool,
-) error {
+) (*store.Usage, error) {
 	// Resolve internal config (including credential lookup)
 	provider, apiKey, baseURL, internalModel, ok := h.modelsMgr.ResolveInternalConfig(modelCfg.ID)
 	if !ok {
-		return fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
+		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
 
 	// Create provider
 	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
 	if err != nil {
-		return fmt.Errorf("failed to create provider: %w", err)
+		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 
 	// Convert request
 	req, err := h.convertRequest(requestBody)
 	if err != nil {
-		return fmt.Errorf("failed to convert request: %w", err)
+		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
 	// Override model with internal model name
@@ -56,14 +57,24 @@ func (h *Handler) handleInternalNonStream(
 	req *providers.ChatCompletionRequest,
 	w http.ResponseWriter,
 	internalModel string,
-) error {
+) (*store.Usage, error) {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	return json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		return nil, err
+	}
+
+	// Extract usage from response
+	usage := &store.Usage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+	return usage, nil
 }
 
 // handleInternalStream handles streaming requests for internal providers
@@ -73,10 +84,10 @@ func (h *Handler) handleInternalStream(
 	req *providers.ChatCompletionRequest,
 	w http.ResponseWriter,
 	internalModel string,
-) error {
+) (*store.Usage, error) {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Set SSE headers
@@ -87,7 +98,7 @@ func (h *Handler) handleInternalStream(
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return fmt.Errorf("streaming not supported")
+		return nil, fmt.Errorf("streaming not supported")
 	}
 
 	// Create tool call buffer with integrated repair
@@ -114,6 +125,9 @@ func (h *Handler) handleInternalStream(
 	firstChunk := true
 	nextToolCallIndex := 0
 	seenToolCallIDs := make(map[string]int)
+
+	// Track usage from done event
+	var extractedUsage *store.Usage
 
 	for event := range eventCh {
 		switch event.Type {
@@ -263,6 +277,15 @@ func (h *Handler) handleInternalStream(
 				}
 			}
 
+			// Extract usage from the done event's full response
+			if event.Response != nil {
+				extractedUsage = &store.Usage{
+					PromptTokens:     event.Response.Usage.PromptTokens,
+					CompletionTokens: event.Response.Usage.CompletionTokens,
+					TotalTokens:      event.Response.Usage.TotalTokens,
+				}
+			}
+
 			// Write finish chunk with finish_reason before [DONE]
 			// This is required by OpenAI streaming format - clients expect finish_reason in the last chunk
 			// Use the finish_reason from the event (e.g., "tool_calls" for tool calls, "stop" for normal completion)
@@ -308,11 +331,11 @@ func (h *Handler) handleInternalStream(
 			data, _ := json.Marshal(errorChunk)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
-			return fmt.Errorf("provider stream error: %s", errMsg)
+			return nil, fmt.Errorf("provider stream error: %s", errMsg)
 		}
 	}
 
-	return nil
+	return extractedUsage, nil
 }
 
 // convertRequest converts map[string]interface{} to providers.ChatCompletionRequest

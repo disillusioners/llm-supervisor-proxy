@@ -433,7 +433,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 				// Execute with ultimate model (raw proxy, no retry/fallback)
 				// The Execute method determines streaming from requestBody["stream"]
-				err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
+				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
 				if err != nil {
 					log.Printf("[UltimateModel] Error: %v", err)
 					rc.reqLog.Status = "failed"
@@ -461,10 +461,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 
-				// Success - update log
+				// Success - update log with usage
 				rc.reqLog.Status = "completed"
 				rc.reqLog.EndTime = time.Now()
 				rc.reqLog.Duration = time.Since(rc.startTime).String()
+				rc.reqLog.Usage = usage
 				h.store.Add(rc.reqLog)
 
 				// Count this request for hourly usage tracking
@@ -718,7 +719,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				return
 			}
 
-			// Log raw response on success - capture bytes BEFORE final pruning
+			// Log raw response on success if enabled - capture bytes BEFORE final pruning
 			if rc.conf.LogRawUpstreamResponse {
 				if buf := winner.GetBuffer(); buf != nil {
 					capturedBytes := buf.GetAllRawBytes()
@@ -726,10 +727,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}
 			}
 
-			// Now safe to prune (after capturing raw response)
-			buffer.Prune(readIndex)
-
 			// Extract usage from the last SSE chunk (it contains the "usage" field)
+			// IMPORTANT: Must do this BEFORE Prune, as Prune sets chunks to nil
 			chunks, _ = buffer.GetChunksFrom(0)
 			for i := len(chunks) - 1; i >= 0; i-- {
 				chunk := chunks[i]
@@ -744,6 +743,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					}
 				}
 			}
+
+			// Now safe to prune (after extracting usage)
+			buffer.Prune(readIndex)
 
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
