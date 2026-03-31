@@ -9,12 +9,20 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 - **Database**: SQLite (default), PostgreSQL (supported)
 - **Build**: `go build`, `npm run build` (frontend)
 
+## Testing History
+
+| Phase | Date | Status | Details |
+|-------|------|--------|---------|
+| Phase 1 | 2026-03-31 | ✅ PASS | Token hourly usage (backend), 355+ tests |
+| Phase 2 | 2026-03-31 | ✅ PASS | Usage API endpoints, 202 tests |
+| Phase 3 | 2026-03-31 | ✅ PASS | Frontend visualization, 231 tests |
+
 ## Test Commands
 - **Unit tests**: `go test ./... -v`
 - **Unit tests (with race)**: `go test ./... -v -race`
 - **Go vet**: `go vet ./...`
 - **Frontend build**: `cd pkg/ui/frontend && npm run build`
-- **Full build**: `go build ./...`
+- **Full build**: `go build ./cmd/main.go` (note: `go build .` conflicts with `test_load.go`)
 
 ## Key Test Files
 - `pkg/models/peak_hours_test.go` — Peak hour unit tests
