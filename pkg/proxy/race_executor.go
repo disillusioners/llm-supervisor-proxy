@@ -210,6 +210,15 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 		return err
 	}
 
+	// Extract usage from response and store it
+	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 || resp.Usage.TotalTokens > 0 {
+		upstreamReq.SetUsage(&TokenUsage{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			TotalTokens:      resp.Usage.TotalTokens,
+		})
+	}
+
 	// Marshal response to JSON
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -485,6 +494,13 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 					"completion_tokens": event.Response.Usage.CompletionTokens,
 					"total_tokens":      event.Response.Usage.TotalTokens,
 				}
+
+				// Also store usage for retrieval after race completes
+				upstreamReq.SetUsage(&TokenUsage{
+					PromptTokens:     event.Response.Usage.PromptTokens,
+					CompletionTokens: event.Response.Usage.CompletionTokens,
+					TotalTokens:      event.Response.Usage.TotalTokens,
+				})
 			}
 
 			finalData, _ := json.Marshal(finalChunk)
@@ -660,6 +676,23 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 		}
 	}
 
+	// Extract usage from response and store it
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(body, &respMap); err == nil {
+		if usageMap, ok := respMap["usage"].(map[string]interface{}); ok {
+			promptTokens := intValue(usageMap["prompt_tokens"])
+			completionTokens := intValue(usageMap["completion_tokens"])
+			totalTokens := intValue(usageMap["total_tokens"])
+			if promptTokens > 0 || completionTokens > 0 || totalTokens > 0 {
+				req.SetUsage(&TokenUsage{
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					TotalTokens:      totalTokens,
+				})
+			}
+		}
+	}
+
 	// Add as single chunk (the non-streaming JSON response)
 	if !req.buffer.Add(body) {
 		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", req.modelID)
@@ -679,6 +712,61 @@ func getNormalizerDescription(normalizerName string) string {
 		return "Repaired malformed JSON in tool_call arguments"
 	default:
 		return "Normalized stream chunk"
+	}
+}
+
+// intValue safely converts an interface{} to int
+func intValue(v interface{}) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	default:
+		return 0
+	}
+}
+
+// extractUsageFromSSEChunk extracts usage data from an SSE chunk if present
+// The chunk is expected to be in the format: "data: {...json...}\n"
+func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
+	// Check if this is a data line
+	const dataPrefix = "data: "
+	if len(line) <= len(dataPrefix) {
+		return
+	}
+	if !bytes.HasPrefix(line, []byte(dataPrefix)) {
+		return
+	}
+
+	// Extract JSON part (skip "data: " prefix)
+	jsonPart := line[len(dataPrefix):]
+
+	// Try to parse as JSON
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(jsonPart, &chunk); err != nil {
+		return
+	}
+
+	// Look for usage field
+	usageMap, ok := chunk["usage"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	promptTokens := intValue(usageMap["prompt_tokens"])
+	completionTokens := intValue(usageMap["completion_tokens"])
+	totalTokens := intValue(usageMap["total_tokens"])
+
+	// Only set if we have meaningful usage data
+	if promptTokens > 0 || completionTokens > 0 || totalTokens > 0 {
+		req.SetUsage(&TokenUsage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
+		})
 	}
 }
 
@@ -906,6 +994,9 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 					return fmt.Errorf("buffer limit exceeded: streaming tool_call chunk for model %s", req.modelID)
 				}
 			}
+
+			// Extract usage from SSE chunk if present
+			extractUsageFromSSEChunk(req, normalizedLine)
 
 			// Check for stream error chunk (e.g., from LiteLLM)
 			if isStreamErrorChunk(line) != "" {

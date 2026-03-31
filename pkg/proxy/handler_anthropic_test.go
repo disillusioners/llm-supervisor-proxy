@@ -233,7 +233,7 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil)
 
 	t.Cleanup(func() { upstream.Close() })
 	return h, upstream

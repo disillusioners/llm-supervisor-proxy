@@ -18,6 +18,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
+	usage "github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
 // Config holds runtime configuration for the proxy handler
@@ -94,9 +95,10 @@ type Handler struct {
 	bufferStore     *bufferstore.BufferStore
 	tokenStore      *auth.TokenStore
 	ultimateHandler *ultimatemodel.Handler
+	counter         *usage.Counter
 }
 
-func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore) *Handler {
+func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore *auth.TokenStore, counter *usage.Counter) *Handler {
 	h := &Handler{
 		config: config,
 		bus:    bus,
@@ -116,6 +118,7 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 		},
 		bufferStore: bufferStore,
 		tokenStore:  tokenStore,
+		counter:     counter,
 	}
 
 	// Initialize ultimate model handler
@@ -240,24 +243,27 @@ func (h *Handler) extractAPIKey(r *http.Request) string {
 	return ""
 }
 
-// authenticate validates the API key and returns true if valid
-func (h *Handler) authenticate(r *http.Request) bool {
+// authenticate validates the API key and returns the token + true if valid
+func (h *Handler) authenticate(r *http.Request) (*auth.AuthToken, bool) {
 	// If tokenStore is nil, skip validation (auth disabled)
 	if h.tokenStore == nil {
-		return true
+		return nil, true
 	}
 
 	apiKey := h.extractAPIKey(r)
 	if apiKey == "" {
-		return false
+		return nil, false
 	}
 
 	// Create a timeout context for database query
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	_, err := h.tokenStore.ValidateToken(ctx, apiKey)
-	return err == nil
+	token, err := h.tokenStore.ValidateToken(ctx, apiKey)
+	if err != nil {
+		return nil, false
+	}
+	return token, true
 }
 
 // requiresInternalAuth checks if any model in the request chain uses internal upstream
@@ -333,7 +339,8 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Only authenticate if using internal upstream
 	// For external upstream, the upstream provider handles authentication
 	if h.requiresInternalAuth(rc) {
-		if !h.authenticate(r) {
+		token, ok := h.authenticate(r)
+		if !ok {
 			// Update request log to failed status
 			rc.reqLog.Status = "failed"
 			rc.reqLog.Error = "Authentication failed: invalid or expired API key"
@@ -349,6 +356,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 			h.sendAuthError(w)
 			return
+		}
+		if token != nil {
+			rc.tokenID = token.ID
+			rc.tokenName = token.Name
 		}
 	}
 
@@ -455,6 +466,22 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				rc.reqLog.EndTime = time.Now()
 				rc.reqLog.Duration = time.Since(rc.startTime).String()
 				h.store.Add(rc.reqLog)
+
+				// Count this request for hourly usage tracking
+				if rc.tokenID != "" && h.counter != nil {
+					var promptTokens, completionTokens, totalTokens int
+					if rc.reqLog.Usage != nil {
+						promptTokens = rc.reqLog.Usage.PromptTokens
+						completionTokens = rc.reqLog.Usage.CompletionTokens
+						totalTokens = rc.reqLog.Usage.TotalTokens
+					}
+					hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+					go func() {
+						if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+							log.Printf("failed to increment usage counter: %v", err)
+						}
+					}()
+				}
 
 				h.publishEvent("request_completed", map[string]interface{}{
 					"id":             rc.reqID,
@@ -702,6 +729,22 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// Now safe to prune (after capturing raw response)
 			buffer.Prune(readIndex)
 
+			// Extract usage from the last SSE chunk (it contains the "usage" field)
+			chunks, _ = buffer.GetChunksFrom(0)
+			for i := len(chunks) - 1; i >= 0; i-- {
+				chunk := chunks[i]
+				if bytes.HasPrefix(chunk, []byte("data: ")) {
+					data := bytes.TrimPrefix(chunk, []byte("data: "))
+					if string(data) == "[DONE]" || string(data) == "" {
+						continue
+					}
+					if usage := extractUsageFromChunk(data); usage != nil {
+						rc.reqLog.Usage = usage
+						break
+					}
+				}
+			}
+
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
 				if i < len(rc.toolCallArgBuilders) {
@@ -756,6 +799,22 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			rc.reqLog.Duration = time.Since(rc.startTime).String()
 			rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
 			h.store.Add(rc.reqLog)
+
+			// Count this request for hourly usage tracking
+			if rc.tokenID != "" && h.counter != nil {
+				var promptTokens, completionTokens, totalTokens int
+				if rc.reqLog.Usage != nil {
+					promptTokens = rc.reqLog.Usage.PromptTokens
+					completionTokens = rc.reqLog.Usage.CompletionTokens
+					totalTokens = rc.reqLog.Usage.TotalTokens
+				}
+				hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+				go func() {
+					if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+						log.Printf("failed to increment usage counter: %v", err)
+					}
+				}()
+			}
 
 			h.publishEvent("request_completed", map[string]interface{}{
 				"id":       rc.reqID,
@@ -853,6 +912,21 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 				}
 			}
 		}
+
+		// Extract usage from response
+		if usageData, ok := resp["usage"].(map[string]interface{}); ok {
+			usage := &store.Usage{}
+			if v, ok := usageData["prompt_tokens"].(float64); ok {
+				usage.PromptTokens = int(v)
+			}
+			if v, ok := usageData["completion_tokens"].(float64); ok {
+				usage.CompletionTokens = int(v)
+			}
+			if v, ok := usageData["total_tokens"].(float64); ok {
+				usage.TotalTokens = int(v)
+			}
+			rc.reqLog.Usage = usage
+		}
 	}
 
 	// Log success
@@ -866,6 +940,22 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	}
 	rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
 	h.store.Add(rc.reqLog)
+
+	// Count this request for hourly usage tracking
+	if rc.tokenID != "" && h.counter != nil {
+		var promptTokens, completionTokens, totalTokens int
+		if rc.reqLog.Usage != nil {
+			promptTokens = rc.reqLog.Usage.PromptTokens
+			completionTokens = rc.reqLog.Usage.CompletionTokens
+			totalTokens = rc.reqLog.Usage.TotalTokens
+		}
+		hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+		go func() {
+			if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+				log.Printf("failed to increment usage counter: %v", err)
+			}
+		}()
+	}
 
 	h.publishEvent("request_completed", map[string]interface{}{
 		"id":       rc.reqID,

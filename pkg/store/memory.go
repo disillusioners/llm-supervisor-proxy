@@ -51,6 +51,10 @@ type RequestLog struct {
 	// Token usage tracking
 	Usage *Usage `json:"usage,omitempty"` // Final usage from the winning response
 
+	// Token identity for usage tracking
+	TokenID   string `json:"token_id,omitempty"`
+	TokenName string `json:"token_name,omitempty"`
+
 	// Fallback tracking
 	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model
 	FallbackUsed    []string `json:"fallback_used,omitempty"`    // List of fallback models that were attempted

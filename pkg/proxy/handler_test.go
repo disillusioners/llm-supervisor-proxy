@@ -245,7 +245,7 @@ func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(cfg, bus, reqStore, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil)
 
 	t.Cleanup(func() {
 		upstream.Close()
@@ -1477,7 +1477,7 @@ func TestSaveRawResponse_SavesToFile(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
 
 	// Create a buffer with some data
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1530,7 +1530,7 @@ func TestSaveRawResponse_SkipsWhenTooLarge(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
 
 	// Create a buffer with data larger than limit
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1564,7 +1564,7 @@ func TestSaveRawResponse_SkipsWhenBufferEmpty(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
 
 	// Create an empty buffer
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1589,7 +1589,7 @@ func TestSaveRawResponse_NilBufferStore(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, nil, nil, nil)
 
 	// Create a buffer with data
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1616,7 +1616,7 @@ func TestSaveRawResponse_NilBuffer(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
 
 	// Should not panic with nil buffer
 	h.saveRawResponse("test-req", nil, []byte("request"), 1024)

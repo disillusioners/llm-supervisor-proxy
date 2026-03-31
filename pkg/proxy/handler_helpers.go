@@ -76,6 +76,10 @@ type requestContext struct {
 	// When true, this request will not retry upstream on errors
 	// This is set after ReleaseStreamChunkDeadline is reached and buffer is flushed
 	streamingNonRetryable bool
+
+	// Token identity for usage tracking
+	tokenID   string
+	tokenName string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -618,4 +622,33 @@ func extractNestedError(errorResp map[string]interface{}) string {
 	}
 
 	return ""
+}
+
+// extractUsageFromChunk parses usage data from an SSE chunk JSON payload.
+// Returns nil if no usage field is present.
+func extractUsageFromChunk(data []byte) *store.Usage {
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return nil
+	}
+	usageData, ok := chunk["usage"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	// Safely extract each field with type assertions
+	var promptTokens, completionTokens, totalTokens int
+	if v, ok := usageData["prompt_tokens"].(float64); ok {
+		promptTokens = int(v)
+	}
+	if v, ok := usageData["completion_tokens"].(float64); ok {
+		completionTokens = int(v)
+	}
+	if v, ok := usageData["total_tokens"].(float64); ok {
+		totalTokens = int(v)
+	}
+	return &store.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+	}
 }

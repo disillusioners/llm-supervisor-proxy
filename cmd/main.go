@@ -22,6 +22,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
 // Version is set at build time via -ldflags
@@ -89,12 +90,19 @@ func main() {
 	// Initialize Token Store
 	tokenStore := auth.NewTokenStore(dbStore.DB, dbStore.Dialect)
 
+	// Initialize Usage Counter
+	var usageCounter *usage.Counter
+	if dbStore != nil {
+		usageCounter = usage.NewCounter(dbStore.DB, dbStore.Dialect)
+		log.Printf("Usage counter initialized")
+	}
+
 	// Initialize UI Server
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore)
 	ui.SetVersion(Version)
 
 	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter)
 
 	// Setup Server
 	mux := http.NewServeMux()
