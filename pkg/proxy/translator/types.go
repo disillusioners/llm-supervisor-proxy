@@ -25,6 +25,13 @@ type AnthropicRequest struct {
 	Tools         []AnthropicTool        `json:"tools,omitempty"`
 	ToolChoice    interface{}            `json:"tool_choice,omitempty"` // string or object
 	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	Thinking      *ThinkingConfig        `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig represents extended thinking configuration.
+type ThinkingConfig struct {
+	Type         string `json:"type"`          // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // AnthropicMessage represents a message in the Anthropic format.
@@ -90,8 +97,10 @@ type AnthropicResponse struct {
 
 // UsageInfo represents token usage information.
 type UsageInfo struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

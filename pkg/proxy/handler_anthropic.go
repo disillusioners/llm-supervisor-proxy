@@ -706,9 +706,9 @@ func copyAnthropicHeaders(dst *http.Request, src http.Header) {
 		switch strings.ToLower(name) {
 		case "content-length", "host":
 			continue
-		case "x-api-key", "anthropic-version":
-			// Translate x-api-key to Authorization Bearer
-			if strings.ToLower(name) == "x-api-key" && len(values) > 0 {
+		case "x-api-key":
+			// Translate x-api-key to Authorization Bearer for OpenAI upstream
+			if len(values) > 0 {
 				dst.Header.Set("Authorization", "Bearer "+values[0])
 			}
 			continue
