@@ -172,6 +172,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		modelList:        modelList,
 		anthropicReq:     &anthropicReq,
 		requestBody:      requestBody,
+		originalBody:     bodyBytes,
 		isStream:         isStream,
 		originalModel:    anthropicReq.Model,
 		baseCtx:          r.Context(),
@@ -260,7 +261,53 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 
 	var success bool
 	if isInternal {
-		success = h.doAnthropicInternalRequest(w, arc, modelConfig)
+		// Check if the internal model's credential is an Anthropic provider
+		// If so, use passthrough mode instead of the internal OpenAI handler
+		credProvider := ""
+		if modelConfig.CredentialID != "" {
+			if cred := arc.conf.ModelsConfig.GetCredential(modelConfig.CredentialID); cred != nil {
+				credProvider = strings.ToLower(cred.Provider)
+			}
+		}
+		if credProvider == "anthropic" {
+			// Anthropic provider — use passthrough mode
+			arc.isAnthropicUpstream = true
+			// Build passthrough target URL from credential's base_url or model config
+			passthroughURL := modelConfig.InternalBaseURL
+			credAPIKey := ""
+			if modelConfig.CredentialID != "" {
+				if cred := arc.conf.ModelsConfig.GetCredential(modelConfig.CredentialID); cred != nil {
+					if passthroughURL == "" {
+						passthroughURL = cred.BaseURL
+					}
+					credAPIKey = cred.ResolveAPIKey()
+				}
+			}
+			if passthroughURL == "" {
+				passthroughURL = arc.conf.UpstreamURL
+			}
+			cleanURL := strings.TrimSuffix(passthroughURL, "/v1")
+			cleanURL = strings.TrimSuffix(cleanURL, "/")
+			arc.targetURL = cleanURL + "/v1/messages"
+			// Use original Anthropic body (not translated)
+			arc.requestBody = make([]byte, len(arc.originalBody))
+			copy(arc.requestBody, arc.originalBody)
+			// Set the actual upstream model name
+			if modelConfig.InternalModel != "" {
+				var reqBody map[string]interface{}
+				if json.Unmarshal(arc.requestBody, &reqBody) == nil {
+					reqBody["model"] = modelConfig.InternalModel
+					arc.requestBody, _ = json.Marshal(reqBody)
+				}
+			}
+			// Set credential API key on arc for doAnthropicRequest to use
+			if credAPIKey != "" {
+				arc.credentialAPIKey = credAPIKey
+			}
+			success = h.doAnthropicRequest(w, arc, currentModel)
+		} else {
+			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
+		}
 	} else {
 		success = h.doAnthropicRequest(w, arc, currentModel)
 	}
@@ -301,6 +348,17 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 					req.Header.Set("Authorization", "Bearer "+apiKey)
 				}
 			}
+		}
+	} else if arc.credentialAPIKey != "" {
+		// Internal model passthrough: use credential's API key
+		req.Header.Del("Authorization")
+		req.Header.Del("X-API-Key")
+		req.Header.Del("x-api-key")
+		req.Header.Del("api-key")
+		if arc.isAnthropicUpstream {
+			req.Header.Set("x-api-key", arc.credentialAPIKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+arc.credentialAPIKey)
 		}
 	}
 
@@ -610,7 +668,8 @@ type anthropicRequestContext struct {
 	reqLog             *store.RequestLog
 	modelList          []string
 	anthropicReq       *translator.AnthropicRequest
-	requestBody        []byte // original Anthropic body (passthrough) or translated OpenAI body
+	requestBody        []byte // request body to send (translated or passthrough)
+	originalBody       []byte // original Anthropic body (always preserved)
 	isStream           bool
 	originalModel      string
 	baseCtx            context.Context
@@ -620,6 +679,7 @@ type anthropicRequestContext struct {
 	lastError          []byte
 	lastStatusCode     int
 	isAnthropicUpstream bool // true when upstream speaks Anthropic protocol
+	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
 
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
