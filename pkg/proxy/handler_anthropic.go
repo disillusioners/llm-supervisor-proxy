@@ -78,8 +78,17 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// Get config snapshot
 	conf := h.config.Clone()
 
-	// Detect if upstream speaks Anthropic protocol (passthrough mode)
-	isAnthropicUpstream := isAnthropicUpstream(conf.UpstreamURL, conf.UpstreamProtocol)
+	// Resolve upstream protocol (credential-based takes priority):
+	// 1. Credential's Provider field (if UpstreamCredentialID is set)
+	// 2. Global UPSTREAM_PROTOCOL env var or config
+	// 3. URL heuristic (fallback)
+	credentialProvider := ""
+	if conf.UpstreamCredentialID != "" {
+		if cred := conf.ModelsConfig.GetCredential(conf.UpstreamCredentialID); cred != nil {
+			credentialProvider = strings.ToLower(cred.Provider)
+		}
+	}
+	isAnthropicUpstream := resolveUpstreamProtocol(conf.UpstreamURL, conf.UpstreamProtocol, credentialProvider)
 
 	// Build target URL — strip trailing /v1 from upstream to avoid double path
 	cleanURL := strings.TrimSuffix(conf.UpstreamURL, "/v1")
@@ -270,14 +279,12 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 
 	// Copy headers based on upstream protocol
 	if arc.isAnthropicUpstream {
-		// Passthrough: forward all Anthropic headers as-is (keep x-api-key, anthropic-version, etc.)
 		copyAnthropicHeadersPassthrough(req, arc.originalHeaders)
 	} else {
-		// Translation mode: convert x-api-key to Authorization Bearer for OpenAI upstream
 		copyAnthropicHeaders(req, arc.originalHeaders)
 	}
 
-	// If UpstreamCredentialID is configured, resolve the credential and set auth header
+	// Resolve credential and set auth header
 	if arc.conf.UpstreamCredentialID != "" {
 		req.Header.Del("Authorization")
 		req.Header.Del("X-API-Key")
@@ -748,17 +755,20 @@ func validateAnthropicRequest(req *translator.AnthropicRequest) error {
 	return nil
 }
 
-// isAnthropicUpstream detects if the upstream speaks Anthropic protocol.
-// Priority: explicit config > env var > URL heuristic.
-func isAnthropicUpstream(upstreamURL, upstreamProtocol string) bool {
-	// 1. Explicit config from database/API
-	if upstreamProtocol != "" {
-		return strings.ToLower(upstreamProtocol) == "anthropic"
+// resolveUpstreamProtocol determines if the upstream speaks Anthropic protocol.
+// Priority: credential provider > global config/env > URL heuristic.
+func resolveUpstreamProtocol(upstreamURL, upstreamProtocol, credentialProvider string) bool {
+	// 1. Credential's Provider field (most specific — per-provider setting)
+	if credentialProvider == "anthropic" {
+		return true
+	}
+	if credentialProvider == "openai" {
+		return false
 	}
 
-	// 2. Environment variable override
-	if env := os.Getenv("UPSTREAM_PROTOCOL"); env != "" {
-		return strings.ToLower(env) == "anthropic"
+	// 2. Global config or environment variable
+	if upstreamProtocol != "" {
+		return strings.ToLower(upstreamProtocol) == "anthropic"
 	}
 
 	// 3. URL heuristic: if path contains "anthropic", assume Anthropic protocol
