@@ -77,6 +77,7 @@ The proxy uses a three-tier configuration system with the following precedence:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
+| `UPSTREAM_PROTOCOL` | *(auto-detect)* | Upstream protocol: `anthropic`, `openai`, or empty for auto-detect (URL heuristic). |
 | `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
@@ -196,12 +197,28 @@ For full database details and rollback procedures, see [`docs/database-migration
    llm-supervisor-proxy
    ```
 3. **Point your Agent** to the Proxy (port 4321):
+
+   **OpenAI-compatible clients:**
    ```bash
    curl -X POST http://localhost:4321/v1/chat/completions \
      -H "Content-Type: application/json" \
      -d '{
        "model": "gpt-4",
        "messages": [{"role": "user", "content": "Write a long story about a space pirate."}],
+       "stream": true
+     }'
+   ```
+
+   **Anthropic-compatible clients (Claude Code):**
+   ```bash
+   curl -X POST http://localhost:4321/v1/messages \
+     -H "x-api-key: <your-key>" \
+     -H "anthropic-version: 2023-06-01" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "claude-sonnet-4-20250514",
+       "max_tokens": 1024,
+       "messages": [{"role": "user", "content": "Hello!"}],
        "stream": true
      }'
    ```
@@ -223,17 +240,66 @@ The proxy includes a built-in monitoring dashboard accessible at `http://localho
 
 The proxy supports multiple LLM providers out of the box:
 
-| Provider | Default Base URL | Notes |
-|----------|-----------------|-------|
-| **OpenAI** | `https://api.openai.com/v1` | Standard OpenAI API |
-| **Anthropic** | — | Anthropic Messages API |
-| **Azure OpenAI** | — | Requires `AZURE_API_KEY` and deployment URL |
-| **Google Gemini** | — | Google AI Studio / Vertex AI |
-| **Zhipu/GLM** | `https://open.bigmodel.cn/api/paas/v4` | OpenAI-compatible |
-| **MiniMax** | `https://api.minimax.io/v1` | OpenAI-compatible |
-| **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI-compatible |
+| Provider | Default Base URL | Protocol | Notes |
+|----------|-----------------|----------|-------|
+| **OpenAI** | `https://api.openai.com/v1` | OpenAI | Standard OpenAI API |
+| **Anthropic** | `https://api.anthropic.com/v1` | Anthropic | Anthropic Messages API |
+| **Azure OpenAI** | — | OpenAI | Requires `AZURE_API_KEY` and deployment URL |
+| **Google Gemini** | — | OpenAI | Google AI Studio / Vertex AI |
+| **Zhipu/GLM** | `https://open.bigmodel.cn/api/paas/v4` | OpenAI | OpenAI-compatible |
+| **MiniMax** | `https://api.minimax.io/v1` | OpenAI | OpenAI-compatible |
+| **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI | OpenAI-compatible |
 
 Configure per-model credentials and base URLs via the Web UI or database.
+
+### Dual Client Protocol Support
+
+The proxy accepts requests in both **OpenAI** and **Anthropic** formats:
+
+| Client Protocol | Endpoint | Upstream Protocol |
+|----------------|----------|-------------------|
+| OpenAI (`/v1/chat/completions`) | ChatGPT, LangChain, LiteLLM | Any OpenAI-compatible provider |
+| Anthropic (`/v1/messages`) | Claude Code, Anthropic SDK | Auto-detected or configured |
+
+### Upstream Protocol Detection
+
+When clients send Anthropic-format requests via `/v1/messages`, the proxy needs to know what protocol the upstream speaks:
+
+1. **Explicit config** — Set `UPSTREAM_PROTOCOL=anthropic` or `UPSTREAM_PROTOCOL=openai` (most reliable)
+2. **Environment variable** — `UPSTREAM_PROTOCOL` env var
+3. **Auto-detection** — If upstream URL path contains "anthropic", uses passthrough mode
+
+| Upstream | Protocol Mode | What Happens |
+|----------|--------------|--------------|
+| Anthropic API or Anthropic-compatible | `anthropic` | **Passthrough** — request forwarded as-is, no translation |
+| OpenAI or OpenAI-compatible | `openai` or auto | **Translation** — Anthropic→OpenAI on request, OpenAI→Anthropic on response |
+
+### Claude Code Setup
+
+Point Claude Code at the proxy:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:4321
+export ANTHROPIC_AUTH_TOKEN=<your-api-key>
+claude "hello world"
+```
+
+Or in Claude Code settings (`~/.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:4321",
+    "ANTHROPIC_AUTH_TOKEN": "<your-api-key>"
+  }
+}
+```
+
+If your upstream is Anthropic-compatible, also set:
+
+```bash
+UPSTREAM_PROTOCOL=anthropic UPSTREAM_URL=https://your-anthropic-provider.com llm-supervisor-proxy
+```
 
 ## 🔐 API Token Authentication
 
