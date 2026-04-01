@@ -78,24 +78,38 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// Get config snapshot
 	conf := h.config.Clone()
 
-	// Build target URL for OpenAI upstream
-	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
-	if err != nil {
-		h.sendAnthropicError(w, "api_error", "Invalid upstream URL configuration", http.StatusInternalServerError)
-		return
+	// Detect if upstream speaks Anthropic protocol (passthrough mode)
+	isAnthropicUpstream := isAnthropicUpstream(conf.UpstreamURL, conf.UpstreamProtocol)
+
+	// Build target URL — strip trailing /v1 from upstream to avoid double path
+	cleanURL := strings.TrimSuffix(conf.UpstreamURL, "/v1")
+	cleanURL = strings.TrimSuffix(cleanURL, "/")
+
+	var targetURL string
+	if isAnthropicUpstream {
+		targetURL = cleanURL + "/v1/messages"
+	} else {
+		targetURL = cleanURL + "/v1/chat/completions"
 	}
 
-	// Translate to OpenAI format
-	modelMapping := getModelMappingConfig(conf.ModelsConfig)
-	openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
-	openaiBodyBytes, err := json.Marshal(openaiReq)
-	if err != nil {
-		h.sendAnthropicError(w, "api_error", "Failed to translate request", http.StatusInternalServerError)
-		return
+	// Build request body
+	var requestBody []byte
+	if isAnthropicUpstream {
+		// Passthrough: use original Anthropic body as-is
+		requestBody = bodyBytes
+	} else {
+		// Translate to OpenAI format
+		modelMapping := getModelMappingConfig(conf.ModelsConfig)
+		openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
+		var err error
+		requestBody, err = json.Marshal(openaiReq)
+		if err != nil {
+			h.sendAnthropicError(w, "api_error", "Failed to translate request", http.StatusInternalServerError)
+			return
+		}
+		debugLog("=== TRANSLATED OPENAI REQUEST ===")
+		debugLog("OpenAI Body: %s", string(requestBody))
 	}
-
-	debugLog("=== TRANSLATED OPENAI REQUEST ===")
-	debugLog("OpenAI Body: %s", string(openaiBodyBytes))
 
 	// Create request log
 	reqID := uuid.New().String()
@@ -116,10 +130,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	appTag := r.Header.Get("x-proxy-app")
 
 	// Safely extract original model name
-	originalModel, _ := openaiReq["model"].(string)
-	if originalModel == "" {
-		originalModel = anthropicReq.Model
-	}
+	originalModel := anthropicReq.Model
 
 	reqLog := &store.RequestLog{
 		ID:            reqID,
@@ -144,19 +155,20 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	// Create anthropic request context
 	arc := &anthropicRequestContext{
-		conf:            conf,
-		targetURL:       targetURL,
-		reqID:           reqID,
-		startTime:       startTime,
-		reqLog:          reqLog,
-		modelList:       modelList,
-		anthropicReq:    &anthropicReq,
-		openaiBody:      openaiBodyBytes,
-		isStream:        isStream,
-		originalModel:   anthropicReq.Model,
-		baseCtx:         r.Context(),
-		method:          r.Method,
-		originalHeaders: r.Header,
+		conf:             conf,
+		targetURL:        targetURL,
+		reqID:            reqID,
+		startTime:        startTime,
+		reqLog:           reqLog,
+		modelList:        modelList,
+		anthropicReq:     &anthropicReq,
+		requestBody:      requestBody,
+		isStream:         isStream,
+		originalModel:    anthropicReq.Model,
+		baseCtx:          r.Context(),
+		method:           r.Method,
+		originalHeaders:  r.Header,
+		isAnthropicUpstream: isAnthropicUpstream,
 	}
 
 	// Outer loop: iterate through models (original + fallbacks)
@@ -170,9 +182,33 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			break
 		}
 
-		// Update model in translated request
-		openaiReq["model"] = currentModel
-		arc.openaiBody, _ = json.Marshal(openaiReq)
+		// Update model in request body
+		if isAnthropicUpstream {
+			// For passthrough, unmarshal, update model, re-marshal
+			var reqBody map[string]interface{}
+			if err := json.Unmarshal(arc.requestBody, &reqBody); err != nil {
+				log.Printf("Failed to unmarshal request body for model update: %v", err)
+				continue
+			}
+			reqBody["model"] = currentModel
+			newBody, err := json.Marshal(reqBody)
+			if err != nil {
+				log.Printf("Failed to marshal request body for model update: %v", err)
+				continue
+			}
+			arc.requestBody = newBody
+		} else {
+			// For OpenAI translation path, re-translate with new model
+			modelMapping := getModelMappingConfig(conf.ModelsConfig)
+			arc.anthropicReq.Model = currentModel
+			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
+			newBody, err := json.Marshal(openaiReq)
+			if err != nil {
+				log.Printf("Failed to marshal translated request: %v", err)
+				continue
+			}
+			arc.requestBody = newBody
+		}
 
 		success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 		if success {
@@ -226,31 +262,37 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 // doAnthropicRequest performs a single upstream request
 func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicRequestContext, currentModel string) bool {
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(arc.baseCtx, arc.method, arc.targetURL, bytes.NewReader(arc.openaiBody))
+	req, err := http.NewRequestWithContext(arc.baseCtx, arc.method, arc.targetURL, bytes.NewReader(arc.requestBody))
 	if err != nil {
 		log.Printf("Failed to create Anthropic upstream request: %v", err)
 		return false
 	}
 
-	// Copy headers (translate auth)
-	copyAnthropicHeaders(req, arc.originalHeaders)
+	// Copy headers based on upstream protocol
+	if arc.isAnthropicUpstream {
+		// Passthrough: forward all Anthropic headers as-is (keep x-api-key, anthropic-version, etc.)
+		copyAnthropicHeadersPassthrough(req, arc.originalHeaders)
+	} else {
+		// Translation mode: convert x-api-key to Authorization Bearer for OpenAI upstream
+		copyAnthropicHeaders(req, arc.originalHeaders)
+	}
 
 	// If UpstreamCredentialID is configured, resolve the credential and set auth header
-	// This allows the proxy to authenticate with external upstream providers
-	// using a different token than what the client provided
 	if arc.conf.UpstreamCredentialID != "" {
-		// Remove all auth headers first to avoid conflicts
 		req.Header.Del("Authorization")
 		req.Header.Del("X-API-Key")
 		req.Header.Del("x-api-key")
 		req.Header.Del("api-key")
 
-		// Resolve credential
 		cred := arc.conf.ModelsConfig.GetCredential(arc.conf.UpstreamCredentialID)
 		if cred != nil {
 			apiKey := cred.ResolveAPIKey()
 			if apiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+apiKey)
+				if arc.isAnthropicUpstream {
+					req.Header.Set("x-api-key", apiKey)
+				} else {
+					req.Header.Set("Authorization", "Bearer "+apiKey)
+				}
 			}
 		}
 	}
@@ -258,7 +300,6 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	// Send request
 	resp, err := h.client.Do(req)
 	if err != nil {
-		// Per Go's http.Client.Do docs: even on error, resp.Body may be non-nil and must be closed
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -274,14 +315,21 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 		debugLog("=== UPSTREAM ERROR RESPONSE ===")
 		debugLog("Status: %d", resp.StatusCode)
 		debugLog("Body: %s", string(bodyBytes))
-		// Don't send error response here - let the retry loop handle it
-		// Store the error for potential use if all retries fail
 		arc.lastError = bodyBytes
 		arc.lastStatusCode = resp.StatusCode
 		return false
 	}
 
-	// Handle response
+	// Handle response based on upstream protocol
+	if arc.isAnthropicUpstream {
+		// Passthrough: forward upstream response as-is (already in Anthropic format)
+		if arc.isStream {
+			return h.handlePassthroughStreamResponse(w, resp, arc)
+		}
+		return h.handlePassthroughNonStreamResponse(w, resp, arc)
+	}
+
+	// Translation mode: translate OpenAI response to Anthropic format
 	if arc.isStream {
 		return h.handleAnthropicStreamResponse(w, resp, arc)
 	}
@@ -303,7 +351,7 @@ func (f *flushingResponseRecorder) Flush() {
 func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthropicRequestContext, modelConfig *models.ModelConfig) bool {
 	// Parse the OpenAI request body
 	var openaiReq map[string]interface{}
-	if err := json.Unmarshal(arc.openaiBody, &openaiReq); err != nil {
+	if err := json.Unmarshal(arc.requestBody, &openaiReq); err != nil {
 		log.Printf("Failed to parse OpenAI request body: %v", err)
 		return false
 	}
@@ -548,22 +596,23 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 
 // anthropicRequestContext holds state for an Anthropic request
 type anthropicRequestContext struct {
-	conf            ConfigSnapshot
-	targetURL       string
-	reqID           string
-	startTime       time.Time
-	reqLog          *store.RequestLog
-	modelList       []string
-	anthropicReq    *translator.AnthropicRequest
-	openaiBody      []byte
-	isStream        bool
-	originalModel   string
-	baseCtx         context.Context
-	method          string
-	originalHeaders http.Header
-	headersSent     bool
-	lastError       []byte
-	lastStatusCode  int
+	conf               ConfigSnapshot
+	targetURL          string
+	reqID              string
+	startTime          time.Time
+	reqLog             *store.RequestLog
+	modelList          []string
+	anthropicReq       *translator.AnthropicRequest
+	requestBody        []byte // original Anthropic body (passthrough) or translated OpenAI body
+	isStream           bool
+	originalModel      string
+	baseCtx            context.Context
+	method             string
+	originalHeaders    http.Header
+	headersSent        bool
+	lastError          []byte
+	lastStatusCode     int
+	isAnthropicUpstream bool // true when upstream speaks Anthropic protocol
 
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
@@ -699,6 +748,156 @@ func validateAnthropicRequest(req *translator.AnthropicRequest) error {
 	return nil
 }
 
+// isAnthropicUpstream detects if the upstream speaks Anthropic protocol.
+// Priority: explicit config > env var > URL heuristic.
+func isAnthropicUpstream(upstreamURL, upstreamProtocol string) bool {
+	// 1. Explicit config from database/API
+	if upstreamProtocol != "" {
+		return strings.ToLower(upstreamProtocol) == "anthropic"
+	}
+
+	// 2. Environment variable override
+	if env := os.Getenv("UPSTREAM_PROTOCOL"); env != "" {
+		return strings.ToLower(env) == "anthropic"
+	}
+
+	// 3. URL heuristic: if path contains "anthropic", assume Anthropic protocol
+	parsed, err := url.Parse(upstreamURL)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(parsed.Path), "anthropic")
+}
+
+// copyAnthropicHeadersPassthrough forwards all original Anthropic headers as-is.
+// Unlike copyAnthropicHeaders, this does NOT convert x-api-key to Authorization Bearer.
+func copyAnthropicHeadersPassthrough(dst *http.Request, src http.Header) {
+	for name, values := range src {
+		switch strings.ToLower(name) {
+		case "content-length", "host":
+			continue
+		}
+		for _, value := range values {
+			dst.Header.Add(name, value)
+		}
+	}
+	dst.Header.Set("Content-Type", "application/json")
+}
+
+// handlePassthroughNonStreamResponse forwards a non-streaming Anthropic response as-is.
+func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		log.Printf("Failed to read passthrough response: %v", err)
+		return false
+	}
+
+	// Extract content for storage
+	var anthropicResp translator.AnthropicResponse
+	if err := json.Unmarshal(bodyBytes, &anthropicResp); err == nil {
+		for _, block := range anthropicResp.Content {
+			switch block.Type {
+			case "text":
+				arc.accumulatedResponse.WriteString(block.Text)
+			case "thinking":
+				arc.accumulatedThinking.WriteString(block.Thinking)
+			case "tool_use":
+				inputStr := string(block.Input)
+				arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
+					ID:   block.ID,
+					Type: block.Type,
+					Function: store.Function{
+						Name:      block.Name,
+						Arguments: inputStr,
+					},
+				})
+			}
+		}
+	}
+
+	// Forward response as-is
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(bodyBytes)
+
+	h.finalizeAnthropicSuccess(arc)
+	return true
+}
+
+// handlePassthroughStreamResponse pipes Anthropic SSE events directly to the client.
+// No translation needed — just forward each line as-is for real-time streaming.
+// Also extracts content from SSE events for request logging.
+func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
+	debugLog("=== PASSTHROUGH STREAM START ===")
+	debugLog("Request ID: %s", arc.reqID)
+	debugLog("Model: %s", arc.originalModel)
+
+	// Send headers immediately for TTFB
+	if !arc.headersSent {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		arc.headersSent = true
+
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		debugLog("Headers sent, connection established")
+	}
+
+	// Pipe upstream SSE to client, parsing for content extraction
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		// Check if client disconnected
+		if arc.baseCtx.Err() != nil {
+			log.Printf("Client disconnected during passthrough stream")
+			break
+		}
+
+		line := scanner.Bytes()
+
+		// Extract text from content_block_delta events for logging
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			data := bytes.TrimPrefix(line, []byte("data: "))
+			var event map[string]interface{}
+			if json.Unmarshal(data, &event) == nil {
+				switch eventType := event["type"]; eventType {
+				case "content_block_delta":
+					if delta, ok := event["delta"].(map[string]interface{}); ok {
+						if delta["type"] == "text_delta" {
+							if text, ok := delta["text"].(string); ok {
+								arc.accumulatedResponse.WriteString(text)
+							}
+						} else if delta["type"] == "thinking_delta" {
+							if thinking, ok := delta["thinking"].(string); ok {
+								arc.accumulatedThinking.WriteString(thinking)
+							}
+						}
+					}
+				case "message_delta":
+					// stop_reason available here if needed
+				}
+			}
+		}
+
+		// Forward the line as-is
+		w.Write(line)
+		w.Write([]byte("\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Passthrough stream scanner error: %v", err)
+	}
+
+	h.finalizeAnthropicSuccess(arc)
+	return true
+}
+
 // copyAnthropicHeaders copies headers for upstream request
 func copyAnthropicHeaders(dst *http.Request, src http.Header) {
 	for name, values := range src {
@@ -706,9 +905,9 @@ func copyAnthropicHeaders(dst *http.Request, src http.Header) {
 		switch strings.ToLower(name) {
 		case "content-length", "host":
 			continue
-		case "x-api-key", "anthropic-version":
-			// Translate x-api-key to Authorization Bearer
-			if strings.ToLower(name) == "x-api-key" && len(values) > 0 {
+		case "x-api-key":
+			// Translate x-api-key to Authorization Bearer for OpenAI upstream
+			if len(values) > 0 {
 				dst.Header.Set("Authorization", "Bearer "+values[0])
 			}
 			continue
