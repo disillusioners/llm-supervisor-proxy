@@ -79,20 +79,17 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	conf := h.config.Clone()
 
 	// Detect if upstream speaks Anthropic protocol (passthrough mode)
-	isAnthropicUpstream := isAnthropicUpstream(conf.UpstreamURL)
+	isAnthropicUpstream := isAnthropicUpstream(conf.UpstreamURL, conf.UpstreamProtocol)
 
-	// Build target URL
+	// Build target URL — strip trailing /v1 from upstream to avoid double path
+	cleanURL := strings.TrimSuffix(conf.UpstreamURL, "/v1")
+	cleanURL = strings.TrimSuffix(cleanURL, "/")
+
 	var targetURL string
 	if isAnthropicUpstream {
-		// Upstream is Anthropic — forward to /v1/messages
-		targetURL, err = url.JoinPath(conf.UpstreamURL, "/v1/messages")
+		targetURL = cleanURL + "/v1/messages"
 	} else {
-		// Upstream is OpenAI — translate and forward to /v1/chat/completions
-		targetURL, err = url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
-	}
-	if err != nil {
-		h.sendAnthropicError(w, "api_error", "Invalid upstream URL configuration", http.StatusInternalServerError)
-		return
+		targetURL = cleanURL + "/v1/chat/completions"
 	}
 
 	// Build request body
@@ -189,15 +186,28 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		if isAnthropicUpstream {
 			// For passthrough, unmarshal, update model, re-marshal
 			var reqBody map[string]interface{}
-			json.Unmarshal(arc.requestBody, &reqBody)
+			if err := json.Unmarshal(arc.requestBody, &reqBody); err != nil {
+				log.Printf("Failed to unmarshal request body for model update: %v", err)
+				continue
+			}
 			reqBody["model"] = currentModel
-			arc.requestBody, _ = json.Marshal(reqBody)
+			newBody, err := json.Marshal(reqBody)
+			if err != nil {
+				log.Printf("Failed to marshal request body for model update: %v", err)
+				continue
+			}
+			arc.requestBody = newBody
 		} else {
 			// For OpenAI translation path, re-translate with new model
 			modelMapping := getModelMappingConfig(conf.ModelsConfig)
 			arc.anthropicReq.Model = currentModel
 			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
-			arc.requestBody, _ = json.Marshal(openaiReq)
+			newBody, err := json.Marshal(openaiReq)
+			if err != nil {
+				log.Printf("Failed to marshal translated request: %v", err)
+				continue
+			}
+			arc.requestBody = newBody
 		}
 
 		success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
@@ -738,9 +748,20 @@ func validateAnthropicRequest(req *translator.AnthropicRequest) error {
 	return nil
 }
 
-// isAnthropicUpstream detects if the upstream URL points to an Anthropic-compatible API.
-// Uses a simple heuristic: if the URL path contains "anthropic", assume Anthropic protocol.
-func isAnthropicUpstream(upstreamURL string) bool {
+// isAnthropicUpstream detects if the upstream speaks Anthropic protocol.
+// Priority: explicit config > env var > URL heuristic.
+func isAnthropicUpstream(upstreamURL, upstreamProtocol string) bool {
+	// 1. Explicit config from database/API
+	if upstreamProtocol != "" {
+		return strings.ToLower(upstreamProtocol) == "anthropic"
+	}
+
+	// 2. Environment variable override
+	if env := os.Getenv("UPSTREAM_PROTOCOL"); env != "" {
+		return strings.ToLower(env) == "anthropic"
+	}
+
+	// 3. URL heuristic: if path contains "anthropic", assume Anthropic protocol
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
 		return false
@@ -805,6 +826,7 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 
 // handlePassthroughStreamResponse pipes Anthropic SSE events directly to the client.
 // No translation needed — just forward each line as-is for real-time streaming.
+// Also extracts content from SSE events for request logging.
 func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
 	debugLog("=== PASSTHROUGH STREAM START ===")
 	debugLog("Request ID: %s", arc.reqID)
@@ -818,26 +840,58 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 		w.WriteHeader(http.StatusOK)
 		arc.headersSent = true
 
-		w.Write([]byte(": connected\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 		debugLog("Headers sent, connection established")
 	}
 
-	// Pipe upstream SSE to client line-by-line
-	buf := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			w.Write(buf[:n])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-		if err != nil {
+	// Pipe upstream SSE to client, parsing for content extraction
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		// Check if client disconnected
+		if arc.baseCtx.Err() != nil {
+			log.Printf("Client disconnected during passthrough stream")
 			break
 		}
+
+		line := scanner.Bytes()
+
+		// Extract text from content_block_delta events for logging
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			data := bytes.TrimPrefix(line, []byte("data: "))
+			var event map[string]interface{}
+			if json.Unmarshal(data, &event) == nil {
+				switch eventType := event["type"]; eventType {
+				case "content_block_delta":
+					if delta, ok := event["delta"].(map[string]interface{}); ok {
+						if delta["type"] == "text_delta" {
+							if text, ok := delta["text"].(string); ok {
+								arc.accumulatedResponse.WriteString(text)
+							}
+						} else if delta["type"] == "thinking_delta" {
+							if thinking, ok := delta["thinking"].(string); ok {
+								arc.accumulatedThinking.WriteString(thinking)
+							}
+						}
+					}
+				case "message_delta":
+					// stop_reason available here if needed
+				}
+			}
+		}
+
+		// Forward the line as-is
+		w.Write(line)
+		w.Write([]byte("\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Passthrough stream scanner error: %v", err)
 	}
 
 	h.finalizeAnthropicSuccess(arc)
