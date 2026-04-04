@@ -34,7 +34,6 @@ func (c *Config) Clone() ConfigSnapshot {
 	return ConfigSnapshot{
 		UpstreamURL:            cfg.UpstreamURL,
 		UpstreamCredentialID:   cfg.UpstreamCredentialID,
-		UpstreamProtocol:       cfg.UpstreamProtocol,
 		IdleTimeout:            cfg.IdleTimeout.Duration(),
 		StreamDeadline:         cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
@@ -59,7 +58,6 @@ func (c *Config) Clone() ConfigSnapshot {
 type ConfigSnapshot struct {
 	UpstreamURL          string
 	UpstreamCredentialID string
-	UpstreamProtocol     string
 	IdleTimeout          time.Duration
 	StreamDeadline       time.Duration // Time limit before picking best buffer and continuing streaming
 	MaxGenerationTime    time.Duration // Absolute hard timeout for entire request lifecycle

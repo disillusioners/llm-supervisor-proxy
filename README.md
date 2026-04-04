@@ -77,7 +77,6 @@ The proxy uses a three-tier configuration system with the following precedence:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
-| `UPSTREAM_PROTOCOL` | *(auto-detect)* | Upstream protocol: `anthropic`, `openai`, or empty for auto-detect (URL heuristic). |
 | `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
@@ -261,18 +260,16 @@ The proxy accepts requests in both **OpenAI** and **Anthropic** formats:
 | OpenAI (`/v1/chat/completions`) | ChatGPT, LangChain, LiteLLM | Any OpenAI-compatible provider |
 | Anthropic (`/v1/messages`) | Claude Code, Anthropic SDK | Auto-detected or configured |
 
-### Upstream Protocol Detection
+### Upstream Protocol Handling
 
-When clients send Anthropic-format requests via `/v1/messages`, the proxy needs to know what protocol the upstream speaks:
+The proxy handles protocol translation automatically:
 
-1. **Explicit config** — Set `UPSTREAM_PROTOCOL=anthropic` or `UPSTREAM_PROTOCOL=openai` (most reliable)
-2. **Environment variable** — `UPSTREAM_PROTOCOL` env var
-3. **Auto-detection** — If upstream URL path contains "anthropic", uses passthrough mode
+| Context | Protocol | Behavior |
+|---------|----------|----------|
+| External upstream | OpenAI (`/v1/chat/completions`) | Always uses OpenAI protocol (LiteLLM-compatible) |
+| Internal (with Anthropic credential) | Anthropic (`/v1/messages`) | Passthrough — requests forwarded as-is |
 
-| Upstream | Protocol Mode | What Happens |
-|----------|--------------|--------------|
-| Anthropic API or Anthropic-compatible | `anthropic` | **Passthrough** — request forwarded as-is, no translation |
-| OpenAI or OpenAI-compatible | `openai` or auto | **Translation** — Anthropic→OpenAI on request, OpenAI→Anthropic on response |
+When using internal credentials with `credential.Provider == 'anthropic'`, the proxy auto-detects Anthropic protocol for passthrough mode. For all other cases, it uses OpenAI protocol.
 
 ### Claude Code Setup
 
@@ -293,12 +290,6 @@ Or in Claude Code settings (`~/.claude/settings.json`):
     "ANTHROPIC_AUTH_TOKEN": "<your-api-key>"
   }
 }
-```
-
-If your upstream is Anthropic-compatible, also set:
-
-```bash
-UPSTREAM_PROTOCOL=anthropic UPSTREAM_URL=https://your-anthropic-provider.com llm-supervisor-proxy
 ```
 
 ## 🔐 API Token Authentication

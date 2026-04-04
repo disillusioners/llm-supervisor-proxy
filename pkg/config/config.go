@@ -66,7 +66,6 @@ type Config struct {
 	Version              string              `json:"version"`
 	UpstreamURL          string              `json:"upstream_url"`
 	UpstreamCredentialID string              `json:"upstream_credential_id,omitempty"`
-	UpstreamProtocol     string              `json:"upstream_protocol,omitempty"` // "anthropic", "openai", or "" (auto-detect)
 	Port                 int                 `json:"port"`
 	IdleTimeout          Duration            `json:"idle_timeout"`
 	StreamDeadline       Duration            `json:"stream_deadline"`        // Time limit before picking best buffer and continuing streaming (default: 110s)
@@ -359,9 +358,6 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("UPSTREAM_CREDENTIAL_ID"); v != "" {
 		cfg.UpstreamCredentialID = v
-	}
-	if v := os.Getenv("UPSTREAM_PROTOCOL"); v != "" {
-		cfg.UpstreamProtocol = v
 	}
 	if v := os.Getenv("PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil && port > 0 && port <= 65535 {
