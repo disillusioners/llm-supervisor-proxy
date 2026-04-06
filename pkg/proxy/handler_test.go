@@ -1666,3 +1666,306 @@ func TestGetAllRawBytes_SkipsPrunedChunks(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, string(raw))
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Idle Termination Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func TestConfig_Clone_IdleTermination(t *testing.T) {
+	// Set env vars before creating manager
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("IDLE_TERMINATION_ENABLED", "true")
+	t.Setenv("IDLE_TERMINATION_TIMEOUT", "45s")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	proxyCfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: models.NewModelsConfig(),
+		EventBus:     events.NewBus(),
+	}
+
+	// Clone the config
+	snapshot := proxyCfg.Clone()
+
+	// Verify idle termination fields are copied
+	if !snapshot.IdleTerminationEnabled {
+		t.Error("expected IdleTerminationEnabled to be true")
+	}
+	if snapshot.IdleTerminationTimeout != 45*time.Second {
+		t.Errorf("expected IdleTerminationTimeout to be 45s, got %v", snapshot.IdleTerminationTimeout)
+	}
+
+	// Verify deep copy: modifying the original config manager's config
+	// should NOT affect the snapshot
+	cfg := mgr.Get()
+	cfg.IdleTerminationEnabled = false
+	cfg.IdleTerminationTimeout = config.Duration(10 * time.Second)
+
+	// Re-save to manager
+	mgr.Save(cfg)
+
+	// Snapshot should still have the old values
+	if !snapshot.IdleTerminationEnabled {
+		t.Error("snapshot IdleTerminationEnabled changed after modifying manager - deep copy failed")
+	}
+	if snapshot.IdleTerminationTimeout != 45*time.Second {
+		t.Errorf("snapshot IdleTerminationTimeout changed after modifying manager - deep copy failed, got %v", snapshot.IdleTerminationTimeout)
+	}
+}
+
+// mockIdleHangHandler creates a mock that sends a few chunks then hangs
+func mockIdleHangHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send a few chunks immediately
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("chunk%d", i)))
+			flusher.Flush()
+		}
+
+		// Then hang until context cancelled (simulating upstream hanging)
+		<-r.Context().Done()
+	}
+}
+
+// mockContinuousStreamHandler creates a mock that sends chunks continuously
+func mockContinuousStreamHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Send chunks continuously with small delays (simulating active streaming)
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", mockCreateChunk(fmt.Sprintf("word%d", i)))
+			flusher.Flush()
+			time.Sleep(50 * time.Millisecond) // 50ms between chunks
+		}
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+}
+
+// TestIdleTermination_Triggered tests that idle termination fires when upstream hangs
+// during streaming after a winner is selected.
+//
+// The flow is:
+// 1. Race coordinator starts main request
+// 2. Upstream sends partial data then hangs
+// 3. Stream deadline fires (short deadline needed) and picks winner
+// 4. streamResult() starts streaming winner's buffer
+// 5. No more data arrives (upstream hanging)
+// 6. Idle termination fires after 1s of no activity
+//
+// NOTE: This test takes ~2-3 seconds due to stream deadline (2s) + idle timeout (1s).
+// If you need faster tests, skip this one.
+func TestIdleTermination_Triggered(t *testing.T) {
+	// Set short stream deadline (so winner is selected quickly) and idle termination timeout
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("IDLE_TERMINATION_ENABLED", "true")
+	t.Setenv("IDLE_TERMINATION_TIMEOUT", "1s")
+	t.Setenv("STREAM_DEADLINE", "2s")       // Must be > idle timeout for idle termination to fire
+	t.Setenv("RACE_RETRY_ENABLED", "false") // Disable race retry to test idle termination in streamResult()
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	proxyCfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: models.NewModelsConfig(),
+	}
+
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+
+	// Create mock upstream that hangs after a few chunks
+	upstream := httptest.NewServer(mockIdleHangHandler(t))
+	defer upstream.Close()
+
+	// Update manager to point to our mock
+	cfg := mgr.Get()
+	cfg.UpstreamURL = upstream.URL
+	mgr.Save(cfg)
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+
+	// Execute with timeout
+	done := make(chan struct{})
+	go func() {
+		h.HandleChatCompletions(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Request completed
+	case <-time.After(10 * time.Second):
+		t.Fatal("request did not complete within 10 seconds")
+	}
+
+	// Verify response contains idle termination error
+	respBody := rr.Body.String()
+
+	// Should contain error indicating idle termination
+	// The exact message is "Upstream idle timeout — response terminated"
+	if !strings.Contains(respBody, "idle") && !strings.Contains(respBody, "Idle") {
+		t.Errorf("expected idle termination error in response, got: %s", respBody)
+	}
+
+	// Should contain error field (from sendSSEError format)
+	if !strings.Contains(respBody, "\"error\"") {
+		t.Errorf("expected 'error' field in SSE error response, got: %s", respBody)
+	}
+}
+
+// TestIdleTermination_Disabled_NoTermination tests that disabled idle termination doesn't interfere
+func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
+	// Set idle termination disabled
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("IDLE_TERMINATION_ENABLED", "false")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	proxyCfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: models.NewModelsConfig(),
+	}
+
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+
+	// Use normal mock handler (completes successfully)
+	upstream := httptest.NewServer(mockLLMHandler(t))
+	defer upstream.Close()
+
+	// Update manager to point to our mock
+	cfg := mgr.Get()
+	cfg.UpstreamURL = upstream.URL
+	mgr.Save(cfg)
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Should complete normally
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	respBody := rr.Body.String()
+
+	// Should contain [DONE]
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in stream response")
+	}
+
+	// Should NOT contain any error
+	if strings.Contains(respBody, "\"error\"") {
+		t.Errorf("unexpected error in response when idle termination disabled: %s", respBody)
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}
+
+// TestIdleTermination_NormalStreamingNotTerminated tests that active streaming is not terminated
+func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
+	// Set short idle termination timeout (but streaming should keep it active)
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("IDLE_TERMINATION_ENABLED", "true")
+	t.Setenv("IDLE_TERMINATION_TIMEOUT", "1s")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	proxyCfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: models.NewModelsConfig(),
+	}
+
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+
+	// Use mock that sends continuously (50ms between chunks)
+	upstream := httptest.NewServer(mockContinuousStreamHandler(t))
+	defer upstream.Close()
+
+	// Update manager to point to our mock
+	cfg := mgr.Get()
+	cfg.UpstreamURL = upstream.URL
+	mgr.Save(cfg)
+
+	body := simpleBody("mock-model", true)
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+
+	// Execute with timeout
+	done := make(chan struct{})
+	go func() {
+		h.HandleChatCompletions(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Request completed
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not complete within 5 seconds")
+	}
+
+	// Should complete successfully
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	respBody := rr.Body.String()
+
+	// Should contain [DONE]
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in stream response - active streaming was incorrectly terminated")
+	}
+
+	// Should NOT contain any idle termination error
+	if strings.Contains(respBody, "idle") && strings.Contains(respBody, "timeout") {
+		t.Errorf("unexpected idle timeout error in response: %s", respBody)
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s' - request was incorrectly terminated", reqs[0].Status)
+	}
+}

@@ -439,6 +439,79 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantError: false,
 		},
+		// Idle termination validation tests
+		{
+			name: "idle termination enabled with valid timeout",
+			cfg: Config{
+				UpstreamURL:            "http://localhost:4001",
+				Port:                   8089,
+				IdleTimeout:            Duration(10 * time.Second),
+				StreamDeadline:         Duration(110 * time.Second),
+				MaxGenerationTime:      Duration(180 * time.Second),
+				RaceMaxParallel:        3,
+				IdleTerminationEnabled: true,
+				IdleTerminationTimeout: Duration(60 * time.Second),
+			},
+			wantError: false,
+		},
+		{
+			name: "idle termination enabled with timeout too low",
+			cfg: Config{
+				UpstreamURL:            "http://localhost:4001",
+				Port:                   8089,
+				IdleTimeout:            Duration(10 * time.Second),
+				StreamDeadline:         Duration(110 * time.Second),
+				MaxGenerationTime:      Duration(180 * time.Second),
+				RaceMaxParallel:        3,
+				IdleTerminationEnabled: true,
+				IdleTerminationTimeout: Duration(500 * time.Millisecond),
+			},
+			wantError: true,
+			errorMsg:  "idle_termination_timeout must be at least 1 second when enabled",
+		},
+		{
+			name: "idle termination enabled with zero timeout",
+			cfg: Config{
+				UpstreamURL:            "http://localhost:4001",
+				Port:                   8089,
+				IdleTimeout:            Duration(10 * time.Second),
+				StreamDeadline:         Duration(110 * time.Second),
+				MaxGenerationTime:      Duration(180 * time.Second),
+				RaceMaxParallel:        3,
+				IdleTerminationEnabled: true,
+				IdleTerminationTimeout: Duration(0),
+			},
+			wantError: true,
+			errorMsg:  "idle_termination_timeout must be at least 1 second when enabled",
+		},
+		{
+			name: "idle termination disabled with zero timeout",
+			cfg: Config{
+				UpstreamURL:            "http://localhost:4001",
+				Port:                   8089,
+				IdleTimeout:            Duration(10 * time.Second),
+				StreamDeadline:         Duration(110 * time.Second),
+				MaxGenerationTime:      Duration(180 * time.Second),
+				RaceMaxParallel:        3,
+				IdleTerminationEnabled: false,
+				IdleTerminationTimeout: Duration(0),
+			},
+			wantError: false,
+		},
+		{
+			name: "idle termination disabled with valid timeout",
+			cfg: Config{
+				UpstreamURL:            "http://localhost:4001",
+				Port:                   8089,
+				IdleTimeout:            Duration(10 * time.Second),
+				StreamDeadline:         Duration(110 * time.Second),
+				MaxGenerationTime:      Duration(180 * time.Second),
+				RaceMaxParallel:        3,
+				IdleTerminationEnabled: false,
+				IdleTerminationTimeout: Duration(30 * time.Second),
+			},
+			wantError: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -490,6 +563,12 @@ func TestDefaults(t *testing.T) {
 	}
 	if Defaults.RaceMaxParallel != wantRaceMaxParallel {
 		t.Errorf("Defaults.RaceMaxParallel = %d, want %d", Defaults.RaceMaxParallel, wantRaceMaxParallel)
+	}
+	if Defaults.IdleTerminationEnabled != true {
+		t.Errorf("Defaults.IdleTerminationEnabled = %v, want true", Defaults.IdleTerminationEnabled)
+	}
+	if Defaults.IdleTerminationTimeout != Duration(120*time.Second) {
+		t.Errorf("Defaults.IdleTerminationTimeout = %v, want 120s", Defaults.IdleTerminationTimeout)
 	}
 }
 
@@ -622,6 +701,8 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	os.Setenv("MAX_GENERATION_TIME", "600s")
 	os.Setenv("RACE_RETRY_ENABLED", "true")
 	os.Setenv("RACE_MAX_PARALLEL", "5")
+	os.Setenv("IDLE_TERMINATION_ENABLED", "false")
+	os.Setenv("IDLE_TERMINATION_TIMEOUT", "30s")
 	defer func() {
 		os.Unsetenv("APPLY_ENV_OVERRIDES")
 		os.Unsetenv("UPSTREAM_URL")
@@ -630,6 +711,8 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 		os.Unsetenv("MAX_GENERATION_TIME")
 		os.Unsetenv("RACE_RETRY_ENABLED")
 		os.Unsetenv("RACE_MAX_PARALLEL")
+		os.Unsetenv("IDLE_TERMINATION_ENABLED")
+		os.Unsetenv("IDLE_TERMINATION_TIMEOUT")
 	}()
 
 	m := &Manager{
@@ -658,6 +741,12 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	}
 	if cfg.RaceMaxParallel != 5 {
 		t.Errorf("RaceMaxParallel = %d, want 5", cfg.RaceMaxParallel)
+	}
+	if cfg.IdleTerminationEnabled != false {
+		t.Errorf("IdleTerminationEnabled = %v, want false", cfg.IdleTerminationEnabled)
+	}
+	if cfg.IdleTerminationTimeout != Duration(30*time.Second) {
+		t.Errorf("IdleTerminationTimeout = %v, want 30s", cfg.IdleTerminationTimeout)
 	}
 }
 

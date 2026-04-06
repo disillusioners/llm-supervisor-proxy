@@ -124,6 +124,14 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.RaceMaxBufferBytes = incoming.RaceMaxBufferBytes
 	}
 
+	// Idle termination: check if idle termination config was provided
+	if isIdleTerminationProvided(incoming) {
+		result.IdleTerminationEnabled = incoming.IdleTerminationEnabled
+		if incoming.IdleTerminationTimeout != 0 {
+			result.IdleTerminationTimeout = incoming.IdleTerminationTimeout
+		}
+	}
+
 	// Loop detection: check if any loop detection field was set
 	// We check multiple fields to detect if loop_detection was intentionally sent
 	if isLoopDetectionProvided(incoming.LoopDetection) {
@@ -204,6 +212,11 @@ func isRaceRetryProvided(cfg config.Config) bool {
 		cfg.RaceMaxBufferBytes != 0 ||
 		cfg.RaceRetryEnabled || // booleans are also checked since true is a valid intentional value
 		cfg.RaceParallelOnIdle
+}
+
+// isIdleTerminationProvided checks if idle termination config was explicitly provided
+func isIdleTerminationProvided(cfg config.Config) bool {
+	return cfg.IdleTerminationEnabled || cfg.IdleTerminationTimeout != 0
 }
 
 // isUltimateModelProvided checks if ultimate model config was explicitly provided

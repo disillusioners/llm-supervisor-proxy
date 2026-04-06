@@ -672,6 +672,77 @@ func TestRaceRetryPersistence(t *testing.T) {
 	t.Logf("Initial max_parallel was %d, now is %d (should be 7)", initialMaxParallel, cfg3.RaceMaxParallel)
 }
 
+func TestIdleTerminationPersistence(t *testing.T) {
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Save config with custom idle termination settings
+	cfg := cfgMgr.Get()
+	cfg.IdleTerminationEnabled = true
+	cfg.IdleTerminationTimeout = config.Duration(60 * time.Second)
+
+	_, err = cfgMgr.Save(cfg)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	// Verify in same session
+	cfg2 := cfgMgr.Get()
+	if cfg2.IdleTerminationEnabled != true {
+		t.Errorf("Same session: IdleTerminationEnabled = %v, want true", cfg2.IdleTerminationEnabled)
+	}
+	if cfg2.IdleTerminationTimeout != config.Duration(60*time.Second) {
+		t.Errorf("Same session: IdleTerminationTimeout = %v, want 60s", cfg2.IdleTerminationTimeout)
+	}
+
+	// Now simulate restart - create NEW config manager
+	store2, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create second SQLite connection: %v", err)
+	}
+	defer store2.Close()
+
+	cfgMgr2, err := NewConfigManager(store2, bus)
+	if err != nil {
+		t.Fatalf("Failed to create second config manager: %v", err)
+	}
+
+	// Load from database (simulating restart)
+	if err := cfgMgr2.Load(); err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	cfg3 := cfgMgr2.Get()
+
+	// Check idle termination fields persisted
+	if cfg3.IdleTerminationEnabled != true {
+		t.Errorf("After restart: IdleTerminationEnabled = %v, want true", cfg3.IdleTerminationEnabled)
+	}
+	if cfg3.IdleTerminationTimeout != config.Duration(60*time.Second) {
+		t.Errorf("After restart: IdleTerminationTimeout = %v, want 60s", cfg3.IdleTerminationTimeout)
+	}
+
+	t.Logf("Idle termination settings persisted correctly: enabled=%v, timeout=%v",
+		cfg3.IdleTerminationEnabled, cfg3.IdleTerminationTimeout)
+}
+
 func TestLogRawUpstreamPersistence(t *testing.T) {
 	// Create temp database
 	tmpDir := t.TempDir()
@@ -982,6 +1053,118 @@ func TestConfigManager_PartialUpdate(t *testing.T) {
 	if loadedCfg.LoopDetection.ShadowMode {
 		t.Errorf("Expected LoopDetection.ShadowMode false (preserved), got %v", loadedCfg.LoopDetection.ShadowMode)
 	}
+}
+
+// TestIdleTerminationMergeConfig tests that idle termination config is correctly
+// merged during partial updates and that isIdleTerminationProvided() works correctly.
+func TestIdleTerminationMergeConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	bus := events.NewBus()
+	cfgMgr, err := NewConfigManager(store, bus)
+	if err != nil {
+		t.Fatalf("Failed to create config manager: %v", err)
+	}
+
+	// Step 1: Save full config with idle termination settings
+	fullCfg := cfgMgr.Get()
+	fullCfg.IdleTerminationEnabled = true
+	fullCfg.IdleTerminationTimeout = config.Duration(300 * time.Second)
+
+	_, err = cfgMgr.Save(fullCfg)
+	if err != nil {
+		t.Fatalf("Failed to save initial config: %v", err)
+	}
+
+	// Step 2: Save partial config WITHOUT idle termination fields
+	// This should preserve the existing idle termination values
+	partialCfg := config.Config{
+		UpstreamURL:       "http://updated:4001",
+		IdleTimeout:       fullCfg.IdleTimeout,
+		StreamDeadline:    fullCfg.StreamDeadline,
+		MaxGenerationTime: fullCfg.MaxGenerationTime,
+		// Note: IdleTerminationEnabled and IdleTerminationTimeout are NOT set
+	}
+
+	_, err = cfgMgr.Save(partialCfg)
+	if err != nil {
+		t.Fatalf("Failed to save partial config: %v", err)
+	}
+
+	// Verify idle termination values are PRESERVED
+	loadedCfg := cfgMgr.Get()
+	if !loadedCfg.IdleTerminationEnabled {
+		t.Errorf("Expected IdleTerminationEnabled true (preserved), got %v", loadedCfg.IdleTerminationEnabled)
+	}
+	if loadedCfg.IdleTerminationTimeout != config.Duration(300*time.Second) {
+		t.Errorf("Expected IdleTerminationTimeout 300s (preserved), got %v", loadedCfg.IdleTerminationTimeout)
+	}
+
+	// Step 3: Save config that provides idle termination but disables it
+	// Note: To trigger merge, we need IdleTerminationTimeout != 0 (isIdleTerminationProvided check)
+	// When we provide IdleTerminationTimeout != 0, it gets copied along with IdleTerminationEnabled
+	disabledCfg := config.Config{
+		UpstreamURL:            "http://disabled:4001",
+		IdleTimeout:            fullCfg.IdleTimeout,
+		StreamDeadline:         fullCfg.StreamDeadline,
+		MaxGenerationTime:      fullCfg.MaxGenerationTime,
+		IdleTerminationEnabled: false,
+		IdleTerminationTimeout: config.Duration(1 * time.Second), // Required for isIdleTerminationProvided to return true
+	}
+
+	_, err = cfgMgr.Save(disabledCfg)
+	if err != nil {
+		t.Fatalf("Failed to save disabled config: %v", err)
+	}
+
+	loadedCfg = cfgMgr.Get()
+	if loadedCfg.IdleTerminationEnabled {
+		t.Errorf("Expected IdleTerminationEnabled false, got %v", loadedCfg.IdleTerminationEnabled)
+	}
+	// Timeout is copied (not preserved) because we set it to trigger merge
+	if loadedCfg.IdleTerminationTimeout != config.Duration(1*time.Second) {
+		t.Errorf("Expected IdleTerminationTimeout 1s (copied), got %v", loadedCfg.IdleTerminationTimeout)
+	}
+
+	// Step 4: Save config with only IdleTerminationTimeout changed
+	// Note: We need IdleTerminationTimeout != 0 to trigger merge, but enabled stays same
+	timeoutCfg := config.Config{
+		UpstreamURL:            "http://timeout:4001",
+		IdleTimeout:            fullCfg.IdleTimeout,
+		StreamDeadline:         fullCfg.StreamDeadline,
+		MaxGenerationTime:      fullCfg.MaxGenerationTime,
+		IdleTerminationTimeout: config.Duration(45 * time.Second),
+		// IdleTerminationEnabled not set - should be preserved from previous (false)
+	}
+
+	_, err = cfgMgr.Save(timeoutCfg)
+	if err != nil {
+		t.Fatalf("Failed to save timeout config: %v", err)
+	}
+
+	loadedCfg = cfgMgr.Get()
+	// Enabled should still be false (preserved from step 3)
+	if loadedCfg.IdleTerminationEnabled {
+		t.Errorf("Expected IdleTerminationEnabled false (preserved), got %v", loadedCfg.IdleTerminationEnabled)
+	}
+	// Timeout should be updated to 45s
+	if loadedCfg.IdleTerminationTimeout != config.Duration(45*time.Second) {
+		t.Errorf("Expected IdleTerminationTimeout 45s, got %v", loadedCfg.IdleTerminationTimeout)
+	}
+
+	t.Logf("Idle termination merge config works correctly: enabled preserved=%v, timeout updated correctly",
+		!loadedCfg.IdleTerminationEnabled)
 }
 
 // TestConfigManager_EnvOverridePrecedence tests that ENV variables override database values
