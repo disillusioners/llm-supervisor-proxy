@@ -166,6 +166,14 @@ func Decrypt(ciphertext string) (string, error) {
 	return string(plaintext), nil
 }
 
+// ResetEncryptionState resets the encryption state for testing purposes
+// This is only intended for use in tests
+func ResetEncryptionState() {
+	encryptionKey = nil
+	encryptionKeyOnce = sync.Once{}
+	encryptionKeyErr = nil
+}
+
 // GenerateKey generates a new random 32-byte key encoded as base64
 // Useful for generating the INTERNAL_ENCRYPTION_KEY
 func GenerateKey() (string, error) {

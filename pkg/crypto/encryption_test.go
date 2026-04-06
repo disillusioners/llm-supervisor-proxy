@@ -2,15 +2,12 @@ package crypto
 
 import (
 	"os"
-	"sync"
 	"testing"
 )
 
 // resetEncryptionState resets the encryption state for testing
 func resetEncryptionState() {
-	encryptionKey = nil
-	encryptionKeyOnce = sync.Once{}
-	encryptionKeyErr = nil
+	ResetEncryptionState()
 }
 
 func TestEncryptDecrypt(t *testing.T) {
