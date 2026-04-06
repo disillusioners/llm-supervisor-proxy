@@ -393,11 +393,14 @@ func TestStreamResponse_SSEHeadersSet(t *testing.T) {
 	h := NewHandler(cfg, modelsCfg, nil)
 
 	// Get the server's response
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -434,11 +437,14 @@ func TestStreamResponse_DataForwarding(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -467,11 +473,14 @@ func TestStreamResponse_DONEMarker(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -497,7 +506,10 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
@@ -528,11 +540,14 @@ func TestStreamResponse_EmptyStream(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -561,11 +576,14 @@ func TestStreamResponse_MultipleChunks(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -600,11 +618,14 @@ func TestStreamResponse_WithToolCallBuffer(t *testing.T) {
 	repairCfg := toolrepair.DisabledConfig()
 	h.SetToolCallBufferConfig(1024*1024, false, repairCfg)
 
-	resp, _ := http.Get(server.URL)
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err := h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model")
 
 	if err != nil {
 		t.Errorf("streamResponse with tool buffer returned error: %v", err)
