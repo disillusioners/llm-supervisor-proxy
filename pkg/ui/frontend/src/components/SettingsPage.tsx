@@ -129,7 +129,7 @@ export function SettingsPage({
       setLogRawUpstreamMaxKB(config.log_raw_upstream_max_kb ?? 1024);
       // Stream idle termination sync
       setIdleTerminationEnabled(config.idle_termination_enabled ?? true);
-      setIdleTerminationTimeout(config.idle_termination_timeout || "2m");
+      setIdleTerminationTimeout(config.idle_termination_timeout ?? "2m");
     }
   }, [config]);
 
