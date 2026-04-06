@@ -85,6 +85,10 @@ type Config struct {
 	RaceMaxParallel    int  `json:"race_max_parallel"`
 	RaceMaxBufferBytes int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
 
+	// Idle Termination
+	IdleTerminationEnabled bool     `json:"idle_termination_enabled"`
+	IdleTerminationTimeout Duration `json:"idle_termination_timeout"`
+
 	// Tool Call Buffering (for weak streaming clients)
 	ToolCallBufferDisabled bool  `json:"tool_call_buffer_disabled"` // When true, tool calls are streamed as-is (for clients that can handle partial JSON)
 	ToolCallBufferMaxSize  int64 `json:"tool_call_buffer_max_size"` // Max bytes to buffer per request (default: 1MB)
@@ -208,6 +212,9 @@ var Defaults = Config{
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
 	LogRawUpstreamMaxKB:    1024,  // 1MB default
+	// Idle Termination
+	IdleTerminationEnabled: true,
+	IdleTerminationTimeout: Duration(120 * time.Second),
 }
 
 // Validate ensures config values are valid before saving
@@ -248,6 +255,11 @@ func (c *Config) Validate() error {
 	}
 	if c.RaceMaxBufferBytes > 0 && c.RaceMaxBufferBytes < 65536 {
 		return errors.New("race_max_buffer_bytes must be at least 65536 bytes (64KB) or 0 for unlimited")
+	}
+	if c.IdleTerminationEnabled {
+		if c.IdleTerminationTimeout < Duration(time.Second) {
+			return fmt.Errorf("idle_termination_timeout must be at least 1 second when enabled")
+		}
 	}
 	if c.UltimateModel.MaxRetries < 0 {
 		return errors.New("ultimate_model.max_retries cannot be negative")
@@ -445,6 +457,15 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("LOG_RAW_UPSTREAM_MAX_KB"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r > 0 {
 			cfg.LogRawUpstreamMaxKB = r
+		}
+	}
+	// Idle Termination configuration
+	if v := os.Getenv("IDLE_TERMINATION_ENABLED"); v != "" {
+		cfg.IdleTerminationEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("IDLE_TERMINATION_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.IdleTerminationTimeout = Duration(d)
 		}
 	}
 	return cfg

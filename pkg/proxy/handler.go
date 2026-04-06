@@ -51,6 +51,8 @@ func (c *Config) Clone() ConfigSnapshot {
 		LogRawUpstreamResponse: cfg.LogRawUpstreamResponse,
 		LogRawUpstreamOnError:  cfg.LogRawUpstreamOnError,
 		LogRawUpstreamMaxKB:    cfg.LogRawUpstreamMaxKB,
+		IdleTerminationEnabled: cfg.IdleTerminationEnabled,
+		IdleTerminationTimeout: cfg.IdleTerminationTimeout.Duration(),
 		EventBus:               c.EventBus,
 	}
 }
@@ -82,6 +84,10 @@ type ConfigSnapshot struct {
 	LogRawUpstreamResponse bool
 	LogRawUpstreamOnError  bool
 	LogRawUpstreamMaxKB    int
+
+	// Idle Termination
+	IdleTerminationEnabled bool
+	IdleTerminationTimeout time.Duration
 
 	// Event Bus for publishing events during request handling
 	EventBus *events.Bus
@@ -845,6 +851,18 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					flusher.Flush()
 				}
 				buffer.Prune(readIndex)
+			}
+
+			// Idle termination: check if upstream has stopped sending data
+			if rc.conf.IdleTerminationEnabled && rc.conf.IdleTerminationTimeout > 0 && !buffer.IsComplete() {
+				if winner.IsIdle(rc.conf.IdleTerminationTimeout) {
+					log.Printf("[STREAM] Idle termination: upstream idle for %v, terminating stream",
+						time.Since(winner.GetLastActivity()))
+					winner.Cancel()
+					h.sendSSEError(w, models.ErrorTypeServerError,
+						"Upstream idle timeout — response terminated")
+					return
+				}
 			}
 		}
 	}

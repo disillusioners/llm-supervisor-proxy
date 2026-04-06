@@ -89,6 +89,9 @@ export function SettingsPage({
   const [logRawUpstreamResponse, setLogRawUpstreamResponse] = useState(false);
   const [logRawUpstreamOnError, setLogRawUpstreamOnError] = useState(false);
   const [logRawUpstreamMaxKB, setLogRawUpstreamMaxKB] = useState(1024);
+  // Stream idle termination state
+  const [idleTerminationEnabled, setIdleTerminationEnabled] = useState(true);
+  const [idleTerminationTimeout, setIdleTerminationTimeout] = useState("2m");
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -124,6 +127,9 @@ export function SettingsPage({
       setLogRawUpstreamResponse(config.log_raw_upstream_response ?? false);
       setLogRawUpstreamOnError(config.log_raw_upstream_on_error ?? false);
       setLogRawUpstreamMaxKB(config.log_raw_upstream_max_kb ?? 1024);
+      // Stream idle termination sync
+      setIdleTerminationEnabled(config.idle_termination_enabled ?? true);
+      setIdleTerminationTimeout(config.idle_termination_timeout || "2m");
     }
   }, [config]);
 
@@ -165,6 +171,9 @@ export function SettingsPage({
         log_raw_upstream_response: logRawUpstreamResponse,
         log_raw_upstream_on_error: logRawUpstreamOnError,
         log_raw_upstream_max_kb: logRawUpstreamMaxKB,
+        // Stream idle termination
+        idle_termination_enabled: idleTerminationEnabled,
+        idle_termination_timeout: idleTerminationTimeout,
       });
 
       // Show success message, and also show restart warning if required
@@ -367,6 +376,8 @@ export function SettingsPage({
               logRawUpstreamResponse={logRawUpstreamResponse}
               logRawUpstreamOnError={logRawUpstreamOnError}
               logRawUpstreamMaxKB={logRawUpstreamMaxKB}
+              idleTerminationEnabled={idleTerminationEnabled}
+              idleTerminationTimeout={idleTerminationTimeout}
               onUpstreamUrlChange={setUpstreamUrl}
               onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
@@ -383,6 +394,8 @@ export function SettingsPage({
               onLogRawUpstreamResponseChange={setLogRawUpstreamResponse}
               onLogRawUpstreamOnErrorChange={setLogRawUpstreamOnError}
               onLogRawUpstreamMaxKBChange={setLogRawUpstreamMaxKB}
+              onIdleTerminationEnabledChange={setIdleTerminationEnabled}
+              onIdleTerminationTimeoutChange={setIdleTerminationTimeout}
               onApply={handleApplyProxy}
               setStatus={setStatusWrapper}
             />

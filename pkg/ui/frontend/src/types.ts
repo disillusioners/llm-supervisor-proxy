@@ -80,6 +80,9 @@ export interface AppConfig {
   sse_heartbeat_enabled?: boolean;
   tool_call_buffer_disabled?: boolean;
   tool_call_buffer_max_size?: number;
+  // Idle termination configuration
+  idle_termination_enabled?: boolean;
+  idle_termination_timeout?: string;
   // Deprecated - kept for backward compatibility with older backend versions
   max_upstream_error_retries?: number;
   max_idle_retries?: number;

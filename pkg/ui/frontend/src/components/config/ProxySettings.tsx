@@ -10,6 +10,9 @@ interface ProxySettingsProps {
   streamDeadline: string;
   maxGenTime: string;
   originalPort: number;
+  // Idle termination fields
+  idleTerminationEnabled: boolean;
+  idleTerminationTimeout: string;
   // Race retry fields
   raceRetryEnabled: boolean;
   raceParallelOnIdle: boolean;
@@ -40,6 +43,8 @@ interface ProxySettingsProps {
   onLogRawUpstreamResponseChange: (value: boolean) => void;
   onLogRawUpstreamOnErrorChange: (value: boolean) => void;
   onLogRawUpstreamMaxKBChange: (value: number) => void;
+  onIdleTerminationEnabledChange: (value: boolean) => void;
+  onIdleTerminationTimeoutChange: (value: string) => void;
   onApply: () => Promise<void>;
   setStatus: (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => void;
 }
@@ -54,6 +59,8 @@ export function ProxySettings({
   streamDeadline,
   maxGenTime,
   originalPort,
+  idleTerminationEnabled,
+  idleTerminationTimeout,
   raceRetryEnabled,
   raceParallelOnIdle,
   raceMaxParallel,
@@ -80,6 +87,8 @@ export function ProxySettings({
   onLogRawUpstreamResponseChange,
   onLogRawUpstreamOnErrorChange,
   onLogRawUpstreamMaxKBChange,
+  onIdleTerminationEnabledChange,
+  onIdleTerminationTimeoutChange,
   onApply,
   setStatus,
 }: ProxySettingsProps) {
@@ -197,6 +206,52 @@ export function ProxySettings({
         </div>
         <p class="text-xs text-gray-500 mt-1">
           Max buffer caching time for race retry. After this deadline, the request with most content wins and others are cancelled.
+        </p>
+      </div>
+
+      {/* Idle Termination */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Enable Idle Stream Termination</label>
+        <div class="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onIdleTerminationEnabledChange(!idleTerminationEnabled)}
+            class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              idleTerminationEnabled ? 'bg-blue-600' : 'bg-gray-600'
+            }`}
+          >
+            <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              idleTerminationEnabled ? 'translate-x-6' : 'translate-x-1'
+            }`} />
+          </button>
+          <span class="text-sm text-gray-400">
+            {idleTerminationEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+      </div>
+
+      {/* Idle Termination Timeout */}
+      <div class={`${!idleTerminationEnabled ? 'opacity-50' : ''}`}>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Idle Termination Timeout</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </span>
+          <input
+            type="text"
+            value={idleTerminationTimeout}
+            onInput={(e) => onIdleTerminationTimeoutChange((e.target as HTMLInputElement).value)}
+            disabled={!idleTerminationEnabled}
+            class={`w-full pl-10 pr-4 py-2 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow ${
+              idleTerminationEnabled ? 'bg-gray-700' : 'bg-gray-800'
+            }`}
+            placeholder="2m"
+          />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+          Max idle time after stream winner is selected. If upstream sends no data for this duration, the stream is terminated.
         </p>
       </div>
 
