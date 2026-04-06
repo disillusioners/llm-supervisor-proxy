@@ -860,7 +860,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 						time.Since(winner.GetLastActivity()))
 					winner.Cancel()
 					h.sendSSEError(w, models.ErrorTypeServerError,
-						"Upstream idle timeout — response terminated")
+						"Upstream idle timeout — try resume command or split your task smaller parts")
 					return
 				}
 			}
