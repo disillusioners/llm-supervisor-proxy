@@ -145,7 +145,9 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 					content = c
 				case []interface{}:
 					// Flatten array content to string for storage
+					// Pre-size based on typical message length
 					var sb strings.Builder
+					sb.Grow(512)
 					for _, part := range c {
 						if partMap, ok := part.(map[string]interface{}); ok {
 							if text, ok := partMap["text"].(string); ok {
@@ -200,7 +202,9 @@ func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterf
 	if allModels == nil {
 		allModels = []string{}
 	}
-	modelList := []string{originalModel}
+	// Pre-allocate with original + fallbacks (typically 1-3 models)
+	modelList := make([]string, 0, 1+len(allModels))
+	modelList = append(modelList, originalModel)
 	modelList = append(modelList, allModels...)
 	log.Printf("[PEAK-DBG] buildModelList EXIT: modelList=%v (original=%q + fallbacks=%v)", modelList, originalModel, allModels)
 	return modelList
@@ -329,15 +333,29 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 	}
 
 	if content, ok := delta["content"].(string); ok {
+		// Pre-size response builder on first chunk (typical LLM response is 2KB-8KB)
+		if response.Len() == 0 {
+			response.Grow(4096)
+		}
 		response.WriteString(content)
 	}
 	// Extract thinking/reasoning content - support multiple provider field names
 	// Priority: reasoning_content > reasoning > thinking
 	if t, ok := delta["reasoning_content"].(string); ok && t != "" {
+		// Pre-size thinking builder on first chunk (typical thinking is 1KB-4KB)
+		if thinking.Len() == 0 {
+			thinking.Grow(2048)
+		}
 		thinking.WriteString(t)
 	} else if t, ok := delta["reasoning"].(string); ok && t != "" {
+		if thinking.Len() == 0 {
+			thinking.Grow(2048)
+		}
 		thinking.WriteString(t)
 	} else if t, ok := delta["thinking"].(string); ok && t != "" {
+		if thinking.Len() == 0 {
+			thinking.Grow(2048)
+		}
 		thinking.WriteString(t)
 	}
 
@@ -360,7 +378,10 @@ func extractStreamChunkContent(data []byte, response, thinking *strings.Builder,
 			// Ensure accumulator has enough capacity
 			for len(*toolCallsAccum) <= idx {
 				*toolCallsAccum = append(*toolCallsAccum, store.ToolCall{})
-				*toolCallArgBuilders = append(*toolCallArgBuilders, &strings.Builder{})
+				// Pre-size builder for typical function arguments (1KB is enough for most cases)
+				b := &strings.Builder{}
+				b.Grow(1024)
+				*toolCallArgBuilders = append(*toolCallArgBuilders, b)
 			}
 
 			// Update tool call at index
