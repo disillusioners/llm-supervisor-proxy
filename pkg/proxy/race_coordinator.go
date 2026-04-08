@@ -801,6 +801,12 @@ func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
 	case http.StatusBadGateway: // 502
 		errType = models.ErrorTypeUpstreamError
 		errCode = models.ErrorCodeUnavailable
+	case http.StatusNotFound: // 404
+		errType = models.ErrorTypeServerError
+		errCode = "model_not_found"
+	case http.StatusInternalServerError: // 500
+		errType = models.ErrorTypeServerError
+		errCode = ""
 	case http.StatusServiceUnavailable: // 503
 		errType = models.ErrorTypeTooManyRequests
 		errCode = models.ErrorCodeUnavailable
@@ -808,6 +814,9 @@ func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
 		errType = models.ErrorTypeUpstreamError
 		errCode = ""
 	default:
+		// httpStatus 0 means mismatched statuses (e.g., 429 + context canceled)
+		// Default to BadGateway to ensure valid HTTP status
+		httpStatus = http.StatusBadGateway
 		errType = models.ErrorTypeServerError
 		errCode = ""
 	}
@@ -899,6 +908,12 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 	case http.StatusBadGateway:
 		errType = models.ErrorTypeUpstreamError
 		errCode = models.ErrorCodeUnavailable
+	case http.StatusNotFound: // 404
+		errType = models.ErrorTypeServerError
+		errCode = "model_not_found"
+	case http.StatusInternalServerError: // 500
+		errType = models.ErrorTypeServerError
+		errCode = ""
 	case http.StatusServiceUnavailable:
 		errType = models.ErrorTypeTooManyRequests
 		errCode = models.ErrorCodeUnavailable
@@ -906,6 +921,9 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 		errType = models.ErrorTypeUpstreamError
 		errCode = ""
 	default:
+		// httpStatus 0 means mismatched statuses (e.g., 429 + context canceled)
+		// Default to BadGateway to ensure valid HTTP status
+		httpStatus = http.StatusBadGateway
 		errType = models.ErrorTypeServerError
 		errCode = ""
 	}
