@@ -105,7 +105,7 @@ func (c *raceCoordinator) publishEvent(eventType string, data map[string]interfa
 // Start initiates the race
 func (c *raceCoordinator) Start() {
 	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
-	log.Printf("[FALLBACK-DEBUG] Coordinator models=%v, len=%d", c.models, len(c.models))
+
 	log.Printf("[PEAK-DBG] race_coordinator.Start: models=%v, len=%d", c.models, len(c.models))
 
 	// Publish race_started event
@@ -267,7 +267,6 @@ func (c *raceCoordinator) manage() {
 				return
 			}
 			// Spawning logic (on failure or idle)
-			log.Printf("[FALLBACK-DEBUG] manage() spawn check: len(requests)=%d, len(models)=%d, winner=%v", len(c.requests), len(c.models), c.winner != nil)
 			if c.winner == nil && len(c.requests) < len(c.models) {
 				running := 0
 				for _, r := range c.requests {
@@ -283,7 +282,7 @@ func (c *raceCoordinator) manage() {
 					// Case 1: Latest request failed - spawn fallback directly (skip retry with same model)
 					latestReq := c.requests[len(c.requests)-1]
 					if latestReq.IsDone() && latestReq.GetError() != nil {
-						log.Printf("[FALLBACK-DEBUG] Latest request failed: id=%d, modelID=%q, modelType=%v, err=%v", latestReq.id, latestReq.modelID, latestReq.modelType, latestReq.GetError())
+
 						errMsg := latestReq.GetError().Error()
 						log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, errMsg)
 						shouldSpawn = true
@@ -327,7 +326,7 @@ func (c *raceCoordinator) manage() {
 				}
 
 				if shouldSpawn {
-					log.Printf("[FALLBACK-DEBUG] shouldSpawn=true, trigger=%s, len(c.models)=%d", triggerInfo.trigger, len(c.models))
+
 					c.mu.Unlock()
 
 					if triggerInfo.trigger == triggerIdleTimeout {
@@ -522,7 +521,7 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	req.SetContext(ctx, cancel)
 
 	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req)
-	log.Printf("[FALLBACK-DEBUG] execute() result: req.id=%d, req.modelID=%q, req.modelType=%v, err=%v", req.id, req.modelID, req.modelType, err)
+
 	if err != nil {
 		req.MarkFailed(err)
 		log.Printf("[RACE] Request %d failed: %v", req.id, err)
