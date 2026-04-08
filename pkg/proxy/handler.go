@@ -380,7 +380,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	// Debug log when ultimate model is skipped due to missing permission
 	if h.ultimateHandler != nil && !rc.ultimateModelEnabled && rc.tokenID != "" {
-		log.Printf("[DEBUG] ultimate model skipped: token %s lacks ultimate_model_enabled", rc.tokenID)
+		log.Printf("[DEBUG] ultimate model skipped: token %s (%s) lacks ultimate_model_enabled, model: %s", rc.tokenID, rc.tokenName, rc.reqLog.Model)
 	}
 
 	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
