@@ -18,6 +18,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Phase 3 | 2026-03-31 | ✅ PASS | Frontend visualization, 231 tests |
 | Test Pack | 2026-04-06 | ✅ PASS | 819 tests, 5 new test files, 4109 lines |
 | Idle Termination | 2026-04-06 | ✅ PASS | 8 new tests, 575 new lines, commit 068aa0d |
+| Memory Traps Fix | 2026-04-08 | ✅ PASS | Full integration test with race, 23 packages, quick fix commit 972dd01 |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
