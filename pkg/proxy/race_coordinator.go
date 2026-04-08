@@ -500,6 +500,11 @@ func (c *raceCoordinator) cancelAll() {
 	c.cancelAllExcept(nil)
 }
 
+// cancelAllExcept cancels all requests except the winner.
+// Each call to req.Cancel() performs full cleanup:
+//   - Cancels the request context
+//   - Drains and closes the HTTP response body
+//   - Releases the stream buffer
 func (c *raceCoordinator) cancelAllExcept(winner *upstreamRequest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

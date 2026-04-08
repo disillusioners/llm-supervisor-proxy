@@ -273,11 +273,18 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 	}
 
 	for event := range eventCh {
-		// Check for context cancellation
+		// Check for context cancellation or explicit cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Check if the request was cancelled to exit promptly
+		// This ensures the goroutine exits immediately when Cancel() is called,
+		// even if context cancellation hasn't propagated yet
+		if upstreamReq.IsCancelled() {
+			return context.Canceled
 		}
 
 		switch event.Type {
@@ -927,6 +934,12 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 		case <-readDone:
 			// Track activity for coordinator's idle detection
 			req.TrackActivity()
+			// Check if the request was cancelled to exit promptly
+			// This ensures the goroutine exits immediately when Cancel() is called,
+			// even if context cancellation hasn't propagated yet
+			if req.IsCancelled() {
+				return context.Canceled
+			}
 			// Continuous processing
 		case <-time.After(readTimeout):
 			// Read timeout - but DON'T return error!

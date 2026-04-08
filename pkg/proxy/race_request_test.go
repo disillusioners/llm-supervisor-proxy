@@ -3,6 +3,10 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -538,4 +542,98 @@ func TestUpstreamRequestHTTPStatus(t *testing.T) {
 	if got := req.GetHTTPStatus(); got != 500 {
 		t.Errorf("GetHTTPStatus() = %d, want 500", got)
 	}
+}
+
+func TestUpstreamRequestIsCancelled(t *testing.T) {
+	t.Run("not cancelled initially", func(t *testing.T) {
+		req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+		if req.IsCancelled() {
+			t.Error("IsCancelled() = true, want false initially")
+		}
+	})
+
+	t.Run("cancelled after Cancel()", func(t *testing.T) {
+		req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+		req.Cancel()
+		if !req.IsCancelled() {
+			t.Error("IsCancelled() = false, want true after Cancel()")
+		}
+	})
+}
+
+func TestUpstreamRequestCancelIdempotent(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+	ctx, cancel := context.WithCancel(context.Background())
+	req.SetContext(ctx, cancel)
+
+	// Call Cancel multiple times - should not panic
+	req.Cancel()
+	req.Cancel()
+	req.Cancel()
+
+	if !req.IsCancelled() {
+		t.Error("IsCancelled() = false, want true after Cancel()")
+	}
+}
+
+func TestUpstreamRequestCancelReleasesBuffer(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	// Add data to buffer
+	req.buffer.Add([]byte("test data"))
+	if req.buffer == nil {
+		t.Fatal("buffer is nil before Cancel()")
+	}
+
+	req.Cancel()
+
+	// Buffer should be released (set to nil)
+	if req.buffer != nil {
+		t.Error("buffer is not nil after Cancel(), want nil")
+	}
+}
+
+func TestUpstreamRequestCancelConcurrent(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+	ctx, cancel := context.WithCancel(context.Background())
+	req.SetContext(ctx, cancel)
+
+	// Launch multiple concurrent Cancel() calls
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req.Cancel()
+		}()
+	}
+
+	// Wait for all goroutines
+	wg.Wait()
+
+	// Should still be cancelled
+	if !req.IsCancelled() {
+		t.Error("IsCancelled() = false, want true after concurrent Cancel()")
+	}
+}
+
+func TestUpstreamRequestCleanupWithResponseBody(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	// Simulate a response body
+	req.mu.Lock()
+	req.resp = &http.Response{
+		Body: io.NopCloser(strings.NewReader("test response body")),
+	}
+	req.mu.Unlock()
+
+	// Cancel should drain and close the body
+	req.Cancel()
+
+	// Response should be cleared
+	req.mu.RLock()
+	if req.resp != nil {
+		t.Error("resp is not nil after Cancel(), want nil")
+	}
+	req.mu.RUnlock()
 }

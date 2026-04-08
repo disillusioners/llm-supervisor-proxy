@@ -17,6 +17,18 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
+// sharedHTTPClient is a module-level HTTP client with connection pooling.
+// Reusing a single client prevents accumulation of orphaned connection pools
+// that occur when creating a new client per request.
+var sharedHTTPClient = &http.Client{
+	Timeout: 0, // No timeout - use context for cancellation
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     300 * time.Second,
+	},
+}
+
 // executeExternal handles requests to external upstream (proxy mode)
 // This is a RAW PROXY - no retry, no fallback, no buffering, no loop detection
 func (h *Handler) executeExternal(
@@ -71,17 +83,8 @@ func (h *Handler) executeExternal(
 		}
 	}
 
-	// Send request
-	client := &http.Client{
-		Timeout: 0, // No timeout - use context for cancellation
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     300 * time.Second,
-		},
-	}
-
-	resp, err := client.Do(upstreamReq)
+	// Send request using shared HTTP client with connection pooling
+	resp, err := sharedHTTPClient.Do(upstreamReq)
 	if err != nil {
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
@@ -179,8 +182,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		)
 	}
 
-	// Collect all data lines with JSON for reverse-scan usage extraction
-	var dataLines [][]byte
+	// Track the last chunk containing usage data (only need the most recent)
+	var lastUsageChunk []byte
 
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -192,22 +195,31 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
 
-		// Collect data lines for reverse-scan usage extraction
-		if bytes.HasPrefix([]byte(line), []byte("data: ")) {
-			data := bytes.TrimPrefix([]byte(line), []byte("data: "))
-			// Only collect non-empty, non-[DONE] lines
-			dataStr := string(data)
-			if dataStr != "[DONE]\n" && dataStr != "[DONE]" && dataStr != "\n" && dataStr != "" {
-				dataLines = append(dataLines, data)
+		// Convert to []byte once and reuse (fixes double allocation)
+		lineBytes := []byte(line)
+
+		// Extract usage from data lines - only keep the most recent usage chunk
+		// This replaces unbounded accumulation of all dataLines
+		if bytes.HasPrefix(lineBytes, []byte("data: ")) {
+			data := bytes.TrimPrefix(lineBytes, []byte("data: "))
+			// Check for non-empty, non-[DONE] lines
+			// Only track chunks that might contain usage (avoid checking [DONE], empty lines)
+			if len(data) > 0 &&
+				!bytes.HasPrefix(data, []byte("[DONE]")) &&
+				!bytes.HasPrefix(data, []byte("\n")) {
+				// Try to extract usage - if present, update lastUsageChunk
+				if extractUsageFromChunk(data) != nil {
+					lastUsageChunk = data
+				}
 			}
 		}
 
 		// Process through tool call buffer
 		var chunksToEmit [][]byte
 		if toolCallBuffer != nil {
-			chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+			chunksToEmit = toolCallBuffer.ProcessChunk(lineBytes)
 		} else {
-			chunksToEmit = [][]byte{[]byte(line)}
+			chunksToEmit = [][]byte{lineBytes}
 		}
 
 		// Write all chunks
@@ -232,12 +244,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 	}
 
-	// Extract usage by reverse-scanning collected data lines (same pattern as handler.go's streamResult)
+	// Extract usage from the last chunk that contained usage data
 	var usage *store.Usage
-	for i := len(dataLines) - 1; i >= 0; i-- {
-		if usage = extractUsageFromChunk(dataLines[i]); usage != nil {
-			break
-		}
+	if lastUsageChunk != nil {
+		usage = extractUsageFromChunk(lastUsageChunk)
 	}
 
 	return usage, nil

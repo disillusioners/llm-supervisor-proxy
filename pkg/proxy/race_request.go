@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -47,6 +48,10 @@ type upstreamRequest struct {
 	status   upstreamStatus     // Current status
 	err      error              // Final error (if any)
 	attempts int                // Number of HTTP retries (for connectivity)
+
+	// Cancellation state
+	cancelled  bool      // Set when Cancel() has been called
+	cancelOnce sync.Once // Ensures cleanup is only performed once
 
 	// Timing
 	startTime        time.Time
@@ -96,8 +101,10 @@ func (r *upstreamRequest) MarkCompleted() {
 	defer r.mu.Unlock()
 	r.status = statusCompleted
 	r.completionTime = time.Now()
-	// Signal buffer completion
-	r.buffer.Close(nil)
+	// Signal buffer completion (only if buffer hasn't been released by Cancel())
+	if r.buffer != nil {
+		r.buffer.Close(nil)
+	}
 }
 
 func (r *upstreamRequest) MarkFailed(err error) {
@@ -106,8 +113,10 @@ func (r *upstreamRequest) MarkFailed(err error) {
 	r.status = statusFailed
 	r.err = err
 	r.completionTime = time.Now()
-	// Signal buffer completion with error
-	r.buffer.Close(err)
+	// Signal buffer completion with error (only if buffer hasn't been released by Cancel())
+	if r.buffer != nil {
+		r.buffer.Close(err)
+	}
 }
 
 func (r *upstreamRequest) SetContext(ctx context.Context, cancel context.CancelFunc) {
@@ -164,13 +173,56 @@ func (r *upstreamRequest) IsStreaming() bool {
 	return r.status == statusStreaming
 }
 
-// Cancel safely cancels the request's context if cancel function is set
+// IsCancelled returns true if the request has been cancelled
+func (r *upstreamRequest) IsCancelled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelled
+}
+
+// Cancel safely cancels the request's context and performs full cleanup.
+// This method is idempotent - calling it multiple times is safe.
+// Cancel performs the following cleanup:
+//   - Cancels the request context
+//   - Drains and closes the HTTP response body
+//   - Releases the stream buffer
 func (r *upstreamRequest) Cancel() {
-	r.mu.RLock()
-	cancel := r.cancel
-	r.mu.RUnlock()
-	if cancel != nil {
-		cancel()
+	// Use sync.Once to ensure cleanup only happens once
+	r.cancelOnce.Do(func() {
+		r.mu.Lock()
+		r.cancelled = true
+		cancel := r.cancel
+		r.mu.Unlock()
+
+		// Cancel the context first
+		if cancel != nil {
+			cancel()
+		}
+
+		// Perform full cleanup
+		r.cleanup()
+	})
+}
+
+// cleanup drains and closes the response body and releases the buffer.
+// Must be called with mutex held (or via Cancel which holds it).
+func (r *upstreamRequest) cleanup() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Drain and close response body if present
+	if r.resp != nil && r.resp.Body != nil {
+		// Drain any remaining data to prevent connection from being closed prematurely
+		// This is important for HTTP connection reuse
+		io.Copy(io.Discard, r.resp.Body)
+		r.resp.Body.Close()
+		r.resp = nil
+	}
+
+	// Release the stream buffer
+	if r.buffer != nil {
+		r.buffer.Close(context.Canceled)
+		r.buffer = nil
 	}
 }
 
