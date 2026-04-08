@@ -175,8 +175,8 @@ func (r *upstreamRequest) IsStreaming() bool {
 
 // IsCancelled returns true if the request has been cancelled
 func (r *upstreamRequest) IsCancelled() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.cancelled
 }
 
@@ -205,7 +205,9 @@ func (r *upstreamRequest) Cancel() {
 }
 
 // cleanup drains and closes the response body and releases the buffer.
-// Must be called with mutex held (or via Cancel which holds it).
+// Called by Cancel() without the mutex held (after Cancel releases it) to avoid
+// deadlock. sync.Once guarantees single-threaded access, so no additional
+// synchronization is needed here.
 func (r *upstreamRequest) cleanup() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

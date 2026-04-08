@@ -162,7 +162,18 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 	if err != nil {
 		return fmt.Errorf("upstream request failed: %w", err)
 	}
-	defer resp.Body.Close()
+
+	// Deferred function to close response body only if req.resp hasn't been
+	// cleared by cleanup() (which happens when Cancel() is called).
+	// This prevents double-close when both Cancel() and this defer execute.
+	defer func() {
+		req.mu.Lock()
+		if req.resp != nil && req.resp.Body != nil {
+			req.resp.Body.Close()
+			req.resp = nil
+		}
+		req.mu.Unlock()
+	}()
 
 	req.resp = resp
 

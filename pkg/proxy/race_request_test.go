@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -386,10 +387,10 @@ func TestUpstreamRequestCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		req.SetContext(ctx, cancel)
 
-		canceled := false
+		var canceled atomic.Int32
 		go func() {
 			<-ctx.Done()
-			canceled = true
+			canceled.Store(1)
 		}()
 
 		// Give goroutine time to set up listener
@@ -400,7 +401,7 @@ func TestUpstreamRequestCancel(t *testing.T) {
 		// Give cancel time to propagate
 		time.Sleep(time.Millisecond)
 
-		if !canceled {
+		if canceled.Load() != 1 {
 			t.Error("Cancel() did not trigger context cancellation")
 		}
 	})
