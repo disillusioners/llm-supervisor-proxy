@@ -22,12 +22,13 @@ var (
 
 // AuthToken represents a stored API token
 type AuthToken struct {
-	ID        string
-	Name      string
-	TokenHash string
-	ExpiresAt *time.Time
-	CreatedAt time.Time
-	CreatedBy string
+	ID                   string
+	Name                 string
+	TokenHash            string
+	ExpiresAt            *time.Time
+	CreatedAt            time.Time
+	CreatedBy            string
+	UltimateModelEnabled bool `json:"ultimate_model_enabled"`
 }
 
 // GenerateToken generates a new random token with sk- prefix

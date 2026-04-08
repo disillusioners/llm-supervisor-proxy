@@ -55,7 +55,8 @@ func setupIntegrationDB(t *testing.T) *sql.DB {
 		name TEXT NOT NULL,
 		expires_at TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
-		created_by TEXT NOT NULL
+		created_by TEXT NOT NULL,
+		ultimate_model_enabled BOOLEAN NOT NULL DEFAULT FALSE
 	)`)
 	if err != nil {
 		db.Close()
@@ -105,7 +106,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 	// Setup: Create token store and generate a valid API token
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	// CreateToken returns the plaintext token (show once), so we use that
-	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user")
+	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", false)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	// CreateToken returns the plaintext token (show once), so we use that
-	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user")
+	plaintextToken, storedToken, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test-user", false)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}

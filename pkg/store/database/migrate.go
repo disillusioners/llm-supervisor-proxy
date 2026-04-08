@@ -41,6 +41,7 @@ var migrations = []migration{
 	{"017", "017_config_json.up"},
 	{"018", "018_add_peak_hours.up"},
 	{"019", "019_token_hourly_usage.up"},
+	{"020", "020_add_ultimate_model_enabled.up"},
 }
 
 // RunMigrations executes database schema migrations

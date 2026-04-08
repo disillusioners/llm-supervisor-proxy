@@ -19,9 +19,10 @@ type TokenStore struct {
 // This allows for mocking in tests
 type TokenStoreInterface interface {
 	ValidateToken(ctx context.Context, plaintext string) (*AuthToken, error)
-	CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string) (string, *AuthToken, error)
+	CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool) (string, *AuthToken, error)
 	DeleteToken(ctx context.Context, id string) error
 	ListTokens(ctx context.Context) ([]AuthToken, error)
+	UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool) error
 }
 
 // Ensure TokenStore implements TokenStoreInterface at compile time
@@ -34,7 +35,7 @@ func NewTokenStore(db *sql.DB, dialect database.Dialect) *TokenStore {
 
 // CreateToken creates a new API token
 // Returns the plaintext token (show once) and the stored token info
-func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string) (string, *AuthToken, error) {
+func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool) (string, *AuthToken, error) {
 	plaintext, hash, err := GenerateToken()
 	if err != nil {
 		return "", nil, err
@@ -50,23 +51,24 @@ func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *ti
 
 	var query string
 	if s.dialect == database.PostgreSQL {
-		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by) VALUES ($1, $2, $3, $4, $5, $6)`
+		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by, ultimate_model_enabled) VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	} else {
-		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)`
+		query = `INSERT INTO auth_tokens (id, token_hash, name, expires_at, created_at, created_by, ultimate_model_enabled) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	}
 
-	_, err = s.db.ExecContext(ctx, query, id, hash, name, expiresAtStr, now.Format(time.RFC3339), createdBy)
+	_, err = s.db.ExecContext(ctx, query, id, hash, name, expiresAtStr, now.Format(time.RFC3339), createdBy, ultimateModelEnabled)
 	if err != nil {
 		return "", nil, err
 	}
 
 	token := &AuthToken{
-		ID:        id,
-		Name:      name,
-		TokenHash: hash,
-		ExpiresAt: expiresAt,
-		CreatedAt: now,
-		CreatedBy: createdBy,
+		ID:                   id,
+		Name:                 name,
+		TokenHash:            hash,
+		ExpiresAt:            expiresAt,
+		CreatedAt:            now,
+		CreatedBy:            createdBy,
+		UltimateModelEnabled: ultimateModelEnabled,
 	}
 
 	return plaintext, token, nil
@@ -86,12 +88,12 @@ func (s *TokenStore) ValidateToken(ctx context.Context, plaintext string) (*Auth
 
 	var query string
 	if s.dialect == database.PostgreSQL {
-		query = `SELECT id, token_hash, name, expires_at, created_at, created_by FROM auth_tokens WHERE token_hash = $1`
+		query = `SELECT id, token_hash, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens WHERE token_hash = $1`
 	} else {
-		query = `SELECT id, token_hash, name, expires_at, created_at, created_by FROM auth_tokens WHERE token_hash = ?`
+		query = `SELECT id, token_hash, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens WHERE token_hash = ?`
 	}
 
-	err := s.db.QueryRowContext(ctx, query, hash).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
+	err := s.db.QueryRowContext(ctx, query, hash).Scan(&token.ID, &token.TokenHash, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy, &token.UltimateModelEnabled)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrTokenNotFound
@@ -124,9 +126,14 @@ func (s *TokenStore) ValidateToken(ctx context.Context, plaintext string) (*Auth
 
 // ListTokens returns all tokens (without hashes)
 func (s *TokenStore) ListTokens(ctx context.Context) ([]AuthToken, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, expires_at, created_at, created_by
-		FROM auth_tokens ORDER BY created_at DESC`)
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens ORDER BY created_at DESC`
+	} else {
+		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens ORDER BY created_at DESC`
+	}
+
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +145,7 @@ func (s *TokenStore) ListTokens(ctx context.Context) ([]AuthToken, error) {
 		var expiresAtStr sql.NullString
 		var createdAtStr string
 
-		err := rows.Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
+		err := rows.Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy, &token.UltimateModelEnabled)
 		if err != nil {
 			return nil, err
 		}
@@ -192,12 +199,12 @@ func (s *TokenStore) GetTokenByID(ctx context.Context, id string) (*AuthToken, e
 
 	var query string
 	if s.dialect == database.PostgreSQL {
-		query = `SELECT id, name, expires_at, created_at, created_by FROM auth_tokens WHERE id = $1`
+		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens WHERE id = $1`
 	} else {
-		query = `SELECT id, name, expires_at, created_at, created_by FROM auth_tokens WHERE id = ?`
+		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens WHERE id = ?`
 	}
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&token.ID, &token.Name, &expiresAtStr, &createdAtStr, &token.CreatedBy, &token.UltimateModelEnabled)
 
 	if err == sql.ErrNoRows {
 		return nil, ErrTokenNotFound
@@ -217,4 +224,29 @@ func (s *TokenStore) GetTokenByID(ctx context.Context, id string) (*AuthToken, e
 	token.CreatedAt = t
 
 	return token, nil
+}
+
+// UpdateTokenPermission updates the ultimate_model_enabled flag for a token
+func (s *TokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool) error {
+	var query string
+	if s.dialect == database.PostgreSQL {
+		query = `UPDATE auth_tokens SET ultimate_model_enabled = $1 WHERE id = $2`
+	} else {
+		query = `UPDATE auth_tokens SET ultimate_model_enabled = ? WHERE id = ?`
+	}
+
+	result, err := s.db.ExecContext(ctx, query, ultimateModelEnabled, id)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrTokenNotFound
+	}
+
+	return nil
 }

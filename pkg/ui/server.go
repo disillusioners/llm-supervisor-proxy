@@ -807,17 +807,19 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 
 // TokenResponse represents a token in API responses (without sensitive data)
 type TokenResponse struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	ExpiresAt *string `json:"expires_at,omitempty"`
-	CreatedAt string  `json:"created_at"`
-	CreatedBy string  `json:"created_by"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	ExpiresAt            *string `json:"expires_at,omitempty"`
+	CreatedAt            string  `json:"created_at"`
+	CreatedBy            string  `json:"created_by"`
+	UltimateModelEnabled bool    `json:"ultimate_model_enabled"`
 }
 
 // CreateTokenRequest represents the request body for creating a token
 type CreateTokenRequest struct {
-	Name      string  `json:"name"`
-	ExpiresAt *string `json:"expires_at,omitempty"` // ISO 8601 format, optional
+	Name                 string  `json:"name"`
+	ExpiresAt            *string `json:"expires_at,omitempty"` // ISO 8601 format, optional
+	UltimateModelEnabled bool    `json:"ultimate_model_enabled"`
 }
 
 // CreateTokenResponse includes the plaintext token (shown only once)
@@ -840,13 +842,8 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTokenDetail handles DELETE for a specific token
+// handleTokenDetail handles DELETE and PATCH for a specific token
 func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	ctx := r.Context()
 	id := strings.TrimPrefix(r.URL.Path, "/fe/api/tokens/")
 	if id == "" {
@@ -859,17 +856,52 @@ func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.tokenStore.DeleteToken(ctx, id)
+	switch r.Method {
+	case http.MethodDelete:
+		err := s.tokenStore.DeleteToken(ctx, id)
+		if err != nil {
+			if err == auth.ErrTokenNotFound {
+				http.Error(w, "Token not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to delete token: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	case http.MethodPatch:
+		s.updateTokenPermission(ctx, w, r, id)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// UpdateTokenPermissionRequest represents the request body for updating token permission
+type UpdateTokenPermissionRequest struct {
+	UltimateModelEnabled bool `json:"ultimate_model_enabled"`
+}
+
+// updateTokenPermission handles PATCH /fe/api/tokens/{id}
+func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWriter, r *http.Request, id string) {
+	var req UpdateTokenPermissionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	err := s.tokenStore.UpdateTokenPermission(ctx, id, req.UltimateModelEnabled)
 	if err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to delete token: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to update token permission: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -889,10 +921,11 @@ func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.
 	response := make([]TokenResponse, len(tokens))
 	for i, t := range tokens {
 		response[i] = TokenResponse{
-			ID:        t.ID,
-			Name:      t.Name,
-			CreatedAt: t.CreatedAt.Format(time.RFC3339),
-			CreatedBy: t.CreatedBy,
+			ID:                   t.ID,
+			Name:                 t.Name,
+			CreatedAt:            t.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            t.CreatedBy,
+			UltimateModelEnabled: t.UltimateModelEnabled,
 		}
 		if t.ExpiresAt != nil {
 			iso := t.ExpiresAt.Format(time.RFC3339)
@@ -938,7 +971,7 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 		createdBy = user
 	}
 
-	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy)
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, req.UltimateModelEnabled)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
 		return
@@ -946,10 +979,11 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 
 	response := CreateTokenResponse{
 		TokenResponse: TokenResponse{
-			ID:        token.ID,
-			Name:      token.Name,
-			CreatedAt: token.CreatedAt.Format(time.RFC3339),
-			CreatedBy: token.CreatedBy,
+			ID:                   token.ID,
+			Name:                 token.Name,
+			CreatedAt:            token.CreatedAt.Format(time.RFC3339),
+			CreatedBy:            token.CreatedBy,
+			UltimateModelEnabled: token.UltimateModelEnabled,
 		},
 		Token: plaintext, // Show once!
 	}
