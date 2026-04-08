@@ -342,6 +342,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Reset accumulated buffers after request completes to prevent memory leaks
+	// from strings.Builder internal buffers retaining capacity
+	defer func() {
+		if rc != nil {
+			rc.reset()
+		}
+	}()
+
 	// Only authenticate if using internal upstream
 	// For external upstream, the upstream provider handles authentication
 	if h.requiresInternalAuth(rc) {

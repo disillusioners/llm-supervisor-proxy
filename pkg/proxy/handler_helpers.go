@@ -82,6 +82,26 @@ type requestContext struct {
 	tokenName string
 }
 
+// reset clears all accumulated state in the request context.
+// This is essential to prevent memory leaks from strings.Builder internal buffers
+// which retain capacity even after Reset() is called.
+func (rc *requestContext) reset() {
+	rc.accumulatedResponse.Reset()
+	rc.accumulatedThinking.Reset()
+	rc.accumulatedToolCalls = nil
+	// Reset each tool call builder to release internal buffer capacity
+	for _, b := range rc.toolCallArgBuilders {
+		b.Reset()
+	}
+	rc.toolCallArgBuilders = nil
+	rc.streamBuffer.Reset()
+	rc.headersSent = false
+	rc.streamID = ""
+	rc.streamIDSet = false
+	rc.streamingNonRetryable = false
+	rc.currentModelIndex = 0
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helper functions (no Handler receiver)
 // ─────────────────────────────────────────────────────────────────────────────

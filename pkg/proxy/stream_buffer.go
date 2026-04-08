@@ -67,7 +67,7 @@ type streamBuffer struct {
 	err       error         // Final error (if any)
 	totalLen  int64         // Total bytes buffered (atomic access)
 	maxBytes  int64         // Maximum bytes to buffer (memory protection)
-	overflow  bool          // True if maxBytes exceeded
+	overflow  uint32        // atomic: 1 if maxBytes exceeded
 	completed int32         // Atomic: 1 when stream done
 
 	// Caching for GetAllRawBytesOnce
@@ -108,7 +108,7 @@ func (sb *streamBuffer) Add(line []byte) bool {
 	// Check overflow atomically
 	newLen := atomic.AddInt64(&sb.totalLen, chunkSize)
 	if newLen > sb.maxBytes {
-		sb.overflow = true
+		atomic.StoreUint32(&sb.overflow, 1)
 		return false
 	}
 
@@ -142,6 +142,7 @@ func (sb *streamBuffer) Close(err error) {
 
 	sb.mu.Lock()
 	sb.err = err
+	sb.InvalidateCache() // W1: Invalidate cache when closing to prevent stale data
 	sb.mu.Unlock()
 
 	// Send final notification and close done channel
@@ -199,7 +200,10 @@ func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
 		return nil, fromIndex
 	}
 
-	// Fast path: fromIndex=0 with no nil chunks - return slice view without copy
+	// Fast path: fromIndex=0 with no nil chunks - return defensive copy of slice header
+	// Note: fast path only works before Prune() is called, since Prune() sets
+	// chunks to nil. This is intentional — after pruning, the slow path handles
+	// the sparse chunk slice correctly.
 	if fromIndex == 0 {
 		hasNil := false
 		for _, c := range sb.chunks {
@@ -209,7 +213,9 @@ func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
 			}
 		}
 		if !hasNil {
-			return sb.chunks, len(sb.chunks)
+			// W2: Defensive copy of slice header (~24 bytes) to prevent callers
+			// from getting direct reference to internal state
+			return append([][]byte(nil), sb.chunks...), len(sb.chunks)
 		}
 	}
 
@@ -252,8 +258,8 @@ func (sb *streamBuffer) Prune(readIndex int) {
 func (sb *streamBuffer) ShouldPrune(readIndex int) bool {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
-	// Only prune if readIndex is within bounds and past halfway point
-	return readIndex > 0 && readIndex <= len(sb.chunks) && readIndex > len(sb.chunks)/2
+	// W3: Fix boundary - only prune if readIndex is within bounds (not at end)
+	return readIndex > 0 && readIndex < len(sb.chunks) && readIndex > len(sb.chunks)/2
 }
 
 // TotalLen returns total buffered bytes. Thread-safe.

@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -161,8 +162,8 @@ func TestStreamBufferAddOverflow(t *testing.T) {
 		t.Error("Add() returned true on overflow, want false")
 	}
 
-	// Verify overflow flag is set
-	if !sb.overflow {
+	// Verify overflow flag is set (atomic read)
+	if atomic.LoadUint32(&sb.overflow) == 0 {
 		t.Error("overflow flag not set after overflow")
 	}
 }
@@ -751,9 +752,12 @@ func TestStreamBufferGetChunksFromFastPath(t *testing.T) {
 	chunks1, nextIndex := sb.GetChunksFrom(0)
 	chunks2, _ := sb.GetChunksFrom(0)
 
-	// Fast path should return same underlying slice
-	if &chunks1[0] != &chunks2[0] {
-		t.Error("Fast path should return same slice reference")
+	// Fast path returns defensive copy, so slices should have same content but different backing arrays
+	if len(chunks1) != len(chunks2) {
+		t.Error("Fast path chunks should have same length")
+	}
+	if &chunks1[0] == &chunks2[0] {
+		t.Error("Fast path should return defensive copy with different backing array")
 	}
 
 	// Next index should be 2 (len of chunks)
@@ -876,5 +880,79 @@ func TestStreamBufferInvalidateCacheOnPrune(t *testing.T) {
 	// result2 should have fewer bytes since we pruned
 	if len(result2) >= len(result1) {
 		t.Error("Cache should be invalidated after prune, result should be smaller")
+	}
+}
+
+// Test 1: GetChunksFrom fast path disabled after Prune
+func TestStreamBufferFastPathDisabledAfterPrune(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add data
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	// First call uses fast path (before pruning)
+	chunks1, _ := sb.GetChunksFrom(0)
+	_ = chunks1 // Verify fast path works
+
+	// Prune - this sets chunks to nil
+	sb.Prune(1)
+
+	// After pruning, fast path should be disabled (slow path handles nil chunks)
+	// GetChunksFrom should use slow path and filter out nil chunks
+	chunks2, _ := sb.GetChunksFrom(0)
+
+	// Should have 1 remaining chunk (nil chunk was filtered)
+	if len(chunks2) != 1 {
+		t.Errorf("Expected 1 chunk after pruning, got %d", len(chunks2))
+	}
+}
+
+// Test 2: GetAllRawBytesOnce after Close
+func TestStreamBufferGetAllRawBytesOnceAfterClose(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add data
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	// Cache the result
+	result1 := sb.GetAllRawBytesOnce()
+
+	// Close the buffer
+	sb.Close(nil)
+
+	// GetAllRawBytesOnce should still work (cache was invalidated, rebuilt from chunks)
+	result2 := sb.GetAllRawBytesOnce()
+
+	// Should return valid data
+	if len(result2) == 0 {
+		t.Error("GetAllRawBytesOnce after Close should return remaining chunks")
+	}
+
+	// result2 should be same as result1 (content unchanged after close)
+	if string(result1) != string(result2) {
+		t.Errorf("GetAllRawBytesOnce content changed after Close: got %q, want %q", string(result2), string(result1))
+	}
+}
+
+// Test 3: ShouldPrune boundary when readIndex == len(chunks)
+func TestStreamBufferShouldPruneBoundaryAtEnd(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add 4 chunks
+	for i := 0; i < 4; i++ {
+		sb.Add([]byte("chunk"))
+	}
+
+	// readIndex == len(chunks) (all consumed) should NOT trigger prune
+	if sb.ShouldPrune(4) {
+		t.Error("ShouldPrune(4) should be false when len(chunks)=4 (all consumed)")
+	}
+
+	// readIndex == len(chunks) - 1 (one remaining) SHOULD trigger prune
+	// (past halfway point: 3 > 4/2 = 2)
+	if !sb.ShouldPrune(3) {
+		t.Error("ShouldPrune(3) should be true (past halfway, one chunk remaining)")
 	}
 }

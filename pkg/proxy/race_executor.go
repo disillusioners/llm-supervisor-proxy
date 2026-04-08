@@ -762,6 +762,12 @@ func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
 	// Extract JSON part (skip "data: " prefix)
 	jsonPart := line[len(dataPrefix):]
 
+	// Quick filter: skip unmarshaling if chunk likely has no usage data
+	// Most chunks don't contain usage/choices fields, so avoid expensive JSON parse
+	if !bytes.Contains(jsonPart, []byte(`"usage"`)) && !bytes.Contains(jsonPart, []byte(`"choices"`)) {
+		return
+	}
+
 	// Try to parse as JSON
 	var chunk map[string]interface{}
 	if err := json.Unmarshal(jsonPart, &chunk); err != nil {

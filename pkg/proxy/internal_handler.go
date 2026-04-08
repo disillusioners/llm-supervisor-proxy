@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
@@ -26,9 +27,9 @@ type InternalHandler struct {
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
 
 	// Tool call buffer configuration
-	toolCallBufferMaxSize   int64            // Max size for tool call buffer
-	toolCallBufferDisabled  bool             // Disable tool call buffering
-	toolRepairConfig        *toolrepair.Config // Tool repair config for buffer
+	toolCallBufferMaxSize  int64              // Max size for tool call buffer
+	toolCallBufferDisabled bool               // Disable tool call buffering
+	toolRepairConfig       *toolrepair.Config // Tool repair config for buffer
 }
 
 // NewInternalHandler creates a new internal handler for a model
@@ -293,15 +294,16 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 						msg.Content = c
 					case []interface{}:
 						// Flatten array content to string for provider compatibility
-						var contentStr string
+						var sb strings.Builder
+						sb.Grow(len(c) * 64) // Pre-allocate reasonable capacity
 						for _, part := range c {
 							if partMap, ok := part.(map[string]interface{}); ok {
 								if text, ok := partMap["text"].(string); ok {
-									contentStr += text
+									sb.WriteString(text)
 								}
 							}
 						}
-						msg.Content = contentStr
+						msg.Content = sb.String()
 					default:
 						// Unsupported content type, skip or handle as needed
 						logger.Debugf("Unsupported content type: %T", content)
