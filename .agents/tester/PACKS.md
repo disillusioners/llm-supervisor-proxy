@@ -21,7 +21,7 @@
 | models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors | 120s | 2026-04-06 | PASS |
 | toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-04-06 | PASS |
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-04-06 | PASS |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-04-06 | PASS |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-04-09 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-04-06 | PASS |
 
 ## Mock Test Packs
