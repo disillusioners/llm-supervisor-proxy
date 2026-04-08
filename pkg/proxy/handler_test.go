@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -1967,5 +1968,323 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	}
 	if reqs[0].Status != "completed" {
 		t.Errorf("expected status 'completed', got '%s' - request was incorrectly terminated", reqs[0].Status)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Ultimate Model Permission Gate Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ultimateMockTokenStore is a mock implementation of auth.TokenStoreInterface for ultimate model tests
+type ultimateMockTokenStore struct {
+	tokens map[string]*auth.AuthToken
+}
+
+func newUltimateMockTokenStore() *ultimateMockTokenStore {
+	return &ultimateMockTokenStore{
+		tokens: make(map[string]*auth.AuthToken),
+	}
+}
+
+func (m *ultimateMockTokenStore) addToken(plaintext string, token *auth.AuthToken) {
+	m.tokens[plaintext] = token
+}
+
+func (m *ultimateMockTokenStore) ValidateToken(ctx context.Context, plaintext string) (*auth.AuthToken, error) {
+	if token, ok := m.tokens[plaintext]; ok {
+		return token, nil
+	}
+	return nil, auth.ErrTokenNotFound
+}
+
+// newTestHandlerWithTokenStore creates a handler with a mock token store for auth testing
+func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig models.ModelsConfigInterface, tokenStore auth.TokenStoreInterface, configOpts ...func(*config.Config)) (*Handler, *httptest.Server) {
+	t.Helper()
+
+	upstream := httptest.NewServer(upstreamHandler)
+
+	mgr := newTestManagerWithConfig(t, upstream.URL, configOpts...)
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+
+	t.Cleanup(func() {
+		upstream.Close()
+	})
+
+	return h, upstream
+}
+
+// TestUltimateModelPermissionGranted_AllowsFlow tests that when permission is granted,
+// the ultimate model gate does not block the request and allows normal flow to proceed.
+// This test verifies the permission gate allows through authorized requests.
+func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
+	// Create internal model config (triggers auth)
+	mc := models.NewModelsConfig()
+	mc.AddModel(models.ModelConfig{
+		ID:       "internal-model",
+		Name:     "Internal Model",
+		Enabled:  true,
+		Internal: true, // This triggers authentication
+	})
+
+	// Set up ultimate model config
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	cfg := mgr.Get()
+	cfg.UltimateModel.ModelID = "ultimate-model"
+	cfg.UltimateModel.MaxHash = 100
+	cfg.UltimateModel.MaxRetries = 3
+	mgr.Save(cfg)
+
+	// Create mock token store with permission granted
+	tokenStore := newMockTokenStore()
+	tokenStore.addToken("sk-test-token-enabled", &auth.AuthToken{
+		ID:                   "token-123",
+		Name:                 "Test Token",
+		UltimateModelEnabled: true, // Permission granted
+	})
+
+	// Create handler with mock LLM
+	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
+		c.UltimateModel.ModelID = "ultimate-model"
+		c.UltimateModel.MaxHash = 100
+		c.UltimateModel.MaxRetries = 3
+	})
+	defer upstream.Close()
+
+	// Send request with permission granted
+	body := simpleBody("internal-model", true)
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer sk-test-token-enabled")
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// With permission granted, the request should complete successfully
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200 with permission granted, got %d", rr.Code)
+	}
+
+	// Verify the response contains the normal proxy response
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in response")
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}
+
+// TestUltimateModelPermissionDenied_SkipsUltimateModel tests that when permission is denied,
+// the ultimate model check is skipped entirely and requests fall through to normal proxy.
+func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
+	// Create internal model config (triggers auth)
+	mc := models.NewModelsConfig()
+	mc.AddModel(models.ModelConfig{
+		ID:       "internal-model",
+		Name:     "Internal Model",
+		Enabled:  true,
+		Internal: true, // This triggers authentication
+	})
+
+	// Set up ultimate model config
+	t.Setenv("APPLY_ENV_OVERRIDES", "1")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+
+	// Create mock token store with permission DENIED
+	tokenStore := newMockTokenStore()
+	tokenStore.addToken("sk-test-token-denied", &auth.AuthToken{
+		ID:                   "token-456",
+		Name:                 "Denied Token",
+		UltimateModelEnabled: false, // Permission denied
+	})
+
+	// Create handler with mock LLM
+	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
+		c.UltimateModel.ModelID = "ultimate-model"
+		c.UltimateModel.MaxHash = 100
+		c.UltimateModel.MaxRetries = 3
+	})
+	defer upstream.Close()
+
+	// Send request with permission denied (streaming to get SSE format)
+	body := simpleBody("internal-model", true)
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer sk-test-token-denied")
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Request should complete successfully via normal proxy (not ultimate model)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200 with permission denied, got %d", rr.Code)
+	}
+
+	// Verify the response contains the normal proxy response (SSE format with [DONE])
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in normal proxy response")
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+	// Verify ultimate model was NOT used
+	if reqs[0].UltimateModelUsed {
+		t.Error("expected UltimateModelUsed to be false when permission denied")
+	}
+}
+
+// TestUltimateModelPermissionDenied_HashInCache_Skips tests that even if a hash exists in
+// the ultimate model cache, the permission gate prevents ultimate model triggering.
+func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
+	// Create internal model config (triggers auth)
+	mc := models.NewModelsConfig()
+	mc.AddModel(models.ModelConfig{
+		ID:       "internal-model",
+		Name:     "Internal Model",
+		Enabled:  true,
+		Internal: true,
+	})
+
+	// Create mock token store with permission DENIED
+	tokenStore := newMockTokenStore()
+	tokenStore.addToken("sk-test-token-denied", &auth.AuthToken{
+		ID:                   "token-789",
+		Name:                 "Denied Token",
+		UltimateModelEnabled: false, // Permission denied
+	})
+
+	// Create handler with mock LLM
+	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
+		c.UltimateModel.ModelID = "ultimate-model"
+		c.UltimateModel.MaxHash = 100
+		c.UltimateModel.MaxRetries = 3
+	})
+	defer upstream.Close()
+
+	// Pre-populate the ultimate model hash cache with a known hash
+	// This simulates a previously failed request that should trigger ultimate model
+	testMessages := []map[string]interface{}{
+		{"role": "user", "content": "test prompt for hash"},
+	}
+	h.ultimateHandler.ShouldTrigger(testMessages) // This computes and checks the hash
+	// Mark it as failed to store in cache
+	h.ultimateHandler.MarkFailed(testMessages)
+
+	// Send the SAME request that would trigger ultimate model (hash in cache)
+	// but with permission DENIED
+	body := bodyWithPrompt("internal-model", true, "test prompt for hash")
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer sk-test-token-denied")
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Request should complete via normal proxy (ultimate model skipped due to permission)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200 with permission denied even with hash in cache, got %d", rr.Code)
+	}
+
+	// Verify response came from normal proxy
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in response from normal proxy")
+	}
+
+	// Verify request completed via normal proxy, not ultimate model
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+	// Verify ultimate model was NOT used despite hash being in cache
+	if reqs[0].UltimateModelUsed {
+		t.Error("expected UltimateModelUsed to be false - permission denied should skip ultimate model even with hash in cache")
+	}
+}
+
+// TestUltimateModelPermission_NoAuth_DefaultsFalse tests that when no authentication
+// is required (external model), ultimate model is not triggered because rc.ultimateModelEnabled
+// defaults to false.
+func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
+	// Create external model config (does NOT trigger auth)
+	mc := models.NewModelsConfig()
+	mc.AddModel(models.ModelConfig{
+		ID:      "external-model",
+		Name:    "External Model",
+		Enabled: true,
+		// Internal: false (default) - no auth required
+	})
+
+	// Create handler WITHOUT token store (auth disabled)
+	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, nil, func(c *config.Config) {
+		c.UltimateModel.ModelID = "ultimate-model"
+		c.UltimateModel.MaxHash = 100
+		c.UltimateModel.MaxRetries = 3
+	})
+	defer upstream.Close()
+
+	// Pre-populate hash cache
+	testMessages := []map[string]interface{}{
+		{"role": "user", "content": "test prompt no auth"},
+	}
+	h.ultimateHandler.MarkFailed(testMessages)
+
+	// Send request without authentication
+	body := bodyWithPrompt("external-model", true, "test prompt no auth")
+	req := makeRequest(t, body)
+	// No Authorization header - simulates external model request
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Request should complete via normal proxy
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify no ultimate model was triggered
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "[DONE]") {
+		t.Error("expected [DONE] in response from normal proxy")
+	}
+
+	// Verify request completed via normal proxy
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+	if reqs[0].UltimateModelUsed {
+		t.Error("expected UltimateModelUsed to be false for unauthenticated request")
 	}
 }

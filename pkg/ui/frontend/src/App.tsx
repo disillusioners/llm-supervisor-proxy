@@ -9,7 +9,7 @@ export function App() {
   const { requests, loading: requestsLoading, refetch: refetchRequests } = useRequests();
   const { config, updateConfig, refetch: refetchConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel, refetch: refetchModels } = useModels();
-  const { tokens, createToken, deleteToken, refetch: refetchTokens } = useTokens();
+  const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
  
  const { appTags, refetch: refetchAppTags } = useAppTags();
 
@@ -26,6 +26,7 @@ export function App() {
         tokens={tokens}
         onCreateToken={createToken}
         onDeleteToken={deleteToken}
+        onUpdateTokenPermission={updateTokenPermission}
         onRefetchTokens={refetchTokens}
       />
       <DashboardRoute
@@ -142,6 +143,7 @@ function SettingsRoute({
     tokens,
     onCreateToken,
     onDeleteToken,
+    onUpdateTokenPermission,
     onRefetchTokens,
 }: {
     config: any;
@@ -151,8 +153,9 @@ function SettingsRoute({
     onUpdateModel: (id: string, updates: any) => Promise<void>;
     onDeleteModel: (id: string) => Promise<void>;
     tokens: any[];
-    onCreateToken: (name: string, expiresAt: string | null) => Promise<any>;
+    onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
+    onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean) => Promise<boolean>;
     onRefetchTokens: () => void;
 }) {
     return (
@@ -166,6 +169,7 @@ function SettingsRoute({
             tokens={tokens}
             onCreateToken={onCreateToken}
             onDeleteToken={onDeleteToken}
+            onUpdateTokenPermission={onUpdateTokenPermission}
             onRefetchTokens={onRefetchTokens}
         />
     );

@@ -80,6 +80,9 @@ type requestContext struct {
 	// Token identity for usage tracking
 	tokenID   string
 	tokenName string
+
+	// Ultimate model permission (from token)
+	ultimateModelEnabled bool
 }
 
 // reset clears all accumulated state in the request context.

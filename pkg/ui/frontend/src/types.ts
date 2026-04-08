@@ -126,10 +126,11 @@ export interface ApiToken {
   id: string;
   name: string;
   token?: string;         // Only returned once on creation
-  prefix: string;         // e.g., "sk-proxy-***"
+  prefix: string;        // e.g., "sk-proxy-***"
   expires_at?: string;    // ISO date or null
   created_at: string;
   last_used_at?: string;
+  ultimate_model_enabled: boolean;
 }
 
 export interface Message {

@@ -6,11 +6,15 @@ interface TokenListProps {
   onRevoke: (id: string) => Promise<void>;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
   onCreateToken: () => void;
+  onUpdatePermission: (id: string, ultimateModelEnabled: boolean) => Promise<boolean>;
+  onRefetchTokens: () => void;
 }
 
-export function TokenList({ tokens, onRevoke, onStatus, onCreateToken }: TokenListProps) {
+export function TokenList({ tokens, onRevoke, onStatus, onCreateToken, onUpdatePermission, onRefetchTokens }: TokenListProps) {
   const [tokenToRevoke, setTokenToRevoke] = useState<ApiToken | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [optimisticValues, setOptimisticValues] = useState<Record<string, boolean>>({});
 
   const handleConfirmRevoke = async () => {
     if (!tokenToRevoke) return;
@@ -45,6 +49,42 @@ export function TokenList({ tokens, onRevoke, onStatus, onCreateToken }: TokenLi
     return new Date(expiresAt) < new Date();
   };
 
+  const handleTogglePermission = async (token: ApiToken) => {
+    if (togglingId) return; // Prevent concurrent toggles
+    const newValue = !token.ultimate_model_enabled;
+    try {
+      setTogglingId(token.id);
+      onStatus(null);
+      // Optimistic update - toggle immediately
+      setOptimisticValues(prev => ({ ...prev, [token.id]: newValue }));
+      const success = await onUpdatePermission(token.id, newValue);
+      if (!success) {
+        // 404 - token was deleted, refresh list and revert optimistic update
+        setOptimisticValues(prev => {
+          const next = { ...prev };
+          delete next[token.id];
+          return next;
+        });
+        onRefetchTokens();
+        onStatus({ type: 'error', message: 'Token not found. The list has been refreshed.' });
+      }
+    } catch (e) {
+      // Revert optimistic update on error
+      setOptimisticValues(prev => {
+        const next = { ...prev };
+        delete next[token.id];
+        return next;
+      });
+      onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update permission' });
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const isTokenEnabled = (token: ApiToken) => {
+    return token.id in optimisticValues ? optimisticValues[token.id] : token.ultimate_model_enabled;
+  };
+
   return (
     <div class="space-y-4">
       <div class="flex justify-between items-center mb-2">
@@ -70,48 +110,72 @@ export function TokenList({ tokens, onRevoke, onStatus, onCreateToken }: TokenLi
         </div>
       ) : (
         <div class="space-y-2">
-          {tokens.map((token) => (
-            <div
-              key={token.id}
-              class="flex items-center justify-between bg-gray-700/80 rounded-md p-3 border border-gray-600/50 hover:bg-gray-700 transition-colors"
-            >
-              <div class="flex items-center gap-3 flex-1 min-w-0">
-                <div class="flex-1 min-w-0">
-                  <p class="text-gray-100 font-medium truncate flex items-center gap-2">
-                    {token.name}
-                    {isExpired(token.expires_at) && (
-                      <span class="text-xs bg-red-900/50 text-red-300 border border-red-800/40 px-1.5 py-0.5 rounded">
-                        Expired
-                      </span>
-                    )}
-                  </p>
-                  <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
-                    {token.prefix}
-                  </p>
-                  <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
-                    <span>Created: {formatDate(token.created_at)}</span>
-                    {token.expires_at && (
-                      <span>Expires: {formatDate(token.expires_at)}</span>
-                    )}
-                    {token.last_used_at && (
-                      <span>Last used: {formatDate(token.last_used_at)}</span>
-                    )}
+          {tokens.map((token) => {
+            const enabled = isTokenEnabled(token);
+            const isToggling = togglingId === token.id;
+            return (
+              <div
+                key={token.id}
+                class="flex items-center justify-between bg-gray-700/80 rounded-md p-3 border border-gray-600/50 hover:bg-gray-700 transition-colors"
+              >
+                <div class="flex items-center gap-3 flex-1 min-w-0">
+                  <div class="flex-1 min-w-0">
+                    <p class="text-gray-100 font-medium truncate flex items-center gap-2">
+                      {token.name}
+                      {isExpired(token.expires_at) && (
+                        <span class="text-xs bg-red-900/50 text-red-300 border border-red-800/40 px-1.5 py-0.5 rounded">
+                          Expired
+                        </span>
+                      )}
+                      {enabled && (
+                        <span class="text-xs bg-purple-900/50 text-purple-300 border border-purple-800/40 px-1.5 py-0.5 rounded">
+                          ULTIMATE
+                        </span>
+                      )}
+                    </p>
+                    <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
+                      {token.prefix}
+                    </p>
+                    <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                      <span>Created: {formatDate(token.created_at)}</span>
+                      {token.expires_at && (
+                        <span>Expires: {formatDate(token.expires_at)}</span>
+                      )}
+                      {token.last_used_at && (
+                        <span>Last used: {formatDate(token.last_used_at)}</span>
+                      )}
+                    </div>
                   </div>
                 </div>
+                <div class="flex items-center gap-1 flex-shrink-0 ml-4">
+                  {/* Ultimate Model Toggle */}
+                  <div class="flex items-center gap-2 mr-2" title="Ultimate Model Access">
+                    <button
+                      type="button"
+                      onClick={() => handleTogglePermission(token)}
+                      disabled={isToggling}
+                      class={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                        enabled ? 'bg-purple-600' : 'bg-gray-600'
+                      } ${isToggling ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <span class={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                        enabled ? 'translate-x-5' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => setTokenToRevoke(token)}
+                    class="text-gray-400 hover:text-red-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
+                    title="Revoke token"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
               </div>
-              <div class="flex items-center gap-1 flex-shrink-0 ml-4">
-                <button
-                  onClick={() => setTokenToRevoke(token)}
-                  class="text-gray-400 hover:text-red-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
-                  title="Revoke token"
-                >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

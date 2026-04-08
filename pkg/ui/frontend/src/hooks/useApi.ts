@@ -269,14 +269,32 @@ export function useTokens() {
     }
   }, []);
 
-  const createToken = useCallback(async (name: string, expiresAt: string | null): Promise<ApiToken> => {
+  const createToken = useCallback(async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean): Promise<ApiToken> => {
     const token = await apiFetch<ApiToken>('/tokens', {
       method: 'POST',
-      body: JSON.stringify({ name, expires_at: expiresAt }),
+      body: JSON.stringify({ name, expires_at: expiresAt, ultimate_model_enabled: ultimateModelEnabled }),
     });
     await fetchTokens();
     return token;
   }, [fetchTokens]);
+
+  const updateTokenPermission = useCallback(async (id: string, ultimateModelEnabled: boolean): Promise<boolean> => {
+    try {
+      await apiFetch<{ success: boolean }>(`/tokens/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ultimate_model_enabled: ultimateModelEnabled }),
+      });
+      // Update local state on success only
+      setTokens(prev => prev.map(t => t.id === id ? { ...t, ultimate_model_enabled: ultimateModelEnabled } : t));
+      return true;
+    } catch (e) {
+      // Check for 404 - token not found
+      if (e instanceof Error && e.message.includes('404')) {
+        return false;
+      }
+      throw e;
+    }
+  }, []);
 
   const deleteToken = useCallback(async (id: string) => {
     await apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' });
@@ -287,7 +305,7 @@ export function useTokens() {
     fetchTokens();
   }, [fetchTokens]);
 
-  return { tokens, loading, createToken, deleteToken, refetch: fetchTokens };
+  return { tokens, loading, createToken, updateTokenPermission, deleteToken, refetch: fetchTokens };
 }
 
 // Credentials API

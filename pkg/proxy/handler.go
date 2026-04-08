@@ -374,12 +374,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		if token != nil {
 			rc.tokenID = token.ID
 			rc.tokenName = token.Name
+			rc.ultimateModelEnabled = token.UltimateModelEnabled
 		}
+	}
+
+	// Debug log when ultimate model is skipped due to missing permission
+	if h.ultimateHandler != nil && !rc.ultimateModelEnabled && rc.tokenID != "" {
+		log.Printf("[DEBUG] ultimate model skipped: token %s lacks ultimate_model_enabled", rc.tokenID)
 	}
 
 	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
 	// Check if ultimate model should be triggered for duplicate requests
-	if h.ultimateHandler != nil {
+	// Permission gate: skip if token lacks ultimate_model_enabled permission
+	if h.ultimateHandler != nil && rc.ultimateModelEnabled {
 		// Extract messages from request body
 		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
 			// Convert to map[string]interface{} format for hashing

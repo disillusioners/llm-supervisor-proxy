@@ -20,8 +20,9 @@ interface SettingsPageProps {
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
   tokens: ApiToken[];
-  onCreateToken: (name: string, expiresAt: string | null) => Promise<ApiToken>;
+  onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
+  onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean) => Promise<boolean>;
   onRefetchTokens: () => void;
 }
 
@@ -40,6 +41,7 @@ export function SettingsPage({
   tokens,
   onCreateToken,
   onDeleteToken,
+  onUpdateTokenPermission,
   onRefetchTokens,
 }: SettingsPageProps) {
   const [activeTab, setActiveTab] = useState<TabType>('proxy');
@@ -232,9 +234,9 @@ export function SettingsPage({
   };
 
   // Token handlers
-  const handleCreateToken = async (name: string, expiresAt: string | null) => {
+  const handleCreateToken = async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => {
     try {
-      const token = await onCreateToken(name, expiresAt);
+      const token = await onCreateToken(name, expiresAt, ultimateModelEnabled);
       setNewToken(token);
       setShowTokenValue(true);
       onRefetchTokens();
@@ -444,6 +446,8 @@ export function SettingsPage({
                   onRevoke={handleRevokeToken}
                   onStatus={setStatusWrapper}
                   onCreateToken={() => setShowTokenForm(true)}
+                  onUpdatePermission={onUpdateTokenPermission}
+                  onRefetchTokens={onRefetchTokens}
                 />
               ) : (
                 <TokenForm
