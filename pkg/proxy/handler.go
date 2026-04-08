@@ -592,7 +592,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	// Capture raw bytes BEFORE any pruning happens - this is the complete response
 	if rc.conf.LogRawUpstreamResponse {
 		if buf := winner.GetBuffer(); buf != nil {
-			capturedBytes := buf.GetAllRawBytes()
+			capturedBytes := buf.GetAllRawBytesOnce()
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 		}
 	}
@@ -638,7 +638,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	if flusher != nil {
 		flusher.Flush()
 	}
-	buffer.Prune(readIndex)
+	if buffer.ShouldPrune(readIndex) {
+		buffer.Prune(readIndex)
+	}
 
 	// Continue streaming until complete
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -665,7 +667,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if flusher != nil {
 				flusher.Flush()
 			}
-			buffer.Prune(readIndex)
+			if buffer.ShouldPrune(readIndex) {
+				buffer.Prune(readIndex)
+			}
 		case <-buffer.Done():
 			// Stream complete - drain remaining data
 			chunks, _ = buffer.GetChunksFrom(readIndex)
@@ -694,7 +698,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				// Log raw response on error
 				if rc.conf.LogRawUpstreamOnError {
 					if buf := winner.GetBuffer(); buf != nil {
-						capturedBytes := buf.GetAllRawBytes()
+						capturedBytes := buf.GetAllRawBytesOnce()
 						go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 					}
 				}
@@ -728,7 +732,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// Log raw response on success if enabled - capture bytes BEFORE final pruning
 			if rc.conf.LogRawUpstreamResponse {
 				if buf := winner.GetBuffer(); buf != nil {
-					capturedBytes := buf.GetAllRawBytes()
+					capturedBytes := buf.GetAllRawBytesOnce()
 					go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 				}
 			}
@@ -850,7 +854,9 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if flusher != nil {
 					flusher.Flush()
 				}
-				buffer.Prune(readIndex)
+				if buffer.ShouldPrune(readIndex) {
+					buffer.Prune(readIndex)
+				}
 			}
 
 			// Idle termination: check if upstream has stopped sending data
@@ -884,7 +890,7 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		// Log raw response on error if enabled - capture bytes before returning
 		if rc.conf.LogRawUpstreamOnError {
 			if buf := winner.GetBuffer(); buf != nil {
-				capturedBytes := buf.GetAllRawBytes()
+				capturedBytes := buf.GetAllRawBytesOnce()
 				go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 			}
 		}
@@ -987,7 +993,7 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	// Log raw response on success if enabled - capture bytes before returning
 	if rc.conf.LogRawUpstreamResponse {
 		if buf := winner.GetBuffer(); buf != nil {
-			capturedBytes := buf.GetAllRawBytes()
+			capturedBytes := buf.GetAllRawBytesOnce()
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 		}
 	}

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -596,5 +597,284 @@ func TestStreamBufferGetAllRawBytesWithPrune(t *testing.T) {
 	// "b\n" + "c\n" = 4 bytes
 	if len(result) != 4 {
 		t.Errorf("GetAllRawBytes() = %d bytes after prune, want 4", len(result))
+	}
+}
+
+func TestChunkPool(t *testing.T) {
+	pool := newChunkPool()
+
+	// Test Get with small size
+	chunk := pool.Get(100)
+	if cap(chunk) < 100 {
+		t.Errorf("Get(100) returned chunk with capacity %d, want >= 100", cap(chunk))
+	}
+	if len(chunk) != 100 {
+		t.Errorf("Get(100) returned chunk with length %d, want 100", len(chunk))
+	}
+	pool.Put(chunk)
+
+	// Test Get with larger size
+	chunk2 := pool.Get(4000)
+	if cap(chunk2) < 4000 {
+		t.Errorf("Get(4000) returned chunk with capacity %d, want >= 4000", cap(chunk2))
+	}
+	pool.Put(chunk2)
+
+	// Test Get with very large size (shouldn't pool)
+	chunk3 := pool.Get(100 * 1024)
+	if cap(chunk3) < 100*1024 {
+		t.Errorf("Get(100*1024) returned chunk with capacity %d, want >= 100KB", cap(chunk3))
+	}
+	// Very large chunks should not be returned to pool (we don't call Put for them)
+
+	// Test that reused chunks have correct data
+	chunk4 := pool.Get(50)
+	for i := range chunk4 {
+		chunk4[i] = byte(i % 256)
+	}
+	pool.Put(chunk4)
+
+	chunk5 := pool.Get(50)
+	// Verify chunk is reused (may or may not have old data depending on pool implementation)
+	if cap(chunk5) < 50 {
+		t.Errorf("Get(50) after put returned chunk with capacity %d, want >= 50", cap(chunk5))
+	}
+}
+
+func TestChunkPoolSizes(t *testing.T) {
+	tests := []struct {
+		name    string
+		minSize int
+	}{
+		{"tiny", 100},
+		{"small", 1000},
+		{"medium", 4000},
+		{"large", 8000},
+		{"xlarge", 64 * 1024},
+	}
+
+	pool := newChunkPool()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunk := pool.Get(tt.minSize)
+			if len(chunk) != tt.minSize {
+				t.Errorf("Get(%d) len = %d, want %d", tt.minSize, len(chunk), tt.minSize)
+			}
+			if cap(chunk) < tt.minSize {
+				t.Errorf("Get(%d) cap = %d, want >= %d", tt.minSize, cap(chunk), tt.minSize)
+			}
+			pool.Put(chunk)
+		})
+	}
+}
+
+func TestChunkPoolVeryLargeChunks(t *testing.T) {
+	pool := newChunkPool()
+
+	// Very large chunks (>64KB) should be allocated but not pooled
+	// They should still work correctly
+	chunk := pool.Get(128 * 1024)
+	if len(chunk) != 128*1024 {
+		t.Errorf("Get(128*1024) len = %d, want %d", len(chunk), 128*1024)
+	}
+
+	// Write some data
+	for i := 0; i < len(chunk); i++ {
+		chunk[i] = byte(i % 256)
+	}
+
+	// Verify data
+	for i := 0; i < len(chunk); i++ {
+		if chunk[i] != byte(i%256) {
+			t.Errorf("chunk[%d] = %d, want %d", i, chunk[i], byte(i%256))
+			break
+		}
+	}
+}
+
+func BenchmarkChunkPoolGet(b *testing.B) {
+	pool := newChunkPool()
+	for i := 0; i < b.N; i++ {
+		chunk := pool.Get(1000)
+		pool.Put(chunk)
+	}
+}
+
+func BenchmarkChunkAllocation(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		chunk := make([]byte, 1000)
+		_ = chunk
+	}
+}
+
+// === Memory Optimization Tests ===
+
+func TestStreamBufferGetAllRawBytesOnce(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add some data
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	// First call should build cache
+	result1 := sb.GetAllRawBytesOnce()
+
+	// Second call should return cached result
+	result2 := sb.GetAllRawBytesOnce()
+
+	if &result1[0] != &result2[0] {
+		t.Error("GetAllRawBytesOnce should return cached result")
+	}
+}
+
+func TestStreamBufferCacheInvalidation(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	sb.Add([]byte("chunk1"))
+	result1 := sb.GetAllRawBytesOnce()
+
+	sb.Add([]byte("chunk2"))
+	result2 := sb.GetAllRawBytesOnce()
+
+	if &result1[0] == &result2[0] {
+		t.Error("Cache should be invalidated after Add")
+	}
+}
+
+func TestStreamBufferGetChunksFromFastPath(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	chunks1, nextIndex := sb.GetChunksFrom(0)
+	chunks2, _ := sb.GetChunksFrom(0)
+
+	// Fast path should return same underlying slice
+	if &chunks1[0] != &chunks2[0] {
+		t.Error("Fast path should return same slice reference")
+	}
+
+	// Next index should be 2 (len of chunks)
+	if nextIndex != 2 {
+		t.Errorf("Expected nextIndex=2, got %d", nextIndex)
+	}
+}
+
+func TestStreamBufferShouldPrune(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add 4 chunks
+	for i := 0; i < 4; i++ {
+		sb.Add([]byte("chunk"))
+	}
+
+	// readIndex=0 should NOT trigger prune
+	if sb.ShouldPrune(0) {
+		t.Error("ShouldPrune(0) should be false")
+	}
+
+	// readIndex=1 should NOT trigger prune (1 <= 4/2)
+	if sb.ShouldPrune(1) {
+		t.Error("ShouldPrune(1) should be false")
+	}
+
+	// readIndex=2 should NOT trigger prune (2 == 4/2)
+	if sb.ShouldPrune(2) {
+		t.Error("ShouldPrune(2) should be false")
+	}
+
+	// readIndex=3 should trigger prune (3 > 4/2)
+	if !sb.ShouldPrune(3) {
+		t.Error("ShouldPrune(3) should be true")
+	}
+}
+
+func TestStreamBufferShouldPruneEmptyBuffer(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Empty buffer - no pruning needed
+	if sb.ShouldPrune(0) {
+		t.Error("ShouldPrune(0) on empty buffer should be false")
+	}
+	if sb.ShouldPrune(1) {
+		t.Error("ShouldPrune(1) on empty buffer should be false")
+	}
+}
+
+func TestStreamBufferGetChunksFromWithPrunedChunks(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add 4 chunks
+	for i := 0; i < 4; i++ {
+		sb.Add([]byte("chunk"))
+	}
+
+	// Prune first 2 chunks
+	sb.Prune(2)
+
+	// GetChunksFrom(0) should skip nil chunks
+	chunks, nextIndex := sb.GetChunksFrom(0)
+
+	// Should have 2 remaining chunks
+	if len(chunks) != 2 {
+		t.Errorf("Expected 2 chunks after pruning, got %d", len(chunks))
+	}
+
+	// Next index should be 4 (original length)
+	if nextIndex != 4 {
+		t.Errorf("Expected nextIndex=4, got %d", nextIndex)
+	}
+}
+
+func TestStreamBufferGetAllRawBytesOnceConcurrency(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add some data
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	var wg sync.WaitGroup
+	results := make([][]byte, 10)
+
+	// Launch 10 concurrent readers
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = sb.GetAllRawBytesOnce()
+		}(i)
+	}
+
+	wg.Wait()
+
+	// All results should have the same memory address (cached)
+	for i := 1; i < 10; i++ {
+		if &results[0][0] != &results[i][0] {
+			t.Errorf("Result %d has different address than result 0", i)
+		}
+	}
+}
+
+func TestStreamBufferInvalidateCacheOnPrune(t *testing.T) {
+	sb := newStreamBuffer(1024 * 1024)
+
+	// Add data
+	sb.Add([]byte("chunk1"))
+	sb.Add([]byte("chunk2"))
+
+	// First call builds cache
+	result1 := sb.GetAllRawBytesOnce()
+
+	// Prune should invalidate cache
+	sb.Prune(1)
+
+	// Next call should rebuild cache
+	result2 := sb.GetAllRawBytesOnce()
+
+	// result2 should have fewer bytes since we pruned
+	if len(result2) >= len(result1) {
+		t.Error("Cache should be invalidated after prune, result should be smaller")
 	}
 }
