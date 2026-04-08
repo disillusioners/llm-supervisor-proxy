@@ -1,6 +1,7 @@
 package normalizers
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -63,8 +64,8 @@ func (m *mockModelsConfig) RemoveCredential(id string) error { return nil }
 type mockToolCallRepairNormalizer struct {
 	name          string
 	enabledByDef  bool
-	modifiedCount int
-	resetCount    int
+	modifiedCount int64
+	resetCount    int64
 }
 
 func newMockToolCallRepairNormalizer(name string, enabledByDefault bool) *mockToolCallRepairNormalizer {
@@ -83,11 +84,11 @@ func (n *mockToolCallRepairNormalizer) EnabledByDefault() bool {
 }
 
 func (n *mockToolCallRepairNormalizer) Reset(ctx *NormalizeContext) {
-	n.resetCount++
+	atomic.AddInt64(&n.resetCount, 1)
 }
 
 func (n *mockToolCallRepairNormalizer) Normalize(line []byte, ctx *NormalizeContext) ([]byte, bool) {
-	n.modifiedCount++
+	atomic.AddInt64(&n.modifiedCount, 1)
 	return line, false
 }
 
