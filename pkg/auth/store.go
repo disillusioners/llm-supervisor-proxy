@@ -126,12 +126,7 @@ func (s *TokenStore) ValidateToken(ctx context.Context, plaintext string) (*Auth
 
 // ListTokens returns all tokens (without hashes)
 func (s *TokenStore) ListTokens(ctx context.Context) ([]AuthToken, error) {
-	var query string
-	if s.dialect == database.PostgreSQL {
-		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens ORDER BY created_at DESC`
-	} else {
-		query = `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens ORDER BY created_at DESC`
-	}
+	query := `SELECT id, name, expires_at, created_at, created_by, ultimate_model_enabled FROM auth_tokens ORDER BY created_at DESC`
 
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {

@@ -884,6 +884,9 @@ type UpdateTokenPermissionRequest struct {
 
 // updateTokenPermission handles PATCH /fe/api/tokens/{id}
 func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWriter, r *http.Request, id string) {
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 	var req UpdateTokenPermissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
