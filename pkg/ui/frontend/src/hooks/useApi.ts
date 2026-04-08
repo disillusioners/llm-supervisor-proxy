@@ -280,18 +280,21 @@ export function useTokens() {
 
   const updateTokenPermission = useCallback(async (id: string, ultimateModelEnabled: boolean): Promise<boolean> => {
     try {
-      await apiFetch<{ success: boolean }>(`/tokens/${id}`, {
+      // Direct fetch to check response status before throwing
+      const response = await fetch(`${API_BASE}/tokens/${id}`, {
         method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ultimate_model_enabled: ultimateModelEnabled }),
       });
+      if (!response.ok) {
+        if (response.status === 404) return false;
+        const err = await response.json().catch(() => ({ error: 'Request failed' }));
+        throw new Error(err.error || 'Request failed');
+      }
       // Update local state on success only
       setTokens(prev => prev.map(t => t.id === id ? { ...t, ultimate_model_enabled: ultimateModelEnabled } : t));
       return true;
     } catch (e) {
-      // Check for 404 - token not found
-      if (e instanceof Error && e.message.includes('404')) {
-        return false;
-      }
       throw e;
     }
   }, []);
