@@ -408,8 +408,9 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 	log.Printf("[RACE] Streaming deadline reached after %v, picking best buffer", time.Since(c.startTime))
 
 	// Find request with most content (best candidate to continue)
+	// If all buffers are equal, prefer the first (main) request
 	var best *upstreamRequest
-	var bestLen int64
+	var bestLen int64 = -1 // Start at -1 so first request always gets selected
 
 	for _, req := range c.requests {
 		if req != nil && !req.IsDone() {
@@ -421,7 +422,9 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 		}
 	}
 
-	if best != nil && bestLen > 0 {
+	// If we have a winner (even with 0 bytes), stream it
+	// Only error if no requests exist at all
+	if best != nil {
 		c.winner = best
 		c.winnerIdx = best.id
 
