@@ -36,6 +36,7 @@ export function useRequests(initialAppTag?: string) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentAppTag, setCurrentAppTag] = useState(initialAppTag);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -58,9 +59,13 @@ export function useRequests(initialAppTag?: string) {
 
     fetchRequests();
     return () => controller.abort();
-  }, [currentAppTag, initialAppTag]);
+  }, [currentAppTag, initialAppTag, refreshKey]);
 
-  return { requests, loading, error, refetch: () => {/* handled by effect */}, setAppTag: setCurrentAppTag };
+  const refetch = useCallback(() => {
+    setRefreshKey(k => k + 1);
+  }, []);
+
+  return { requests, loading, error, refetch, setAppTag: setCurrentAppTag };
 }
 
 export function useRequestDetail(id: string | null) {
@@ -218,6 +223,7 @@ export function formatDuration(value: string | number): string {
 export function useAppTags() {
   const [appTags, setAppTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -244,9 +250,15 @@ export function useAppTags() {
 
     fetchAppTags();
     return () => controller.abort();
+  }, [refreshKey]);
+
+  const refetch = useCallback(() => {
+    // Invalidate cache so next refetch gets fresh data
+    defaultAPICache.delete('app-tags');
+    setRefreshKey(k => k + 1);
   }, []);
 
-  return { appTags, loading, refetch: () => {/* handled by effect */} };
+  return { appTags, loading, refetch };
 }
 
 // Version API
@@ -292,9 +304,14 @@ export function useRam() {
 
   useEffect(() => {
     const controller = new AbortController();
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let isFetching = false;
 
     const fetchRam = async () => {
-      if (document.hidden) return;
+      // Don't start new fetch if hidden or already fetching
+      if (document.hidden || isFetching) return;
+
+      isFetching = true;
       try {
         const data = await apiFetch<{ alloc_bytes: number; alloc_mb: number }>('/ram', { signal: controller.signal });
         setAllocMB(data.alloc_mb);
@@ -304,22 +321,42 @@ export function useRam() {
         setError(err instanceof Error ? err.message : 'Failed to fetch RAM');
       } finally {
         setLoading(false);
+        isFetching = false;
+      }
+    };
+
+    const startInterval = () => {
+      if (!interval) {
+        fetchRam(); // Fetch immediately when starting
+        interval = setInterval(fetchRam, 5000);
+      }
+    };
+
+    const stopInterval = () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
       }
     };
 
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        fetchRam();
+      if (document.hidden) {
+        stopInterval();
+      } else {
+        startInterval();
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    const interval = setInterval(fetchRam, 5000);
-    fetchRam();
+
+    // Start interval if not hidden, otherwise wait for visibility change
+    if (!document.hidden) {
+      startInterval();
+    }
 
     return () => {
       controller.abort();
-      clearInterval(interval);
+      stopInterval();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
@@ -375,6 +412,8 @@ export function useTokens() {
         throw new Error(err.error || 'Request failed');
       }
       setTokens(prev => prev.map(t => t.id === id ? { ...t, ultimate_model_enabled: ultimateModelEnabled } : t));
+      // Invalidate cache so next fetch gets fresh data
+      defaultAPICache.delete('tokens');
       return true;
     } catch (e) {
       throw e;

@@ -8,7 +8,6 @@ export const DEFAULT_TTL = 30_000; // 30 seconds
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
-  promise?: Promise<T>;
 }
 
 /**
@@ -32,6 +31,7 @@ const defaultDebug: Debug = () => {};
  */
 export class APICache<T = unknown> {
   private cache = new Map<string, CacheEntry<T>>();
+  private promises = new Map<string, Promise<T>>();
   private readonly defaultTTL: number;
   private readonly debug: Debug;
   private readonly onEvict?: (key: string) => void;
@@ -77,14 +77,15 @@ export class APICache<T = unknown> {
    * @param ttl Optional TTL override for this specific entry
    */
   async getOrFetch<U = T>(key: string, fetcher: () => Promise<U>, ttl?: number): Promise<U> {
-    // Check for existing in-flight request
-    const existing = this.cache.get(key);
-    if (existing?.promise) {
+    // Check for existing in-flight promise FIRST (atomic)
+    const existingPromise = this.promises.get(key);
+    if (existingPromise) {
       this.debug(`DEDUP: ${key} (reusing in-flight request)`);
-      return existing.promise as unknown as Promise<U>;
+      return existingPromise as unknown as Promise<U>;
     }
 
     // Check for valid cached value
+    const existing = this.cache.get(key);
     if (existing && !this.isExpired(existing)) {
       this.debug(`HIT: ${key}`);
       return existing.value as unknown as U;
@@ -95,32 +96,15 @@ export class APICache<T = unknown> {
     const promise = fetcher()
       .then((value) => {
         this.set(key, value as unknown as T, ttl);
-        // Clear the promise reference once complete (allows re-fetch)
-        const entry = this.cache.get(key);
-        if (entry) {
-          entry.promise = undefined;
-        }
         return value;
       })
-      .catch((error) => {
-        // Clear the promise on error so next call can retry
-        const entry = this.cache.get(key);
-        if (entry) {
-          entry.promise = undefined;
-        }
-        throw error;
+      .finally(() => {
+        // Clear the promise reference once complete (allows re-fetch)
+        this.promises.delete(key);
       });
 
-    // Store the promise for deduplication
-    if (existing) {
-      (existing as CacheEntry<T>).promise = promise as unknown as Promise<T>;
-    } else {
-      this.cache.set(key, {
-        value: undefined as T,
-        expiresAt: 0,
-        promise: promise as unknown as Promise<T>,
-      });
-    }
+    // Set promise atomically BEFORE any other call can check
+    this.promises.set(key, promise as unknown as Promise<T>);
 
     return promise;
   }
@@ -145,6 +129,7 @@ export class APICache<T = unknown> {
    * Delete a specific key from cache
    */
   delete(key: string): boolean {
+    this.promises.delete(key);
     const existed = this.cache.has(key);
     if (existed) {
       this.cache.delete(key);
@@ -177,6 +162,7 @@ export class APICache<T = unknown> {
    * Clear all entries from cache
    */
   clear(): number {
+    this.promises.clear();
     const count = this.cache.size;
     this.cache.clear();
     this.debug(`CLEAR: ${count} keys`);

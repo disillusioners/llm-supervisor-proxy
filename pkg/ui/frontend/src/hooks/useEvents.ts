@@ -213,13 +213,12 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
 // Hook to detect events that should trigger request list refresh
 // Debounces SSE-driven refetches to avoid cascading HTTP calls when multiple events arrive close together
 export function useEventRefresh(onRefresh: () => void) {
-  // Debounce refs for each refetch type
-  const requestsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const appTagsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Single debounce ref for all refetches
+  const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // Event types that trigger request refetch
-    const requestsRefreshTypes = [
+    // Event types that trigger data refetch
+    const refreshTypes = [
       'request_started',
       'request_completed',
       'retry_attempt',
@@ -231,47 +230,27 @@ export function useEventRefresh(onRefresh: () => void) {
       'auth_failed',
     ];
 
-    // Event types that trigger app tags refetch (same as requests for now)
-    const appTagsRefreshTypes = requestsRefreshTypes;
-
-    const debouncedRefreshRequests = () => {
-      if (requestsDebounceRef.current) {
-        clearTimeout(requestsDebounceRef.current);
+    const debouncedRefresh = () => {
+      if (refreshDebounceRef.current) {
+        clearTimeout(refreshDebounceRef.current);
       }
-      requestsDebounceRef.current = setTimeout(() => {
-        onRefresh();
-      }, 300);
-    };
-
-    const debouncedRefreshAppTags = () => {
-      if (appTagsDebounceRef.current) {
-        clearTimeout(appTagsDebounceRef.current);
-      }
-      appTagsDebounceRef.current = setTimeout(() => {
+      refreshDebounceRef.current = setTimeout(() => {
         onRefresh();
       }, 300);
     };
 
     const handleEvent = (data: Event) => {
-      if (requestsRefreshTypes.includes(data.type)) {
-        debouncedRefreshRequests();
-      }
-      if (appTagsRefreshTypes.includes(data.type)) {
-        debouncedRefreshAppTags();
+      if (refreshTypes.includes(data.type)) {
+        debouncedRefresh();
       }
     };
 
     const unsubscribe = subscribe(handleEvent);
 
     return () => {
-      // Clean up SSE subscription
       unsubscribe();
-      // Clean up debounce timers
-      if (requestsDebounceRef.current) {
-        clearTimeout(requestsDebounceRef.current);
-      }
-      if (appTagsDebounceRef.current) {
-        clearTimeout(appTagsDebounceRef.current);
+      if (refreshDebounceRef.current) {
+        clearTimeout(refreshDebounceRef.current);
       }
     };
   }, [onRefresh]);

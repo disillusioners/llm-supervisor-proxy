@@ -55,7 +55,7 @@ function DashboardRoute({
   default?: boolean;
   requests: Request[];
   requestsLoading: boolean;
-  refetchRequests: (appTag?: string) => void;
+  refetchRequests: () => void;
   refetchAppTags: () => void;
   appTags: string[];
 }) {
@@ -93,12 +93,12 @@ function DashboardRoute({
     const handleAppTagChange = useCallback((tag: string) => {
         setSelectedAppTag(tag);
         // Refetch requests with the new filter
-        refetchRequests(tag);
+        refetchRequests();
     }, [refetchRequests]);
 
     const handleRefreshRequests = useCallback(() => {
-        refetchRequests(selectedAppTag || '');
-    }, [refetchRequests, selectedAppTag]);
+        refetchRequests();
+    }, [refetchRequests]);
 
     return (
         <ErrorBoundary>
