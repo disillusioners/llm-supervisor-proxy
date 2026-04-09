@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary } from '../types';
+import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
 
 // Generic fetch helper
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+async function apiFetch<T>(path: string, options?: RequestInit & { signal?: AbortSignal }): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    signal: options?.signal,
     headers: {
       'Content-Type': 'application/json',
       ...options?.headers,
@@ -23,6 +25,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// Helper to check if error is from AbortController
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
 // Requests API
 export function useRequests(initialAppTag?: string) {
   const [requests, setRequests] = useState<Request[]>([]);
@@ -30,26 +37,30 @@ export function useRequests(initialAppTag?: string) {
   const [error, setError] = useState<string | null>(null);
   const [currentAppTag, setCurrentAppTag] = useState(initialAppTag);
 
-  const fetchRequests = useCallback(async (overrideTag?: string) => {
-    try {
-      setLoading(true);
-      const tag = overrideTag !== undefined ? overrideTag : currentAppTag;
-      const url = tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests';
-      const data = await apiFetch<Request[]>(url);
-      setRequests(data);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to fetch requests');
-    } finally {
-      setLoading(false);
-    }
-  }, [currentAppTag]);
-
   useEffect(() => {
-    fetchRequests();
-  }, [fetchRequests]);
+    const controller = new AbortController();
 
-  return { requests, loading, error, refetch: fetchRequests, setAppTag: setCurrentAppTag };
+    async function fetchRequests() {
+      try {
+        setLoading(true);
+        const tag = initialAppTag !== undefined ? initialAppTag : currentAppTag;
+        const url = tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests';
+        const data = await apiFetch<Request[]>(url, { signal: controller.signal });
+        setRequests(data);
+        setError(null);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch requests');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchRequests();
+    return () => controller.abort();
+  }, [currentAppTag, initialAppTag]);
+
+  return { requests, loading, error, refetch: () => {/* handled by effect */}, setAppTag: setCurrentAppTag };
 }
 
 export function useRequestDetail(id: string | null) {
@@ -63,20 +74,24 @@ export function useRequestDetail(id: string | null) {
       return;
     }
 
-    const fetchDetail = async () => {
+    const controller = new AbortController();
+
+    async function fetchDetail() {
       try {
         setLoading(true);
-        const data = await apiFetch<RequestDetail>(`/requests/${id}`);
+        const data = await apiFetch<RequestDetail>(`/requests/${id}`, { signal: controller.signal });
         setDetail(data);
         setError(null);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to fetch request');
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch request');
       } finally {
         setLoading(false);
       }
-    };
+    }
 
     fetchDetail();
+    return () => controller.abort();
   }, [id]);
 
   return { detail, loading, error };
@@ -87,13 +102,21 @@ export function useConfig() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchConfig = useCallback(async () => {
+  const fetchConfig = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
-      const data = await apiFetch<AppConfig>('/config');
+      const data = await defaultAPICache.getOrFetch<AppConfig>('config', async () => {
+        const response = await fetch(`${API_BASE}/config`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<AppConfig>;
+      }, 30000);
       setConfig(data);
-    } catch (e) {
-      console.error('Failed to fetch config:', e);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      console.error('Failed to fetch config:', err);
     } finally {
       setLoading(false);
     }
@@ -104,12 +127,15 @@ export function useConfig() {
       method: 'PUT',
       body: JSON.stringify(updates),
     });
+    defaultAPICache.delete('config');
     await fetchConfig();
     return response;
   }, [fetchConfig]);
 
   useEffect(() => {
-    fetchConfig();
+    const controller = new AbortController();
+    fetchConfig(controller.signal);
+    return () => controller.abort();
   }, [fetchConfig]);
 
   return { config, loading, updateConfig, refetch: fetchConfig };
@@ -120,13 +146,21 @@ export function useModels() {
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchModels = useCallback(async () => {
+  const fetchModels = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
-      const data = await apiFetch<Model[]>('/models');
+      const data = await defaultAPICache.getOrFetch<Model[]>('models', async () => {
+        const response = await fetch(`${API_BASE}/models`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<Model[]>;
+      }, 15000);
       setModels(data || []);
-    } catch (e) {
-      console.error('Failed to fetch models:', e);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      console.error('Failed to fetch models:', err);
     } finally {
       setLoading(false);
     }
@@ -137,28 +171,31 @@ export function useModels() {
       method: 'POST',
       body: JSON.stringify(model),
     });
+    defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels]);
 
   const updateModel = useCallback(async (id: string, updates: Partial<Model>) => {
-    // Merge with the current model to ensure all required fields (e.g. `name`) are always present,
-    // even for partial updates like toggling `enabled`.
     const current = models.find(m => m.id === id);
     const merged = { ...current, ...updates, id };
     await apiFetch<Model>(`/models/${id}`, {
       method: 'PUT',
       body: JSON.stringify(merged),
     });
+    defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
+    defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels]);
 
   useEffect(() => {
-    fetchModels();
+    const controller = new AbortController();
+    fetchModels(controller.signal);
+    return () => controller.abort();
   }, [fetchModels]);
 
   return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels };
@@ -182,23 +219,34 @@ export function useAppTags() {
   const [appTags, setAppTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchAppTags = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = await apiFetch<string[]>('/app-tags');
-      setAppTags(data || []);
-    } catch (e) {
-      console.error('Failed to fetch app tags:', e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
+    const controller = new AbortController();
+
+    async function fetchAppTags() {
+      try {
+        setLoading(true);
+        const data = await defaultAPICache.getOrFetch<string[]>('app-tags', async () => {
+          const response = await fetch(`${API_BASE}/app-tags`, {
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<string[]>;
+        }, 30000);
+        setAppTags(data || []);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        console.error('Failed to fetch app tags:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
     fetchAppTags();
+    return () => controller.abort();
   }, []);
 
-  return { appTags, loading, refetch: fetchAppTags };
+  return { appTags, loading, refetch: () => {/* handled by effect */} };
 }
 
 // Version API
@@ -207,19 +255,30 @@ export function useVersion() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetchVersion = async () => {
+    const controller = new AbortController();
+
+    async function fetchVersion() {
       try {
         setLoading(true);
-        const data = await apiFetch<{ version: string }>('/version');
+        const data = await defaultAPICache.getOrFetch<{ version: string }>('version', async () => {
+          const response = await fetch(`${API_BASE}/version`, {
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<{ version: string }>;
+        }, 300000);
         setVersion(data.version);
-      } catch (e) {
-        console.error('Failed to fetch version:', e);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        console.error('Failed to fetch version:', err);
       } finally {
         setLoading(false);
       }
-    };
+    }
 
     fetchVersion();
+    return () => controller.abort();
   }, []);
 
   return { version, loading };
@@ -231,23 +290,39 @@ export function useRam() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchRam = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ alloc_bytes: number; alloc_mb: number }>('/ram');
-      setAllocMB(data.alloc_mb);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to fetch RAM');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
-    fetchRam();
+    const controller = new AbortController();
+
+    const fetchRam = async () => {
+      if (document.hidden) return;
+      try {
+        const data = await apiFetch<{ alloc_bytes: number; alloc_mb: number }>('/ram', { signal: controller.signal });
+        setAllocMB(data.alloc_mb);
+        setError(null);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch RAM');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        fetchRam();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     const interval = setInterval(fetchRam, 5000);
-    return () => clearInterval(interval);
-  }, [fetchRam]);
+    fetchRam();
+
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   return { allocMB, loading, error };
 }
@@ -257,13 +332,21 @@ export function useTokens() {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchTokens = useCallback(async () => {
+  const fetchTokens = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
-      const data = await apiFetch<ApiToken[]>('/tokens');
+      const data = await defaultAPICache.getOrFetch<ApiToken[]>('tokens', async () => {
+        const response = await fetch(`${API_BASE}/tokens`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<ApiToken[]>;
+      }, 15000);
       setTokens(data || []);
-    } catch (e) {
-      console.error('Failed to fetch tokens:', e);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      console.error('Failed to fetch tokens:', err);
     } finally {
       setLoading(false);
     }
@@ -274,13 +357,13 @@ export function useTokens() {
       method: 'POST',
       body: JSON.stringify({ name, expires_at: expiresAt, ultimate_model_enabled: ultimateModelEnabled }),
     });
+    defaultAPICache.delete('tokens');
     await fetchTokens();
     return token;
   }, [fetchTokens]);
 
   const updateTokenPermission = useCallback(async (id: string, ultimateModelEnabled: boolean): Promise<boolean> => {
     try {
-      // Direct fetch to check response status before throwing
       const response = await fetch(`${API_BASE}/tokens/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -291,7 +374,6 @@ export function useTokens() {
         const err = await response.json().catch(() => ({ error: 'Request failed' }));
         throw new Error(err.error || 'Request failed');
       }
-      // Update local state on success only
       setTokens(prev => prev.map(t => t.id === id ? { ...t, ultimate_model_enabled: ultimateModelEnabled } : t));
       return true;
     } catch (e) {
@@ -301,11 +383,14 @@ export function useTokens() {
 
   const deleteToken = useCallback(async (id: string) => {
     await apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' });
+    defaultAPICache.delete('tokens');
     await fetchTokens();
   }, [fetchTokens]);
 
   useEffect(() => {
-    fetchTokens();
+    const controller = new AbortController();
+    fetchTokens(controller.signal);
+    return () => controller.abort();
   }, [fetchTokens]);
 
   return { tokens, loading, createToken, updateTokenPermission, deleteToken, refetch: fetchTokens };
@@ -357,23 +442,34 @@ export function useProviders() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchProviders = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = await apiFetch<Provider[]>('/providers');
-      setProviders(data || []);
-    } catch (e) {
-      console.error('Failed to fetch providers:', e);
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function fetchProviders() {
+      try {
+        setLoading(true);
+        const data = await defaultAPICache.getOrFetch<Provider[]>('providers', async () => {
+          const response = await fetch(`${API_BASE}/providers`, {
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<Provider[]>;
+        }, 60000);
+        setProviders(data || []);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        console.error('Failed to fetch providers:', err);
+      } finally {
+        setLoading(false);
+      }
     }
+
+    fetchProviders();
+    return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    fetchProviders();
-  }, [fetchProviders]);
-
-  return { providers, loading, refetch: fetchProviders };
+  return { providers, loading, refetch: () => {/* handled by effect */} };
 }
 
 export async function getProviders(): Promise<Provider[]> {
@@ -440,7 +536,20 @@ export function useUsage() {
     }
   }, []);
 
-  useEffect(() => { fetchTokens(); }, [fetchTokens]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const doFetchTokens = async () => {
+      try {
+        const data = await apiFetch<{ tokens: UsageToken[] }>('/usage/tokens', { signal: controller.signal });
+        setUsageTokens(data.tokens || []);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        // silently fail
+      }
+    };
+    doFetchTokens();
+    return () => controller.abort();
+  }, []);
 
   return { usageData, usageTokens, summary, loading, error, fetchUsage, fetchTokens, fetchSummary };
 }

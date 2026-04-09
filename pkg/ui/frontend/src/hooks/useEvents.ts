@@ -211,25 +211,68 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
 }
 
 // Hook to detect events that should trigger request list refresh
+// Debounces SSE-driven refetches to avoid cascading HTTP calls when multiple events arrive close together
 export function useEventRefresh(onRefresh: () => void) {
+  // Debounce refs for each refetch type
+  const requestsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const appTagsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    const handleEvent = (data: Event) => {
-      const refreshTypes = [
-        'request_started',
-        'request_completed',
-        'retry_attempt',
-        'error_max_upstream_error_retries',
-        'timeout_idle',
-        'loop_interrupted',
-        'fallback_triggered',
-        'all_models_failed',
-        'auth_failed',
-      ];
-      if (refreshTypes.includes(data.type)) {
+    // Event types that trigger request refetch
+    const requestsRefreshTypes = [
+      'request_started',
+      'request_completed',
+      'retry_attempt',
+      'error_max_upstream_error_retries',
+      'timeout_idle',
+      'loop_interrupted',
+      'fallback_triggered',
+      'all_models_failed',
+      'auth_failed',
+    ];
+
+    // Event types that trigger app tags refetch (same as requests for now)
+    const appTagsRefreshTypes = requestsRefreshTypes;
+
+    const debouncedRefreshRequests = () => {
+      if (requestsDebounceRef.current) {
+        clearTimeout(requestsDebounceRef.current);
+      }
+      requestsDebounceRef.current = setTimeout(() => {
         onRefresh();
+      }, 300);
+    };
+
+    const debouncedRefreshAppTags = () => {
+      if (appTagsDebounceRef.current) {
+        clearTimeout(appTagsDebounceRef.current);
+      }
+      appTagsDebounceRef.current = setTimeout(() => {
+        onRefresh();
+      }, 300);
+    };
+
+    const handleEvent = (data: Event) => {
+      if (requestsRefreshTypes.includes(data.type)) {
+        debouncedRefreshRequests();
+      }
+      if (appTagsRefreshTypes.includes(data.type)) {
+        debouncedRefreshAppTags();
       }
     };
 
-    return subscribe(handleEvent);
+    const unsubscribe = subscribe(handleEvent);
+
+    return () => {
+      // Clean up SSE subscription
+      unsubscribe();
+      // Clean up debounce timers
+      if (requestsDebounceRef.current) {
+        clearTimeout(requestsDebounceRef.current);
+      }
+      if (appTagsDebounceRef.current) {
+        clearTimeout(appTagsDebounceRef.current);
+      }
+    };
   }, [onRefresh]);
 }

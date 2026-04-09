@@ -1,14 +1,15 @@
 import { useState, useCallback } from 'preact/hooks';
-import { Router, route } from 'preact-router';
-import { Header, RequestList, RequestDetail, EventLog, SettingsPage } from './components';
+import { Router } from 'preact-router';
+import { Header, RequestList, RequestDetail, EventLog, SettingsPage, ErrorBoundary } from './components';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
+import type { Request } from './types';
 
  
 export function App() {
   // API hooks - fetch data once at the top level
   const { requests, loading: requestsLoading, refetch: refetchRequests } = useRequests();
-  const { config, updateConfig, refetch: refetchConfig } = useConfig();
-  const { models, addModel, updateModel, deleteModel, refetch: refetchModels } = useModels();
+  const { config, updateConfig } = useConfig();
+  const { models, addModel, updateModel, deleteModel } = useModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
  
  const { appTags, refetch: refetchAppTags } = useAppTags();
@@ -50,6 +51,8 @@ function DashboardRoute({
   refetchAppTags,
   appTags,
 }: {
+  path?: string;
+  default?: boolean;
   requests: Request[];
   requestsLoading: boolean;
   refetchRequests: (appTag?: string) => void;
@@ -98,6 +101,7 @@ function DashboardRoute({
     }, [refetchRequests, selectedAppTag]);
 
     return (
+        <ErrorBoundary>
         <div class="h-screen flex flex-col bg-gray-900">
             {/* Header */}
             <Header />
@@ -129,6 +133,7 @@ function DashboardRoute({
                 </div>
             </main>
         </div>
+        </ErrorBoundary>
     );
 }
 
@@ -146,6 +151,7 @@ function SettingsRoute({
     onUpdateTokenPermission,
     onRefetchTokens,
 }: {
+    path?: string;
     config: any;
     onUpdateConfig: (config: any) => Promise<any>;
     models: any[];
@@ -159,6 +165,7 @@ function SettingsRoute({
     onRefetchTokens: () => void;
 }) {
     return (
+        <ErrorBoundary>
         <SettingsPage
             config={config}
             onUpdateConfig={onUpdateConfig}
@@ -172,5 +179,6 @@ function SettingsRoute({
             onUpdateTokenPermission={onUpdateTokenPermission}
             onRefetchTokens={onRefetchTokens}
         />
+        </ErrorBoundary>
     );
 }
