@@ -7,7 +7,7 @@ import type { Request } from './types';
  
 export function App() {
   // API hooks - fetch data once at the top level
-  const { requests, loading: requestsLoading, refetch: refetchRequests } = useRequests();
+  const { requests, loading: requestsLoading, refetch: refetchRequests, setAppTag: setRequestsAppTag } = useRequests();
   const { config, updateConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel } = useModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
@@ -36,6 +36,7 @@ export function App() {
         requests={requests}
         requestsLoading={requestsLoading}
         refetchRequests={refetchRequests}
+        setRequestsAppTag={setRequestsAppTag}
         refetchAppTags={refetchAppTags}
         appTags={appTags}
       />
@@ -48,6 +49,7 @@ function DashboardRoute({
   requests,
   requestsLoading,
   refetchRequests,
+  setRequestsAppTag,
   refetchAppTags,
   appTags,
 }: {
@@ -56,6 +58,7 @@ function DashboardRoute({
   requests: Request[];
   requestsLoading: boolean;
   refetchRequests: () => void;
+  setRequestsAppTag: (tag: string | undefined) => void;
   refetchAppTags: () => void;
   appTags: string[];
 }) {
@@ -92,9 +95,8 @@ function DashboardRoute({
     
     const handleAppTagChange = useCallback((tag: string) => {
         setSelectedAppTag(tag);
-        // Refetch requests with the new filter
-        refetchRequests();
-    }, [refetchRequests]);
+        setRequestsAppTag(tag || undefined);
+    }, [setRequestsAppTag]);
 
     const handleRefreshRequests = useCallback(() => {
         refetchRequests();
