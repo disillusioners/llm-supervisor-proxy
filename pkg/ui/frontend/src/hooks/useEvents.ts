@@ -216,6 +216,10 @@ export function useEventRefresh(onRefresh: () => void) {
   // Single debounce ref for all refetches
   const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Keep ref to latest onRefresh to avoid stale closure and unnecessary re-subscriptions
+  const onRefreshRef = useRef(onRefresh);
+  onRefreshRef.current = onRefresh;
+
   useEffect(() => {
     // Event types that trigger data refetch
     const refreshTypes = [
@@ -235,7 +239,7 @@ export function useEventRefresh(onRefresh: () => void) {
         clearTimeout(refreshDebounceRef.current);
       }
       refreshDebounceRef.current = setTimeout(() => {
-        onRefresh();
+        onRefreshRef.current();
       }, 300);
     };
 
@@ -253,5 +257,5 @@ export function useEventRefresh(onRefresh: () => void) {
         clearTimeout(refreshDebounceRef.current);
       }
     };
-  }, [onRefresh]);
+  }, []); // No deps - subscribe once, use ref for onRefresh
 }
