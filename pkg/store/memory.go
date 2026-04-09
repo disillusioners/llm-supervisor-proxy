@@ -80,6 +80,10 @@ type RequestStore struct {
 	requests []*RequestLog
 	maxSize  int
 	ByID     map[string]*RequestLog
+
+	// Cache for GetUniqueAppTags() results
+	appTagsCache      []string
+	appTagsCacheDirty bool
 }
 
 func NewRequestStore(maxSize int) *RequestStore {
@@ -93,6 +97,9 @@ func NewRequestStore(maxSize int) *RequestStore {
 func (s *RequestStore) Add(req *RequestLog) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Invalidate app tags cache on any modification
+	s.appTagsCacheDirty = true
 
 	// If we have an ID collision (shouldn't happen with UUIDs, but safety first), overwrite?
 	// or assume Add is for new requests.
@@ -172,9 +179,18 @@ func (s *RequestStore) ListFiltered(appTag string) []*RequestLog {
 
 // GetUniqueAppTags returns a sorted list of unique app tags from all requests.
 // Includes an empty string entry if there are requests without an app tag.
+// Results are cached and only recomputed when the underlying data changes.
 func (s *RequestStore) GetUniqueAppTags() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Return cached result if valid
+	if !s.appTagsCacheDirty {
+		// Return a copy to prevent external mutation
+		result := make([]string, len(s.appTagsCache))
+		copy(result, s.appTagsCache)
+		return result
+	}
 
 	tagSet := make(map[string]bool)
 	hasEmptyTag := false
@@ -203,12 +219,21 @@ func (s *RequestStore) GetUniqueAppTags() []string {
 	}
 
 	// Add "default" at the beginning if there are requests without app tag
+	var result []string
 	if hasEmptyTag {
-		result := make([]string, 0, len(tags)+1)
+		result = make([]string, 0, len(tags)+1)
 		result = append(result, "") // Empty string represents "default"
 		result = append(result, tags...)
-		return result
+	} else {
+		result = tags
 	}
 
-	return tags
+	// Update cache (must hold lock for this)
+	s.appTagsCache = result
+	s.appTagsCacheDirty = false
+
+	// Return a copy to prevent external mutation
+	cached := make([]string, len(result))
+	copy(cached, result)
+	return cached
 }
