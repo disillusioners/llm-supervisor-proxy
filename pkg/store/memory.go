@@ -180,13 +180,25 @@ func (s *RequestStore) ListFiltered(appTag string) []*RequestLog {
 // GetUniqueAppTags returns a sorted list of unique app tags from all requests.
 // Includes an empty string entry if there are requests without an app tag.
 // Results are cached and only recomputed when the underlying data changes.
+// Uses double-checked locking for thread-safe cache access.
 func (s *RequestStore) GetUniqueAppTags() []string {
+	// Fast path: check with read lock first
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Return cached result if valid
 	if !s.appTagsCacheDirty {
 		// Return a copy to prevent external mutation
+		result := make([]string, len(s.appTagsCache))
+		copy(result, s.appTagsCache)
+		s.mu.RUnlock()
+		return result
+	}
+	s.mu.RUnlock()
+
+	// Slow path: cache is dirty, need exclusive write access
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check: another goroutine may have recomputed while we waited
+	if !s.appTagsCacheDirty {
 		result := make([]string, len(s.appTagsCache))
 		copy(result, s.appTagsCache)
 		return result
@@ -228,7 +240,7 @@ func (s *RequestStore) GetUniqueAppTags() []string {
 		result = tags
 	}
 
-	// Update cache (must hold lock for this)
+	// Update cache while holding write lock
 	s.appTagsCache = result
 	s.appTagsCacheDirty = false
 
