@@ -1,8 +1,12 @@
 import { useState, useCallback } from 'preact/hooks';
 import { Router } from 'preact-router';
-import { Header, RequestList, RequestDetail, EventLog, SettingsPage, ErrorBoundary } from './components';
+import { lazy, Suspense } from 'preact/compat';
+import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
+import { LoadingFallback } from './components/LoadingFallback';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
 import type { Request } from './types';
+
+const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
  
 export function App() {
@@ -168,6 +172,7 @@ function SettingsRoute({
 }) {
     return (
         <ErrorBoundary>
+        <Suspense fallback={<LoadingFallback />}>
         <SettingsPage
             config={config}
             onUpdateConfig={onUpdateConfig}
@@ -181,6 +186,7 @@ function SettingsRoute({
             onUpdateTokenPermission={onUpdateTokenPermission}
             onRefetchTokens={onRefetchTokens}
         />
+        </Suspense>
         </ErrorBoundary>
     );
 }
