@@ -162,38 +162,80 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 	dialect := s.dbStore.Dialect
 
-	if tokenID != "" {
-		// Query with token_id filter
-		if dialect == database.PostgreSQL {
-			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+	if view == "daily" {
+		// Daily aggregation: group by token_id and day
+		if tokenID != "" {
+			// Query with token_id filter
+			if dialect == database.PostgreSQL {
+				query = `SELECT u.token_id, coalesce(t.name, ''), SUBSTR(u.hour_bucket, 1, 10), SUM(u.request_count), SUM(u.prompt_tokens), SUM(u.completion_tokens), SUM(u.total_tokens)
+				FROM token_hourly_usage u
+				LEFT JOIN auth_tokens t ON u.token_id = t.id
+				WHERE u.token_id = $1 AND u.hour_bucket >= $2 AND u.hour_bucket <= $3
+				GROUP BY u.token_id, t.name, SUBSTR(u.hour_bucket, 1, 10)
+				ORDER BY SUBSTR(u.hour_bucket, 1, 10)`
+			} else {
+				query = `SELECT u.token_id, coalesce(t.name, ''), SUBSTR(u.hour_bucket, 1, 10), SUM(u.request_count), SUM(u.prompt_tokens), SUM(u.completion_tokens), SUM(u.total_tokens)
+				FROM token_hourly_usage u
+				LEFT JOIN auth_tokens t ON u.token_id = t.id
+				WHERE u.token_id = ? AND u.hour_bucket >= ? AND u.hour_bucket <= ?
+				GROUP BY u.token_id, t.name, SUBSTR(u.hour_bucket, 1, 10)
+				ORDER BY SUBSTR(u.hour_bucket, 1, 10)`
+			}
+			args = []interface{}{tokenID, from, to}
+		} else {
+			// Query without token_id filter (all tokens)
+			if dialect == database.PostgreSQL {
+				query = `SELECT u.token_id, coalesce(t.name, ''), SUBSTR(u.hour_bucket, 1, 10), SUM(u.request_count), SUM(u.prompt_tokens), SUM(u.completion_tokens), SUM(u.total_tokens)
+				FROM token_hourly_usage u
+				LEFT JOIN auth_tokens t ON u.token_id = t.id
+				WHERE u.hour_bucket >= $1 AND u.hour_bucket <= $2
+				GROUP BY u.token_id, t.name, SUBSTR(u.hour_bucket, 1, 10)
+				ORDER BY SUBSTR(u.hour_bucket, 1, 10)`
+			} else {
+				query = `SELECT u.token_id, coalesce(t.name, ''), SUBSTR(u.hour_bucket, 1, 10), SUM(u.request_count), SUM(u.prompt_tokens), SUM(u.completion_tokens), SUM(u.total_tokens)
+				FROM token_hourly_usage u
+				LEFT JOIN auth_tokens t ON u.token_id = t.id
+				WHERE u.hour_bucket >= ? AND u.hour_bucket <= ?
+				GROUP BY u.token_id, t.name, SUBSTR(u.hour_bucket, 1, 10)
+				ORDER BY SUBSTR(u.hour_bucket, 1, 10)`
+			}
+			args = []interface{}{from, to}
+		}
+	} else {
+		// Hourly view (default): return individual hour buckets
+		if tokenID != "" {
+			// Query with token_id filter
+			if dialect == database.PostgreSQL {
+				query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.token_id = $1 AND u.hour_bucket >= $2 AND u.hour_bucket <= $3
 				ORDER BY u.hour_bucket`
-		} else {
-			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			} else {
+				query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.token_id = ? AND u.hour_bucket >= ? AND u.hour_bucket <= ?
 				ORDER BY u.hour_bucket`
-		}
-		args = []interface{}{tokenID, from, to}
-	} else {
-		// Query without token_id filter (all tokens)
-		if dialect == database.PostgreSQL {
-			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			}
+			args = []interface{}{tokenID, from, to}
+		} else {
+			// Query without token_id filter (all tokens)
+			if dialect == database.PostgreSQL {
+				query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.hour_bucket >= $1 AND u.hour_bucket <= $2
 				ORDER BY u.hour_bucket`
-		} else {
-			query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
+			} else {
+				query = `SELECT u.token_id, coalesce(t.name, ''), u.hour_bucket, u.request_count, u.prompt_tokens, u.completion_tokens, u.total_tokens
 				FROM token_hourly_usage u
 				LEFT JOIN auth_tokens t ON u.token_id = t.id
 				WHERE u.hour_bucket >= ? AND u.hour_bucket <= ?
 				ORDER BY u.hour_bucket`
+			}
+			args = []interface{}{from, to}
 		}
-		args = []interface{}{from, to}
 	}
 
 	rows, err := s.dbStore.DB.QueryContext(ctx, query, args...)

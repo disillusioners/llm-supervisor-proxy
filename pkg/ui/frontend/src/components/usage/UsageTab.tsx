@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'preact/hooks';
 import { useUsage } from '../../hooks/useApi';
 import { UsageSummaryCards } from './UsageSummaryCards';
 import { UsageTable } from './UsageTable';
+import { UsageChart } from './UsageChart';
 
 function toHourFormat(d: Date): string {
   return d.getFullYear() + '-' +
@@ -20,6 +21,7 @@ export function UsageTab() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [view, setView] = useState<'hourly' | 'daily'>('hourly');
+  const [displayMode, setDisplayMode] = useState<'chart' | 'table'>('chart');
 
   // Calculate date range boundaries
   const { from, to } = useMemo(() => {
@@ -152,14 +154,75 @@ export function UsageTab() {
       {/* Summary cards */}
       <UsageSummaryCards summary={summary} loading={loading} />
 
-      {/* Usage table */}
-      <UsageTable
-        data={usageData?.data || []}
-        totals={usageData?.totals || null}
-        loading={loading}
-        view={view}
-        onViewChange={setView}
-      />
+      {/* Display mode toggle and view toggle row */}
+      <div class="flex gap-4 items-center">
+        {/* Display mode toggle (chart/table) */}
+        <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
+          <button
+            onClick={() => setDisplayMode('chart')}
+            class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              displayMode === 'chart'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            📊 Chart
+          </button>
+          <button
+            onClick={() => setDisplayMode('table')}
+            class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              displayMode === 'table'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            📋 Table
+          </button>
+        </div>
+
+        {/* View toggle (hourly/daily) - only show for table mode */}
+        {displayMode === 'table' && (
+          <div class="flex gap-1">
+            <button
+              onClick={() => setView('hourly')}
+              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                view === 'hourly'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:text-white'
+              }`}
+            >
+              Hourly
+            </button>
+            <button
+              onClick={() => setView('daily')}
+              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                view === 'daily'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-700 text-gray-400 hover:text-white'
+              }`}
+            >
+              Daily
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Chart or Table view */}
+      {displayMode === 'chart' ? (
+        <UsageChart
+          data={usageData?.data || []}
+          view={view}
+          loading={loading}
+        />
+      ) : (
+        <UsageTable
+          data={usageData?.data || []}
+          totals={usageData?.totals || null}
+          loading={loading}
+          view={view}
+          onViewChange={setView}
+        />
+      )}
     </div>
   );
 }

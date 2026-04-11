@@ -163,9 +163,17 @@ export function formatTokenCount(n: number): string {
 }
 
 export function formatHourBucket(bucket: string): string {
-  // "2026-03-30T14" → "Mar 30, 14:00"
-  return bucket.replace(/(\d{4})-(\d{2})-(\d{2})T(\d{2})/, (_, _y, m, d, h) => {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return months[parseInt(m)-1] + ' ' + parseInt(d) + ', ' + h + ':00';
-  });
+  // "2026-03-30T14" → "Mar 30, 14:00" (hourly format)
+  // "2026-03-30" → "Mar 30, 2026" (daily format)
+  if (bucket.includes('T')) {
+    return bucket.replace(/(\d{4})-(\d{2})-(\d{2})T(\d{2})/, (_, _y, m, d, h) => {
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return months[parseInt(m)-1] + ' ' + parseInt(d) + ', ' + h + ':00';
+    });
+  } else {
+    return bucket.replace(/(\d{4})-(\d{2})-(\d{2})/, (_, _y, m, d) => {
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return months[parseInt(m)-1] + ' ' + parseInt(d) + ', ' + _y;
+    });
+  }
 }

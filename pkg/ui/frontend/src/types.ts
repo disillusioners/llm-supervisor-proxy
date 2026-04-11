@@ -314,7 +314,9 @@ export interface AppState {
   showConfig: boolean;
 }
 
-export interface HourlyUsageRow {
+// UsageDataRow represents a single row of usage data.
+// hour_bucket can be either "2026-03-30T14" (hourly) or "2026-03-30" (daily)
+export interface UsageDataRow {
   token_name: string;
   token_id: string;
   hour_bucket: string;
@@ -323,6 +325,9 @@ export interface HourlyUsageRow {
   completion_tokens: number;
   total_tokens: number;
 }
+
+// Backward compatibility alias
+export type HourlyUsageRow = UsageDataRow;
 
 export interface UsageTotals {
   request_count: number;
@@ -336,7 +341,7 @@ export interface UsageResponse {
   from: string;
   to: string;
   view: 'hourly' | 'daily';
-  data: HourlyUsageRow[];
+  data: UsageDataRow[];
   totals: UsageTotals;
 }
 
