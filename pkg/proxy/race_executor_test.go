@@ -753,7 +753,7 @@ func TestHandleNonStreamingResponse_Success(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -778,7 +778,7 @@ func TestHandleNonStreamingResponse_WithUsage(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -806,15 +806,18 @@ func TestHandleNonStreamingResponse_WithoutUsage(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify usage was NOT set (no usage in response)
+	// Verify usage IS set (fallback token counting kicks in when provider doesn't return usage)
 	usage := req.GetUsage()
-	if usage != nil {
-		t.Errorf("expected usage to be nil (no usage in response), got %+v", usage)
+	if usage == nil {
+		t.Fatal("expected usage to be set via fallback token counting, got nil")
+	}
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		t.Errorf("expected at least some tokens to be counted via fallback, got prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
 	}
 }
 
@@ -822,19 +825,22 @@ func TestHandleNonStreamingResponse_EmptyUsage(t *testing.T) {
 	cfg := newTestConfigSnapshot("test-model")
 	req := newTestUpstreamRequest("test-model")
 
-	// Response with zero usage values - should not set usage
+	// Response with zero usage values - fallback token counting should kick in
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify usage was NOT set (all zero values)
+	// Verify usage IS set (fallback token counting kicks in when provider returns zero usage)
 	usage := req.GetUsage()
-	if usage != nil {
-		t.Errorf("expected usage to be nil (zero values), got %+v", usage)
+	if usage == nil {
+		t.Fatal("expected usage to be set via fallback token counting, got nil")
+	}
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		t.Errorf("expected at least some tokens to be counted via fallback, got prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
 	}
 }
 
@@ -849,7 +855,7 @@ func TestHandleNonStreamingResponse_ReadError(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -866,7 +872,7 @@ func TestHandleNonStreamingResponse_InvalidJSON(t *testing.T) {
 	body := `not valid json`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -890,7 +896,7 @@ func TestHandleNonStreamingResponse_WithToolRepair(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Let me check that","tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{bad json}"}}]},"finish_reason":"tool_calls"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req)
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -936,7 +942,7 @@ func TestHandleStreamingResponse_NormalStream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -981,7 +987,7 @@ func TestHandleStreamingResponse_WithUsage(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1021,7 +1027,7 @@ func TestHandleStreamingResponse_EmptyStream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1069,7 +1075,7 @@ func TestHandleStreamingResponse_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel before calling handler
 
-	err = handleStreamingResponse(ctx, cfg, resp, req, "openai")
+	err = handleStreamingResponse(ctx, cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err == nil {
 		t.Fatal("expected error due to context cancellation")
 	}
@@ -1105,7 +1111,7 @@ func TestHandleStreamingResponse_PrematureClose(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err == nil {
 		t.Fatal("expected error due to premature close")
 	}
@@ -1135,7 +1141,7 @@ func TestHandleStreamingResponse_StreamErrorChunk(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err == nil {
 		t.Fatal("expected error due to stream error chunk")
 	}
@@ -1174,7 +1180,7 @@ func TestHandleInternalNonStream_Success(t *testing.T) {
 
 	req := newTestUpstreamRequest("internal-model")
 
-	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model")
+	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1216,7 +1222,7 @@ func TestHandleInternalNonStream_ProviderError(t *testing.T) {
 
 	req := newTestUpstreamRequest("internal-model")
 
-	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model")
+	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1250,15 +1256,18 @@ func TestHandleInternalNonStream_NoUsage(t *testing.T) {
 
 	req := newTestUpstreamRequest("internal-model")
 
-	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model")
+	err := handleInternalNonStream(context.Background(), provider, newChatCompletionRequest(), req, "internal-model", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify usage was NOT set (zero values)
+	// Verify usage IS set (fallback token counting kicks in when provider returns zero usage)
 	usage := req.GetUsage()
-	if usage != nil {
-		t.Errorf("expected usage to be nil (zero values), got %+v", usage)
+	if usage == nil {
+		t.Fatal("expected usage to be set via fallback token counting, got nil")
+	}
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		t.Errorf("expected at least some tokens to be counted via fallback, got prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
 	}
 }
 
@@ -1296,6 +1305,7 @@ func TestHandleInternalStream_Success(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1338,6 +1348,7 @@ func TestHandleInternalStream_WithThinking(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1393,6 +1404,7 @@ func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1429,6 +1441,7 @@ func TestHandleInternalStream_ProviderError(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1462,6 +1475,7 @@ func TestHandleInternalStream_ErrorEvent(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1488,6 +1502,7 @@ func TestHandleInternalStream_EmptyStream(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 
 	// Should error because stream ended without "done" signal
@@ -1533,6 +1548,7 @@ func TestHandleInternalStream_WithToolRepair(t *testing.T) {
 		normalizers.NewContext("openai", "0"),
 		cfg.ToolRepair,
 		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1578,7 +1594,7 @@ func TestHandleStreamingResponse_MultipleChunks(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai")
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

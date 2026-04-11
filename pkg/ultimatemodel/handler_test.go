@@ -1024,7 +1024,7 @@ func TestExecuteInternal_NonStreaming(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := h.executeInternal(ctx, w, body, modelCfg, false)
+	_, err := h.executeInternal(ctx, w, body, nil, modelCfg, false)
 	if err == nil {
 		t.Log("executeInternal succeeded (unexpected in test without real provider)")
 	}

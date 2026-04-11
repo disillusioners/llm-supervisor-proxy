@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
@@ -36,6 +37,7 @@ func (h *Handler) executeExternal(
 	w http.ResponseWriter,
 	r *http.Request,
 	requestBody map[string]interface{},
+	requestBodyBytes []byte,
 	modelCfg *models.ModelConfig,
 	isStream bool,
 ) (*store.Usage, error) {
@@ -105,7 +107,7 @@ func (h *Handler) executeExternal(
 
 	if isStream {
 		// Stream response directly
-		return h.streamResponse(w, resp, modelCfg.ID)
+		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes)
 	}
 
 	// Non-streaming: read body, extract usage, then copy to response
@@ -116,6 +118,29 @@ func (h *Handler) executeExternal(
 
 	// Extract usage from response
 	usage := extractUsageFromResponse(bodyBytes)
+
+	// Fallback token counting if usage is nil/zero
+	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, modelCfg.ID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelCfg.ID)
+			}
+			completionText := token.ExtractCompletionTextFromJSON(bodyBytes)
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, modelCfg.ID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, modelCfg.ID)
+			}
+			usage = &store.Usage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			}
+			log.Printf("[fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
+				modelCfg.ID, promptTokens, completionTokens, promptTokens+completionTokens)
+		}
+	}
 
 	// Write response
 	w.WriteHeader(resp.StatusCode)
@@ -153,7 +178,7 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 }
 
 // streamResponse streams the upstream response directly to client
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string) (*store.Usage, error) {
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte) (*store.Usage, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -184,6 +209,9 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 
 	// Track the last chunk containing usage data (only need the most recent)
 	var lastUsageChunk []byte
+
+	// Accumulate raw SSE chunks for fallback token counting
+	var rawChunks bytes.Buffer
 
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -222,9 +250,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			chunksToEmit = [][]byte{lineBytes}
 		}
 
-		// Write all chunks
+		// Write all chunks and accumulate for fallback token counting
 		for _, chunk := range chunksToEmit {
 			w.Write(chunk)
+			rawChunks.Write(chunk)
 		}
 		flusher.Flush()
 	}
@@ -248,6 +277,29 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	var usage *store.Usage
 	if lastUsageChunk != nil {
 		usage = extractUsageFromChunk(lastUsageChunk)
+	}
+
+	// Fallback token counting if usage is nil/zero
+	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelID)
+			}
+			completionText := token.ExtractCompletionTextFromChunks(rawChunks.Bytes())
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, modelID)
+			}
+			usage = &store.Usage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			}
+			log.Printf("[fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
+				modelID, promptTokens, completionTokens, promptTokens+completionTokens)
+		}
 	}
 
 	return usage, nil

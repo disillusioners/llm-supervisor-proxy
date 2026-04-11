@@ -15,6 +15,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
@@ -489,6 +490,27 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				rc.reqLog.Usage = usage
 				h.store.Add(rc.reqLog)
 
+				// Fallback token counting: if provider didn't return usage, estimate from request
+				if token.FallbackEnabled() {
+					if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
+						tokenizer := token.GetTokenizer()
+						model := ultimateModelID
+						requestBytes, _ := json.Marshal(rc.requestBody)
+						promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
+						if err != nil {
+							log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+						}
+						// Note: completion text not available here since response was streamed to client
+						rc.reqLog.Usage = &store.Usage{
+							PromptTokens:     promptTokens,
+							CompletionTokens: 0,
+							TotalTokens:      promptTokens,
+						}
+						log.Printf("[fallback-token-count] model=%s prompt=%d completion=0 (ultimate model, response not buffered)",
+							model, promptTokens)
+					}
+				}
+
 				// Count this request for hourly usage tracking
 				if rc.tokenID != "" && h.counter != nil {
 					var promptTokens, completionTokens, totalTokens int
@@ -769,6 +791,37 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}
 			}
 
+			// Fallback token counting: if provider didn't return usage, estimate from buffer
+			if token.FallbackEnabled() {
+				if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
+					tokenizer := token.GetTokenizer()
+					model := winner.GetModelID()
+					if model == "" {
+						model, _ = rc.requestBody["model"].(string)
+					}
+					requestBytes, _ := json.Marshal(rc.requestBody)
+					promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+					}
+
+					rawBytes := winner.GetBuffer().GetAllRawBytesOnce()
+					completionText := token.ExtractCompletionTextFromChunks(rawBytes)
+					completionTokens, err := tokenizer.CountCompletionTokens(completionText, model)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
+					}
+
+					rc.reqLog.Usage = &store.Usage{
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						TotalTokens:      promptTokens + completionTokens,
+					}
+					log.Printf("[fallback-token-count] model=%s prompt=%d completion=%d total=%d (streaming)",
+						model, promptTokens, completionTokens, promptTokens+completionTokens)
+				}
+			}
+
 			// Now safe to prune (after extracting usage)
 			buffer.Prune(readIndex)
 
@@ -967,6 +1020,36 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 				usage.TotalTokens = int(v)
 			}
 			rc.reqLog.Usage = usage
+		}
+
+		// Fallback token counting: if provider didn't return usage, estimate from response
+		if token.FallbackEnabled() {
+			if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
+				tokenizer := token.GetTokenizer()
+				model := winner.GetModelID()
+				if model == "" {
+					model, _ = rc.requestBody["model"].(string)
+				}
+				requestBytes, _ := json.Marshal(rc.requestBody)
+				promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
+				if err != nil {
+					log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+				}
+
+				completionText := token.ExtractCompletionTextFromJSON(finalBody)
+				completionTokens, err := tokenizer.CountCompletionTokens(completionText, model)
+				if err != nil {
+					log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
+				}
+
+				rc.reqLog.Usage = &store.Usage{
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					TotalTokens:      promptTokens + completionTokens,
+				}
+				log.Printf("[fallback-token-count] model=%s prompt=%d completion=%d total=%d (non-streaming)",
+					model, promptTokens, completionTokens, promptTokens+completionTokens)
+			}
 		}
 	}
 

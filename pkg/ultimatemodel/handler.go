@@ -247,13 +247,18 @@ func (h *Handler) Execute(
 	ctx, cancel := context.WithTimeout(parentCtx, cfg.MaxGenerationTime.Duration())
 	defer cancel()
 
+	// Marshal request body for token counting
+	requestBodyBytes, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
 	// Route to internal or external handler
 	var usage *store.Usage
-	var err error
 	if modelCfg.Internal {
-		usage, err = h.executeInternal(ctx, w, requestBody, modelCfg, isStream)
+		usage, err = h.executeInternal(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream)
 	} else {
-		usage, err = h.executeExternal(ctx, w, r, requestBody, modelCfg, isStream)
+		usage, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream)
 	}
 
 	if err != nil {
@@ -266,6 +271,7 @@ func (h *Handler) Execute(
 	// On success: clear retry counter but keep hash in cache
 	// This prevents immediate re-triggering of ultimate model for same content
 	h.hashCache.ClearRetryCount(hash)
+
 	return usage, nil
 }
 

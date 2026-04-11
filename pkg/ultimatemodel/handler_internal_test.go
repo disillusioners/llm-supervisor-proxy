@@ -55,7 +55,7 @@ func TestHandleInternalNonStream_Success(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	result, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model")
+	result, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalNonStream returned error: %v", err)
@@ -107,7 +107,7 @@ func TestHandleInternalNonStream_ProviderError(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model")
+	_, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Expected error from provider")
@@ -149,7 +149,7 @@ func TestHandleInternalNonStream_EmptyUsage(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	result, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model")
+	result, err := h.handleInternalNonStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalNonStream returned error: %v", err)
@@ -184,7 +184,7 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -259,7 +259,7 @@ func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -310,7 +310,7 @@ func TestHandleInternalStream_Thinking(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -345,7 +345,7 @@ func TestHandleInternalStream_Error(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Expected error from stream")
@@ -649,7 +649,8 @@ func TestExecuteInternal_ResolveFailure(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.executeInternal(context.Background(), w, body, modelCfg, false)
+	requestBodyBytes, _ := json.Marshal(body)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelCfg, false)
 
 	if err == nil {
 		t.Fatal("Expected error for unresolved internal config")
@@ -711,7 +712,7 @@ func TestHandleInternalStream_EmptyContent(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -746,7 +747,7 @@ func TestHandleInternalStream_MultipleToolCalls(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -842,7 +843,7 @@ func TestHandleInternalStream_UsageFromDoneEvent(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -884,14 +885,21 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model")
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
 	}
 
-	// Should return nil usage when no usage in done event
-	if usage != nil {
-		t.Errorf("Usage = %v, want nil when no usage in done event", usage)
+	// With fallback token counting, usage is now a zero struct instead of nil
+	// when no usage is provided in the done event (nil requestBodyBytes means fallback counts 0)
+	if usage == nil {
+		t.Errorf("Usage should not be nil - fallback should return zero-usage struct")
+	}
+	if usage.PromptTokens != 0 {
+		t.Errorf("PromptTokens = %d, want 0 (no requestBodyBytes for fallback)", usage.PromptTokens)
+	}
+	if usage.CompletionTokens != 0 {
+		t.Errorf("CompletionTokens = %d, want 0 (empty stream for fallback)", usage.CompletionTokens)
 	}
 }

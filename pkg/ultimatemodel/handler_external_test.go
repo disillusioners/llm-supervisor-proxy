@@ -31,8 +31,9 @@ func TestExecuteExternal_UpstreamURLNotConfigured(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err == nil {
 		t.Error("executeExternal should return error when upstream URL is empty")
@@ -91,8 +92,9 @@ func TestExecuteExternal_SuccessfulNonStreaming(t *testing.T) {
 		"model":    "original-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -151,8 +153,9 @@ func TestExecuteExternal_SuccessfulStreaming(t *testing.T) {
 		"stream":   true,
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), true)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), true)
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -183,8 +186,9 @@ func TestExecuteExternal_UpstreamError(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err == nil {
 		t.Error("executeExternal should return error for upstream failure")
@@ -213,8 +217,9 @@ func TestExecuteExternal_UpstreamReturns400(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err == nil {
 		t.Error("executeExternal should return error for 400 response")
@@ -243,12 +248,13 @@ func TestExecuteExternal_ContextCancellation(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
 	// Create a context that will timeout quickly
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := h.executeExternal(ctx, w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(ctx, w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err == nil {
 		t.Error("executeExternal should return error for cancelled context")
@@ -279,8 +285,9 @@ func TestExecuteExternal_ResponseHeadersForwarded(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -322,8 +329,9 @@ func TestExecuteExternal_ModelIDOverride(t *testing.T) {
 		"model":    "original-model", // Original model
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -364,8 +372,9 @@ func TestExecuteExternal_HeadersHopByHopSkipped(t *testing.T) {
 		"model":    "ultimate-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -400,7 +409,7 @@ func TestStreamResponse_SSEHeadersSet(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -444,7 +453,7 @@ func TestStreamResponse_DataForwarding(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -480,7 +489,7 @@ func TestStreamResponse_DONEMarker(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -513,7 +522,7 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	usage, err := h.streamResponse(w, resp, "ultimate-model")
+	usage, err := h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -547,7 +556,7 @@ func TestStreamResponse_EmptyStream(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -583,7 +592,7 @@ func TestStreamResponse_MultipleChunks(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -625,7 +634,7 @@ func TestStreamResponse_WithToolCallBuffer(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model")
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
 
 	if err != nil {
 		t.Errorf("streamResponse with tool buffer returned error: %v", err)
@@ -774,8 +783,9 @@ func TestExecuteExternal_Integration(t *testing.T) {
 		"model":    "different-model",
 		"messages": []map[string]interface{}{{"role": "user", "content": "Test"}},
 	}
+	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err != nil {
 		t.Fatalf("executeExternal failed: %v", err)
@@ -809,10 +819,10 @@ func TestExecuteExternal_RequestBodyMarshalingError(t *testing.T) {
 		"unmarshalable": make(chan int),
 	}
 
-	_, err := h.executeExternal(context.Background(), w, r, body, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, nil, modelsCfg.GetModel("ultimate-model"), false)
 
 	if err == nil {
-		t.Error("executeExternal should return error for unmarshallable body")
+		t.Error("executeExternal should return error for unmarshalable body")
 	}
 }
 

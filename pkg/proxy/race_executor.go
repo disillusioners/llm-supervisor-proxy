@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -85,9 +86,9 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
 		normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
 		normalizers.GetRegistry().ResetAll(normCtx)
-		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline)
+		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline, rawBody)
 	}
-	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel)
+	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
 }
 
 // executeExternalRequest handles requests to external upstream (LiteLLM, etc.)
@@ -200,18 +201,18 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 	if !isStreaming {
 		// Non-streaming response: read entire body as single chunk
-		return handleNonStreamingResponse(ctx, cfg, resp, req)
+		return handleNonStreamingResponse(ctx, cfg, resp, req, finalBody)
 	}
 
 	// Streaming response
 	req.MarkStreaming()
 	// Detect provider for normalization
 	provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
-	return handleStreamingResponse(ctx, cfg, resp, req, provider)
+	return handleStreamingResponse(ctx, cfg, resp, req, provider, finalBody)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
-func handleInternalNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string) error {
+func handleInternalNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, rawBody []byte) error {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		// Extract HTTP status from ProviderError if available
@@ -236,6 +237,43 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 		return fmt.Errorf("failed to marshal response: %w", err)
 	}
 
+	// If provider didn't return usage, use fallback token counting
+	if upstreamReq.usage == nil || (upstreamReq.usage.PromptTokens == 0 && upstreamReq.usage.CompletionTokens == 0 && upstreamReq.usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			// Convert bodyMap back to rawBody for fallback counting
+			reqBody, _ := json.Marshal(req)
+			promptTokens, err := tokenizer.CountPromptTokens(reqBody, internalModel)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+			}
+			// Extract completion text from the response we already have
+			var respMap map[string]interface{}
+			json.Unmarshal(data, &respMap)
+			var completionText string
+			if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]interface{}); ok {
+					if msg, ok := choice["message"].(map[string]interface{}); ok {
+						if content, ok := msg["content"].(string); ok {
+							completionText = content
+						}
+					}
+				}
+			}
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+			}
+			upstreamReq.SetUsage(&TokenUsage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			})
+			log.Printf("[fallback-token-count] internal non-streaming: model=%s prompt=%d completion=%d total=%d",
+				internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+		}
+	}
+
 	// Add as single chunk
 	if !upstreamReq.buffer.Add(data) {
 		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
@@ -245,7 +283,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 }
 
 // handleInternalStream handles streaming requests for internal providers
-func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration) error {
+func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration, rawBody []byte) error {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		// Extract HTTP status from ProviderError if available
@@ -532,6 +570,30 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 				return fmt.Errorf("buffer limit exceeded: done marker for model %s", internalModel)
 			}
 
+			// If provider didn't return usage in the done event, use fallback
+			if upstreamReq.usage == nil || (upstreamReq.usage.PromptTokens == 0 && upstreamReq.usage.CompletionTokens == 0 && upstreamReq.usage.TotalTokens == 0) {
+				if token.FallbackEnabled() {
+					tokenizer := token.GetTokenizer()
+					promptTokens, err := tokenizer.CountPromptTokens(rawBody, internalModel)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+					}
+					rawBytes := upstreamReq.buffer.GetAllRawBytesOnce()
+					completionText := token.ExtractCompletionTextFromChunks(rawBytes)
+					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+					}
+					upstreamReq.SetUsage(&TokenUsage{
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						TotalTokens:      promptTokens + completionTokens,
+					})
+					log.Printf("[fallback-token-count] internal streaming: model=%s prompt=%d completion=%d total=%d",
+						internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+				}
+			}
+
 			return nil
 
 		case "error":
@@ -678,7 +740,7 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 }
 
 // handleNonStreamingResponse reads a non-streaming JSON response
-func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest) error {
+func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, rawBody []byte) error {
 	// Limit body size to 10MB to prevent unbounded memory consumption
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
@@ -708,6 +770,29 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 					TotalTokens:      totalTokens,
 				})
 			}
+		}
+	}
+
+	// If provider didn't return usage, use fallback token counting
+	if req.usage == nil || (req.usage.PromptTokens == 0 && req.usage.CompletionTokens == 0 && req.usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
+			}
+			completionText := token.ExtractCompletionTextFromJSON(body)
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
+			}
+			req.SetUsage(&TokenUsage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			})
+			log.Printf("[fallback-token-count] non-streaming: model=%s prompt=%d completion=%d total=%d",
+				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
 
@@ -894,7 +979,7 @@ func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepai
 // Per the unified race retry design, the main request should continue streaming
 // even after idle timeout - the coordinator will spawn parallel requests.
 // Idle timeout detection is handled by the coordinator via TrackActivity().
-func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string) error {
+func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string, rawBody []byte) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
@@ -1084,6 +1169,30 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 					},
 				})
 			}
+		}
+	}
+
+	// If no usage was found during streaming, use fallback
+	if req.usage == nil || (req.usage.PromptTokens == 0 && req.usage.CompletionTokens == 0 && req.usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
+			}
+			rawBytes := req.buffer.GetAllRawBytesOnce()
+			completionText := token.ExtractCompletionTextFromChunks(rawBytes)
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
+			}
+			req.SetUsage(&TokenUsage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			})
+			log.Printf("[fallback-token-count] streaming: model=%s prompt=%d completion=%d total=%d",
+				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
 

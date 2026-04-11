@@ -1,6 +1,7 @@
 package ultimatemodel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
@@ -20,6 +22,7 @@ func (h *Handler) executeInternal(
 	ctx context.Context,
 	w http.ResponseWriter,
 	requestBody map[string]interface{},
+	requestBodyBytes []byte,
 	modelCfg *models.ModelConfig,
 	isStream bool,
 ) (*store.Usage, error) {
@@ -45,9 +48,9 @@ func (h *Handler) executeInternal(
 	req.Model = internalModel
 
 	if isStream {
-		return h.handleInternalStream(ctx, providerClient, req, w, internalModel)
+		return h.handleInternalStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
 	}
-	return h.handleInternalNonStream(ctx, providerClient, req, w, internalModel)
+	return h.handleInternalNonStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -57,6 +60,7 @@ func (h *Handler) handleInternalNonStream(
 	req *providers.ChatCompletionRequest,
 	w http.ResponseWriter,
 	internalModel string,
+	requestBodyBytes []byte,
 ) (*store.Usage, error) {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
@@ -74,6 +78,31 @@ func (h *Handler) handleInternalNonStream(
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
 	}
+
+	// Fallback token counting if usage is nil/zero
+	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, internalModel)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+			}
+			respBytes, _ := json.Marshal(resp)
+			completionText := token.ExtractCompletionTextFromJSON(respBytes)
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+			if err != nil {
+				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+			}
+			usage = &store.Usage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			}
+			log.Printf("[fallback-token-count] ultimate-internal: model=%s prompt=%d completion=%d total=%d",
+				internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+		}
+	}
+
 	return usage, nil
 }
 
@@ -84,6 +113,7 @@ func (h *Handler) handleInternalStream(
 	req *providers.ChatCompletionRequest,
 	w http.ResponseWriter,
 	internalModel string,
+	requestBodyBytes []byte,
 ) (*store.Usage, error) {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
@@ -129,6 +159,9 @@ func (h *Handler) handleInternalStream(
 	// Track usage from done event
 	var extractedUsage *store.Usage
 
+	// Accumulate raw SSE chunks for fallback token counting
+	var rawChunks bytes.Buffer
+
 	for event := range eventCh {
 		switch event.Type {
 		case "content":
@@ -173,6 +206,8 @@ func (h *Handler) handleInternalStream(
 				data, _ = json.Marshal(chunk)
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
+			rawChunks.Write(data)
+			rawChunks.Write([]byte("\n\n"))
 			flusher.Flush()
 			firstChunk = false
 
@@ -236,6 +271,7 @@ func (h *Handler) handleInternalStream(
 				// Write all chunks to client
 				for _, chunk := range chunksToEmit {
 					w.Write(chunk)
+					rawChunks.Write(chunk)
 				}
 				flusher.Flush()
 			}
@@ -259,6 +295,8 @@ func (h *Handler) handleInternalStream(
 			}
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", data)
+			rawChunks.Write(data)
+			rawChunks.Write([]byte("\n\n"))
 			flusher.Flush()
 
 		case "done":
@@ -308,10 +346,35 @@ func (h *Handler) handleInternalStream(
 			}
 			finalData, _ := json.Marshal(finalChunk)
 			fmt.Fprintf(w, "data: %s\n\n", finalData)
+			rawChunks.Write(finalData)
+			rawChunks.Write([]byte("\n\n"))
 
 			// Write [DONE] marker
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
+
+			// Fallback token counting if usage is nil/zero
+			if extractedUsage == nil || (extractedUsage.PromptTokens == 0 && extractedUsage.CompletionTokens == 0 && extractedUsage.TotalTokens == 0) {
+				if token.FallbackEnabled() {
+					tokenizer := token.GetTokenizer()
+					promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, internalModel)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+					}
+					completionText := token.ExtractCompletionTextFromChunks(rawChunks.Bytes())
+					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+					if err != nil {
+						log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+					}
+					extractedUsage = &store.Usage{
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						TotalTokens:      promptTokens + completionTokens,
+					}
+					log.Printf("[fallback-token-count] ultimate-internal: model=%s prompt=%d completion=%d total=%d",
+						internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+				}
+			}
 
 		case "error":
 			// Write error as SSE event
