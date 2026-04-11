@@ -245,7 +245,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 			reqBody, _ := json.Marshal(req)
 			promptTokens, err := tokenizer.CountPromptTokens(reqBody, internalModel)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
 			}
 			// Extract completion text from the response we already have
 			var respMap map[string]interface{}
@@ -262,14 +262,14 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 			}
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
 			}
 			upstreamReq.SetUsage(&TokenUsage{
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      promptTokens + completionTokens,
 			})
-			log.Printf("[fallback-token-count] internal non-streaming: model=%s prompt=%d completion=%d total=%d",
+			log.Printf("[DEBUG][fallback-token-count] internal non-streaming: model=%s prompt=%d completion=%d total=%d",
 				internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
@@ -576,20 +576,20 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 					tokenizer := token.GetTokenizer()
 					promptTokens, err := tokenizer.CountPromptTokens(rawBody, internalModel)
 					if err != nil {
-						log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
 					}
 					rawBytes := upstreamReq.buffer.GetAllRawBytesOnce()
 					completionText := token.ExtractCompletionTextFromChunks(rawBytes)
 					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
 					if err != nil {
-						log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+						log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
 					}
 					upstreamReq.SetUsage(&TokenUsage{
 						PromptTokens:     promptTokens,
 						CompletionTokens: completionTokens,
 						TotalTokens:      promptTokens + completionTokens,
 					})
-					log.Printf("[fallback-token-count] internal streaming: model=%s prompt=%d completion=%d total=%d",
+					log.Printf("[DEBUG][fallback-token-count] internal streaming: model=%s prompt=%d completion=%d total=%d",
 						internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
 				}
 			}
@@ -779,19 +779,19 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
 			}
 			completionText := token.ExtractCompletionTextFromJSON(body)
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
 			}
 			req.SetUsage(&TokenUsage{
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      promptTokens + completionTokens,
 			})
-			log.Printf("[fallback-token-count] non-streaming: model=%s prompt=%d completion=%d total=%d",
+			log.Printf("[DEBUG][fallback-token-count] non-streaming: model=%s prompt=%d completion=%d total=%d",
 				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
@@ -1178,20 +1178,20 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
 			}
 			rawBytes := req.buffer.GetAllRawBytesOnce()
 			completionText := token.ExtractCompletionTextFromChunks(rawBytes)
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
 			}
 			req.SetUsage(&TokenUsage{
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      promptTokens + completionTokens,
 			})
-			log.Printf("[fallback-token-count] streaming: model=%s prompt=%d completion=%d total=%d",
+			log.Printf("[DEBUG][fallback-token-count] streaming: model=%s prompt=%d completion=%d total=%d",
 				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}

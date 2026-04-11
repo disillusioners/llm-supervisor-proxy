@@ -12,6 +12,7 @@ type Tokenizer struct {
 	mu               sync.RWMutex
 	fallbackEncoding string
 	modelPrefixMap   map[string]string // model prefix → encoding name
+	encodingCache    sync.Map          // encodingName → *tk.Tiktoken
 }
 
 // Singleton
@@ -59,11 +60,20 @@ func (t *Tokenizer) resolveEncoding(model string) string {
 // CountTokens counts tokens in the given text for the given model
 func (t *Tokenizer) CountTokens(text string, model string) (int, error) {
 	encodingName := t.resolveEncoding(model)
+
+	// Check cache first
+	if cached, ok := t.encodingCache.Load(encodingName); ok {
+		enc := cached.(*tk.Tiktoken)
+		return len(enc.Encode(text, nil, nil)), nil
+	}
+
+	// Load and cache
 	enc, err := tk.GetEncoding(encodingName)
 	if err != nil {
 		// fallback to simplest estimation: len/4
 		return len(text) / 4, nil
 	}
+	t.encodingCache.Store(encodingName, enc)
 	return len(enc.Encode(text, nil, nil)), nil
 }
 

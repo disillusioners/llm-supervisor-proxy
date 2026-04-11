@@ -498,7 +498,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						requestBytes, _ := json.Marshal(rc.requestBody)
 						promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
 						if err != nil {
-							log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+							log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
 						}
 						// Note: completion text not available here since response was streamed to client
 						rc.reqLog.Usage = &store.Usage{
@@ -506,7 +506,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 							CompletionTokens: 0,
 							TotalTokens:      promptTokens,
 						}
-						log.Printf("[fallback-token-count] model=%s prompt=%d completion=0 (ultimate model, response not buffered)",
+						log.Printf("[DEBUG][fallback-token-count] model=%s prompt=%d completion=0 (ultimate model, response not buffered)",
 							model, promptTokens)
 					}
 				}
@@ -802,14 +802,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					requestBytes, _ := json.Marshal(rc.requestBody)
 					promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
 					if err != nil {
-						log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
 					}
 
 					rawBytes := winner.GetBuffer().GetAllRawBytesOnce()
 					completionText := token.ExtractCompletionTextFromChunks(rawBytes)
 					completionTokens, err := tokenizer.CountCompletionTokens(completionText, model)
 					if err != nil {
-						log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
+						log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
 					}
 
 					rc.reqLog.Usage = &store.Usage{
@@ -817,7 +817,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 						CompletionTokens: completionTokens,
 						TotalTokens:      promptTokens + completionTokens,
 					}
-					log.Printf("[fallback-token-count] model=%s prompt=%d completion=%d total=%d (streaming)",
+					log.Printf("[DEBUG][fallback-token-count] model=%s prompt=%d completion=%d total=%d (streaming)",
 						model, promptTokens, completionTokens, promptTokens+completionTokens)
 				}
 			}
@@ -1033,13 +1033,13 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 				requestBytes, _ := json.Marshal(rc.requestBody)
 				promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
 				if err != nil {
-					log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+					log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
 				}
 
 				completionText := token.ExtractCompletionTextFromJSON(finalBody)
 				completionTokens, err := tokenizer.CountCompletionTokens(completionText, model)
 				if err != nil {
-					log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
+					log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, model)
 				}
 
 				rc.reqLog.Usage = &store.Usage{
@@ -1047,7 +1047,7 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 					CompletionTokens: completionTokens,
 					TotalTokens:      promptTokens + completionTokens,
 				}
-				log.Printf("[fallback-token-count] model=%s prompt=%d completion=%d total=%d (non-streaming)",
+				log.Printf("[DEBUG][fallback-token-count] model=%s prompt=%d completion=%d total=%d (non-streaming)",
 					model, promptTokens, completionTokens, promptTokens+completionTokens)
 			}
 		}

@@ -125,19 +125,19 @@ func (h *Handler) executeExternal(
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, modelCfg.ID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelCfg.ID)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelCfg.ID)
 			}
 			completionText := token.ExtractCompletionTextFromJSON(bodyBytes)
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, modelCfg.ID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, modelCfg.ID)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, modelCfg.ID)
 			}
 			usage = &store.Usage{
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      promptTokens + completionTokens,
 			}
-			log.Printf("[fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
+			log.Printf("[DEBUG][fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
 				modelCfg.ID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
@@ -285,19 +285,19 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelID)
 			}
 			completionText := token.ExtractCompletionTextFromChunks(rawChunks.Bytes())
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, modelID)
 			if err != nil {
-				log.Printf("[fallback-token-count] error counting completion tokens: %v, model=%s", err, modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, modelID)
 			}
 			usage = &store.Usage{
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 				TotalTokens:      promptTokens + completionTokens,
 			}
-			log.Printf("[fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
+			log.Printf("[DEBUG][fallback-token-count] ultimate-external: model=%s prompt=%d completion=%d total=%d",
 				modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
