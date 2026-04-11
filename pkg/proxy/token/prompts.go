@@ -13,7 +13,8 @@ func extractPromptText(body []byte) string {
 		return string(body)
 	}
 
-	var text string
+	var buf strings.Builder
+	buf.Grow(len(body)) // Pre-allocate based on input size
 
 	// Chat completions: messages array
 	if messagesRaw, ok := req["messages"]; ok {
@@ -22,14 +23,14 @@ func extractPromptText(body []byte) string {
 			for _, msg := range messages {
 				// Handle string content
 				if content, ok := msg["content"].(string); ok {
-					text += content
+					buf.WriteString(content)
 				}
 				// Handle array content (multimodal)
 				if contentArr, ok := msg["content"].([]interface{}); ok {
 					for _, item := range contentArr {
 						if itemMap, ok := item.(map[string]interface{}); ok {
 							if textContent, ok := itemMap["text"].(string); ok {
-								text += textContent
+								buf.WriteString(textContent)
 							}
 						}
 					}
@@ -39,6 +40,7 @@ func extractPromptText(body []byte) string {
 	}
 
 	// Legacy completions: prompt field
+	text := buf.String()
 	if text == "" {
 		if promptRaw, ok := req["prompt"]; ok {
 			var prompt string
@@ -78,6 +80,18 @@ func ExtractCompletionTextFromChunks(data []byte) string {
 				if delta, ok := choice["delta"].(map[string]interface{}); ok {
 					if content, ok := delta["content"].(string); ok {
 						result.WriteString(content)
+					}
+					// Extract tool call arguments
+					if toolCalls, ok := delta["tool_calls"].([]interface{}); ok {
+						for _, tc := range toolCalls {
+							if tcMap, ok := tc.(map[string]interface{}); ok {
+								if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+									if args, ok := fn["arguments"].(string); ok {
+										result.WriteString(args)
+									}
+								}
+							}
+						}
 					}
 				}
 				// Also check message.content for non-streaming responses embedded in SSE
