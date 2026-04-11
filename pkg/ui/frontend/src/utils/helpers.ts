@@ -163,6 +163,8 @@ export function formatTokenCount(n: number): string {
 }
 
 export function formatHourBucket(bucket: string): string {
+  // Null guard - return empty string for undefined/null bucket
+  if (!bucket) return '';
   // "2026-03-30T14" → "Mar 30, 14:00" (hourly format)
   // "2026-03-30" → "Mar 30, 2026" (daily format)
   if (bucket.includes('T')) {

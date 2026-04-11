@@ -21,6 +21,9 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Memory Traps Fix | 2026-04-08 | ✅ PASS | Full integration test with race, 23 packages, quick fix commit 972dd01 |
 | Token Ultimate Permission | 2026-04-09 | ✅ PASS | 22/22 packages, 9/9 API tests, feature branch `feature/token-ultimate-permission` |
 | Fallback Token Count Tests | 2026-04-11 | ✅ PASS | 23 test functions, 129 subcases, 1107 lines, 21 packages, race clean |
+| Usage Chart + Daily Bug Fix | 2026-04-12 | ✅ PASS | 21 packages, API verified (hourly/daily), browser automation 6/6, bug fix confirmed |
+| Usage Chart + Daily Fix | 2026-04-12 | ✅ PASS | 21/21 Go tests, API verified, browser 6/6 PASS, bug fix verified, branch `feature/usage-chart-view` |
+| Usage Chart + Daily Bug Fix | 2026-04-11 | ✅ PASS | 21 packages, API verified, browser automation 6/6 scenarios, quick fix W3 applied |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
