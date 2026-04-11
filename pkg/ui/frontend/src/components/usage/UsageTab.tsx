@@ -180,31 +180,29 @@ export function UsageTab() {
           </button>
         </div>
 
-        {/* View toggle (hourly/daily) - only show for table mode */}
-        {displayMode === 'table' && (
-          <div class="flex gap-1">
-            <button
-              onClick={() => setView('hourly')}
-              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                view === 'hourly'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:text-white'
-              }`}
-            >
-              Hourly
-            </button>
-            <button
-              onClick={() => setView('daily')}
-              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                view === 'daily'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:text-white'
-              }`}
-            >
-              Daily
-            </button>
-          </div>
-        )}
+        {/* View toggle (hourly/daily) - always visible */}
+        <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
+          <button
+            onClick={() => setView('hourly')}
+            class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              view === 'hourly'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Hourly
+          </button>
+          <button
+            onClick={() => setView('daily')}
+            class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              view === 'daily'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            Daily
+          </button>
+        </div>
       </div>
 
       {/* Chart or Table view */}
