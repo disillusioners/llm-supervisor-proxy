@@ -20,6 +20,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Idle Termination | 2026-04-06 | ✅ PASS | 8 new tests, 575 new lines, commit 068aa0d |
 | Memory Traps Fix | 2026-04-08 | ✅ PASS | Full integration test with race, 23 packages, quick fix commit 972dd01 |
 | Token Ultimate Permission | 2026-04-09 | ✅ PASS | 22/22 packages, 9/9 API tests, feature branch `feature/token-ultimate-permission` |
+| Fallback Token Count Tests | 2026-04-11 | ✅ PASS | 23 test functions, 129 subcases, 1107 lines, 21 packages, race clean |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
@@ -34,6 +35,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Pack | Directory | Tests | Key Files |
 |------|-----------|-------|-----------|
 | proxy_unit_test | pkg/proxy/ | ~300+ | race_executor_test.go, handler_*.go, adapter_*.go |
+| token_unit_test | pkg/proxy/token/ | ~23 | counter_test.go, prompts_test.go |
 | ultimatemodel_unit_test | pkg/ultimatemodel/ | ~114 | handler_external_test.go, handler_internal_test.go, usage_test.go |
 | store_unit_test | pkg/store/database/ | ~50+ | querybuilder_test.go, database_test.go |
 | models_unit_test | pkg/models/ | ~100 | peak_hours_test.go, config_deep_test.go |

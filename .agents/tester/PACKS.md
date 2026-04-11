@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 9 packs across 22 packages
-- Unit: 8 | Integration: 0 | E2E: 0 | Mock: 1
+- Total: 10 packs across 22 packages
+- Unit: 9 | Integration: 0 | E2E: 0 | Mock: 1
 - All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
 
 ## Timeout Configuration
@@ -22,6 +22,7 @@
 | toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-04-09 | PASS |
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-04-09 | PASS |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-04-09 | PASS |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-04-11 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-04-09 | PASS |
 
 ## Mock Test Packs
