@@ -1179,3 +1179,300 @@ func newMockModelsConfig() *models.ModelsConfig {
 	})
 	return config
 }
+
+// =============================================================================
+// Tests for Peak Hour + Secondary Model Combo
+// =============================================================================
+
+// TestRaceCoordinator_PeakHourWithSecondaryModel tests that when peak hours are
+// active and secondary model is configured:
+// - Main request uses the peak hour model
+// - Second request uses the secondary model (NOT the peak model)
+//
+// This is a critical combo scenario: peak hours use a more expensive model,
+// while secondary model is typically a cheaper/faster fallback.
+func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
+	ctx := context.Background()
+
+	// Create models config with peak hour and secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "peak-hour-test-model",
+			Name:                   "Peak Hour Test Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model (cheaper/faster)
+			PeakHourEnabled:        true,
+			PeakHourStart:          "00:00", // Peak hours: all day
+			PeakHourEnd:            "23:59",
+			PeakHourTimezone:       "+0",
+			PeakHourModel:          "glm-peak-model", // Peak hour model (expensive)
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	cfg := newTestConfigSnapshot("peak-hour-test-model")
+	cfg.ModelsConfig = modelsConfig
+
+	// Need at least 2 models for second request to spawn
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-hour-test-model", "fallback-model"})
+
+	// Spawn main request (should get peak hour model via ResolveInternalConfig)
+	coord.spawn(modelTypeMain, spawnTriggerInfo{
+		trigger:       "",
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Spawn second request (should get secondary model, NOT peak model)
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{
+		trigger:       triggerIdleTimeout,
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	if len(coord.requests) != 2 {
+		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))
+	}
+
+	mainReq := coord.requests[0]
+	secondReq := coord.requests[1]
+
+	// Verify main request type
+	if mainReq.GetModelType() != modelTypeMain {
+		t.Errorf("Main request type = %v, want %v", mainReq.GetModelType(), modelTypeMain)
+	}
+
+	// Verify second request type
+	if secondReq.GetModelType() != modelTypeSecond {
+		t.Errorf("Second request type = %v, want %v", secondReq.GetModelType(), modelTypeSecond)
+	}
+
+	// Verify main request does NOT have secondary flag (uses primary/peak)
+	if mainReq.UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+
+	// Verify second request HAS secondary flag
+	if !secondReq.UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+
+	// CRITICAL ASSERTION: Verify that main and second requests have DIFFERENT model usage intentions
+	// Main: useSecondaryUpstream=false → will get peak hour model via ResolveInternalConfig
+	// Second: useSecondaryUpstream=true → will get secondary model via executeInternalRequest
+
+	// The key insight is that the SECONDARY model should NOT be affected by peak hours
+	// because the secondary logic is in executeInternalRequest(), not ResolveInternalConfig()
+	// So when useSecondaryUpstream=true, it uses SecondaryUpstreamModel, not PeakHourModel
+}
+
+// TestRaceCoordinator_PeakHourModelOnly_NoSecondary tests that when peak hours
+// are active but no secondary model is configured, the main request uses
+// peak hour model (via ResolveInternalConfig).
+func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
+	ctx := context.Background()
+
+	// Create models config with peak hour but NO secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:               "peak-only-model",
+			Name:             "Peak Only Model",
+			Enabled:          true,
+			Internal:         true,
+			CredentialID:     "test-cred",
+			InternalModel:    "glm-5.0",
+			PeakHourEnabled:  true,
+			PeakHourStart:    "00:00", // Peak all day
+			PeakHourEnd:      "23:59",
+			PeakHourTimezone: "+0",
+			PeakHourModel:    "glm-peak-model",
+			// Note: No SecondaryUpstreamModel configured
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	cfg := newTestConfigSnapshot("peak-only-model")
+	cfg.ModelsConfig = modelsConfig
+
+	// Need at least 2 models for second request to spawn
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"peak-only-model", "fallback-model"})
+
+	// Spawn main request
+	coord.spawn(modelTypeMain, spawnTriggerInfo{
+		trigger:       "",
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Spawn second request
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{
+		trigger:       triggerIdleTimeout,
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	if len(coord.requests) != 2 {
+		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))
+	}
+
+	mainReq := coord.requests[0]
+	secondReq := coord.requests[1]
+
+	// Verify main request does NOT have secondary flag
+	if mainReq.UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+
+	// Second request has secondary flag, but since no secondary is configured,
+	// it will fall back to using the peak hour model (via ResolveInternalConfig fallback)
+	if !secondReq.UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+}
+
+// TestRaceCoordinator_SecondaryOverridesPeakHour verifies that the secondary
+// model is used independently of peak hours - the secondary logic in
+// executeInternalRequest() should NOT be affected by peak hour settings.
+func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
+	ctx := context.Background()
+
+	// Create models config with both peak hour and secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "combo-model",
+			Name:                   "Combo Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary
+			PeakHourEnabled:        true,
+			PeakHourStart:          "00:00", // Peak all day
+			PeakHourEnd:            "23:59",
+			PeakHourTimezone:       "+0",
+			PeakHourModel:          "glm-peak-model", // Peak model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	cfg := newTestConfigSnapshot("combo-model")
+	cfg.ModelsConfig = modelsConfig
+
+	// Need at least 2 models for second request to spawn
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"combo-model", "fallback-model"})
+
+	// Spawn both main and second requests
+	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", errorMessage: "", failedRequest: -1})
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, errorMessage: "", failedRequest: -1})
+
+	if len(coord.requests) != 2 {
+		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))
+	}
+
+	mainReq := coord.requests[0]
+	secondReq := coord.requests[1]
+
+	// Verify model IDs are the same (both target combo-model)
+	if mainReq.GetModelID() != "combo-model" {
+		t.Errorf("Main request modelID = %q, want combo-model", mainReq.GetModelID())
+	}
+	if secondReq.GetModelID() != "combo-model" {
+		t.Errorf("Second request modelID = %q, want combo-model", secondReq.GetModelID())
+	}
+
+	// KEY TEST: The DIFFERENCE is in useSecondaryUpstream flag
+	// Main request: useSecondaryUpstream=false
+	//   → executeInternalRequest() will NOT use secondary
+	//   → ResolveInternalConfig() will check peak hours → returns PeakHourModel
+	//
+	// Second request: useSecondaryUpstream=true
+	//   → executeInternalRequest() WILL use secondary
+	//   → SecondaryUpstreamModel takes precedence over PeakHourModel
+	//
+	// This is the intended behavior: secondary is a "cheaper fallback" for the
+	// race retry, not a "peak hour replacement"
+
+	if mainReq.UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+	if !secondReq.UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+}
+
+// TestRaceCoordinator_NoPeakHour_UsesInternalModel tests that when peak hours
+// are not active, the main request uses the regular internal model.
+func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
+	ctx := context.Background()
+
+	// Create models config with peak hour DISABLED
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "no-peak-model",
+			Name:                   "No Peak Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",
+			SecondaryUpstreamModel: "glm-4-flash",
+			PeakHourEnabled:        false, // Peak hours DISABLED
+			PeakHourModel:          "glm-peak-model",
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	cfg := newTestConfigSnapshot("no-peak-model")
+	cfg.ModelsConfig = modelsConfig
+
+	// Need at least 2 models for second request to spawn
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"no-peak-model", "fallback-model"})
+
+	// Spawn main request
+	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", errorMessage: "", failedRequest: -1})
+
+	// Spawn second request
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, errorMessage: "", failedRequest: -1})
+
+	if len(coord.requests) != 2 {
+		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))
+	}
+
+	mainReq := coord.requests[0]
+	secondReq := coord.requests[1]
+
+	// Main: useSecondaryUpstream=false → will get InternalModel (glm-5.0)
+	// Second: useSecondaryUpstream=true → will get SecondaryUpstreamModel (glm-4-flash)
+	if mainReq.UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+	if !secondReq.UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+}

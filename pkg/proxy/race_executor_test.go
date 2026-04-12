@@ -1610,8 +1610,483 @@ func TestHandleStreamingResponse_MultipleChunks(t *testing.T) {
 }
 
 // =============================================================================
-// Tests for Secondary Upstream Model
+// Tests for Secondary Upstream Model - Execution Level (E2E)
 // =============================================================================
+
+// mockProviderWithCapture is a mock provider that captures the model name
+// from ChatCompletion calls for verification purposes.
+type mockProviderWithCapture struct {
+	name               string
+	capturedModel      string
+	chatCompletionResp *providers.ChatCompletionResponse
+	chatCompletionErr  error
+	streamEvents       []providers.StreamEvent
+	streamErr          error
+	mu                 sync.Mutex
+}
+
+func newMockProviderWithCapture() *mockProviderWithCapture {
+	return &mockProviderWithCapture{name: "mock-with-capture"}
+}
+
+func (m *mockProviderWithCapture) Name() string {
+	return m.name
+}
+
+func (m *mockProviderWithCapture) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	// Capture the model name from the request
+	m.mu.Lock()
+	m.capturedModel = req.Model
+	m.mu.Unlock()
+
+	if m.chatCompletionErr != nil {
+		return nil, m.chatCompletionErr
+	}
+	return m.chatCompletionResp, nil
+}
+
+func (m *mockProviderWithCapture) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	// Capture the model name from the request
+	m.mu.Lock()
+	m.capturedModel = req.Model
+	m.mu.Unlock()
+
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+
+	ch := make(chan providers.StreamEvent, len(m.streamEvents))
+	events := make([]providers.StreamEvent, len(m.streamEvents))
+	copy(events, m.streamEvents)
+	go func() {
+		defer close(ch)
+		for _, event := range events {
+			select {
+			case ch <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch, nil
+}
+
+func (m *mockProviderWithCapture) IsRetryable(err error) bool {
+	var providerErr *providers.ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.Retryable
+	}
+	return false
+}
+
+func (m *mockProviderWithCapture) setStreamEvents(events []providers.StreamEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.streamEvents = events
+}
+
+func (m *mockProviderWithCapture) getCapturedModel() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.capturedModel
+}
+
+// TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream tests that when
+// useSecondaryUpstream=true, the secondary model is used instead of the primary
+// model in the actual provider call (non-streaming).
+func TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream(t *testing.T) {
+	// Create mock provider that captures model name
+	provider := newMockProviderWithCapture()
+	provider.chatCompletionResp = &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-123",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   "glm-4-flash",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:    "assistant",
+					Content: "Hello from secondary",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	// Create models config with primary and secondary models
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "test-internal-model",
+			Name:                   "Test Internal Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "test-internal-model",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Create upstream request with useSecondaryUpstream=true
+	req := newUpstreamRequest(1, modelTypeSecond, "test-internal-model", 1024*1024)
+	req.SetUseSecondaryUpstream(true)
+
+	// Set up a mock provider factory that returns our captured provider
+	// We'll use a channel to pass the provider to the executor
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- provider
+	close(providerCh)
+
+	// Save original and replace with mock
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return provider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
+
+	// Call executeInternalRequest
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Verify the provider received the secondary model, NOT the primary
+	capturedModel := provider.getCapturedModel()
+	if capturedModel != "glm-4-flash" {
+		t.Errorf("Provider received model %q, want %q (secondary model should be used)",
+			capturedModel, "glm-4-flash")
+	}
+	if capturedModel == "glm-5.0" {
+		t.Error("Provider received primary model 'glm-5.0' - secondary model swap did NOT happen!")
+	}
+}
+
+// TestExecuteInternalRequest_SecondaryModelSwap_E2E_Stream tests that when
+// useSecondaryUpstream=true, the secondary model is used in streaming requests.
+func TestExecuteInternalRequest_SecondaryModelSwap_E2E_Stream(t *testing.T) {
+	// Create mock provider that captures model name
+	provider := newMockProviderWithCapture()
+	provider.setStreamEvents([]providers.StreamEvent{
+		{Type: "content", Content: "Hello"},
+		{
+			Type:         "done",
+			FinishReason: "stop",
+			Response: &providers.ChatCompletionResponse{
+				Usage: providers.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      15,
+				},
+			},
+		},
+	})
+
+	// Create models config with primary and secondary models
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "test-internal-model",
+			Name:                   "Test Internal Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "test-internal-model",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Create upstream request with useSecondaryUpstream=true
+	req := newUpstreamRequest(1, modelTypeSecond, "test-internal-model", 1024*1024)
+	req.SetUseSecondaryUpstream(true)
+
+	// Set up a mock provider factory
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- provider
+	close(providerCh)
+
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return provider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":true}`)
+
+	// Call executeInternalRequest
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Verify the provider received the secondary model
+	capturedModel := provider.getCapturedModel()
+	if capturedModel != "glm-4-flash" {
+		t.Errorf("Provider received model %q, want %q (secondary model should be used)",
+			capturedModel, "glm-4-flash")
+	}
+	if capturedModel == "glm-5.0" {
+		t.Error("Provider received primary model 'glm-5.0' - secondary model swap did NOT happen!")
+	}
+}
+
+// TestExecuteInternalRequest_NoSecondary_UsesPrimary_E2E tests that when
+// useSecondaryUpstream=true but SecondaryUpstreamModel is empty, the primary
+// model is used (no swap happens).
+func TestExecuteInternalRequest_NoSecondary_UsesPrimary_E2E(t *testing.T) {
+	// Create mock provider that captures model name
+	provider := newMockProviderWithCapture()
+	provider.chatCompletionResp = &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-123",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   "glm-5.0",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:    "assistant",
+					Content: "Hello from primary",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	// Create models config with only primary model (no secondary)
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:            "test-internal-no-secondary",
+			Name:          "Test Internal No Secondary",
+			Enabled:       true,
+			Internal:      true,
+			CredentialID:  "test-cred",
+			InternalModel: "glm-5.0", // Primary only, no secondary
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "test-internal-no-secondary",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Create upstream request with useSecondaryUpstream=true (but no secondary configured)
+	req := newUpstreamRequest(1, modelTypeSecond, "test-internal-no-secondary", 1024*1024)
+	req.SetUseSecondaryUpstream(true)
+
+	// Set up a mock provider factory
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- provider
+	close(providerCh)
+
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return provider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
+
+	// Call executeInternalRequest
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Verify the provider received the primary model (no secondary to swap to)
+	capturedModel := provider.getCapturedModel()
+	if capturedModel != "glm-5.0" {
+		t.Errorf("Provider received model %q, want %q (should fall back to primary)",
+			capturedModel, "glm-5.0")
+	}
+}
+
+// TestExecuteInternalRequest_SecondaryFalse_UsesPrimary_E2E tests that when
+// useSecondaryUpstream=false, the primary model is used even if SecondaryUpstreamModel is configured.
+func TestExecuteInternalRequest_SecondaryFalse_UsesPrimary_E2E(t *testing.T) {
+	// Create mock provider that captures model name
+	provider := newMockProviderWithCapture()
+	provider.chatCompletionResp = &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-123",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   "glm-5.0",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:    "assistant",
+					Content: "Hello from primary",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	// Create models config with primary and secondary models
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "test-internal-model",
+			Name:                   "Test Internal Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "test-internal-model",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Create upstream request with useSecondaryUpstream=FALSE
+	req := newUpstreamRequest(0, modelTypeMain, "test-internal-model", 1024*1024)
+	// Don't call SetUseSecondaryUpstream(true) - default is false
+
+	// Set up a mock provider factory
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- provider
+	close(providerCh)
+
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return provider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
+
+	// Call executeInternalRequest
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Verify the provider received the primary model (not secondary)
+	capturedModel := provider.getCapturedModel()
+	if capturedModel != "glm-5.0" {
+		t.Errorf("Provider received model %q, want %q (should use primary when useSecondary=false)",
+			capturedModel, "glm-5.0")
+	}
+	if capturedModel == "glm-4-flash" {
+		t.Error("Provider received secondary model 'glm-4-flash' - primary model should be used when useSecondary=false!")
+	}
+}
 
 // TestResolveInternalConfig_SecondaryModelConfigured tests that when a model has
 // SecondaryUpstreamModel configured, it can be retrieved from the config.
@@ -1884,5 +2359,372 @@ func TestConfigSnapshot_WithModelsConfig(t *testing.T) {
 
 	if modelConfig.SecondaryUpstreamModel != "glm-4-flash" {
 		t.Errorf("SecondaryUpstreamModel = %s, want glm-4-flash", modelConfig.SecondaryUpstreamModel)
+	}
+}
+
+// =============================================================================
+// C2: Peak Hour + Secondary Model Combo Runtime Tests
+// =============================================================================
+
+// TestExecuteInternalRequest_PeakHourAndSecondary_Combo_NonStream tests the interaction
+// between peak hours and secondary model during runtime execution (non-streaming).
+// When peak hours are active AND secondary model is configured:
+// - Main request (useSecondary=false) should use peak hour model
+// - Second request (useSecondary=true) should use secondary model (NOT peak model)
+func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_NonStream(t *testing.T) {
+	// Get current time to configure peak hours around now in local timezone
+	now := time.Now()
+	_, localOffset := now.Zone()
+	localOffsetHours := localOffset / 3600
+
+	// Format as +H or -H for the peak hour timezone
+	var tzOffset string
+	if localOffsetHours >= 0 {
+		tzOffset = fmt.Sprintf("+%d", localOffsetHours)
+	} else {
+		tzOffset = fmt.Sprintf("%d", localOffsetHours)
+	}
+
+	currentHour := now.Hour()
+	// Configure peak hours to include the current hour (start 1 hour before, end 1 hour after)
+	peakStart := (currentHour - 1 + 24) % 24
+	peakEnd := (currentHour + 1) % 24
+
+	peakStartStr := fmt.Sprintf("%02d:00", peakStart)
+	peakEndStr := fmt.Sprintf("%02d:00", peakEnd)
+
+	// Create mock provider that captures model name for main request
+	mainProvider := newMockProviderWithCapture()
+	mainProvider.chatCompletionResp = &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-main",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   "glm-peak-model",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:    "assistant",
+					Content: "Hello from peak model",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	// Create mock provider that captures model name for second request
+	secondaryProvider := newMockProviderWithCapture()
+	secondaryProvider.chatCompletionResp = &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-secondary",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   "glm-4-flash",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:    "assistant",
+					Content: "Hello from secondary model",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	}
+
+	// Create models config with peak hour and secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "peak-secondary-model",
+			Name:                   "Peak and Secondary Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",        // Base model
+			PeakHourEnabled:        true,             // Peak hours ACTIVE
+			PeakHourStart:          peakStartStr,     // Start time (local)
+			PeakHourEnd:            peakEndStr,       // End time (local)
+			PeakHourTimezone:       tzOffset,         // Local timezone offset
+			PeakHourModel:          "glm-peak-model", // Peak hour model
+			SecondaryUpstreamModel: "glm-4-flash",    // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "peak-secondary-model",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// =========================================================================
+	// Test 1: Main request (useSecondary=false) should get peak hour model
+	// =========================================================================
+
+	// Create main upstream request with useSecondaryUpstream=false (default)
+	mainReq := newUpstreamRequest(0, modelTypeMain, "peak-secondary-model", 1024*1024)
+	// Don't set secondary flag - it should be false by default
+
+	// Set up mock provider factory
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- mainProvider
+	close(providerCh)
+
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return mainProvider, nil
+		}
+	}
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
+
+	// Call executeInternalRequest for main request
+	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed for main request: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Main request should receive peak hour model, NOT base model
+	mainCapturedModel := mainProvider.getCapturedModel()
+	if mainCapturedModel != "glm-peak-model" {
+		t.Errorf("Main request received model %q, want %q (peak hour model should be used)",
+			mainCapturedModel, "glm-peak-model")
+	}
+	if mainCapturedModel == "glm-5.0" {
+		t.Error("Main request received base model 'glm-5.0' - peak hour model should be used!")
+	}
+
+	// Restore original provider factory for second request test
+	newProviderClient = originalNewProvider
+
+	// =========================================================================
+	// Test 2: Second request (useSecondary=true) should get secondary model
+	// =========================================================================
+
+	// Reset provider channel for second request
+	providerCh2 := make(chan providers.Provider, 1)
+	providerCh2 <- secondaryProvider
+	close(providerCh2)
+
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh2:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return secondaryProvider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	// Create second upstream request with useSecondaryUpstream=true
+	secondReq := newUpstreamRequest(1, modelTypeSecond, "peak-secondary-model", 1024*1024)
+	secondReq.SetUseSecondaryUpstream(true)
+
+	// Call executeInternalRequest for second request
+	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed for second request: %v", err)
+	}
+
+	// CRITICAL ASSERTION: Second request should receive secondary model, NOT peak model
+	secondaryCapturedModel := secondaryProvider.getCapturedModel()
+	if secondaryCapturedModel != "glm-4-flash" {
+		t.Errorf("Second request received model %q, want %q (secondary model should be used, NOT peak)",
+			secondaryCapturedModel, "glm-4-flash")
+	}
+	if secondaryCapturedModel == "glm-peak-model" {
+		t.Error("Second request received peak hour model 'glm-peak-model' - secondary model should be used!")
+	}
+	if secondaryCapturedModel == "glm-5.0" {
+		t.Error("Second request received base model 'glm-5.0' - secondary model should be used!")
+	}
+}
+
+// TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream tests the interaction
+// between peak hours and secondary model during streaming execution.
+// Verifies that streaming requests follow the same model selection logic.
+func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) {
+	// Get current time to configure peak hours around now in local timezone
+	now := time.Now()
+	_, localOffset := now.Zone()
+	localOffsetHours := localOffset / 3600
+
+	// Format as +H or -H for the peak hour timezone
+	var tzOffset string
+	if localOffsetHours >= 0 {
+		tzOffset = fmt.Sprintf("+%d", localOffsetHours)
+	} else {
+		tzOffset = fmt.Sprintf("%d", localOffsetHours)
+	}
+
+	currentHour := now.Hour()
+	peakStart := (currentHour - 1 + 24) % 24
+	peakEnd := (currentHour + 1) % 24
+
+	peakStartStr := fmt.Sprintf("%02d:00", peakStart)
+	peakEndStr := fmt.Sprintf("%02d:00", peakEnd)
+
+	// Create mock providers for main and second requests
+	mainProvider := newMockProviderWithCapture()
+	mainProvider.setStreamEvents([]providers.StreamEvent{
+		{Type: "content", Content: "Hello from peak"},
+		{
+			Type:         "done",
+			FinishReason: "stop",
+			Response: &providers.ChatCompletionResponse{
+				Usage: providers.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+			},
+		},
+	})
+
+	secondaryProvider := newMockProviderWithCapture()
+	secondaryProvider.setStreamEvents([]providers.StreamEvent{
+		{Type: "content", Content: "Hello from secondary"},
+		{
+			Type:         "done",
+			FinishReason: "stop",
+			Response: &providers.ChatCompletionResponse{
+				Usage: providers.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+			},
+		},
+	})
+
+	// Create models config with peak hour and secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "peak-secondary-stream",
+			Name:                   "Peak and Secondary Stream",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",
+			PeakHourEnabled:        true,
+			PeakHourStart:          peakStartStr,
+			PeakHourEnd:            peakEndStr,
+			PeakHourTimezone:       tzOffset,
+			PeakHourModel:          "glm-peak-model",
+			SecondaryUpstreamModel: "glm-4-flash",
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	cfg := &ConfigSnapshot{
+		ModelID:            "peak-secondary-stream",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Test main request (streaming, useSecondary=false)
+	mainReq := newUpstreamRequest(0, modelTypeMain, "peak-secondary-stream", 1024*1024)
+
+	providerCh := make(chan providers.Provider, 1)
+	providerCh <- mainProvider
+	close(providerCh)
+
+	originalNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return mainProvider, nil
+		}
+	}
+
+	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":true}`)
+
+	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed for streaming main request: %v", err)
+	}
+
+	// Verify main request got peak hour model
+	mainCapturedModel := mainProvider.getCapturedModel()
+	if mainCapturedModel != "glm-peak-model" {
+		t.Errorf("Streaming main request received model %q, want %q",
+			mainCapturedModel, "glm-peak-model")
+	}
+
+	// Restore and test second request
+	newProviderClient = originalNewProvider
+
+	providerCh2 := make(chan providers.Provider, 1)
+	providerCh2 <- secondaryProvider
+	close(providerCh2)
+
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		select {
+		case p, ok := <-providerCh2:
+			if !ok {
+				t.Fatal("provider channel closed unexpectedly")
+			}
+			return p, nil
+		default:
+			return secondaryProvider, nil
+		}
+	}
+	defer func() {
+		newProviderClient = originalNewProvider
+	}()
+
+	secondReq := newUpstreamRequest(1, modelTypeSecond, "peak-secondary-stream", 1024*1024)
+	secondReq.SetUseSecondaryUpstream(true)
+
+	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq)
+	if err != nil {
+		t.Fatalf("executeInternalRequest failed for streaming second request: %v", err)
+	}
+
+	// Verify second request got secondary model
+	secondaryCapturedModel := secondaryProvider.getCapturedModel()
+	if secondaryCapturedModel != "glm-4-flash" {
+		t.Errorf("Streaming second request received model %q, want %q",
+			secondaryCapturedModel, "glm-4-flash")
+	}
+	if secondaryCapturedModel == "glm-peak-model" {
+		t.Error("Streaming second request received peak model - should use secondary!")
 	}
 }

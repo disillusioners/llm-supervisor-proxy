@@ -22,6 +22,9 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
+// newProviderClient is a variable that can be overridden in tests to inject mock providers
+var newProviderClient = providers.NewProvider
+
 // executeRequest performs the actual HTTP call to upstream
 // and streams the response into the request's buffer.
 // It checks if the model is internal and routes accordingly.
@@ -92,7 +95,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	}
 
 	// Create provider client
-	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
+	providerClient, err := newProviderClient(provider, apiKey, baseURL)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
