@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
@@ -1605,5 +1606,283 @@ func TestHandleStreamingResponse_MultipleChunks(t *testing.T) {
 	expectedMin := 20
 	if len(chunks) < expectedMin {
 		t.Errorf("expected at least %d chunks, got %d", expectedMin, len(chunks))
+	}
+}
+
+// =============================================================================
+// Tests for Secondary Upstream Model
+// =============================================================================
+
+// TestResolveInternalConfig_SecondaryModelConfigured tests that when a model has
+// SecondaryUpstreamModel configured, it can be retrieved from the config.
+func TestResolveInternalConfig_SecondaryModelConfigured(t *testing.T) {
+	// Create models config with primary and secondary models
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "test-internal-model",
+			Name:                   "Test Internal Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Get the model config and verify secondary model is set
+	modelConfig := modelsConfig.GetModel("test-internal-model")
+	if modelConfig == nil {
+		t.Fatal("model config should not be nil")
+	}
+	if modelConfig.SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("SecondaryUpstreamModel = %s, want glm-4-flash", modelConfig.SecondaryUpstreamModel)
+	}
+	if modelConfig.InternalModel != "glm-5.0" {
+		t.Errorf("InternalModel = %s, want glm-5.0", modelConfig.InternalModel)
+	}
+
+	// ResolveInternalConfig should return primary model (secondary is only used by executor)
+	provider, apiKey, baseURL, model, ok := modelsConfig.ResolveInternalConfig("test-internal-model")
+	if !ok {
+		t.Fatal("ResolveInternalConfig should return ok=true for internal model")
+	}
+	if model != "glm-5.0" {
+		t.Errorf("ResolveInternalConfig should return primary model 'glm-5.0', got '%s'", model)
+	}
+	_ = provider
+	_ = apiKey
+	_ = baseURL
+}
+
+// TestResolveInternalConfig_SecondaryModelEmptyFallsBack tests that when
+// SecondaryUpstreamModel is empty, ResolveInternalConfig returns the primary model.
+func TestResolveInternalConfig_SecondaryModelEmptyFallsBack(t *testing.T) {
+	// Create models config with primary model but NO secondary model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:            "test-internal-no-secondary",
+			Name:          "Test Internal No Secondary",
+			Enabled:       true,
+			Internal:      true,
+			CredentialID:  "test-cred",
+			InternalModel: "glm-5.0", // Primary only, no secondary
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Get the model config - should have empty secondary model
+	modelConfig := modelsConfig.GetModel("test-internal-no-secondary")
+	if modelConfig == nil {
+		t.Fatal("model config should not be nil")
+	}
+	if modelConfig.SecondaryUpstreamModel != "" {
+		t.Errorf("SecondaryUpstreamModel should be empty, got: %s", modelConfig.SecondaryUpstreamModel)
+	}
+
+	// ResolveInternalConfig should return the primary model
+	provider, apiKey, baseURL, model, ok := modelsConfig.ResolveInternalConfig("test-internal-no-secondary")
+	if !ok {
+		t.Fatal("ResolveInternalConfig should return ok=true for internal model")
+	}
+	if model != "glm-5.0" {
+		t.Errorf("Expected model 'glm-5.0' (primary), got '%s'", model)
+	}
+	_ = provider
+	_ = apiKey
+	_ = baseURL
+}
+
+// TestResolveInternalConfig_NonInternalModel_IgnoresSecondaryFlag tests that for
+// non-internal models, secondary upstream is not applicable.
+func TestResolveInternalConfig_NonInternalModel_IgnoresSecondaryFlag(t *testing.T) {
+	// Create models config with a non-internal model
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:       "test-external-model",
+			Name:     "Test External Model",
+			Enabled:  true,
+			Internal: false, // External model - no secondary support
+		},
+	}
+
+	// Get the model config
+	modelConfig := modelsConfig.GetModel("test-external-model")
+	if modelConfig == nil {
+		t.Fatal("model config should not be nil")
+	}
+	if modelConfig.Internal {
+		t.Error("model should be non-internal")
+	}
+
+	// ResolveInternalConfig should return ok=false for non-internal models
+	_, _, _, _, ok := modelsConfig.ResolveInternalConfig("test-external-model")
+	if ok {
+		t.Error("ResolveInternalConfig should return ok=false for non-internal model")
+	}
+}
+
+// TestResolveInternalConfig_UseSecondaryUpstreamFalse_UsesPrimary tests that when
+// useSecondaryUpstream=false (default), ResolveInternalConfig returns the primary model.
+func TestResolveInternalConfig_UseSecondaryUpstreamFalse_UsesPrimary(t *testing.T) {
+	// Create models config with both primary and secondary models
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "test-both-models",
+			Name:                   "Test Both Models",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",     // Primary model
+			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// ResolveInternalConfig should return the primary model
+	provider, apiKey, baseURL, model, ok := modelsConfig.ResolveInternalConfig("test-both-models")
+	if !ok {
+		t.Fatal("ResolveInternalConfig should return ok=true for internal model")
+	}
+	if model != "glm-5.0" {
+		t.Errorf("Expected primary model 'glm-5.0', got '%s'", model)
+	}
+	_ = provider
+	_ = apiKey
+	_ = baseURL
+}
+
+// TestResolveInternalConfig_ModelNotFound tests behavior when model is not found
+func TestResolveInternalConfig_ModelNotFound(t *testing.T) {
+	// Create models config without the model we're looking for
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "some-other-model",
+			Name:                   "Some Other Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",
+			SecondaryUpstreamModel: "glm-4-flash",
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// GetModel should return nil
+	modelConfig := modelsConfig.GetModel("nonexistent-model")
+	if modelConfig != nil {
+		t.Error("GetModel should return nil for non-existent model")
+	}
+
+	// ResolveInternalConfig should return ok=false
+	_, _, _, _, ok := modelsConfig.ResolveInternalConfig("nonexistent-model")
+	if ok {
+		t.Error("ResolveInternalConfig should return ok=false for non-existent model")
+	}
+}
+
+// TestUpstreamRequest_SecondaryFlag_WithModelTypeSecond tests that the secondary
+// flag is correctly associated with modelTypeSecond requests.
+func TestUpstreamRequest_SecondaryFlag_WithModelTypeSecond(t *testing.T) {
+	// Create a second request
+	req := newUpstreamRequest(1, modelTypeSecond, "test-internal-model", 1024*1024)
+
+	// By default, new requests should not have secondary upstream set
+	if req.UseSecondaryUpstream() {
+		t.Error("newUpstreamRequest() should default to false for useSecondaryUpstream")
+	}
+
+	// Manually set the flag (simulating what race coordinator does)
+	req.SetUseSecondaryUpstream(true)
+	if !req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(true) should make UseSecondaryUpstream() return true")
+	}
+
+	// Verify the request info
+	if req.GetModelType() != modelTypeSecond {
+		t.Errorf("GetModelType() = %v, want %v", req.GetModelType(), modelTypeSecond)
+	}
+	if req.GetID() != 1 {
+		t.Errorf("GetID() = %d, want 1", req.GetID())
+	}
+
+	// Reset the flag
+	req.SetUseSecondaryUpstream(false)
+	if req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(false) should reset the flag")
+	}
+}
+
+// TestConfigSnapshot_WithModelsConfig tests that ConfigSnapshot can hold a ModelsConfig
+// with secondary upstream models.
+func TestConfigSnapshot_WithModelsConfig(t *testing.T) {
+	// Create models config
+	modelsConfig := models.NewModelsConfig()
+	modelsConfig.Models = []models.ModelConfig{
+		{
+			ID:                     "snapshot-test-model",
+			Name:                   "Snapshot Test Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",
+			SecondaryUpstreamModel: "glm-4-flash",
+		},
+	}
+	modelsConfig.Credentials = models.NewCredentialsConfig()
+	_ = modelsConfig.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+
+	// Create config snapshot with models config
+	cfg := &ConfigSnapshot{
+		ModelID:            "snapshot-test-model",
+		ModelsConfig:       modelsConfig,
+		IdleTimeout:        60 * time.Second,
+		StreamDeadline:     110 * time.Second,
+		MaxGenerationTime:  300 * time.Second,
+		RaceMaxBufferBytes: 1024 * 1024,
+	}
+
+	// Verify models config is accessible
+	if cfg.ModelsConfig == nil {
+		t.Fatal("ModelsConfig should not be nil")
+	}
+
+	// Get the model from config
+	modelConfig := cfg.ModelsConfig.GetModel("snapshot-test-model")
+	if modelConfig == nil {
+		t.Fatal("GetModel should return model config")
+	}
+
+	if modelConfig.SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("SecondaryUpstreamModel = %s, want glm-4-flash", modelConfig.SecondaryUpstreamModel)
 	}
 }

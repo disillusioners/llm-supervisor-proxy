@@ -964,3 +964,218 @@ func TestGetStatsWithSpawnTriggers(t *testing.T) {
 		t.Errorf("SpawnTriggers[1] = %s, want main_error", stats.SpawnTriggers[1])
 	}
 }
+
+// =============================================================================
+// Tests for Secondary Upstream Model Integration
+// =============================================================================
+
+// TestRaceCoordinator_SecondaryFlagSetOnSecondRequest tests that the race coordinator
+// sets useSecondaryUpstream=true on second requests.
+func TestRaceCoordinator_SecondaryFlagSetOnSecondRequest(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfigSnapshot("test-model")
+	cfg.ModelsConfig = newMockModelsConfig()
+
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"})
+
+	// Manually spawn a second request (simulating what manage() does on idle)
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{
+		trigger:       triggerIdleTimeout,
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Verify the second request has useSecondaryUpstream=true
+	if len(coord.requests) != 1 {
+		t.Fatalf("Expected 1 request, got %d", len(coord.requests))
+	}
+
+	secondReq := coord.requests[0]
+	if secondReq.GetModelType() != modelTypeSecond {
+		t.Errorf("Expected modelTypeSecond, got %v", secondReq.GetModelType())
+	}
+	if !secondReq.UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+}
+
+// TestRaceCoordinator_MainRequestHasSecondaryFlagFalse tests that main requests
+// have useSecondaryUpstream=false by default.
+func TestRaceCoordinator_MainRequestHasSecondaryFlagFalse(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfigSnapshot("test-model")
+	cfg.ModelsConfig = newMockModelsConfig()
+
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"})
+
+	// Manually spawn a main request
+	coord.spawn(modelTypeMain, spawnTriggerInfo{
+		trigger:       "",
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Verify the main request has useSecondaryUpstream=false
+	if len(coord.requests) != 1 {
+		t.Fatalf("Expected 1 request, got %d", len(coord.requests))
+	}
+
+	mainReq := coord.requests[0]
+	if mainReq.GetModelType() != modelTypeMain {
+		t.Errorf("Expected modelTypeMain, got %v", mainReq.GetModelType())
+	}
+	if mainReq.UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+}
+
+// TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse tests that fallback requests
+// have useSecondaryUpstream=false by default.
+func TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfigSnapshot("test-model")
+	cfg.ModelsConfig = newMockModelsConfig()
+
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"})
+
+	// Manually spawn a fallback request
+	coord.spawn(modelTypeFallback, spawnTriggerInfo{
+		trigger:       triggerMainError,
+		errorMessage:  "upstream error",
+		failedRequest: 0,
+	})
+
+	// Verify the fallback request has useSecondaryUpstream=false
+	if len(coord.requests) != 1 {
+		t.Fatalf("Expected 1 request, got %d", len(coord.requests))
+	}
+
+	fallbackReq := coord.requests[0]
+	if fallbackReq.GetModelType() != modelTypeFallback {
+		t.Errorf("Expected modelTypeFallback, got %v", fallbackReq.GetModelType())
+	}
+	if fallbackReq.UseSecondaryUpstream() {
+		t.Error("Fallback request should have useSecondaryUpstream=false")
+	}
+}
+
+// TestRaceCoordinator_AllRequestTypes tests that all three request types are
+// spawned correctly with the right secondary flag values.
+func TestRaceCoordinator_AllRequestTypes(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfigSnapshot("test-model")
+	cfg.ModelsConfig = newMockModelsConfig()
+
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model", "fallback-model"})
+
+	// Spawn main request
+	coord.spawn(modelTypeMain, spawnTriggerInfo{
+		trigger:       "",
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Spawn second request
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{
+		trigger:       triggerIdleTimeout,
+		errorMessage:  "",
+		failedRequest: -1,
+	})
+
+	// Spawn fallback request
+	coord.spawn(modelTypeFallback, spawnTriggerInfo{
+		trigger:       triggerMainError,
+		errorMessage:  "upstream error",
+		failedRequest: 0,
+	})
+
+	// Verify all three requests exist with correct secondary flag values
+	if len(coord.requests) != 3 {
+		t.Fatalf("Expected 3 requests, got %d", len(coord.requests))
+	}
+
+	// Main request
+	if coord.requests[0].GetModelType() != modelTypeMain {
+		t.Errorf("Request 0 should be main, got %v", coord.requests[0].GetModelType())
+	}
+	if coord.requests[0].UseSecondaryUpstream() {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+
+	// Second request
+	if coord.requests[1].GetModelType() != modelTypeSecond {
+		t.Errorf("Request 1 should be second, got %v", coord.requests[1].GetModelType())
+	}
+	if !coord.requests[1].UseSecondaryUpstream() {
+		t.Error("Second request should have useSecondaryUpstream=true")
+	}
+
+	// Fallback request
+	if coord.requests[2].GetModelType() != modelTypeFallback {
+		t.Errorf("Request 2 should be fallback, got %v", coord.requests[2].GetModelType())
+	}
+	if coord.requests[2].UseSecondaryUpstream() {
+		t.Error("Fallback request should have useSecondaryUpstream=false")
+	}
+}
+
+// TestRaceCoordinator_UseSecondaryUpstreamFlagAccessible tests that the
+// UseSecondaryUpstream flag is accessible through the upstreamRequest interface.
+func TestRaceCoordinator_UseSecondaryUpstreamFlagAccessible(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfigSnapshot("test-model")
+	cfg.ModelsConfig = newMockModelsConfig()
+
+	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"test-model"})
+
+	// Create a request with the flag
+	req := newUpstreamRequest(0, modelTypeSecond, "test-model", 1024)
+
+	// Test setting and getting the flag
+	req.SetUseSecondaryUpstream(true)
+	if !req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(true) should make UseSecondaryUpstream() return true")
+	}
+
+	req.SetUseSecondaryUpstream(false)
+	if req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(false) should make UseSecondaryUpstream() return false")
+	}
+
+	// Add to coordinator
+	coord.mu.Lock()
+	coord.requests = append(coord.requests, req)
+	coord.mu.Unlock()
+
+	// Verify it's accessible
+	if len(coord.requests) != 1 {
+		t.Fatalf("Expected 1 request, got %d", len(coord.requests))
+	}
+	// Flag should be false after reset
+	if coord.requests[0].UseSecondaryUpstream() {
+		t.Error("Request in coordinator should have useSecondaryUpstream=false after reset")
+	}
+}
+
+// newMockModelsConfig creates a minimal ModelsConfig for testing
+func newMockModelsConfig() *models.ModelsConfig {
+	config := models.NewModelsConfig()
+	config.Models = []models.ModelConfig{
+		{
+			ID:                     "test-model",
+			Name:                   "Test Model",
+			Enabled:                true,
+			Internal:               true,
+			CredentialID:           "test-cred",
+			InternalModel:          "glm-5.0",
+			SecondaryUpstreamModel: "glm-4-flash",
+		},
+	}
+	config.Credentials = models.NewCredentialsConfig()
+	_ = config.Credentials.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+	return config
+}

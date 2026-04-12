@@ -1758,3 +1758,373 @@ func TestModelsManager_ResolveInternalConfig_NonExistentModel(t *testing.T) {
 		t.Error("Expected ResolveInternalConfig to return ok=false for non-existent model")
 	}
 }
+
+// =============================================================================
+// Tests for Secondary Upstream Model CRUD
+// =============================================================================
+
+// setupModelsManagerForSecondary creates a ModelsManager with a test credential
+func setupModelsManagerForSecondary(t *testing.T) (*ModelsManager, func()) {
+	t.Helper()
+
+	// Create temp database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		store.Close()
+		t.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Create models manager
+	modelsMgr, err := NewModelsManager(store)
+	if err != nil {
+		store.Close()
+		t.Fatalf("Failed to create models manager: %v", err)
+	}
+
+	// Add a test credential
+	testCred := models.CredentialConfig{
+		ID:       "secondary-test-cred",
+		Provider: "openai",
+		APIKey:   "test-api-key-for-secondary",
+	}
+	if err := modelsMgr.AddCredential(testCred); err != nil {
+		store.Close()
+		t.Fatalf("Failed to add credential: %v", err)
+	}
+
+	cleanup := func() {
+		store.Close()
+	}
+
+	return modelsMgr, cleanup
+}
+
+// TestModelsManager_AddModel_WithSecondaryUpstreamModel tests that AddModel works
+// with secondary_upstream_model field.
+func TestModelsManager_AddModel_WithSecondaryUpstreamModel(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add model with secondary upstream model
+	testModel := models.ModelConfig{
+		ID:                     "secondary-test-model",
+		Name:                   "Secondary Test Model",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model with secondary_upstream_model: %v", err)
+	}
+
+	// Verify model was added with secondary upstream model
+	modelList := modelsMgr.GetModels()
+	if len(modelList) != 1 {
+		t.Fatalf("Expected 1 model, got: %d", len(modelList))
+	}
+	if modelList[0].SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("SecondaryUpstreamModel = %s, want glm-4-flash", modelList[0].SecondaryUpstreamModel)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("secondary-test-model")
+}
+
+// TestModelsManager_GetModel_ReturnsSecondaryUpstreamModel tests that GetModel returns
+// the secondary_upstream_model field.
+func TestModelsManager_GetModel_ReturnsSecondaryUpstreamModel(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add model with secondary upstream model
+	testModel := models.ModelConfig{
+		ID:                     "get-secondary-test",
+		Name:                   "Get Secondary Test",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Get the model
+	model := modelsMgr.GetModel("get-secondary-test")
+	if model == nil {
+		t.Fatal("GetModel returned nil")
+	}
+	if model.SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("SecondaryUpstreamModel = %s, want glm-4-flash", model.SecondaryUpstreamModel)
+	}
+	if model.InternalModel != "glm-5.0" {
+		t.Errorf("InternalModel = %s, want glm-5.0", model.InternalModel)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("get-secondary-test")
+}
+
+// TestModelsManager_UpdateModel_SecondaryUpstreamModel tests that UpdateModel works
+// with secondary_upstream_model field.
+func TestModelsManager_UpdateModel_SecondaryUpstreamModel(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add model without secondary upstream model
+	testModel := models.ModelConfig{
+		ID:                     "update-secondary-test",
+		Name:                   "Update Secondary Test",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "", // No secondary model initially
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Update with secondary upstream model
+	updatedModel := testModel
+	updatedModel.SecondaryUpstreamModel = "glm-4-flash"
+	if err := modelsMgr.UpdateModel("update-secondary-test", updatedModel); err != nil {
+		t.Fatalf("Failed to update model: %v", err)
+	}
+
+	// Verify update
+	model := modelsMgr.GetModel("update-secondary-test")
+	if model == nil {
+		t.Fatal("GetModel returned nil after update")
+	}
+	if model.SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("SecondaryUpstreamModel after update = %s, want glm-4-flash", model.SecondaryUpstreamModel)
+	}
+
+	// Update to change secondary upstream model
+	updatedModel2 := updatedModel
+	updatedModel2.SecondaryUpstreamModel = "glm-4-plus"
+	if err := modelsMgr.UpdateModel("update-secondary-test", updatedModel2); err != nil {
+		t.Fatalf("Failed to update model again: %v", err)
+	}
+
+	// Verify second update
+	model2 := modelsMgr.GetModel("update-secondary-test")
+	if model2.SecondaryUpstreamModel != "glm-4-plus" {
+		t.Errorf("SecondaryUpstreamModel after second update = %s, want glm-4-plus", model2.SecondaryUpstreamModel)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("update-secondary-test")
+}
+
+// TestModelsManager_AddModel_SecondaryWithNonInternal tests that AddModel accepts
+// non-internal models with secondary_upstream_model (validation is done separately).
+func TestModelsManager_AddModel_SecondaryWithNonInternal(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// AddModel does NOT validate - just inserts the model
+	// Validation is done separately via Validate()
+	// This test verifies AddModel accepts the model (validation is tested in Validate tests)
+	testModel := models.ModelConfig{
+		ID:                     "invalid-secondary-external",
+		Name:                   "Invalid Secondary External",
+		Enabled:                true,
+		Internal:               false,
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	err := modelsMgr.AddModel(testModel)
+	// AddModel succeeds - validation is separate
+	if err != nil {
+		t.Errorf("AddModel failed: %v", err)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("invalid-secondary-external")
+}
+
+// TestModelsManager_Validate_SecondaryWithNonInternal tests that Validate rejects
+// a model with secondary_upstream_model but internal=false.
+func TestModelsManager_Validate_SecondaryWithNonInternal(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add a model with secondary_upstream_model but internal=false
+	// Note: AddModel doesn't validate, so we need to validate via ModelsManager.Validate()
+	testModel := models.ModelConfig{
+		ID:                     "validate-secondary-external",
+		Name:                   "Validate Secondary External",
+		Enabled:                true,
+		Internal:               false,
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	// AddModel succeeds (no validation in AddModel itself)
+	err := modelsMgr.AddModel(testModel)
+	if err != nil {
+		t.Fatalf("AddModel failed: %v", err)
+	}
+
+	// Validate() should fail
+	err = modelsMgr.Validate()
+	if err == nil {
+		t.Error("Expected Validate to fail for non-internal model with secondary_upstream_model")
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("validate-secondary-external")
+}
+
+// TestModelsManager_ResolveInternalConfig_WithSecondary tests that ResolveInternalConfig
+// returns the primary model (secondary is for race retry, not ResolveInternalConfig).
+func TestModelsManager_ResolveInternalConfig_WithSecondary(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add model with secondary upstream model
+	testModel := models.ModelConfig{
+		ID:                     "resolve-with-secondary",
+		Name:                   "Resolve With Secondary",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// Resolve should return primary model (not secondary)
+	provider, apiKey, baseURL, model, ok := modelsMgr.ResolveInternalConfig("resolve-with-secondary")
+	if !ok {
+		t.Fatal("ResolveInternalConfig should return ok=true")
+	}
+	if model != "glm-5.0" {
+		t.Errorf("ResolveInternalConfig should return primary model 'glm-5.0', got '%s'", model)
+	}
+	_ = provider
+	_ = apiKey
+	_ = baseURL
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("resolve-with-secondary")
+}
+
+// TestModelsManager_SecondaryUpstreamModel_EmptyValid tests that empty secondary_upstream_model
+// is valid for internal models.
+func TestModelsManager_SecondaryUpstreamModel_EmptyValid(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	// Add model with empty secondary upstream model
+	testModel := models.ModelConfig{
+		ID:                     "empty-secondary",
+		Name:                   "Empty Secondary",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "", // Empty secondary model
+	}
+	if err := modelsMgr.AddModel(testModel); err != nil {
+		t.Fatalf("Failed to add model with empty secondary_upstream_model: %v", err)
+	}
+
+	// Verify model was added
+	model := modelsMgr.GetModel("empty-secondary")
+	if model == nil {
+		t.Fatal("GetModel returned nil")
+	}
+	if model.SecondaryUpstreamModel != "" {
+		t.Errorf("SecondaryUpstreamModel = %s, want empty string", model.SecondaryUpstreamModel)
+	}
+
+	// Cleanup
+	_ = modelsMgr.RemoveModel("empty-secondary")
+}
+
+// TestModelsManager_SecondaryUpstreamModel_Roundtrip tests that secondary_upstream_model
+// survives a complete CRUD cycle (add, get, update, remove).
+func TestModelsManager_SecondaryUpstreamModel_Roundtrip(t *testing.T) {
+	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
+	defer cleanup()
+
+	modelID := "roundtrip-secondary"
+
+	// 1. Add model with secondary upstream model
+	initialModel := models.ModelConfig{
+		ID:                     modelID,
+		Name:                   "Roundtrip Secondary",
+		Enabled:                true,
+		Internal:               true,
+		CredentialID:           "secondary-test-cred",
+		InternalModel:          "glm-5.0",
+		SecondaryUpstreamModel: "glm-4-flash",
+	}
+	if err := modelsMgr.AddModel(initialModel); err != nil {
+		t.Fatalf("Failed to add model: %v", err)
+	}
+
+	// 2. Get model and verify
+	model1 := modelsMgr.GetModel(modelID)
+	if model1 == nil {
+		t.Fatal("GetModel returned nil")
+	}
+	if model1.SecondaryUpstreamModel != "glm-4-flash" {
+		t.Errorf("After add: SecondaryUpstreamModel = %s, want glm-4-flash", model1.SecondaryUpstreamModel)
+	}
+
+	// 3. Update model - remove secondary
+	updateModel1 := initialModel
+	updateModel1.SecondaryUpstreamModel = ""
+	if err := modelsMgr.UpdateModel(modelID, updateModel1); err != nil {
+		t.Fatalf("Failed to update model: %v", err)
+	}
+
+	// 4. Get model and verify secondary is gone
+	model2 := modelsMgr.GetModel(modelID)
+	if model2 == nil {
+		t.Fatal("GetModel returned nil after update")
+	}
+	if model2.SecondaryUpstreamModel != "" {
+		t.Errorf("After remove: SecondaryUpstreamModel = %s, want empty", model2.SecondaryUpstreamModel)
+	}
+
+	// 5. Update model - add secondary back
+	updateModel2 := updateModel1
+	updateModel2.SecondaryUpstreamModel = "glm-4-plus"
+	if err := modelsMgr.UpdateModel(modelID, updateModel2); err != nil {
+		t.Fatalf("Failed to update model again: %v", err)
+	}
+
+	// 6. Get model and verify secondary is restored
+	model3 := modelsMgr.GetModel(modelID)
+	if model3 == nil {
+		t.Fatal("GetModel returned nil after second update")
+	}
+	if model3.SecondaryUpstreamModel != "glm-4-plus" {
+		t.Errorf("After restore: SecondaryUpstreamModel = %s, want glm-4-plus", model3.SecondaryUpstreamModel)
+	}
+
+	// 7. Remove model
+	if err := modelsMgr.RemoveModel(modelID); err != nil {
+		t.Fatalf("Failed to remove model: %v", err)
+	}
+
+	// 8. Verify model is gone
+	model4 := modelsMgr.GetModel(modelID)
+	if model4 != nil {
+		t.Error("GetModel should return nil after removal")
+	}
+}

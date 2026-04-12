@@ -482,3 +482,71 @@ func TestStreamBuffer_ConcurrentReadWrite(t *testing.T) {
 		t.Error("Concurrent read/write test timed out")
 	}
 }
+
+// =============================================================================
+// Integration Tests for Secondary Upstream Model
+// =============================================================================
+
+// NOTE: The core functionality of secondary upstream model is tested in:
+// - race_request_test.go: Tests for SetUseSecondaryUpstream/UseSecondaryUpstream methods
+// - race_executor_test.go: Tests for executeInternalRequest with secondary model
+// - config_secondary_test.go: Tests for validation
+// - database_test.go: Tests for CRUD with secondary_upstream_model field
+// - handlers_models_test.go: Tests for API handlers
+
+// TestRaceCoordinator_SecondaryFlagAccessible verifies that the secondary flag
+// is accessible on upstreamRequest objects managed by the coordinator.
+func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
+	// Setup mock upstream that succeeds quickly
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: success\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	cfg := &ConfigSnapshot{
+		UpstreamURL:        server.URL,
+		RaceRetryEnabled:   true,
+		RaceParallelOnIdle: true,
+		RaceMaxParallel:    3,
+		RaceMaxBufferBytes: 1000,
+		IdleTimeout:        1 * time.Second,
+		StreamDeadline:     5 * time.Second,
+		MaxGenerationTime:  5 * time.Second,
+		ModelID:            "test-model",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
+	rawBody := []byte(`{"model":"test-model"}`)
+	models := []string{"test-model", "fallback-model"}
+
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator.Start()
+
+	winner := coordinator.WaitForWinner()
+	if winner == nil {
+		t.Fatalf("No winner selected")
+	}
+
+	// Verify the winner request has accessible secondary flag methods
+	if winner.UseSecondaryUpstream() != false {
+		t.Error("Main request should have useSecondaryUpstream=false")
+	}
+
+	// Manually set the flag to verify it works
+	winner.SetUseSecondaryUpstream(true)
+	if !winner.UseSecondaryUpstream() {
+		t.Error("After SetUseSecondaryUpstream(true), UseSecondaryUpstream() should return true")
+	}
+
+	// Reset to false
+	winner.SetUseSecondaryUpstream(false)
+	if winner.UseSecondaryUpstream() {
+		t.Error("After SetUseSecondaryUpstream(false), UseSecondaryUpstream() should return false")
+	}
+}

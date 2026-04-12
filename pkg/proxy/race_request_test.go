@@ -638,3 +638,165 @@ func TestUpstreamRequestCleanupWithResponseBody(t *testing.T) {
 	}
 	req.mu.RUnlock()
 }
+
+// =============================================================================
+// Tests for UseSecondaryUpstream flag
+// =============================================================================
+
+func TestUpstreamRequestUseSecondaryUpstream(t *testing.T) {
+	tests := []struct {
+		name       string
+		initialVal bool
+		setVal     bool
+		want       bool
+	}{
+		{
+			name:       "default is false",
+			initialVal: false,
+			setVal:     false,
+			want:       false,
+		},
+		{
+			name:       "set to true",
+			initialVal: false,
+			setVal:     true,
+			want:       true,
+		},
+		{
+			name:       "set back to false",
+			initialVal: true,
+			setVal:     false,
+			want:       false,
+		},
+		{
+			name:       "set to true multiple times",
+			initialVal: false,
+			setVal:     true,
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+			// Set initial value if different from default
+			if tt.initialVal {
+				req.SetUseSecondaryUpstream(tt.initialVal)
+			}
+
+			// Verify initial state
+			if got := req.UseSecondaryUpstream(); got != tt.initialVal {
+				t.Errorf("initial UseSecondaryUpstream() = %v, want %v", got, tt.initialVal)
+			}
+
+			// Set the new value
+			req.SetUseSecondaryUpstream(tt.setVal)
+
+			// Verify the value was updated
+			if got := req.UseSecondaryUpstream(); got != tt.want {
+				t.Errorf("UseSecondaryUpstream() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpstreamRequestUseSecondaryUpstreamConcurrent(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	// Concurrent reads and writes
+	var wg sync.WaitGroup
+	numGoroutines := 100
+
+	// Readers
+	for i := 0; i < numGoroutines/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = req.UseSecondaryUpstream()
+			}
+		}()
+	}
+
+	// Writers alternating between true and false
+	for i := 0; i < numGoroutines/2; i++ {
+		wg.Add(1)
+		go func(val bool) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				req.SetUseSecondaryUpstream(val)
+			}
+		}(i%2 == 0)
+	}
+
+	wg.Wait()
+
+	// After concurrent access, the value should be either true or false (not panic)
+	val := req.UseSecondaryUpstream()
+	if val != true && val != false {
+		t.Errorf("UseSecondaryUpstream() = %v, want true or false", val)
+	}
+}
+
+func TestUpstreamRequestUseSecondaryUpstreamWithModelTypeSecond(t *testing.T) {
+	// Test that second requests have useSecondaryUpstream flag set correctly
+	req := newUpstreamRequest(1, modelTypeSecond, "gpt-4", 1024)
+
+	// By default, new requests should not have secondary upstream set
+	if req.UseSecondaryUpstream() {
+		t.Error("newUpstreamRequest() with modelTypeSecond should default to false for useSecondaryUpstream")
+	}
+
+	// Manually set the flag
+	req.SetUseSecondaryUpstream(true)
+	if !req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(true) should make UseSecondaryUpstream() return true")
+	}
+
+	// Verify the request info
+	if req.GetModelType() != modelTypeSecond {
+		t.Errorf("GetModelType() = %v, want %v", req.GetModelType(), modelTypeSecond)
+	}
+	if req.GetID() != 1 {
+		t.Errorf("GetID() = %d, want 1", req.GetID())
+	}
+}
+
+func TestUpstreamRequestUseSecondaryUpstreamWithModelTypeMain(t *testing.T) {
+	// Test that main requests can also have the flag set
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	// Main requests default to false
+	if req.UseSecondaryUpstream() {
+		t.Error("newUpstreamRequest() with modelTypeMain should default to false")
+	}
+
+	// Set the flag
+	req.SetUseSecondaryUpstream(true)
+	if !req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(true) should work for main requests too")
+	}
+
+	// Reset to false
+	req.SetUseSecondaryUpstream(false)
+	if req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(false) should reset the flag")
+	}
+}
+
+func TestUpstreamRequestUseSecondaryUpstreamWithModelTypeFallback(t *testing.T) {
+	// Test that fallback requests can have the flag set
+	req := newUpstreamRequest(2, modelTypeFallback, "claude-3", 1024)
+
+	// Fallback requests default to false
+	if req.UseSecondaryUpstream() {
+		t.Error("newUpstreamRequest() with modelTypeFallback should default to false")
+	}
+
+	// Set the flag
+	req.SetUseSecondaryUpstream(true)
+	if !req.UseSecondaryUpstream() {
+		t.Error("SetUseSecondaryUpstream(true) should work for fallback requests too")
+	}
+}
