@@ -22,6 +22,7 @@ export function UsageTab() {
   const [customTo, setCustomTo] = useState('');
   const [view, setView] = useState<'hourly' | 'daily'>('hourly');
   const [displayMode, setDisplayMode] = useState<'chart' | 'table'>('chart');
+  const [metricType, setMetricType] = useState<'tokens' | 'requests'>('tokens');
 
   // Calculate date range boundaries
   const { from, to } = useMemo(() => {
@@ -154,7 +155,7 @@ export function UsageTab() {
       {/* Summary cards */}
       <UsageSummaryCards summary={summary} loading={loading} />
 
-      {/* Display mode toggle and view toggle row */}
+      {/* Chart/Table and Metric type toggle row */}
       <div class="flex gap-4 items-center">
         {/* Display mode toggle (chart/table) */}
         <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
@@ -179,6 +180,32 @@ export function UsageTab() {
             📋 Table
           </button>
         </div>
+
+        {/* Metric type toggle (tokens/requests) - only show in chart mode */}
+        {displayMode === 'chart' && (
+          <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
+            <button
+              onClick={() => setMetricType('tokens')}
+              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                metricType === 'tokens'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              🎯 Tokens
+            </button>
+            <button
+              onClick={() => setMetricType('requests')}
+              class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                metricType === 'requests'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              📝 Requests
+            </button>
+          </div>
+        )}
 
         {/* View toggle (hourly/daily) - always visible */}
         <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
@@ -211,6 +238,7 @@ export function UsageTab() {
           data={usageData?.data || []}
           view={view}
           loading={loading}
+          metricType={metricType}
         />
       ) : (
         <UsageTable

@@ -22,9 +22,10 @@ interface UsageChartProps {
   data: UsageDataRow[];
   view: 'hourly' | 'daily';
   loading: boolean;
+  metricType?: 'tokens' | 'requests';
 }
 
-export function UsageChart({ data, view, loading }: UsageChartProps) {
+export function UsageChart({ data, view, loading, metricType = 'tokens' }: UsageChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
 
@@ -51,6 +52,11 @@ export function UsageChart({ data, view, loading }: UsageChartProps) {
     const datasets: { label: string; data: number[]; borderColor: string; backgroundColor: string; borderWidth: number; borderDash?: number[]; tension: number; pointRadius: number; }[] = [];
 
     // Add a line for each unique token
+    const getMetricValue = (row: UsageDataRow | undefined) => {
+      if (!row) return 0;
+      return metricType === 'tokens' ? row.total_tokens : row.request_count;
+    };
+
     tokenIds.forEach((tokenId, index) => {
       const tokenData = data.find(d => d.token_id === tokenId);
       const color = COLORS[index % COLORS.length];
@@ -58,7 +64,7 @@ export function UsageChart({ data, view, loading }: UsageChartProps) {
         label: tokenData?.token_name || tokenId,
         data: buckets.map(bucket => {
           const row = data.find(d => d.hour_bucket === bucket && d.token_id === tokenId);
-          return row?.total_tokens || 0;
+          return getMetricValue(row);
         }),
         borderColor: color,
         backgroundColor: color + '20',
@@ -74,7 +80,7 @@ export function UsageChart({ data, view, loading }: UsageChartProps) {
       data: buckets.map(bucket => {
         return data
           .filter(d => d.hour_bucket === bucket)
-          .reduce((sum, d) => sum + d.total_tokens, 0);
+          .reduce((sum, d) => sum + getMetricValue(d), 0);
       }),
       borderColor: '#ffffff',
       backgroundColor: '#ffffff10',
@@ -126,7 +132,8 @@ export function UsageChart({ data, view, loading }: UsageChartProps) {
             callbacks: {
               label: (context) => {
                 const value = context.parsed.y;
-                return `${context.dataset.label}: ${value.toLocaleString()} tokens`;
+                const unit = metricType === 'tokens' ? 'tokens' : 'requests';
+                return `${context.dataset.label}: ${value.toLocaleString()} ${unit}`;
               },
             },
           },
@@ -171,7 +178,7 @@ export function UsageChart({ data, view, loading }: UsageChartProps) {
         chartRef.current = null;
       }
     };
-  }, [data, view, loading]);
+  }, [data, view, loading, metricType]);
 
   if (loading) {
     return (
