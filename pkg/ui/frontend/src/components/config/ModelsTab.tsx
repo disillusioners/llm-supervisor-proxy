@@ -181,7 +181,7 @@ export function ModelsTab({
                         )}
                         {model.internal && model.secondary_upstream_model && (
                           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium 
-                                       bg-purple-900/50 text-purple-300 border border-purple-700 ml-2">
+                                       bg-purple-900/50 text-purple-300 border border-purple-700">
                             ↻ {model.secondary_upstream_model}
                           </span>
                         )}

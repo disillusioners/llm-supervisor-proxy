@@ -83,7 +83,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     return `Winner: ${e.data?.winner_type || '?'} request #${e.data?.winner_index ?? '?'} (${e.data?.winner_model || '?'})${duration}${bytes}`;
   },
   race_all_failed: (e) => `All ${e.data?.total_attempts || '?'} race requests failed after ${e.data?.duration_ms || '?'}ms`,
-  race_secondary_model_used: (e) => `Switched to secondary upstream model: ${e.data?.model || '?'}`,
+  race_secondary_model_used: (e) => `Switched to secondary upstream model: ${e.data?.secondary_model || '?'}`,
   tool_repair: (e) => {
     const d = e.data;
     const repaired = d?.repaired ?? 0;
