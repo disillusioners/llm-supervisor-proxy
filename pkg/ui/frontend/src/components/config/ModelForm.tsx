@@ -85,6 +85,7 @@ interface ModelFormProps {
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
+    secondary_upstream_model?: string;
     release_stream_chunk_deadline?: string;
     peak_hour_enabled?: boolean;
     peak_hour_start?: string;
@@ -117,6 +118,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     internal_api_key: '',
     internal_base_url: '',
     internal_model: '',
+    secondary_upstream_model: '',
     release_stream_chunk_deadline: '',
     peak_hour_enabled: false,
     peak_hour_start: '',
@@ -172,6 +174,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
         internal_model: initialData.internal_model ?? '',
+        secondary_upstream_model: initialData.secondary_upstream_model ?? '',
         release_stream_chunk_deadline: initialData.release_stream_chunk_deadline ?? '',
         peak_hour_enabled: initialData.peak_hour_enabled ?? false,
         peak_hour_start: initialData.peak_hour_start ?? '',
@@ -190,6 +193,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: '',
         internal_base_url: '',
         internal_model: '',
+        secondary_upstream_model: '',
         release_stream_chunk_deadline: '',
         peak_hour_enabled: false,
         peak_hour_start: '',
@@ -228,6 +232,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       if (field === 'internal' && value === false) {
         updated.credential_id = '';
         updated.internal_api_key = '';
+        updated.secondary_upstream_model = '';
         // Clear all peak hour fields when internal upstream is turned off
         updated.peak_hour_enabled = false;
         updated.peak_hour_start = '';
@@ -290,6 +295,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
         internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
+        secondary_upstream_model: formData.internal && formData.secondary_upstream_model ? formData.secondary_upstream_model : undefined,
         release_stream_chunk_deadline: formData.release_stream_chunk_deadline || undefined,
         // Peak hour fields only included when internal is true
         peak_hour_enabled: formData.internal ? formData.peak_hour_enabled : undefined,
@@ -559,6 +565,25 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                 placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : 'gpt-4'}
               />
               <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
+            </div>
+
+            {/* Secondary Upstream Model - for retry */}
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">
+                Secondary Upstream Model <span class="text-gray-500 font-normal">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={formData.secondary_upstream_model}
+                onInput={(e) => handleInputChange('secondary_upstream_model', (e.target as HTMLInputElement).value)}
+                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 
+                       focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-shadow"
+                placeholder="e.g., glm-4-flash (optional retry model)"
+              />
+              <p class="text-xs text-gray-400 mt-1">
+                Upstream model to use for retries when the primary fails (e.g., faster/cheaper model). 
+                Leave empty to retry with the same model.
+              </p>
             </div>
 
             {/* Peak Hour Auto-Switch Section */}

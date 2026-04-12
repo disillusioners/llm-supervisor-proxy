@@ -54,6 +54,7 @@ export function ModelsTab({
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
+    secondary_upstream_model?: string;
     release_stream_chunk_deadline?: string;
   }) => {
     try {
@@ -83,6 +84,7 @@ export function ModelsTab({
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,
           internal_model: data.internal_model,
+          secondary_upstream_model: data.internal ? data.secondary_upstream_model : undefined,
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
           peak_hour_enabled: data.peak_hour_enabled,
           peak_hour_start: data.peak_hour_start,
@@ -168,6 +170,21 @@ export function ModelsTab({
                       <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
                         {escapeHtml(model.id)}
                       </p>
+                      {/* Internal model and secondary upstream model badges */}
+                      <div class="mt-1 flex items-center gap-1.5 flex-wrap">
+                        {model.internal && model.internal_model && (
+                          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium 
+                                       bg-blue-900/50 text-blue-300 border border-blue-700">
+                            {model.internal_model}
+                          </span>
+                        )}
+                        {model.internal && model.secondary_upstream_model && (
+                          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium 
+                                       bg-purple-900/50 text-purple-300 border border-purple-700 ml-2">
+                            ↻ {model.secondary_upstream_model}
+                          </span>
+                        )}
+                      </div>
                       {(model.fallback_chain ?? []).length > 0 && (
                         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
                           <span class="text-xs text-gray-500 font-medium">FALLBACKS:</span>

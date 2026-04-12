@@ -47,8 +47,44 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 
 // executeInternalRequest handles requests to internal providers (bypassing external upstream)
 func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest) error {
-	// Resolve internal config (including credential lookup)
-	provider, apiKey, baseURL, internalModel, ok := cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+	// Check if we should use secondary upstream model (for modelTypeSecond)
+	useSecondary := req.UseSecondaryUpstream()
+
+	var internalModel string
+	var provider, apiKey, baseURL string
+	var ok bool
+
+	if useSecondary && cfg.ModelsConfig != nil {
+		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		if modelConfig != nil && modelConfig.SecondaryUpstreamModel != "" && modelConfig.InternalModel != "" {
+			// Resolve credential/provider from primary config, but use secondary model name
+			provider, apiKey, baseURL, _, ok = cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+			if ok {
+				internalModel = modelConfig.SecondaryUpstreamModel
+				log.Printf("[SECONDARY] Using secondary upstream model %s instead of %s for model %s",
+					internalModel, modelConfig.InternalModel, req.modelID)
+
+				// Publish event for frontend tracking
+				if cfg.EventBus != nil {
+					cfg.EventBus.Publish(events.Event{
+						Type:      "race_secondary_model_used",
+						Timestamp: time.Now().Unix(),
+						Data: map[string]interface{}{
+							"id":              fmt.Sprintf("%d", req.id),
+							"model_id":        req.modelID,
+							"primary_model":   modelConfig.InternalModel,
+							"secondary_model": modelConfig.SecondaryUpstreamModel,
+						},
+					})
+				}
+			}
+		}
+	}
+
+	// Fallback to normal resolution if secondary not used or not configured
+	if !ok {
+		provider, apiKey, baseURL, internalModel, ok = cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+	}
 
 	log.Printf("[PEAK-DBG] executeInternalRequest: req.modelID=%q -> ResolveInternalConfig returned internalModel=%q, ok=%v", req.modelID, internalModel, ok)
 	if !ok {

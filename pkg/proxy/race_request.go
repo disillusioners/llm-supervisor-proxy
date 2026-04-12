@@ -68,6 +68,10 @@ type upstreamRequest struct {
 
 	// HTTP status code from upstream (0 if not an HTTP error)
 	httpStatusCode int
+
+	// Flag to use secondary upstream model for modelTypeSecond requests
+	// Only applicable to internal models
+	useSecondaryUpstream bool
 }
 
 func newUpstreamRequest(id int, mType upstreamModelType, modelID string, maxBuffer int) *upstreamRequest {
@@ -284,4 +288,18 @@ func (r *upstreamRequest) GetHTTPStatus() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.httpStatusCode
+}
+
+// SetUseSecondaryUpstream sets whether to use secondary upstream model
+func (r *upstreamRequest) SetUseSecondaryUpstream(val bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.useSecondaryUpstream = val
+}
+
+// UseSecondaryUpstream returns whether to use secondary upstream model
+func (r *upstreamRequest) UseSecondaryUpstream() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.useSecondaryUpstream
 }

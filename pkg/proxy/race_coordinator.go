@@ -154,6 +154,12 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	}
 
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
+
+	// Set flag to use secondary upstream model for second requests
+	if mType == modelTypeSecond {
+		req.SetUseSecondaryUpstream(true)
+	}
+
 	c.requests = append(c.requests, req)
 	c.spawnTriggers = append(c.spawnTriggers, triggerInfo)
 

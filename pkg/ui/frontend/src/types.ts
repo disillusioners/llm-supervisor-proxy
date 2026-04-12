@@ -112,6 +112,7 @@ export interface Model {
   internal_api_key?: string;   // Display only, write-only
   internal_base_url?: string; // Base URL override (optional)
   internal_model?: string;     // Actual model name at provider
+  secondary_upstream_model?: string; // Alternative upstream model for retries
   // Release stream chunk deadline
   release_stream_chunk_deadline?: string; // Duration string (e.g., "1m50s", "2m30s")
   // Peak hour configuration
@@ -220,6 +221,7 @@ export type EventType =
   | 'race_spawn'
   | 'race_winner_selected'
   | 'race_all_failed'
+  | 'race_secondary_model_used'
   // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
   | 'shadow_retry_won'
