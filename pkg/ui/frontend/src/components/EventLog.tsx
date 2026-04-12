@@ -83,6 +83,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     return `Winner: ${e.data?.winner_type || '?'} request #${e.data?.winner_index ?? '?'} (${e.data?.winner_model || '?'})${duration}${bytes}`;
   },
   race_all_failed: (e) => `All ${e.data?.total_attempts || '?'} race requests failed after ${e.data?.duration_ms || '?'}ms`,
+  race_secondary_model_used: (e) => `Switched to secondary upstream model: ${e.data?.model || '?'}`,
   tool_repair: (e) => {
     const d = e.data;
     const repaired = d?.repaired ?? 0;
@@ -136,6 +137,7 @@ const EVENT_COLORS: Record<EventType, string> = {
   race_spawn: 'text-blue-400',
   race_winner_selected: 'text-green-400',
   race_all_failed: 'text-red-400',
+  race_secondary_model_used: 'text-purple-400',
   tool_repair: 'text-amber-400',
   ultimate_model_retry_exhausted: 'text-red-400',
   internal_error: 'text-red-400',
@@ -179,6 +181,7 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   race_spawn: 'RACE_SPAWN',
   race_winner_selected: 'RACE_WINNER',
   race_all_failed: 'RACE_ALL_FAILED',
+  race_secondary_model_used: 'SECONDARY_MODEL_USED',
   tool_repair: 'TOOL_REPAIR',
   ultimate_model_retry_exhausted: 'ULTIMATE_RETRY_EXHAUSTED',
   internal_error: 'INTERNAL_ERROR',

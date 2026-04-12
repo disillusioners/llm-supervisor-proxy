@@ -70,6 +70,7 @@ export function ModelsTab({
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,
           internal_model: data.internal_model,
+          secondary_upstream_model: data.internal ? data.secondary_upstream_model : undefined,
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
