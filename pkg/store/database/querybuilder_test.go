@@ -222,16 +222,16 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		qb := NewQueryBuilder(PostgreSQL)
 		got := qb.InsertModel()
 		// Verify it uses $N placeholders
-		if !contains(got, "$1") || !contains(got, "$15") {
+		if !contains(got, "$1") || !contains(got, "$16") {
 			t.Errorf("PostgreSQL InsertModel() should use $N placeholders, got: %v", got)
 		}
 		// Verify it has ON CONFLICT
 		if !contains(got, "ON CONFLICT") {
 			t.Errorf("PostgreSQL InsertModel() should use ON CONFLICT")
 		}
-		// Verify it has 15 columns (for 15 placeholders)
-		if countOccurrences(got, "$") != 15 {
-			t.Errorf("PostgreSQL InsertModel() should have 15 placeholders, got: %d", countOccurrences(got, "$"))
+		// Verify it has 16 columns (for 16 placeholders)
+		if countOccurrences(got, "$") != 16 {
+			t.Errorf("PostgreSQL InsertModel() should have 16 placeholders, got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
@@ -248,9 +248,9 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "UPDATE models SET") {
 			t.Errorf("SQLite UpdateModel() should use UPDATE models SET")
 		}
-		// Verify it has 15 ? placeholders (14 fields + WHERE id = ?)
-		if countOccurrences(got, "?") != 15 {
-			t.Errorf("SQLite UpdateModel() should have 15 placeholders, got: %d", countOccurrences(got, "?"))
+		// Verify it has 16 ? placeholders (15 fields + WHERE id = ?)
+		if countOccurrences(got, "?") != 16 {
+			t.Errorf("SQLite UpdateModel() should have 16 placeholders, got: %d", countOccurrences(got, "?"))
 		}
 	})
 
@@ -258,12 +258,12 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		qb := NewQueryBuilder(PostgreSQL)
 		got := qb.UpdateModel()
 		// Verify it uses $N placeholders
-		if !contains(got, "$1") || !contains(got, "$15") {
+		if !contains(got, "$1") || !contains(got, "$16") {
 			t.Errorf("PostgreSQL UpdateModel() should use $N placeholders, got: %v", got)
 		}
-		// Verify it has 15 placeholders (14 fields + WHERE id = $15)
-		if countOccurrences(got, "$") != 15 {
-			t.Errorf("PostgreSQL UpdateModel() should have 15 placeholders, got: %d", countOccurrences(got, "$"))
+		// Verify it has 16 placeholders (15 fields + WHERE id = $16)
+		if countOccurrences(got, "$") != 16 {
+			t.Errorf("PostgreSQL UpdateModel() should have 16 placeholders, got: %d", countOccurrences(got, "$"))
 		}
 	})
 }

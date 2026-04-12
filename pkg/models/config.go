@@ -102,6 +102,9 @@ type ModelConfig struct {
 	PeakHourEnd      string `json:"peak_hour_end,omitempty"`      // HH:MM format (local time)
 	PeakHourTimezone string `json:"peak_hour_timezone,omitempty"` // UTC offset like +7, -5, +5.5
 	PeakHourModel    string `json:"peak_hour_model,omitempty"`    // Upstream model name during peak hours
+
+	// Secondary upstream model for retry logic (only valid for internal=true)
+	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.
@@ -493,6 +496,13 @@ func (mc *ModelsConfig) Validate() error {
 			}
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+			}
+		}
+
+		// Validate secondary upstream model
+		if model.SecondaryUpstreamModel != "" {
+			if !model.Internal {
+				return fmt.Errorf("model %s: secondary_upstream_model requires internal to be true", model.ID)
 			}
 		}
 

@@ -43,6 +43,8 @@ type Model struct {
 	PeakHourEnd      string `json:"peak_hour_end"`
 	PeakHourTimezone string `json:"peak_hour_timezone"`
 	PeakHourModel    string `json:"peak_hour_model"`
+	// Secondary upstream model for retry logic
+	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -391,6 +393,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				PeakHourEnd:                mc.PeakHourEnd,
 				PeakHourTimezone:           mc.PeakHourTimezone,
 				PeakHourModel:              mc.PeakHourModel,
+				SecondaryUpstreamModel:     mc.SecondaryUpstreamModel,
 			}
 		}
 
@@ -427,6 +430,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate secondary_upstream_model requires internal upstream
+		if newModel.SecondaryUpstreamModel != "" && !newModel.Internal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "secondary_upstream_model requires internal to be true",
+			})
+			return
+		}
+
 		// Generate ID if not provided
 		if newModel.ID == "" {
 			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
@@ -449,6 +462,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			PeakHourEnd:                newModel.PeakHourEnd,
 			PeakHourTimezone:           newModel.PeakHourTimezone,
 			PeakHourModel:              newModel.PeakHourModel,
+			SecondaryUpstreamModel:     newModel.SecondaryUpstreamModel,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -515,6 +529,16 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate secondary_upstream_model requires internal upstream
+		if updatedModel.SecondaryUpstreamModel != "" && !updatedModel.Internal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "secondary_upstream_model requires internal to be true",
+			})
+			return
+		}
+
 		// Keep the same ID
 		updatedModel.ID = id
 
@@ -535,6 +559,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			PeakHourEnd:                updatedModel.PeakHourEnd,
 			PeakHourTimezone:           updatedModel.PeakHourTimezone,
 			PeakHourModel:              updatedModel.PeakHourModel,
+			SecondaryUpstreamModel:     updatedModel.SecondaryUpstreamModel,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {

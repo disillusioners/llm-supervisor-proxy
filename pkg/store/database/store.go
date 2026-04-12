@@ -468,6 +468,8 @@ type dbModelRow struct {
 	PeakHourEnd      string
 	PeakHourTimezone string
 	PeakHourModel    string
+	// Secondary upstream model for retry logic
+	SecondaryUpstreamModel string
 }
 
 // dbCredentialRow represents a row from the credentials table
@@ -570,6 +572,7 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.PeakHourEnd,
 			&dbModel.PeakHourTimezone,
 			&dbModel.PeakHourModel,
+			&dbModel.SecondaryUpstreamModel,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
@@ -589,6 +592,7 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			PeakHourEnd:                dbModel.PeakHourEnd,
 			PeakHourTimezone:           dbModel.PeakHourTimezone,
 			PeakHourModel:              dbModel.PeakHourModel,
+			SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
 		}
 
 		// Parse fallback chain
@@ -620,7 +624,8 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
-		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -628,7 +633,8 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
-			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -651,6 +657,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.PeakHourEnd,
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
+		&dbModel.SecondaryUpstreamModel,
 	)
 	if err != nil {
 		return nil
@@ -670,6 +677,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		PeakHourEnd:                dbModel.PeakHourEnd,
 		PeakHourTimezone:           dbModel.PeakHourTimezone,
 		PeakHourModel:              dbModel.PeakHourModel,
+		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
 	}
 
 	// Parse fallback chain
@@ -736,6 +744,7 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.PeakHourEnd,
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
+		&dbModel.SecondaryUpstreamModel,
 	)
 	if err != nil {
 		return nil
@@ -782,6 +791,7 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.PeakHourEnd,
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
+		&dbModel.SecondaryUpstreamModel,
 	)
 	if err != nil {
 		return nil
@@ -814,7 +824,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
@@ -842,6 +852,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.PeakHourEnd,
 		model.PeakHourTimezone,
 		model.PeakHourModel,
+		model.SecondaryUpstreamModel,
 	)
 	return err
 }
@@ -865,7 +876,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -892,6 +903,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.PeakHourEnd,
 		model.PeakHourTimezone,
 		model.PeakHourModel,
+		model.SecondaryUpstreamModel,
 		modelID,
 	)
 	return err
@@ -906,7 +918,7 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -956,6 +968,13 @@ func (m *ModelsManager) Validate() error {
 			}
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+			}
+		}
+
+		// Validate secondary upstream model
+		if model.SecondaryUpstreamModel != "" {
+			if !model.Internal {
+				return fmt.Errorf("model %s: secondary_upstream_model requires internal to be true", model.ID)
 			}
 		}
 

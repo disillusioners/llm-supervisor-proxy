@@ -83,8 +83,9 @@ func (q *QueryBuilder) InsertModel() string {
 	if q.dialect == PostgreSQL {
 		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
 			internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
-			peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
+			secondary_upstream_model)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
@@ -100,12 +101,14 @@ func (q *QueryBuilder) InsertModel() string {
 				peak_hour_end = EXCLUDED.peak_hour_end,
 				peak_hour_timezone = EXCLUDED.peak_hour_timezone,
 				peak_hour_model = EXCLUDED.peak_hour_model,
+				secondary_upstream_model = EXCLUDED.secondary_upstream_model,
 				updated_at = NOW()`
 	}
 	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
 		internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
-		peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
+		secondary_upstream_model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateModel returns the appropriate UPDATE query for a model
@@ -126,8 +129,9 @@ func (q *QueryBuilder) UpdateModel() string {
 			peak_hour_end = $12,
 			peak_hour_timezone = $13,
 			peak_hour_model = $14,
+			secondary_upstream_model = $15,
 			updated_at = NOW()
-		WHERE id = $15`
+		WHERE id = $16`
 	}
 	return `UPDATE models SET
 			name = ?,
@@ -144,6 +148,7 @@ func (q *QueryBuilder) UpdateModel() string {
 			peak_hour_end = ?,
 			peak_hour_timezone = ?,
 			peak_hour_model = ?,
+			secondary_upstream_model = ?,
 			updated_at = datetime('now')
 		WHERE id = ?`
 }
@@ -164,7 +169,8 @@ func (q *QueryBuilder) GetModelByID() string {
 			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, '')
 		FROM models WHERE id = $1`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
@@ -172,7 +178,8 @@ func (q *QueryBuilder) GetModelByID() string {
 		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, '')
 	FROM models WHERE id = ?`
 }
 
@@ -184,7 +191,8 @@ func (q *QueryBuilder) GetAllModels() string {
             coalesce(internal, false), coalesce(credential_id, ''),
             coalesce(internal_base_url, ''), coalesce(internal_model, ''),
             peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-            coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+            coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+            coalesce(secondary_upstream_model, '')
         FROM models ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -192,7 +200,8 @@ func (q *QueryBuilder) GetAllModels() string {
         coalesce(internal, 0), coalesce(credential_id, ''),
         coalesce(internal_base_url, ''), coalesce(internal_model, ''),
         peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-        coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+        coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+        coalesce(secondary_upstream_model, '')
     FROM models ORDER BY name`
 }
 
@@ -204,7 +213,8 @@ func (q *QueryBuilder) GetEnabledModels() string {
 			coalesce(internal, false), coalesce(credential_id, ''),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, '')
 		FROM models WHERE enabled = true ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -212,6 +222,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 		coalesce(internal, 0), coalesce(credential_id, ''),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
-		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, '')
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, '')
 	FROM models WHERE enabled = 1 ORDER BY name`
 }
