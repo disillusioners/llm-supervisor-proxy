@@ -23,7 +23,8 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Fallback Token Count Tests | 2026-04-11 | ✅ PASS | 23 test functions, 129 subcases, 1107 lines, 21 packages, race clean |
 | Usage Chart + Daily Bug Fix | 2026-04-12 | ✅ PASS | 21 packages, API verified (hourly/daily), browser automation 6/6, bug fix confirmed |
 | Usage Chart + Daily Fix | 2026-04-12 | ✅ PASS | 21/21 Go tests, API verified, browser 6/6 PASS, bug fix verified, branch `feature/usage-chart-view` |
-| Usage Chart + Daily Bug Fix | 2026-04-11 | ✅ PASS | 21 packages, API verified, browser automation 6/6 scenarios, quick fix W3 applied |
+| Secondary Upstream Model (Phase 4) | 2026-04-13 | ✅ PASS | 7 new/extended test files, 2011 lines, 935 tests total, commit 9b20182 |
+| C1+C2 Critical Test Gaps | 2026-04-13 | ✅ PASS | 8 new test functions, 1144 lines, execution-level model swap + peak combo, commit 3cd5d56 |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
@@ -41,7 +42,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | token_unit_test | pkg/proxy/token/ | ~23 | counter_test.go, prompts_test.go |
 | ultimatemodel_unit_test | pkg/ultimatemodel/ | ~114 | handler_external_test.go, handler_internal_test.go, usage_test.go |
 | store_unit_test | pkg/store/database/ | ~50+ | querybuilder_test.go, database_test.go |
-| models_unit_test | pkg/models/ | ~100 | peak_hours_test.go, config_deep_test.go |
+| models_unit_test | pkg/models/ | ~100 | peak_hours_test.go, config_deep_test.go, config_secondary_test.go |
 | toolrepair_unit_test | pkg/toolrepair/ | ~45 | strategies_test.go, repair_test.go |
 | loopdetection_unit_test | pkg/loopdetection/ | ~31 | detector_test.go |
 | auth_unit_test | pkg/auth/ | ~20 | token_test.go, store_test.go |
