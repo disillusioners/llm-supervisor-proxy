@@ -295,7 +295,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
         internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
-        secondary_upstream_model: formData.internal && formData.secondary_upstream_model ? formData.secondary_upstream_model : undefined,
+        secondary_upstream_model: formData.internal ? (formData.secondary_upstream_model || '') : undefined,
         release_stream_chunk_deadline: formData.release_stream_chunk_deadline || undefined,
         // Peak hour fields only included when internal is true
         peak_hour_enabled: formData.internal ? formData.peak_hour_enabled : undefined,
