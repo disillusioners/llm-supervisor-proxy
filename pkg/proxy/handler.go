@@ -655,8 +655,10 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 		}
 	}
 
-	// Start heartbeat goroutine
-	heartbeatCancel := h.startSSEHeartbeat(w, rc.baseCtx)
+	// Start heartbeat goroutine - always runs to keep connection alive
+	// Uses background context so it survives request completion/deadline
+	// Will stop when client disconnects (write fails)
+	heartbeatCancel := h.startSSEHeartbeat(w, context.Background())
 	defer heartbeatCancel()
 
 	// Stream existing chunks first
