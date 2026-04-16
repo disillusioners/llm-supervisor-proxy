@@ -577,48 +577,67 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// If winner is nil, it means either context cancelled or all models failed
 	select {
 	case <-rc.baseCtx.Done():
+		// Context cancelled (timeout, client disconnect, etc.) - treat as failure
+		log.Printf("Request %s context cancelled (timeout or client disconnect)", rc.reqID)
+		h.handleRaceFailure(w, rc, coordinator, "context_cancelled")
 		return
 	default:
-		// All attempts failed - mark for ultimate model retry
+		// All attempts failed with errors - mark for ultimate model retry
 		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
+		h.handleRaceFailure(w, rc, coordinator, "all_models_failed")
+		return
+	}
+}
 
-		// Mark this request as failed so ultimate model can be triggered on retry
-		if h.ultimateHandler != nil {
-			if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-				msgMaps := make([]map[string]interface{}, len(messages))
-				for i, msg := range messages {
-					if m, ok := msg.(map[string]interface{}); ok {
-						msgMaps[i] = m
-					}
+// handleRaceFailure handles the common failure case for race retry.
+// This is called when either all models failed with errors OR the context was cancelled.
+func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, coordinator *raceCoordinator, reason string) {
+	// Mark this request as failed so ultimate model can be triggered on retry
+	if h.ultimateHandler != nil {
+		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+			msgMaps := make([]map[string]interface{}, len(messages))
+			for i, msg := range messages {
+				if m, ok := msg.(map[string]interface{}); ok {
+					msgMaps[i] = m
 				}
-				h.ultimateHandler.MarkFailed(msgMaps)
 			}
+			h.ultimateHandler.MarkFailed(msgMaps)
 		}
+	}
 
-		// Get final error info from coordinator (OpenCode-compatible format)
+	// Get final error info from coordinator (OpenCode-compatible format)
+	var errInfo FinalErrorInfo
+	switch reason {
+	case "context_cancelled":
+		// Create error info for context cancellation
+		errInfo = FinalErrorInfo{
+			HTTPStatus: http.StatusGatewayTimeout,
+			Message:    "Request timeout or client disconnected",
+			ErrorType:  "timeout",
+			ErrorCode:  "request_timeout",
+		}
+	case "all_models_failed":
 		// First check if stream deadline fired with no content (specific timeout message)
-		var errInfo FinalErrorInfo
 		if deadlineErr := coordinator.GetStreamDeadlineError(); deadlineErr != nil {
 			errInfo = *deadlineErr
 		} else {
 			errInfo = coordinator.GetFinalErrorInfo()
 		}
-
-		// Log failure
-		rc.reqLog.Status = "failed"
-		rc.reqLog.Error = errInfo.Message
-		rc.reqLog.EndTime = time.Now()
-		rc.reqLog.Duration = time.Since(rc.startTime).String()
-		h.store.Add(rc.reqLog)
-
-		h.publishEvent("request_failed", map[string]interface{}{
-			"id":    rc.reqID,
-			"error": rc.reqLog.Error,
-		})
-
-		h.sendError(w, errInfo.HTTPStatus, errInfo.Message, errInfo.ErrorType, errInfo.ErrorCode)
-		return
 	}
+
+	// Log failure
+	rc.reqLog.Status = "failed"
+	rc.reqLog.Error = errInfo.Message
+	rc.reqLog.EndTime = time.Now()
+	rc.reqLog.Duration = time.Since(rc.startTime).String()
+	h.store.Add(rc.reqLog)
+
+	h.publishEvent("request_failed", map[string]interface{}{
+		"id":    rc.reqID,
+		"error": rc.reqLog.Error,
+	})
+
+	h.sendError(w, errInfo.HTTPStatus, errInfo.Message, errInfo.ErrorType, errInfo.ErrorCode)
 }
 
 // streamResult flushes the winner's buffer to the client
