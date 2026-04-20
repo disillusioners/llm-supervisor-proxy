@@ -45,9 +45,17 @@ export function useRequests(initialAppTag?: string) {
       try {
         setLoading(true);
         const tag = initialAppTag !== undefined ? initialAppTag : currentAppTag;
-        const url = tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests';
-        const data = await apiFetch<Request[]>(url, { signal: controller.signal });
-        setRequests(data);
+        // Use cache key based on app tag filter
+        const cacheKey = tag ? `requests:${tag}` : 'requests';
+        const data = await defaultAPICache.getOrFetch<Request[]>(cacheKey, async () => {
+          const response = await fetch(`${API_BASE}${tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests'}`, {
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<Request[]>;
+        }, 5000);
+        setRequests(data || []);
         setError(null);
       } catch (err) {
         if (isAbortError(err)) return;
@@ -62,8 +70,12 @@ export function useRequests(initialAppTag?: string) {
   }, [currentAppTag, initialAppTag, refreshKey]);
 
   const refetch = useCallback(() => {
+    // Invalidate cache so next refetch gets fresh data
+    const tag = initialAppTag !== undefined ? initialAppTag : currentAppTag;
+    const cacheKey = tag ? `requests:${tag}` : 'requests';
+    defaultAPICache.delete(cacheKey);
     setRefreshKey(k => k + 1);
-  }, []);
+  }, [currentAppTag, initialAppTag]);
 
   return { requests, loading, error, refetch, setAppTag: setCurrentAppTag };
 }
