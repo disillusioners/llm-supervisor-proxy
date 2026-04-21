@@ -605,7 +605,27 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		if rc.isStream {
 			// Stream the final result from the winner's buffer
-			h.streamResult(w, rc, winner)
+			if err := h.streamResult(w, rc, winner); err != nil {
+				// Client write failed (e.g., Cloudflare/proxy dropped connection).
+				// This is not a race failure, but we still need to mark the hash
+				// so ultimate model can be triggered on retry.
+				log.Printf("[STREAM] Client write failed for request %s: %v (will enable ultimate model on retry)", rc.reqID, err)
+
+				// Mark for ultimate model retry
+				if h.ultimateHandler != nil {
+					if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+						msgMaps := make([]map[string]interface{}, len(messages))
+						for i, msg := range messages {
+							if m, ok := msg.(map[string]interface{}); ok {
+								msgMaps[i] = m
+							}
+						}
+						h.ultimateHandler.MarkFailed(msgMaps)
+					}
+				}
+				// Don't send error response - connection is already broken
+				return
+			}
 		} else {
 			// Send a single JSON response from the winner's buffer
 			h.handleNonStreamResult(w, rc, winner)
@@ -686,9 +706,14 @@ func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, c
 
 // streamResult flushes the winner's buffer to the client.
 // Note: Headers and heartbeat are already set up in HandleChatCompletions.
-func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) {
+// Returns an error if client write failed (e.g., connection dropped by Cloudflare/proxy).
+// The caller should check for this error and call handleRaceFailure to enable ultimate model retry.
+func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) error {
 	buffer := winner.GetBuffer()
 	readIndex := 0
+
+	// Track if we've already sent an error (to avoid duplicates)
+	idleTerminated := false
 
 	// Capture raw bytes BEFORE any pruning happens - this is the complete response
 	if rc.conf.LogRawUpstreamResponse {
@@ -704,7 +729,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	chunks, _ := buffer.GetChunksFrom(readIndex)
 	for _, chunk := range chunks {
 		if _, err := w.Write(chunk); err != nil {
-			return
+			return fmt.Errorf("client write failed: %w", err)
 		}
 		// Extract content for logging
 		if bytes.HasPrefix(chunk, []byte("data: ")) {
@@ -727,13 +752,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	for {
 		select {
 		case <-rc.baseCtx.Done():
-			return
+			// Context cancelled - this is not a client write failure
+			return nil
 		case <-buffer.NotifyCh():
 			// New data available
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			for _, chunk := range chunks {
 				if _, err := w.Write(chunk); err != nil {
-					return
+					return fmt.Errorf("client write failed: %w", err)
 				}
 				// Extract content for logging
 				if bytes.HasPrefix(chunk, []byte("data: ")) {
@@ -753,7 +779,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			for _, chunk := range chunks {
 				if _, err := w.Write(chunk); err != nil {
-					return
+					return fmt.Errorf("client write failed: %w", err)
 				}
 				if flusher != nil {
 					flusher.Flush()
@@ -771,6 +797,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 
 			// If stream failed, send error event to client
 			if err := buffer.Err(); err != nil {
+				// If idle termination already handled this, skip duplicate error
+				if idleTerminated {
+					log.Printf("[STREAM] Buffer closed after idle termination, skipping duplicate error")
+					return nil
+				}
+
 				log.Printf("[ERROR] Stream buffer closed with error: %v", err)
 
 				// Log raw response on error
@@ -804,7 +836,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return
+				return nil // Buffer error already handled with error response to client
 			}
 
 			// Log raw response on success if enabled - capture bytes BEFORE final pruning
@@ -945,14 +977,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			})
 
 			// Log raw response on success if enabled - we capture at beginning of streamResult
-			return
+			return nil
 		case <-ticker.C:
 			// Safety backup if notification missed
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			if len(chunks) > 0 {
 				for _, chunk := range chunks {
 					if _, err := w.Write(chunk); err != nil {
-						return
+						return fmt.Errorf("client write failed: %w", err)
 					}
 					if bytes.HasPrefix(chunk, []byte("data: ")) {
 						data := bytes.TrimPrefix(chunk, []byte("data: "))
@@ -973,10 +1005,29 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if winner.IsIdle(rc.conf.IdleTerminationTimeout) {
 					log.Printf("[STREAM] Idle termination: upstream idle for %v, terminating stream",
 						time.Since(winner.GetLastActivity()))
+
+					// Mark this request as failed so ultimate model can be triggered on retry
+					if h.ultimateHandler != nil {
+						if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
+							msgMaps := make([]map[string]interface{}, len(messages))
+							for i, msg := range messages {
+								if m, ok := msg.(map[string]interface{}); ok {
+									msgMaps[i] = m
+								}
+							}
+							h.ultimateHandler.MarkFailed(msgMaps)
+						}
+					}
+
+					// Mark as terminated to avoid duplicate error in buffer.Done()
+					idleTerminated = true
+
+					// Cancel the winner to close the buffer and stop upstream goroutine.
+					// Don't send SSE error - connection is already broken (Cloudflare dropped).
+					// The buffer.Done() case will handle cleanup with idleTerminated guard.
 					winner.Cancel()
-					h.sendSSEError(w, models.ErrorTypeServerError,
-						"Upstream idle timeout — try resume command or split your task smaller parts")
-					return
+
+					return nil
 				}
 			}
 		}
