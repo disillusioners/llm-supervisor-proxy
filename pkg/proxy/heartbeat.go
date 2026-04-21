@@ -14,12 +14,12 @@ import (
 
 const (
 	// HeartbeatInterval is the interval between SSE heartbeat comments
-	HeartbeatInterval = 30 * time.Second
+	HeartbeatInterval = 15 * time.Second
 	// HeartbeatWriteTimeout is the timeout for writing heartbeat data
 	HeartbeatWriteTimeout = 3 * time.Second
 )
 
-// startSSEHeartbeat starts a goroutine that sends SSE comments every 30 seconds
+// startSSEHeartbeat starts a goroutine that sends SSE comments every 15 seconds
 // to keep the client connection alive while buffering upstream data.
 // Uses background context so it survives request completion/deadline.
 // Returns a cancel function to stop the heartbeat.

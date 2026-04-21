@@ -453,6 +453,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					"max_retries":    result.MaxRetries,
 				})
 
+				// Start heartbeat for streaming requests - runs until request ends
+				var heartbeatCancel context.CancelFunc
+				if rc.isStream {
+					heartbeatCancel = h.startSSEHeartbeat(w, rc.baseCtx)
+				}
+				defer func() {
+					if heartbeatCancel != nil {
+						heartbeatCancel()
+					}
+				}()
+
 				// Execute with ultimate model (raw proxy, no retry/fallback)
 				// The Execute method determines streaming from requestBody["stream"]
 				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
@@ -541,6 +552,34 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// === END ULTIMATE MODEL CHECK ===
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})
+
+	// For streaming requests, send headers early and start heartbeat
+	// This ensures client receives heartbeats during race retry wait time
+	var heartbeatCancel context.CancelFunc
+	if rc.isStream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		rc.headersSent = true
+
+		// Send initial connected message
+		fmt.Fprint(w, ": connected\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// Start heartbeat - runs through race retry and streaming until request ends
+		heartbeatCancel = h.startSSEHeartbeat(w, rc.baseCtx)
+	}
+
+	// Ensure heartbeat is cancelled when this function returns
+	defer func() {
+		if heartbeatCancel != nil {
+			heartbeatCancel()
+		}
+	}()
 
 	// Unified Race Retry Design (Parallel Race)
 	log.Printf("[RACE] Parallel race retry started for request %s", rc.reqID)
@@ -637,10 +676,16 @@ func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, c
 		"error": rc.reqLog.Error,
 	})
 
-	h.sendError(w, errInfo.HTTPStatus, errInfo.Message, errInfo.ErrorType, errInfo.ErrorCode)
+	// If headers already sent (streaming request), send SSE error instead of HTTP error
+	if rc.headersSent {
+		h.sendSSEError(w, models.ErrorTypeServerError, errInfo.Message)
+	} else {
+		h.sendError(w, errInfo.HTTPStatus, errInfo.Message, errInfo.ErrorType, errInfo.ErrorCode)
+	}
 }
 
-// streamResult flushes the winner's buffer to the client
+// streamResult flushes the winner's buffer to the client.
+// Note: Headers and heartbeat are already set up in HandleChatCompletions.
 func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) {
 	buffer := winner.GetBuffer()
 	readIndex := 0
@@ -653,33 +698,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 		}
 	}
 
-	// Set headers if not already sent
-	if !rc.headersSent {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(http.StatusOK)
-		rc.headersSent = true
-	}
-
 	flusher, _ := w.(http.Flusher)
-
-	// Send initial connected message for SSE
-	if rc.isStream {
-		if _, err := w.Write([]byte(": connected\n\n")); err != nil {
-			return
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}
-
-	// Start heartbeat goroutine - always runs to keep connection alive
-	// Uses background context so it survives request completion/deadline
-	// Will stop when client disconnects (write fails)
-	heartbeatCancel := h.startSSEHeartbeat(w, context.Background())
-	defer heartbeatCancel()
 
 	// Stream existing chunks first
 	chunks, _ := buffer.GetChunksFrom(readIndex)

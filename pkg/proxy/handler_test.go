@@ -576,10 +576,21 @@ func TestMockLLM_500Error(t *testing.T) {
 			rr := httptest.NewRecorder()
 			handle(rr, req)
 
-			// With race retry, the actual upstream status is propagated (500)
-			// instead of always returning 502 Bad Gateway
-			if rr.Code != http.StatusInternalServerError {
-				t.Errorf("expected status %d, got %d", http.StatusInternalServerError, rr.Code)
+			// With heartbeat feature, headers are sent early for streaming requests.
+			// When all models fail, streaming requests return HTTP 200 with SSE error in body,
+			// while non-streaming requests return HTTP 500.
+			// Since bodyWithPrompt uses streaming=true, we check for SSE error in body.
+			if rr.Code != http.StatusOK {
+				t.Errorf("expected status %d for streaming, got %d", http.StatusOK, rr.Code)
+			}
+
+			// Verify SSE error is in the body
+			respBody := rr.Body.String()
+			if !strings.Contains(respBody, "data: ") {
+				t.Error("expected SSE error format 'data: ' in response body")
+			}
+			if !strings.Contains(respBody, "error") {
+				t.Error("expected 'error' in SSE response body")
 			}
 
 			reqs := h.store.List()
