@@ -311,8 +311,8 @@ func (b *ToolCallBuffer) emitToolCall(idx int, args string, builder *ToolCallBui
 	}
 
 	data, _ := json.Marshal(chunk)
-	// Add trailing newline for proper SSE format
-	return []byte("data: " + string(data) + "\n")
+	// Add trailing newlines for proper SSE format (data: <json>\n\n)
+	return []byte("data: " + string(data) + "\n\n")
 }
 
 // Flush emits all remaining buffered tool calls (called on stream end).
