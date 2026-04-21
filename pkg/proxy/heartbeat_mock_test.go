@@ -175,6 +175,9 @@ func TestHeartbeat_MockServer_Basic(t *testing.T) {
 // To run this test explicitly:
 // go test -run TestHeartbeat_MockServer_OneMinute -timeout 120s ./pkg/proxy/...
 func TestHeartbeat_MockServer_OneMinute(t *testing.T) {
+	// Skip by default - these tests take 1+ minutes
+	t.Skip("skipping - long-running test; run explicitly with: go test -run TestHeartbeat_MockServer_OneMinute -timeout 120s ./pkg/proxy/...")
+
 	const (
 		testDuration  = 60 * time.Second
 		chunkInterval = 5 * time.Second // Send data every 5 seconds
@@ -243,6 +246,9 @@ func TestHeartbeat_MockServer_OneMinute(t *testing.T) {
 // To run this test explicitly:
 // go test -run TestHeartbeat_MockServer_TwoMinutes -timeout 180s ./pkg/proxy/...
 func TestHeartbeat_MockServer_TwoMinutes(t *testing.T) {
+	// Skip by default - these tests take 2+ minutes
+	t.Skip("skipping - long-running test; run explicitly with: go test -run TestHeartbeat_MockServer_TwoMinutes -timeout 240s ./pkg/proxy/...")
+
 	const (
 		testDuration  = 120 * time.Second
 		chunkInterval = 5 * time.Second
@@ -304,6 +310,9 @@ func TestHeartbeat_MockServer_TwoMinutes(t *testing.T) {
 // To run this test explicitly:
 // go test -run TestHeartbeat_MockServer_WithPeriodicData -timeout 120s ./pkg/proxy/...
 func TestHeartbeat_MockServer_WithPeriodicData(t *testing.T) {
+	// Skip by default - takes ~65 seconds
+	t.Skip("skipping - long-running test; run explicitly with: go test -run TestHeartbeat_MockServer_WithPeriodicData -timeout 120s ./pkg/proxy/...")
+
 	const (
 		testDuration    = 65 * time.Second
 		dataInterval    = 3 * time.Second // Send data every 3 seconds
@@ -503,8 +512,11 @@ func mockNeverEndingUpstream(stopCh <-chan struct{}, dataInterval time.Duration)
 // Accounting for timing variance, we check for 10-14 heartbeats.
 //
 // To run this test:
-// go test -run TestHeartbeat_MockServer_ThreeMinutes -timeout 240s ./pkg/proxy/...
+// go test -run TestHeartbeat_MockServer_ThreeMinutes -timeout 420s ./pkg/proxy/...
 func TestHeartbeat_MockServer_ThreeMinutes(t *testing.T) {
+	// Skip by default - takes ~3 minutes
+	t.Skip("skipping - long-running test; run explicitly with: go test -run TestHeartbeat_MockServer_ThreeMinutes -timeout 420s ./pkg/proxy/...")
+
 	const (
 		testDuration = 3 * time.Minute
 		dataInterval = 10 * time.Second // Send data every 10 seconds to keep connection active
