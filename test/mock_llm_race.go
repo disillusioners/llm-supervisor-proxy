@@ -319,6 +319,28 @@ func handleStream(w http.ResponseWriter, r *http.Request, model, prompt string) 
 		return
 	}
 
+	// Scenario 7: Slow stream for heartbeat testing
+	// Sends data every 2 seconds for a long time to keep connection alive
+	// Used for testing heartbeat feature
+	if strings.Contains(prompt, "mock-slow-stream") {
+		log.Printf("[%s] Simulating SLOW STREAM for heartbeat testing (2s interval, long duration)", model)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for i := 0; ; i++ {
+			select {
+			case <-r.Context().Done():
+				log.Printf("[%s] Context cancelled at iteration %d", model, i)
+				return
+			case <-ticker.C:
+				token := fmt.Sprintf(" heartbeat-test-%d", i)
+				fmt.Fprintf(w, "data: %s\n\n", createChunk(model, token))
+				flusher.Flush()
+				log.Printf("[%s] Sent token %d: '%s'", model, i, token)
+			}
+		}
+	}
+
 	// Default: Normal response
 	log.Printf("[%s] Normal streaming response", model)
 	tokens := []string{"Hello", " world", "!", " I", " am", " a", " useful", " token", " stream", "."}
