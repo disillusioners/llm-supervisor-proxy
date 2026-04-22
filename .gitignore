@@ -33,3 +33,6 @@ k8s/secrets/
 *.log
 proxy_debug*
 pkg/store/database/config.db
+/smoke
+/smoke_test
+/smoke_results/*

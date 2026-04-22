@@ -384,6 +384,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] ultimate model skipped: token %s (%s) lacks ultimate_model_enabled, model: %s", rc.tokenID, rc.tokenName, rc.reqLog.Model)
 	}
 
+	// Header override for forcing ultimate model (for testing/debugging)
+	forceUltimate := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
+	if forceUltimate {
+		rc.ultimateModelEnabled = true
+		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
+	}
+
 	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
 	// Check if ultimate model should be triggered for duplicate requests
 	// Permission gate: skip if token lacks ultimate_model_enabled permission
@@ -398,7 +405,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 
-			result := h.ultimateHandler.ShouldTrigger(msgMaps)
+			var result ultimatemodel.ShouldTriggerResult
+			if forceUltimate {
+				result = h.ultimateHandler.ForceTrigger(msgMaps)
+				log.Printf("[DEBUG] ForceTrigger hash=%s", result.Hash[:8])
+			} else {
+				result = h.ultimateHandler.ShouldTrigger(msgMaps)
+			}
 			if result.Triggered {
 				// Check if retry limit exhausted
 				if result.RetryExhausted {

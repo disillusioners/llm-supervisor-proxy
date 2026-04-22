@@ -62,6 +62,16 @@ func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterf
 // IMPORTANT: Hash is only stored when MarkFailed is called after a failure.
 // This prevents simple messages like "hi", "hello" from triggering ultimate model.
 func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTriggerResult {
+	return h.shouldTriggerInternal(messages, false)
+}
+
+// ForceTrigger always triggers ultimate model, bypassing hash cache check.
+// Used for testing/debugging via X-Force-Ultimate-Model header.
+func (h *Handler) ForceTrigger(messages []map[string]interface{}) ShouldTriggerResult {
+	return h.shouldTriggerInternal(messages, true)
+}
+
+func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force bool) ShouldTriggerResult {
 	cfg := h.config.Get()
 	if cfg.UltimateModel.ModelID == "" {
 		return ShouldTriggerResult{Triggered: false}
@@ -75,9 +85,8 @@ func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTrigger
 	// Generate hash from messages (role + content only)
 	hash := HashMessages(messages)
 
-	// Only CHECK if hash exists (don't store)
-	// Hash is only stored when MarkFailed is called
-	if !h.hashCache.Contains(hash) {
+	// Force mode bypasses hash cache check
+	if !force && !h.hashCache.Contains(hash) {
 		return ShouldTriggerResult{Triggered: false, Hash: hash}
 	}
 
