@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
@@ -190,7 +191,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		return nil, fmt.Errorf("streaming not supported")
 	}
 
-	// Create tool call buffer (same pattern as handleInternalStream)
+	// Create normalizer context for this stream
+	normCtx := normalizers.NewContext("openai", "ultimate-external")
+	normalizers.GetRegistry().ResetAll(normCtx)
+
+	// Create tool call buffer
 	var toolCallBuffer *toolcall.ToolCallBuffer
 	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
 		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
@@ -207,11 +212,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		)
 	}
 
-	// Track the last chunk containing usage data (only need the most recent)
+	// Track the last chunk containing usage data
 	var lastUsageChunk []byte
 
-	// Accumulate raw SSE chunks for fallback token counting
-	var rawChunks bytes.Buffer
+	// Create buffer to batch all writes like race executor does
+	var buf bytes.Buffer
 
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -223,19 +228,21 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
 
-		// Convert to []byte once and reuse (fixes double allocation)
 		lineBytes := []byte(line)
 
-		// Extract usage from data lines - only keep the most recent usage chunk
-		// This replaces unbounded accumulation of all dataLines
+		// Apply normalization to fix malformed chunks
+		normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName(lineBytes, normCtx)
+		if modified {
+			log.Printf("[DEBUG] UltimateModel: normalized stream chunk by %s", normalizerName)
+			lineBytes = normalizedLine
+		}
+
+		// Extract usage from data lines
 		if bytes.HasPrefix(lineBytes, []byte("data: ")) {
 			data := bytes.TrimPrefix(lineBytes, []byte("data: "))
-			// Check for non-empty, non-[DONE] lines
-			// Only track chunks that might contain usage (avoid checking [DONE], empty lines)
 			if len(data) > 0 &&
 				!bytes.HasPrefix(data, []byte("[DONE]")) &&
 				!bytes.HasPrefix(data, []byte("\n")) {
-				// Try to extract usage - if present, update lastUsageChunk
 				if extractUsageFromChunk(data) != nil {
 					lastUsageChunk = data
 				}
@@ -250,22 +257,19 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			chunksToEmit = [][]byte{lineBytes}
 		}
 
-		// Write all chunks and accumulate for fallback token counting
+		// Buffer all chunks
 		for _, chunk := range chunksToEmit {
-			w.Write(chunk)
-			rawChunks.Write(chunk)
+			buf.Write(chunk)
 		}
-		flusher.Flush()
 	}
 
 	// Flush remaining buffered tool calls at stream end
 	if toolCallBuffer != nil {
 		flushChunks := toolCallBuffer.Flush()
 		for _, chunk := range flushChunks {
-			w.Write(chunk)
+			buf.Write(chunk)
 		}
 
-		// Log repair stats if any repairs occurred
 		stats := toolCallBuffer.GetRepairStats()
 		if stats.Attempted > 0 {
 			log.Printf("[TOOL-BUFFER] UltimateModel External: Repair stats: attempted=%d, success=%d, failed=%d",
@@ -273,24 +277,24 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 	}
 
-	// Extract usage from the last chunk that contained usage data
+	// Extract usage from the last chunk
 	var usage *store.Usage
 	if lastUsageChunk != nil {
 		usage = extractUsageFromChunk(lastUsageChunk)
 	}
 
-	// Fallback token counting if usage is nil/zero
+	// Fallback token counting
 	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 		if token.FallbackEnabled() {
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, modelID)
 			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v", err)
 			}
-			completionText := token.ExtractCompletionTextFromChunks(rawChunks.Bytes())
+			completionText := token.ExtractCompletionTextFromChunks(buf.Bytes())
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, modelID)
 			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, modelID)
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v", err)
 			}
 			usage = &store.Usage{
 				PromptTokens:     promptTokens,
@@ -301,6 +305,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 				modelID, promptTokens, completionTokens, promptTokens+completionTokens)
 		}
 	}
+
+	// Write all buffered data to client in one flush
+	w.Write(buf.Bytes())
+	flusher.Flush()
 
 	return usage, nil
 }

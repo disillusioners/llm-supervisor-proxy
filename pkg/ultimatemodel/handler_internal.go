@@ -132,8 +132,6 @@ func (h *Handler) handleInternalStream(
 	}
 
 	// Create tool call buffer with integrated repair
-	// This replaces the separate accumulator + post-stream repair pattern
-	// Repair happens during streaming when tool calls are emitted
 	var toolCallBuffer *toolcall.ToolCallBuffer
 	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
 		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
@@ -143,7 +141,6 @@ func (h *Handler) handleInternalStream(
 			h.toolRepairConfig,
 		)
 	} else if !h.toolCallBufferDisabled {
-		// Buffer without repair (repair disabled)
 		toolCallBuffer = toolcall.NewToolCallBuffer(
 			h.toolCallBufferMaxSize,
 			internalModel,
@@ -162,15 +159,15 @@ func (h *Handler) handleInternalStream(
 	// Accumulate raw SSE chunks for fallback token counting
 	var rawChunks bytes.Buffer
 
+	// Create a simple buffer to batch writes like the race executor does
+	var buf bytes.Buffer
+
 	for event := range eventCh {
 		switch event.Type {
 		case "content":
 			// Write SSE data event
-			// OpenAI streaming format: role is only present in FIRST chunk
-			// Use map to control exactly what gets serialized (avoid zero-value string issue)
 			var data []byte
 			if firstChunk {
-				// First chunk includes role
 				chunk := map[string]interface{}{
 					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 					"object":  "chat.completion.chunk",
@@ -188,7 +185,6 @@ func (h *Handler) handleInternalStream(
 				}
 				data, _ = json.Marshal(chunk)
 			} else {
-				// Subsequent chunks: NO role field at all (not even empty string)
 				chunk := map[string]interface{}{
 					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 					"object":  "chat.completion.chunk",
@@ -205,19 +201,15 @@ func (h *Handler) handleInternalStream(
 				}
 				data, _ = json.Marshal(chunk)
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			rawChunks.Write(data)
-			rawChunks.Write([]byte("\n\n"))
-			flusher.Flush()
+			buf.WriteString("data: ")
+			buf.Write(data)
+			buf.WriteString("\n\n")
 			firstChunk = false
 
 		case "tool_call":
-			// Write tool_call delta
-			// Must include index field for each tool call (required for streaming)
 			if len(event.ToolCalls) > 0 {
 				toolCalls := make([]map[string]interface{}, len(event.ToolCalls))
 				for i, tc := range event.ToolCalls {
-					// Assign index based on tool call ID if seen before, otherwise use next available
 					var index int
 					if tc.ID != "" {
 						if idx, seen := seenToolCallIDs[tc.ID]; seen {
@@ -228,7 +220,6 @@ func (h *Handler) handleInternalStream(
 							nextToolCallIndex++
 						}
 					} else {
-						// No ID, use position-based index
 						index = i
 					}
 					toolCalls[i] = map[string]interface{}{
@@ -256,11 +247,8 @@ func (h *Handler) handleInternalStream(
 					},
 				}
 				data, _ := json.Marshal(chunk)
-				line := fmt.Sprintf("data: %s\n\n", data)
+				line := "data: " + string(data) + "\n\n"
 
-				// Process through tool call buffer (if enabled)
-				// The buffer accumulates tool call fragments, repairs when complete, and emits
-				// Non-tool-call chunks pass through immediately
 				var chunksToEmit [][]byte
 				if toolCallBuffer != nil {
 					chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
@@ -268,17 +256,12 @@ func (h *Handler) handleInternalStream(
 					chunksToEmit = [][]byte{[]byte(line)}
 				}
 
-				// Write all chunks to client
 				for _, chunk := range chunksToEmit {
-					w.Write(chunk)
-					rawChunks.Write(chunk)
+					buf.Write(chunk)
 				}
-				flusher.Flush()
 			}
 
 		case "thinking":
-			// Write thinking/reasoning content (DeepSeek-style reasoning_content field)
-			// Use map to control exactly what gets serialized
 			chunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				"object":  "chat.completion.chunk",
@@ -294,28 +277,25 @@ func (h *Handler) handleInternalStream(
 				},
 			}
 			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			rawChunks.Write(data)
-			rawChunks.Write([]byte("\n\n"))
-			flusher.Flush()
+			buf.WriteString("data: ")
+			buf.Write(data)
+			buf.WriteString("\n\n")
 
 		case "done":
-			// Flush any remaining buffered tool calls with repair
+			// Flush remaining tool calls
 			if toolCallBuffer != nil {
 				flushChunks := toolCallBuffer.Flush()
 				for _, chunk := range flushChunks {
-					w.Write(chunk)
+					buf.Write(chunk)
 				}
-
-				// Log repair stats if any repairs occurred
 				stats := toolCallBuffer.GetRepairStats()
 				if stats.Attempted > 0 {
-					log.Printf("[TOOL-BUFFER] UltimateModel: Repair stats: attempted=%d, success=%d, failed=%d",
+					log.Printf("[TOOL-BUFFER] UltimateModel Internal: Repair stats: attempted=%d, success=%d, failed=%d",
 						stats.Attempted, stats.Successful, stats.Failed)
 				}
 			}
 
-			// Extract usage from the done event's full response
+			// Extract usage
 			if event.Response != nil {
 				extractedUsage = &store.Usage{
 					PromptTokens:     event.Response.Usage.PromptTokens,
@@ -324,9 +304,7 @@ func (h *Handler) handleInternalStream(
 				}
 			}
 
-			// Write finish chunk with finish_reason before [DONE]
-			// This is required by OpenAI streaming format - clients expect finish_reason in the last chunk
-			// Use the finish_reason from the event (e.g., "tool_calls" for tool calls, "stop" for normal completion)
+			// Write finish chunk
 			finishReason := event.FinishReason
 			if finishReason == "" {
 				finishReason = "stop"
@@ -345,26 +323,23 @@ func (h *Handler) handleInternalStream(
 				},
 			}
 			finalData, _ := json.Marshal(finalChunk)
-			fmt.Fprintf(w, "data: %s\n\n", finalData)
-			rawChunks.Write(finalData)
-			rawChunks.Write([]byte("\n\n"))
+			buf.WriteString("data: ")
+			buf.Write(finalData)
+			buf.WriteString("\n\n")
+			buf.WriteString("data: [DONE]\n\n")
 
-			// Write [DONE] marker
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
-
-			// Fallback token counting if usage is nil/zero
+			// Fallback token counting
 			if extractedUsage == nil || (extractedUsage.PromptTokens == 0 && extractedUsage.CompletionTokens == 0 && extractedUsage.TotalTokens == 0) {
 				if token.FallbackEnabled() {
 					tokenizer := token.GetTokenizer()
 					promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, internalModel)
 					if err != nil {
-						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v", err)
 					}
-					completionText := token.ExtractCompletionTextFromChunks(rawChunks.Bytes())
+					completionText := token.ExtractCompletionTextFromChunks(buf.Bytes())
 					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
 					if err != nil {
-						log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+						log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v", err)
 					}
 					extractedUsage = &store.Usage{
 						PromptTokens:     promptTokens,
@@ -376,29 +351,31 @@ func (h *Handler) handleInternalStream(
 				}
 			}
 
+			// Flush everything to client
+			rawChunks.Write(buf.Bytes())
+			w.Write(buf.Bytes())
+			flusher.Flush()
+
+			return extractedUsage, nil
+
 		case "error":
-			// Write error as SSE event
-			errMsg := "unknown error"
+			errMsg := ""
 			if event.Error != nil {
 				errMsg = event.Error.Error()
 			}
-			log.Printf("[UltimateModel] Stream error from provider: %s", errMsg)
-			// If headers not sent, we can return error
-			// Otherwise, we need to send SSE error
-			errorChunk := map[string]interface{}{
-				"error": map[string]string{
-					"message": errMsg,
-					"type":    "ultimate_model_error",
-				},
-			}
-			data, _ := json.Marshal(errorChunk)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", errMsg)
+			data, _ := json.Marshal(errResp)
+			buf.WriteString("data: ")
+			buf.Write(data)
+			buf.WriteString("\n\n")
+			rawChunks.Write(buf.Bytes())
+			w.Write(buf.Bytes())
 			flusher.Flush()
-			return nil, fmt.Errorf("provider stream error: %s", errMsg)
+			return nil, fmt.Errorf("provider error: %s", errMsg)
 		}
 	}
 
-	return extractedUsage, nil
+	return nil, fmt.Errorf("event channel closed unexpectedly")
 }
 
 // convertRequest converts map[string]interface{} to providers.ChatCompletionRequest

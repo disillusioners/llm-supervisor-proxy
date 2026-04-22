@@ -201,21 +201,22 @@ func parseStreamResponse(body io.Reader) ([]string, string, []ToolCall) {
 
 		if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
 			if choice, ok := choices[0].(map[string]interface{}); ok {
-				// Extract content delta
+				// Extract delta content
 				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+					// Content delta
 					if content, ok := delta["content"].(string); ok {
 						fullContent.WriteString(content)
 					}
-				}
-				// Extract tool calls
-				if tc, ok := choice["tool_calls"].([]interface{}); ok {
-					for _, t := range tc {
-						if tMap, ok := t.(map[string]interface{}); ok {
-							if fn, ok := tMap["function"].(map[string]interface{}); ok {
-								toolCalls = append(toolCalls, ToolCall{
-									Name: fmt.Sprintf("%v", fn["name"]),
-									Args: fmt.Sprintf("%v", fn["arguments"]),
-								})
+					// Tool calls in streaming format are in delta.tool_calls
+					if tc, ok := delta["tool_calls"].([]interface{}); ok {
+						for _, t := range tc {
+							if tMap, ok := t.(map[string]interface{}); ok {
+								if fn, ok := tMap["function"].(map[string]interface{}); ok {
+									toolCalls = append(toolCalls, ToolCall{
+										Name: fmt.Sprintf("%v", fn["name"]),
+										Args: fmt.Sprintf("%v", fn["arguments"]),
+									})
+								}
 							}
 						}
 					}
