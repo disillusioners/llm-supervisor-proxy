@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -104,6 +105,7 @@ type ModelResult struct {
 	Content    string
 	ToolCalls  []ToolCall
 	RawJSON    string
+	StreamData []string
 	Error      string
 }
 
@@ -128,27 +130,100 @@ func testModel(modelName string) *ModelResult {
 
 	result.StatusCode = resp.StatusCode
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	result.RawJSON = string(body)
-
 	if resp.StatusCode != http.StatusOK {
-		result.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		result.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))
 		return result
 	}
 
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		result.Error = "JSON parse failed"
-		return result
-	}
+	// Parse streaming SSE response
+	result.StreamData, result.Content, result.ToolCalls = parseStreamResponse(resp.Body)
 
-	result.Content = extractContent(parsed)
-	result.ToolCalls = extractToolCalls(parsed)
+	// Store raw SSE chunks as JSON array
+	var rawJSON bytes.Buffer
+	rawJSON.WriteString("[\n")
+	for i, chunk := range result.StreamData {
+		if i > 0 {
+			rawJSON.WriteString(",\n")
+		}
+		data, _ := json.Marshal(chunk)
+		rawJSON.Write(data)
+	}
+	rawJSON.WriteString("\n]")
+	result.RawJSON = rawJSON.String()
+
 	return result
+}
+
+func parseRawChunks(content string) []string {
+	var chunks []string
+	reader := strings.NewReader(content)
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			chunks = append(chunks, string(buf[:n]))
+		}
+		if err != nil {
+			break
+		}
+	}
+	return chunks
+}
+
+func parseStreamResponse(body io.Reader) ([]string, string, []ToolCall) {
+	var streamData []string
+	var fullContent strings.Builder
+	var toolCalls []ToolCall
+	scanner := bufio.NewScanner(body)
+
+	// Increase buffer size for larger chunks
+	const maxCapacity = 1024 * 1024 // 1MB
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		streamData = append(streamData, line)
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]interface{}); ok {
+				// Extract content delta
+				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+					if content, ok := delta["content"].(string); ok {
+						fullContent.WriteString(content)
+					}
+				}
+				// Extract tool calls
+				if tc, ok := choice["tool_calls"].([]interface{}); ok {
+					for _, t := range tc {
+						if tMap, ok := t.(map[string]interface{}); ok {
+							if fn, ok := tMap["function"].(map[string]interface{}); ok {
+								toolCalls = append(toolCalls, ToolCall{
+									Name: fmt.Sprintf("%v", fn["name"]),
+									Args: fmt.Sprintf("%v", fn["arguments"]),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return streamData, fullContent.String(), toolCalls
 }
 
 func buildRequest(model string) map[string]interface{} {
@@ -179,7 +254,7 @@ func buildRequest(model string) map[string]interface{} {
 			},
 		},
 		"tool_choice": "auto",
-		"stream":      false,
+		"stream":      true,
 	}
 }
 
