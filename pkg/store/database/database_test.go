@@ -1351,9 +1351,6 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 	if loadedCfg.BufferMaxStorageMB != 200 {
 		t.Errorf("BufferMaxStorageMB mismatch: got %d, want 200", loadedCfg.BufferMaxStorageMB)
 	}
-	if !loadedCfg.SSEHeartbeatEnabled {
-		t.Errorf("SSEHeartbeatEnabled mismatch: got %v, want true", loadedCfg.SSEHeartbeatEnabled)
-	}
 
 	// Verify race retry fields
 	if !loadedCfg.RaceRetryEnabled {

@@ -119,13 +119,6 @@ func (m *MockConfigManager) GetBufferMaxStorageMB() int {
 	return m.Config.BufferMaxStorageMB
 }
 
-// GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled.
-func (m *MockConfigManager) GetSSEHeartbeatEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Config.SSEHeartbeatEnabled
-}
-
 // GetLoopDetection returns the loop detection configuration.
 func (m *MockConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	m.mu.RLock()

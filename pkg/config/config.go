@@ -73,7 +73,6 @@ type Config struct {
 	MaxStreamBufferSize  int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
 	BufferStorageDir     string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
 	BufferMaxStorageMB   int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
-	SSEHeartbeatEnabled  bool                `json:"sse_heartbeat_enabled"`  // Enable SSE heartbeat for streaming responses
 	LoopDetection        LoopDetectionConfig `json:"loop_detection"`
 	ToolRepair           toolrepair.Config   `json:"tool_repair"`
 	UltimateModel        UltimateModelConfig `json:"ultimate_model"`
@@ -111,7 +110,6 @@ type ManagerInterface interface {
 	GetMaxStreamBufferSize() int
 	GetBufferStorageDir() string
 	GetBufferMaxStorageMB() int
-	GetSSEHeartbeatEnabled() bool
 	GetLoopDetection() LoopDetectionConfig
 	GetUltimateModel() UltimateModelConfig
 	GetRaceRetryEnabled() bool
@@ -168,8 +166,7 @@ var Defaults = Config{
 	MaxGenerationTime:    Duration(300 * time.Second), // Absolute hard timeout for entire request lifecycle
 	MaxStreamBufferSize:  10 * 1024 * 1024,            // 10MB default
 	BufferStorageDir:     "",                          // Empty means use default data directory
-	BufferMaxStorageMB:   100,                         // 100MB default
-	SSEHeartbeatEnabled:  false,                       // Disable heartbeat by default
+	BufferMaxStorageMB:  100,                         // 100MB default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
 		ShadowMode:                true,
@@ -396,9 +393,6 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("LOOP_DETECTION_SHADOW_MODE"); v != "" {
 		cfg.LoopDetection.ShadowMode = v == "true" || v == "1"
-	}
-	if v := os.Getenv("SSE_HEARTBEAT_ENABLED"); v != "" {
-		cfg.SSEHeartbeatEnabled = v == "true" || v == "1"
 	}
 	if v := os.Getenv("ULTIMATE_MODEL_ID"); v != "" {
 		cfg.UltimateModel.ModelID = v
@@ -641,13 +635,6 @@ func (m *Manager) GetBufferMaxStorageMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.BufferMaxStorageMB
-}
-
-// GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses
-func (m *Manager) GetSSEHeartbeatEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.SSEHeartbeatEnabled
 }
 
 // GetUltimateModel returns the ultimate model configuration

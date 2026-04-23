@@ -146,23 +146,6 @@ func TestMockConfigManager_GetBufferMaxStorageMB(t *testing.T) {
 	}
 }
 
-func TestMockConfigManager_GetSSEHeartbeatEnabled(t *testing.T) {
-	mock := NewMockConfigManager()
-
-	// Default is false
-	if mock.GetSSEHeartbeatEnabled() {
-		t.Error("Expected SSEHeartbeatEnabled to be false by default")
-	}
-
-	mock.SetConfig(config.Config{
-		SSEHeartbeatEnabled: true,
-	})
-
-	if !mock.GetSSEHeartbeatEnabled() {
-		t.Error("Expected SSEHeartbeatEnabled to be true")
-	}
-}
-
 func TestMockConfigManager_GetLoopDetection(t *testing.T) {
 	mock := NewMockConfigManager()
 	mock.SetConfig(config.Config{

@@ -290,13 +290,6 @@ func (m *ConfigManager) GetBufferMaxStorageMB() int {
 	return m.cfg.BufferMaxStorageMB
 }
 
-// GetSSEHeartbeatEnabled returns whether SSE heartbeat is enabled for streaming responses
-func (m *ConfigManager) GetSSEHeartbeatEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.SSEHeartbeatEnabled
-}
-
 // GetLoopDetection returns the loop detection configuration
 func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	m.mu.RLock()

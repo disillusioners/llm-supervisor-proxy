@@ -252,6 +252,14 @@ func (h *Handler) Execute(
 		isStream = stream
 	}
 
+	// Start heartbeat for streaming requests - runs until request ends
+	// Heartbeat is started here (after headers are set) to keep connection alive
+	var heartbeatCancel context.CancelFunc
+	heartbeatCtx, heartbeatCancel := context.WithCancel(parentCtx)
+	if isStream {
+		go startSSEHeartbeat(w, heartbeatCtx)
+	}
+
 	// Apply MaxGenerationTime as the absolute hard timeout
 	ctx, cancel := context.WithTimeout(parentCtx, cfg.MaxGenerationTime.Duration())
 	defer cancel()
@@ -259,6 +267,7 @@ func (h *Handler) Execute(
 	// Marshal request body for token counting
 	requestBodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
+		heartbeatCancel()
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
@@ -269,6 +278,9 @@ func (h *Handler) Execute(
 	} else {
 		usage, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream)
 	}
+
+	// Stop heartbeat
+	heartbeatCancel()
 
 	if err != nil {
 		// On failure: KEEP retry counter to enforce limit

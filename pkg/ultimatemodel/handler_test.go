@@ -79,10 +79,6 @@ func (m *mockConfigManager) GetBufferMaxStorageMB() int {
 	return m.cfg.BufferMaxStorageMB
 }
 
-func (m *mockConfigManager) GetSSEHeartbeatEnabled() bool {
-	return m.cfg.SSEHeartbeatEnabled
-}
-
 func (m *mockConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	return m.cfg.LoopDetection
 }

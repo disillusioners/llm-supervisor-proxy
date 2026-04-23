@@ -39,11 +39,10 @@ func (c *Config) Clone() ConfigSnapshot {
 		StreamDeadline:         cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
 		MaxStreamBufferSize:    cfg.MaxStreamBufferSize,
-		ModelsConfig:           c.ModelsConfig,
-		LoopDetection:          cfg.LoopDetection,
-		ToolRepair:             cfg.ToolRepair,
-		SSEHeartbeatEnabled:    cfg.SSEHeartbeatEnabled,
-		RaceRetryEnabled:       cfg.RaceRetryEnabled,
+		ModelsConfig:          c.ModelsConfig,
+		LoopDetection:         cfg.LoopDetection,
+		ToolRepair:            cfg.ToolRepair,
+		RaceRetryEnabled:      cfg.RaceRetryEnabled,
 		RaceParallelOnIdle:     cfg.RaceParallelOnIdle,
 		RaceMaxParallel:        cfg.RaceMaxParallel,
 		RaceMaxBufferBytes:     cfg.RaceMaxBufferBytes,
@@ -68,7 +67,6 @@ type ConfigSnapshot struct {
 	ModelsConfig         models.ModelsConfigInterface
 	LoopDetection        config.LoopDetectionConfig
 	ToolRepair           toolrepair.Config
-	SSEHeartbeatEnabled  bool
 
 	// Race Retry
 	RaceRetryEnabled   bool
@@ -466,19 +464,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					"max_retries":    result.MaxRetries,
 				})
 
-				// Start heartbeat for streaming requests - runs until request ends
-				var heartbeatCancel context.CancelFunc
-				if rc.isStream {
-					heartbeatCancel = h.startSSEHeartbeat(w, rc.baseCtx)
-				}
-				defer func() {
-					if heartbeatCancel != nil {
-						heartbeatCancel()
-					}
-				}()
-
 				// Execute with ultimate model (raw proxy, no retry/fallback)
 				// The Execute method determines streaming from requestBody["stream"]
+				// Heartbeat is started by the ultimate handler after headers are sent
 				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
 				if err != nil {
 					log.Printf("[UltimateModel] Error: %v", err)
