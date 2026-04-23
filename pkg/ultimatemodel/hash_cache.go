@@ -85,8 +85,11 @@ func (c *HashCache) Remove(hash string) {
 			// Shift remaining elements to fill the gap
 			copy(c.hashes[i:], c.hashes[i+1:c.count])
 			c.count--
-			c.head = (c.head - 1 + c.size) % c.size
 			c.hashes[c.count] = "" // Clear the last element
+			// head only changes if we removed at head position (i == 0)
+			if i == 0 {
+				c.head = (c.head - 1 + c.size) % c.size
+			}
 			break
 		}
 	}

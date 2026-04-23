@@ -54,13 +54,9 @@ func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterf
 }
 
 // ShouldTrigger checks if ultimate model should be triggered.
-// It ONLY checks if hash exists (does NOT store hash).
-// Returns true if:
-// 1. Ultimate model is configured (non-empty ModelID)
-// 2. This request hash was already in cache (previously failed)
-//
-// IMPORTANT: Hash is only stored when MarkFailed is called after a failure.
-// This prevents simple messages like "hi", "hello" from triggering ultimate model.
+// Hash is registered on entry - first call returns false, subsequent calls
+// with same hash trigger ultimate model.
+// On success, hash is removed from cache; on failure, hash remains.
 func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTriggerResult {
 	return h.shouldTriggerInternal(messages, false)
 }
@@ -85,10 +81,14 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// Generate hash from messages (role + content only)
 	hash := HashMessages(messages)
 
-	// Force mode bypasses hash cache check
-	if !force && !h.hashCache.Contains(hash) {
+	// Store hash and check if it was already there (atomic operation)
+	// Returns true if duplicate, false if first time
+	alreadyExists := h.hashCache.StoreAndCheck(hash)
+	if !force && !alreadyExists {
+		// First time seeing this request - don't trigger, hash is stored
 		return ShouldTriggerResult{Triggered: false, Hash: hash}
 	}
+	// Hash was already in cache (duplicate) - trigger ultimate model
 
 	// Get max retries config
 	maxRetries := cfg.UltimateModel.MaxRetries
@@ -116,8 +116,8 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 }
 
 // MarkFailed stores the hash to mark this request as failed.
-// This should be called when a normal request fails, so subsequent
-// retries can trigger the ultimate model.
+// DEPRECATED: Hash is now stored automatically on ShouldTrigger entry.
+// This function is kept for backward compatibility with existing code.
 // Returns the computed hash for reference.
 func (h *Handler) MarkFailed(messages []map[string]interface{}) string {
 	if len(messages) == 0 {
@@ -289,9 +289,9 @@ func (h *Handler) Execute(
 		return nil, err
 	}
 
-	// On success: clear retry counter but keep hash in cache
-	// This prevents immediate re-triggering of ultimate model for same content
-	h.hashCache.ClearRetryCount(hash)
+	// On success: remove hash from cache so same content can be processed normally again
+	// This also clears the retry counter for the hash
+	h.hashCache.Remove(hash)
 
 	return usage, nil
 }
