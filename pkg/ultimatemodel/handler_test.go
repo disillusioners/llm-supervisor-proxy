@@ -333,13 +333,25 @@ func TestShouldTrigger_AfterMarkFailed(t *testing.T) {
 		{"role": "user", "content": "Hello"},
 	}
 
-	// Mark as failed
+	// MarkFailed stores the hash (counter = 0)
 	h.MarkFailed(messages)
 
-	// Now should trigger
+	// First ShouldTrigger: counter = 1, not triggered (first duplicate = allowed retry)
+	r1 := h.ShouldTrigger(messages)
+	if r1.Triggered {
+		t.Error("First ShouldTrigger should not trigger (counter at 1, need 2)")
+	}
+
+	// Second ShouldTrigger: counter = 2, triggered (second duplicate = triggers)
+	r2 := h.ShouldTrigger(messages)
+	if !r2.Triggered {
+		t.Error("Second ShouldTrigger should trigger (counter at 2)")
+	}
+
+	// Third ShouldTrigger: counter = 3, still triggered
 	result := h.ShouldTrigger(messages)
 	if !result.Triggered {
-		t.Error("Should trigger after MarkFailed")
+		t.Error("Third ShouldTrigger should also trigger")
 	}
 }
 
@@ -374,24 +386,25 @@ func TestShouldTrigger_RetryExhausted(t *testing.T) {
 		{"role": "user", "content": "Hello"},
 	}
 
+	// MarkFailed stores the hash (counter = 0 initially)
 	h.MarkFailed(messages)
 
-	// First trigger
+	// First call after MarkFailed: counter = 1, not triggered (first duplicate)
 	r1 := h.ShouldTrigger(messages)
-	if !r1.Triggered || r1.CurrentRetry != 1 {
-		t.Errorf("First trigger: triggered=%v, retry=%d", r1.Triggered, r1.CurrentRetry)
+	if r1.Triggered || r1.CurrentRetry != 1 {
+		t.Errorf("First call: triggered=%v (expected false), retry=%d (expected 1)", r1.Triggered, r1.CurrentRetry)
 	}
 
-	// Second trigger
+	// Second call: counter = 2, triggered (second duplicate)
 	r2 := h.ShouldTrigger(messages)
 	if !r2.Triggered || r2.CurrentRetry != 2 {
-		t.Errorf("Second trigger: triggered=%v, retry=%d", r2.Triggered, r2.CurrentRetry)
+		t.Errorf("Second call: triggered=%v (expected true), retry=%d (expected 2)", r2.Triggered, r2.CurrentRetry)
 	}
 
-	// Third trigger - exhausted
+	// Third call: counter = 3, triggered, exhausted (exceeded MaxRetries=2)
 	r3 := h.ShouldTrigger(messages)
 	if !r3.Triggered || !r3.RetryExhausted || r3.CurrentRetry != 3 {
-		t.Errorf("Third trigger: triggered=%v, exhausted=%v, retry=%d", r3.Triggered, r3.RetryExhausted, r3.CurrentRetry)
+		t.Errorf("Third call: triggered=%v (expected true), exhausted=%v (expected true), retry=%d (expected 3)", r3.Triggered, r3.RetryExhausted, r3.CurrentRetry)
 	}
 }
 
@@ -1068,14 +1081,22 @@ func TestHandler_ConcurrentShouldTrigger(t *testing.T) {
 	close(results)
 
 	triggered := 0
+	notTriggered := 0
 	for r := range results {
 		if r.Triggered {
 			triggered++
+		} else {
+			notTriggered++
 		}
 	}
 
-	if triggered != 100 {
-		t.Errorf("Expected 100 triggered, got %d", triggered)
+	// With new logic: first increment gets counter=1 (not triggered),
+	// subsequent increments get counter>=2 (triggered)
+	if triggered != 99 {
+		t.Errorf("Expected 99 triggered (one gets counter=1), got %d", triggered)
+	}
+	if notTriggered != 1 {
+		t.Errorf("Expected 1 not triggered, got %d", notTriggered)
 	}
 }
 
@@ -1097,13 +1118,19 @@ func TestHandler_FullFlow(t *testing.T) {
 		t.Error("Should not trigger on first request")
 	}
 
-	// 2. Mark as failed
+	// 2. Mark as failed (stores hash)
 	hash := h.MarkFailed(messages)
 
-	// 3. Now should trigger
+	// 3. First ShouldTrigger: counter=1, not triggered
+	result = h.ShouldTrigger(messages)
+	if result.Triggered {
+		t.Error("First ShouldTrigger after MarkFailed should not trigger (counter=1)")
+	}
+
+	// 4. Second ShouldTrigger: counter=2, triggered
 	result = h.ShouldTrigger(messages)
 	if !result.Triggered {
-		t.Error("Should trigger after MarkFailed")
+		t.Error("Second ShouldTrigger after MarkFailed should trigger (counter=2)")
 	}
 
 	// 4. GetModelID should work

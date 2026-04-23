@@ -84,21 +84,21 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// Store hash and check if it was already there (atomic operation)
 	// Returns true if duplicate, false if first time
 	alreadyExists := h.hashCache.StoreAndCheck(hash)
+
+	// First time seeing this request - store hash, don't trigger, don't increment
 	if !force && !alreadyExists {
-		// First time seeing this request - don't trigger, hash is stored
 		return ShouldTriggerResult{Triggered: false, Hash: hash}
 	}
-	// Hash was already in cache (duplicate) - trigger ultimate model
 
-	// Get max retries config
+	// Hash was already in cache (duplicate) - increment retry counter
 	maxRetries := cfg.UltimateModel.MaxRetries
 	if maxRetries <= 0 {
-		// MaxRetries=0 means unlimited - don't track retries
+		// MaxRetries=0 means unlimited - trigger on any duplicate after first
 		return ShouldTriggerResult{
 			Triggered:      true,
 			Hash:           hash,
 			RetryExhausted: false,
-			CurrentRetry:   0,
+			CurrentRetry:   1,
 			MaxRetries:     0,
 		}
 	}
@@ -106,8 +106,12 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// ATOMIC increment and check - prevents race condition
 	newCount, exhausted := h.hashCache.IncrementAndCheckRetry(hash, maxRetries)
 
+	// Trigger if we've seen this hash 2+ times (3rd call onwards)
+	// This gives 2 retries without ultimate model before triggering
+	shouldTrigger := newCount >= 2
+
 	return ShouldTriggerResult{
-		Triggered:      true,
+		Triggered:      shouldTrigger,
 		Hash:           hash,
 		RetryExhausted: exhausted,
 		CurrentRetry:   newCount,
