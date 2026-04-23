@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
@@ -60,6 +61,13 @@ type requestContext struct {
 
 	// State
 	headersSent bool
+
+	// Channel to signal client disconnection (closed by heartbeat on write failure)
+	clientGoneCh chan struct{}
+
+	// Mutex to protect ResponseWriter writes from concurrent access
+	// Both heartbeat and streamResult must acquire this before writing
+	writeMu sync.Mutex
 
 	// Loop detection (persists across retries within this request)
 	loopDetector *loopdetection.Detector

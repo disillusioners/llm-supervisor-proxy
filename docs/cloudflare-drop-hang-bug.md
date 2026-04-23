@@ -2,11 +2,11 @@
 
 ## Issue
 
-When Cloudflare drops a client connection silently, `streamResult()` can hang forever if no new data arrives from upstream.
+When Cloudflare drops a client connection silently, `streamResult()` could hang forever if no new data arrived from upstream.
 
 ## Root Cause
 
-The `streamResult()` function in `pkg/proxy/handler.go` has a select loop with these cases:
+The original `streamResult()` function had a select loop with these cases:
 
 ```go
 select {
@@ -21,66 +21,78 @@ case <-ticker.C:
 }
 ```
 
-**Problem:** None of these cases detect a dropped client connection when upstream is still sending (or paused):
+**Problems:**
 
-1. `rc.baseCtx.Done()` - NOT triggered by Cloudflare drop (Go HTTP server doesn't propagate this)
-2. `buffer.NotifyCh()` - Only fires when upstream sends NEW data
-3. `buffer.Done()` - Only fires when upstream COMPLETES
-4. `ticker.C` (10ms) - Only checks for missed notifications, doesn't test connection
+1. **Race Condition (Fixed):** When client disconnects, Go's HTTP server cancels `r.Context()` (baseCtx), AND heartbeat detected write failure and closed `clientGoneCh`. Both channels fire simultaneously → select picks randomly → ~50% chance of silent success instead of error handling.
 
-**If Cloudflare drops connection:**
-- Upstream continues streaming (or pauses)
-- No new data → `buffer.NotifyCh()` never fires
-- No context cancellation → `rc.baseCtx.Done()` never fires
-- Buffer not complete → `buffer.Done()` never fires
-- Ticker checks idle termination every 120s (configurable)
+2. **Concurrent Writes (Fixed):** Heartbeat goroutine and `streamResult()` both called `w.Write()` on the same `ResponseWriter` - not thread-safe.
 
-**Result:** `streamResult()` hangs forever. Frontend shows "running" forever.
+3. **No disconnect detection:** None of the select cases detected a dropped client when upstream was still sending slowly.
 
 ## Solution
 
-Add a client liveness probe that periodically tests if the connection is still writable:
+### Fix 1: Mutex-Protected Writes
+Both heartbeat and `streamResult()` acquire a mutex before writing to ResponseWriter:
 
 ```go
-clientLivenessCheck := time.NewTicker(30 * time.Second)
-defer clientLivenessCheck.Stop()
+// requestContext has:
+writeMu sync.Mutex
 
-select {
-    // ... existing cases ...
-case <-clientLivenessCheck.C:
-    // Write a space to detect dropped connection
-    if _, err := fmt.Fprint(w, " "); err != nil {
-        return fmt.Errorf("client liveness probe failed: %w", err)
-    }
-    flusher.Flush()
+// streamResult writes:
+rc.writeMu.Lock()
+if _, err := w.Write(chunk); err != nil {
+    rc.writeMu.Unlock()
+    return fmt.Errorf("client write failed: %w", err)
 }
+rc.writeMu.Unlock()
+
+// Heartbeat writes:
+writeMu.Lock()
+_, err := w.Write(heartbeatData)
+writeMu.Unlock()
 ```
 
-**Why a space character?**
-- Invisible in SSE output (no `data: ` prefix)
-- Forces a write + flush
-- Detects connection drop immediately
-
-## Additional Fix
-
-When client write fails, also cancel other parallel requests:
+### Fix 2: Heartbeat as Sole Disconnect Detector
+Heartbeat is now the only signal for client disconnection:
+- Changed interval from 15s → 5s
+- On write failure → closes `clientGoneCh`
+- `streamResult()` listens for `clientGoneCh` in select
+- `baseCtx.Done()` only used for timeout handling (not disconnect detection)
 
 ```go
-if err := h.streamResult(w, rc, winner); err != nil {
-    coordinator.cancelAllExcept(winner)  // Cancel second/fallback
+select {
+case <-rc.baseCtx.Done():
+    return nil  // Timeout - not a client error
+case <-rc.clientGoneCh:
+    return fmt.Errorf("client disconnected (heartbeat detected)")
+case <-buffer.NotifyCh():
     // ...
 }
 ```
 
-Previously, only the winner was cancelled via defer, leaving second/fallback requests running until idle timeout.
+### Fix 3: Immediate Cancellation on Error
+When client write fails:
+```go
+coordinator.cancelAllExcept(winner)  // Cancel other parallel requests
+```
 
 ## Timeline After Fix
 
 ```
 t=0s     Cloudflare drops connection
-t=30s    Liveness probe fails
-         → streamResult() returns error
+t=5s     Heartbeat tries to send, write fails
+         → close(clientGoneCh)
+         → streamResult() receives from clientGoneCh
+         → Returns error
          → coordinator.cancelAllExcept(winner)
-         → handler returns
+         → Handler marks for ultimate model
          → Frontend receives completion/error event
 ```
+
+## Changes Made
+
+| File | Change |
+|------|--------|
+| `heartbeat.go` | 5s interval, takes `*sync.Mutex`, mutex used for all writes |
+| `handler_helpers.go` | Added `clientGoneCh` and `writeMu` fields |
+| `handler.go` | Pass `writeMu` to heartbeat, wrap all writes with mutex |

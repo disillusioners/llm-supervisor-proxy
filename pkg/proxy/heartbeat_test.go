@@ -40,9 +40,9 @@ func TestStartSSEHeartbeat(t *testing.T) {
 func testStartSSEHeartbeatReturnsCancel(t *testing.T) {
 	h := &Handler{}
 	w := httptest.NewRecorder()
-	ctx := context.Background()
+	var mu sync.Mutex
 
-	cancel := h.startSSEHeartbeat(w, ctx)
+	cancel := h.startSSEHeartbeat(w, &mu, nil)
 
 	// Cancel function should not be nil
 	if cancel == nil {
@@ -57,10 +57,7 @@ func testStartSSEHeartbeatReturnsCancel(t *testing.T) {
 func testStartSSEHeartbeatCancelStopsGoroutine(t *testing.T) {
 	h := &Handler{}
 	w := httptest.NewRecorder()
-	ctx := context.Background()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var mu sync.Mutex
 
 	// Create a mock response writer to track writes
 	flusher := &mockFlusher{
@@ -71,13 +68,13 @@ func testStartSSEHeartbeatCancelStopsGoroutine(t *testing.T) {
 		flusher:        flusher,
 	}
 
-	cancel := h.startSSEHeartbeat(mockWriter, ctx)
+	cancel := h.startSSEHeartbeat(mockWriter, &mu, nil)
 
 	// Cancel immediately
 	cancel()
 
 	// Wait for goroutine to potentially write a heartbeat
-	// With 30s interval, no heartbeat should be written
+	// With 5s interval, no heartbeat should be written
 	select {
 	case <-flusher.flushed:
 		// This would indicate a heartbeat was sent, which shouldn't happen on immediate cancel
@@ -85,18 +82,11 @@ func testStartSSEHeartbeatCancelStopsGoroutine(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		// Expected: no flush within short time window
 	}
-
-	wg.Done()
 }
 
 func testStartSSEHeartbeatContextCancellationStopsGoroutine(t *testing.T) {
 	h := &Handler{}
-
-	// Create a context that will be cancelled
-	ctx, cancelCtx := context.WithCancel(context.Background())
-
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var mu sync.Mutex
 
 	flusher := &mockFlusher{
 		flushed: make(chan struct{}, 10),
@@ -107,37 +97,32 @@ func testStartSSEHeartbeatContextCancellationStopsGoroutine(t *testing.T) {
 	}
 
 	// Start heartbeat
-	cancelHeartbeat := h.startSSEHeartbeat(mockWriter, ctx)
+	cancelHeartbeat := h.startSSEHeartbeat(mockWriter, &mu, nil)
 
-	// Cancel the context
-	cancelCtx()
+	// Cancel immediately
+	cancelHeartbeat()
 
 	// Wait a bit for the goroutine to exit
 	time.Sleep(100 * time.Millisecond)
 
-	// Cancel the heartbeat to clean up
-	cancelHeartbeat()
-
-	// Verify no heartbeat was sent (interval is 30s)
+	// Verify no heartbeat was sent (interval is 5s)
 	select {
 	case <-flusher.flushed:
-		t.Error("heartbeat was sent after context cancellation")
+		t.Error("heartbeat was sent after cancel")
 	default:
 		// Expected: no flush
 	}
-
-	wg.Done()
 }
 
 func testStartSSEHeartbeatDoesNotBlock(t *testing.T) {
 	h := &Handler{}
 	w := httptest.NewRecorder()
-	ctx := context.Background()
+	var mu sync.Mutex
 
 	// This should return immediately, not wait for any heartbeat
 	done := make(chan struct{})
 	go func() {
-		cancel := h.startSSEHeartbeat(w, ctx)
+		cancel := h.startSSEHeartbeat(w, &mu, nil)
 		close(done)
 		cancel()
 	}()
@@ -182,11 +167,12 @@ func TestSendHeartbeat(t *testing.T) {
 func testSendHeartbeatWritesCorrectData(t *testing.T) {
 	h := &Handler{}
 	w := httptest.NewRecorder()
+	var mu sync.Mutex
 	ctx := context.Background()
 	writeTimeout := time.NewTimer(HeartbeatWriteTimeout)
 	defer writeTimeout.Stop()
 
-	h.sendHeartbeat(w, ctx, writeTimeout)
+	h.sendHeartbeat(w, &mu, ctx, writeTimeout)
 
 	body := w.Body.String()
 	expected := ": heartbeat\n\n"
@@ -206,10 +192,11 @@ func testSendHeartbeatFlushesIfFlusher(t *testing.T) {
 		flusher:        flusher,
 	}
 	ctx := context.Background()
+	var mu sync.Mutex
 	writeTimeout := time.NewTimer(HeartbeatWriteTimeout)
 	defer writeTimeout.Stop()
 
-	h.sendHeartbeat(w, ctx, writeTimeout)
+	h.sendHeartbeat(w, &mu, ctx, writeTimeout)
 
 	select {
 	case <-flusher.flushed:
@@ -231,6 +218,7 @@ func testSendHeartbeatReturnsEarlyIfCancelled(t *testing.T) {
 	flusher := &mockFlusher{
 		flushed: make(chan struct{}, 1),
 	}
+	var mu sync.Mutex
 	w := &writeTrackingResponseWriter{
 		ResponseWriter: httptest.NewRecorder(),
 		flusher:        flusher,
@@ -241,7 +229,7 @@ func testSendHeartbeatReturnsEarlyIfCancelled(t *testing.T) {
 	defer writeTimeout.Stop()
 
 	start := time.Now()
-	h.sendHeartbeat(w, ctx, writeTimeout)
+	h.sendHeartbeat(w, &mu, ctx, writeTimeout)
 	elapsed := time.Since(start)
 
 	// Should return quickly without waiting for write
@@ -262,6 +250,7 @@ func testSendHeartbeatHandlesWriteTimeout(t *testing.T) {
 	h := &Handler{}
 
 	// Create a writer that delays Write but completes within timeout
+	var mu sync.Mutex
 	slowWriter := &slowResponseWriter{
 		delay: 50 * time.Millisecond, // Slower than 10ms timeout
 		flusher: &mockFlusher{
@@ -276,7 +265,7 @@ func testSendHeartbeatHandlesWriteTimeout(t *testing.T) {
 	defer writeTimeout.Stop()
 
 	start := time.Now()
-	h.sendHeartbeat(slowWriter, ctx, writeTimeout)
+	h.sendHeartbeat(slowWriter, &mu, ctx, writeTimeout)
 	elapsed := time.Since(start)
 
 	// Should return when timeout fires (around 10ms)

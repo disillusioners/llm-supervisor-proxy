@@ -565,14 +565,21 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusOK)
 		rc.headersSent = true
 
-		// Send initial connected message
+		// Send initial connected message (no mutex needed for initial setup)
 		fmt.Fprint(w, ": connected\n\n")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 
+		// Create channel for heartbeat to signal client disconnection
+		rc.clientGoneCh = make(chan struct{})
+
 		// Start heartbeat - runs through race retry and streaming until request ends
-		heartbeatCancel = h.startSSEHeartbeat(w, rc.baseCtx)
+		// Heartbeat checks connection every 5 seconds; on failure, closes clientGoneCh
+		// Pass writeMu to synchronize heartbeat writes with streamResult writes
+		heartbeatCancel = h.startSSEHeartbeat(w, &rc.writeMu, func() {
+			close(rc.clientGoneCh)
+		})
 	}
 
 	// Ensure heartbeat is cancelled when this function returns
@@ -611,6 +618,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// This is not a race failure, but we still need to mark the hash
 				// so ultimate model can be triggered on retry.
 				log.Printf("[STREAM] Client write failed for request %s: %v (will enable ultimate model on retry)", rc.reqID, err)
+
+				// Cancel all other parallel requests to stop wasted upstream work.
+				// The winner's cancel is handled by the defer below.
+				coordinator.cancelAllExcept(winner)
 
 				// Mark for ultimate model retry
 				if h.ultimateHandler != nil {
@@ -726,10 +737,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 
 	flusher, _ := w.(http.Flusher)
 
-	// Stream existing chunks first
+	// Stream existing chunks first (with mutex to sync with heartbeat writes)
 	chunks, _ := buffer.GetChunksFrom(readIndex)
+	rc.writeMu.Lock()
 	for _, chunk := range chunks {
 		if _, err := w.Write(chunk); err != nil {
+			rc.writeMu.Unlock()
 			return fmt.Errorf("client write failed: %w", err)
 		}
 		// Extract content for logging
@@ -742,6 +755,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	if flusher != nil {
 		flusher.Flush()
 	}
+	rc.writeMu.Unlock()
 	if buffer.ShouldPrune(readIndex) {
 		buffer.Prune(readIndex)
 	}
@@ -755,11 +769,16 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 		case <-rc.baseCtx.Done():
 			// Context cancelled - this is not a client write failure
 			return nil
+		case <-rc.clientGoneCh:
+			// Heartbeat detected client disconnection - signal as error so handler cancels all requests
+			return fmt.Errorf("client disconnected (heartbeat detected)")
 		case <-buffer.NotifyCh():
 			// New data available
 			chunks, _ = buffer.GetChunksFrom(readIndex)
+			rc.writeMu.Lock()
 			for _, chunk := range chunks {
 				if _, err := w.Write(chunk); err != nil {
+					rc.writeMu.Unlock()
 					return fmt.Errorf("client write failed: %w", err)
 				}
 				// Extract content for logging
@@ -772,14 +791,17 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if flusher != nil {
 				flusher.Flush()
 			}
+			rc.writeMu.Unlock()
 			if buffer.ShouldPrune(readIndex) {
 				buffer.Prune(readIndex)
 			}
 		case <-buffer.Done():
 			// Stream complete - drain remaining data
 			chunks, _ = buffer.GetChunksFrom(readIndex)
+			rc.writeMu.Lock()
 			for _, chunk := range chunks {
 				if _, err := w.Write(chunk); err != nil {
+					rc.writeMu.Unlock()
 					return fmt.Errorf("client write failed: %w", err)
 				}
 				if flusher != nil {
@@ -795,6 +817,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if flusher != nil {
 				flusher.Flush()
 			}
+			rc.writeMu.Unlock()
 
 			// If stream failed, send error event to client
 			if err := buffer.Err(); err != nil {
@@ -833,10 +856,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				// Send OpenAI-compatible error response
 				errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
 				data, _ := json.Marshal(errResp)
+				rc.writeMu.Lock()
 				fmt.Fprintf(w, "data: %s\n\n", string(data))
 				if flusher != nil {
 					flusher.Flush()
 				}
+				rc.writeMu.Unlock()
 				return nil // Buffer error already handled with error response to client
 			}
 
@@ -983,8 +1008,10 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// Safety backup if notification missed
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			if len(chunks) > 0 {
+				rc.writeMu.Lock()
 				for _, chunk := range chunks {
 					if _, err := w.Write(chunk); err != nil {
+						rc.writeMu.Unlock()
 						return fmt.Errorf("client write failed: %w", err)
 					}
 					if bytes.HasPrefix(chunk, []byte("data: ")) {
@@ -996,6 +1023,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if flusher != nil {
 					flusher.Flush()
 				}
+				rc.writeMu.Unlock()
 				if buffer.ShouldPrune(readIndex) {
 					buffer.Prune(readIndex)
 				}
