@@ -654,19 +654,24 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	case <-rc.baseCtx.Done():
 		// Context cancelled (timeout, client disconnect, etc.) - treat as failure
 		log.Printf("Request %s context cancelled (timeout or client disconnect)", rc.reqID)
-		h.handleRaceFailure(w, rc, coordinator, "context_cancelled")
+		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "context_cancelled")
 		return
 	default:
 		// All attempts failed with errors - mark for ultimate model retry
 		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
-		h.handleRaceFailure(w, rc, coordinator, "all_models_failed")
+		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")
 		return
 	}
 }
 
 // handleRaceFailure handles the common failure case for race retry.
 // This is called when either all models failed with errors OR the context was cancelled.
-func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, coordinator *raceCoordinator, reason string) {
+func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, coordinator *raceCoordinator, heartbeatCancel context.CancelFunc, reason string) {
+	// Cancel heartbeat first to prevent concurrent writes with sendSSEError
+	// This is safe to call even if nil (no-op)
+	if heartbeatCancel != nil {
+		heartbeatCancel()
+	}
 	// Mark this request as failed so ultimate model can be triggered on retry
 	if h.ultimateHandler != nil {
 		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
@@ -771,8 +776,12 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	for {
 		select {
 		case <-rc.baseCtx.Done():
-			// Context cancelled - this is not a client write failure
-			return nil
+			// Context cancelled - could be client disconnect OR timeout
+			// Go's HTTP server cancels r.Context() on client disconnect
+			if rc.baseCtx.Err() == context.Canceled {
+				return fmt.Errorf("client disconnected (context cancelled by HTTP server)")
+			}
+			return nil // Deadline exceeded - handled by coordinator
 		case <-rc.clientGoneCh:
 			// Heartbeat detected client disconnection - signal as error so handler cancels all requests
 			return fmt.Errorf("client disconnected (heartbeat detected)")
