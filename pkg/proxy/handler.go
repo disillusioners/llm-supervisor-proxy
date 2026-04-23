@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
@@ -39,10 +40,10 @@ func (c *Config) Clone() ConfigSnapshot {
 		StreamDeadline:         cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
 		MaxStreamBufferSize:    cfg.MaxStreamBufferSize,
-		ModelsConfig:          c.ModelsConfig,
-		LoopDetection:         cfg.LoopDetection,
-		ToolRepair:            cfg.ToolRepair,
-		RaceRetryEnabled:      cfg.RaceRetryEnabled,
+		ModelsConfig:           c.ModelsConfig,
+		LoopDetection:          cfg.LoopDetection,
+		ToolRepair:             cfg.ToolRepair,
+		RaceRetryEnabled:       cfg.RaceRetryEnabled,
 		RaceParallelOnIdle:     cfg.RaceParallelOnIdle,
 		RaceMaxParallel:        cfg.RaceMaxParallel,
 		RaceMaxBufferBytes:     cfg.RaceMaxBufferBytes,
@@ -574,12 +575,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Create channel for heartbeat to signal client disconnection
 		rc.clientGoneCh = make(chan struct{})
 
+		// Use sync.Once to ensure clientGoneCh is only closed once
+		// Even if heartbeat tries to send multiple times after disconnect
+		var closeClientGoneCh sync.Once
+		closeOnce := func() { closeClientGoneCh.Do(func() { close(rc.clientGoneCh) }) }
+
 		// Start heartbeat - runs through race retry and streaming until request ends
 		// Heartbeat checks connection every 5 seconds; on failure, closes clientGoneCh
 		// Pass writeMu to synchronize heartbeat writes with streamResult writes
-		heartbeatCancel = h.startSSEHeartbeat(w, &rc.writeMu, func() {
-			close(rc.clientGoneCh)
-		})
+		heartbeatCancel = h.startSSEHeartbeat(w, &rc.writeMu, closeOnce)
 	}
 
 	// Ensure heartbeat is cancelled when this function returns
