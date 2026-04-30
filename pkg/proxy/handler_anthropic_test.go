@@ -544,3 +544,314 @@ func TestAnthropic_Multimodal(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit Tests for extractOpenAIResponseContentFromSSE
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestExtractOpenAIResponseContentFromSSE_BasicText(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"content":"Hello"},"index":0}]}
+data: {"choices":[{"delta":{"content":" World"},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "Hello World" {
+		t.Errorf("expected 'Hello World', got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_Thinking(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"reasoning_content":"Hmm,"},"index":0}]}
+data: {"choices":[{"delta":{"reasoning_content":" thinking..."},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "Hmm, thinking..." {
+		t.Errorf("expected 'Hmm, thinking...', got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_BothThinkingAndText(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"reasoning_content":"Let me think"},"index":0}]}
+data: {"choices":[{"delta":{"content":"Here's the answer."},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "Here's the answer." {
+		t.Errorf("expected 'Here's the answer.', got %q", content)
+	}
+	if thinking != "Let me think" {
+		t.Errorf("expected 'Let me think', got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_ToolCalls(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{\"location\":"}}]},"index":0}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"San Francisco\"]}"}}]},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+	if toolCalls[0].ID != "call_abc" {
+		t.Errorf("expected tool call ID 'call_abc', got %q", toolCalls[0].ID)
+	}
+	if toolCalls[0].Function.Name != "get_weather" {
+		t.Errorf("expected function name 'get_weather', got %q", toolCalls[0].Function.Name)
+	}
+	if toolCalls[0].Function.Arguments != `{"location":"San Francisco"}` {
+		t.Errorf("expected arguments '{\"location\":\"San Francisco\"}', got %q", toolCalls[0].Function.Arguments)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_DoneMarker(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"content":"Hello"},"index":0}]}
+data: [DONE]
+data: {"choices":[{"delta":{"content":" Should not appear"},"index":0}]}
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "Hello" {
+		t.Errorf("expected 'Hello', got %q", content)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_EmptyBuffer(t *testing.T) {
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte{})
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if toolCalls != nil {
+		t.Errorf("expected nil tool calls, got %v", toolCalls)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_MalformedJSON(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"content":"Hello"},"index":0}]}
+data: not json at all
+data: {"choices":[{"delta":{"content":" World"},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "Hello World" {
+		t.Errorf("expected 'Hello World', got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_LargeLine(t *testing.T) {
+	largeContent := strings.Repeat("x", 100*1024)
+	sseBuffer := fmt.Sprintf(`data: {"choices":[{"delta":{"content":"%s"},"index":0}]}
+data: [DONE]
+`, largeContent)
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != largeContent {
+		t.Errorf("expected large content of length %d, got %d", len(largeContent), len(content))
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromSSE_ThinkingField(t *testing.T) {
+	sseBuffer := `data: {"choices":[{"delta":{"thinking":"Internal thought"},"index":0}]}
+data: [DONE]
+`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "Internal thought" {
+		t.Errorf("expected 'Internal thought', got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit Tests for extractOpenAIResponseContentFromJSON
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestExtractOpenAIResponseContentFromJSON_Basic(t *testing.T) {
+	openaiBody := `{
+		"choices": [{
+			"message": {
+				"role": "assistant",
+				"content": "Hello, world!"
+			}
+		}]
+	}`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "Hello, world!" {
+		t.Errorf("expected 'Hello, world!', got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+func TestExtractOpenAIResponseContentFromJSON_WithThinking(t *testing.T) {
+	openaiBody := `{
+		"choices": [{
+			"message": {
+				"role": "assistant",
+				"content": "Here's the answer.",
+				"reasoning_content": "Let me think about this..."
+			}
+		}]
+	}`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "Here's the answer." {
+		t.Errorf("expected 'Here's the answer.', got %q", content)
+	}
+	if thinking != "Let me think about this..." {
+		t.Errorf("expected 'Let me think about this...', got %q", thinking)
+	}
+	if len(toolCalls) != 0 {
+		t.Errorf("expected no tool calls, got %d", len(toolCalls))
+	}
+}
+
+func TestExtractOpenAIResponseContentFromJSON_WithToolCalls(t *testing.T) {
+	openaiBody := `{
+		"choices": [{
+			"message": {
+				"role": "assistant",
+				"content": "Let me check the weather.",
+				"tool_calls": [
+					{
+						"id": "call_123",
+						"type": "function",
+						"function": {
+							"name": "get_weather",
+							"arguments": "{\"location\": \"San Francisco\"}"
+						}
+					}
+				]
+			}
+		}]
+	}`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "Let me check the weather." {
+		t.Errorf("expected 'Let me check the weather.', got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+	if toolCalls[0].ID != "call_123" {
+		t.Errorf("expected ID 'call_123', got %q", toolCalls[0].ID)
+	}
+	if toolCalls[0].Type != "function" {
+		t.Errorf("expected type 'function', got %q", toolCalls[0].Type)
+	}
+	if toolCalls[0].Function.Name != "get_weather" {
+		t.Errorf("expected function name 'get_weather', got %q", toolCalls[0].Function.Name)
+	}
+	if toolCalls[0].Function.Arguments != `{"location": "San Francisco"}` {
+		t.Errorf("expected arguments '{\"location\": \"San Francisco\"}', got %q", toolCalls[0].Function.Arguments)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromJSON_EmptyChoices(t *testing.T) {
+	openaiBody := `{"choices": []}`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if toolCalls != nil {
+		t.Errorf("expected nil tool calls, got %v", toolCalls)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromJSON_InvalidJSON(t *testing.T) {
+	openaiBody := `not valid json at all {`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if toolCalls != nil {
+		t.Errorf("expected nil tool calls, got %v", toolCalls)
+	}
+}
+
+func TestExtractOpenAIResponseContentFromJSON_NoMessage(t *testing.T) {
+	openaiBody := `{"choices": [{}]}`
+
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON([]byte(openaiBody))
+
+	if content != "" {
+		t.Errorf("expected empty content, got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+	if toolCalls != nil {
+		t.Errorf("expected nil tool calls, got %v", toolCalls)
+	}
+}
