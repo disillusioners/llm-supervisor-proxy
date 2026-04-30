@@ -708,12 +708,17 @@ func (h *Handler) sendAnthropicError(w http.ResponseWriter, errorType, message s
 
 	errorResp := map[string]interface{}{
 		"type": "error",
-		"error": map[string]string{
+		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
 		},
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 // finalizeAnthropicSuccess updates the request log and appends the assistant message.
@@ -784,7 +789,6 @@ func extractOpenAIResponseContentFromJSON(openaiBody []byte) (content, thinking 
 	}
 	return content, thinking, toolCalls
 }
-
 
 // extractOpenAIResponseContentFromSSE extracts content, thinking, and tool calls from buffered OpenAI SSE lines.
 // Unlike FromJSON, this parses each "data: {...}" line and accumulates content from streaming deltas.
@@ -890,12 +894,16 @@ func getStringVal(m map[string]interface{}, key string) string {
 func (h *Handler) sendAnthropicSSEError(w http.ResponseWriter, errorType, message string) {
 	errorEvent := map[string]interface{}{
 		"type": "error",
-		"error": map[string]string{
+		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
 		},
 	}
-	eventBytes, _ := json.Marshal(errorEvent)
+	eventBytes, err := json.Marshal(errorEvent)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
 	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(eventBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()

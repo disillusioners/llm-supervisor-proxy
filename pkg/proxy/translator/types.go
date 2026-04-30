@@ -30,7 +30,7 @@ type AnthropicRequest struct {
 
 // ThinkingConfig represents extended thinking configuration.
 type ThinkingConfig struct {
-	Type         string `json:"type"`          // "enabled"
+	Type         string `json:"type"` // "enabled"
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
@@ -57,7 +57,7 @@ type ContentBlock struct {
 
 	// For type "tool_result"
 	ToolUseID string      `json:"tool_use_id,omitempty"`
-	Content   interface{} `json:"content,omitempty"` // string or []ContentBlock
+	Content   interface{} `json:"content"` // string or []ContentBlock
 	IsError   bool        `json:"is_error,omitempty"`
 
 	// For type "thinking"

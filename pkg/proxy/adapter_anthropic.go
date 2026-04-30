@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -182,7 +183,6 @@ func (a *AnthropicAdapter) SetStreamHeaders(w http.ResponseWriter) {
 func (a *AnthropicAdapter) WriteError(w http.ResponseWriter, errorType, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	// Anthropic format: HAS "type": "error" at root level
 	errorResp := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
@@ -190,24 +190,35 @@ func (a *AnthropicAdapter) WriteError(w http.ResponseWriter, errorType, message 
 			"message": message,
 		},
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 func (a *AnthropicAdapter) WriteStreamError(w http.ResponseWriter, errorType, message string) {
 	a.WriteStreamErrorWithCode(w, errorType, "", message)
 }
 
-// WriteStreamErrorWithCode sends a streaming error with optional code field.
-// For Anthropic protocol, we send message_stop event and close the stream.
-// The official Anthropic protocol does NOT have an "event: error" event type.
-// Errors during streaming should either: (A) send message_stop and close, or
-// (B) return HTTP error before streaming starts.
 func (a *AnthropicAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorType, code, message string) {
-	// Option A: Send message_stop and close (Anthropic-compliant)
-	// Note: We cannot send error details in-stream with Anthropic protocol.
-	// The client should check for abrupt stream termination.
-	// For detailed errors, return HTTP error before streaming starts.
-	fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+	errorEvent := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    errorType,
+			"message": message,
+		},
+	}
+	if code != "" {
+		errorEvent["error"].(map[string]interface{})["code"] = code
+	}
+	errBytes, err := json.Marshal(errorEvent)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(errBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -217,7 +228,6 @@ func (a *AnthropicAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, error
 func (a *AnthropicAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, code, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	// Anthropic format: HAS "type": "error" at root level
 	errorResp := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
@@ -228,7 +238,12 @@ func (a *AnthropicAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, 
 	if code != "" {
 		errorResp["error"].(map[string]interface{})["code"] = code
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -369,8 +369,36 @@ func TestAnthropicAdapter_WriteStreamError(t *testing.T) {
 	adapter.WriteStreamError(rec, "rate_limit_error", "Rate limit exceeded")
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "event: message_stop") {
-		t.Error("expected 'event: message_stop' in response")
+	if !strings.Contains(body, "event: error") {
+		t.Error("expected 'event: error' in response")
+	}
+
+	lines := strings.Split(body, "\n")
+	var dataLine string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: ") {
+			dataLine = strings.TrimPrefix(line, "data: ")
+			break
+		}
+	}
+	if dataLine == "" {
+		t.Fatal("expected 'data: {...}' line in response")
+	}
+
+	var errResp map[string]interface{}
+	if err := json.Unmarshal([]byte(dataLine), &errResp); err != nil {
+		t.Fatalf("failed to parse error response JSON: %v", err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'error' object in response")
+	}
+	if errObj["type"] != "rate_limit_error" {
+		t.Errorf("expected type 'rate_limit_error', got '%v'", errObj["type"])
+	}
+	if errObj["message"] != "Rate limit exceeded" {
+		t.Errorf("expected message 'Rate limit exceeded', got '%v'", errObj["message"])
 	}
 }
 
@@ -382,8 +410,39 @@ func TestAnthropicAdapter_WriteStreamErrorWithCode(t *testing.T) {
 	adapter.WriteStreamErrorWithCode(rec, "invalid_request_error", "INVALID_MODEL", "Model not found")
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "event: message_stop") {
-		t.Error("expected 'event: message_stop' in response")
+	if !strings.Contains(body, "event: error") {
+		t.Error("expected 'event: error' in response")
+	}
+
+	lines := strings.Split(body, "\n")
+	var dataLine string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: ") {
+			dataLine = strings.TrimPrefix(line, "data: ")
+			break
+		}
+	}
+	if dataLine == "" {
+		t.Fatal("expected 'data: {...}' line in response")
+	}
+
+	var errResp map[string]interface{}
+	if err := json.Unmarshal([]byte(dataLine), &errResp); err != nil {
+		t.Fatalf("failed to parse error response JSON: %v", err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'error' object in response")
+	}
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("expected type 'invalid_request_error', got '%v'", errObj["type"])
+	}
+	if errObj["message"] != "Model not found" {
+		t.Errorf("expected message 'Model not found', got '%v'", errObj["message"])
+	}
+	if errObj["code"] != "INVALID_MODEL" {
+		t.Errorf("expected code 'INVALID_MODEL', got '%v'", errObj["code"])
 	}
 }
 

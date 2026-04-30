@@ -61,6 +61,44 @@ func TranslateToolChoice(choice interface{}) interface{} {
 	return choice
 }
 
+// TranslateOpenAIToolChoiceToAnthropic translates OpenAI tool_choice to Anthropic format.
+// OpenAI accepts: "none", "auto", "required", "any", or {"type": "function", "function": {"name": "..."}}
+// Anthropic accepts: "auto", "any", or {"type": "tool", "name": "..."}
+func TranslateOpenAIToolChoiceToAnthropic(choice interface{}) interface{} {
+	if choice == nil {
+		return nil
+	}
+
+	// Handle string case: "none", "auto", "required", "any"
+	if str, ok := choice.(string); ok {
+		switch str {
+		case "none", "auto":
+			return "auto"
+		case "required", "any":
+			return "any"
+		default:
+			return "auto"
+		}
+	}
+
+	// Handle object case: {"type": "function", "function": {"name": "..."}}
+	if m, ok := choice.(map[string]interface{}); ok {
+		if m["type"] == "function" {
+			if fn, ok := m["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok {
+					return map[string]interface{}{
+						"type": "tool",
+						"name": name,
+					}
+				}
+			}
+		}
+	}
+
+	// Unrecognized object shape — cannot translate. Return nil so Anthropic uses default behavior.
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool Use Translation (Request - Assistant Message)
 // ─────────────────────────────────────────────────────────────────────────────
