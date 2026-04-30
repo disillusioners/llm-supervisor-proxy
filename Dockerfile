@@ -40,10 +40,8 @@ COPY --from=builder /app/llm-supervisor-proxy /usr/local/bin/llm-supervisor-prox
 # Create directory for SQLite database (if used)
 RUN mkdir -p /data && chmod 777 /data
 
-EXPOSE 8080
+EXPOSE 4321
 
-# Enable env var overrides so PORT takes effect (required by config loading logic)
-ENV APPLY_ENV_OVERRIDES=1
-ENV PORT=8080
+ENV PORT=4321
 
 ENTRYPOINT ["llm-supervisor-proxy"]
