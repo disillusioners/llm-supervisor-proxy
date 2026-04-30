@@ -189,6 +189,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		savedCredentialAPIKey := arc.credentialAPIKey
 		savedRequestBody := make([]byte, len(arc.requestBody))
 		copy(savedRequestBody, arc.requestBody)
+		savedAnthropicReqModel := arc.anthropicReq.Model
 
 		// Update model in request body
 		if arc.isAnthropicUpstream {
@@ -228,6 +229,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.targetURL = savedTargetURL
 		arc.credentialAPIKey = savedCredentialAPIKey
 		arc.requestBody = savedRequestBody
+		arc.anthropicReq.Model = savedAnthropicReqModel
 
 		arc.reqLog.Status = "failed"
 		arc.reqLog.Error = "Model failed"
@@ -599,6 +601,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 	// Buffer all OpenAI chunks
 	var buffer bytes.Buffer
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // Increase max token size from default 64KB to 1MB
 	chunkCount := 0
 
 	for scanner.Scan() {
@@ -1098,14 +1101,16 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 }
 
 // getModelMappingConfig extracts model mapping from config
-func getModelMappingConfig(modelsConfig interface{}) *translator.ModelMappingConfig {
-	// Return mapping config without default - unknown models pass through unchanged
-	// This allows Anthropic clients to use any model configured in the proxy
+func getModelMappingConfig(modelsConfig models.ModelsConfigInterface) *translator.ModelMappingConfig {
+	mapping := make(map[string]string)
+	if modelsConfig != nil {
+		for _, model := range modelsConfig.GetModels() {
+			if model.ID != "" && model.Name != "" && model.Name != model.ID {
+				mapping[model.Name] = model.ID
+			}
+		}
+	}
 	return &translator.ModelMappingConfig{
-		// No DefaultModel - let unknown models pass through
-		Mapping: map[string]string{
-			// Claude model aliases can be mapped here if needed
-			// e.g., "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
-		},
+		Mapping: mapping,
 	}
 }

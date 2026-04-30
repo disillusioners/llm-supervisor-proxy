@@ -19,7 +19,8 @@ import (
 // AnthropicAdapter handles Anthropic Messages API requests by translating
 // to/from OpenAI format for upstream.
 type AnthropicAdapter struct {
-	extractor ResponseExtractor
+	extractor     ResponseExtractor
+	originalModel string // model name from the incoming Anthropic request
 }
 
 // NewAnthropicAdapter creates a new Anthropic adapter.
@@ -43,6 +44,9 @@ func (a *AnthropicAdapter) ParseRequest(r *http.Request) (map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
 		return nil, nil, fmt.Errorf("invalid JSON body")
 	}
+
+	// Capture original model name for response translation
+	a.originalModel = anthropicReq.Model
 
 	// Validate request
 	if err := validateAnthropicAdapterRequest(&anthropicReq); err != nil {
@@ -138,9 +142,7 @@ func (a *AnthropicAdapter) IsStream(body map[string]interface{}) bool {
 
 func (a *AnthropicAdapter) WriteNonStreamResponse(w http.ResponseWriter, openaiResponse []byte) error {
 	// Translate OpenAI response to Anthropic format
-	// The original model should be extracted from context, but we use empty string
-	// since the translation will preserve it from the OpenAI response
-	anthropicResp, err := translator.TranslateNonStreamResponse(openaiResponse, "")
+	anthropicResp, err := translator.TranslateNonStreamResponse(openaiResponse, a.originalModel)
 	if err != nil {
 		return fmt.Errorf("failed to translate response: %w", err)
 	}
@@ -281,13 +283,17 @@ func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessa
 }
 
 // getAnthropicModelMapping extracts model mapping from config
-func getAnthropicModelMapping(_ models.ModelsConfigInterface) *translator.ModelMappingConfig {
+func getAnthropicModelMapping(modelsConfig models.ModelsConfigInterface) *translator.ModelMappingConfig {
+	mapping := make(map[string]string)
+	if modelsConfig != nil {
+		for _, model := range modelsConfig.GetModels() {
+			if model.ID != "" && model.Name != "" && model.Name != model.ID {
+				mapping[model.Name] = model.ID
+			}
+		}
+	}
 	// Return mapping config without default - unknown models pass through unchanged
-	// This allows Anthropic clients to use any model configured in the proxy
 	return &translator.ModelMappingConfig{
-		// No DefaultModel - let unknown models pass through
-		Mapping: map[string]string{
-			// Claude model aliases can be mapped here if needed
-		},
+		Mapping: mapping,
 	}
 }
