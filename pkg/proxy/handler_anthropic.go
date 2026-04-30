@@ -471,7 +471,7 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	debugLog("OpenAI Body: %s", string(openaiBody))
 
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON(openaiBody)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -500,7 +500,7 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 // handleAnthropicInternalStreamResponse handles streaming internal responses
 func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE(openaiBody)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -550,7 +550,7 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	}
 
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(bodyBytes)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON(bodyBytes)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -622,7 +622,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			debugLog("Stream complete, received %d chunks, translating...", chunkCount)
 
 			// Extract content for storage before translation
-			content, thinking, toolCalls := extractOpenAIResponseContent(buffer.Bytes())
+			content, thinking, toolCalls := extractOpenAIResponseContentFromSSE(buffer.Bytes())
 			arc.accumulatedResponse.WriteString(content)
 			arc.accumulatedThinking.WriteString(thinking)
 			arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -740,7 +740,7 @@ func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
 }
 
 // extractOpenAIResponseContent extracts content, thinking, and tool calls from OpenAI response.
-func extractOpenAIResponseContent(openaiBody []byte) (content, thinking string, toolCalls []store.ToolCall) {
+func extractOpenAIResponseContentFromJSON(openaiBody []byte) (content, thinking string, toolCalls []store.ToolCall) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(openaiBody, &resp); err != nil {
 		return "", "", nil
@@ -776,6 +776,98 @@ func extractOpenAIResponseContent(openaiBody []byte) (content, thinking string, 
 					toolCall.Function.Arguments = getStringVal(fn, "arguments")
 				}
 				toolCalls = append(toolCalls, toolCall)
+			}
+		}
+	}
+	return content, thinking, toolCalls
+}
+
+
+// extractOpenAIResponseContentFromSSE extracts content, thinking, and tool calls from buffered OpenAI SSE lines.
+// Unlike FromJSON, this parses each "data: {...}" line and accumulates content from streaming deltas.
+func extractOpenAIResponseContentFromSSE(sseBuffer []byte) (content, thinking string, toolCalls []store.ToolCall) {
+	scanner := bufio.NewScanner(bytes.NewReader(sseBuffer))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+
+		// Only process data lines
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+
+		data := bytes.TrimPrefix(line, []byte("data: "))
+
+		// Skip [DONE] marker
+		if bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+
+		// Parse the chunk JSON
+		var chunk map[string]interface{}
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed chunk: %v", err)
+			continue
+		}
+
+		choices, ok := chunk["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			continue
+		}
+
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Accumulate text content
+		if c, ok := delta["content"].(string); ok {
+			content += c
+		}
+
+		// Accumulate thinking (reasoning_content or thinking field)
+		if r, ok := delta["reasoning_content"].(string); ok {
+			thinking += r
+		}
+		if t, ok := delta["thinking"].(string); ok {
+			thinking += t
+		}
+
+		// Accumulate tool calls by index
+		if tcs, ok := delta["tool_calls"].([]interface{}); ok {
+			for _, tc := range tcs {
+				tcMap, ok := tc.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				index := 0
+				if idx, ok := tcMap["index"].(float64); ok {
+					index = int(idx)
+				}
+
+				// Ensure we have enough slots
+				for len(toolCalls) <= index {
+					toolCalls = append(toolCalls, store.ToolCall{})
+				}
+
+				if id, ok := tcMap["id"].(string); ok && id != "" {
+					toolCalls[index].ID = id
+				}
+
+				if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+					if name, ok := fn["name"].(string); ok {
+						toolCalls[index].Function.Name = name
+					}
+					if args, ok := fn["arguments"].(string); ok {
+						toolCalls[index].Function.Arguments += args
+					}
+				}
 			}
 		}
 	}

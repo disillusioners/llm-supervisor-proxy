@@ -171,20 +171,26 @@ func generateAnthropicEvents(state *StreamState) []string {
 	var contentBlocks []ContentBlock
 	var blockIndex int
 
-	// 2. Text block (with thinking merged in using thinking_delta type)
-	if state.ThinkingContent.Len() > 0 || state.AccumulatedContent.Len() > 0 {
+	// 2. Thinking block (separate content block with type "thinking")
+	if state.ThinkingContent.Len() > 0 {
+		// content_block_start for thinking
+		events = append(events, formatContentBlockStart(blockIndex, "thinking"))
+
+		// content_block_delta for thinking
+		events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent.String()))
+
+		// content_block_stop
+		events = append(events, formatContentBlockStop(blockIndex))
+		blockIndex++
+	}
+
+	// 3. Text block (separate content block with type "text")
+	if state.AccumulatedContent.Len() > 0 {
 		// content_block_start for text
 		events = append(events, formatContentBlockStart(blockIndex, "text"))
 
-		// content_block_delta for thinking first (uses thinking_delta type)
-		if state.ThinkingContent.Len() > 0 {
-			events = append(events, formatThinkingBlockDelta(blockIndex, state.ThinkingContent.String()))
-		}
-
 		// content_block_delta for text
-		if state.AccumulatedContent.Len() > 0 {
-			events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent.String()))
-		}
+		events = append(events, formatContentBlockDelta(blockIndex, "text_delta", state.AccumulatedContent.String()))
 
 		// content_block_stop
 		events = append(events, formatContentBlockStop(blockIndex))

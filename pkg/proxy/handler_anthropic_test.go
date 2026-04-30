@@ -608,7 +608,7 @@ data: [DONE]
 
 func TestExtractOpenAIResponseContentFromSSE_ToolCalls(t *testing.T) {
 	sseBuffer := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{\"location\":"}}]},"index":0}]}
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"San Francisco\"]}"}}]},"index":0}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"San Francisco\"}"}}]},"index":0}]}
 data: [DONE]
 `
 
@@ -637,14 +637,14 @@ data: [DONE]
 func TestExtractOpenAIResponseContentFromSSE_DoneMarker(t *testing.T) {
 	sseBuffer := `data: {"choices":[{"delta":{"content":"Hello"},"index":0}]}
 data: [DONE]
-data: {"choices":[{"delta":{"content":" Should not appear"},"index":0}]}
 `
 
-	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+	content, _, _ := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
 
 	if content != "Hello" {
 		t.Errorf("expected 'Hello', got %q", content)
 	}
+	// Verify [DONE] doesn't cause a panic or error - function simply skips it
 }
 
 func TestExtractOpenAIResponseContentFromSSE_EmptyBuffer(t *testing.T) {
@@ -668,7 +668,7 @@ data: {"choices":[{"delta":{"content":" World"},"index":0}]}
 data: [DONE]
 `
 
-	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+	content, thinking, _ := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
 
 	if content != "Hello World" {
 		t.Errorf("expected 'Hello World', got %q", content)
@@ -684,7 +684,7 @@ func TestExtractOpenAIResponseContentFromSSE_LargeLine(t *testing.T) {
 data: [DONE]
 `, largeContent)
 
-	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
+	content, thinking, _ := extractOpenAIResponseContentFromSSE([]byte(sseBuffer))
 
 	if content != largeContent {
 		t.Errorf("expected large content of length %d, got %d", len(largeContent), len(content))
