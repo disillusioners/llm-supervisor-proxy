@@ -203,6 +203,11 @@ func (a *AnthropicAdapter) WriteStreamError(w http.ResponseWriter, errorType, me
 }
 
 func (a *AnthropicAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorType, code, message string) {
+	// Emit message_stop before error to ensure proper stream termination per Anthropic SSE spec.
+	// Anthropic clients expect the stream to end with message_stop; sending an error without it
+	// can leave clients in a broken state waiting for stream completion.
+	fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+
 	errorEvent := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{

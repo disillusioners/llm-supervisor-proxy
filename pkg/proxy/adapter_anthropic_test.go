@@ -369,20 +369,30 @@ func TestAnthropicAdapter_WriteStreamError(t *testing.T) {
 	adapter.WriteStreamError(rec, "rate_limit_error", "Rate limit exceeded")
 
 	body := rec.Body.String()
+	if !strings.Contains(body, "event: message_stop") {
+		t.Error("expected 'event: message_stop' in response")
+	}
 	if !strings.Contains(body, "event: error") {
 		t.Error("expected 'event: error' in response")
 	}
 
+	// Find the data line that follows the error event (not message_stop)
 	lines := strings.Split(body, "\n")
 	var dataLine string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimPrefix(line, "data: ")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "event: error" {
+			// Next non-empty line should be the data line
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(lines[j], "data: ") {
+					dataLine = strings.TrimPrefix(lines[j], "data: ")
+					break
+				}
+			}
 			break
 		}
 	}
 	if dataLine == "" {
-		t.Fatal("expected 'data: {...}' line in response")
+		t.Fatal("expected 'data: {...}' line after 'event: error'")
 	}
 
 	var errResp map[string]interface{}
@@ -410,20 +420,30 @@ func TestAnthropicAdapter_WriteStreamErrorWithCode(t *testing.T) {
 	adapter.WriteStreamErrorWithCode(rec, "invalid_request_error", "INVALID_MODEL", "Model not found")
 
 	body := rec.Body.String()
+	if !strings.Contains(body, "event: message_stop") {
+		t.Error("expected 'event: message_stop' in response")
+	}
 	if !strings.Contains(body, "event: error") {
 		t.Error("expected 'event: error' in response")
 	}
 
+	// Find the data line that follows the error event (not message_stop)
 	lines := strings.Split(body, "\n")
 	var dataLine string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimPrefix(line, "data: ")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "event: error" {
+			// Next non-empty line should be the data line
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(lines[j], "data: ") {
+					dataLine = strings.TrimPrefix(lines[j], "data: ")
+					break
+				}
+			}
 			break
 		}
 	}
 	if dataLine == "" {
-		t.Fatal("expected 'data: {...}' line in response")
+		t.Fatal("expected 'data: {...}' line after 'event: error'")
 	}
 
 	var errResp map[string]interface{}

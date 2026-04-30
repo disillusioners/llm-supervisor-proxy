@@ -99,7 +99,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		requestBody = bodyBytes
 	} else {
 		// Translate to OpenAI format
-		modelMapping := getModelMappingConfig(conf.ModelsConfig)
+		modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 		openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
 		var err error
 		requestBody, err = json.Marshal(openaiReq)
@@ -208,7 +208,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.requestBody = newBody
 		} else {
 			// For OpenAI translation path, re-translate with new model
-			modelMapping := getModelMappingConfig(conf.ModelsConfig)
+			modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 			arc.anthropicReq.Model = currentModel
 			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
 			newBody, err := json.Marshal(openaiReq)
@@ -1108,17 +1108,4 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 	return result
 }
 
-// getModelMappingConfig extracts model mapping from config
-func getModelMappingConfig(modelsConfig models.ModelsConfigInterface) *translator.ModelMappingConfig {
-	mapping := make(map[string]string)
-	if modelsConfig != nil {
-		for _, model := range modelsConfig.GetModels() {
-			if model.ID != "" && model.Name != "" && model.Name != model.ID {
-				mapping[model.Name] = model.ID
-			}
-		}
-	}
-	return &translator.ModelMappingConfig{
-		Mapping: mapping,
-	}
-}
+

@@ -72,7 +72,13 @@ func TranslateOpenAIToolChoiceToAnthropic(choice interface{}) interface{} {
 	// Handle string case: "none", "auto", "required", "any"
 	if str, ok := choice.(string); ok {
 		switch str {
-		case "none", "auto":
+		case "none":
+			// NOTE: OpenAI "none" means "do not use any tools", but Anthropic has no
+			// equivalent. We map to "auto" (model decides) as the closest approximation.
+			// This is a semantic gap — callers who need strict no-tool behavior should
+			// omit the tools array entirely or handle it at a higher level.
+			return "auto"
+		case "auto":
 			return "auto"
 		case "required", "any":
 			return "any"

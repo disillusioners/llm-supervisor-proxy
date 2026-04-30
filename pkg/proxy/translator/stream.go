@@ -25,6 +25,7 @@ func TranslateBufferedStream(openaiBuffer []byte, originalModel string) ([]byte,
 
 	// Scan through all SSE data lines
 	scanner := bufio.NewScanner(bytes.NewReader(openaiBuffer))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // Increase max token size from default 64KB to 1MB
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
