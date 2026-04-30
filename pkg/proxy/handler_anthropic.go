@@ -99,7 +99,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		requestBody = bodyBytes
 	} else {
 		// Translate to OpenAI format
-		modelMapping := getModelMappingConfig(conf.ModelsConfig)
+		modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 		openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
 		var err error
 		requestBody, err = json.Marshal(openaiReq)
@@ -189,6 +189,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		savedCredentialAPIKey := arc.credentialAPIKey
 		savedRequestBody := make([]byte, len(arc.requestBody))
 		copy(savedRequestBody, arc.requestBody)
+		savedAnthropicReqModel := arc.anthropicReq.Model
 
 		// Update model in request body
 		if arc.isAnthropicUpstream {
@@ -207,7 +208,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.requestBody = newBody
 		} else {
 			// For OpenAI translation path, re-translate with new model
-			modelMapping := getModelMappingConfig(conf.ModelsConfig)
+			modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 			arc.anthropicReq.Model = currentModel
 			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
 			newBody, err := json.Marshal(openaiReq)
@@ -228,6 +229,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.targetURL = savedTargetURL
 		arc.credentialAPIKey = savedCredentialAPIKey
 		arc.requestBody = savedRequestBody
+		arc.anthropicReq.Model = savedAnthropicReqModel
 
 		arc.reqLog.Status = "failed"
 		arc.reqLog.Error = "Model failed"
@@ -471,7 +473,7 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	debugLog("OpenAI Body: %s", string(openaiBody))
 
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON(openaiBody)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -500,7 +502,7 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 // handleAnthropicInternalStreamResponse handles streaming internal responses
 func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(openaiBody)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromSSE(openaiBody)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -550,7 +552,7 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	}
 
 	// Extract content for storage before translation
-	content, thinking, toolCalls := extractOpenAIResponseContent(bodyBytes)
+	content, thinking, toolCalls := extractOpenAIResponseContentFromJSON(bodyBytes)
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -599,6 +601,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 	// Buffer all OpenAI chunks
 	var buffer bytes.Buffer
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // Increase max token size from default 64KB to 1MB
 	chunkCount := 0
 
 	for scanner.Scan() {
@@ -622,7 +625,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			debugLog("Stream complete, received %d chunks, translating...", chunkCount)
 
 			// Extract content for storage before translation
-			content, thinking, toolCalls := extractOpenAIResponseContent(buffer.Bytes())
+			content, thinking, toolCalls := extractOpenAIResponseContentFromSSE(buffer.Bytes())
 			arc.accumulatedResponse.WriteString(content)
 			arc.accumulatedThinking.WriteString(thinking)
 			arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
@@ -705,12 +708,17 @@ func (h *Handler) sendAnthropicError(w http.ResponseWriter, errorType, message s
 
 	errorResp := map[string]interface{}{
 		"type": "error",
-		"error": map[string]string{
+		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
 		},
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 // finalizeAnthropicSuccess updates the request log and appends the assistant message.
@@ -740,7 +748,7 @@ func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
 }
 
 // extractOpenAIResponseContent extracts content, thinking, and tool calls from OpenAI response.
-func extractOpenAIResponseContent(openaiBody []byte) (content, thinking string, toolCalls []store.ToolCall) {
+func extractOpenAIResponseContentFromJSON(openaiBody []byte) (content, thinking string, toolCalls []store.ToolCall) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(openaiBody, &resp); err != nil {
 		return "", "", nil
@@ -779,6 +787,97 @@ func extractOpenAIResponseContent(openaiBody []byte) (content, thinking string, 
 			}
 		}
 	}
+	return content, thinking, toolCalls
+}
+
+// extractOpenAIResponseContentFromSSE extracts content, thinking, and tool calls from buffered OpenAI SSE lines.
+// Unlike FromJSON, this parses each "data: {...}" line and accumulates content from streaming deltas.
+func extractOpenAIResponseContentFromSSE(sseBuffer []byte) (content, thinking string, toolCalls []store.ToolCall) {
+	scanner := bufio.NewScanner(bytes.NewReader(sseBuffer))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+
+		// Only process data lines
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+
+		data := bytes.TrimPrefix(line, []byte("data: "))
+
+		// Skip [DONE] marker
+		if bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+
+		// Parse the chunk JSON
+		var chunk map[string]interface{}
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed chunk: %v", err)
+			continue
+		}
+
+		choices, ok := chunk["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			continue
+		}
+
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Accumulate text content
+		if c, ok := delta["content"].(string); ok {
+			content += c
+		}
+
+		// Accumulate thinking (reasoning_content or thinking field)
+		if r, ok := delta["reasoning_content"].(string); ok {
+			thinking += r
+		}
+		if t, ok := delta["thinking"].(string); ok {
+			thinking += t
+		}
+
+		// Accumulate tool calls by index
+		if tcs, ok := delta["tool_calls"].([]interface{}); ok {
+			for _, tc := range tcs {
+				tcMap, ok := tc.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				index := 0
+				if idx, ok := tcMap["index"].(float64); ok {
+					index = int(idx)
+				}
+
+				// Ensure we have enough slots
+				for len(toolCalls) <= index {
+					toolCalls = append(toolCalls, store.ToolCall{})
+				}
+
+				if id, ok := tcMap["id"].(string); ok && id != "" {
+					toolCalls[index].ID = id
+				}
+
+				if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+					if name, ok := fn["name"].(string); ok {
+						toolCalls[index].Function.Name = name
+					}
+					if args, ok := fn["arguments"].(string); ok {
+						toolCalls[index].Function.Arguments += args
+					}
+				}
+			}
+		}
+	}
 
 	return content, thinking, toolCalls
 }
@@ -795,12 +894,16 @@ func getStringVal(m map[string]interface{}, key string) string {
 func (h *Handler) sendAnthropicSSEError(w http.ResponseWriter, errorType, message string) {
 	errorEvent := map[string]interface{}{
 		"type": "error",
-		"error": map[string]string{
+		"error": map[string]interface{}{
 			"type":    errorType,
 			"message": message,
 		},
 	}
-	eventBytes, _ := json.Marshal(errorEvent)
+	eventBytes, err := json.Marshal(errorEvent)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
 	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(eventBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -1005,15 +1108,4 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 	return result
 }
 
-// getModelMappingConfig extracts model mapping from config
-func getModelMappingConfig(modelsConfig interface{}) *translator.ModelMappingConfig {
-	// Return mapping config without default - unknown models pass through unchanged
-	// This allows Anthropic clients to use any model configured in the proxy
-	return &translator.ModelMappingConfig{
-		// No DefaultModel - let unknown models pass through
-		Mapping: map[string]string{
-			// Claude model aliases can be mapped here if needed
-			// e.g., "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
-		},
-	}
-}
+

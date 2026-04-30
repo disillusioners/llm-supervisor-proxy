@@ -18,6 +18,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -768,7 +769,7 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 	}
 
 	if toolChoice, exists := body["tool_choice"]; exists {
-		req.ToolChoice = toolChoice
+		req.ToolChoice = translator.TranslateOpenAIToolChoiceToAnthropic(toolChoice)
 	}
 
 	if extra, ok := body["extra"].(map[string]interface{}); ok {

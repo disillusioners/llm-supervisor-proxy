@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -19,7 +20,8 @@ import (
 // AnthropicAdapter handles Anthropic Messages API requests by translating
 // to/from OpenAI format for upstream.
 type AnthropicAdapter struct {
-	extractor ResponseExtractor
+	extractor     ResponseExtractor
+	originalModel string // model name from the incoming Anthropic request
 }
 
 // NewAnthropicAdapter creates a new Anthropic adapter.
@@ -43,6 +45,9 @@ func (a *AnthropicAdapter) ParseRequest(r *http.Request) (map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
 		return nil, nil, fmt.Errorf("invalid JSON body")
 	}
+
+	// Capture original model name for response translation
+	a.originalModel = anthropicReq.Model
 
 	// Validate request
 	if err := validateAnthropicAdapterRequest(&anthropicReq); err != nil {
@@ -138,9 +143,7 @@ func (a *AnthropicAdapter) IsStream(body map[string]interface{}) bool {
 
 func (a *AnthropicAdapter) WriteNonStreamResponse(w http.ResponseWriter, openaiResponse []byte) error {
 	// Translate OpenAI response to Anthropic format
-	// The original model should be extracted from context, but we use empty string
-	// since the translation will preserve it from the OpenAI response
-	anthropicResp, err := translator.TranslateNonStreamResponse(openaiResponse, "")
+	anthropicResp, err := translator.TranslateNonStreamResponse(openaiResponse, a.originalModel)
 	if err != nil {
 		return fmt.Errorf("failed to translate response: %w", err)
 	}
@@ -180,7 +183,6 @@ func (a *AnthropicAdapter) SetStreamHeaders(w http.ResponseWriter) {
 func (a *AnthropicAdapter) WriteError(w http.ResponseWriter, errorType, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	// Anthropic format: HAS "type": "error" at root level
 	errorResp := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
@@ -188,24 +190,40 @@ func (a *AnthropicAdapter) WriteError(w http.ResponseWriter, errorType, message 
 			"message": message,
 		},
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 func (a *AnthropicAdapter) WriteStreamError(w http.ResponseWriter, errorType, message string) {
 	a.WriteStreamErrorWithCode(w, errorType, "", message)
 }
 
-// WriteStreamErrorWithCode sends a streaming error with optional code field.
-// For Anthropic protocol, we send message_stop event and close the stream.
-// The official Anthropic protocol does NOT have an "event: error" event type.
-// Errors during streaming should either: (A) send message_stop and close, or
-// (B) return HTTP error before streaming starts.
 func (a *AnthropicAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, errorType, code, message string) {
-	// Option A: Send message_stop and close (Anthropic-compliant)
-	// Note: We cannot send error details in-stream with Anthropic protocol.
-	// The client should check for abrupt stream termination.
-	// For detailed errors, return HTTP error before streaming starts.
+	// Emit message_stop before error to ensure proper stream termination per Anthropic SSE spec.
+	// Anthropic clients expect the stream to end with message_stop; sending an error without it
+	// can leave clients in a broken state waiting for stream completion.
 	fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+
+	errorEvent := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    errorType,
+			"message": message,
+		},
+	}
+	if code != "" {
+		errorEvent["error"].(map[string]interface{})["code"] = code
+	}
+	errBytes, err := json.Marshal(errorEvent)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(errBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -215,7 +233,6 @@ func (a *AnthropicAdapter) WriteStreamErrorWithCode(w http.ResponseWriter, error
 func (a *AnthropicAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, code, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	// Anthropic format: HAS "type": "error" at root level
 	errorResp := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
@@ -226,7 +243,12 @@ func (a *AnthropicAdapter) WriteErrorWithCode(w http.ResponseWriter, errorType, 
 	if code != "" {
 		errorResp["error"].(map[string]interface{})["code"] = code
 	}
-	json.NewEncoder(w).Encode(errorResp)
+	errBytes, err := json.Marshal(errorResp)
+	if err != nil {
+		log.Printf("failed to marshal error response: %v", err)
+		return
+	}
+	w.Write(errBytes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,13 +303,17 @@ func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessa
 }
 
 // getAnthropicModelMapping extracts model mapping from config
-func getAnthropicModelMapping(_ models.ModelsConfigInterface) *translator.ModelMappingConfig {
+func getAnthropicModelMapping(modelsConfig models.ModelsConfigInterface) *translator.ModelMappingConfig {
+	mapping := make(map[string]string)
+	if modelsConfig != nil {
+		for _, model := range modelsConfig.GetModels() {
+			if model.ID != "" && model.Name != "" && model.Name != model.ID {
+				mapping[model.Name] = model.ID
+			}
+		}
+	}
 	// Return mapping config without default - unknown models pass through unchanged
-	// This allows Anthropic clients to use any model configured in the proxy
 	return &translator.ModelMappingConfig{
-		// No DefaultModel - let unknown models pass through
-		Mapping: map[string]string{
-			// Claude model aliases can be mapped here if needed
-		},
+		Mapping: mapping,
 	}
 }

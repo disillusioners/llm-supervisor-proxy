@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -143,7 +144,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:           ":" + strconv.Itoa(cfg.Port),
-		Handler:        mux,
+		Handler:        recoveryMiddleware(mux),
 		ReadTimeout:    readTimeout,
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,
@@ -182,4 +183,18 @@ func main() {
 	}
 
 	log.Println("Server exiting")
+}
+
+// recoveryMiddleware catches panics in HTTP handlers, logs the stack trace,
+// returns HTTP 500 to the client, and prevents the process from crashing.
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("panic recovered: %v\n%s", err, debug.Stack())
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }

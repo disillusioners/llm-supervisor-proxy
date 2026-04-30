@@ -372,6 +372,44 @@ func TestAnthropicAdapter_WriteStreamError(t *testing.T) {
 	if !strings.Contains(body, "event: message_stop") {
 		t.Error("expected 'event: message_stop' in response")
 	}
+	if !strings.Contains(body, "event: error") {
+		t.Error("expected 'event: error' in response")
+	}
+
+	// Find the data line that follows the error event (not message_stop)
+	lines := strings.Split(body, "\n")
+	var dataLine string
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "event: error" {
+			// Next non-empty line should be the data line
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(lines[j], "data: ") {
+					dataLine = strings.TrimPrefix(lines[j], "data: ")
+					break
+				}
+			}
+			break
+		}
+	}
+	if dataLine == "" {
+		t.Fatal("expected 'data: {...}' line after 'event: error'")
+	}
+
+	var errResp map[string]interface{}
+	if err := json.Unmarshal([]byte(dataLine), &errResp); err != nil {
+		t.Fatalf("failed to parse error response JSON: %v", err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'error' object in response")
+	}
+	if errObj["type"] != "rate_limit_error" {
+		t.Errorf("expected type 'rate_limit_error', got '%v'", errObj["type"])
+	}
+	if errObj["message"] != "Rate limit exceeded" {
+		t.Errorf("expected message 'Rate limit exceeded', got '%v'", errObj["message"])
+	}
 }
 
 func TestAnthropicAdapter_WriteStreamErrorWithCode(t *testing.T) {
@@ -384,6 +422,47 @@ func TestAnthropicAdapter_WriteStreamErrorWithCode(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: message_stop") {
 		t.Error("expected 'event: message_stop' in response")
+	}
+	if !strings.Contains(body, "event: error") {
+		t.Error("expected 'event: error' in response")
+	}
+
+	// Find the data line that follows the error event (not message_stop)
+	lines := strings.Split(body, "\n")
+	var dataLine string
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "event: error" {
+			// Next non-empty line should be the data line
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(lines[j], "data: ") {
+					dataLine = strings.TrimPrefix(lines[j], "data: ")
+					break
+				}
+			}
+			break
+		}
+	}
+	if dataLine == "" {
+		t.Fatal("expected 'data: {...}' line after 'event: error'")
+	}
+
+	var errResp map[string]interface{}
+	if err := json.Unmarshal([]byte(dataLine), &errResp); err != nil {
+		t.Fatalf("failed to parse error response JSON: %v", err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'error' object in response")
+	}
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("expected type 'invalid_request_error', got '%v'", errObj["type"])
+	}
+	if errObj["message"] != "Model not found" {
+		t.Errorf("expected message 'Model not found', got '%v'", errObj["message"])
+	}
+	if errObj["code"] != "INVALID_MODEL" {
+		t.Errorf("expected code 'INVALID_MODEL', got '%v'", errObj["code"])
 	}
 }
 

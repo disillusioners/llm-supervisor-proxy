@@ -13,6 +13,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -411,9 +412,9 @@ func (h *InternalHandler) convertRequest(body map[string]interface{}) (*provider
 		}
 	}
 
-	// Handle tool_choice
+	// Handle tool_choice - translate from OpenAI to Anthropic format
 	if toolChoice, ok := body["tool_choice"]; ok {
-		req.ToolChoice = toolChoice
+		req.ToolChoice = translator.TranslateOpenAIToolChoiceToAnthropic(toolChoice)
 	}
 
 	// Store any extra fields not handled above

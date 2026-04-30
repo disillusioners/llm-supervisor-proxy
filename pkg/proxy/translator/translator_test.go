@@ -2,6 +2,7 @@ package translator
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -777,5 +778,187 @@ func TestModelMappingConfig_GetMappedModel(t *testing.T) {
 	var nilConfig *ModelMappingConfig
 	if result := nilConfig.GetMappedModel("any-model"); result != "any-model" {
 		t.Errorf("expected original model, got '%s'", result)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool Choice Translation Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTranslateOpenAIToolChoiceToAnthropic(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected interface{}
+	}{
+		{
+			name:     "nil returns nil",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name:     "auto maps to auto",
+			input:    "auto",
+			expected: "auto",
+		},
+		{
+			name:     "none maps to auto",
+			input:    "none",
+			expected: "auto",
+		},
+		{
+			name:     "required maps to any",
+			input:    "required",
+			expected: "any",
+		},
+		{
+			name:     "any maps to any",
+			input:    "any",
+			expected: "any",
+		},
+		{
+			name:     "unknown defaults to auto",
+			input:    "unknown",
+			expected: "auto",
+		},
+		{
+			name: "function object translates to tool object",
+			input: map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name": "get_weather",
+				},
+			},
+			expected: map[string]interface{}{
+				"type": "tool",
+				"name": "get_weather",
+			},
+		},
+		{
+			name: "non-function object returns nil",
+			input: map[string]interface{}{
+				"type": "other",
+				"name": "get_weather",
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := TranslateOpenAIToolChoiceToAnthropic(tt.input)
+
+			// Special handling for map comparison
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+
+			// For maps, compare as JSON
+			if expectedMap, ok := tt.expected.(map[string]interface{}); ok {
+				resultMap, ok := result.(map[string]interface{})
+				if !ok {
+					t.Errorf("expected map, got %T", result)
+					return
+				}
+				if expectedMap["type"] != resultMap["type"] || expectedMap["name"] != resultMap["name"] {
+					t.Errorf("expected %v, got %v", tt.expected, result)
+				}
+				return
+			}
+
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestTranslateToolChoice(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected interface{}
+	}{
+		{
+			name:     "nil returns nil",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name:     "auto wraps as type object",
+			input:    "auto",
+			expected: map[string]string{"type": "auto"},
+		},
+		{
+			name:     "any wraps as type object",
+			input:    "any",
+			expected: map[string]string{"type": "any"},
+		},
+		{
+			name: "tool object preserves name in function",
+			input: map[string]interface{}{
+				"type": "tool",
+				"name": "get_weather",
+			},
+			expected: map[string]interface{}{
+				"type": "tool",
+				"function": map[string]string{
+					"name": "get_weather",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := TranslateToolChoice(tt.input)
+
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+
+			// For maps, compare as JSON
+			if expectedMap, ok := tt.expected.(map[string]interface{}); ok {
+				resultMap, ok := result.(map[string]interface{})
+				if !ok {
+					t.Errorf("expected map, got %T", result)
+					return
+				}
+				if expectedMap["type"] != resultMap["type"] {
+					t.Errorf("expected type %v, got %v", expectedMap["type"], resultMap["type"])
+				}
+				if fn, ok := expectedMap["function"]; ok {
+					resultFn, ok := resultMap["function"].(map[string]string)
+					expectedFn := fn.(map[string]string)
+					if !ok || resultFn["name"] != expectedFn["name"] {
+						t.Errorf("expected function %v, got %v", fn, resultMap["function"])
+					}
+				}
+				return
+			}
+
+			// For string maps
+			if expectedStrMap, ok := tt.expected.(map[string]string); ok {
+				resultStrMap, ok := result.(map[string]string)
+				if !ok {
+					t.Errorf("expected map[string]string, got %T", result)
+					return
+				}
+				if expectedStrMap["type"] != resultStrMap["type"] {
+					t.Errorf("expected type %v, got %v", expectedStrMap["type"], resultStrMap["type"])
+				}
+				return
+			}
+
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
 	}
 }
