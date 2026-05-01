@@ -1,16 +1,28 @@
 import { useState } from 'preact/hooks';
+import { ModelMultiSelect } from './ModelMultiSelect';
+import type { ApiToken } from '../../types';
 
 interface TokenFormProps {
-  onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => Promise<void>;
+  models: { name: string; id: string }[];
+  token?: ApiToken;  // For editing existing tokens
+  onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
 
-export function TokenForm({ onSubmit, onCancel, onStatus }: TokenFormProps) {
-  const [name, setName] = useState('');
-  const [expiresAt, setExpiresAt] = useState('');
-  const [ultimateModelEnabled, setUltimateModelEnabled] = useState(false);
+export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: TokenFormProps) {
+  const [name, setName] = useState(token?.name || '');
+  const [expiresAt, setExpiresAt] = useState(() => {
+    if (token?.expires_at) {
+      return token.expires_at.split('T')[0]; // Extract date part only
+    }
+    return '';
+  });
+  const [ultimateModelEnabled, setUltimateModelEnabled] = useState(token?.ultimate_model_enabled || false);
+  const [selectedModels, setSelectedModels] = useState<string[]>(token?.allowed_models || []);
   const [saving, setSaving] = useState(false);
+
+  const isEditing = !!token;
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -22,9 +34,10 @@ export function TokenForm({ onSubmit, onCancel, onStatus }: TokenFormProps) {
       setSaving(true);
       onStatus(null);
       const expires = expiresAt ? new Date(expiresAt).toISOString() : null;
-      await onSubmit(name.trim(), expires, ultimateModelEnabled);
+      // When selectedModels is empty, it means all models are allowed
+      await onSubmit(name.trim(), expires, ultimateModelEnabled, selectedModels);
     } catch (e) {
-      onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to create token' });
+      onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save token' });
     } finally {
       setSaving(false);
     }
@@ -35,7 +48,9 @@ export function TokenForm({ onSubmit, onCancel, onStatus }: TokenFormProps) {
 
   return (
     <div class="bg-gray-700/50 rounded-lg p-5 border border-gray-600">
-      <h3 class="text-lg font-medium text-white mb-4">Create New API Token</h3>
+      <h3 class="text-lg font-medium text-white mb-4">
+        {isEditing ? 'Edit API Token' : 'Create New API Token'}
+      </h3>
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1">
@@ -63,6 +78,24 @@ export function TokenForm({ onSubmit, onCancel, onStatus }: TokenFormProps) {
             class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
           />
           <p class="text-xs text-gray-400 mt-1">Leave empty for no expiration</p>
+        </div>
+
+        {/* Allowed Models Multi-Select */}
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">
+            Allowed Models <span class="text-gray-500">(optional)</span>
+          </label>
+          <ModelMultiSelect
+            models={models}
+            selected={selectedModels}
+            onChange={setSelectedModels}
+          />
+          <p class="text-xs text-gray-400 mt-1">
+            {selectedModels.length === 0
+              ? 'No selection means all models are allowed'
+              : `Only these models are allowed: ${selectedModels.join(', ')}`
+            }
+          </p>
         </div>
 
         {/* Ultimate Model Access Toggle */}
@@ -103,7 +136,7 @@ export function TokenForm({ onSubmit, onCancel, onStatus }: TokenFormProps) {
             class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-md transition-colors text-sm font-medium"
             disabled={!name.trim() || saving}
           >
-            {saving ? 'Creating...' : 'Create Token'}
+            {saving ? (isEditing ? 'Saving...' : 'Creating...') : (isEditing ? 'Save Changes' : 'Create Token')}
           </button>
         </div>
       </div>

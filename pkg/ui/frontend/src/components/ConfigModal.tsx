@@ -20,9 +20,9 @@ interface ConfigModalProps {
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
   tokens: ApiToken[];
-  onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => Promise<ApiToken>;
+  onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
-  onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean) => Promise<boolean>;
+  onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[]) => Promise<boolean>;
   onRefetchTokens: () => void;
 }
 
@@ -216,9 +216,9 @@ export function ConfigModal({
   };
 
   // Token handlers
-  const handleCreateToken = async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => {
+  const handleCreateToken = async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => {
     try {
-      const token = await onCreateToken(name, expiresAt, ultimateModelEnabled);
+      const token = await onCreateToken(name, expiresAt, ultimateModelEnabled, allowedModels);
       setNewToken(token);
       setShowTokenValue(true);
       onRefetchTokens();
@@ -393,6 +393,7 @@ export function ConfigModal({
               {!showTokenForm ? (
                 <TokenList
                   tokens={tokens}
+                  models={models.map(m => ({ name: m.name, id: m.id }))}
                   onRevoke={handleRevokeToken}
                   onStatus={setStatusWrapper}
                   onCreateToken={() => setShowTokenForm(true)}
@@ -401,6 +402,7 @@ export function ConfigModal({
                 />
               ) : (
                 <TokenForm
+                  models={models.map(m => ({ name: m.name, id: m.id }))}
                   onSubmit={handleCreateToken}
                   onCancel={() => setShowTokenForm(false)}
                   onStatus={setStatusWrapper}

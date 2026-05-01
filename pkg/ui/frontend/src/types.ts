@@ -132,6 +132,7 @@ export interface ApiToken {
   created_at: string;
   last_used_at?: string;
   ultimate_model_enabled: boolean;
+  allowed_models: string[] | null;  // null means all models allowed
 }
 
 export interface Message {
