@@ -2319,3 +2319,334 @@ func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 		t.Error("expected UltimateModelUsed to be false for unauthenticated request")
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Model Access Control Tests (allowed_models 403 enforcement)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// modelAccessMockTokenStore is a mock implementation of auth.TokenStoreInterface
+// for testing model access control
+type modelAccessMockTokenStore struct {
+	tokens map[string]*auth.AuthToken
+}
+
+func newModelAccessMockTokenStore() *modelAccessMockTokenStore {
+	return &modelAccessMockTokenStore{
+		tokens: make(map[string]*auth.AuthToken),
+	}
+}
+
+func (m *modelAccessMockTokenStore) addToken(plaintext string, token *auth.AuthToken) {
+	m.tokens[plaintext] = token
+}
+
+func (m *modelAccessMockTokenStore) ValidateToken(ctx context.Context, plaintext string) (*auth.AuthToken, error) {
+	token, ok := m.tokens[plaintext]
+	if !ok {
+		return nil, auth.ErrTokenNotFound
+	}
+	return token, nil
+}
+
+func (m *modelAccessMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *modelAccessMockTokenStore) DeleteToken(ctx context.Context, id string) error {
+	panic("not implemented")
+}
+
+func (m *modelAccessMockTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *modelAccessMockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *modelAccessMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
+	panic("not implemented")
+}
+
+// TestHandler_ModelNotAllowed_Returns403 tests that requesting a model not in the
+// token's allowed_models list returns a 403 Forbidden response.
+func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
+	// Create mock LLM handler
+	mockHandler := mockLLMHandler(t)
+
+	// Create upstream server first so we can use its URL for the credential
+	upstream := httptest.NewServer(mockHandler)
+	defer upstream.Close()
+
+	// Create internal model config (triggers auth when Internal=true with credential)
+	mc := models.NewModelsConfig()
+
+	// Add credential (required for internal models)
+	err := mc.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add internal model that references the credential
+	err = mc.AddModel(models.ModelConfig{
+		ID:            "claude-3",
+		Name:          "Claude 3",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "claude-3",
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Also add gpt-4 as internal model (for the allowed test later, though this test uses claude-3)
+	err = mc.AddModel(models.ModelConfig{
+		ID:            "gpt-4",
+		Name:          "GPT-4",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "gpt-4",
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Create config manager
+	mgr := newTestManagerWithConfig(t, upstream.URL)
+
+	// Create token store with a token that only allows "gpt-4"
+	tokenStore := newModelAccessMockTokenStore()
+	allowedToken := &auth.AuthToken{
+		ID:            "test-token-id",
+		Name:          "Test Token",
+		AllowedModels: []string{"gpt-4"}, // Only gpt-4 is allowed
+	}
+	plaintextToken := "sk-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	tokenStore.addToken(plaintextToken, allowedToken)
+
+	// Create handler
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: mc,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+
+	// Send request with model "claude-3" (not in allowed list)
+	body := simpleBody("claude-3", false)
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Should return 403 Forbidden
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected status %d (Forbidden), got %d", http.StatusForbidden, rr.Code)
+	}
+
+	// Response body should contain "model not allowed"
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "model not allowed") {
+		t.Errorf("expected response body to contain 'model not allowed', got: %s", respBody)
+	}
+
+	// Response body should include the denied model name "claude-3"
+	if !strings.Contains(respBody, "claude-3") {
+		t.Errorf("expected response body to contain denied model name 'claude-3', got: %s", respBody)
+	}
+
+	// Verify request was logged as failed
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "failed" {
+		t.Errorf("expected status 'failed', got '%s'", reqs[0].Status)
+	}
+	if !strings.Contains(reqs[0].Error, "not allowed") {
+		t.Errorf("expected error to contain 'not allowed', got: %s", reqs[0].Error)
+	}
+}
+
+// TestHandler_ModelAllowed_PassesThrough tests that requesting a model in the
+// token's allowed_models list passes through to normal flow.
+func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
+	// Create mock LLM handler
+	mockHandler := mockLLMHandler(t)
+
+	// Create upstream server first so we can use its URL for the credential
+	upstream := httptest.NewServer(mockHandler)
+	defer upstream.Close()
+
+	// Create internal model config (triggers auth when Internal=true with credential)
+	mc := models.NewModelsConfig()
+
+	// Add credential (required for internal models)
+	err := mc.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add internal model that references the credential
+	err = mc.AddModel(models.ModelConfig{
+		ID:            "gpt-4",
+		Name:          "GPT-4",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "gpt-4",
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Create config manager
+	mgr := newTestManagerWithConfig(t, upstream.URL)
+
+	// Create token store with a token that only allows "gpt-4"
+	tokenStore := newModelAccessMockTokenStore()
+	allowedToken := &auth.AuthToken{
+		ID:            "test-token-id",
+		Name:          "Test Token",
+		AllowedModels: []string{"gpt-4"}, // Only gpt-4 is allowed
+	}
+	plaintextToken := "sk-1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+	tokenStore.addToken(plaintextToken, allowedToken)
+
+	// Create handler
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: mc,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+
+	// Send request with model "gpt-4" (in allowed list)
+	body := simpleBody("gpt-4", false)
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Should NOT return 403 - should pass through to normal flow
+	if rr.Code == http.StatusForbidden {
+		t.Error("expected status NOT 403 (Forbidden) when model is allowed, got 403")
+	}
+
+	// Request should succeed (200)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}
+
+// TestHandler_AllModelsAllowed_PassesThrough tests that a token with nil/empty
+// allowed_models (all models allowed) can access any model.
+func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
+	// Create mock LLM handler
+	mockHandler := mockLLMHandler(t)
+
+	// Create upstream server first so we can use its URL for the credential
+	upstream := httptest.NewServer(mockHandler)
+	defer upstream.Close()
+
+	// Create internal model config (triggers auth when Internal=true with credential)
+	mc := models.NewModelsConfig()
+
+	// Add credential (required for internal models)
+	err := mc.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add internal model that references the credential
+	err = mc.AddModel(models.ModelConfig{
+		ID:            "any-model",
+		Name:          "Any Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "any-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Create config manager
+	mgr := newTestManagerWithConfig(t, upstream.URL)
+
+	// Create token store with a token that allows ALL models (nil AllowedModels)
+	tokenStore := newModelAccessMockTokenStore()
+	allAllowedToken := &auth.AuthToken{
+		ID:            "test-token-id",
+		Name:          "Test Token",
+		AllowedModels: nil, // nil = all models allowed
+	}
+	plaintextToken := "sk-1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+	tokenStore.addToken(plaintextToken, allAllowedToken)
+
+	// Create handler
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: mc,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+
+	// Send request with any model
+	body := simpleBody("any-model", false)
+	req := makeRequest(t, body)
+	req.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	// Should NOT return 403
+	if rr.Code == http.StatusForbidden {
+		t.Error("expected status NOT 403 (Forbidden) when all models allowed, got 403")
+	}
+
+	// Request should succeed (200)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Verify request completed successfully
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	if reqs[0].Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", reqs[0].Status)
+	}
+}

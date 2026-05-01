@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 )
 
@@ -35,19 +36,34 @@ type AuthToken struct {
 
 // ScanAllowedModels deserializes allowed_models from a JSON string (from DB).
 // If the value is NULL/empty, returns nil (all models allowed).
-// If JSON is malformed, returns nil (fail open - allow all).
+// If JSON is malformed, returns empty slice (fail closed - deny all models).
+// Handles both string and []byte types from different DB drivers.
 func ScanAllowedModels(raw interface{}) []string {
 	if raw == nil {
 		return nil
 	}
-	str, ok := raw.(string)
-	if !ok || str == "" {
+
+	// Handle both string and []byte (some DB drivers return []byte for TEXT)
+	var str string
+	switch v := raw.(type) {
+	case string:
+		str = v
+	case []byte:
+		str = string(v)
+	default:
+		// Fail closed for unknown types
+		return []string{}
+	}
+
+	if str == "" {
 		return nil
 	}
+
 	var models []string
 	if err := json.Unmarshal([]byte(str), &models); err != nil {
-		// Fail open - treat malformed JSON as "all models allowed"
-		return nil
+		// Fail closed - deny all models on malformed JSON
+		log.Printf("SECURITY: malformed allowed_models JSON for token, denying all models")
+		return []string{}
 	}
 	return models
 }

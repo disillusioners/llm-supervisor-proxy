@@ -488,6 +488,39 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
 					ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
+				// === ULTIMATE MODEL ACCESS CHECK ===
+				// Check if the ultimate model is allowed for this token
+				// This prevents X-Force-Ultimate-Model header from bypassing allowed_models
+				// Re-authenticate to get the token (token variable not in scope here)
+				if h.requiresInternalAuth(rc) {
+					if authToken, ok := h.authenticate(r); ok && authToken != nil {
+						if !authToken.IsModelAllowed(ultimateModelID) {
+							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
+
+							// Update request log to failed status
+							rc.reqLog.Status = "failed"
+							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
+							rc.reqLog.EndTime = time.Now()
+							rc.reqLog.Duration = time.Since(rc.startTime).String()
+							rc.reqLog.UltimateModelUsed = true
+							rc.reqLog.UltimateModelID = ultimateModelID
+							h.store.Add(rc.reqLog)
+
+							// Publish event
+							h.publishEvent("ultimate_model_not_allowed", map[string]interface{}{
+								"id":    rc.reqID,
+								"model": ultimateModelID,
+								"token": rc.tokenID,
+							})
+
+							// Send 403 Forbidden response
+							h.sendModelNotAllowedError(w, ultimateModelID)
+							return
+						}
+					}
+				}
+				// === END ULTIMATE MODEL ACCESS CHECK ===
+
 				// Update request log with ultimate model info
 				rc.reqLog.UltimateModelUsed = true
 				rc.reqLog.UltimateModelID = ultimateModelID

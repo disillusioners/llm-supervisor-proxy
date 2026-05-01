@@ -51,17 +51,24 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
     onChange(Array.from(newSelected));
   };
 
-  // Clear all selections (means all models allowed)
+  // Clear selections for filtered models only
   const clearAll = () => {
-    onChange([]);
+    const filteredNames = new Set(filteredModels.map(m => m.name));
+    onChange(selected.filter(name => !filteredNames.has(name)));
   };
 
-  // Handle toggle all (select all if none selected, otherwise clear all)
+  // Handle toggle all (select/deselect only filtered models)
   const handleToggleAll = () => {
-    if (selected.length === 0) {
-      onChange(models.map(m => m.name));
+    const filteredNames = new Set(filteredModels.map(m => m.name));
+    const filteredSelected = selected.filter(name => filteredNames.has(name));
+
+    if (filteredSelected.length === 0) {
+      // Select all filtered models
+      const newSelected = new Set([...selected, ...filteredModels.map(m => m.name)]);
+      onChange(Array.from(newSelected));
     } else {
-      onChange([]);
+      // Deselect all filtered models
+      onChange(selected.filter(name => !filteredNames.has(name)));
     }
   };
 
@@ -73,8 +80,8 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
     return `${selected.length} model${selected.length > 1 ? 's' : ''} selected`;
   };
 
-  // Check if all models are selected
-  const allSelected = models.length > 0 && selected.length === models.length;
+  // Check if all filtered models are selected
+  const allFilteredSelected = filteredModels.length > 0 && filteredModels.every(m => selected.includes(m.name));
 
   return (
     <div ref={containerRef} class="relative">
@@ -122,11 +129,11 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
             <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
-                checked={allSelected}
+                checked={allFilteredSelected}
                 onChange={handleToggleAll}
                 class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
               />
-              <span>{allSelected ? 'Deselect all' : 'Select all'}</span>
+              <span>{allFilteredSelected ? 'Deselect all' : 'Select all'}</span>
             </label>
             <div class="flex gap-2">
               <button

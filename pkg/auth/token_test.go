@@ -120,7 +120,7 @@ func TestScanAllowedModels(t *testing.T) {
 		{
 			name:     "non-string type",
 			input:    123,
-			expected: nil,
+			expected: []string{},
 		},
 		{
 			name:     "valid JSON array multiple elements",
@@ -140,17 +140,27 @@ func TestScanAllowedModels(t *testing.T) {
 		{
 			name:     "malformed JSON string",
 			input:    `"not-json"`,
-			expected: nil,
+			expected: []string{},
 		},
 		{
 			name:     "malformed JSON random",
 			input:    `{invalid}`,
-			expected: nil,
+			expected: []string{},
 		},
 		{
 			name:     "valid JSON with extra whitespace",
 			input:    `  ["model-1", "model-2"]  `,
 			expected: []string{"model-1", "model-2"},
+		},
+		{
+			name:     "byte slice input (postgres driver)",
+			input:    []byte(`["byte-model"]`),
+			expected: []string{"byte-model"},
+		},
+		{
+			name:     "byte slice empty array",
+			input:    []byte(`[]`),
+			expected: []string{},
 		},
 	}
 

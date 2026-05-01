@@ -123,7 +123,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
       // Optimistic update
       setOptimisticAllowedModels(prev => ({ ...prev, [tokenId]: editingModelsValue }));
       setEditingModelsId(null);
-      const success = await onUpdatePermission(tokenId, token.ultimate_model_enabled, editingModelsValue);
+      const success = await onUpdatePermission(tokenId, isTokenEnabled(token), editingModelsValue);
       if (!success) {
         // Revert optimistic update
         setOptimisticAllowedModels(prev => {
