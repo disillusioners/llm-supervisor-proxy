@@ -56,7 +56,8 @@ func setupIntegrationDB(t *testing.T) *sql.DB {
 		expires_at TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_by TEXT NOT NULL,
-		ultimate_model_enabled BOOLEAN NOT NULL DEFAULT FALSE
+		ultimate_model_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+		allowed_models TEXT DEFAULT '[]'
 	)`)
 	if err != nil {
 		db.Close()
