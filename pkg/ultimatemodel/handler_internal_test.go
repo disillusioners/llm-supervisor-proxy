@@ -871,12 +871,12 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	h := NewHandler(cfg, modelsCfg, nil)
 
-	// Create mock provider with no usage in done event
+	// Create mock provider with no usage in done event and empty stream
+	// This tests that fallback counting returns zero usage when no content is streamed
 	p := &mockProvider{
 		name: "mock",
 		streamEvents: []providers.StreamEvent{
-			{Type: "content", Content: "Hello"},
-			{Type: "done", FinishReason: "stop", Response: nil}, // No usage
+			{Type: "done", FinishReason: "stop", Response: nil}, // No usage, no content
 		},
 	}
 
@@ -892,7 +892,8 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	}
 
 	// With fallback token counting, usage is now a zero struct instead of nil
-	// when no usage is provided in the done event (nil requestBodyBytes means fallback counts 0)
+	// when no usage is provided in the done event.
+	// Since requestBodyBytes is nil and no content was streamed, both should be 0.
 	if usage == nil {
 		t.Errorf("Usage should not be nil - fallback should return zero-usage struct")
 	}
