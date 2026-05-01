@@ -51,15 +51,17 @@ func (s *TokenStore) CreateToken(ctx context.Context, name string, expiresAt *ti
 		expiresAtStr = expiresAt.Format(time.RFC3339)
 	}
 
-	// Serialize allowed_models to JSON; nil/empty = NULL
+	// Serialize allowed_models to JSON; nil = NULL (all models allowed), empty array = [] (no models allowed)
 	var allowedModelsJSON interface{}
-	if len(allowedModels) > 0 {
+	if allowedModels != nil {
+		// Empty slice [] is different from nil - store as JSON array
 		jsonBytes, err := json.Marshal(allowedModels)
 		if err != nil {
 			return "", nil, err
 		}
 		allowedModelsJSON = string(jsonBytes)
 	}
+	// If allowedModels is nil, allowedModelsJSON stays nil -> NULL in DB -> all models allowed
 
 	var query string
 	if s.dialect == database.PostgreSQL {
