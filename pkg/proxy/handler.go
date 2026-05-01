@@ -302,6 +302,19 @@ func (h *Handler) sendAuthError(w http.ResponseWriter) {
 	))
 }
 
+// sendModelNotAllowedError sends a 403 Forbidden JSON error response for model access violations
+func (h *Handler) sendModelNotAllowedError(w http.ResponseWriter, modelName string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"type":    "access_denied",
+			"message": "model not allowed for this token",
+			"model":   modelName,
+		},
+	})
+}
+
 // sendError sends a JSON error response in OpenAI-compatible format
 func (h *Handler) sendError(w http.ResponseWriter, code int, message, errType, errorCode string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -375,6 +388,32 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			rc.tokenID = token.ID
 			rc.tokenName = token.Name
 			rc.ultimateModelEnabled = token.UltimateModelEnabled
+
+			// === MODEL ACCESS CHECK ===
+			// Check if the requested model is allowed for this token
+			// This check happens AFTER authentication but BEFORE ultimate model logic
+			if !token.IsModelAllowed(rc.reqLog.Model) {
+				log.Printf("[AUTH] Model '%s' not allowed for token %s (%s)", rc.reqLog.Model, rc.tokenID, rc.tokenName)
+
+				// Update request log to failed status
+				rc.reqLog.Status = "failed"
+				rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
+				rc.reqLog.EndTime = time.Now()
+				rc.reqLog.Duration = time.Since(rc.startTime).String()
+				h.store.Add(rc.reqLog)
+
+				// Publish event
+				h.publishEvent("model_not_allowed", map[string]interface{}{
+					"id":    rc.reqID,
+					"model": rc.reqLog.Model,
+					"token": rc.tokenID,
+				})
+
+				// Send 403 Forbidden response
+				h.sendModelNotAllowedError(w, rc.reqLog.Model)
+				return
+			}
+			// === END MODEL ACCESS CHECK ===
 		}
 	}
 

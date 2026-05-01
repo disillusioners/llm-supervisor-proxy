@@ -2008,6 +2008,26 @@ func (m *ultimateMockTokenStore) ValidateToken(ctx context.Context, plaintext st
 	return nil, auth.ErrTokenNotFound
 }
 
+func (m *ultimateMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *ultimateMockTokenStore) DeleteToken(ctx context.Context, id string) error {
+	panic("not implemented")
+}
+
+func (m *ultimateMockTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *ultimateMockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (m *ultimateMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
+	panic("not implemented")
+}
+
 // newTestHandlerWithTokenStore creates a handler with a mock token store for auth testing
 func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig models.ModelsConfigInterface, tokenStore auth.TokenStoreInterface, configOpts ...func(*config.Config)) (*Handler, *httptest.Server) {
 	t.Helper()

@@ -832,19 +832,21 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 
 // TokenResponse represents a token in API responses (without sensitive data)
 type TokenResponse struct {
-	ID                   string  `json:"id"`
-	Name                 string  `json:"name"`
-	ExpiresAt            *string `json:"expires_at,omitempty"`
-	CreatedAt            string  `json:"created_at"`
-	CreatedBy            string  `json:"created_by"`
-	UltimateModelEnabled bool    `json:"ultimate_model_enabled"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	ExpiresAt            *string   `json:"expires_at,omitempty"`
+	CreatedAt            string    `json:"created_at"`
+	CreatedBy            string    `json:"created_by"`
+	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
 }
 
 // CreateTokenRequest represents the request body for creating a token
 type CreateTokenRequest struct {
-	Name                 string  `json:"name"`
-	ExpiresAt            *string `json:"expires_at,omitempty"` // ISO 8601 format, optional
-	UltimateModelEnabled bool    `json:"ultimate_model_enabled"`
+	Name                 string    `json:"name"`
+	ExpiresAt            *string   `json:"expires_at,omitempty"` // ISO 8601 format, optional
+	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
 }
 
 // CreateTokenResponse includes the plaintext token (shown only once)
@@ -904,7 +906,8 @@ func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
 
 // UpdateTokenPermissionRequest represents the request body for updating token permission
 type UpdateTokenPermissionRequest struct {
-	UltimateModelEnabled bool `json:"ultimate_model_enabled"`
+	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
 }
 
 // updateTokenPermission handles PATCH /fe/api/tokens/{id}
@@ -918,7 +921,36 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	err := s.tokenStore.UpdateTokenPermission(ctx, id, req.UltimateModelEnabled)
+	// Determine allowed_models to set:
+	// - If AllowedModels is nil in request, we don't update it (keep existing)
+	// - If AllowedModels is non-nil (including empty array), we update it
+	// Since *[]string is nil if field absent, we use a sentinel to distinguish "not provided" vs "explicitly empty"
+	// For simplicity, we'll update when provided - caller should send explicit value to change
+	var allowedModelsToSet []string
+	if req.AllowedModels != nil {
+		allowedModelsToSet = *req.AllowedModels
+	} else {
+		// Signal "don't update" by passing a special marker
+		// We'll handle this by checking if the field was present
+	}
+
+	// To properly handle partial updates, we need to get the current token first
+	currentToken, err := s.tokenStore.GetTokenByID(ctx, id)
+	if err != nil {
+		if err == auth.ErrTokenNotFound {
+			http.Error(w, "Token not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to get token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// If allowedModels not provided in request, keep existing
+	if req.AllowedModels == nil {
+		allowedModelsToSet = currentToken.AllowedModels
+	}
+
+	err = s.tokenStore.UpdateTokenPermission(ctx, id, req.UltimateModelEnabled, allowedModelsToSet)
 	if err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -954,6 +986,7 @@ func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.
 			CreatedAt:            t.CreatedAt.Format(time.RFC3339),
 			CreatedBy:            t.CreatedBy,
 			UltimateModelEnabled: t.UltimateModelEnabled,
+			AllowedModels:        &t.AllowedModels,
 		}
 		if t.ExpiresAt != nil {
 			iso := t.ExpiresAt.Format(time.RFC3339)
@@ -999,7 +1032,13 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 		createdBy = user
 	}
 
-	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, req.UltimateModelEnabled)
+	// Get allowed models (nil/empty = all models allowed)
+	var allowedModels []string
+	if req.AllowedModels != nil {
+		allowedModels = *req.AllowedModels
+	}
+
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, req.UltimateModelEnabled, allowedModels)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
 		return
@@ -1012,6 +1051,7 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 			CreatedAt:            token.CreatedAt.Format(time.RFC3339),
 			CreatedBy:            token.CreatedBy,
 			UltimateModelEnabled: token.UltimateModelEnabled,
+			AllowedModels:        &token.AllowedModels,
 		},
 		Token: plaintext, // Show once!
 	}

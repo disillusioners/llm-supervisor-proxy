@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -28,7 +29,27 @@ type AuthToken struct {
 	ExpiresAt            *time.Time
 	CreatedAt            time.Time
 	CreatedBy            string
-	UltimateModelEnabled bool `json:"ultimate_model_enabled"`
+	UltimateModelEnabled bool         `json:"ultimate_model_enabled"`
+	AllowedModels        []string     `json:"allowed_models"` // nil/empty = all models allowed
+}
+
+// ScanAllowedModels deserializes allowed_models from a JSON string (from DB).
+// If the value is NULL/empty, returns nil (all models allowed).
+// If JSON is malformed, returns nil (fail open - allow all).
+func ScanAllowedModels(raw interface{}) []string {
+	if raw == nil {
+		return nil
+	}
+	str, ok := raw.(string)
+	if !ok || str == "" {
+		return nil
+	}
+	var models []string
+	if err := json.Unmarshal([]byte(str), &models); err != nil {
+		// Fail open - treat malformed JSON as "all models allowed"
+		return nil
+	}
+	return models
 }
 
 // GenerateToken generates a new random token with sk- prefix
@@ -69,4 +90,19 @@ func (t *AuthToken) IsExpired() bool {
 		return false
 	}
 	return time.Now().After(*t.ExpiresAt)
+}
+
+// IsModelAllowed checks if the given model name is allowed for this token.
+// Returns true if AllowedModels is nil/empty (all models allowed) or if
+// modelName is found in the list. Case-sensitive exact match.
+func (t *AuthToken) IsModelAllowed(modelName string) bool {
+	if len(t.AllowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range t.AllowedModels {
+		if allowed == modelName {
+			return true
+		}
+	}
+	return false
 }

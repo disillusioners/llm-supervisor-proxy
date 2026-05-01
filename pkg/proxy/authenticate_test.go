@@ -44,7 +44,7 @@ func (m *mockTokenStore) ValidateToken(ctx context.Context, plaintext string) (*
 	return token, nil
 }
 
-func (m *mockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool) (string, *auth.AuthToken, error) {
+func (m *mockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
 	// Not used in authenticate tests
 	panic("not implemented")
 }
@@ -59,7 +59,12 @@ func (m *mockTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, erro
 	panic("not implemented")
 }
 
-func (m *mockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool) error {
+func (m *mockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
+	// Not used in authenticate tests
+	panic("not implemented")
+}
+
+func (m *mockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
 	// Not used in authenticate tests
 	panic("not implemented")
 }
@@ -340,7 +345,7 @@ func (s *slowMockTokenStore) ValidateToken(ctx context.Context, plaintext string
 	}
 }
 
-func (s *slowMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool) (string, *auth.AuthToken, error) {
+func (s *slowMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 
@@ -352,6 +357,10 @@ func (s *slowMockTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, 
 	panic("not implemented")
 }
 
-func (s *slowMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool) error {
+func (s *slowMockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
+	panic("not implemented")
+}
+
+func (s *slowMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
 	panic("not implemented")
 }
