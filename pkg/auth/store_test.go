@@ -720,7 +720,7 @@ func TestValidateTokenReturnsUltimateModelEnabled(t *testing.T) {
 	// Create token with ultimate_model_enabled = true
 	plaintext, _, err := store.CreateToken(ctx, "validate-ultimate", nil, "admin", true, nil)
 	if err != nil {
-		t.Fatalf("CreateToken() error = %v", err)
+		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
 
 	// Validate it
@@ -731,5 +731,245 @@ func TestValidateTokenReturnsUltimateModelEnabled(t *testing.T) {
 
 	if !validated.UltimateModelEnabled {
 		t.Error("validated.UltimateModelEnabled should be true")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Allowed Models Integration Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCreateTokenWithAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	allowedModels := []string{"gpt-4", "claude-3"}
+	_, token, err := store.CreateToken(ctx, "allowed-models-test", nil, "admin", false, allowedModels)
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v, want nil", err)
+	}
+
+	if token == nil {
+		t.Fatal("token is nil")
+	}
+
+	if len(token.AllowedModels) != 2 {
+		t.Errorf("token.AllowedModels length = %d, want 2", len(token.AllowedModels))
+	}
+
+	if token.AllowedModels[0] != "gpt-4" || token.AllowedModels[1] != "claude-3" {
+		t.Errorf("token.AllowedModels = %v, want [gpt-4, claude-3]", token.AllowedModels)
+	}
+}
+
+func TestValidateTokenReturnsAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	allowedModels := []string{"gpt-4", "gemini-pro"}
+	plaintext, _, err := store.CreateToken(ctx, "validate-allowed", nil, "admin", false, allowedModels)
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v, want nil", err)
+	}
+
+	// Validate and check AllowedModels is returned
+	validated, err := store.ValidateToken(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("ValidateToken() error = %v, want nil", err)
+	}
+
+	if len(validated.AllowedModels) != 2 {
+		t.Errorf("validated.AllowedModels length = %d, want 2", len(validated.AllowedModels))
+	}
+
+	if validated.AllowedModels[0] != "gpt-4" || validated.AllowedModels[1] != "gemini-pro" {
+		t.Errorf("validated.AllowedModels = %v, want [gpt-4, gemini-pro]", validated.AllowedModels)
+	}
+}
+
+func TestListTokensReturnsAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create tokens with different allowed_models
+	_, _, err := store.CreateToken(ctx, "list-allowed-1", nil, "admin", false, []string{"gpt-4"})
+	if err != nil {
+		t.Fatalf("CreateToken(1) error = %v", err)
+	}
+
+	_, _, err = store.CreateToken(ctx, "list-allowed-2", nil, "admin", false, []string{"claude-3", "gemini-pro"})
+	if err != nil {
+		t.Fatalf("CreateToken(2) error = %v", err)
+	}
+
+	_, _, err = store.CreateToken(ctx, "list-allowed-nil", nil, "admin", false, nil)
+	if err != nil {
+		t.Fatalf("CreateToken(3) error = %v", err)
+	}
+
+	tokens, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatalf("ListTokens() error = %v", err)
+	}
+
+	if len(tokens) != 3 {
+		t.Fatalf("len(tokens) = %d, want 3", len(tokens))
+	}
+
+	// Find and verify each token's AllowedModels
+	found := make(map[string][]string)
+	for _, token := range tokens {
+		found[token.Name] = token.AllowedModels
+	}
+
+	// Token with single model
+	if len(found["list-allowed-1"]) != 1 || found["list-allowed-1"][0] != "gpt-4" {
+		t.Errorf("list-allowed-1.AllowedModels = %v, want [gpt-4]", found["list-allowed-1"])
+	}
+
+	// Token with multiple models
+	if len(found["list-allowed-2"]) != 2 {
+		t.Errorf("list-allowed-2.AllowedModels length = %d, want 2", len(found["list-allowed-2"]))
+	}
+
+	// Token with nil models
+	if found["list-allowed-nil"] != nil {
+		t.Errorf("list-allowed-nil.AllowedModels = %v, want nil", found["list-allowed-nil"])
+	}
+}
+
+func TestGetTokenByIDReturnsAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	allowedModels := []string{"o3-mini", "o1", "claude-sonnet"}
+	_, created, err := store.CreateToken(ctx, "get-allowed-test", nil, "admin", false, allowedModels)
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v", err)
+	}
+
+	// Get by ID
+	retrieved, err := store.GetTokenByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTokenByID() error = %v, want nil", err)
+	}
+
+	if len(retrieved.AllowedModels) != 3 {
+		t.Errorf("retrieved.AllowedModels length = %d, want 3", len(retrieved.AllowedModels))
+	}
+
+	if retrieved.AllowedModels[0] != "o3-mini" || retrieved.AllowedModels[1] != "o1" || retrieved.AllowedModels[2] != "claude-sonnet" {
+		t.Errorf("retrieved.AllowedModels = %v, want [o3-mini, o1, claude-sonnet]", retrieved.AllowedModels)
+	}
+}
+
+func TestUpdateTokenPermissionWithAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create token with nil allowed_models
+	_, created, err := store.CreateToken(ctx, "update-allowed-test", nil, "admin", false, nil)
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v", err)
+	}
+
+	// Verify initial state
+	retrieved, _ := store.GetTokenByID(ctx, created.ID)
+	if retrieved.AllowedModels != nil {
+		t.Errorf("Initial AllowedModels = %v, want nil", retrieved.AllowedModels)
+	}
+
+	// Update with allowed_models
+	newAllowedModels := []string{"gpt-4-turbo", "claude-3-5-sonnet"}
+	err = store.UpdateTokenPermission(ctx, created.ID, false, newAllowedModels)
+	if err != nil {
+		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
+	}
+
+	// Verify update
+	retrieved, _ = store.GetTokenByID(ctx, created.ID)
+	if len(retrieved.AllowedModels) != 2 {
+		t.Errorf("After update AllowedModels length = %d, want 2", len(retrieved.AllowedModels))
+	}
+	if retrieved.AllowedModels[0] != "gpt-4-turbo" || retrieved.AllowedModels[1] != "claude-3-5-sonnet" {
+		t.Errorf("After update AllowedModels = %v, want [gpt-4-turbo, claude-3-5-sonnet]", retrieved.AllowedModels)
+	}
+}
+
+func TestUpdateTokenPermissionClearAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create token with allowed_models
+	_, created, err := store.CreateToken(ctx, "clear-allowed-test", nil, "admin", false, []string{"gpt-4"})
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v", err)
+	}
+
+	// Verify initial state
+	retrieved, _ := store.GetTokenByID(ctx, created.ID)
+	if len(retrieved.AllowedModels) != 1 {
+		t.Errorf("Initial AllowedModels length = %d, want 1", len(retrieved.AllowedModels))
+	}
+
+	// Update with nil to clear
+	err = store.UpdateTokenPermission(ctx, created.ID, false, nil)
+	if err != nil {
+		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
+	}
+
+	// Verify cleared
+	retrieved, _ = store.GetTokenByID(ctx, created.ID)
+	if retrieved.AllowedModels != nil {
+		t.Errorf("After clear AllowedModels = %v, want nil", retrieved.AllowedModels)
+	}
+}
+
+func TestCreateTokenWithEmptyAllowedModels(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewTokenStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create token with empty slice
+	_, token, err := store.CreateToken(ctx, "empty-allowed-test", nil, "admin", false, []string{})
+	if err != nil {
+		t.Fatalf("CreateToken() error = %v, want nil", err)
+	}
+
+	// Empty slice should serialize to NULL in DB
+	// After retrieval, it should be nil
+	plaintext, _, _ := store.CreateToken(ctx, "for-validate", nil, "admin", false, []string{})
+	validated, err := store.ValidateToken(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("ValidateToken() error = %v", err)
+	}
+
+	// Empty slice stored returns nil
+	if validated.AllowedModels != nil {
+		t.Errorf("Empty []string stored returns %v, want nil", validated.AllowedModels)
+	}
+
+	// Original token object has empty slice (before DB round-trip)
+	if token.AllowedModels == nil {
+		t.Errorf("token.AllowedModels should be empty slice, got nil")
 	}
 }
