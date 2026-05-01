@@ -409,14 +409,15 @@ func TestIsModelAllowed_NilAllowedModels(t *testing.T) {
 }
 
 func TestIsModelAllowed_EmptyAllowedModels(t *testing.T) {
+	// Empty slice [] means "all models allowed" (same as nil)
 	token := &auth.AuthToken{AllowedModels: []string{}}
 	tests := []struct {
 		model  string
 		allowed bool
 	}{
-		{"gpt-4", false},
-		{"claude-3", false},
-		{"any-model", false},
+		{"gpt-4", true},
+		{"claude-3", true},
+		{"any-model", true},
 	}
 
 	for _, tt := range tests {
@@ -597,12 +598,12 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	}
 }
 
-func TestHandler_EmptyAllowedModels_DeniesAll(t *testing.T) {
+func TestHandler_EmptyAllowedModels_AllowsAll(t *testing.T) {
 	env := setupTestEnv(t)
 	ctx := context.Background()
 
-	// Create token with empty allowed_models (denies all)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "deny-all-token", nil, "test", false, []string{})
+	// Create token with empty allowed_models (allows all, same as nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allow-all-token", nil, "test", false, []string{})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -612,9 +613,9 @@ func TestHandler_EmptyAllowedModels_DeniesAll(t *testing.T) {
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	// Should be 403 - empty array means no models allowed
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden, got %d: %s", rr.Code, rr.Body.String())
+	// Should be 200 - empty array means all models allowed
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

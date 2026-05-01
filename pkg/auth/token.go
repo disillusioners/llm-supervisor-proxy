@@ -109,16 +109,13 @@ func (t *AuthToken) IsExpired() bool {
 }
 
 // IsModelAllowed checks if the given model name is allowed for this token.
-// Returns true if AllowedModels is nil/empty (all models allowed) or if
-// modelName is found in the list. Case-sensitive exact match.
-// Empty slice [] means no models allowed (returns false).
+// Returns true if AllowedModels is nil (all models allowed) or if modelName is
+// found in the list. Empty slice is treated the same as nil (all models allowed).
+// Case-sensitive exact match.
 func (t *AuthToken) IsModelAllowed(modelName string) bool {
-	// Empty slice means no models allowed
-	if t.AllowedModels == nil {
-		return true
-	}
+	// nil or empty slice means all models are allowed
 	if len(t.AllowedModels) == 0 {
-		return false
+		return true
 	}
 	for _, allowed := range t.AllowedModels {
 		if allowed == modelName {
