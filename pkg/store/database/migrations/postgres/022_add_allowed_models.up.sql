@@ -1,0 +1,1 @@
+ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS allowed_models TEXT DEFAULT NULL;
