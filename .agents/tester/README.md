@@ -26,6 +26,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Secondary Upstream Model (Phase 4) | 2026-04-13 | ✅ PASS | 7 new/extended test files, 2011 lines, 935 tests total, commit 9b20182 |
 | C1+C2 Critical Test Gaps | 2026-04-13 | ✅ PASS | 8 new test functions, 1144 lines, execution-level model swap + peak combo, commit 3cd5d56 |
 | Token Allowed Models | 2026-05-01 | ✅ PASS | 23 integration tests, 3 bugs found+fixed, branch `feature/token-allowed-models` |
+| Token Ultimate Model Override | 2026-05-02 | ✅ PASS | 24 new tests, 1297 lines, branch `feature/token-ultimate-model` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
