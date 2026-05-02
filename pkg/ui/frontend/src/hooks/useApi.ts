@@ -429,7 +429,7 @@ export function useTokens() {
         body: JSON.stringify({
           ultimate_model_enabled: ultimateModelEnabled,
           allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null,
-          ultimate_model: ultimateModel,
+          ...(ultimateModel !== undefined && { ultimate_model: ultimateModel }),
         }),
       });
       if (!response.ok) {

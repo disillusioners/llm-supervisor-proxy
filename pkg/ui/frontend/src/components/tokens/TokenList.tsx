@@ -61,6 +61,10 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
 
   const handleTogglePermission = async (token: ApiToken) => {
     if (togglingId) return; // Guard FIRST - prevent concurrent toggles
+    // Cancel any in-progress ultimate_model edit
+    if (editingUltimateModelId === token.id) {
+      cancelEditUltimateModel();
+    }
     const currentValue = optimisticValues[token.id] ?? token.ultimate_model_enabled;
     const newValue = !currentValue;
     try {
