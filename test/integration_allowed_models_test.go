@@ -188,7 +188,7 @@ func TestCreateToken_WithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models
-	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token", nil, "test", false, []string{"gpt-4", "claude-3"})
+	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token", nil, "test", false, "", []string{"gpt-4", "claude-3"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestCreateToken_WithNilAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with nil allowed_models (all models allowed)
-	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token-nil", nil, "test", false, nil)
+	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token-nil", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestCreateToken_WithEmptyAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty allowed_models (no models allowed)
-	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token-empty", nil, "test", false, []string{})
+	plaintext, token, err := env.tokenStore.CreateToken(ctx, "test-token-empty", nil, "test", false, "", []string{})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -281,13 +281,13 @@ func TestUpdateTokenPermission_AllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token without allowed_models
-	_, token, err := env.tokenStore.CreateToken(ctx, "test-token-update", nil, "test", false, nil)
+	_, token, err := env.tokenStore.CreateToken(ctx, "test-token-update", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
 	// Update allowed_models
-	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, true, []string{"gpt-4", "claude-3", "gpt-3.5"})
+	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, true, "", []string{"gpt-4", "claude-3", "gpt-3.5"})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission failed: %v", err)
 	}
@@ -310,13 +310,13 @@ func TestUpdateTokenPermission_ClearAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models
-	_, token, err := env.tokenStore.CreateToken(ctx, "test-token-clear", nil, "test", false, []string{"gpt-4"})
+	_, token, err := env.tokenStore.CreateToken(ctx, "test-token-clear", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
 	// Update to clear allowed_models (pass empty slice)
-	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, false, []string{})
+	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, false, "", []string{})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission failed: %v", err)
 	}
@@ -346,8 +346,8 @@ func TestListTokens_ReturnsAllowedModels(t *testing.T) {
 		{"token-empty", []string{}},
 	}
 
-	for _, tc := range testCases {
-		_, _, err := env.tokenStore.CreateToken(ctx, tc.name, nil, "test", false, tc.allowedModels)
+		for _, tc := range testCases {
+		_, _, err := env.tokenStore.CreateToken(ctx, tc.name, nil, "test", false, "", tc.allowedModels)
 		if err != nil {
 			t.Fatalf("CreateToken(%s) failed: %v", tc.name, err)
 		}
@@ -513,7 +513,7 @@ func TestHandler_ModelAllowed_Returns200(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with gpt-4 allowed
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", false, []string{"gpt-4"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with only gpt-4 allowed
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, []string{"gpt-4"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with no restrictions (nil allowed_models)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", false, nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -603,7 +603,7 @@ func TestHandler_EmptyAllowedModels_AllowsAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty allowed_models (allows all, same as nil)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allow-all-token", nil, "test", false, []string{})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allow-all-token", nil, "test", false, "", []string{})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestHandler_CaseSensitivity_ExactMatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token allowing "GPT-4" (uppercase)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-token", nil, "test", false, []string{"GPT-4"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-token", nil, "test", false, "", []string{"GPT-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -685,7 +685,7 @@ func TestHandler_UpdateToken_ChangesEnforcement(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with gpt-4 allowed
-	plaintext, token, err := env.tokenStore.CreateToken(ctx, "update-test", nil, "test", false, []string{"gpt-4"})
+	plaintext, token, err := env.tokenStore.CreateToken(ctx, "update-test", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestHandler_UpdateToken_ChangesEnforcement(t *testing.T) {
 	}
 
 	// Update token to allow claude-3
-	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, false, []string{"gpt-4", "claude-3"})
+	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, false, "", []string{"gpt-4", "claude-3"})
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission failed: %v", err)
 	}
@@ -733,7 +733,7 @@ func TestHandler_ValidateToken_ReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with specific allowed_models
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "validate-test", nil, "test", false, []string{"gpt-4", "claude-3"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "validate-test", nil, "test", false, "", []string{"gpt-4", "claude-3"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestAPI_CreateToken_WithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models via store
-	plaintext, token, err := env.tokenStore.CreateToken(ctx, "api-token", nil, "test", false, []string{"gpt-4", "claude-3"})
+	plaintext, token, err := env.tokenStore.CreateToken(ctx, "api-token", nil, "test", false, "", []string{"gpt-4", "claude-3"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -782,11 +782,11 @@ func TestAPI_ListTokens_ReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create tokens with different allowed_models
-	_, _, err := env.tokenStore.CreateToken(ctx, "api-token-1", nil, "test", false, []string{"gpt-4"})
+	_, _, err := env.tokenStore.CreateToken(ctx, "api-token-1", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
-	_, _, err = env.tokenStore.CreateToken(ctx, "api-token-2", nil, "test", false, nil)
+	_, _, err = env.tokenStore.CreateToken(ctx, "api-token-2", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -807,14 +807,14 @@ func TestAPI_PatchToken_UpdateAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token
-	_, token, err := env.tokenStore.CreateToken(ctx, "patch-token", nil, "test", false, nil)
+	_, token, err := env.tokenStore.CreateToken(ctx, "patch-token", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
 	// Update allowed_models
 	models := []string{"gpt-4", "claude-3", "gpt-3.5"}
-	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, true, models)
+	err = env.tokenStore.UpdateTokenPermission(ctx, token.ID, true, "", models)
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission failed: %v", err)
 	}

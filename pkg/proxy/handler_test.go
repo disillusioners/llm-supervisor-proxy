@@ -2008,7 +2008,7 @@ func (m *ultimateMockTokenStore) ValidateToken(ctx context.Context, plaintext st
 	return nil, auth.ErrTokenNotFound
 }
 
-func (m *ultimateMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *ultimateMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 
@@ -2024,7 +2024,7 @@ func (m *ultimateMockTokenStore) GetTokenByID(ctx context.Context, id string) (*
 	panic("not implemented")
 }
 
-func (m *ultimateMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
+func (m *ultimateMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
 	panic("not implemented")
 }
 
@@ -2348,7 +2348,7 @@ func (m *modelAccessMockTokenStore) ValidateToken(ctx context.Context, plaintext
 	return token, nil
 }
 
-func (m *modelAccessMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *modelAccessMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 
@@ -2364,7 +2364,7 @@ func (m *modelAccessMockTokenStore) GetTokenByID(ctx context.Context, id string)
 	panic("not implemented")
 }
 
-func (m *modelAccessMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, allowedModels []string) error {
+func (m *modelAccessMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
 	panic("not implemented")
 }
 

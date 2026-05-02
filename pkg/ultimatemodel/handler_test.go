@@ -670,7 +670,7 @@ func TestExecute_ModelNotFound(t *testing.T) {
 
 	hash := "somehash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "nonexistent-model", hash, &headersSent)
+	_, err := h.Execute(context.Background(), w, r, body, "nonexistent-model", hash, &headersSent, nil)
 
 	if err == nil {
 		t.Error("Execute should return error for unknown model")
@@ -730,7 +730,7 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 
 	hash := "testhash123"
 	headersSent := false
-	usage, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent)
+	usage, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -800,7 +800,7 @@ func TestExecute_ExternalStreaming(t *testing.T) {
 
 	hash := "streamhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -834,7 +834,7 @@ func TestExecute_UpstreamError(t *testing.T) {
 
 	hash := "errorhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
 
 	if err == nil {
 		t.Error("Execute should return error for upstream failure")
@@ -870,7 +870,7 @@ func TestExecute_ContextCancellation(t *testing.T) {
 
 	hash := "cancelhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
 
 	// Should get an error due to context timeout
 	if err == nil {

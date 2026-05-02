@@ -48,7 +48,7 @@ func newTestDB(t *testing.T) (*testDB, func()) {
 
 // runTestMigrations creates the auth_tokens table for testing
 func runTestMigrations(db *sql.DB) error {
-	// Create auth_tokens table (matching migration 004 + 020 + 022)
+	// Create auth_tokens table (matching migration 004 + 020 + 022 + 023)
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS auth_tokens (
 			id TEXT PRIMARY KEY,
@@ -58,6 +58,7 @@ func runTestMigrations(db *sql.DB) error {
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL,
 			ultimate_model_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+			ultimate_model TEXT,
 			allowed_models TEXT
 		)
 	`)
@@ -96,7 +97,7 @@ func TestCreateToken(t *testing.T) {
 	store := NewTokenStore(db.DB, database.SQLite)
 	ctx := context.Background()
 
-	plaintext, token, err := store.CreateToken(ctx, "test-token", nil, "admin", false, nil)
+	plaintext, token, err := store.CreateToken(ctx, "test-token", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -142,7 +143,7 @@ func TestCreateTokenWithExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	futureTime := time.Now().Add(24 * time.Hour)
-	plaintext, token, err := store.CreateToken(ctx, "expiring-token", &futureTime, "admin", false, nil)
+	plaintext, token, err := store.CreateToken(ctx, "expiring-token", &futureTime, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -172,7 +173,7 @@ func TestValidateTokenValid(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	plaintext, _, err := store.CreateToken(ctx, "valid-test", nil, "admin", false, nil)
+	plaintext, _, err := store.CreateToken(ctx, "valid-test", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -253,7 +254,7 @@ func TestValidateTokenExpired(t *testing.T) {
 
 	// Create token with past expiration
 	pastTime := time.Now().Add(-24 * time.Hour)
-	plaintext, _, err := store.CreateToken(ctx, "expired-token", &pastTime, "admin", false, nil)
+	plaintext, _, err := store.CreateToken(ctx, "expired-token", &pastTime, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -291,7 +292,7 @@ func TestListTokensReturnsAll(t *testing.T) {
 
 	// Create multiple tokens
 	for i := 0; i < 5; i++ {
-		_, _, err := store.CreateToken(ctx, "token-"+string(rune('a'+i)), nil, "admin", false, nil)
+		_, _, err := store.CreateToken(ctx, "token-"+string(rune('a'+i)), nil, "admin", false, "", nil)
 		if err != nil {
 			t.Fatalf("CreateToken() error = %v", err)
 		}
@@ -323,7 +324,7 @@ func TestListTokensOrderedByCreatedAtDesc(t *testing.T) {
 
 	// Create tokens with slight delays to ensure different timestamps
 	for i := 0; i < 3; i++ {
-		_, _, err := store.CreateToken(ctx, "order-test-"+string(rune('a'+i)), nil, "admin", false, nil)
+		_, _, err := store.CreateToken(ctx, "order-test-"+string(rune('a'+i)), nil, "admin", false, "", nil)
 		if err != nil {
 			t.Fatalf("CreateToken() error = %v", err)
 		}
@@ -352,7 +353,7 @@ func TestDeleteToken(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	plaintext, token, err := store.CreateToken(ctx, "delete-test", nil, "admin", false, nil)
+	plaintext, token, err := store.CreateToken(ctx, "delete-test", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -391,7 +392,7 @@ func TestGetTokenByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a token
-	_, created, err := store.CreateToken(ctx, "get-by-id-test", nil, "creator", false, nil)
+	_, created, err := store.CreateToken(ctx, "get-by-id-test", nil, "creator", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -445,12 +446,12 @@ func TestTokenStoreMultipleOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// Create multiple tokens
-	token1, _, err := store.CreateToken(ctx, "multi-1", nil, "admin", false, nil)
+	token1, _, err := store.CreateToken(ctx, "multi-1", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken(1) error = %v", err)
 	}
 
-	token2, _, err := store.CreateToken(ctx, "multi-2", nil, "admin", false, nil)
+	token2, _, err := store.CreateToken(ctx, "multi-2", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken(2) error = %v", err)
 	}
@@ -476,7 +477,7 @@ func TestTokenStoreMultipleOperations(t *testing.T) {
 	}
 
 	// Delete one
-	_, deleteToken, _ := store.CreateToken(ctx, "to-delete", nil, "admin", false, nil)
+	_, deleteToken, _ := store.CreateToken(ctx, "to-delete", nil, "admin", false, "", nil)
 	store.DeleteToken(ctx, deleteToken.ID)
 
 	tokens, err = store.ListTokens(ctx)
@@ -496,7 +497,7 @@ func TestTokenStoreCreateTokenWithNoExpiration(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with nil expiration
-	_, token, err := store.CreateToken(ctx, "no-expire", nil, "admin", false, nil)
+	_, token, err := store.CreateToken(ctx, "no-expire", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -506,7 +507,7 @@ func TestTokenStoreCreateTokenWithNoExpiration(t *testing.T) {
 	}
 
 	// Should validate successfully (not expired)
-	plaintext, _, _ := store.CreateToken(ctx, "for-plaintext", nil, "admin", false, nil)
+	plaintext, _, _ := store.CreateToken(ctx, "for-plaintext", nil, "admin", false, "", nil)
 	validated, err := store.ValidateToken(ctx, plaintext)
 	if err != nil {
 		t.Fatalf("ValidateToken() error = %v", err)
@@ -532,7 +533,7 @@ func TestCreateTokenWithUltimateModelEnabled(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with ultimate_model_enabled = true
-	plaintext, token, err := store.CreateToken(ctx, "ultimate-enabled", nil, "admin", true, nil)
+	plaintext, token, err := store.CreateToken(ctx, "ultimate-enabled", nil, "admin", true, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -568,7 +569,7 @@ func TestCreateTokenWithUltimateModelDisabled(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with ultimate_model_enabled = false (default)
-	_, token, err := store.CreateToken(ctx, "ultimate-disabled", nil, "admin", false, nil)
+	_, token, err := store.CreateToken(ctx, "ultimate-disabled", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -586,12 +587,12 @@ func TestListTokensReturnsUltimateModelEnabled(t *testing.T) {
 	ctx := context.Background()
 
 	// Create tokens with different ultimate_model_enabled values
-	_, _, err := store.CreateToken(ctx, "ultimate-true", nil, "admin", true, nil)
+	_, _, err := store.CreateToken(ctx, "ultimate-true", nil, "admin", true, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
 
-	_, _, err = store.CreateToken(ctx, "ultimate-false", nil, "admin", false, nil)
+	_, _, err = store.CreateToken(ctx, "ultimate-false", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -638,7 +639,7 @@ func TestGetTokenByIDReturnsUltimateModelEnabled(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with ultimate_model_enabled = true
-	_, created, err := store.CreateToken(ctx, "get-ultimate-test", nil, "admin", true, nil)
+	_, created, err := store.CreateToken(ctx, "get-ultimate-test", nil, "admin", true, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -662,7 +663,7 @@ func TestUpdateTokenPermission(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with ultimate_model_enabled = false
-	_, created, err := store.CreateToken(ctx, "update-test", nil, "admin", false, nil)
+	_, created, err := store.CreateToken(ctx, "update-test", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -673,7 +674,7 @@ func TestUpdateTokenPermission(t *testing.T) {
 	}
 
 	// Enable ultimate model
-	err = store.UpdateTokenPermission(ctx, created.ID, true, nil)
+	err = store.UpdateTokenPermission(ctx, created.ID, true, "", nil)
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission(enable) error = %v, want nil", err)
 	}
@@ -685,7 +686,7 @@ func TestUpdateTokenPermission(t *testing.T) {
 	}
 
 	// Disable ultimate model
-	err = store.UpdateTokenPermission(ctx, created.ID, false, nil)
+	err = store.UpdateTokenPermission(ctx, created.ID, false, "", nil)
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission(disable) error = %v, want nil", err)
 	}
@@ -704,7 +705,7 @@ func TestUpdateTokenPermissionNotFound(t *testing.T) {
 	store := NewTokenStore(db.DB, database.SQLite)
 	ctx := context.Background()
 
-	err := store.UpdateTokenPermission(ctx, "nonexistent-id", true, nil)
+	err := store.UpdateTokenPermission(ctx, "nonexistent-id", true, "", nil)
 	if err != ErrTokenNotFound {
 		t.Errorf("UpdateTokenPermission() error = %v, want ErrTokenNotFound", err)
 	}
@@ -718,7 +719,7 @@ func TestValidateTokenReturnsUltimateModelEnabled(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with ultimate_model_enabled = true
-	plaintext, _, err := store.CreateToken(ctx, "validate-ultimate", nil, "admin", true, nil)
+	plaintext, _, err := store.CreateToken(ctx, "validate-ultimate", nil, "admin", true, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -746,7 +747,7 @@ func TestCreateTokenWithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"gpt-4", "claude-3"}
-	_, token, err := store.CreateToken(ctx, "allowed-models-test", nil, "admin", false, allowedModels)
+	_, token, err := store.CreateToken(ctx, "allowed-models-test", nil, "admin", false, "", allowedModels)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -772,7 +773,7 @@ func TestValidateTokenReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"gpt-4", "gemini-pro"}
-	plaintext, _, err := store.CreateToken(ctx, "validate-allowed", nil, "admin", false, allowedModels)
+	plaintext, _, err := store.CreateToken(ctx, "validate-allowed", nil, "admin", false, "", allowedModels)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
@@ -800,17 +801,17 @@ func TestListTokensReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create tokens with different allowed_models
-	_, _, err := store.CreateToken(ctx, "list-allowed-1", nil, "admin", false, []string{"gpt-4"})
+	_, _, err := store.CreateToken(ctx, "list-allowed-1", nil, "admin", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken(1) error = %v", err)
 	}
 
-	_, _, err = store.CreateToken(ctx, "list-allowed-2", nil, "admin", false, []string{"claude-3", "gemini-pro"})
+	_, _, err = store.CreateToken(ctx, "list-allowed-2", nil, "admin", false, "", []string{"claude-3", "gemini-pro"})
 	if err != nil {
 		t.Fatalf("CreateToken(2) error = %v", err)
 	}
 
-	_, _, err = store.CreateToken(ctx, "list-allowed-nil", nil, "admin", false, nil)
+	_, _, err = store.CreateToken(ctx, "list-allowed-nil", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken(3) error = %v", err)
 	}
@@ -854,7 +855,7 @@ func TestGetTokenByIDReturnsAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	allowedModels := []string{"o3-mini", "o1", "claude-sonnet"}
-	_, created, err := store.CreateToken(ctx, "get-allowed-test", nil, "admin", false, allowedModels)
+	_, created, err := store.CreateToken(ctx, "get-allowed-test", nil, "admin", false, "", allowedModels)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -882,7 +883,7 @@ func TestUpdateTokenPermissionWithAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with nil allowed_models
-	_, created, err := store.CreateToken(ctx, "update-allowed-test", nil, "admin", false, nil)
+	_, created, err := store.CreateToken(ctx, "update-allowed-test", nil, "admin", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -895,7 +896,7 @@ func TestUpdateTokenPermissionWithAllowedModels(t *testing.T) {
 
 	// Update with allowed_models
 	newAllowedModels := []string{"gpt-4-turbo", "claude-3-5-sonnet"}
-	err = store.UpdateTokenPermission(ctx, created.ID, false, newAllowedModels)
+	err = store.UpdateTokenPermission(ctx, created.ID, false, "", newAllowedModels)
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
 	}
@@ -918,7 +919,7 @@ func TestUpdateTokenPermissionClearAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models
-	_, created, err := store.CreateToken(ctx, "clear-allowed-test", nil, "admin", false, []string{"gpt-4"})
+	_, created, err := store.CreateToken(ctx, "clear-allowed-test", nil, "admin", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v", err)
 	}
@@ -930,7 +931,7 @@ func TestUpdateTokenPermissionClearAllowedModels(t *testing.T) {
 	}
 
 	// Update with nil to clear
-	err = store.UpdateTokenPermission(ctx, created.ID, false, nil)
+	err = store.UpdateTokenPermission(ctx, created.ID, false, "", nil)
 	if err != nil {
 		t.Fatalf("UpdateTokenPermission() error = %v, want nil", err)
 	}
@@ -950,14 +951,14 @@ func TestCreateTokenWithEmptyAllowedModels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty slice
-	_, token, err := store.CreateToken(ctx, "empty-allowed-test", nil, "admin", false, []string{})
+	_, token, err := store.CreateToken(ctx, "empty-allowed-test", nil, "admin", false, "", []string{})
 	if err != nil {
 		t.Fatalf("CreateToken() error = %v, want nil", err)
 	}
 
 	// Empty slice should serialize to NULL in DB
 	// After retrieval, it should be nil
-	plaintext, _, _ := store.CreateToken(ctx, "for-validate", nil, "admin", false, []string{})
+	plaintext, _, _ := store.CreateToken(ctx, "for-validate", nil, "admin", false, "", []string{})
 	validated, err := store.ValidateToken(ctx, plaintext)
 	if err != nil {
 		t.Fatalf("ValidateToken() error = %v", err)

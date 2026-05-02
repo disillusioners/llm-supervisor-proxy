@@ -223,6 +223,7 @@ func (h *Handler) SendRetryExhaustedError(
 // On failure: KEEPS retry counter to enforce max retry limit.
 // On success: clears retry counter but keeps hash in cache.
 // Returns usage statistics extracted from the response.
+// tokenModelID is an optional per-token override for the ultimate model ID (nil = use global config).
 func (h *Handler) Execute(
 	parentCtx context.Context,
 	w http.ResponseWriter,
@@ -231,9 +232,15 @@ func (h *Handler) Execute(
 	originalModelID string,
 	hash string,
 	headersSent *bool,
+	tokenModelID *string,
 ) (*store.Usage, error) {
 	cfg := h.config.Get()
 	modelID := cfg.UltimateModel.ModelID
+
+	// Apply per-token override if provided
+	if tokenModelID != nil && *tokenModelID != "" {
+		modelID = *tokenModelID
+	}
 
 	// Get model config from DATABASE
 	modelCfg := h.modelsMgr.GetModel(modelID)

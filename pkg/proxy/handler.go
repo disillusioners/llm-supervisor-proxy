@@ -388,6 +388,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			rc.tokenID = token.ID
 			rc.tokenName = token.Name
 			rc.ultimateModelEnabled = token.UltimateModelEnabled
+			rc.ultimateModelID = token.UltimateModelID
 
 			// === MODEL ACCESS CHECK ===
 			// Check if the requested model is allowed for this token
@@ -453,6 +454,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			if result.Triggered {
 				// Check if retry limit exhausted
 				if result.RetryExhausted {
+					// Resolve ultimate model ID with per-token override
+					ultimateModelID := h.ultimateHandler.GetModelID()
+					if rc.ultimateModelID != "" {
+						ultimateModelID = rc.ultimateModelID
+					}
+
 					log.Printf("[UltimateModel] Retry limit exhausted for hash=%s (attempt %d/%d)",
 						result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
@@ -468,7 +475,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					rc.reqLog.EndTime = time.Now()
 					rc.reqLog.Duration = time.Since(rc.startTime).String()
 					rc.reqLog.UltimateModelUsed = true
-					rc.reqLog.UltimateModelID = h.ultimateHandler.GetModelID()
+					rc.reqLog.UltimateModelID = ultimateModelID
 					h.store.Add(rc.reqLog)
 
 					// Publish event
@@ -484,7 +491,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					return
 				}
 
+				// Resolve ultimate model ID with per-token override
 				ultimateModelID := h.ultimateHandler.GetModelID()
+				if rc.ultimateModelID != "" {
+					ultimateModelID = rc.ultimateModelID
+					log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
+				}
 				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
 					ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
@@ -540,7 +552,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// Execute with ultimate model (raw proxy, no retry/fallback)
 				// The Execute method determines streaming from requestBody["stream"]
 				// Heartbeat is started by the ultimate handler after headers are sent
-				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent)
+				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
 				if err != nil {
 					log.Printf("[UltimateModel] Error: %v", err)
 					rc.reqLog.Status = "failed"

@@ -1,0 +1,1 @@
+ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS ultimate_model TEXT DEFAULT NULL;

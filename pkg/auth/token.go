@@ -31,6 +31,7 @@ type AuthToken struct {
 	CreatedAt            time.Time
 	CreatedBy            string
 	UltimateModelEnabled bool         `json:"ultimate_model_enabled"`
+	UltimateModelID      string       `json:"ultimate_model"` // Empty = use global config
 	AllowedModels        []string     `json:"allowed_models"` // nil/empty = all models allowed
 }
 
@@ -66,6 +67,23 @@ func ScanAllowedModels(raw interface{}) []string {
 		return []string{}
 	}
 	return models
+}
+
+// scanString deserializes a nullable string from DB.
+// NULL -> empty string, non-NULL -> the value.
+// Handles both string and []byte types from different DB drivers.
+func scanString(raw interface{}) string {
+	if raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return v
+	case []byte:
+		return string(v)
+	default:
+		return ""
+	}
 }
 
 // GenerateToken generates a new random token with sk- prefix

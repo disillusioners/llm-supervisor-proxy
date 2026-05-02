@@ -91,6 +91,7 @@ type requestContext struct {
 
 	// Ultimate model permission (from token)
 	ultimateModelEnabled bool
+	ultimateModelID     string // Per-token override model ID (empty = use global config)
 }
 
 // reset clears all accumulated state in the request context.
