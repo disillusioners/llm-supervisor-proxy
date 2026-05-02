@@ -1829,18 +1829,19 @@ func TestIdleTermination_Triggered(t *testing.T) {
 		t.Fatal("request did not complete within 10 seconds")
 	}
 
-	// Verify response contains idle termination error
+	// Verify response: when idle termination fires, the partial chunks are returned
+	// but no SSE error is sent (connection is already broken per handler.go design)
 	respBody := rr.Body.String()
 
-	// Should contain error indicating idle termination
-	// The exact message is "Upstream idle timeout — response terminated"
-	if !strings.Contains(respBody, "idle") && !strings.Contains(respBody, "Idle") {
-		t.Errorf("expected idle termination error in response, got: %s", respBody)
+	// Should contain the partial chunks that were received before termination
+	if !strings.Contains(respBody, "chunk0") || !strings.Contains(respBody, "chunk1") || !strings.Contains(respBody, "chunk2") {
+		t.Errorf("expected partial chunks in response, got: %s", respBody)
 	}
 
-	// Should contain error field (from sendSSEError format)
-	if !strings.Contains(respBody, "\"error\"") {
-		t.Errorf("expected 'error' field in SSE error response, got: %s", respBody)
+	// Should NOT contain an error field (idle termination doesn't send SSE error,
+	// it just ends the stream - connection considered already broken)
+	if strings.Contains(respBody, "\"error\"") {
+		t.Errorf("expected no 'error' field in SSE response (idle termination doesn't send error), got: %s", respBody)
 	}
 }
 

@@ -293,3 +293,47 @@ func TestAuthToken_IsModelAllowed(t *testing.T) {
 		})
 	}
 }
+
+// TestIsModelAllowed_UltimateModel verifies that the ultimate model is subject to
+// the same allowed_models restrictions as regular models.
+func TestIsModelAllowed_UltimateModel(t *testing.T) {
+	// Token has allowed_models=["gpt-4o"] but ultimate_model="claude-3-opus"
+	// The ultimate model should NOT be allowed because it's not in the allowed list
+	token := &AuthToken{
+		AllowedModels:    []string{"gpt-4o"},
+		UltimateModelID:  "claude-3-opus",
+		UltimateModelEnabled: true,
+	}
+
+	// gpt-4o is in allowed list - should be allowed
+	if !token.IsModelAllowed("gpt-4o") {
+		t.Error("gpt-4o should be allowed (it's in allowed_models)")
+	}
+
+	// claude-3-opus is the ultimate model but NOT in allowed list - should NOT be allowed
+	if token.IsModelAllowed("claude-3-opus") {
+		t.Error("claude-3-opus should NOT be allowed (ultimate model not in allowed_models)")
+	}
+
+	// Token with empty allowed_models (all models allowed) - ultimate model should be allowed
+	token2 := &AuthToken{
+		AllowedModels:    nil, // all models allowed
+		UltimateModelID:  "claude-3-opus",
+		UltimateModelEnabled: true,
+	}
+
+	if !token2.IsModelAllowed("claude-3-opus") {
+		t.Error("claude-3-opus should be allowed when allowed_models is nil")
+	}
+
+	// Token with ultimate model explicitly in allowed list
+	token3 := &AuthToken{
+		AllowedModels:    []string{"gpt-4o", "claude-3-opus"},
+		UltimateModelID:  "claude-3-opus",
+		UltimateModelEnabled: true,
+	}
+
+	if !token3.IsModelAllowed("claude-3-opus") {
+		t.Error("claude-3-opus should be allowed (it's in allowed_models)")
+	}
+}

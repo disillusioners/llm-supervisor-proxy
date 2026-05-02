@@ -1158,3 +1158,272 @@ func TestHandler_FullFlow(t *testing.T) {
 
 	_ = hash // Use the hash
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-Token Override Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestExecute_PerTokenOverride_NonStream tests Execute with tokenModelID override (non-streaming)
+func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract model from request body
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model" // Global config model
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	// Add both the global model and the per-token override model
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddModel(models.ModelConfig{ID: "token-override-model", Name: "token-override", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "per-token-hash"
+	headersSent := false
+	tokenModelID := "token-override-model" // Per-token override
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
+
+	if err != nil {
+		t.Errorf("Execute returned error: %v", err)
+	}
+
+	// Verify the per-token model was used instead of global
+	if usedModel != "token-override-model" {
+		t.Errorf("Expected model = %q, got %q", "token-override-model", usedModel)
+	}
+}
+
+// TestExecute_PerTokenOverride_Stream tests Execute with tokenModelID override (streaming)
+func TestExecute_PerTokenOverride_Stream(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract model from request body
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+
+		time.Sleep(10 * time.Millisecond)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n")
+		flusher.Flush()
+
+		time.Sleep(10 * time.Millisecond)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddModel(models.ModelConfig{ID: "token-stream-override", Name: "token-stream", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   true,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "stream-override-hash"
+	headersSent := false
+	tokenModelID := "token-stream-override"
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
+
+	if err != nil {
+		t.Errorf("Execute returned error: %v", err)
+	}
+
+	if usedModel != "token-stream-override" {
+		t.Errorf("Expected model = %q, got %q", "token-stream-override", usedModel)
+	}
+}
+
+// TestExecute_PerTokenOverride_Empty_UsesGlobal tests that empty string tokenModelID uses global config
+func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "empty-override-hash"
+	headersSent := false
+	emptyModelID := "" // Empty string - should use global
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &emptyModelID)
+
+	if err != nil {
+		t.Errorf("Execute returned error: %v", err)
+	}
+
+	// Verify the global model was used
+	if usedModel != "global-ultimate-model" {
+		t.Errorf("Expected model = %q (global), got %q", "global-ultimate-model", usedModel)
+	}
+}
+
+// TestExecute_PerTokenOverrideNil_UsesGlobal tests that nil tokenModelID uses global config
+func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "nil-override-hash"
+	headersSent := false
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil) // nil - should use global
+
+	if err != nil {
+		t.Errorf("Execute returned error: %v", err)
+	}
+
+	// Verify the global model was used
+	if usedModel != "global-ultimate-model" {
+		t.Errorf("Expected model = %q (global), got %q", "global-ultimate-model", usedModel)
+	}
+}

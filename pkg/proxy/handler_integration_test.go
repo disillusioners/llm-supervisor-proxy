@@ -399,3 +399,378 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		t.Errorf("total_tokens = %d, want 450", totalTok)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-Token Ultimate Model Override Integration Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestPerTokenUltimateModelOverride_Resolution tests that when a token has ultimateModelID set
+// and ultimateModelEnabled=true, the handler passes the token's model to ultimateHandler.Execute()
+// instead of the global config model.
+func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
+	// Setup: Create in-memory database with required tables
+	db := setupIntegrationDB(t)
+
+	// Setup: Create counter backed by the database
+	counter := usage.NewCounter(db, database.SQLite)
+
+	// Setup: Create token store with a token that has ultimateModelID set
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate-override",
+		nil,
+		"test-user",
+		true,               // ultimateModelEnabled = true
+		"token-ultimate-model", // ultimateModelID = per-token override
+		nil,               // allowedModels = nil (all models allowed)
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	// Setup: Create models config
+	modelsConfig := models.NewModelsConfig()
+
+	// Create ultimate model upstream server that records the model used
+	var ultimateModelUsed string
+	ultimateUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extract model from request
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				ultimateModelUsed = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-ultimate",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   ultimateModelUsed,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Ultimate response!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer ultimateUpstream.Close()
+
+	// Add credential for ultimate model
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "ultimate-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  ultimateUpstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add global ultimate model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "global-ultimate-model",
+		Name:          "Global Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "ultimate-credential",
+		InternalModel: "global-ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (global): %v", err)
+	}
+
+	// Add per-token ultimate model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "token-ultimate-model",
+		Name:          "Token Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "ultimate-credential",
+		InternalModel: "token-ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (token): %v", err)
+	}
+
+	// Add an INTERNAL model for the test request (triggers auth)
+	regularUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Regular upstream should not be called for ultimate model request")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer regularUpstream.Close()
+
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "regular-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  regularUpstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential (regular): %v", err)
+	}
+
+	// Use an internal model to trigger authentication
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "test-model",
+		Name:          "Test Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "regular-credential",
+		InternalModel: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (regular): %v", err)
+	}
+
+	// Setup: Create config manager
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", regularUpstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "global-ultimate-model") // Global config
+	t.Setenv("LOOP_DETECTION_ENABLED", "false")             // Disable loop detection to simplify test
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Disable race retry in the config
+	cfg := mgr.Get()
+	cfg.RaceRetryEnabled = false
+	mgr.Save(cfg)
+
+	conf := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter)
+
+	// Mark the request hash as failed so ultimate model will be triggered
+	// (simulating a duplicate request scenario)
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Trigger ultimate model"},
+	}
+	// Access ultimateHandler (private field) from the handler in the same package
+	h.ultimateHandler.MarkFailed(messages)
+
+	// First ShouldTrigger call: counter=1, not triggered
+	result := h.ultimateHandler.ShouldTrigger(messages)
+	if result.Triggered {
+		t.Error("First ShouldTrigger should not trigger (counter=1)")
+	}
+
+	// Second ShouldTrigger call: counter=2, triggered
+	result = h.ultimateHandler.ShouldTrigger(messages)
+	if !result.Triggered {
+		t.Fatal("Second ShouldTrigger should trigger (counter=2)")
+	}
+
+	// Execute the request
+	reqBody := map[string]interface{}{
+		"model":  "test-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": "Trigger ultimate model",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, httpReq)
+
+	// Verify the request succeeded
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the per-token ultimate model was used instead of the global
+	if ultimateModelUsed != "token-ultimate-model" {
+		t.Errorf("Expected ultimate model = %q (per-token), got %q", "token-ultimate-model", ultimateModelUsed)
+	}
+
+	_ = tokenID // Use the variable
+}
+
+// TestPerTokenUltimateModelDisabled_UsesGlobal tests that when ultimateModelEnabled=false,
+// the global model is used even if the token has UltimateModelID set.
+func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
+	// Setup: Create in-memory database with required tables
+	db := setupIntegrationDB(t)
+
+	// Setup: Create counter backed by the database
+	counter := usage.NewCounter(db, database.SQLite)
+
+	// Setup: Create token with UltimateModelID set but ultimateModelEnabled=false
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate-disabled",
+		nil,
+		"test-user",
+		false,              // ultimateModelEnabled = false (disabled!)
+		"token-ultimate-model", // But ultimateModelID is set
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	// Setup: Create models config
+	modelsConfig := models.NewModelsConfig()
+
+	// Create upstream server for regular requests
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockNonStreamResponseWithUsage("Hello!", 10, 5, 15))
+	}))
+	defer upstream.Close()
+
+	// Create ultimate model upstream server (should NOT be called)
+	ultimateUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Ultimate model upstream should NOT be called when ultimateModelEnabled=false")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ultimateUpstream.Close()
+
+	// Add credential for ultimate model
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "ultimate-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  ultimateUpstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add global ultimate model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "global-ultimate-model",
+		Name:          "Global Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "ultimate-credential",
+		InternalModel: "global-ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (global): %v", err)
+	}
+
+	// Add per-token ultimate model (won't be used because ultimateModelEnabled=false)
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "token-ultimate-model",
+		Name:          "Token Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "ultimate-credential",
+		InternalModel: "token-ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (token): %v", err)
+	}
+
+	// Add regular internal model
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "regular-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential (regular): %v", err)
+	}
+
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "test-model",
+		Name:          "Test Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "regular-credential",
+		InternalModel: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (regular): %v", err)
+	}
+
+	// Setup: Create config manager
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "global-ultimate-model")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	// Make a regular request (not triggering ultimate model because it's disabled)
+	reqBody := map[string]interface{}{
+		"model":  "test-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": "Hello",
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, httpReq)
+
+	// Verify the request succeeded using regular upstream (not ultimate)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The response should come from the regular upstream, not the ultimate model upstream
+	// This confirms ultimate model was not triggered
+
+	_ = tokenID // Use the variable
+}
