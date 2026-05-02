@@ -383,14 +383,17 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                       <div class="flex items-center gap-2">
                         <span class="text-xs text-gray-400">Ultimate model:</span>
                         {editingUltimateModelId === token.id ? (
-                          <input
-                            type="text"
+                          <select
                             value={editingUltimateModelValue}
-                            onInput={(e) => setEditingUltimateModelValue((e.target as HTMLInputElement).value)}
-                            class="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs w-40 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            placeholder="Global default"
+                            onChange={(e) => setEditingUltimateModelValue((e.target as HTMLSelectElement).value)}
+                            class="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                             disabled={savingUltimateModel}
-                          />
+                          >
+                            <option value="">Global Default</option>
+                            {[...models].sort((a, b) => a.name.localeCompare(b.name)).map(model => (
+                              <option key={model.id} value={model.name}>{model.name}</option>
+                            ))}
+                          </select>
                         ) : (
                           <>
                             {token.ultimate_model && token.ultimate_model.trim() !== '' ? (

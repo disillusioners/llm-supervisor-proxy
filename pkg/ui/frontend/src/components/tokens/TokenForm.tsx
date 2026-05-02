@@ -139,13 +139,20 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
             <label class="block text-sm font-medium text-gray-300 mb-1">
               Ultimate Model Override <span class="text-gray-500">(optional)</span>
             </label>
-            <input
-              type="text"
+            <select
               value={ultimateModel}
-              onInput={(e) => setUltimateModel((e.target as HTMLInputElement).value)}
-              class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-              placeholder="e.g., claude-3-opus (leave empty for global default)"
-            />
+              onChange={(e) => setUltimateModel((e.target as HTMLSelectElement).value)}
+              class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            >
+              <option value="">Global Default</option>
+              {[...models]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((model) => (
+                  <option key={model.id} value={model.name}>
+                    {model.name}
+                  </option>
+                ))}
+            </select>
             <p class="text-xs text-gray-400 mt-1">
               Overrides the global ultimate model configuration for this token
             </p>
