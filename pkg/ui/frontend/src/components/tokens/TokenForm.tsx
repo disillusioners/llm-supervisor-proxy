@@ -5,7 +5,7 @@ import type { ApiToken } from '../../types';
 interface TokenFormProps {
   models: { name: string; id: string }[];
   token?: ApiToken;  // For editing existing tokens
-  onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<void>;
+  onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[], ultimateModel?: string) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
@@ -19,6 +19,7 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
     return '';
   });
   const [ultimateModelEnabled, setUltimateModelEnabled] = useState(token?.ultimate_model_enabled || false);
+  const [ultimateModel, setUltimateModel] = useState(token?.ultimate_model || '');
   const [selectedModels, setSelectedModels] = useState<string[]>(token?.allowed_models || []);
   const [saving, setSaving] = useState(false);
 
@@ -35,7 +36,9 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
       onStatus(null);
       const expires = expiresAt ? new Date(expiresAt).toISOString() : null;
       // When selectedModels is empty, it means all models are allowed
-      await onSubmit(name.trim(), expires, ultimateModelEnabled, selectedModels);
+      // When ultimateModelEnabled is false, clear ultimateModel to ""
+      const ultimateModelValue = ultimateModelEnabled ? ultimateModel : '';
+      await onSubmit(name.trim(), expires, ultimateModelEnabled, selectedModels, ultimateModelValue);
     } catch (e) {
       onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save token' });
     } finally {
@@ -106,7 +109,13 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
           <div class="flex items-center gap-3">
             <button
               type="button"
-              onClick={() => setUltimateModelEnabled(!ultimateModelEnabled)}
+              onClick={() => {
+                setUltimateModelEnabled(!ultimateModelEnabled);
+                if (ultimateModelEnabled) {
+                  // Clearing - reset ultimateModel value
+                  setUltimateModel('');
+                }
+              }}
               class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                 ultimateModelEnabled ? 'bg-blue-600' : 'bg-gray-600'
               }`}
@@ -123,6 +132,25 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
             Allow this token to trigger the ultimate model for duplicate request handling
           </p>
         </div>
+
+        {/* Ultimate Model Override - only shown when enabled */}
+        {ultimateModelEnabled && (
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Ultimate Model Override <span class="text-gray-500">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={ultimateModel}
+              onInput={(e) => setUltimateModel((e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+              placeholder="e.g., claude-3-opus (leave empty for global default)"
+            />
+            <p class="text-xs text-gray-400 mt-1">
+              Overrides the global ultimate model configuration for this token
+            </p>
+          </div>
+        )}
 
         <div class="flex justify-end gap-3 pt-2">
           <button

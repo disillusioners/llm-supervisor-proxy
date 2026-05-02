@@ -8,7 +8,7 @@ interface TokenListProps {
   onRevoke: (id: string) => Promise<void>;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
   onCreateToken: () => void;
-  onUpdatePermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[]) => Promise<boolean>;
+  onUpdatePermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[], ultimateModel?: string) => Promise<boolean>;
   onRefetchTokens: () => void;
 }
 
@@ -21,6 +21,10 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
   const [editingModelsId, setEditingModelsId] = useState<string | null>(null);
   const [editingModelsValue, setEditingModelsValue] = useState<string[]>([]);
   const [savingModels, setSavingModels] = useState(false);
+  // Ultimate model override editing state
+  const [editingUltimateModelId, setEditingUltimateModelId] = useState<string | null>(null);
+  const [editingUltimateModelValue, setEditingUltimateModelValue] = useState('');
+  const [savingUltimateModel, setSavingUltimateModel] = useState(false);
 
   const handleConfirmRevoke = async () => {
     if (!tokenToRevoke) return;
@@ -65,7 +69,9 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
       // Optimistic update - toggle immediately
       setOptimisticValues(prev => ({ ...prev, [token.id]: newValue }));
       const allowedModels = optimisticAllowedModels[token.id] ?? token.allowed_models ?? [];
-      const success = await onUpdatePermission(token.id, newValue, allowedModels);
+      // When toggling OFF, send empty string to clear ultimate_model
+      const ultimateModel = newValue ? token.ultimate_model : '';
+      const success = await onUpdatePermission(token.id, newValue, allowedModels, ultimateModel);
       if (!success) {
         // 404 - token was deleted, refresh list and revert optimistic update
         setOptimisticValues(prev => {
@@ -123,7 +129,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
       // Optimistic update
       setOptimisticAllowedModels(prev => ({ ...prev, [tokenId]: editingModelsValue }));
       setEditingModelsId(null);
-      const success = await onUpdatePermission(tokenId, isTokenEnabled(token), editingModelsValue);
+      const success = await onUpdatePermission(tokenId, isTokenEnabled(token), editingModelsValue, token.ultimate_model);
       if (!success) {
         // Revert optimistic update
         setOptimisticAllowedModels(prev => {
@@ -146,6 +152,55 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
       setSavingModels(false);
       setEditingModelsValue([]);
     }
+  };
+
+  // Ultimate Model Override editing
+  const startEditUltimateModel = (token: ApiToken) => {
+    setEditingUltimateModelId(token.id);
+    setEditingUltimateModelValue(token.ultimate_model || '');
+  };
+
+  const cancelEditUltimateModel = () => {
+    setEditingUltimateModelId(null);
+    setEditingUltimateModelValue('');
+  };
+
+  const saveEditUltimateModel = async (tokenId: string) => {
+    try {
+      setSavingUltimateModel(true);
+      onStatus(null);
+      const token = tokens.find(t => t.id === tokenId);
+      if (!token) return;
+      setEditingUltimateModelId(null);
+      const success = await onUpdatePermission(tokenId, isTokenEnabled(token), token.allowed_models ?? [], editingUltimateModelValue);
+      if (!success) {
+        onRefetchTokens();
+        onStatus({ type: 'error', message: 'Token not found. The list has been refreshed.' });
+      }
+    } catch (e) {
+      onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to update ultimate model' });
+    } finally {
+      setSavingUltimateModel(false);
+      setEditingUltimateModelValue('');
+    }
+  };
+
+  // Get ultimate model display
+  const getUltimateModelDisplay = (token: ApiToken) => {
+    if (!isTokenEnabled(token)) {
+      return null;
+    }
+    const model = token.ultimate_model;
+    if (model && model.trim() !== '') {
+      return (
+        <span class="text-xs bg-purple-900/50 text-purple-300 border border-purple-800/40 px-1.5 py-0.5 rounded">
+          model: {model}
+        </span>
+      );
+    }
+    return (
+      <span class="text-xs text-gray-500">Global default</span>
+    );
   };
 
   // Get display text for allowed models
@@ -224,6 +279,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                             ULTIMATE
                           </span>
                         )}
+                        {enabled && getUltimateModelDisplay(token)}
                       </p>
                       <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
                         {token.prefix}
@@ -315,6 +371,65 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                     </div>
                   )}
                 </div>
+
+                {/* Ultimate Model Override Row - only shown when enabled */}
+                {enabled && (
+                  <div class="mt-2 pt-2 border-t border-gray-600/20">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-400">Ultimate model:</span>
+                        {editingUltimateModelId === token.id ? (
+                          <input
+                            type="text"
+                            value={editingUltimateModelValue}
+                            onInput={(e) => setEditingUltimateModelValue((e.target as HTMLInputElement).value)}
+                            class="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs w-40 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            placeholder="Global default"
+                            disabled={savingUltimateModel}
+                          />
+                        ) : (
+                          <>
+                            {token.ultimate_model && token.ultimate_model.trim() !== '' ? (
+                              <span class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded">
+                                {token.ultimate_model}
+                              </span>
+                            ) : (
+                              <span class="text-xs text-gray-500">Global default</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {editingUltimateModelId === token.id ? (
+                        <div class="flex items-center gap-2">
+                          <button
+                            onClick={cancelEditUltimateModel}
+                            class="text-xs text-gray-400 hover:text-gray-300 px-2 py-1 rounded hover:bg-gray-600/50"
+                            disabled={savingUltimateModel}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => saveEditUltimateModel(token.id)}
+                            class="text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-gray-600/50 bg-blue-600/20"
+                            disabled={savingUltimateModel}
+                          >
+                            {savingUltimateModel ? 'Saving...' : 'Save'}
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => startEditUltimateModel(token)}
+                          class="text-xs text-gray-400 hover:text-blue-400 px-2 py-1 rounded hover:bg-gray-600/50"
+                          title="Edit ultimate model override"
+                        >
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
