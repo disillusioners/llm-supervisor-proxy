@@ -50,7 +50,7 @@ export function ModelsTab({
     truncate_params: string[];
     internal?: boolean;
     credential_id?: string;
-    internal_provider?: 'openai' | 'zhipu' | 'azure';
+    internal_provider?: 'openai' | 'zhipu' | 'azure' | 'deepseek';
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;

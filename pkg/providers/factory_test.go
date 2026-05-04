@@ -53,8 +53,8 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	if len(types) != 8 {
-		t.Errorf("expected 8 provider types, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 provider types, got %d", len(types))
 	}
 }
 

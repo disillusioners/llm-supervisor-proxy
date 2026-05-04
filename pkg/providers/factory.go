@@ -16,6 +16,7 @@ const (
 	ProviderZAI       ProviderType = "zai"
 	ProviderMiniMax   ProviderType = "minimax"
 	ProviderGrok      ProviderType = "grok"
+	ProviderDeepSeek  ProviderType = "deepseek"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -57,6 +58,12 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "https://api.x.ai/v1"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderDeepSeek:
+		// DeepSeek uses OpenAI-compatible API
+		if baseURL == "" {
+			baseURL = "https://api.deepseek.com"
+		}
+		return NewOpenAIProvider(apiKey, baseURL), nil
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", providerType)
 	}
@@ -65,7 +72,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek:
 		return true
 	default:
 		return false
@@ -138,6 +145,12 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "gray",
 		description: "xAI (Grok models)",
 	},
+	ProviderDeepSeek: {
+		name:        "DeepSeek",
+		baseURL:     "https://api.deepseek.com",
+		color:       "indigo",
+		description: "DeepSeek AI",
+	},
 }
 
 // GetProviders returns a list of all providers with their metadata
@@ -168,5 +181,6 @@ func GetProviderTypes() []ProviderType {
 		ProviderZAI,
 		ProviderMiniMax,
 		ProviderGrok,
+		ProviderDeepSeek,
 	}
 }

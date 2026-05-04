@@ -562,7 +562,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                 value={formData.internal_model}
                 onInput={(e) => handleInputChange('internal_model', (e.target as HTMLInputElement).value)}
                 class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : 'gpt-4'}
+                placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : selectedProvider === 'deepseek' ? 'deepseek-chat' : 'gpt-4'}
               />
               <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
             </div>
