@@ -28,6 +28,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Token Allowed Models | 2026-05-01 | ✅ PASS | 23 integration tests, 3 bugs found+fixed, branch `feature/token-allowed-models` |
 | Token Ultimate Model Override | 2026-05-02 | ✅ PASS | 24 new tests, 1297 lines, branch `feature/token-ultimate-model` |
 | DeepSeek Provider | 2026-05-04 | ✅ PASS | 22 packages, 2229+ tests, frontend build PASS, branch `feature/deepseek-provider` |
+| Reasoning Content Fix | 2026-05-05 | ✅ PASS | 22 packages, 14 E2E subtests, ensure.md ALL PASS, branch `fix/forward-reasoning-content` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
