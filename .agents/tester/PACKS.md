@@ -23,7 +23,7 @@
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-04-13 | PASS |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-04-13 | PASS |
 | token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-04-13 | PASS |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-04-13 | PASS |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-04 | PASS |
 
 ## Mock Test Packs
 
