@@ -2728,3 +2728,190 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) 
 		t.Error("Streaming second request received peak model - should use secondary!")
 	}
 }
+
+func TestConvertToProviderRequest_NameField(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         map[string]interface{}
+		model        string
+		wantName     string
+		wantNameInIdx int // Which message should have name
+	}{
+		{
+			name: "message with name field",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "Hello",
+						"name":    "human_user",
+					},
+				},
+			},
+			model:        "gpt-4",
+			wantName:     "human_user",
+			wantNameInIdx: 0,
+		},
+		{
+			name: "multiple messages with name in second message",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "What is 2+2?",
+					},
+					map[string]interface{}{
+						"role":    "system",
+						"content": "You are a helpful assistant.",
+						"name":    "system_prompt",
+					},
+				},
+			},
+			model:        "gpt-4",
+			wantName:     "system_prompt",
+			wantNameInIdx: 1,
+		},
+		{
+			name: "message without name field",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "Hello",
+					},
+				},
+			},
+			model:        "gpt-4",
+			wantName:     "",
+			wantNameInIdx: 0,
+		},
+		{
+			name: "message with name and other fields",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":             "assistant",
+						"content":          "The answer is 42.",
+						"name":             "assistant_1",
+						"reasoning_content": "Let me calculate...",
+					},
+				},
+			},
+			model:        "deepseek-r1",
+			wantName:     "assistant_1",
+			wantNameInIdx: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := convertToProviderRequest(tt.body, tt.model)
+			if err != nil {
+				t.Fatalf("convertToProviderRequest() error = %v", err)
+			}
+
+			if len(req.Messages) <= tt.wantNameInIdx {
+				t.Fatalf("Messages count = %d, want at least %d", len(req.Messages), tt.wantNameInIdx+1)
+			}
+
+			msg := req.Messages[tt.wantNameInIdx]
+			if msg.Name != tt.wantName {
+				t.Errorf("Messages[%d].Name = %q, want %q",
+					tt.wantNameInIdx, msg.Name, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestConvertToProviderRequest_ReasoningContent(t *testing.T) {
+	tests := []struct {
+		name                  string
+		body                  map[string]interface{}
+		model                 string
+		wantReasoningContent  string
+		wantReasoningInMsgIdx int // Which message should have reasoning_content
+	}{
+		{
+			name: "message with reasoning_content",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":             "assistant",
+						"content":          "The answer is 42.",
+						"reasoning_content": "Let me think about this step by step...",
+					},
+				},
+			},
+			model:                 "deepseek-r1",
+			wantReasoningContent:  "Let me think about this step by step...",
+			wantReasoningInMsgIdx: 0,
+		},
+		{
+			name: "multiple messages with reasoning_content in second message",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "What is 2+2?",
+					},
+					map[string]interface{}{
+						"role":             "assistant",
+						"content":          "4",
+						"reasoning_content": "I need to add 2 and 2 together.",
+					},
+				},
+			},
+			model:                 "deepseek-r1",
+			wantReasoningContent:  "I need to add 2 and 2 together.",
+			wantReasoningInMsgIdx: 1,
+		},
+		{
+			name: "message without reasoning_content",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":    "user",
+						"content": "Hello",
+					},
+				},
+			},
+			model:                 "gpt-4",
+			wantReasoningContent:  "",
+			wantReasoningInMsgIdx: 0,
+		},
+		{
+			name: "empty reasoning_content should be preserved",
+			body: map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role":             "assistant",
+						"content":          "Answer",
+						"reasoning_content": "",
+					},
+				},
+			},
+			model:                 "deepseek-r1",
+			wantReasoningContent:  "",
+			wantReasoningInMsgIdx: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := convertToProviderRequest(tt.body, tt.model)
+			if err != nil {
+				t.Fatalf("convertToProviderRequest() error = %v", err)
+			}
+
+			if len(req.Messages) <= tt.wantReasoningInMsgIdx {
+				t.Fatalf("Messages count = %d, want at least %d", len(req.Messages), tt.wantReasoningInMsgIdx+1)
+			}
+
+			msg := req.Messages[tt.wantReasoningInMsgIdx]
+			if msg.ReasoningContent != tt.wantReasoningContent {
+				t.Errorf("Messages[%d].ReasoningContent = %q, want %q",
+					tt.wantReasoningInMsgIdx, msg.ReasoningContent, tt.wantReasoningContent)
+			}
+		})
+	}
+}

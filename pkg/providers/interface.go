@@ -41,11 +41,12 @@ type ChatCompletionRequest struct {
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"` // Required for tool role messages
+	Role            string      `json:"role"`
+	Content         interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name            string      `json:"name,omitempty"`
+	ToolCalls       []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID      string      `json:"tool_call_id,omitempty"` // Required for tool role messages
+	ReasoningContent string     `json:"reasoning_content,omitempty"` // For DeepSeek R1-style thinking models
 }
 
 // Tool represents a tool definition

@@ -719,6 +719,14 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 				if toolCallID, ok := msg["tool_call_id"].(string); ok {
 					chatMsg.ToolCallID = toolCallID
 				}
+				// Handle reasoning_content for DeepSeek R1-style thinking models
+				if reasoningContent, ok := msg["reasoning_content"].(string); ok {
+					chatMsg.ReasoningContent = reasoningContent
+				}
+				// Handle name field for preserving message sender identity
+				if name, ok := msg["name"].(string); ok {
+					chatMsg.Name = name
+				}
 				// Debug log for tool role messages to diagnose MiniMax compatibility issues
 				if chatMsg.Role == "tool" {
 					if chatMsg.ToolCallID == "" {
