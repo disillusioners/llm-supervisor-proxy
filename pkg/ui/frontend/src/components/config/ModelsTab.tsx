@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import type { Model } from '../../types';
+import type { Model, InternalProvider } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { ModelForm } from './ModelForm';
 
@@ -50,7 +50,7 @@ export function ModelsTab({
     truncate_params: string[];
     internal?: boolean;
     credential_id?: string;
-    internal_provider?: 'openai' | 'zhipu' | 'azure' | 'deepseek';
+    internal_provider?: InternalProvider;
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;

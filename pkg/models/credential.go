@@ -20,6 +20,7 @@ var validProviders = map[string]bool{
 	"zai":       true,
 	"minimax":   true,
 	"grok":      true,
+	"deepseek":  true,
 }
 
 // isValidProvider checks if the provider is in the allowed list
