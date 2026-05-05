@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 10 packs across 22 packages
-- Unit: 9 | Integration: 0 | E2E: 0 | Mock: 1
+- Total: 10 packs across 25 packages
+- Unit: 9 | Integration: 1 | E2E: 1 | Mock: 1
 - All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
 
 ## Timeout Configuration
@@ -32,6 +32,7 @@
 | peak_hour_fallback_mock | test/mock_llm_peak_hour_fallback.go | E2E Mock | N/A (Go test) | 2026-04-09 | PASS |
 | frontend_api_cache_mock | test/mock_frontend_api_cache.mjs | Unit | 60s | 2026-04-09 | PASS |
 | allowed_models_integration | test/integration_allowed_models_test.go | Integration | N/A (Go test) | 2026-05-01 | PASS |
+| e2e_reasoning_content | test/e2e_reasoning_content/ | E2E | N/A (Go test) | 2026-05-05 | PASS |
 
 ---
 
