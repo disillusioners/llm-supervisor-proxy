@@ -138,6 +138,14 @@ func (h *Handler) GetModelID() string {
 	return h.config.Get().UltimateModel.ModelID
 }
 
+// GetModelName returns the model name for a given model ID, or empty string if not found
+func (h *Handler) GetModelName(modelID string) string {
+	if modelCfg := h.modelsMgr.GetModel(modelID); modelCfg != nil {
+		return modelCfg.Name
+	}
+	return ""
+}
+
 // SetToolCallBufferConfig sets the tool call buffer configuration
 func (h *Handler) SetToolCallBufferConfig(maxSize int64, disabled bool, repairConfig *toolrepair.Config) {
 	h.toolCallBufferMaxSize = maxSize

@@ -398,7 +398,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                           <>
                             {token.ultimate_model && token.ultimate_model.trim() !== '' ? (
                               <span class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded">
-                                {token.ultimate_model}
+                                {models.find(m => m.id === token.ultimate_model)?.name || token.ultimate_model}
                               </span>
                             ) : (
                               <span class="text-xs text-gray-500">Global default</span>

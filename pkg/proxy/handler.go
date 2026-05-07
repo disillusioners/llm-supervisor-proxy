@@ -506,12 +506,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// Re-authenticate to get the token (token variable not in scope here)
 				if h.requiresInternalAuth(rc) {
 					if authToken, ok := h.authenticate(r); ok && authToken != nil {
-						if !authToken.IsModelAllowed(ultimateModelID) {
-							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
+						// Resolve model ID to name for IsModelAllowed check (allowed_models stores names)
+						ultimateModelName := h.ultimateHandler.GetModelName(ultimateModelID)
+						if ultimateModelName == "" {
+							ultimateModelName = ultimateModelID // fallback to ID if model not found
+						}
+						if !authToken.IsModelAllowed(ultimateModelName) {
+							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelName, rc.tokenID, rc.tokenName)
 
 							// Update request log to failed status
 							rc.reqLog.Status = "failed"
-							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
+							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelName)
 							rc.reqLog.EndTime = time.Now()
 							rc.reqLog.Duration = time.Since(rc.startTime).String()
 							rc.reqLog.UltimateModelUsed = true
@@ -526,7 +531,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 							})
 
 							// Send 403 Forbidden response
-							h.sendModelNotAllowedError(w, ultimateModelID)
+							h.sendModelNotAllowedError(w, ultimateModelName)
 							return
 						}
 					}
