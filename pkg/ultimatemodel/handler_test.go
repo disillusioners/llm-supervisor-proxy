@@ -157,6 +157,15 @@ func (m *mockModelsConfig) GetModel(modelID string) *models.ModelConfig {
 	return m.models[modelID]
 }
 
+func (m *mockModelsConfig) GetModelByName(modelName string) *models.ModelConfig {
+	for _, model := range m.models {
+		if model.Name == modelName {
+			return model
+		}
+	}
+	return nil
+}
+
 func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (string, string, string, string, bool) {
 	if cfg, ok := m.internalCfgs[modelID]; ok {
 		return cfg.provider, cfg.apiKey, cfg.baseURL, cfg.model, cfg.ok
@@ -1205,6 +1214,7 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 
 	modelsCfg := newMockModelsConfig()
 	// Add both the global model and the per-token override model
+	// Note: TokenForm.tsx stores model.name as value, not model.id
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 	modelsCfg.AddModel(models.ModelConfig{ID: "token-override-model", Name: "token-override", Enabled: true, Internal: false})
 
@@ -1220,7 +1230,7 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 
 	hash := "per-token-hash"
 	headersSent := false
-	tokenModelID := "token-override-model" // Per-token override
+	tokenModelID := "token-override" // Per-token override uses model NAME (as TokenForm stores model.name)
 	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
 
 	if err != nil {
@@ -1283,7 +1293,7 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 
 	hash := "stream-override-hash"
 	headersSent := false
-	tokenModelID := "token-stream-override"
+	tokenModelID := "token-stream" // Per-token override uses model NAME (as TokenForm stores model.name)
 	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
 
 	if err != nil {

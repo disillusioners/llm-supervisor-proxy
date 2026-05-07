@@ -161,7 +161,7 @@ func (q *QueryBuilder) DeleteModel() string {
 	return `DELETE FROM models WHERE id = ?`
 }
 
-// GetModelByID returns the appropriate SELECT query for a model
+// GetModelByID returns the appropriate SELECT query for a model by ID
 func (q *QueryBuilder) GetModelByID() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
@@ -181,6 +181,28 @@ func (q *QueryBuilder) GetModelByID() string {
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 		coalesce(secondary_upstream_model, '')
 	FROM models WHERE id = ?`
+}
+
+// GetModelByName returns the appropriate SELECT query for a model by name
+func (q *QueryBuilder) GetModelByName() string {
+	if q.dialect == PostgreSQL {
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+			coalesce(release_stream_chunk_deadline, 0), 
+			coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, '')
+		FROM models WHERE name = $1`
+	}
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+		coalesce(release_stream_chunk_deadline, 0),
+		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, '')
+	FROM models WHERE name = ?`
 }
 
 // GetAllModels returns the appropriate SELECT query for all models

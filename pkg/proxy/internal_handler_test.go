@@ -37,6 +37,16 @@ func (m *mockModelsConfig) GetModel(modelID string) *models.ModelConfig {
 	return nil
 }
 
+func (m *mockModelsConfig) GetModelByName(modelName string) *models.ModelConfig {
+	for _, model := range m.models {
+		if model.Name == modelName {
+			copy := model
+			return &copy
+		}
+	}
+	return nil
+}
+
 func (m *mockModelsConfig) GetTruncateParams(modelID string) []string {
 	if model := m.GetModel(modelID); model != nil {
 		return model.TruncateParams

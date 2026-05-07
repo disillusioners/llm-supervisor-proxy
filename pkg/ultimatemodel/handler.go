@@ -237,13 +237,19 @@ func (h *Handler) Execute(
 	cfg := h.config.Get()
 	modelID := cfg.UltimateModel.ModelID
 
-	// Apply per-token override if provided
+	// Get model config from DATABASE
+	// Per-token override uses model name (stored by TokenForm), so search by name
+	// Global config uses database ID (stored by ProxySettings), so search by ID
+	var modelCfg *models.ModelConfig
 	if tokenModelID != nil && *tokenModelID != "" {
+		// Per-token override - search by name
 		modelID = *tokenModelID
+		modelCfg = h.modelsMgr.GetModelByName(modelID)
+	} else {
+		// Global config - search by ID
+		modelCfg = h.modelsMgr.GetModel(modelID)
 	}
 
-	// Get model config from DATABASE
-	modelCfg := h.modelsMgr.GetModel(modelID)
 	if modelCfg == nil {
 		// Model not found - this is a config error, clear everything
 		h.hashCache.Remove(hash) // Also clears retry counter

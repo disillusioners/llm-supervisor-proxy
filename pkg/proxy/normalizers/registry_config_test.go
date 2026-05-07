@@ -25,6 +25,15 @@ func (m *mockModelsConfig) GetModel(modelID string) *models.ModelConfig {
 	return m.models[modelID]
 }
 
+func (m *mockModelsConfig) GetModelByName(modelName string) *models.ModelConfig {
+	for _, model := range m.models {
+		if model.Name == modelName {
+			return model
+		}
+	}
+	return nil
+}
+
 func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (string, string, string, string, bool) {
 	if cfg, ok := m.models[modelID]; ok && cfg.Internal {
 		return "anthropic", "test-key", "https://api.anthropic.com", cfg.InternalModel, true
