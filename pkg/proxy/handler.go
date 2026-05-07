@@ -393,27 +393,35 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// === MODEL ACCESS CHECK ===
 			// Check if the requested model is allowed for this token
 			// This check happens AFTER authentication but BEFORE ultimate model logic
-			if !token.IsModelAllowed(rc.reqLog.Model) {
-				log.Printf("[AUTH] Model '%s' not allowed for token %s (%s)", rc.reqLog.Model, rc.tokenID, rc.tokenName)
+			// Only check internal models - external models don't need to be in our DB
+			// Resolve model name to ID for the allowed_models check (AllowedModels stores IDs)
+			modelID := rc.conf.ModelsConfig.GetModelIDByName(rc.reqLog.Model)
+			if modelID != "" {
+				// Model exists in our DB - check if allowed
+				if !token.IsModelAllowed(modelID) {
+					log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)", rc.reqLog.Model, modelID, rc.tokenID, rc.tokenName)
 
-				// Update request log to failed status
-				rc.reqLog.Status = "failed"
-				rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
-				rc.reqLog.EndTime = time.Now()
-				rc.reqLog.Duration = time.Since(rc.startTime).String()
-				h.store.Add(rc.reqLog)
+					// Update request log to failed status
+					rc.reqLog.Status = "failed"
+					rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
+					rc.reqLog.EndTime = time.Now()
+					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					h.store.Add(rc.reqLog)
 
-				// Publish event
-				h.publishEvent("model_not_allowed", map[string]interface{}{
-					"id":    rc.reqID,
-					"model": rc.reqLog.Model,
-					"token": rc.tokenID,
-				})
+					// Publish event
+					h.publishEvent("model_not_allowed", map[string]interface{}{
+						"id":    rc.reqID,
+						"model": rc.reqLog.Model,
+						"token": rc.tokenID,
+					})
 
-				// Send 403 Forbidden response
-				h.sendModelNotAllowedError(w, rc.reqLog.Model)
-				return
+					// Send 403 Forbidden response
+					h.sendModelNotAllowedError(w, rc.reqLog.Model)
+					return
+				}
 			}
+			// If model not found in DB (external model), skip the allowed_models check
+			// External models don't have AllowedModels restrictions
 			// === END MODEL ACCESS CHECK ===
 		}
 	}
@@ -506,17 +514,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// Re-authenticate to get the token (token variable not in scope here)
 				if h.requiresInternalAuth(rc) {
 					if authToken, ok := h.authenticate(r); ok && authToken != nil {
-						// Resolve model ID to name for IsModelAllowed check (allowed_models stores names)
-						ultimateModelName := h.ultimateHandler.GetModelName(ultimateModelID)
-						if ultimateModelName == "" {
-							ultimateModelName = ultimateModelID // fallback to ID if model not found
-						}
-						if !authToken.IsModelAllowed(ultimateModelName) {
-							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelName, rc.tokenID, rc.tokenName)
+						// ultimateModelID is already an ID - pass directly to IsModelAllowed()
+						if !authToken.IsModelAllowed(ultimateModelID) {
+							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
 
 							// Update request log to failed status
 							rc.reqLog.Status = "failed"
-							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelName)
+							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
 							rc.reqLog.EndTime = time.Now()
 							rc.reqLog.Duration = time.Since(rc.startTime).String()
 							rc.reqLog.UltimateModelUsed = true
@@ -531,7 +535,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 							})
 
 							// Send 403 Forbidden response
-							h.sendModelNotAllowedError(w, ultimateModelName)
+							h.sendModelNotAllowedError(w, ultimateModelID)
 							return
 						}
 					}
