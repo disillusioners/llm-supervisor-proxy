@@ -419,9 +419,30 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					h.sendModelNotAllowedError(w, rc.reqLog.Model)
 					return
 				}
+			} else if len(token.AllowedModels) > 0 {
+				// Model not in DB AND token has restrictions → deny (fail-closed)
+				// Unknown models should not bypass allowed_models restrictions
+				log.Printf("[AUTH] Model '%s' not found in DB, token %s (%s) has restrictions - denying", rc.reqLog.Model, rc.tokenID, rc.tokenName)
+
+				// Update request log to failed status
+				rc.reqLog.Status = "failed"
+				rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
+				rc.reqLog.EndTime = time.Now()
+				rc.reqLog.Duration = time.Since(rc.startTime).String()
+				h.store.Add(rc.reqLog)
+
+				// Publish event
+				h.publishEvent("model_not_allowed", map[string]interface{}{
+					"id":    rc.reqID,
+					"model": rc.reqLog.Model,
+					"token": rc.tokenID,
+				})
+
+				// Send 403 Forbidden response
+				h.sendModelNotAllowedError(w, rc.reqLog.Model)
+				return
 			}
-			// If model not found in DB (external model), skip the allowed_models check
-			// External models don't have AllowedModels restrictions
+			// else: model not in DB and no restrictions → allow (external/open models)
 			// === END MODEL ACCESS CHECK ===
 		}
 	}

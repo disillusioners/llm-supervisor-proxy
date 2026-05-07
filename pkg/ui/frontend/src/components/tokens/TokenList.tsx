@@ -207,6 +207,11 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
     );
   };
 
+  // Get model display name from ID
+  const getModelDisplayName = (modelId: string) => {
+    return models.find(m => m.id === modelId)?.name ?? modelId;
+  };
+
   // Get display text for allowed models
   const getAllowedModelsDisplay = (token: ApiToken) => {
     const allowed = getAllowedModels(token);
@@ -219,9 +224,9 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
     const remaining = allowed.length - maxShow;
     return (
       <div class="flex flex-wrap items-center gap-1">
-        {shown.map(name => (
-          <span key={name} class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded truncate max-w-[100px]" title={name}>
-            {name}
+        {shown.map(id => (
+          <span key={id} class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded truncate max-w-[100px]" title={id}>
+            {getModelDisplayName(id)}
           </span>
         ))}
         {remaining > 0 && (
