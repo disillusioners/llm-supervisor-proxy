@@ -30,6 +30,8 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | DeepSeek Provider | 2026-05-04 | ✅ PASS | 22 packages, 2229+ tests, frontend build PASS, branch `feature/deepseek-provider` |
 | Reasoning Content Fix | 2026-05-05 | ✅ PASS | 22 packages, 14 E2E subtests, ensure.md ALL PASS, branch `fix/forward-reasoning-content` |
 | E2E Reasoning Content Tests | 2026-05-05 | ✅ PASS | 5 E2E tests, 25 packages regression, commit 3c9d6b8 |
+| Ultimate Model "Not Found" Fix | 2026-05-07 | ✅ PASS | 22/22 packages regression, 26 focused tests, 361 new lines, commit 8250179 |
+| Ultimate Model ID Refactor | 2026-05-07 | ✅ PASS | 24/24 packages, 1044 tests, 7 new tests, frontend PASS, branch `fix/ultimate-model-use-id` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
