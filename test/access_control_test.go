@@ -340,6 +340,45 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 	}
 }
 
+// TestA5_RestrictedToken_ExternalModel_Denied verifies that external models
+// (not in DB) are denied when the token has allowed_models restrictions (fail-closed)
+func TestA5_RestrictedToken_ExternalModel_Denied(t *testing.T) {
+	env := setupAccessControlEnv(t)
+	ctx := context.Background()
+
+	// Create token with allowed_models = ["model-id-1"] (restricted)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, "", []string{"model-id-1"})
+	if err != nil {
+		t.Fatalf("CreateToken failed: %v", err)
+	}
+
+	// Request with "Some External Model" (not in DB)
+	// External model + restricted token = 403 Forbidden (fail-closed)
+	req := makeAccessControlRequest("Some External Model", plaintext)
+	rr := httptest.NewRecorder()
+	env.handler.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden (external model with restricted token), got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify error structure
+	var errResp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	errorObj, ok := errResp["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected 'error' field in response")
+	}
+	if errorObj["type"] != "access_denied" {
+		t.Errorf("Expected error type 'access_denied', got %v", errorObj["type"])
+	}
+	if errorObj["message"] != "model not allowed for this token" {
+		t.Errorf("Expected error message 'model not allowed for this token', got %v", errorObj["message"])
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Group B: Ultimate Model + allowed_models Interaction Tests
 // ═══════════════════════════════════════════════════════════════════════════════

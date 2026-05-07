@@ -459,9 +459,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] ultimate model skipped: token %s (%s) lacks ultimate_model_enabled, model: %s", rc.tokenID, rc.tokenName, rc.reqLog.Model)
 	}
 
-	// Header override for forcing ultimate model (for testing/debugging)
+	// Header override for forcing ultimate model (fail-closed: requires auth AND admin must have enabled it)
 	forceUltimate := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
-	if forceUltimate {
+	if forceUltimate && authToken != nil && rc.ultimateModelEnabled {
 		rc.ultimateModelEnabled = true
 		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
 	}
