@@ -391,7 +391,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                           >
                             <option value="">Global Default</option>
                             {[...models].sort((a, b) => a.name.localeCompare(b.name)).map(model => (
-                              <option key={model.id} value={model.name}>{model.name}</option>
+                              <option key={model.id} value={model.id}>{model.name}</option>
                             ))}
                           </select>
                         ) : (

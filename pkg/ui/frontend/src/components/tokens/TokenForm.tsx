@@ -148,7 +148,7 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
               {[...models]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((model) => (
-                  <option key={model.id} value={model.name}>
+                  <option key={model.id} value={model.id}>
                     {model.name}
                   </option>
                 ))}
