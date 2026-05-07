@@ -198,7 +198,7 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
     if (model && model.trim() !== '') {
       return (
         <span class="text-xs bg-purple-900/50 text-purple-300 border border-purple-800/40 px-1.5 py-0.5 rounded">
-          model: {model}
+          model: {getModelDisplayName(model)}
         </span>
       );
     }
