@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
 )
@@ -77,13 +78,33 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	}
 	h.store.Add(reqLog)
 
-	modelList := buildModelList(originalModel, conf.ModelsConfig)
+	// Resolve model name to config at the boundary
+	var resolvedModel *models.ModelConfig
+	if conf.ModelsConfig != nil {
+		resolvedModel = conf.ModelsConfig.ResolveModelByName(originalModel)
+	}
+
+	// Build model list using resolved config
+	var modelList []string
+	if resolvedModel != nil {
+		// Known model — use ID and fallback chain from config
+		modelList = make([]string, 0, 1+len(resolvedModel.FallbackChain))
+		modelList = append(modelList, resolvedModel.ID)
+		modelList = append(modelList, resolvedModel.FallbackChain...)
+	} else {
+		// External/unknown model — no fallback chain, just use raw name
+		modelList = []string{originalModel}
+	}
+
+	// Set ModelID to the resolved ID (or raw name for external models)
+	if resolvedModel != nil {
+		conf.ModelID = resolvedModel.ID
+	} else {
+		conf.ModelID = originalModel
+	}
 
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
 	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
-
-	// Populate ModelID in snapshot
-	conf.ModelID = originalModel
 
 	return &requestContext{
 		conf:             conf,
@@ -92,6 +113,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		startTime:        startTime,
 		reqLog:           reqLog,
 		modelList:        modelList,
+		resolvedModel:    resolvedModel,
 		requestBody:      requestBody,
 		rawBody:          bodyBytes, // Save original body bytes
 		isStream:         isStream,

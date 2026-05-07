@@ -280,14 +280,13 @@ func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 		return false
 	}
 
-	// Check all models in the chain (primary + fallbacks)
-	// rc.modelList contains model names, so we need to resolve to IDs first
-	for _, modelName := range rc.modelList {
-		modelID := rc.conf.ModelsConfig.GetModelIDByName(modelName)
-		if modelID == "" {
-			// Model not found in our config - might be external
-			continue
-		}
+	// Check if resolved model (primary) is internal
+	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+		return true
+	}
+
+	// Check all models in the chain (IDs for resolved models, raw names for external)
+	for _, modelID := range rc.modelList {
 		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
 		if modelConfig != nil && modelConfig.Internal {
 			return true
@@ -409,7 +408,10 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// This check happens AFTER authentication for internal models
 	// For external models: only check if token has restrictions (fail-closed)
 	if authToken != nil {
-		modelID := rc.conf.ModelsConfig.GetModelIDByName(rc.reqLog.Model)
+		var modelID string
+		if rc.resolvedModel != nil {
+			modelID = rc.resolvedModel.ID
+		}
 		if modelID != "" {
 			// Model exists in our DB - check if allowed by token
 			if !authToken.IsModelAllowed(modelID) {
@@ -479,8 +481,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 		// If ultimate model is different from the requested model, check access control
 		if ultimateModelID != "" && authToken != nil {
-			modelID := rc.conf.ModelsConfig.GetModelIDByName(rc.reqLog.Model)
-			if ultimateModelID != modelID {
+			var requestedModelID string
+			if rc.resolvedModel != nil {
+				requestedModelID = rc.resolvedModel.ID
+			}
+			if ultimateModelID != requestedModelID {
 				// Ultimate model is different - check if allowed
 				if !authToken.IsModelAllowed(ultimateModelID) {
 					log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)

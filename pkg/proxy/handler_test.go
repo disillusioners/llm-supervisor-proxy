@@ -611,8 +611,9 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
 			// Set up fallback chain so race retry has multiple models to try
-			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "Mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "Fallback Mock", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
 			return mc
 		}(),
 		configOpts: []func(*config.Config){
@@ -672,8 +673,9 @@ func TestMockLLM_FallbackAfter500(t *testing.T) {
 		name: "MockLLM_FallbackAfter500",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "Primary", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "Fallback", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "primary-mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -922,8 +924,9 @@ func TestFallback4xxTriggered(t *testing.T) {
 		name: "Fallback4xxTriggered",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			mc.AddModel(models.ModelConfig{ID: "primary", Name: "Primary", Enabled: true, FallbackChain: []string{"secondary"}})
-			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "Secondary", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "primary", Name: "primary", Enabled: true, FallbackChain: []string{"secondary"}})
+			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "secondary", Enabled: true})
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {

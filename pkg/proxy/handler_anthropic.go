@@ -150,8 +150,30 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	h.publishEvent("request_started", map[string]interface{}{"id": reqID})
 
-	// Build model list for fallback
-	modelList := buildModelList(anthropicReq.Model, conf.ModelsConfig)
+	// Resolve model name to config at the boundary
+	var resolvedModel *models.ModelConfig
+	if conf.ModelsConfig != nil {
+		resolvedModel = conf.ModelsConfig.ResolveModelByName(originalModel)
+	}
+
+	// Build model list using resolved config
+	var modelList []string
+	if resolvedModel != nil {
+		// Known model — use ID and fallback chain from config
+		modelList = make([]string, 0, 1+len(resolvedModel.FallbackChain))
+		modelList = append(modelList, resolvedModel.ID)
+		modelList = append(modelList, resolvedModel.FallbackChain...)
+	} else {
+		// External/unknown model — no fallback chain, just use raw name
+		modelList = []string{originalModel}
+	}
+
+	// Set ModelID to the resolved ID (or raw name for external models)
+	if resolvedModel != nil {
+		conf.ModelID = resolvedModel.ID
+	} else {
+		conf.ModelID = originalModel
+	}
 
 	// Create anthropic request context
 	arc := &anthropicRequestContext{

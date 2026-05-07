@@ -468,18 +468,28 @@ func TestC1_IsModelAllowedReceivesIDs(t *testing.T) {
 		t.Error("'First Model' name should NOT match ID-based allowed_models")
 	}
 
-	// Test 2: Verify GetModelIDByName returns correct IDs
-	if id := env.modelsConfig.GetModelIDByName("First Model"); id != "model-id-1" {
-		t.Errorf("GetModelIDByName('First Model') = %q, want 'model-id-1'", id)
+	// Test 2: Verify ResolveModelByName returns correct configs
+	resolved := env.modelsConfig.ResolveModelByName("First Model")
+	if resolved == nil {
+		t.Error("ResolveModelByName('First Model') should not return nil")
+	} else if resolved.ID != "model-id-1" {
+		t.Errorf("ResolveModelByName('First Model').ID = %q, want 'model-id-1'", resolved.ID)
 	}
-	if id := env.modelsConfig.GetModelIDByName("Second Model"); id != "model-id-2" {
-		t.Errorf("GetModelIDByName('Second Model') = %q, want 'model-id-2'", id)
+	resolved = env.modelsConfig.ResolveModelByName("Second Model")
+	if resolved == nil {
+		t.Error("ResolveModelByName('Second Model') should not return nil")
+	} else if resolved.ID != "model-id-2" {
+		t.Errorf("ResolveModelByName('Second Model').ID = %q, want 'model-id-2'", resolved.ID)
 	}
-	if id := env.modelsConfig.GetModelIDByName("Ultimate Model"); id != "ultimate-id" {
-		t.Errorf("GetModelIDByName('Ultimate Model') = %q, want 'ultimate-id'", id)
+	resolved = env.modelsConfig.ResolveModelByName("Ultimate Model")
+	if resolved == nil {
+		t.Error("ResolveModelByName('Ultimate Model') should not return nil")
+	} else if resolved.ID != "ultimate-id" {
+		t.Errorf("ResolveModelByName('Ultimate Model').ID = %q, want 'ultimate-id'", resolved.ID)
 	}
-	if id := env.modelsConfig.GetModelIDByName("Non-existent Model"); id != "" {
-		t.Errorf("GetModelIDByName('Non-existent Model') = %q, want empty string", id)
+	resolved = env.modelsConfig.ResolveModelByName("Non-existent Model")
+	if resolved != nil {
+		t.Errorf("ResolveModelByName('Non-existent Model') should return nil, got %+v", resolved)
 	}
 
 	// Test 3: End-to-end flow: model name → ID resolution → allowed check
@@ -513,7 +523,7 @@ func TestC2_NoGetModelNameReferences(t *testing.T) {
 	// This is a documentation test - the actual grep is done separately
 	// This test documents the expectation that GetModelName should not exist
 	t.Log("Note: GetModelName references should be checked via grep in the codebase")
-	t.Log("Expected: No references to GetModelName should exist (only GetModelIDByName)")
+	t.Log("Expected: No references to GetModelName should exist (only ResolveModelByName)")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

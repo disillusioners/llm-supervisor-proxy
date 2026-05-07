@@ -123,7 +123,7 @@ type ModelsConfigInterface interface {
 	GetModels() []ModelConfig
 	GetEnabledModels() []ModelConfig
 	GetModel(modelID string) *ModelConfig
-	GetModelIDByName(modelName string) string
+	ResolveModelByName(name string) *ModelConfig
 	GetTruncateParams(modelID string) []string
 	GetFallbackChain(modelID string) []string
 	AddModel(model ModelConfig) error
@@ -195,19 +195,21 @@ func (mc *ModelsConfig) GetModel(modelID string) *ModelConfig {
 	return nil
 }
 
-// GetModelIDByName returns the model ID for a given model name.
-// Returns empty string if the model is not found.
+// ResolveModelByName returns the model configuration for a given model name.
+// Returns nil if the model is not found.
 // Case-sensitive exact match.
-func (mc *ModelsConfig) GetModelIDByName(modelName string) string {
+func (mc *ModelsConfig) ResolveModelByName(name string) *ModelConfig {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
 	for _, model := range mc.Models {
-		if model.Name == modelName {
-			return model.ID
+		if model.Name == name {
+			// Return a copy to avoid mutations
+			copy := model
+			return &copy
 		}
 	}
-	return ""
+	return nil
 }
 
 // GetFallbackChain returns the fallback chain for a given model ID.

@@ -686,24 +686,84 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	return model
 }
 
-// GetModelIDByName returns the model ID for a given model name.
-// Returns empty string if the model is not found.
+// ResolveModelByName returns the model configuration for a given model name.
+// Returns nil if the model is not found.
 // Case-sensitive exact match.
-func (m *ModelsManager) GetModelIDByName(modelName string) string {
+func (m *ModelsManager) ResolveModelByName(name string) *models.ModelConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	query := `SELECT id FROM models WHERE name = ?`
+	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+		peak_hour_enabled, peak_hour_start, peak_hour_end,
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, '')
+		FROM models WHERE name = ?`
+
 	if m.store.Dialect == "postgres" {
-		query = `SELECT id FROM models WHERE name = $1`
+		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+			peak_hour_enabled, peak_hour_start, peak_hour_end,
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, '')
+			FROM models WHERE name = $1`
 	}
 
-	var id string
-	err := m.store.DB.QueryRowContext(context.Background(), query, modelName).Scan(&id)
+	var dbModel dbModelRow
+	err := m.store.DB.QueryRowContext(context.Background(), query, name).Scan(
+		&dbModel.ID,
+		&dbModel.Name,
+		&dbModel.Enabled,
+		&dbModel.FallbackChainJSON,
+		&dbModel.TruncateParamsJSON,
+		&dbModel.CreatedAt,
+		&dbModel.UpdatedAt,
+		&dbModel.ReleaseStreamChunkDeadline,
+		&dbModel.Internal,
+		&dbModel.CredentialID,
+		&dbModel.InternalBaseURL,
+		&dbModel.InternalModel,
+		&dbModel.PeakHourEnabled,
+		&dbModel.PeakHourStart,
+		&dbModel.PeakHourEnd,
+		&dbModel.PeakHourTimezone,
+		&dbModel.PeakHourModel,
+		&dbModel.SecondaryUpstreamModel,
+	)
 	if err != nil {
-		return ""
+		return nil
 	}
-	return id
+
+	model := &models.ModelConfig{
+		ID:                         dbModel.ID,
+		Name:                       dbModel.Name,
+		Enabled:                    dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                   dbModel.isInternal(),
+		CredentialID:               dbModel.CredentialID,
+		InternalBaseURL:            dbModel.InternalBaseURL,
+		InternalModel:              dbModel.InternalModel,
+		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+		PeakHourStart:              dbModel.PeakHourStart,
+		PeakHourEnd:                dbModel.PeakHourEnd,
+		PeakHourTimezone:           dbModel.PeakHourTimezone,
+		PeakHourModel:              dbModel.PeakHourModel,
+		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+	}
+
+	// Parse fallback chain
+	if dbModel.FallbackChainJSON != "" {
+		json.Unmarshal([]byte(dbModel.FallbackChainJSON), &model.FallbackChain)
+	}
+
+	// Parse truncate params
+	if dbModel.TruncateParamsJSON != "" {
+		json.Unmarshal([]byte(dbModel.TruncateParamsJSON), &model.TruncateParams)
+	}
+
+	return model
 }
 
 // GetModels returns all model configurations
