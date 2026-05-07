@@ -2396,7 +2396,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "claude-3",
-		Name:          "Claude 3",
+		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2409,7 +2409,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	// Also add gpt-4 as internal model (for the allowed test later, though this test uses claude-3)
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "gpt-4",
-		Name:          "GPT-4",
+		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2505,7 +2505,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "gpt-4",
-		Name:          "GPT-4",
+		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2592,7 +2592,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "any-model",
-		Name:          "Any Model",
+		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",

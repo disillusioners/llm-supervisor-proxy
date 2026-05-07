@@ -188,6 +188,7 @@ func (m *mockModelsConfig) AddInternalModel(id, provider, apiKey, baseURL, model
 // Satisfy the full interface with no-op implementations
 func (m *mockModelsConfig) GetModels() []models.ModelConfig                         { return nil }
 func (m *mockModelsConfig) GetEnabledModels() []models.ModelConfig                  { return nil }
+func (m *mockModelsConfig) GetModelIDByName(modelName string) string                { return "" }
 func (m *mockModelsConfig) GetTruncateParams(modelID string) []string               { return nil }
 func (m *mockModelsConfig) GetFallbackChain(modelID string) []string                { return nil }
 func (m *mockModelsConfig) AddModelToConfig(mc models.ModelConfig) error            { return nil }

@@ -45,6 +45,7 @@ func (m *mockModelsConfig) AddModelForTest(id string, internal bool) {
 // Satisfy the full interface with no-op implementations
 func (m *mockModelsConfig) GetModels() []models.ModelConfig                         { return nil }
 func (m *mockModelsConfig) GetEnabledModels() []models.ModelConfig                  { return nil }
+func (m *mockModelsConfig) GetModelIDByName(modelName string) string                { return "" }
 func (m *mockModelsConfig) GetTruncateParams(modelID string) []string               { return nil }
 func (m *mockModelsConfig) GetFallbackChain(modelID string) []string                { return nil }
 func (m *mockModelsConfig) AddModel(mc models.ModelConfig) error                    { return nil }

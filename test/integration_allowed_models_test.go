@@ -120,9 +120,9 @@ func setupTestEnv(t *testing.T) *testEnv {
 	for _, model := range []struct {
 		id, name, internalModel string
 	}{
-		{"gpt-4", "GPT-4", "gpt-4"},
-		{"claude-3", "Claude 3", "claude-3"},
-		{"gpt-3.5", "GPT-3.5", "gpt-3.5"},
+		{"gpt-4", "gpt-4", "gpt-4"},
+		{"claude-3", "claude-3", "claude-3"},
+		{"gpt-3.5", "gpt-3.5", "gpt-3.5"},
 	} {
 		if err := modelsConfig.AddModel(models.ModelConfig{
 			ID:            model.id,

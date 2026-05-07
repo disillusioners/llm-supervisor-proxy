@@ -686,6 +686,26 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	return model
 }
 
+// GetModelIDByName returns the model ID for a given model name.
+// Returns empty string if the model is not found.
+// Case-sensitive exact match.
+func (m *ModelsManager) GetModelIDByName(modelName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id FROM models WHERE name = ?`
+	if m.store.Dialect == "postgres" {
+		query = `SELECT id FROM models WHERE name = $1`
+	}
+
+	var id string
+	err := m.store.DB.QueryRowContext(context.Background(), query, modelName).Scan(&id)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
 // GetModels returns all model configurations
 func (m *ModelsManager) GetModels() []models.ModelConfig {
 	m.mu.RLock()
