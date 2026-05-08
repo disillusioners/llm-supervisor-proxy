@@ -99,8 +99,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		requestBody = bodyBytes
 	} else {
 		// Translate to OpenAI format
-		modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
-		openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
+		openaiReq := translator.TranslateRequest(&anthropicReq, nil)
 		var err error
 		requestBody, err = json.Marshal(openaiReq)
 		if err != nil {
@@ -150,8 +149,30 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	h.publishEvent("request_started", map[string]interface{}{"id": reqID})
 
-	// Build model list for fallback
-	modelList := buildModelList(anthropicReq.Model, conf.ModelsConfig)
+	// Resolve model ID to config at the boundary
+	var resolvedModel *models.ModelConfig
+	if conf.ModelsConfig != nil {
+		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
+	}
+
+	// Build model list using resolved config
+	var modelList []string
+	if resolvedModel != nil {
+		// Known model — use ID and fallback chain from config
+		modelList = make([]string, 0, 1+len(resolvedModel.FallbackChain))
+		modelList = append(modelList, resolvedModel.ID)
+		modelList = append(modelList, resolvedModel.FallbackChain...)
+	} else {
+		// External/unknown model — no fallback chain, just use raw name
+		modelList = []string{originalModel}
+	}
+
+	// Set ModelID to the resolved ID (or raw name for external models)
+	if resolvedModel != nil {
+		conf.ModelID = resolvedModel.ID
+	} else {
+		conf.ModelID = originalModel
+	}
 
 	// Create anthropic request context
 	arc := &anthropicRequestContext{
@@ -208,9 +229,8 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.requestBody = newBody
 		} else {
 			// For OpenAI translation path, re-translate with new model
-			modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 			arc.anthropicReq.Model = currentModel
-			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
+			openaiReq := translator.TranslateRequest(arc.anthropicReq, nil)
 			newBody, err := json.Marshal(openaiReq)
 			if err != nil {
 				log.Printf("Failed to marshal translated request: %v", err)

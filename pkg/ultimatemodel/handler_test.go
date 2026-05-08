@@ -1437,3 +1437,370 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 		t.Errorf("Expected model = %q (global), got %q", "global-ultimate-model", usedModel)
 	}
 }
+
+// --- Tests for per-token ultimate model bug fix (commit 8250179) ---
+
+// TestExecute_PerTokenOverride_NonexistentModel tests that per-token override with
+// nonexistent model name returns error, NOT panic (scenario B)
+func TestExecute_PerTokenOverride_NonexistentModel(t *testing.T) {
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+
+	modelsCfg := newMockModelsConfig()
+	// Only add the global model, NOT the per-token override model
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "nonexistent-override-hash"
+	headersSent := false
+	nonexistentModel := "nonexistent-model"
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel)
+
+	// Should return error, NOT panic
+	if err == nil {
+		t.Error("Expected error for nonexistent model, got nil")
+	}
+
+	// Error message should indicate model not found
+	if err != nil {
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "not found") {
+			t.Errorf("Expected error message to contain 'not found', got: %q", errMsg)
+		}
+	}
+}
+
+// TestExecute_PerTokenOverride_NonexistentModel_Streaming tests streaming case (scenario B)
+func TestExecute_PerTokenOverride_NonexistentModel_Streaming(t *testing.T) {
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   true,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "nonexistent-stream-override-hash"
+	headersSent := false
+	nonexistentModel := "totally-fake-model-12345"
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel)
+
+	// Should return error, NOT panic
+	if err == nil {
+		t.Error("Expected error for nonexistent model in streaming, got nil")
+	}
+}
+
+// TestExecute_GlobalConfig_UsesGetModelByID tests that global config uses GetModel (by ID)
+// (scenario D - existing behavior should not be broken)
+func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-model-id" // Global config uses ID
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	// Add model with ID that matches global config, but different NAME
+	// Global config should find it by ID (GetModel)
+	modelsCfg.AddModel(models.ModelConfig{
+		ID:      "global-model-id",
+		Name:    "totally-different-name", // Different from ID
+		Enabled: true,
+		Internal: false,
+	})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "global-id-hash"
+	headersSent := false
+	// No per-token override - should use global config
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+
+	if err != nil {
+		t.Errorf("Execute returned error: %v", err)
+	}
+
+	// Verify the global model (found by ID) was used
+	if usedModel != "global-model-id" {
+		t.Errorf("Expected model = %q (found by ID), got %q", "global-model-id", usedModel)
+	}
+}
+
+// TestExecute_PerTokenOverride_WithID tests per-token override using model ID
+// (per-token now uses ID, not name, since frontend stores model.id)
+func TestExecute_PerTokenOverride_WithID(t *testing.T) {
+	// Create a mock upstream server that records the model used
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	// Add model with UUID-like ID for per-token override
+	modelsCfg.AddModel(models.ModelConfig{
+		ID:      "550e8400-e29b-41d4-a716-446655440000", // UUID-like ID
+		Name:    "per-token-model",                       // Human-readable name
+		Enabled: true,
+		Internal: false,
+	})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "uuid-id-hash"
+	headersSent := false
+	// Per-token override with UUID-like ID
+	perTokenModelID := "550e8400-e29b-41d4-a716-446655440000"
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &perTokenModelID)
+
+	if err != nil {
+		t.Errorf("Execute returned error for UUID-like ID: %v", err)
+	}
+
+	// Should find model by ID and use its ID
+	if usedModel != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("Expected model = %q (found by ID), got %q", "550e8400-e29b-41d4-a716-446655440000", usedModel)
+	}
+}
+
+// TestExecute_PerTokenOverride_WithID_Nonexistent tests that ID that doesn't exist
+// returns error (scenario B)
+func TestExecute_PerTokenOverride_WithID_Nonexistent(t *testing.T) {
+	cfg := newMockConfigManager()
+	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
+
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := map[string]interface{}{
+		"model":    "original-model",
+		"stream":   false,
+		"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+	}
+
+	hash := "fake-uuid-hash"
+	headersSent := false
+	// UUID-like ID that doesn't exist
+	fakeUUID := "123e4567-e89b-12d3-a456-426614174000"
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &fakeUUID)
+
+	// Should return error, NOT panic
+	if err == nil {
+		t.Error("Expected error for nonexistent UUID-like ID, got nil")
+	}
+}
+
+// TestExecute_AllLookupsUseID tests that both global and per-token use GetModel by ID
+// (scenario D - unified approach, no separate paths)
+func TestExecute_AllLookupsUseID(t *testing.T) {
+	var usedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if m, ok := body["model"].(string); ok {
+				usedModel = m
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   usedModel,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UpstreamURL = server.URL
+
+	modelsCfg := newMockModelsConfig()
+	// Add models with different ID and NAME
+	modelsCfg.AddModel(models.ModelConfig{
+		ID:       "global-model-id",
+		Name:     "Global Model",
+		Enabled:  true,
+		Internal: false,
+	})
+	modelsCfg.AddModel(models.ModelConfig{
+		ID:       "per-token-model-id",
+		Name:     "Per Token Model",
+		Enabled:  true,
+		Internal: false,
+	})
+
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	tests := []struct {
+		name           string
+		globalModelID  string
+		perTokenModel  *string
+		expectedModel  string
+	}{
+		{
+			name:          "global uses ID lookup",
+			globalModelID: "global-model-id",
+			perTokenModel: nil,
+			expectedModel: "global-model-id",
+		},
+		{
+			name:          "per-token uses ID lookup",
+			globalModelID: "wrong-id",
+			perTokenModel: strPtr("per-token-model-id"),
+			expectedModel: "per-token-model-id",
+		},
+		{
+			name:          "per-token empty string uses global",
+			globalModelID: "global-model-id",
+			perTokenModel: strPtr(""),
+			expectedModel: "global-model-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg.cfg.UltimateModel.ModelID = tt.globalModelID
+			usedModel = ""
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			body := map[string]interface{}{
+				"model":    "original-model",
+				"stream":   false,
+				"messages": []map[string]interface{}{{"role": "user", "content": "Hello"}},
+			}
+
+			hash := tt.name + "-hash"
+			headersSent := false
+			_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, tt.perTokenModel)
+
+			if err != nil {
+				t.Errorf("Execute returned error: %v", err)
+				return
+			}
+
+			if usedModel != tt.expectedModel {
+				t.Errorf("Expected model = %q, got %q", tt.expectedModel, usedModel)
+			}
+		})
+	}
+}
+
+// strPtr is a helper to create string pointers
+func strPtr(s string) *string {
+	return &s
+}

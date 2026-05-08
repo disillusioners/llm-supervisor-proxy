@@ -120,9 +120,9 @@ func setupTestEnv(t *testing.T) *testEnv {
 	for _, model := range []struct {
 		id, name, internalModel string
 	}{
-		{"gpt-4", "GPT-4", "gpt-4"},
-		{"claude-3", "Claude 3", "claude-3"},
-		{"gpt-3.5", "GPT-3.5", "gpt-3.5"},
+		{"gpt-4", "gpt-4", "gpt-4"},
+		{"claude-3", "claude-3", "claude-3"},
+		{"gpt-3.5", "gpt-3.5", "gpt-3.5"},
 	} {
 		if err := modelsConfig.AddModel(models.ModelConfig{
 			ID:            model.id,
@@ -623,28 +623,31 @@ func TestHandler_CaseSensitivity_ExactMatch(t *testing.T) {
 	env := setupTestEnv(t)
 	ctx := context.Background()
 
-	// Create token allowing "GPT-4" (uppercase)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-token", nil, "test", false, "", []string{"GPT-4"})
+	// Create token allowing "gpt-4" (lowercase, matching DB model name)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-token", nil, "test", false, "", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Test: lowercase gpt-4 should be DENIED
-	req := makeHandlerRequest("gpt-4", plaintext)
+	// Test: different case "GPT-4" should be DENIED (case-sensitive matching)
+	req := makeHandlerRequest("GPT-4", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 for 'gpt-4' when 'GPT-4' is allowed, got %d", rr.Code)
+		t.Errorf("Expected 403 for 'GPT-4' when 'gpt-4' is allowed (case mismatch), got %d", rr.Code)
 	}
 
-	// Test: uppercase GPT-4 should be ALLOWED
-	req = makeHandlerRequest("GPT-4", plaintext)
+	// Test: exact match "gpt-4" should be ALLOWED
+	req = makeHandlerRequest("gpt-4", plaintext)
 	rr = httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code == http.StatusForbidden {
-		t.Errorf("Expected 200 for 'GPT-4' (exact match), got 403")
+		t.Errorf("Expected 200 for 'gpt-4' (exact match), got 403")
+	}
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

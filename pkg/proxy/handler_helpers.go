@@ -28,6 +28,9 @@ type requestContext struct {
 	reqLog    *store.RequestLog
 	modelList []string
 
+	// Resolved model config at the boundary (nil for external/unknown models)
+	resolvedModel *models.ModelConfig
+
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 
@@ -196,30 +199,6 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 		}
 	}
 	return storeMessages
-}
-
-// buildModelList constructs [originalModel, fallback1, fallback2, ...] from config.
-func buildModelList(originalModel string, modelsConfig models.ModelsConfigInterface) []string {
-	log.Printf("[PEAK-DBG] buildModelList ENTRY: originalModel=%q", originalModel)
-
-	var allModels []string
-	if modelsConfig != nil {
-		fallbackChain := modelsConfig.GetFallbackChain(originalModel)
-		log.Printf("[PEAK-DBG] buildModelList: GetFallbackChain(%q) = %v", originalModel, fallbackChain)
-		if len(fallbackChain) > 0 {
-			allModels = fallbackChain[1:]
-			log.Printf("[PEAK-DBG] buildModelList: fallbackChain[1:] = %v (fallback models)", allModels)
-		}
-	}
-	if allModels == nil {
-		allModels = []string{}
-	}
-	// Pre-allocate with original + fallbacks (typically 1-3 models)
-	modelList := make([]string, 0, 1+len(allModels))
-	modelList = append(modelList, originalModel)
-	modelList = append(modelList, allModels...)
-	log.Printf("[PEAK-DBG] buildModelList EXIT: modelList=%v (original=%q + fallbacks=%v)", modelList, originalModel, allModels)
-	return modelList
 }
 
 // copyHeaders copies request headers from src to dst, skipping Content-Length

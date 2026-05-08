@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'preact/hooks';
 
 interface ModelMultiSelectProps {
   models: { name: string; id: string; [key: string]: any }[];
-  selected: string[];  // Currently selected model names
+  selected: string[];  // Currently selected model IDs
   onChange: (selected: string[]) => void;
   disabled?: boolean;
 }
@@ -33,42 +33,42 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
   );
 
   // Check if a model is selected
-  const isModelSelected = (modelName: string) => selected.includes(modelName);
+  const isModelSelected = (modelId: string) => selected.includes(modelId);
 
   // Toggle a model's selection
-  const toggleModel = (modelName: string) => {
-    if (isModelSelected(modelName)) {
-      onChange(selected.filter(name => name !== modelName));
+  const toggleModel = (modelId: string) => {
+    if (isModelSelected(modelId)) {
+      onChange(selected.filter(id => id !== modelId));
     } else {
-      onChange([...selected, modelName]);
+      onChange([...selected, modelId]);
     }
   };
 
   // Select all filtered models
   const selectAll = () => {
-    const allFilteredNames = filteredModels.map(m => m.name);
-    const newSelected = new Set([...selected, ...allFilteredNames]);
+    const allFilteredIds = filteredModels.map(m => m.id);
+    const newSelected = new Set([...selected, ...allFilteredIds]);
     onChange(Array.from(newSelected));
   };
 
   // Clear selections for filtered models only
   const clearAll = () => {
-    const filteredNames = new Set(filteredModels.map(m => m.name));
-    onChange(selected.filter(name => !filteredNames.has(name)));
+    const filteredIds = new Set(filteredModels.map(m => m.id));
+    onChange(selected.filter(id => !filteredIds.has(id)));
   };
 
   // Handle toggle all (select/deselect only filtered models)
   const handleToggleAll = () => {
-    const filteredNames = new Set(filteredModels.map(m => m.name));
-    const filteredSelected = selected.filter(name => filteredNames.has(name));
+    const filteredIds = new Set(filteredModels.map(m => m.id));
+    const filteredSelected = selected.filter(id => filteredIds.has(id));
 
     if (filteredSelected.length === 0) {
       // Select all filtered models
-      const newSelected = new Set([...selected, ...filteredModels.map(m => m.name)]);
+      const newSelected = new Set([...selected, ...filteredModels.map(m => m.id)]);
       onChange(Array.from(newSelected));
     } else {
       // Deselect all filtered models
-      onChange(selected.filter(name => !filteredNames.has(name)));
+      onChange(selected.filter(id => !filteredIds.has(id)));
     }
   };
 
@@ -81,7 +81,7 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
   };
 
   // Check if all filtered models are selected
-  const allFilteredSelected = filteredModels.length > 0 && filteredModels.every(m => selected.includes(m.name));
+  const allFilteredSelected = filteredModels.length > 0 && filteredModels.every(m => selected.includes(m.id));
 
   return (
     <div ref={containerRef} class="relative">
@@ -162,14 +162,14 @@ export function ModelMultiSelect({ models, selected, onChange, disabled }: Model
             ) : (
               <ul class="py-1" role="listbox">
                 {filteredModels.map((model) => {
-                  const isSelected = isModelSelected(model.name);
+                  const isSelected = isModelSelected(model.id);
                   return (
                     <li key={model.id}>
                       <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-700/50 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={isSelected}
-                          onChange={() => toggleModel(model.name)}
+                          onChange={() => toggleModel(model.id)}
                           class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
                         />
                         <span class="text-sm text-gray-200 truncate" title={model.name}>

@@ -126,17 +126,17 @@ func (t *AuthToken) IsExpired() bool {
 	return time.Now().After(*t.ExpiresAt)
 }
 
-// IsModelAllowed checks if the given model name is allowed for this token.
-// Returns true if AllowedModels is nil (all models allowed) or if modelName is
+// IsModelAllowed checks if the given model ID is allowed for this token.
+// Returns true if AllowedModels is nil (all models allowed) or if modelID is
 // found in the list. Empty slice is treated the same as nil (all models allowed).
 // Case-sensitive exact match.
-func (t *AuthToken) IsModelAllowed(modelName string) bool {
+func (t *AuthToken) IsModelAllowed(modelID string) bool {
 	// nil or empty slice means all models are allowed
 	if len(t.AllowedModels) == 0 {
 		return true
 	}
 	for _, allowed := range t.AllowedModels {
-		if allowed == modelName {
+		if allowed == modelID {
 			return true
 		}
 	}

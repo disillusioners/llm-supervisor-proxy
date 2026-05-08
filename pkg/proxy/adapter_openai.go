@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
@@ -61,7 +60,7 @@ func (a *OpenAIAdapter) ParseRequest(r *http.Request) (map[string]interface{}, *
 	return body, meta, nil
 }
 
-func (a *OpenAIAdapter) ToUpstreamRequest(body map[string]interface{}, _ models.ModelsConfigInterface) ([]byte, error) {
+func (a *OpenAIAdapter) ToUpstreamRequest(body map[string]interface{}) ([]byte, error) {
 	// OpenAI requests pass through unchanged
 	return json.Marshal(body)
 }
@@ -70,7 +69,7 @@ func (a *OpenAIAdapter) ToStoreMessages(body map[string]interface{}) []store.Mes
 	return parseOpenAIMessages(body)
 }
 
-func (a *OpenAIAdapter) ExtractUpstreamModel(body map[string]interface{}, _ models.ModelsConfigInterface) string {
+func (a *OpenAIAdapter) ExtractUpstreamModel(body map[string]interface{}) string {
 	model, _ := body["model"].(string)
 	return model
 }

@@ -49,6 +49,15 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
   // Calculate min date (today) for the date input
   const today = new Date().toISOString().split('T')[0];
 
+  // Get model display name from ID
+  const getModelDisplayName = (modelId: string) => {
+    return models.find(m => m.id === modelId)?.name ?? modelId;
+  };
+
+  const selectedModelsDisplay = selectedModels.length > 0
+    ? selectedModels.map(id => getModelDisplayName(id)).join(', ')
+    : '';
+
   return (
     <div class="bg-gray-700/50 rounded-lg p-5 border border-gray-600">
       <h3 class="text-lg font-medium text-white mb-4">
@@ -96,7 +105,7 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
           <p class="text-xs text-gray-400 mt-1">
             {selectedModels.length === 0
               ? 'No selection means all models are allowed'
-              : `Only these models are allowed: ${selectedModels.join(', ')}`
+              : `Only these models are allowed: ${selectedModelsDisplay}`
             }
           </p>
         </div>
@@ -148,7 +157,7 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
               {[...models]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((model) => (
-                  <option key={model.id} value={model.name}>
+                  <option key={model.id} value={model.id}>
                     {model.name}
                   </option>
                 ))}

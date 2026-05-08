@@ -611,8 +611,9 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
 			// Set up fallback chain so race retry has multiple models to try
-			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "Mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "Fallback Mock", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
 			return mc
 		}(),
 		configOpts: []func(*config.Config){
@@ -672,8 +673,9 @@ func TestMockLLM_FallbackAfter500(t *testing.T) {
 		name: "MockLLM_FallbackAfter500",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "Primary", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "Fallback", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "primary-mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -922,8 +924,9 @@ func TestFallback4xxTriggered(t *testing.T) {
 		name: "Fallback4xxTriggered",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			mc.AddModel(models.ModelConfig{ID: "primary", Name: "Primary", Enabled: true, FallbackChain: []string{"secondary"}})
-			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "Secondary", Enabled: true})
+			// Note: Name must match the model value used in request body for resolution
+			mc.AddModel(models.ModelConfig{ID: "primary", Name: "primary", Enabled: true, FallbackChain: []string{"secondary"}})
+			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "secondary", Enabled: true})
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -2396,7 +2399,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "claude-3",
-		Name:          "Claude 3",
+		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2409,7 +2412,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	// Also add gpt-4 as internal model (for the allowed test later, though this test uses claude-3)
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "gpt-4",
-		Name:          "GPT-4",
+		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2505,7 +2508,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "gpt-4",
-		Name:          "GPT-4",
+		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",
@@ -2592,7 +2595,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	// Add internal model that references the credential
 	err = mc.AddModel(models.ModelConfig{
 		ID:            "any-model",
-		Name:          "Any Model",
+		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
 		CredentialID:  "test-credential",

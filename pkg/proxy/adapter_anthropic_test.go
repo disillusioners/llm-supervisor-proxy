@@ -128,7 +128,7 @@ func TestAnthropicAdapter_ExtractUpstreamModel(t *testing.T) {
 	adapter := NewAnthropicAdapter()
 
 	body := map[string]interface{}{"model": "claude-3-sonnet"}
-	model := adapter.ExtractUpstreamModel(body, nil)
+	model := adapter.ExtractUpstreamModel(body)
 	if model != "claude-3-sonnet" {
 		t.Errorf("expected 'claude-3-sonnet', got '%s'", model)
 	}
@@ -260,16 +260,6 @@ func parseAnthropicReq(m map[string]interface{}) *translator.AnthropicRequest {
 	return &req
 }
 
-func TestGetAnthropicModelMapping(t *testing.T) {
-	mapping := getAnthropicModelMapping(nil)
-	if mapping == nil {
-		t.Error("expected non-nil mapping")
-	}
-	// Unknown models should pass through
-	if mapping.GetMappedModel("unknown-model") != "unknown-model" {
-		t.Error("expected unknown model to pass through")
-	}
-}
 
 func TestAnthropicAdapter_WriteNonStreamResponse(t *testing.T) {
 	adapter := NewAnthropicAdapter()
@@ -499,7 +489,7 @@ func TestAnthropicAdapter_ToUpstreamRequest(t *testing.T) {
 		},
 	}
 
-	result, err := adapter.ToUpstreamRequest(body, nil)
+	result, err := adapter.ToUpstreamRequest(body)
 	if err != nil {
 		t.Fatalf("ToUpstreamRequest() error = %v", err)
 	}

@@ -786,7 +786,7 @@ func TestOpenAIAdapter_ExtractUpstreamModel(t *testing.T) {
 	adapter := NewOpenAIAdapter()
 
 	body := map[string]interface{}{"model": "gpt-4o"}
-	model := adapter.ExtractUpstreamModel(body, nil)
+	model := adapter.ExtractUpstreamModel(body)
 	if model != "gpt-4o" {
 		t.Errorf("expected 'gpt-4o', got '%s'", model)
 	}
@@ -801,7 +801,7 @@ func TestOpenAIAdapter_ToUpstreamRequest(t *testing.T) {
 		"temperature": 0.7,
 	}
 
-	result, err := adapter.ToUpstreamRequest(body, nil)
+	result, err := adapter.ToUpstreamRequest(body)
 	if err != nil {
 		t.Fatalf("ToUpstreamRequest() error = %v", err)
 	}

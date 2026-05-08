@@ -198,13 +198,18 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
     if (model && model.trim() !== '') {
       return (
         <span class="text-xs bg-purple-900/50 text-purple-300 border border-purple-800/40 px-1.5 py-0.5 rounded">
-          model: {model}
+          model: {getModelDisplayName(model)}
         </span>
       );
     }
     return (
       <span class="text-xs text-gray-500">Global default</span>
     );
+  };
+
+  // Get model display name from ID
+  const getModelDisplayName = (modelId: string) => {
+    return models.find(m => m.id === modelId)?.name ?? modelId;
   };
 
   // Get display text for allowed models
@@ -219,9 +224,9 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
     const remaining = allowed.length - maxShow;
     return (
       <div class="flex flex-wrap items-center gap-1">
-        {shown.map(name => (
-          <span key={name} class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded truncate max-w-[100px]" title={name}>
-            {name}
+        {shown.map(id => (
+          <span key={id} class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded truncate max-w-[100px]" title={id}>
+            {getModelDisplayName(id)}
           </span>
         ))}
         {remaining > 0 && (
@@ -391,14 +396,14 @@ export function TokenList({ tokens, models, onRevoke, onStatus, onCreateToken, o
                           >
                             <option value="">Global Default</option>
                             {[...models].sort((a, b) => a.name.localeCompare(b.name)).map(model => (
-                              <option key={model.id} value={model.name}>{model.name}</option>
+                              <option key={model.id} value={model.id}>{model.name}</option>
                             ))}
                           </select>
                         ) : (
                           <>
                             {token.ultimate_model && token.ultimate_model.trim() !== '' ? (
                               <span class="text-xs bg-gray-700 text-gray-300 border border-gray-600 px-1.5 py-0.5 rounded">
-                                {token.ultimate_model}
+                                {models.find(m => m.id === token.ultimate_model)?.name || token.ultimate_model}
                               </span>
                             ) : (
                               <span class="text-xs text-gray-500">Global default</span>

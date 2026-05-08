@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
@@ -36,14 +35,13 @@ type ProtocolAdapter interface {
 
 	// ToUpstreamRequest converts the client request to OpenAI format for upstream.
 	// The returned []byte is the JSON body to send to upstream.
-	ToUpstreamRequest(body map[string]interface{}, modelMapping models.ModelsConfigInterface) ([]byte, error)
+	ToUpstreamRequest(body map[string]interface{}) ([]byte, error)
 
 	// ToStoreMessages converts request messages to store format for logging.
 	ToStoreMessages(body map[string]interface{}) []store.Message
 
 	// ExtractUpstreamModel extracts the model name that should be used for upstream.
-	// This may differ from the client's model due to mapping.
-	ExtractUpstreamModel(body map[string]interface{}, modelMapping models.ModelsConfigInterface) string
+	ExtractUpstreamModel(body map[string]interface{}) string
 
 	// IsStream returns true if this is a streaming request.
 	IsStream(body map[string]interface{}) bool

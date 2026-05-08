@@ -280,7 +280,12 @@ func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 		return false
 	}
 
-	// Check all models in the chain (primary + fallbacks)
+	// Check if resolved model (primary) is internal
+	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+		return true
+	}
+
+	// Check all models in the chain (IDs for resolved models, raw names for external)
 	for _, modelID := range rc.modelList {
 		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
 		if modelConfig != nil && modelConfig.Internal {
@@ -363,19 +368,23 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 
-	// Only authenticate if using internal upstream
-	// For external upstream, the upstream provider handles authentication
-	if h.requiresInternalAuth(rc) {
-		token, ok := h.authenticate(r)
-		if !ok {
-			// Update request log to failed status
+	// Check if this request requires internal authentication
+	// (model is internal and needs client API key validation)
+	requiresAuth := h.requiresInternalAuth(rc)
+
+	// Try to authenticate the request
+	// Authentication is required for internal models OR when a token is provided
+	var authToken *auth.AuthToken
+	if requiresAuth || h.tokenStore != nil {
+		authToken, _ = h.authenticate(r)
+		if authToken == nil && requiresAuth {
+			// Authentication required but failed
 			rc.reqLog.Status = "failed"
 			rc.reqLog.Error = "Authentication failed: invalid or expired API key"
 			rc.reqLog.EndTime = time.Now()
 			rc.reqLog.Duration = time.Since(rc.startTime).String()
 			h.store.Add(rc.reqLog)
 
-			// Publish event so frontend refreshes
 			h.publishEvent("auth_failed", map[string]interface{}{
 				"id":    rc.reqID,
 				"error": "invalid_api_key",
@@ -384,51 +393,124 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.sendAuthError(w)
 			return
 		}
-		if token != nil {
-			rc.tokenID = token.ID
-			rc.tokenName = token.Name
-			rc.ultimateModelEnabled = token.UltimateModelEnabled
-			rc.ultimateModelID = token.UltimateModelID
+	}
 
-			// === MODEL ACCESS CHECK ===
-			// Check if the requested model is allowed for this token
-			// This check happens AFTER authentication but BEFORE ultimate model logic
-			if !token.IsModelAllowed(rc.reqLog.Model) {
-				log.Printf("[AUTH] Model '%s' not allowed for token %s (%s)", rc.reqLog.Model, rc.tokenID, rc.tokenName)
+	// Populate token info if authenticated
+	if authToken != nil {
+		rc.tokenID = authToken.ID
+		rc.tokenName = authToken.Name
+		rc.ultimateModelEnabled = authToken.UltimateModelEnabled
+		rc.ultimateModelID = authToken.UltimateModelID
+	}
 
-				// Update request log to failed status
+	// === MODEL ACCESS CHECK ===
+	// Check if the requested model is allowed for this token
+	// This check happens AFTER authentication for internal models
+	// For external models: only check if token has restrictions (fail-closed)
+	if authToken != nil {
+		var modelID string
+		if rc.resolvedModel != nil {
+			modelID = rc.resolvedModel.ID
+		}
+		if modelID != "" {
+			// Model exists in our DB - check if allowed by token
+			if !authToken.IsModelAllowed(modelID) {
+				log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)", rc.reqLog.Model, modelID, rc.tokenID, rc.tokenName)
+
 				rc.reqLog.Status = "failed"
 				rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
 				rc.reqLog.EndTime = time.Now()
 				rc.reqLog.Duration = time.Since(rc.startTime).String()
 				h.store.Add(rc.reqLog)
 
-				// Publish event
 				h.publishEvent("model_not_allowed", map[string]interface{}{
 					"id":    rc.reqID,
 					"model": rc.reqLog.Model,
 					"token": rc.tokenID,
 				})
 
-				// Send 403 Forbidden response
 				h.sendModelNotAllowedError(w, rc.reqLog.Model)
 				return
 			}
-			// === END MODEL ACCESS CHECK ===
+		} else if len(authToken.AllowedModels) > 0 {
+			// Model not in DB AND token has restrictions → deny (fail-closed)
+			// Unknown models should not bypass allowed_models restrictions
+			log.Printf("[AUTH] Model '%s' not found in DB, token %s (%s) has restrictions - denying", rc.reqLog.Model, rc.tokenID, rc.tokenName)
+
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", rc.reqLog.Model)
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+
+			h.publishEvent("model_not_allowed", map[string]interface{}{
+				"id":    rc.reqID,
+				"model": rc.reqLog.Model,
+				"token": rc.tokenID,
+			})
+
+			h.sendModelNotAllowedError(w, rc.reqLog.Model)
+			return
 		}
+		// else: model not in DB and no restrictions → allow (external/open models)
 	}
+	// === END MODEL ACCESS CHECK ===
 
 	// Debug log when ultimate model is skipped due to missing permission
 	if h.ultimateHandler != nil && !rc.ultimateModelEnabled && rc.tokenID != "" {
 		log.Printf("[DEBUG] ultimate model skipped: token %s (%s) lacks ultimate_model_enabled, model: %s", rc.tokenID, rc.tokenName, rc.reqLog.Model)
 	}
 
-	// Header override for forcing ultimate model (for testing/debugging)
+	// Header override for forcing ultimate model (fail-closed: requires auth AND admin must have enabled it)
 	forceUltimate := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
-	if forceUltimate {
+	if forceUltimate && authToken != nil && rc.ultimateModelEnabled {
 		rc.ultimateModelEnabled = true
 		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
 	}
+
+	// === ULTIMATE MODEL ACCESS CHECK ===
+	// For ultimate model, we need to check access control separately
+	// because the ultimate model might not be in the original request's model list
+	ultimateModelID := ""
+	if h.ultimateHandler != nil && (rc.ultimateModelEnabled || forceUltimate) {
+		// Determine which ultimate model will be used
+		ultimateModelID = h.ultimateHandler.GetModelID()
+		if rc.ultimateModelID != "" {
+			ultimateModelID = rc.ultimateModelID
+		}
+
+		// If ultimate model is different from the requested model, check access control
+		if ultimateModelID != "" && authToken != nil {
+			var requestedModelID string
+			if rc.resolvedModel != nil {
+				requestedModelID = rc.resolvedModel.ID
+			}
+			if ultimateModelID != requestedModelID {
+				// Ultimate model is different - check if allowed
+				if !authToken.IsModelAllowed(ultimateModelID) {
+					log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
+
+					rc.reqLog.Status = "failed"
+					rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
+					rc.reqLog.EndTime = time.Now()
+					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					rc.reqLog.UltimateModelUsed = true
+					rc.reqLog.UltimateModelID = ultimateModelID
+					h.store.Add(rc.reqLog)
+
+					h.publishEvent("ultimate_model_not_allowed", map[string]interface{}{
+						"id":    rc.reqID,
+						"model": ultimateModelID,
+						"token": rc.tokenID,
+					})
+
+					h.sendModelNotAllowedError(w, ultimateModelID)
+					return
+				}
+			}
+		}
+	}
+	// === END ULTIMATE MODEL ACCESS CHECK ===
 
 	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
 	// Check if ultimate model should be triggered for duplicate requests
@@ -500,38 +582,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
 					ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
-				// === ULTIMATE MODEL ACCESS CHECK ===
-				// Check if the ultimate model is allowed for this token
-				// This prevents X-Force-Ultimate-Model header from bypassing allowed_models
-				// Re-authenticate to get the token (token variable not in scope here)
-				if h.requiresInternalAuth(rc) {
-					if authToken, ok := h.authenticate(r); ok && authToken != nil {
-						if !authToken.IsModelAllowed(ultimateModelID) {
-							log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
-
-							// Update request log to failed status
-							rc.reqLog.Status = "failed"
-							rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
-							rc.reqLog.EndTime = time.Now()
-							rc.reqLog.Duration = time.Since(rc.startTime).String()
-							rc.reqLog.UltimateModelUsed = true
-							rc.reqLog.UltimateModelID = ultimateModelID
-							h.store.Add(rc.reqLog)
-
-							// Publish event
-							h.publishEvent("ultimate_model_not_allowed", map[string]interface{}{
-								"id":    rc.reqID,
-								"model": ultimateModelID,
-								"token": rc.tokenID,
-							})
-
-							// Send 403 Forbidden response
-							h.sendModelNotAllowedError(w, ultimateModelID)
-							return
-						}
-					}
-				}
-				// === END ULTIMATE MODEL ACCESS CHECK ===
+				// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
 
 				// Update request log with ultimate model info
 				rc.reqLog.UltimateModelUsed = true

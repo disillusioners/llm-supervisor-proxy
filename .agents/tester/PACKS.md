@@ -15,14 +15,14 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-04-15 | PASS |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-04-13 | PASS |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-04-13 | PASS |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-05-08 | PASS |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-05-07 | PASS |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-05-07 | PASS |
 | models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-04-13 | PASS |
 | toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-04-13 | PASS |
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-04-13 | PASS |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-04-13 | PASS |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-04-13 | PASS |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-07 | PASS |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-07 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-04 | PASS |
 
 ## Mock Test Packs

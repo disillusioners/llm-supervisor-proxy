@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
@@ -83,7 +82,7 @@ func (a *AnthropicAdapter) ParseRequest(r *http.Request) (map[string]interface{}
 	return body, meta, nil
 }
 
-func (a *AnthropicAdapter) ToUpstreamRequest(body map[string]interface{}, modelMapping models.ModelsConfigInterface) ([]byte, error) {
+func (a *AnthropicAdapter) ToUpstreamRequest(body map[string]interface{}) ([]byte, error) {
 	// Convert map back to AnthropicRequest for translation
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -96,8 +95,7 @@ func (a *AnthropicAdapter) ToUpstreamRequest(body map[string]interface{}, modelM
 	}
 
 	// Translate to OpenAI format
-	mapping := getAnthropicModelMapping(modelMapping)
-	openaiReq := translator.TranslateRequest(&anthropicReq, mapping)
+	openaiReq := translator.TranslateRequest(&anthropicReq, nil)
 
 	return json.Marshal(openaiReq)
 }
@@ -124,10 +122,9 @@ func (a *AnthropicAdapter) ToStoreMessages(body map[string]interface{}) []store.
 	return messages
 }
 
-func (a *AnthropicAdapter) ExtractUpstreamModel(body map[string]interface{}, modelMapping models.ModelsConfigInterface) string {
+func (a *AnthropicAdapter) ExtractUpstreamModel(body map[string]interface{}) string {
 	model, _ := body["model"].(string)
-	mapping := getAnthropicModelMapping(modelMapping)
-	return mapping.GetMappedModel(model)
+	return model
 }
 
 func (a *AnthropicAdapter) IsStream(body map[string]interface{}) bool {
@@ -302,18 +299,4 @@ func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessa
 	return result
 }
 
-// getAnthropicModelMapping extracts model mapping from config
-func getAnthropicModelMapping(modelsConfig models.ModelsConfigInterface) *translator.ModelMappingConfig {
-	mapping := make(map[string]string)
-	if modelsConfig != nil {
-		for _, model := range modelsConfig.GetModels() {
-			if model.ID != "" && model.Name != "" && model.Name != model.ID {
-				mapping[model.Name] = model.ID
-			}
-		}
-	}
-	// Return mapping config without default - unknown models pass through unchanged
-	return &translator.ModelMappingConfig{
-		Mapping: mapping,
-	}
-}
+
