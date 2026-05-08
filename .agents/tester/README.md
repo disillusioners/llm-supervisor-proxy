@@ -35,6 +35,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Model ID Everywhere | 2026-05-07 | ✅ PASS | 24/24 packages, 5 critical bugs found+fixed, 579-line access control test, frontend PASS, branch `fix/models-use-id-everywhere` |
 | X-Force-Ultimate-Model Security | 2026-05-07 | ✅ PASS | 21/21 packages, TestA5 PASS, header gated behind auth+admin, commit `17a7f59` |
 | Model Resolution Pipeline Refactor | 2026-05-07 | ✅ PASS | 24/24 packages, 171 functional tests, frontend PASS, branch `fix/remove-getmodelidbyname` |
+| Remove ResolveModelByName | 2026-05-08 | ✅ PASS | 24/24 packages, access control tests PASS, frontend PASS, commit `a14a0dc`, branch `fix/remove-resolve-model-by-name` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
