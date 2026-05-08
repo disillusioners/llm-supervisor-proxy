@@ -78,10 +78,10 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	}
 	h.store.Add(reqLog)
 
-	// Resolve model name to config at the boundary
+	// Resolve model ID to config at the boundary
 	var resolvedModel *models.ModelConfig
 	if conf.ModelsConfig != nil {
-		resolvedModel = conf.ModelsConfig.ResolveModelByName(originalModel)
+		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
 	}
 
 	// Build model list using resolved config

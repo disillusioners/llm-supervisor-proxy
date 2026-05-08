@@ -99,8 +99,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		requestBody = bodyBytes
 	} else {
 		// Translate to OpenAI format
-		modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
-		openaiReq := translator.TranslateRequest(&anthropicReq, modelMapping)
+		openaiReq := translator.TranslateRequest(&anthropicReq, nil)
 		var err error
 		requestBody, err = json.Marshal(openaiReq)
 		if err != nil {
@@ -150,10 +149,10 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	h.publishEvent("request_started", map[string]interface{}{"id": reqID})
 
-	// Resolve model name to config at the boundary
+	// Resolve model ID to config at the boundary
 	var resolvedModel *models.ModelConfig
 	if conf.ModelsConfig != nil {
-		resolvedModel = conf.ModelsConfig.ResolveModelByName(originalModel)
+		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
 	}
 
 	// Build model list using resolved config
@@ -230,9 +229,8 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.requestBody = newBody
 		} else {
 			// For OpenAI translation path, re-translate with new model
-			modelMapping := getAnthropicModelMapping(conf.ModelsConfig)
 			arc.anthropicReq.Model = currentModel
-			openaiReq := translator.TranslateRequest(arc.anthropicReq, modelMapping)
+			openaiReq := translator.TranslateRequest(arc.anthropicReq, nil)
 			newBody, err := json.Marshal(openaiReq)
 			if err != nil {
 				log.Printf("Failed to marshal translated request: %v", err)

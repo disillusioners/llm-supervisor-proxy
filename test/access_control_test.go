@@ -163,10 +163,10 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 	}
 }
 
-// makeAccessControlRequest creates a request with a specific model name
-func makeAccessControlRequest(modelName, plaintextToken string) *http.Request {
+// makeAccessControlRequest creates a request with a specific model ID
+func makeAccessControlRequest(modelID, plaintextToken string) *http.Request {
 	body := map[string]interface{}{
-		"model": modelName,
+		"model": modelID,
 		"stream": false,
 		"messages": []interface{}{
 			map[string]interface{}{
@@ -200,14 +200,14 @@ func TestA1_AllowedModelMatch(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with model name "First Model" which resolves to ID "model-id-1"
-	req := makeAccessControlRequest("First Model", plaintext)
+	// Request with model ID "model-id-1" (clients should send IDs, not names)
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	// Should be allowed (200)
 	if rr.Code == http.StatusForbidden {
-		t.Errorf("Expected 200 OK, got 403 Forbidden (model name 'First Model' resolves to allowed ID 'model-id-1')")
+		t.Errorf("Expected 200 OK, got 403 Forbidden (model ID 'model-id-1' should be allowed)")
 	}
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
@@ -225,9 +225,8 @@ func TestA2_AllowedModelMismatch(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with model name "Second Model" which resolves to ID "model-id-2"
-	// "model-id-2" is NOT in allowed_models → should be 403
-	req := makeAccessControlRequest("Second Model", plaintext)
+	// Request with model ID "model-id-2" which is NOT in allowed_models → should be 403
+	req := makeAccessControlRequest("model-id-2", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
@@ -396,7 +395,7 @@ func TestB1_UltimateModelAllowed(t *testing.T) {
 
 	// Send a request that will trigger ultimate model
 	// (Use the Force header to trigger it)
-	req := makeAccessControlRequest("First Model", plaintext)
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	req.Header.Set("X-Force-Ultimate-Model", "true")
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
@@ -422,7 +421,7 @@ func TestB2_UltimateModelForbidden(t *testing.T) {
 	}
 
 	// Send a request that will trigger ultimate model
-	req := makeAccessControlRequest("First Model", plaintext)
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	req.Header.Set("X-Force-Ultimate-Model", "true")
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
@@ -463,68 +462,36 @@ func TestC1_IsModelAllowedReceivesIDs(t *testing.T) {
 	if token.IsModelAllowed("model-id-3") {
 		t.Error("model-id-3 should NOT be allowed (not in list)")
 	}
-	// Name-based check should fail
+	// Name-based check should fail (ID-based lookup only)
 	if token.IsModelAllowed("First Model") {
 		t.Error("'First Model' name should NOT match ID-based allowed_models")
 	}
 
-	// Test 2: Verify ResolveModelByName returns correct configs
-	resolved := env.modelsConfig.ResolveModelByName("First Model")
-	if resolved == nil {
-		t.Error("ResolveModelByName('First Model') should not return nil")
-	} else if resolved.ID != "model-id-1" {
-		t.Errorf("ResolveModelByName('First Model').ID = %q, want 'model-id-1'", resolved.ID)
-	}
-	resolved = env.modelsConfig.ResolveModelByName("Second Model")
-	if resolved == nil {
-		t.Error("ResolveModelByName('Second Model') should not return nil")
-	} else if resolved.ID != "model-id-2" {
-		t.Errorf("ResolveModelByName('Second Model').ID = %q, want 'model-id-2'", resolved.ID)
-	}
-	resolved = env.modelsConfig.ResolveModelByName("Ultimate Model")
-	if resolved == nil {
-		t.Error("ResolveModelByName('Ultimate Model') should not return nil")
-	} else if resolved.ID != "ultimate-id" {
-		t.Errorf("ResolveModelByName('Ultimate Model').ID = %q, want 'ultimate-id'", resolved.ID)
-	}
-	resolved = env.modelsConfig.ResolveModelByName("Non-existent Model")
-	if resolved != nil {
-		t.Errorf("ResolveModelByName('Non-existent Model') should return nil, got %+v", resolved)
-	}
-
-	// Test 3: End-to-end flow: model name → ID resolution → allowed check
 	// Create token allowing "model-id-1"
 	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-test-token", nil, "test", false, "", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request "First Model" → resolves to "model-id-1" → should be allowed
-	req := makeAccessControlRequest("First Model", plaintext)
+	// Request "model-id-1" → should be allowed
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK (First Model → model-id-1 → allowed), got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 200 OK (model-id-1 → allowed), got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// Request "Second Model" → resolves to "model-id-2" → should be denied
-	req = makeAccessControlRequest("Second Model", plaintext)
+	// Request "model-id-2" → should be denied (not in allowed list)
+	req = makeAccessControlRequest("model-id-2", plaintext)
 	rr = httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden (Second Model → model-id-2 → not allowed), got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 403 Forbidden (model-id-2 → not allowed), got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
-// TestC2_NoGetModelNameReferences verifies no GetModelName references remain in codebase
-func TestC2_NoGetModelNameReferences(t *testing.T) {
-	// This is a documentation test - the actual grep is done separately
-	// This test documents the expectation that GetModelName should not exist
-	t.Log("Note: GetModelName references should be checked via grep in the codebase")
-	t.Log("Expected: No references to GetModelName should exist (only ResolveModelByName)")
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Edge Case Tests
@@ -574,22 +541,22 @@ func TestEdge_CaseSensitiveIDMatch(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with correct name → should work
-	req := makeAccessControlRequest("First Model", plaintext)
+	// Request with correct ID → should work
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK for 'First Model', got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 200 OK for 'model-id-1', got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// Request with "first model" (lowercase) → should fail (case-sensitive name matching)
-	req = makeAccessControlRequest("first model", plaintext)
+	// Request with "MODEL-ID-1" (uppercase) → should fail (case-sensitive ID matching)
+	req = makeAccessControlRequest("MODEL-ID-1", plaintext)
 	rr = httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
 	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden for 'first model' (case mismatch), got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 403 Forbidden for 'MODEL-ID-1' (case mismatch), got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -605,24 +572,24 @@ func TestEdge_MultipleModelsAllowed(t *testing.T) {
 	}
 
 	testCases := []struct {
-		modelName string
+		modelID     string
 		shouldAllow bool
 	}{
-		{"First Model", true},   // model-id-1 → allowed
-		{"Second Model", true}, // model-id-2 → allowed
-		{"Ultimate Model", false}, // ultimate-id → not allowed
+		{"model-id-1", true},    // allowed
+		{"model-id-2", true},    // allowed
+		{"ultimate-id", false},  // not allowed
 	}
 
 	for _, tc := range testCases {
-		req := makeAccessControlRequest(tc.modelName, plaintext)
+		req := makeAccessControlRequest(tc.modelID, plaintext)
 		rr := httptest.NewRecorder()
 		env.handler.HandleChatCompletions(rr, req)
 
 		if tc.shouldAllow && rr.Code == http.StatusForbidden {
-			t.Errorf("%s: expected 200 OK, got 403", tc.modelName)
+			t.Errorf("%s: expected 200 OK, got 403", tc.modelID)
 		}
 		if !tc.shouldAllow && rr.Code != http.StatusForbidden {
-			t.Errorf("%s: expected 403 Forbidden, got %d", tc.modelName, rr.Code)
+			t.Errorf("%s: expected 403 Forbidden, got %d", tc.modelID, rr.Code)
 		}
 	}
 }
