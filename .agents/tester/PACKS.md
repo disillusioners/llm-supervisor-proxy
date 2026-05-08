@@ -16,14 +16,14 @@
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
 | proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-05-08 | PASS |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-05-07 | PASS |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-05-07 | PASS |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-04-13 | PASS |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-04-13 | PASS |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-04-13 | PASS |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-07 | PASS |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-07 | PASS |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-04 | PASS |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-05-08 | PASS* |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-05-08 | PASS |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-05-08 | PASS |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-05-08 | PASS |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-05-08 | PASS |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-08 | PASS |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-08 | PASS |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-08 | PASS |
 
 ## Mock Test Packs
 
@@ -52,6 +52,21 @@ Update after each test run:
 - ✅ All scripts have cleanup traps on EXIT
 
 ## Recent Test Results (2026-04-13)
+
+## Recent Test Results (2026-05-08)
+
+### Commits d578427 + 585fe6a - Delete Model Button Fix
+| Category | Status | Details |
+|----------|--------|---------|
+| Go Build | ✅ PASS | `go build ./cmd/main.go` |
+| Go Unit Tests | ✅ PASS | 22/23 packages (2 pre-existing failures in ultimatemodel, also fail on master) |
+| Go Vet | ✅ PASS | No issues |
+| Frontend Build | ✅ PASS | 1.46s, 4 chunks, no warnings |
+| Browser Tests | ✅ 5/5 | Delete dialog, cancel, delete, loading state, overlay dismiss |
+| Quick Fixes | 1 | Overlay click dismiss handler (commit 585fe6a) |
+
+*Note: `ultimatemodel_unit_test` has 2 pre-existing failures unrelated to this PR (also fail on master):
+`TestExecute_PerTokenOverride_WithID` and `TestExecute_AllLookupsUseID/per-token_uses_ID_lookup`
 
 ### Commit 3cd5d56 - Critical Test Gaps Fix (C1+C2)
 | Category | Status | Details |

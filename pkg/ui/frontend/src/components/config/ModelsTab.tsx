@@ -28,6 +28,7 @@ export function ModelsTab({
   const [modelFormMode, setModelFormMode] = useState<'add' | 'edit'>('add');
   const [modelToEdit, setModelToEdit] = useState<Model | undefined>(undefined);
   const [modelToDelete, setModelToDelete] = useState<Model | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const handleOpenAddModel = () => {
     setModelToEdit(undefined);
@@ -106,11 +107,14 @@ export function ModelsTab({
     if (!modelToDelete) return;
     try {
       setStatus(null);
+      setDeleting(true);
       await onDeleteModel(modelToDelete.id);
       setStatus({ type: 'success', message: 'Model deleted successfully' });
       setModelToDelete(null);
     } catch (e) {
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to delete model' });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -255,6 +259,45 @@ export function ModelsTab({
           onStatus={setStatus}
           onNavigateToCredentials={onNavigateToCredentials}
         />
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {modelToDelete && (
+        <div
+          class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]"
+          onClick={() => setModelToDelete(null)}
+        >
+          <div
+            class="bg-gray-800 rounded-lg shadow-2xl max-w-sm w-full mx-4 border border-gray-700 p-6 flex flex-col items-center text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div class="w-12 h-12 bg-red-900/30 text-red-400 rounded-full flex items-center justify-center mb-4 border border-red-800/50">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <h3 class="text-xl font-semibold text-white mb-2">Delete Model</h3>
+            <p class="text-gray-300 mb-6">
+              Are you sure you want to delete <span class="font-semibold text-white">"{modelToDelete.name}"</span>? This action cannot be undone.
+            </p>
+            <div class="flex gap-3 w-full">
+              <button
+                onClick={() => setModelToDelete(null)}
+                class="flex-1 px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600"
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteModel}
+                class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors font-medium border border-red-500/50 shadow shadow-red-900/20"
+                disabled={deleting}
+              >
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
