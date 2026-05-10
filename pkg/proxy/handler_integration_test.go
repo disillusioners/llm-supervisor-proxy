@@ -421,9 +421,9 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		"token-with-ultimate-override",
 		nil,
 		"test-user",
-		true,                    // ultimateModelEnabled = true
-		"Token Ultimate Model",  // ultimateModelID = per-token override (uses model NAME, as TokenForm stores model.name)
-		nil,                    // allowedModels = nil (all models allowed)
+		true,                     // ultimateModelEnabled = true
+		"token-ultimate-model",   // ultimateModelID = per-token override (uses model ID, as frontend stores model.id)
+		nil,                      // allowedModels = nil (all models allowed)
 	)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)

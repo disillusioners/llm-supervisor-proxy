@@ -1230,7 +1230,7 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 
 	hash := "per-token-hash"
 	headersSent := false
-	tokenModelID := "token-override" // Per-token override uses model NAME (as TokenForm stores model.name)
+	tokenModelID := "token-override-model" // Per-token override uses model ID (as frontend stores model.id)
 	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
 
 	if err != nil {
@@ -1293,7 +1293,7 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 
 	hash := "stream-override-hash"
 	headersSent := false
-	tokenModelID := "token-stream" // Per-token override uses model NAME (as TokenForm stores model.name)
+	tokenModelID := "token-stream-override" // Per-token override uses model ID (as frontend stores model.id)
 	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
 
 	if err != nil {

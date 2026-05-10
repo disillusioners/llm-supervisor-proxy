@@ -242,9 +242,9 @@ func (h *Handler) Execute(
 	// Global config uses database ID (stored by ProxySettings), so search by ID
 	var modelCfg *models.ModelConfig
 	if tokenModelID != nil && *tokenModelID != "" {
-		// Per-token override - search by name
+		// Per-token override - search by ID (TokenForm stores model.id)
 		modelID = *tokenModelID
-		modelCfg = h.modelsMgr.GetModelByName(modelID)
+		modelCfg = h.modelsMgr.GetModel(modelID)
 	} else {
 		// Global config - search by ID
 		modelCfg = h.modelsMgr.GetModel(modelID)

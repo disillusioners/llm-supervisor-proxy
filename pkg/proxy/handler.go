@@ -613,8 +613,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					h.store.Add(rc.reqLog)
 
 					h.publishEvent("ultimate_model_failed", map[string]interface{}{
-						"id":    rc.reqID,
-						"error": err.Error(),
+						"id":             rc.reqID,
+						"ultimate_model": ultimateModelID,
+						"error":          err.Error(),
 					})
 
 					// If headers not sent, send error response
