@@ -37,6 +37,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | Model Resolution Pipeline Refactor | 2026-05-07 | ✅ PASS | 24/24 packages, 171 functional tests, frontend PASS, branch `fix/remove-getmodelidbyname` |
 | Remove ResolveModelByName | 2026-05-08 | ✅ PASS | 24/24 packages, access control tests PASS, frontend PASS, commit `a14a0dc`, branch `fix/remove-resolve-model-by-name` |
 | Delete Model Button Fix | 2026-05-08 | ✅ PASS | 22/23 packages (2 pre-existing), frontend PASS, browser 5/5, quick fix `585fe6a`, branch `fix/delete-model-button` |
+| Ultimate Model Not Found Log Fix | 2026-05-10 | ✅ PASS | 25/25 packages, ultimatemodel 97 tests, proxy 200+ tests, commit `8510485`, branch `fix/ultimate-model-not-found-log` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
