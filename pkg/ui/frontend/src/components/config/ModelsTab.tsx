@@ -73,6 +73,7 @@ export function ModelsTab({
           internal_model: data.internal_model,
           secondary_upstream_model: data.internal ? (data.secondary_upstream_model || '') : undefined,
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
+          credential_id: data.internal ? data.credential_id : undefined,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
       } else {
