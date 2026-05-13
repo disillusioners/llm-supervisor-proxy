@@ -108,3 +108,17 @@ Update after each test run:
 | pkg/proxy/race_retry_test.go | 68 | EXTENDED — retry integration |
 | pkg/store/database/database_test.go | 370 | EXTENDED — store CRUD |
 | pkg/ui/handlers_models_test.go | 557 | NEW — API handlers |
+
+### Commit a2a6c41 - Credential ID Model Creation Fix (Branch: fix/model-credential-create)
+
+| Category | Status | Details |
+|----------|--------|---------|
+| Go Build | ✅ PASS | `go build ./cmd/main.go` |
+| Go Unit Tests | ✅ PASS | 25/27 packages (2 pre-existing race in stream_buffer.go:166) |
+| Go Vet | ✅ PASS | No issues |
+| Frontend Build | ✅ PASS | Built in 1.72s |
+| Code Logic Verification | ✅ PASS | All 6 checks passed |
+
+**Pre-existing failures (unrelated to fix):**
+- `pkg/proxy` — nil pointer dereference in `streamBuffer.GetAllRawBytesOnce()` (stream_buffer.go:166)
+- `test/e2e_reasoning_content` — same root cause, different call path through race_executor.go:621
