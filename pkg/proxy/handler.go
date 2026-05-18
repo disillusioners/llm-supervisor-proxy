@@ -676,6 +676,22 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					}()
 				}
 
+				// Count this request for model hourly usage tracking
+				if rc.reqLog.Model != "" && h.counter != nil {
+					var promptTokens, completionTokens, totalTokens int
+					if rc.reqLog.Usage != nil {
+						promptTokens = rc.reqLog.Usage.PromptTokens
+						completionTokens = rc.reqLog.Usage.CompletionTokens
+						totalTokens = rc.reqLog.Usage.TotalTokens
+					}
+					hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+					go func() {
+						if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+							log.Printf("failed to increment model usage counter: %v", err)
+						}
+					}()
+				}
+
 				h.publishEvent("request_completed", map[string]interface{}{
 					"id":             rc.reqID,
 					"model":          ultimateModelID,
@@ -1144,6 +1160,22 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}()
 			}
 
+			// Count this request for model hourly usage tracking
+			if rc.reqLog.Model != "" && h.counter != nil {
+				var promptTokens, completionTokens, totalTokens int
+				if rc.reqLog.Usage != nil {
+					promptTokens = rc.reqLog.Usage.PromptTokens
+					completionTokens = rc.reqLog.Usage.CompletionTokens
+					totalTokens = rc.reqLog.Usage.TotalTokens
+				}
+				hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+				go func() {
+					if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+						log.Printf("failed to increment model usage counter: %v", err)
+					}
+				}()
+			}
+
 			h.publishEvent("request_completed", map[string]interface{}{
 				"id":       rc.reqID,
 				"model":    winner.GetModelID(),
@@ -1347,6 +1379,22 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		go func() {
 			if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
 				log.Printf("failed to increment usage counter: %v", err)
+			}
+		}()
+	}
+
+	// Count this request for model hourly usage tracking
+	if rc.reqLog.Model != "" && h.counter != nil {
+		var promptTokens, completionTokens, totalTokens int
+		if rc.reqLog.Usage != nil {
+			promptTokens = rc.reqLog.Usage.PromptTokens
+			completionTokens = rc.reqLog.Usage.CompletionTokens
+			totalTokens = rc.reqLog.Usage.TotalTokens
+		}
+		hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+		go func() {
+			if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+				log.Printf("failed to increment model usage counter: %v", err)
 			}
 		}()
 	}

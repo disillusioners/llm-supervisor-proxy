@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -601,6 +601,24 @@ export function useUsage() {
     }
   }, []);
 
+  const fetchModelUsage = useCallback(async (params: {
+    from?: string;
+    to?: string;
+    view?: 'hourly' | 'daily';
+  }) => {
+    try {
+      const qs = new URLSearchParams();
+      if (params.from) qs.set('from', params.from);
+      if (params.to) qs.set('to', params.to);
+      if (params.view) qs.set('view', params.view);
+      const data = await apiFetch<ModelUsageResponse>('/usage/models?' + qs.toString());
+      return data;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to fetch model usage');
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     const doFetchTokens = async () => {
@@ -616,5 +634,5 @@ export function useUsage() {
     return () => controller.abort();
   }, []);
 
-  return { usageData, usageTokens, summary, loading, error, fetchUsage, fetchTokens, fetchSummary };
+  return { usageData, usageTokens, summary, loading, error, fetchUsage, fetchTokens, fetchSummary, fetchModelUsage };
 }

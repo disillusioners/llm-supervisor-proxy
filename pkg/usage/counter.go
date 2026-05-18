@@ -18,6 +18,16 @@ type HourlyUsageRow struct {
 	TotalTokens      int
 }
 
+// ModelHourlyUsageRow represents a row from the model_hourly_usage table
+type ModelHourlyUsageRow struct {
+	ModelID          string
+	HourBucket       string
+	RequestCount     int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
 // Counter tracks token usage statistics per hour bucket
 type Counter struct {
 	db      *sql.DB
@@ -99,6 +109,76 @@ func (c *Counter) GetTokenUsage(ctx context.Context, tokenID, fromHour, toHour s
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating usage rows: %w", err)
+	}
+
+	return result, nil
+}
+
+// IncrementModelUsage increments usage counters for a model within an hour bucket
+// Uses UPSERT to atomically add counts to the existing values
+func (c *Counter) IncrementModelUsage(ctx context.Context, modelID, hourBucket string, reqCount, promptTok, completionTok, totalTok int) error {
+	var query string
+	if c.dialect == database.PostgreSQL {
+		query = `INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (model_id, hour_bucket) DO UPDATE SET
+				request_count = model_hourly_usage.request_count + EXCLUDED.request_count,
+				prompt_tokens = model_hourly_usage.prompt_tokens + EXCLUDED.prompt_tokens,
+				completion_tokens = model_hourly_usage.completion_tokens + EXCLUDED.completion_tokens,
+				total_tokens = model_hourly_usage.total_tokens + EXCLUDED.total_tokens`
+	} else {
+		query = `INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (model_id, hour_bucket) DO UPDATE SET
+				request_count = request_count + excluded.request_count,
+				prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+				completion_tokens = completion_tokens + excluded.completion_tokens,
+				total_tokens = total_tokens + excluded.total_tokens`
+	}
+
+	args := []interface{}{modelID, hourBucket, reqCount, promptTok, completionTok, totalTok}
+
+	_, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to increment model usage: %w", err)
+	}
+	return nil
+}
+
+// GetModelUsage retrieves usage statistics for models within a time range
+func (c *Counter) GetModelUsage(ctx context.Context, fromHour, toHour string) ([]ModelHourlyUsageRow, error) {
+	var query string
+	if c.dialect == database.PostgreSQL {
+		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+			FROM model_hourly_usage
+			WHERE hour_bucket >= $1 AND hour_bucket <= $2
+			ORDER BY model_id, hour_bucket`
+	} else {
+		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+			FROM model_hourly_usage
+			WHERE hour_bucket >= ? AND hour_bucket <= ?
+			ORDER BY model_id, hour_bucket`
+	}
+
+	args := []interface{}{fromHour, toHour}
+
+	rows, err := c.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query model usage: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ModelHourlyUsageRow
+	for rows.Next() {
+		var row ModelHourlyUsageRow
+		if err := rows.Scan(&row.ModelID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
+			return nil, fmt.Errorf("failed to scan model usage row: %w", err)
+		}
+		result = append(result, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating model usage rows: %w", err)
 	}
 
 	return result, nil

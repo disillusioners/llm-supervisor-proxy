@@ -79,6 +79,32 @@ type UsageSummaryResponse struct {
 	GrandTotal GrandTotal           `json:"grand_total"`
 }
 
+// ModelUsageDataRow represents a row in the model usage data array
+type ModelUsageDataRow struct {
+	ModelID          string `json:"model_id"`
+	ModelName        string `json:"model_name"`
+	HourBucket       string `json:"hour_bucket"`
+	RequestCount     int    `json:"request_count"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+}
+
+// ModelSummary represents a model in the models list
+type ModelSummary struct {
+	ModelID   string `json:"model_id"`
+	ModelName string `json:"model_name"`
+}
+
+// UsageModelsResponse represents the response for GET /fe/api/usage/models
+type UsageModelsResponse struct {
+	From   string                `json:"from"`
+	To     string                `json:"to"`
+	View   string                `json:"view"`
+	Data   []ModelUsageDataRow   `json:"data"`
+	Models []ModelSummary        `json:"models"`
+}
+
 // validateDateRange validates the from/to date range and returns an error message if invalid.
 // The format should be "2006-01-02T15" or "2006-01-02T15:04" (e.g., "2024-03-15T14" or "2024-03-15T14:30").
 func validateDateRange(from, to string) string {
@@ -511,6 +537,151 @@ func (s *Server) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		To:         to,
 		Tokens:     tokens,
 		GrandTotal: grandTotal,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleUsageModels handles GET /fe/api/usage/models
+func (s *Server) handleUsageModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.dbStore == nil {
+		http.Error(w, "Database not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Parse query params
+	fromStr := r.URL.Query().Get("from")
+	toStr := r.URL.Query().Get("to")
+	view := r.URL.Query().Get("view")
+	if view == "" {
+		view = "hourly"
+	}
+
+	// Default time range: last 24 hours
+	now := time.Now()
+	to := toStr
+	if to == "" {
+		to = now.Format("2006-01-02T15")
+	}
+	from := fromStr
+	if from == "" {
+		from = now.Add(-24 * time.Hour).Format("2006-01-02T15")
+	}
+
+	// Validate date range if provided
+	if fromStr != "" || toStr != "" {
+		if errMsg := validateDateRange(from, to); errMsg != "" {
+			http.Error(w, errMsg, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Build query with dialect-aware placeholders
+	var query string
+	var args []interface{}
+
+	dialect := s.dbStore.Dialect
+
+	if view == "daily" {
+		// Daily aggregation: group by model_id and day
+		if dialect == database.PostgreSQL {
+			query = `SELECT model_id, SUBSTR(hour_bucket, 1, 10), SUM(request_count), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens)
+			FROM model_hourly_usage
+			WHERE hour_bucket >= $1 AND hour_bucket <= $2
+			GROUP BY model_id, SUBSTR(hour_bucket, 1, 10)
+			ORDER BY model_id, SUBSTR(hour_bucket, 1, 10)`
+		} else {
+			query = `SELECT model_id, SUBSTR(hour_bucket, 1, 10), SUM(request_count), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens)
+			FROM model_hourly_usage
+			WHERE hour_bucket >= ? AND hour_bucket <= ?
+			GROUP BY model_id, SUBSTR(hour_bucket, 1, 10)
+			ORDER BY model_id, SUBSTR(hour_bucket, 1, 10)`
+		}
+		args = []interface{}{from, to}
+	} else {
+		// Hourly view (default): return individual hour buckets
+		if dialect == database.PostgreSQL {
+			query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+			FROM model_hourly_usage
+			WHERE hour_bucket >= $1 AND hour_bucket <= $2
+			ORDER BY model_id, hour_bucket`
+		} else {
+			query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+			FROM model_hourly_usage
+			WHERE hour_bucket >= ? AND hour_bucket <= ?
+			ORDER BY model_id, hour_bucket`
+		}
+		args = []interface{}{from, to}
+	}
+
+	rows, err := s.dbStore.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		http.Error(w, "Failed to query model usage data", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var data []ModelUsageDataRow
+	modelIDs := make(map[string]bool)
+
+	for rows.Next() {
+		var row ModelUsageDataRow
+		if err := rows.Scan(&row.ModelID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
+			http.Error(w, "Failed to scan model usage row", http.StatusInternalServerError)
+			return
+		}
+		// Look up model name from models config
+		if modelConfig := s.modelsConfig.GetModel(row.ModelID); modelConfig != nil {
+			row.ModelName = modelConfig.Name
+		} else {
+			row.ModelName = row.ModelID
+		}
+		data = append(data, row)
+		modelIDs[row.ModelID] = true
+	}
+
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Error iterating model usage rows", http.StatusInternalServerError)
+		return
+	}
+
+	// Build models list
+	var models []ModelSummary
+	for modelID := range modelIDs {
+		modelSummary := ModelSummary{
+			ModelID: modelID,
+		}
+		if modelConfig := s.modelsConfig.GetModel(modelID); modelConfig != nil {
+			modelSummary.ModelName = modelConfig.Name
+		} else {
+			modelSummary.ModelName = modelID
+		}
+		models = append(models, modelSummary)
+	}
+
+	// Ensure data is not nil
+	if data == nil {
+		data = []ModelUsageDataRow{}
+	}
+	// Ensure models is not nil
+	if models == nil {
+		models = []ModelSummary{}
+	}
+
+	response := UsageModelsResponse{
+		From:   from,
+		To:     to,
+		View:   view,
+		Data:   data,
+		Models: models,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

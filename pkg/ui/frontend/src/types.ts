@@ -378,3 +378,22 @@ export interface UsageSummary {
   }[];
   grand_total: UsageGrandTotal;
 }
+
+// ModelUsageDataRow represents a single row of model usage data.
+export interface ModelUsageDataRow {
+  model_id: string;
+  model_name: string;
+  hour_bucket: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface ModelUsageResponse {
+  from: string;
+  to: string;
+  view: 'hourly' | 'daily';
+  data: ModelUsageDataRow[];
+  models: { model_id: string; model_name: string }[];
+}

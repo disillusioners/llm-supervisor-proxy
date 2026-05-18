@@ -3,6 +3,8 @@ import { useUsage } from '../../hooks/useApi';
 import { UsageSummaryCards } from './UsageSummaryCards';
 import { UsageTable } from './UsageTable';
 import { UsageChart } from './UsageChart';
+import { ModelUsageChart } from './ModelUsageChart';
+import type { ModelUsageResponse } from '../../types';
 
 function toHourFormat(d: Date): string {
   return d.getFullYear() + '-' +
@@ -14,15 +16,16 @@ function toHourFormat(d: Date): string {
 type DateRange = '24h' | '7d' | '30d' | 'custom';
 
 export function UsageTab() {
-  const { usageData, usageTokens, summary, loading, error, fetchUsage, fetchSummary } = useUsage();
+  const { usageData, usageTokens, summary, loading, error, fetchUsage, fetchSummary, fetchModelUsage } = useUsage();
 
   const [selectedTokenId, setSelectedTokenId] = useState('');
   const [dateRange, setDateRange] = useState<DateRange>('24h');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [view, setView] = useState<'hourly' | 'daily'>('hourly');
-  const [displayMode, setDisplayMode] = useState<'chart' | 'table'>('chart');
+  const [displayMode, setDisplayMode] = useState<'by-token-chart' | 'by-model-chart' | 'table'>('by-token-chart');
   const [metricType, setMetricType] = useState<'tokens' | 'requests'>('tokens');
+  const [modelUsageData, setModelUsageData] = useState<ModelUsageResponse | null>(null);
 
   // Calculate date range boundaries
   const { from, to } = useMemo(() => {
@@ -60,6 +63,14 @@ export function UsageTab() {
       view,
     });
   }, [selectedTokenId, from, to, view, fetchSummary, fetchUsage]);
+
+  // Only fetch model usage data when viewing the model chart
+  useEffect(() => {
+    if (displayMode !== 'by-model-chart') return;
+    fetchModelUsage({ from, to, view }).then(data => {
+      setModelUsageData(data);
+    });
+  }, [displayMode, from, to, view, fetchModelUsage]);
 
   const handleDateRangeChange = (range: DateRange) => {
     setDateRange(range);
@@ -157,17 +168,27 @@ export function UsageTab() {
 
       {/* Chart/Table and Metric type toggle row */}
       <div class="flex gap-4 items-center">
-        {/* Display mode toggle (chart/table) */}
+        {/* Display mode toggle (by-token-chart/by-model-chart/table) */}
         <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
           <button
-            onClick={() => setDisplayMode('chart')}
+            onClick={() => setDisplayMode('by-token-chart')}
             class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-              displayMode === 'chart'
+              displayMode === 'by-token-chart'
                 ? 'bg-blue-600 text-white'
                 : 'text-gray-400 hover:text-white'
             }`}
           >
-            📊 Chart
+            📊 By Token
+          </button>
+          <button
+            onClick={() => setDisplayMode('by-model-chart')}
+            class={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              displayMode === 'by-model-chart'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            📊 By Model
           </button>
           <button
             onClick={() => setDisplayMode('table')}
@@ -181,8 +202,8 @@ export function UsageTab() {
           </button>
         </div>
 
-        {/* Metric type toggle (tokens/requests) - only show in chart mode */}
-        {displayMode === 'chart' && (
+        {/* Metric type toggle (tokens/requests) - show for both chart modes */}
+        {displayMode !== 'table' && (
           <div class="flex gap-1 bg-gray-800 rounded-lg p-1">
             <button
               onClick={() => setMetricType('tokens')}
@@ -233,14 +254,23 @@ export function UsageTab() {
       </div>
 
       {/* Chart or Table view */}
-      {displayMode === 'chart' ? (
+      {displayMode === 'by-token-chart' && (
         <UsageChart
           data={usageData?.data || []}
           view={view}
           loading={loading}
           metricType={metricType}
         />
-      ) : (
+      )}
+      {displayMode === 'by-model-chart' && (
+        <ModelUsageChart
+          data={modelUsageData?.data || []}
+          view={view}
+          loading={loading}
+          metricType={metricType}
+        />
+      )}
+      {displayMode === 'table' && (
         <UsageTable
           data={usageData?.data || []}
           totals={usageData?.totals || null}

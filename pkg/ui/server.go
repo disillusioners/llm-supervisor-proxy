@@ -150,6 +150,7 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/usage", s.handleUsage)
 	mux.HandleFunc("/fe/api/usage/tokens", s.handleUsageTokens)
 	mux.HandleFunc("/fe/api/usage/summary", s.handleUsageSummary)
+	mux.HandleFunc("/fe/api/usage/models", s.handleUsageModels)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
