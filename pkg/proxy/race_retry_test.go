@@ -209,14 +209,14 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 
 // TestRaceScenario_FallbackWins verifies that fallback model can win
 func TestRaceScenario_FallbackWins(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		count := callCount.Add(1)
 		// Read the request body to check which model is being used
 		body := make([]byte, 100)
 		r.Body.Read(body)
 
-		if callCount == 1 {
+		if count == 1 {
 			// First request (main) fails
 			time.Sleep(100 * time.Millisecond)
 			w.WriteHeader(http.StatusInternalServerError)
