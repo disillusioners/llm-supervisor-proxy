@@ -10,6 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
@@ -57,15 +58,34 @@ func setupTestServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 
+	// Create model_hourly_usage table
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS model_hourly_usage (
+		model_id TEXT NOT NULL,
+		hour_bucket TEXT NOT NULL,
+		request_count INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (model_id, hour_bucket)
+	)`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+
 	// Create database store
 	dbStore := &database.Store{
 		DB:      db,
 		Dialect: database.SQLite,
 	}
 
+	// Create mock models config
+	mockModels := newMockModelsConfigForHandlers()
+
 	// Create a minimal server for testing
 	s := &Server{
-		dbStore: dbStore,
+		dbStore:      dbStore,
+		modelsConfig: mockModels,
 	}
 
 	t.Cleanup(func() { db.Close() })
@@ -1356,6 +1376,683 @@ func TestHandleUsageTokens_ResponseFields(t *testing.T) {
 		for _, field := range tokenFields {
 			if _, ok := token[field]; !ok {
 				t.Errorf("expected token field %q in response", field)
+			}
+		}
+	}
+}
+
+// =============================================================================
+// Part C: handleUsageModels API Endpoint Tests
+// =============================================================================
+
+func TestHandleUsageModels_BasicQuery(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert test model usage data
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('gpt-4', '2024-01-01T11:00', 3, 600, 300, 900),
+		('claude-3', '2024-01-01T10:00', 2, 400, 200, 600)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Data) != 3 {
+		t.Errorf("expected 3 data rows, got %d", len(resp.Data))
+	}
+
+	if resp.From != "2024-01-01T09" {
+		t.Errorf("expected from = '2024-01-01T09', got %s", resp.From)
+	}
+	if resp.To != "2024-01-01T12" {
+		t.Errorf("expected to = '2024-01-01T12', got %s", resp.To)
+	}
+	if resp.View != "hourly" {
+		t.Errorf("expected view = 'hourly', got %s", resp.View)
+	}
+}
+
+func TestHandleUsageModels_WithFromToParams(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert test data spanning multiple days
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('gpt-4', '2024-01-02T10:00', 10, 2000, 1000, 3000),
+		('gpt-4', '2024-01-03T10:00', 15, 3000, 1500, 4500)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Query only Jan 2
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-02T00&to=2024-01-02T23", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Data) != 1 {
+		t.Errorf("expected 1 data row for Jan 2, got %d", len(resp.Data))
+	}
+
+	if resp.Data[0].HourBucket != "2024-01-02T10:00" {
+		t.Errorf("expected hour_bucket = '2024-01-02T10:00', got %s", resp.Data[0].HourBucket)
+	}
+}
+
+func TestHandleUsageModels_HourlyView(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert test data
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('gpt-4', '2024-01-01T11:00', 3, 600, 300, 900)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12&view=hourly", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.View != "hourly" {
+		t.Errorf("expected view = 'hourly', got %s", resp.View)
+	}
+
+	if len(resp.Data) != 2 {
+		t.Errorf("expected 2 data rows, got %d", len(resp.Data))
+	}
+
+	// Verify each row has full hour bucket format (YYYY-MM-DDTHH:MM)
+	for _, row := range resp.Data {
+		if len(row.HourBucket) != 16 { // Format: "2024-01-01T10:00" = 16 chars
+			t.Errorf("expected hourly hour_bucket format with time, got %s (len=%d)", row.HourBucket, len(row.HourBucket))
+		}
+	}
+}
+
+func TestHandleUsageModels_DailyView(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert test data spanning multiple hours on same day
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('gpt-4', '2024-01-01T11:00', 3, 600, 300, 900),
+		('gpt-4', '2024-01-02T10:00', 10, 2000, 1000, 3000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T00&to=2024-01-02T23&view=daily", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.View != "daily" {
+		t.Errorf("expected view = 'daily', got %s", resp.View)
+	}
+
+	// Should have 2 rows (one per day) with aggregated counts
+	if len(resp.Data) != 2 {
+		t.Errorf("expected 2 data rows (one per day), got %d", len(resp.Data))
+	}
+
+	// Find Jan 1 aggregated row
+	var jan1Row *ModelUsageDataRow
+	var jan2Row *ModelUsageDataRow
+	for i := range resp.Data {
+		if resp.Data[i].HourBucket == "2024-01-01" {
+			jan1Row = &resp.Data[i]
+		} else if resp.Data[i].HourBucket == "2024-01-02" {
+			jan2Row = &resp.Data[i]
+		}
+	}
+	if jan1Row == nil {
+		t.Fatal("Jan 1 row not found")
+	}
+	if jan2Row == nil {
+		t.Fatal("Jan 2 row not found")
+	}
+
+	// Jan 1 should have aggregated counts (5+3=8 requests, 1000+600=1600 prompt, etc.)
+	if jan1Row.RequestCount != 8 {
+		t.Errorf("Jan 1 RequestCount = %d, want 8", jan1Row.RequestCount)
+	}
+	if jan1Row.PromptTokens != 1600 {
+		t.Errorf("Jan 1 PromptTokens = %d, want 1600", jan1Row.PromptTokens)
+	}
+	// Jan 2 should have single hour counts
+	if jan2Row.RequestCount != 10 {
+		t.Errorf("Jan 2 RequestCount = %d, want 10", jan2Row.RequestCount)
+	}
+}
+
+func TestHandleUsageModels_DefaultParams(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// No params provided - should use defaults
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Default view should be "hourly"
+	if resp.View != "hourly" {
+		t.Errorf("expected default view = 'hourly', got %s", resp.View)
+	}
+
+	// From/to should be set to defaults (last 24 hours)
+	if resp.From == "" {
+		t.Error("expected default 'from' to be set")
+	}
+	if resp.To == "" {
+		t.Error("expected default 'to' to be set")
+	}
+}
+
+func TestHandleUsageModels_ReturnsModelsList(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert test model usage data for multiple models
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('claude-3', '2024-01-01T10:00', 3, 600, 300, 900),
+		('gemini-pro', '2024-01-01T11:00', 2, 400, 200, 600)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Models) != 3 {
+		t.Errorf("expected 3 models, got %d", len(resp.Models))
+	}
+
+	// Verify all models are present
+	modelIDs := make(map[string]bool)
+	for _, m := range resp.Models {
+		modelIDs[m.ModelID] = true
+	}
+	expectedModels := []string{"gpt-4", "claude-3", "gemini-pro"}
+	for _, expected := range expectedModels {
+		if !modelIDs[expected] {
+			t.Errorf("expected model %q in models list", expected)
+		}
+	}
+}
+
+func TestHandleUsageModels_ModelNameResolution(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Add models to the mock config
+	ts.modelsConfig.AddModel(models.ModelConfig{
+		ID:   "gpt-4",
+		Name: "GPT-4 Turbo",
+	})
+	ts.modelsConfig.AddModel(models.ModelConfig{
+		ID:   "claude-3",
+		Name: "Claude 3 Sonnet",
+	})
+
+	// Insert test model usage data - one model in config, one not
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('unknown-model', '2024-01-01T10:00', 3, 600, 300, 900)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Find gpt-4 in data
+	var gpt4Row *ModelUsageDataRow
+	var unknownRow *ModelUsageDataRow
+	for i := range resp.Data {
+		if resp.Data[i].ModelID == "gpt-4" {
+			gpt4Row = &resp.Data[i]
+		} else if resp.Data[i].ModelID == "unknown-model" {
+			unknownRow = &resp.Data[i]
+		}
+	}
+
+	if gpt4Row == nil {
+		t.Fatal("gpt-4 row not found")
+	}
+	if unknownRow == nil {
+		t.Fatal("unknown-model row not found")
+	}
+
+	// gpt-4 should have name from config
+	if gpt4Row.ModelName != "GPT-4 Turbo" {
+		t.Errorf("gpt-4 ModelName = %s, want 'GPT-4 Turbo'", gpt4Row.ModelName)
+	}
+
+	// unknown-model should fall back to model_id as name
+	if unknownRow.ModelName != "unknown-model" {
+		t.Errorf("unknown-model ModelName = %s, want 'unknown-model' (model_id)", unknownRow.ModelName)
+	}
+
+	// Also check the models list
+	for _, m := range resp.Models {
+		if m.ModelID == "gpt-4" && m.ModelName != "GPT-4 Turbo" {
+			t.Errorf("models list: gpt-4 ModelName = %s, want 'GPT-4 Turbo'", m.ModelName)
+		}
+		if m.ModelID == "unknown-model" && m.ModelName != "unknown-model" {
+			t.Errorf("models list: unknown-model ModelName = %s, want 'unknown-model'", m.ModelName)
+		}
+	}
+}
+
+func TestHandleUsageModels_InvalidDateFormat(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"invalid from", "from=invalid&to=2024-01-01T12"},
+		{"invalid to", "from=2024-01-01T09&to=invalid"},
+		{"from after to", "from=2024-01-02T00&to=2024-01-01T00"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?"+tt.query, nil)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			ts.handleUsageModels(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected status 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestHandleUsageModels_EmptyResult(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// No test data inserted - should return empty result
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Data) != 0 {
+		t.Errorf("expected 0 data rows, got %d", len(resp.Data))
+	}
+
+	if len(resp.Models) != 0 {
+		t.Errorf("expected 0 models, got %d", len(resp.Models))
+	}
+
+	// Verify empty arrays (not nil)
+	if resp.Data == nil {
+		t.Error("expected empty slice, got nil")
+	}
+	if resp.Models == nil {
+		t.Error("expected empty slice, got nil")
+	}
+}
+
+func TestHandleUsageModels_MethodNotAllowed(t *testing.T) {
+	ts := setupTestServer(t)
+
+	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
+	for _, method := range methods {
+		req := httptest.NewRequest(method, "/fe/api/usage/models", nil)
+		w := httptest.NewRecorder()
+
+		ts.handleUsageModels(w, req)
+
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("expected status 405 for method %s, got %d", method, w.Code)
+		}
+	}
+}
+
+func TestHandleUsageModels_DatabaseNotConfigured(t *testing.T) {
+	s := &Server{dbStore: nil}
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models", nil)
+	w := httptest.NewRecorder()
+
+	s.handleUsageModels(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503, got %d", w.Code)
+	}
+}
+
+func TestHandleUsageModels_ModelWithNoUsage(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Add model to config but with no usage data
+	ts.modelsConfig.AddModel(models.ModelConfig{
+		ID:   "unused-model",
+		Name: "Unused Model",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Model with no usage should not appear in results
+	if len(resp.Models) != 0 {
+		t.Errorf("expected 0 models (unused model should not appear), got %d", len(resp.Models))
+	}
+}
+
+func TestHandleUsageModels_SingleModelWithUsage(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert usage for single model
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('gpt-4', '2024-01-01T10:00', 5, 1000, 500, 1500),
+		('gpt-4', '2024-01-01T11:00', 3, 600, 300, 900)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Models) != 1 {
+		t.Errorf("expected 1 model, got %d", len(resp.Models))
+	}
+
+	if resp.Models[0].ModelID != "gpt-4" {
+		t.Errorf("expected model_id = 'gpt-4', got %s", resp.Models[0].ModelID)
+	}
+
+	if len(resp.Data) != 2 {
+		t.Errorf("expected 2 data rows, got %d", len(resp.Data))
+	}
+}
+
+func TestHandleUsageModels_ModelDeletedFromConfig(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Insert usage for a model that no longer exists in config
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('deleted-model', '2024-01-01T10:00', 5, 1000, 500, 1500)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Model should still appear with model_id as name (fallback behavior)
+	if len(resp.Models) != 1 {
+		t.Errorf("expected 1 model, got %d", len(resp.Models))
+	}
+
+	if resp.Models[0].ModelID != "deleted-model" {
+		t.Errorf("expected model_id = 'deleted-model', got %s", resp.Models[0].ModelID)
+	}
+
+	// Model name should fall back to model_id
+	if resp.Models[0].ModelName != "deleted-model" {
+		t.Errorf("expected model_name = 'deleted-model' (fallback), got %s", resp.Models[0].ModelName)
+	}
+}
+
+func TestHandleUsageModels_ContentType(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	contentType := w.Header().Get("Content-Type")
+	if contentType != "application/json" {
+		t.Errorf("expected Content-Type = 'application/json', got %s", contentType)
+	}
+}
+
+func TestHandleUsageModels_LargeTokenCounts(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	// Test with very large token counts
+	_, err := ts.db.Exec(`INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens) VALUES
+		('large-model', '2024-01-01T10:00', 100, 1000000000, 500000000, 1500000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp UsageModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 data row, got %d", len(resp.Data))
+	}
+
+	if resp.Data[0].PromptTokens != 1000000000 {
+		t.Errorf("PromptTokens = %d, want 1000000000", resp.Data[0].PromptTokens)
+	}
+	if resp.Data[0].CompletionTokens != 500000000 {
+		t.Errorf("CompletionTokens = %d, want 500000000", resp.Data[0].CompletionTokens)
+	}
+	if resp.Data[0].TotalTokens != 1500000000 {
+		t.Errorf("TotalTokens = %d, want 1500000000", resp.Data[0].TotalTokens)
+	}
+}
+
+func TestHandleUsageModels_ResponseFields(t *testing.T) {
+	ts := setupTestServer(t)
+	ctx := context.Background()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/usage/models?from=2024-01-01T09&to=2024-01-01T12", nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	ts.handleUsageModels(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify all expected fields are present
+	expectedFields := []string{"from", "to", "view", "data", "models"}
+	for _, field := range expectedFields {
+		if _, ok := resp[field]; !ok {
+			t.Errorf("expected field %q in response", field)
+		}
+	}
+
+	// Verify data array structure (when empty)
+	data, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatal("data should be an array")
+	}
+	if len(data) > 0 {
+		row, ok := data[0].(map[string]interface{})
+		if !ok {
+			t.Fatal("data row should be an object")
+		}
+		dataFields := []string{"model_id", "model_name", "hour_bucket", "request_count", "prompt_tokens", "completion_tokens", "total_tokens"}
+		for _, field := range dataFields {
+			if _, ok := row[field]; !ok {
+				t.Errorf("expected data field %q in response", field)
+			}
+		}
+	}
+
+	// Verify models array structure (when empty)
+	models, ok := resp["models"].([]interface{})
+	if !ok {
+		t.Fatal("models should be an array")
+	}
+	if len(models) > 0 {
+		model, ok := models[0].(map[string]interface{})
+		if !ok {
+			t.Fatal("model should be an object")
+		}
+		modelFields := []string{"model_id", "model_name"}
+		for _, field := range modelFields {
+			if _, ok := model[field]; !ok {
+				t.Errorf("expected model field %q in response", field)
 			}
 		}
 	}
