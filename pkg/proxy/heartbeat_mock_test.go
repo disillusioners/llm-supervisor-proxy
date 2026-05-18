@@ -414,6 +414,34 @@ func mockDelayedUpstream(delay time.Duration) http.HandlerFunc {
 	}
 }
 
+// safeResponseWriter wraps httptest.ResponseRecorder to provide thread-safe
+// access to the body buffer, preventing data races between handler writes
+// and test reads.
+type safeResponseWriter struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func newSafeResponseWriter() *safeResponseWriter {
+	return &safeResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+	}
+}
+
+// Write implements http.ResponseWriter with mutex protection.
+func (w *safeResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ResponseRecorder.Write(p)
+}
+
+// BodyString returns the body content with mutex protection.
+func (w *safeResponseWriter) BodyString() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ResponseRecorder.Body.String()
+}
+
 // TestHeartbeat_StartsBeforeWaitForWinner verifies that heartbeat is started
 // BEFORE WaitForWinner completes. This is the key fix for the heartbeat feature.
 //
@@ -436,7 +464,7 @@ func TestHeartbeat_StartsBeforeWaitForWinner(t *testing.T) {
 	// Make request
 	body := simpleBody("mock-model", true)
 	req := makeRequest(t, body)
-	rr := httptest.NewRecorder()
+	rr := newSafeResponseWriter()
 
 	// Start timing
 	start := time.Now()
@@ -453,7 +481,7 @@ func TestHeartbeat_StartsBeforeWaitForWinner(t *testing.T) {
 
 	// At this point, headers should have been sent (before WaitForWinner)
 	// Check if connected message is in response
-	respBody := rr.Body.String()
+	respBody := rr.BodyString()
 	if !strings.Contains(respBody, ": connected\n\n") {
 		t.Fatal("expected ': connected' in response within 500ms - heartbeat may not be starting early enough")
 	}
@@ -470,7 +498,7 @@ func TestHeartbeat_StartsBeforeWaitForWinner(t *testing.T) {
 	<-handlerDone
 
 	// Final verification
-	respBody = rr.Body.String()
+	respBody = rr.BodyString()
 	if !strings.Contains(respBody, "delayed response") {
 		t.Error("expected 'delayed response' in final response")
 	}
