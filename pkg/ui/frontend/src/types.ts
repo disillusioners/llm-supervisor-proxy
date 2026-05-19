@@ -397,3 +397,30 @@ export interface ModelUsageResponse {
   data: ModelUsageDataRow[];
   models: { model_id: string; model_name: string }[];
 }
+
+// MCP Server types
+export interface MCPServer {
+  id: string;
+  name: string;
+  description: string;
+  upstream_url: string;
+  transport_type: 'sse' | 'streamable_http';
+  auth_type: 'none' | 'bearer' | 'basic' | 'api_key';
+  auth_token?: string;
+  headers: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MCPServerStatus {
+  enabled: boolean;
+  port: number;
+}
+
+export interface MCPServerTestResult {
+  success: boolean;
+  latency_ms: number;
+  transport: string;
+  error: string;
+}

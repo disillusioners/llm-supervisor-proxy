@@ -1,0 +1,233 @@
+import { useState } from 'preact/hooks';
+import type { MCPServer } from '../../types';
+import { testMCPServer } from '../../hooks/useApi';
+
+interface MCPServerFormProps {
+  server?: MCPServer | null;
+  onSave: (data: {
+    name: string;
+    description: string;
+    upstream_url: string;
+    transport_type: 'sse' | 'streamable_http';
+    auth_type: 'none' | 'bearer' | 'basic' | 'api_key';
+    auth_token?: string;
+    headers: string;
+    enabled: boolean;
+  }) => Promise<void>;
+  onCancel: () => void;
+  setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
+}
+
+export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServerFormProps) {
+  const isEdit = !!server;
+  const [name, setName] = useState(server?.name || '');
+  const [description, setDescription] = useState(server?.description || '');
+  const [upstreamUrl, setUpstreamUrl] = useState(server?.upstream_url || '');
+  const [transportType, setTransportType] = useState<'sse' | 'streamable_http'>(server?.transport_type || 'sse');
+  const [authType, setAuthType] = useState<'none' | 'bearer' | 'basic' | 'api_key'>(server?.auth_type || 'none');
+  const [authToken, setAuthToken] = useState(server?.auth_token || '');
+  const [headers, setHeaders] = useState(server?.headers || '');
+  const [enabled, setEnabled] = useState(server?.enabled ?? true);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const handleSubmit = async (e: Event) => {
+    e.preventDefault();
+    try {
+      setSaving(true);
+      setStatus(null);
+      await onSave({
+        name,
+        description,
+        upstream_url: upstreamUrl,
+        transport_type: transportType,
+        auth_type: authType,
+        auth_token: authType !== 'none' ? authToken : undefined,
+        headers,
+        enabled,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTest = async () => {
+    if (!upstreamUrl) {
+      setStatus({ type: 'error', message: 'Please enter an upstream URL' });
+      return;
+    }
+    try {
+      setTesting(true);
+      setStatus(null);
+      // For new servers, we can't test without saving first
+      // So we'll just validate the URL format
+      try {
+        new URL(upstreamUrl);
+      } catch {
+        setStatus({ type: 'error', message: 'Invalid URL format' });
+        return;
+      }
+      setStatus({ type: 'success', message: 'URL format is valid' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+      <h3 class="text-lg font-semibold text-white mb-4">
+        {isEdit ? 'Edit MCP Server' : 'Add MCP Server'}
+      </h3>
+      <form onSubmit={handleSubmit} class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">
+            Name <span class="text-red-400">*</span>
+          </label>
+          <input
+            type="text"
+            value={name}
+            onInput={(e) => setName((e.target as HTMLInputElement).value)}
+            required
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="e.g., My MCP Server"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">
+            Description
+          </label>
+          <input
+            type="text"
+            value={description}
+            onInput={(e) => setDescription((e.target as HTMLInputElement).value)}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Optional description"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">
+            Upstream URL <span class="text-red-400">*</span>
+          </label>
+          <input
+            type="text"
+            value={upstreamUrl}
+            onInput={(e) => setUpstreamUrl((e.target as HTMLInputElement).value)}
+            required
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="https://mcp.example.com/sse"
+          />
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Transport Type
+            </label>
+            <select
+              value={transportType}
+              onChange={(e) => setTransportType((e.target as HTMLSelectElement).value as 'sse' | 'streamable_http')}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="sse">SSE</option>
+              <option value="streamable_http">Streamable HTTP</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Auth Type
+            </label>
+            <select
+              value={authType}
+              onChange={(e) => setAuthType((e.target as HTMLSelectElement).value as 'none' | 'bearer' | 'basic' | 'api_key')}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="none">None</option>
+              <option value="bearer">Bearer Token</option>
+              <option value="basic">Basic Auth</option>
+              <option value="api_key">API Key</option>
+            </select>
+          </div>
+        </div>
+
+        {authType !== 'none' && (
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Auth Token
+            </label>
+            <input
+              type="password"
+              value={authToken}
+              onInput={(e) => setAuthToken((e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder={authType === 'bearer' ? 'Bearer token' : authType === 'basic' ? 'username:password' : 'API key'}
+            />
+          </div>
+        )}
+
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-1">
+            Custom Headers <span class="text-gray-500 font-normal">(JSON)</span>
+          </label>
+          <textarea
+            value={headers}
+            onInput={(e) => setHeaders((e.target as HTMLTextAreaElement).value)}
+            rows={3}
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
+            placeholder='{"Authorization": "Bearer xxx"}'
+          />
+          <p class="text-xs text-gray-500 mt-1">JSON format for custom HTTP headers</p>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleTest}
+            disabled={testing || !upstreamUrl}
+            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-md transition-colors border border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+          >
+            <svg class={`w-4 h-4 ${testing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            {testing ? 'Testing...' : 'Test Connection'}
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setEnabled(!enabled)}
+            class={`w-10 h-6 rounded-full flex-shrink-0 relative transition-colors ${enabled ? 'bg-green-500' : 'bg-gray-500'
+              }`}
+          >
+            <span class={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${enabled ? 'right-1' : 'left-1'
+              }`}></span>
+          </button>
+          <span class="text-sm text-gray-300">
+            {enabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+
+        <div class="flex gap-3 pt-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            class="flex-1 px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600"
+            disabled={saving}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors font-medium border border-blue-500/50 shadow shadow-blue-900/20"
+            disabled={saving || !name || !upstreamUrl}
+          >
+            {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Add Server'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

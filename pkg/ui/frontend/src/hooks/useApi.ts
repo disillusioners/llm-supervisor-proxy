@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -635,4 +635,104 @@ export function useUsage() {
   }, []);
 
   return { usageData, usageTokens, summary, loading, error, fetchUsage, fetchTokens, fetchSummary, fetchModelUsage };
+}
+
+// MCP Servers API
+export function useMCPServers() {
+  const [servers, setServers] = useState<MCPServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function fetchServers() {
+      try {
+        setLoading(true);
+        const data = await defaultAPICache.getOrFetch<MCPServer[]>('mcp-servers', async () => {
+          const response = await fetch(`${API_BASE}/mcp-servers`, {
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<MCPServer[]>;
+        }, 15000);
+        setServers(data || []);
+        setError(null);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch MCP servers');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchServers();
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  const refetch = useCallback(() => {
+    defaultAPICache.delete('mcp-servers');
+    setRefreshKey(k => k + 1);
+  }, []);
+
+  return { servers, loading, error, refetch };
+}
+
+export function useMCPStatus() {
+  const [status, setStatus] = useState<MCPServerStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function fetchStatus() {
+      try {
+        setLoading(true);
+        const data = await apiFetch<MCPServerStatus>('/mcp-servers/status', { signal: controller.signal });
+        setStatus(data);
+        setError(null);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch MCP status');
+        setStatus(null);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchStatus();
+    return () => controller.abort();
+  }, []);
+
+  return { status, loading, error };
+}
+
+export async function createMCPServer(data: Omit<MCPServer, 'id' | 'created_at' | 'updated_at'> & { id: string }): Promise<MCPServer> {
+  const server = await apiFetch<MCPServer>('/mcp-servers', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  defaultAPICache.delete('mcp-servers');
+  return server;
+}
+
+export async function updateMCPServer(id: string, data: Partial<MCPServer>): Promise<MCPServer> {
+  const server = await apiFetch<MCPServer>(`/mcp-servers/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+  defaultAPICache.delete('mcp-servers');
+  return server;
+}
+
+export async function deleteMCPServer(id: string): Promise<void> {
+  await apiFetch<void>(`/mcp-servers/${id}`, { method: 'DELETE' });
+  defaultAPICache.delete('mcp-servers');
+}
+
+export async function testMCPServer(id: string): Promise<MCPServerTestResult> {
+  return apiFetch<MCPServerTestResult>(`/mcp-servers/${id}/test`, { method: 'POST' });
 }

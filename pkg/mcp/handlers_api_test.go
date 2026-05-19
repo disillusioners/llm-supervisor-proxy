@@ -1,0 +1,1159 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
+)
+
+// =============================================================================
+// Test Helpers
+// =============================================================================
+
+// setupAPITestEnv creates a test Server for API handler testing.
+// Returns the server, cleanup function, and test mux.
+// Note: Uses newTestDB from store_test.go (same package = white-box testing).
+func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, func()) {
+	t.Helper()
+
+	// Create in-memory SQLite (using helper from store_test.go)
+	db, cleanup := newTestDB(t)
+
+	// Create MCPStore
+	mcpStore := NewMCPStore(db.DB, database.SQLite)
+
+	bus := events.NewBus()
+
+	server := &Server{
+		store:   mcpStore,
+		bus:     bus,
+		connMgr: NewConnectionManager(),
+	}
+
+	return server, mcpStore, cleanup
+}
+
+// Helper to create a mock server for test connection testing
+type mockUpstreamServer struct {
+	transportType TransportType
+	statusCode    int
+	contentType   string
+}
+
+func (m *mockUpstreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", m.contentType)
+	w.WriteHeader(m.statusCode)
+}
+
+// =============================================================================
+// Status Endpoint Tests
+// =============================================================================
+
+func TestHandleMCPStatus_WithPort(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	server.port = 4322
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
+	w := httptest.NewRecorder()
+
+	server.handleMCPStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp MCPStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Enabled {
+		t.Error("resp.Enabled should be true when port > 0")
+	}
+	if resp.Port != 4322 {
+		t.Errorf("resp.Port = %d, want 4322", resp.Port)
+	}
+}
+
+func TestHandleMCPStatus_WithoutPort(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	server.port = 0
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
+	w := httptest.NewRecorder()
+
+	server.handleMCPStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp MCPStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Enabled {
+		t.Error("resp.Enabled should be false when port is 0")
+	}
+	if resp.Port != 0 {
+		t.Errorf("resp.Port = %d, want 0", resp.Port)
+	}
+}
+
+func TestHandleMCPStatus_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	tests := []struct {
+		name   string
+		method string
+	}{
+		{"POST", http.MethodPost},
+		{"PUT", http.MethodPut},
+		{"DELETE", http.MethodDelete},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/fe/api/mcp-servers/status", nil)
+			w := httptest.NewRecorder()
+
+			server.handleMCPStatus(w, req)
+
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// List Servers Tests
+// =============================================================================
+
+func TestHandleListMCPServers_ReturnsServers(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create some servers
+	for i := 0; i < 3; i++ {
+		_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+			Name:        fmt.Sprintf("server-%d", i),
+			UpstreamURL: "https://api.example.com/mcp",
+			AuthType:    AuthNone,
+		})
+		if err != nil {
+			t.Fatalf("failed to create server: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleListMCPServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var servers []*MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &servers); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(servers) != 3 {
+		t.Errorf("len(servers) = %d, want 3", len(servers))
+	}
+}
+
+func TestHandleListMCPServers_Empty(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleListMCPServers(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var servers []*MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &servers); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(servers) != 0 {
+		t.Errorf("len(servers) = %d, want 0", len(servers))
+	}
+}
+
+func TestHandleListMCPServers_MasksTokens(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "server-with-token",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthBearer,
+		AuthToken:   "my-secret-token-abc",
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleListMCPServers(w, req)
+
+	var servers []*MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &servers); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	// Verify token is masked: first 6 + "***" + last 3
+	// "my-secret-token-abc"[:6] = "my-sec", last 3 = "abc"
+	expectedMask := "my-sec***abc"
+	if servers[0].AuthToken != expectedMask {
+		t.Errorf("AuthToken = %q, want %q (masked)", servers[0].AuthToken, expectedMask)
+	}
+}
+
+func TestHandleListMCPServers_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleListMCPServers(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Get Server Tests
+// =============================================================================
+
+func TestHandleGetMCPServer_Existing(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthBearer,
+		AuthToken:   "secret-token-xyz",
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/"+created.ID, nil)
+	w := httptest.NewRecorder()
+
+	server.handleGetMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var serverResp MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &serverResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if serverResp.Name != "test-server" {
+		t.Errorf("Name = %q, want %q", serverResp.Name, "test-server")
+	}
+
+	// Verify token is masked
+	// "secret-token-xyz"[:6] = "secret", last 3 = "xyz"
+	expectedMask := "secret***xyz"
+	if serverResp.AuthToken != expectedMask {
+		t.Errorf("AuthToken = %q, want %q (masked)", serverResp.AuthToken, expectedMask)
+	}
+}
+
+func TestHandleGetMCPServer_NotFound(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/nonexistent-id", nil)
+	w := httptest.NewRecorder()
+
+	server.handleGetMCPServer(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleGetMCPServer_MissingID(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	// Path without ID: /fe/api/mcp-servers/ with trailing slash but no ID
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleGetMCPServer(w, req)
+
+	// Should return bad request for missing ID
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleGetMCPServer_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/some-id", nil)
+	w := httptest.NewRecorder()
+
+	server.handleGetMCPServer(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Create Server Tests
+// =============================================================================
+
+func TestHandleCreateMCPServer_Success(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := CreateMCPServerRequest{
+		Name:          "new-server",
+		Description:   "A new test server",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthBearer,
+		AuthToken:     "secret-token-abc",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	var serverResp MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &serverResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if serverResp.Name != "new-server" {
+		t.Errorf("Name = %q, want %q", serverResp.Name, "new-server")
+	}
+
+	if serverResp.Description != "A new test server" {
+		t.Errorf("Description = %q, want %q", serverResp.Description, "A new test server")
+	}
+
+	if serverResp.UpstreamURL != "https://api.example.com/mcp" {
+		t.Errorf("UpstreamURL = %q, want %q", serverResp.UpstreamURL, "https://api.example.com/mcp")
+	}
+
+	// Token should be masked
+	// "secret-token-abc"[:6] = "secret", last 3 = "abc"
+	expectedMask := "secret***abc"
+	if serverResp.AuthToken != expectedMask {
+		t.Errorf("AuthToken = %q, want %q", serverResp.AuthToken, expectedMask)
+	}
+}
+
+func TestHandleCreateMCPServer_EmptyName(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := CreateMCPServerRequest{
+		Name:        "",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:   AuthNone,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	tests := []struct {
+		name       string
+		upstreamURL string
+	}{
+		{"localhost URL", "http://localhost:8080/mcp"},
+		{"invalid URL", "not-a-url"},
+		{"missing scheme", "api.example.com/mcp"},
+		{"private IP", "http://192.168.1.1/mcp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqBody := CreateMCPServerRequest{
+				Name:        "test-server",
+				UpstreamURL: tt.upstreamURL,
+				AuthType:   AuthNone,
+			}
+			body, _ := json.Marshal(reqBody)
+
+			req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			server.handleCreateMCPServer(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestHandleCreateMCPServer_InvalidTransportType(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := CreateMCPServerRequest{
+		Name:          "test-server",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: "invalid_transport",
+		AuthType:      AuthNone,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateMCPServer_MissingTokenForAuth(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := CreateMCPServerRequest{
+		Name:        "test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:   AuthBearer,
+		// AuthToken is missing
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateMCPServer_InvalidJSON(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader([]byte("invalid json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateMCPServer_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Update Server Tests
+// =============================================================================
+
+func TestHandleUpdateMCPServer_Success(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "original-name",
+		Description: "Original description",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	newName := "updated-name"
+	newDesc := "Updated description"
+	updateReq := UpdateMCPServerRequest{
+		Name:        &newName,
+		Description: &newDesc,
+	}
+	body, _ := json.Marshal(updateReq)
+
+	req := httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var serverResp MCPServer
+	if err := json.Unmarshal(w.Body.Bytes(), &serverResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if serverResp.Name != "updated-name" {
+		t.Errorf("Name = %q, want %q", serverResp.Name, "updated-name")
+	}
+
+	if serverResp.Description != "Updated description" {
+		t.Errorf("Description = %q, want %q", serverResp.Description, "Updated description")
+	}
+}
+
+func TestHandleUpdateMCPServer_NotFound(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	newName := "updated-name"
+	updateReq := UpdateMCPServerRequest{
+		Name: &newName,
+	}
+	body, _ := json.Marshal(updateReq)
+
+	req := httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/nonexistent-id", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleUpdateMCPServer_InvalidURL(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	newURL := "http://localhost:8080/mcp"
+	updateReq := UpdateMCPServerRequest{
+		UpstreamURL: &newURL,
+	}
+	body, _ := json.Marshal(updateReq)
+
+	req := httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleUpdateMCPServer_EmptyName(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	emptyName := ""
+	updateReq := UpdateMCPServerRequest{
+		Name: &emptyName,
+	}
+	body, _ := json.Marshal(updateReq)
+
+	req := httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleUpdateMCPServer_InvalidJSON(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader([]byte("invalid json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleUpdateMCPServer_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id", nil)
+	w := httptest.NewRecorder()
+
+	server.handleUpdateMCPServer(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Delete Server Tests
+// =============================================================================
+
+func TestHandleDeleteMCPServer_Success(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "delete-me",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/"+created.ID, nil)
+	w := httptest.NewRecorder()
+
+	server.handleDeleteMCPServer(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusNoContent)
+	}
+
+	// Verify server is deleted
+	_, err = store.GetServer(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetServer failed: %v", err)
+	}
+}
+
+func TestHandleDeleteMCPServer_NotFound(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/nonexistent-id", nil)
+	w := httptest.NewRecorder()
+
+	server.handleDeleteMCPServer(w, req)
+
+	// Delete returns no content even for not found (consistent with store behavior)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestHandleDeleteMCPServer_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id", nil)
+	w := httptest.NewRecorder()
+
+	server.handleDeleteMCPServer(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Test Connection Tests
+// =============================================================================
+
+func TestHandleTestMCPServer_SSE_Success(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "sse-server",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportSSE,
+		AuthType:      AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// Create mock upstream server that returns SSE content type
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Don't send any data - just close
+	}))
+	defer mockUpstream.Close()
+
+	// Update server URL to mock server
+	updatedURL := mockUpstream.URL + "/sse"
+	newURL := updatedURL
+	_, err = store.UpdateServer(ctx, created.ID, UpdateMCPServerRequest{
+		UpstreamURL: &newURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to update server URL: %v", err)
+	}
+
+	// Need to reload the server from the test server instance
+	server.store = store
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/"+created.ID+"/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Success {
+		t.Errorf("Success = false, want true. Error: %s", resp.Error)
+	}
+
+	if resp.Transport != string(TransportSSE) {
+		t.Errorf("Transport = %q, want %q", resp.Transport, TransportSSE)
+	}
+
+	if resp.LatencyMs < 0 {
+		t.Errorf("LatencyMs = %d, want >= 0", resp.LatencyMs)
+	}
+}
+
+func TestHandleTestMCPServer_StreamableHTTP_Success(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "http-server",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// Create mock upstream server that returns 200
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockUpstream.Close()
+
+	// Update server URL to mock server
+	newURL := mockUpstream.URL
+	_, err = store.UpdateServer(ctx, created.ID, UpdateMCPServerRequest{
+		UpstreamURL: &newURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to update server URL: %v", err)
+	}
+
+	server.store = store
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/"+created.ID+"/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if !resp.Success {
+		t.Errorf("Success = false, want true. Error: %s", resp.Error)
+	}
+
+	if resp.Transport != string(TransportStreamableHTTP) {
+		t.Errorf("Transport = %q, want %q", resp.Transport, TransportStreamableHTTP)
+	}
+}
+
+func TestHandleTestMCPServer_Unreachable(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "unreachable-server",
+		UpstreamURL:   "https://api.unreachable.example.com:9999/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/"+created.ID+"/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for unreachable server")
+	}
+
+	if resp.Error == "" {
+		t.Error("Error should not be empty for unreachable server")
+	}
+}
+
+func TestHandleTestMCPServer_NotFound(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/nonexistent-id/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for not found server")
+	}
+
+	if resp.Error != "Server not found" {
+		t.Errorf("Error = %q, want %q", resp.Error, "Server not found")
+	}
+}
+
+func TestHandleTestMCPServer_WrongMethod(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// =============================================================================
+// Token Masking Tests
+// =============================================================================
+
+func TestMaskAuthToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		token    string
+		expected string
+	}{
+		{"empty string", "", "***"},
+		{"short token (5 chars)", "abcde", "***"},
+		{"exactly 9 chars", "123456789", "***"},
+		// "my-secret-token-abc"[:6] = "my-sec", last 3 = "abc"
+		{"long token", "my-secret-token-abc", "my-sec***abc"},
+		// "abcdefghijklmnop"[:6] = "abcdef", last 3 = "nop"
+		{"very long token", "abcdefghijklmnop", "abcdef***nop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := maskAuthToken(tt.token)
+			if result != tt.expected {
+				t.Errorf("maskAuthToken(%q) = %q, want %q", tt.token, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMaskServer(t *testing.T) {
+	server := &MCPServer{
+		ID:        "test-id",
+		Name:      "test-server",
+		AuthToken: "my-secret-token-xyz",
+	}
+
+	masked := maskServer(server)
+
+	// Original should not be modified
+	if server.AuthToken != "my-secret-token-xyz" {
+		t.Errorf("Original server.AuthToken was modified: %q", server.AuthToken)
+	}
+
+	// Masked should have masked token
+	// "my-secret-token-xyz"[:6] = "my-sec", last 3 = "xyz"
+	expected := "my-sec***xyz"
+	if masked.AuthToken != expected {
+		t.Errorf("masked.AuthToken = %q, want %q", masked.AuthToken, expected)
+	}
+}
+
+func TestMaskServer_Nil(t *testing.T) {
+	result := maskServer(nil)
+	if result != nil {
+		t.Errorf("maskServer(nil) = %v, want nil", result)
+	}
+}
+
+func TestMaskServers(t *testing.T) {
+	servers := []*MCPServer{
+		{ID: "1", Name: "server1", AuthToken: "token-one-abc"},
+		{ID: "2", Name: "server2", AuthToken: "token-two-xyz"},
+		nil, // Test nil handling
+	}
+
+	masked := maskServers(servers)
+
+	if len(masked) != 3 {
+		t.Errorf("len(masked) = %d, want 3", len(masked))
+	}
+
+	// "token-one-abc"[:6] = "token-", last 3 = "abc"
+	expected1 := "token-***abc"
+	if masked[0].AuthToken != expected1 {
+		t.Errorf("masked[0].AuthToken = %q, want %q", masked[0].AuthToken, expected1)
+	}
+
+	// "token-two-xyz"[:6] = "token-", last 3 = "xyz"
+	expected2 := "token-***xyz"
+	if masked[1].AuthToken != expected2 {
+		t.Errorf("masked[1].AuthToken = %q, want %q", masked[1].AuthToken, expected2)
+	}
+
+	// nil element should remain nil
+	if masked[2] != nil {
+		t.Errorf("masked[2] = %v, want nil", masked[2])
+	}
+}
+
+func TestMaskServers_NilSlice(t *testing.T) {
+	result := maskServers(nil)
+	if result != nil {
+		t.Errorf("maskServers(nil) = %v, want nil", result)
+	}
+}
+
+// =============================================================================
+// Integration Tests (via RegisterAPIHandlers)
+// =============================================================================
+
+func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a server
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:        "api-test-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	// Test status route
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("Status route: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Test list route
+	req = httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("List route: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Test get route
+	req = httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/"+created.ID, nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("Get route: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Test create route
+	createReq := CreateMCPServerRequest{
+		Name:          "new-api-server",
+		UpstreamURL:   "https://httpbin.org/post",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthNone,
+	}
+	body, _ := json.Marshal(createReq)
+	req = httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("Create route: status code = %d, want %d. Body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+
+	// Test update route
+	newName := "updated-api-server"
+	updateReq := UpdateMCPServerRequest{
+		Name: &newName,
+	}
+	body, _ = json.Marshal(updateReq)
+	req = httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("Update route: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Test delete route
+	req = httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/"+created.ID, nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("Delete route: status code = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+// Helper to suppress unused import warning
+var _ = io.Discard

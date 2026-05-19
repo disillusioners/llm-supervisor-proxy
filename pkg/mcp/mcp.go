@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -59,9 +60,49 @@ func (s *Server) setupRoutes() {
 	s.httpServer.Handler = mux
 }
 
-// RegisterAPIHandlers registers management API routes — stub for Phase 3 to fill
+// RegisterAPIHandlers registers management API routes for MCP servers.
 func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
-	// Phase 3 will add: /fe/api/mcp-servers, /fe/api/mcp-servers/, /fe/api/mcp-servers/status
+	// Status endpoint (must be registered before the catch-all to avoid path conflicts)
+	mux.HandleFunc("/fe/api/mcp-servers/status", s.handleMCPStatus)
+
+	// CRUD + test endpoints - handle all paths under /fe/api/mcp-servers/
+	mux.HandleFunc("/fe/api/mcp-servers/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Route based on method and path pattern
+		switch r.Method {
+		case http.MethodGet:
+			// GET /fe/api/mcp-servers/ → list
+			// GET /fe/api/mcp-servers/{id} → get
+			if path == "/fe/api/mcp-servers/" {
+				s.handleListMCPServers(w, r)
+			} else if strings.HasSuffix(path, "/test") {
+				s.handleTestMCPServer(w, r)
+			} else {
+				s.handleGetMCPServer(w, r)
+			}
+
+		case http.MethodPost:
+			// POST /fe/api/mcp-servers/ → create
+			// POST /fe/api/mcp-servers/{id}/test → test connection
+			if strings.HasSuffix(path, "/test") {
+				s.handleTestMCPServer(w, r)
+			} else {
+				s.handleCreateMCPServer(w, r)
+			}
+
+		case http.MethodPut:
+			// PUT /fe/api/mcp-servers/{id} → update
+			s.handleUpdateMCPServer(w, r)
+
+		case http.MethodDelete:
+			// DELETE /fe/api/mcp-servers/{id} → delete
+			s.handleDeleteMCPServer(w, r)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }
 
 // Start creates and starts the HTTP server

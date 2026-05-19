@@ -10,6 +10,7 @@ import { ToolRepairSettings } from './config/ToolRepairSettings';
 import { TokenList } from './tokens/TokenList';
 import { TokenForm } from './tokens/TokenForm';
 import { UsageTab } from './usage/UsageTab';
+import { MCPServersTab } from './mcp/MCPServersTab';
 import { ToastContainer, type ToastData } from './Toast';
 
 interface SettingsPageProps {
@@ -26,7 +27,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage';
+type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -351,6 +352,15 @@ export function SettingsPage({
           >
             📊 Usage
           </button>
+          <button
+            class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'mcp_servers'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+            }`}
+            onClick={() => setActiveTab('mcp_servers')}
+          >
+            🔌 MCP Servers
+          </button>
         </div>
       </div>
 
@@ -463,6 +473,10 @@ export function SettingsPage({
 
           {activeTab === 'usage' && (
             <UsageTab />
+          )}
+
+          {activeTab === 'mcp_servers' && (
+            <MCPServersTab setStatus={setStatusWrapper} />
           )}
         </div>
 
