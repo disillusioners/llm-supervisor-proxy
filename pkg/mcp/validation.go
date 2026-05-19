@@ -33,14 +33,25 @@ func ValidateUpstreamURL(rawURL string) error {
 			return fmt.Errorf("private/local network URLs are not allowed")
 		}
 	}
+	// Resolve hostname via DNS to catch hex/decimal/octal IPs that bypass net.ParseIP
+	ips, err := net.LookupIP(host)
+	if err == nil {
+		for _, ip := range ips {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				return fmt.Errorf("private/local network URLs are not allowed")
+			}
+		}
+	}
 	return nil
 }
 
 var blockedHeaders = map[string]bool{
-	"host":              true,
-	"content-length":    true,
-	"transfer-encoding": true,
-	"connection":        true,
+	"host":                 true,
+	"content-length":       true,
+	"transfer-encoding":    true,
+	"connection":           true,
+	"authorization":        true,
+	"proxy-authorization":  true,
 }
 
 func ValidateCustomHeaders(headersJSON string) error {
@@ -51,9 +62,12 @@ func ValidateCustomHeaders(headersJSON string) error {
 	if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
-	for key := range headers {
+	for key, value := range headers {
 		if blockedHeaders[strings.ToLower(key)] {
 			return fmt.Errorf("header '%s' is not allowed", key)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("header '%s' value contains invalid characters", key)
 		}
 	}
 	return nil

@@ -63,7 +63,7 @@ func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
 }
 
 // Start creates and starts the HTTP server
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	s.setupRoutes(mux)
 	s.httpServer = &http.Server{

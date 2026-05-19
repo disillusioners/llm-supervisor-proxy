@@ -784,9 +784,10 @@ func TestDeleteServerNotFound(t *testing.T) {
 	store := NewMCPStore(db.DB, database.SQLite)
 	ctx := context.Background()
 
+	// DeleteServer returns nil for not-found (W4 fix)
 	err := store.DeleteServer(ctx, "nonexistent-id")
-	if err != sql.ErrNoRows {
-		t.Errorf("DeleteServer() error = %v, want sql.ErrNoRows", err)
+	if err != nil {
+		t.Errorf("DeleteServer() error = %v, want nil (not-found returns nil)", err)
 	}
 }
 

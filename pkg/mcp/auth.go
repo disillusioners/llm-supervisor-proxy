@@ -25,6 +25,11 @@ func proxyAuthMiddleware(tokenStore auth.TokenStoreInterface) func(http.Handler)
 			}
 
 			token := parts[1]
+			if token == "" {
+				writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
+				return
+			}
+
 			_, err := tokenStore.ValidateToken(r.Context(), token)
 			if err != nil {
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")

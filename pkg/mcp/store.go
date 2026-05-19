@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
@@ -278,7 +279,7 @@ func (s *MCPStore) UpdateServer(ctx context.Context, id string, req UpdateMCPSer
 	// Add WHERE clause argument
 	args = append(args, id)
 
-	query := "UPDATE mcp_servers SET " + joinStrings(setClauses, ", ") + " WHERE id = " + s.qb.Placeholder(argIndex)
+	query := "UPDATE mcp_servers SET " + strings.Join(setClauses, ", ") + " WHERE id = " + s.qb.Placeholder(argIndex)
 
 	_, err = s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -339,32 +340,13 @@ func (s *MCPStore) UpdateServer(ctx context.Context, id string, req UpdateMCPSer
 
 // DeleteServer removes an MCP server by ID
 func (s *MCPStore) DeleteServer(ctx context.Context, id string) error {
-	query := `DELETE FROM mcp_servers WHERE id = ` + s.qb.Placeholder(1)
-
-	result, err := s.db.ExecContext(ctx, query, id)
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM mcp_servers WHERE id = "+s.qb.Placeholder(1),
+		id,
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to delete server: %w", err)
 	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
-	}
-
+	// Return nil even if no rows affected (consistent with GetServer returning nil, nil)
 	return nil
-}
-
-// joinStrings joins strings with a separator
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
-	}
-	return result
 }
