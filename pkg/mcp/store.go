@@ -249,8 +249,7 @@ func (s *MCPStore) UpdateServer(ctx context.Context, id string, req UpdateMCPSer
 		args = append(args, *req.AuthType)
 		argIndex++
 	}
-	if req.AuthToken != nil {
-		// Encrypt the new auth_token
+	if req.AuthToken != nil && *req.AuthToken != "" {
 		encrypted, err := crypto.Encrypt(*req.AuthToken)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt auth_token: %w", err)
@@ -319,7 +318,7 @@ func (s *MCPStore) UpdateServer(ctx context.Context, id string, req UpdateMCPSer
 	} else {
 		updated.AuthType = existing.AuthType
 	}
-	if req.AuthToken != nil {
+	if req.AuthToken != nil && *req.AuthToken != "" {
 		updated.AuthToken = *req.AuthToken
 	} else {
 		updated.AuthToken = existing.AuthToken

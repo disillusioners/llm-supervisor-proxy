@@ -739,6 +739,58 @@ func TestUpdateServerPartialUpdate(t *testing.T) {
 	}
 }
 
+func TestUpdateServerEmptyTokenPreservesExisting(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewMCPStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create server with auth_token="secret123"
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "test-server",
+		UpstreamURL:   "https://example.com/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthBearer,
+		AuthToken:     "secret123",
+	})
+	if err != nil {
+		t.Fatalf("CreateServer failed: %v", err)
+	}
+
+	// Verify token was stored
+	got, err := store.GetServer(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetServer failed: %v", err)
+	}
+	if got.AuthToken != "secret123" {
+		t.Fatalf("initial token = %q, want %q", got.AuthToken, "secret123")
+	}
+
+	// Update with empty auth_token — should NOT destroy the existing token
+	emptyToken := ""
+	newDesc := "updated description"
+	_, err = store.UpdateServer(ctx, created.ID, UpdateMCPServerRequest{
+		AuthToken:   &emptyToken,
+		Description: &newDesc,
+	})
+	if err != nil {
+		t.Fatalf("UpdateServer failed: %v", err)
+	}
+
+	// Verify original token is preserved
+	updated, err := store.GetServer(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetServer after update failed: %v", err)
+	}
+	if updated.AuthToken != "secret123" {
+		t.Errorf("auth_token after update = %q, want %q (original should be preserved)", updated.AuthToken, "secret123")
+	}
+	if updated.Description != "updated description" {
+		t.Errorf("description = %q, want %q", updated.Description, "updated description")
+	}
+}
+
 // =============================================================================
 // DeleteServer Tests
 // =============================================================================

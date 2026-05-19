@@ -97,10 +97,24 @@ func ValidateMcpServerConfig(req *CreateMCPServerRequest) error {
 }
 
 // ValidateUpdateMcpServerConfig validates an UpdateMCPServerRequest
-func ValidateUpdateMcpServerConfig(req *UpdateMCPServerRequest) error {
+func ValidateUpdateMcpServerConfig(req *UpdateMCPServerRequest, existing *MCPServer) error {
 	if req == nil {
 		return nil
 	}
+
+	// C3: Check if empty token would clear a non-none auth type
+	if req.AuthToken != nil && *req.AuthToken == "" {
+		effectiveAuthType := AuthNone
+		if req.AuthType != nil {
+			effectiveAuthType = *req.AuthType
+		} else if existing != nil {
+			effectiveAuthType = existing.AuthType
+		}
+		if effectiveAuthType != AuthNone {
+			return fmt.Errorf("auth_token cannot be empty when auth_type is not 'none'")
+		}
+	}
+
 	if req.Name != nil && *req.Name == "" {
 		return fmt.Errorf("name cannot be empty")
 	}
@@ -114,11 +128,6 @@ func ValidateUpdateMcpServerConfig(req *UpdateMCPServerRequest) error {
 	}
 	if req.AuthType != nil && !req.AuthType.Valid() {
 		return fmt.Errorf("invalid auth_type: %s", *req.AuthType)
-	}
-	if req.AuthToken != nil && *req.AuthToken == "" {
-		if req.AuthType != nil && *req.AuthType != AuthNone {
-			return fmt.Errorf("auth_token cannot be empty when auth_type is not 'none'")
-		}
 	}
 	if req.Headers != nil {
 		if err := ValidateCustomHeaders(*req.Headers); err != nil {

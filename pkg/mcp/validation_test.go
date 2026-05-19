@@ -644,10 +644,41 @@ func TestValidateUpdateMcpServerConfig(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := ValidateUpdateMcpServerConfig(tt.req)
+			err := ValidateUpdateMcpServerConfig(tt.req, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateUpdateMcpServerConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateUpdateMcpServerConfig_EmptyTokenWithExistingBearer(t *testing.T) {
+	// C3: empty token should fail when existing server has bearer auth
+	emptyToken := ""
+	req := &UpdateMCPServerRequest{
+		AuthToken: &emptyToken,
+	}
+	existing := &MCPServer{
+		AuthType:  AuthBearer,
+		AuthToken: "existing-secret",
+	}
+	err := ValidateUpdateMcpServerConfig(req, existing)
+	if err == nil {
+		t.Error("expected error when clearing auth_token on bearer-auth server, got nil")
+	}
+}
+
+func TestValidateUpdateMcpServerConfig_EmptyTokenWithExistingNone(t *testing.T) {
+	// C3: empty token should pass when existing server has none auth
+	emptyToken := ""
+	req := &UpdateMCPServerRequest{
+		AuthToken: &emptyToken,
+	}
+	existing := &MCPServer{
+		AuthType: AuthNone,
+	}
+	err := ValidateUpdateMcpServerConfig(req, existing)
+	if err != nil {
+		t.Errorf("expected no error when clearing auth_token on none-auth server, got: %v", err)
 	}
 }
