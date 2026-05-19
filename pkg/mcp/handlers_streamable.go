@@ -49,6 +49,10 @@ func (s *Server) handleStreamableHTTP(w http.ResponseWriter, r *http.Request) {
 	// Forward request to upstream using server's connection manager
 	resp, err := s.connMgr.ForwardHTTPRequest(ctx, server, r)
 	if err != nil {
+		// C2: Close response body if non-nil before returning
+		if resp != nil {
+			resp.Body.Close()
+		}
 		if ctx.Err() != nil {
 			// Client disconnected
 			log.Printf("[MCP] streamable: client disconnected during request to %s", serverID)

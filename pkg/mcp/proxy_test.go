@@ -3,7 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -642,5 +645,167 @@ func TestInjectAuth_WithExistingRequestHeaders(t *testing.T) {
 	userAgent := req.Header.Get("User-Agent")
 	if userAgent != "TestClient" {
 		t.Errorf("User-Agent = %q, want %q (unaffected)", userAgent, "TestClient")
+	}
+}
+
+// =============================================================================
+// ForwardHTTPRequest Path Stripping Tests (C1)
+// =============================================================================
+
+func TestForwardHTTPRequest_StripsMCPPrefix(t *testing.T) {
+	t.Parallel()
+
+	cm := NewConnectionManager()
+	server := &MCPServer{
+		ID:          "test-server",
+		AuthType:    AuthNone,
+		UpstreamURL: "http://upstream.example.com:3001",
+	}
+
+	// Track the path received by the mock upstream
+	var receivedPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	server.UpstreamURL = upstream.URL
+
+	// Client requests /mcp/{id}/messages, upstream should receive /messages
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages", strings.NewReader(`{"test":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
+	if err != nil {
+		t.Fatalf("ForwardHTTPRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if receivedPath != "/messages" {
+		t.Errorf("upstream received path %q, want %q", receivedPath, "/messages")
+	}
+}
+
+func TestForwardHTTPRequest_StripsMCPPrefixWithTrailingSlash(t *testing.T) {
+	t.Parallel()
+
+	cm := NewConnectionManager()
+	server := &MCPServer{
+		ID:          "test-server",
+		AuthType:    AuthNone,
+		UpstreamURL: "http://upstream.example.com:3001",
+	}
+
+	var receivedPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	server.UpstreamURL = upstream.URL
+
+	// Client requests /mcp/{id}/, upstream should receive /
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/", strings.NewReader(`{"test":true}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
+	if err != nil {
+		t.Fatalf("ForwardHTTPRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if receivedPath != "/" {
+		t.Errorf("upstream received path %q, want %q", receivedPath, "/")
+	}
+}
+
+func TestForwardHTTPRequest_PreservesQueryString(t *testing.T) {
+	t.Parallel()
+
+	cm := NewConnectionManager()
+	server := &MCPServer{
+		ID:          "test-server",
+		AuthType:    AuthNone,
+		UpstreamURL: "http://upstream.example.com:3001",
+	}
+
+	var receivedPath string
+	var receivedQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	server.UpstreamURL = upstream.URL
+
+	// Client requests /mcp/{id}/messages?session=abc&token=123
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages?session=abc&token=123", nil)
+
+	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
+	if err != nil {
+		t.Fatalf("ForwardHTTPRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if receivedPath != "/messages" {
+		t.Errorf("upstream received path %q, want %q", receivedPath, "/messages")
+	}
+	if receivedQuery != "session=abc&token=123" {
+		t.Errorf("upstream received query %q, want %q", receivedQuery, "session=abc&token=123")
+	}
+}
+
+func TestForwardHTTPRequest_ClientBlockedHeadersStripped(t *testing.T) {
+	t.Parallel()
+
+	cm := NewConnectionManager()
+	server := &MCPServer{
+		ID:          "test-server",
+		AuthType:    AuthBearer,
+		AuthToken:   "server-auth-token",
+		UpstreamURL: "http://upstream.example.com:3001",
+	}
+
+	var receivedAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		_ = r.Host // upstream host (stripped from client)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	server.UpstreamURL = upstream.URL
+
+	// Client sends its own Authorization and Host headers
+	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages", nil)
+	req.Header.Set("Authorization", "Bearer client-auth-token")
+	req.Header.Set("Host", "client-host.com")
+	req.Header.Set("Content-Length", "100")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("Connection", "close")
+	req.Header.Set("X-Custom", "should-pass")
+
+	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
+	if err != nil {
+		t.Fatalf("ForwardHTTPRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Client's Authorization should be stripped, server's auth should be used
+	if receivedAuth != "Bearer server-auth-token" {
+		t.Errorf("upstream received Authorization %q, want %q (server's auth, not client's)", receivedAuth, "Bearer server-auth-token")
+	}
+
+	// Client's Host should be stripped (allowed headers should pass)
+	if req.Header.Get("X-Custom") != "should-pass" {
+		t.Errorf("X-Custom header was stripped, should pass through")
 	}
 }

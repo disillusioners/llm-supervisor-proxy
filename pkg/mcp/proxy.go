@@ -177,8 +177,26 @@ func (m *connectionManagerImpl) ConnectUpstream(ctx context.Context, server *MCP
 func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *MCPServer, r *http.Request) (*http.Response, error) {
 	upstreamURL := m.getUpstreamURL(server)
 
+	// C1: Strip /mcp/{id} prefix from path before constructing upstream URL
+	// Client POSTs to /mcp/{id}/messages, upstream expects /messages
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	var upstreamPath string
+	if len(parts) >= 2 && parts[0] == "mcp" && len(parts[1]) > 0 {
+		// /mcp/{id}/messages → /messages, /mcp/{id}/ → /, /mcp/{id} → /
+		if len(parts) == 2 {
+			// /mcp/{id} → /
+			upstreamPath = "/"
+		} else {
+			// /mcp/{id}/... → /...
+			upstreamPath = "/" + strings.Join(parts[2:], "/")
+		}
+	} else {
+		upstreamPath = path
+	}
+
 	// Build the full URL
-	url := strings.TrimSuffix(upstreamURL, "/") + r.URL.Path
+	url := strings.TrimSuffix(upstreamURL, "/") + upstreamPath
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
@@ -193,6 +211,14 @@ func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
+		}
+	}
+
+	// C3: Strip dangerous headers that should not be forwarded to upstream
+	// (e.g., client's Authorization, Host, Content-Length, etc.)
+	for k := range req.Header {
+		if blockedHeaders[strings.ToLower(k)] {
+			req.Header.Del(k)
 		}
 	}
 

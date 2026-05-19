@@ -137,21 +137,8 @@ func rewriteAbsolutePath(line, proxyPath string) string {
 		queryPart = trimmed[queryIdx:]
 	}
 
-	// Check if this looks like a messages endpoint
-	// Replace with proxy path
-	if strings.Contains(pathPart, "/messages") {
-		pathPart = proxyPath
-	} else {
-		// Keep original path, just update to proxy base
-		// Extract just the path segment
-		slashIdx := strings.Index(pathPart, "/")
-		if slashIdx != -1 && slashIdx < len(pathPart)-1 {
-			slashIdx2 := strings.Index(pathPart[slashIdx+1:], "/")
-			if slashIdx2 != -1 {
-				pathPart = proxyPath + pathPart[slashIdx+slashIdx2+1:]
-			}
-		}
-	}
+	// Replace with proxy path (always use proxy path for all absolute paths)
+	pathPart = proxyPath
 
 	if dataPrefix != "" {
 		return fmt.Sprintf("%s %s%s", dataPrefix, pathPart, queryPart)
@@ -179,6 +166,11 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 	if server == nil {
 		log.Printf("[MCP] SSE: server not found: %s", serverID)
 		http.Error(w, "server not found", http.StatusNotFound)
+		return
+	}
+	if !server.Enabled {
+		log.Printf("[MCP] SSE: server is disabled: %s", serverID)
+		http.Error(w, `{"error":"server is disabled"}`, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -361,14 +353,21 @@ func (s *Server) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.connMgr.ForwardHTTPRequest(r.Context(), server, r)
 	if err != nil {
 		log.Printf("[MCP] Messages: failed to forward request for server %s: %v", serverID, err)
+		// C2: Close response body if non-nil before returning
+		if resp != nil {
+			resp.Body.Close()
+		}
 		http.Error(w, "failed to connect to upstream", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	// Pass through important headers
-	if sessionID := r.Header.Get("Mcp-Session-Id"); sessionID != "" {
-		w.Header().Set("Mcp-Session-Id", sessionID)
+	// W3: Prefer upstream's Mcp-Session-Id, fall back to client's
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		w.Header().Set("Mcp-Session-Id", sid)
+	} else if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+		w.Header().Set("Mcp-Session-Id", sid)
 	}
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 
