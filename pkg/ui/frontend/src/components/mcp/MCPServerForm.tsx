@@ -81,7 +81,7 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
         return;
       }
       const result = await testMCPServer(server.id);
-      setTestResult({ success: result.success, latency: result.latency });
+      setTestResult({ success: result.success, latency: result.latency_ms });
     } catch (err) {
       setTestResult({ success: false, error: String(err) });
     } finally {

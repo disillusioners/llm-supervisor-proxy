@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,18 +40,6 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, func()) {
 	}
 
 	return server, mcpStore, cleanup
-}
-
-// Helper to create a mock server for test connection testing
-type mockUpstreamServer struct {
-	transportType TransportType
-	statusCode    int
-	contentType   string
-}
-
-func (m *mockUpstreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", m.contentType)
-	w.WriteHeader(m.statusCode)
 }
 
 // =============================================================================
@@ -735,9 +723,9 @@ func TestHandleDeleteMCPServer_Success(t *testing.T) {
 	}
 
 	// Verify server is deleted
-	_, err = store.GetServer(ctx, created.ID)
-	if err != nil {
-		t.Fatalf("GetServer failed: %v", err)
+	retrieved, err := store.GetServer(ctx, created.ID)
+	if retrieved != nil {
+		t.Error("expected server to be deleted, but it still exists")
 	}
 }
 
@@ -1226,24 +1214,12 @@ func TestHandleTestMCPServer_Timeout(t *testing.T) {
 
 // containsTimeoutError checks if the error message indicates a timeout
 func containsTimeoutError(errMsg string) bool {
-	return contains(errMsg, "timeout") ||
-		contains(errMsg, "deadline") ||
-		contains(errMsg, "context deadline exceeded") ||
-		contains(errMsg, "i/o timeout")
+	return strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "deadline") ||
+		strings.Contains(errMsg, "context deadline exceeded") ||
+		strings.Contains(errMsg, "i/o timeout")
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
 
 func TestHandleDeleteMCPServer_ClosesConnections(t *testing.T) {
 	server, store, cleanup := setupAPITestEnv(t)
@@ -1310,5 +1286,4 @@ func getConnectionsForServer(registry *ConnectionRegistry, serverID string) []co
 	return result
 }
 
-// Helper to suppress unused import warning
-var _ = io.Discard
+

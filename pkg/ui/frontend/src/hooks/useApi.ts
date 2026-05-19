@@ -651,12 +651,7 @@ export function useMCPServers() {
       try {
         setLoading(true);
         const data = await defaultAPICache.getOrFetch<MCPServer[]>('mcp-servers', async () => {
-          const response = await fetch(`${API_BASE}/mcp-servers`, {
-            signal: controller.signal,
-            headers: { 'Content-Type': 'application/json' },
-          });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.json() as Promise<MCPServer[]>;
+          return apiFetch<MCPServer[]>('/mcp-servers', { signal: controller.signal });
         }, 15000);
         setServers(data || []);
         setError(null);
@@ -710,7 +705,7 @@ export function useMCPStatus() {
   return { status, loading, error };
 }
 
-export async function createMCPServer(data: Omit<MCPServer, 'id' | 'created_at' | 'updated_at'> & { id: string }): Promise<MCPServer> {
+export async function createMCPServer(data: Omit<MCPServer, 'id' | 'created_at' | 'updated_at'>): Promise<MCPServer> {
   const server = await apiFetch<MCPServer>('/mcp-servers', {
     method: 'POST',
     body: JSON.stringify(data),

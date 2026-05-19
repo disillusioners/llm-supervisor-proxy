@@ -422,5 +422,5 @@ export interface MCPServerTestResult {
   success: boolean;
   latency_ms: number;
   transport: string;
-  error: string;
+  error?: string;
 }

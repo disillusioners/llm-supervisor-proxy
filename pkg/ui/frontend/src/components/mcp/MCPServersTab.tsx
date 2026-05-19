@@ -43,10 +43,7 @@ export function MCPServersTab({ setStatus }: MCPServersTabProps) {
         await updateMCPServer(serverToEdit.id, data);
         setStatus({ type: 'success', message: 'MCP server updated successfully' });
       } else {
-        await createMCPServer({
-          id: '', // Backend will generate
-          ...data,
-        });
+        await createMCPServer(data);
         setStatus({ type: 'success', message: 'MCP server created successfully' });
       }
       refetch();

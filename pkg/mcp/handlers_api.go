@@ -367,9 +367,7 @@ func (s *Server) injectTestAuth(req *http.Request, server *MCPServer) {
 			for key, value := range headers {
 				// Skip blocked headers
 				lowerKey := strings.ToLower(key)
-				if lowerKey == "host" || lowerKey == "content-length" ||
-					lowerKey == "transfer-encoding" || lowerKey == "connection" ||
-					lowerKey == "authorization" || lowerKey == "proxy-authorization" {
+				if blockedHeaders[lowerKey] {
 					continue
 				}
 				req.Header.Set(key, value)
