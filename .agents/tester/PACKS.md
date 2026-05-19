@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 10 packs across 25 packages
-- Unit: 9 | Integration: 1 | E2E: 1 | Mock: 1
+- Total: 11 packs across 26 packages
+- Unit: 10 | Integration: 1 | E2E: 1 | Mock: 1
 - All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
 
 ## Timeout Configuration
@@ -23,6 +23,7 @@
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-05-08 | PASS |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-08 | PASS |
 | token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-08 | PASS |
+| mcp_unit_test | test/packs/mcp_unit_test.sh (or inline) | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e | 120s | 2026-05-19 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-18 | PASS |
 
 ## Mock Test Packs
