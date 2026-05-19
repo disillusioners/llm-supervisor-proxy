@@ -3,7 +3,6 @@ package mcp
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,9 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,72 +23,7 @@ import (
 func setupSSETest(t *testing.T) (*Server, string, func()) {
 	t.Helper()
 
-	// Create in-memory SQLite for mcp_servers
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("failed to open in-memory database: %v", err)
-	}
-
-	// Run migrations
-	if err := runMCPMigrations(db); err != nil {
-		db.Close()
-		t.Fatalf("failed to run migrations: %v", err)
-	}
-
-	// Create MCPStore
-	mcpStore := NewMCPStore(db, database.SQLite)
-
-	// Create in-memory SQLite for auth_tokens
-	authDB, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		db.Close()
-		t.Fatalf("failed to open auth database: %v", err)
-	}
-
-	createTable := `
-	CREATE TABLE auth_tokens (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		token_hash TEXT NOT NULL UNIQUE,
-		expires_at TEXT,
-		created_at TEXT NOT NULL,
-		created_by TEXT NOT NULL,
-		enabled INTEGER NOT NULL DEFAULT 1,
-		ultimate_model_enabled INTEGER NOT NULL DEFAULT 0,
-		ultimate_model TEXT,
-		allowed_models TEXT
-	);
-	`
-	if _, err := authDB.Exec(createTable); err != nil {
-		db.Close()
-		authDB.Close()
-		t.Fatalf("failed to create auth_tokens table: %v", err)
-	}
-
-	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
-
-	// Create a test token
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", false, "", nil)
-	if err != nil {
-		db.Close()
-		authDB.Close()
-		t.Fatalf("failed to create test token: %v", err)
-	}
-
-	bus := events.NewBus()
-
-	server := &Server{
-		store:      mcpStore,
-		bus:        bus,
-		tokenStore: tokenStore,
-		connMgr:    NewConnectionManager(),
-	}
-
-	cleanup := func() {
-		db.Close()
-		authDB.Close()
-	}
-
+	server, _, plaintext, cleanup := setupTestEnv(t)
 	return server, plaintext, cleanup
 }
 
@@ -149,8 +80,9 @@ func TestExtractServerID_InvalidPath_TooShort(t *testing.T) {
 		{"mcp only no slash", "mcp"},
 		{"empty string", ""},
 		{"single slash", "/"},
-		{"two parts", "/mcp/server"},
 		{"mcp slash only", "/mcp/"},
+		{"SSE endpoint only", "/mcp/sse"},
+		{"messages endpoint only", "/mcp/messages"},
 	}
 
 	for _, tt := range tests {
@@ -178,12 +110,11 @@ func TestExtractServerID_TrailingSlash(t *testing.T) {
 	t.Parallel()
 
 	// Note: extractServerID trims trailing slashes, so "/mcp/server789/" becomes "mcp/server789"
-	// which has only 2 parts, not 3. This returns empty.
+	// which has 2 parts. With the streamable endpoint support, this is now valid.
 	got := extractServerID("/mcp/server789/")
-	if got != "" {
-		// This is the current behavior - the function doesn't extract ID with trailing slash
-		// because after trim("/mcp/server789/") = "mcp/server789" (2 parts, not 3)
-		t.Logf("Note: extractServerID returns %q for path with trailing slash (only 2 parts after trim)", got)
+	want := "server789"
+	if got != want {
+		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server789/", got, want)
 	}
 }
 

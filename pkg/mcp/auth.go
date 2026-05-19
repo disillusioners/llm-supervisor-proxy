@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 )
 
 // contextKey is a private type to avoid collisions in context values.
@@ -54,9 +52,8 @@ func (s *Server) proxyAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Inject validated token into context (type annotation for clarity)
-		var tokenInfo *auth.AuthToken = authToken
-		ctx := context.WithValue(r.Context(), tokenContextKey, tokenInfo)
+		// Inject validated token into context
+		ctx := context.WithValue(r.Context(), tokenContextKey, authToken)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

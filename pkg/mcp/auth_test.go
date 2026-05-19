@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +11,6 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
-	_ "modernc.org/sqlite"
 )
 
 // mockAuthTokenStore implements auth.TokenStoreInterface for testing
@@ -77,43 +74,8 @@ func setupAuthTest(t *testing.T) (*Server, string) {
 func setupAuthTestWithSQLite(t *testing.T) (*Server, string) {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("failed to open in-memory database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	// Create the auth_tokens table
-	createTable := `
-		CREATE TABLE auth_tokens (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			token_hash TEXT NOT NULL UNIQUE,
-			expires_at TEXT,
-			created_at TEXT NOT NULL,
-			created_by TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			ultimate_model_enabled INTEGER NOT NULL DEFAULT 0,
-			ultimate_model TEXT,
-			allowed_models TEXT
-		)
-	`
-	_, err = db.Exec(createTable)
-	if err != nil {
-		t.Fatalf("failed to create auth_tokens table: %v", err)
-	}
-
-	// Create token store
-	tokenStore := auth.NewTokenStore(db, database.SQLite)
-
-	// Create a test token
-	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", false, "", nil)
-	if err != nil {
-		t.Fatalf("failed to create test token: %v", err)
-	}
-
-	bus := events.NewBus()
-	server := NewServer(0, nil, bus, tokenStore)
+	server, _, plaintext, cleanup := setupTestEnv(t)
+	t.Cleanup(cleanup)
 
 	return server, plaintext
 }

@@ -146,6 +146,9 @@ func rewriteAbsolutePath(line, proxyPath string) string {
 	return pathPart + queryPart
 }
 
+// maxSSEEventSize is the maximum size for a single SSE event (10MB)
+const maxSSEEventSize = 10 * 1024 * 1024
+
 // handleSSEConnection handles SSE endpoint connections to upstream MCP servers
 func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 	// Extract serverID from URL path
@@ -233,8 +236,9 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 	s.bus.Publish(events.Event{
 		Type:      "mcp_connection_lost",
 		Timestamp: time.Now().Unix(),
-		Data: map[string]string{
+		Data: map[string]interface{}{
 			"server_id": serverID,
+			"reason":    "upstream_disconnect",
 		},
 	})
 
@@ -244,8 +248,8 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 // streamSSEEvents reads SSE events from upstream and forwards them to the client
 func (s *Server) streamSSEEvents(ctx context.Context, body io.Reader, w http.ResponseWriter, flusher http.Flusher, serverID string) error {
 	scanner := bufio.NewScanner(body)
-	buf := make([]byte, 0, 10*1024*1024) // 10MB buffer
-	scanner.Buffer(buf, 10*1024*1024)
+	buf := make([]byte, 0, maxSSEEventSize)
+	scanner.Buffer(buf, maxSSEEventSize)
 
 	var currentEvent sseEvent
 
@@ -384,20 +388,34 @@ func (s *Server) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // extractServerID extracts the server ID from the URL path
-// Handles paths like /mcp/{id}/sse, /mcp/{id}/messages
+// Handles paths like:
+//   - /mcp/{id}/sse → extracts id
+//   - /mcp/{id}/messages → extracts id
+//   - /mcp/{id} → extracts id
+//   - /mcp/{id}/ → extracts id
 func extractServerID(path string) string {
 	// Normalize path - remove leading/trailing slashes
 	path = strings.Trim(path, "/")
 	parts := strings.Split(path, "/")
 
-	// Expected format: mcp/{serverID}/{endpoint}
-	// parts should be: ["mcp", "{serverID}", "{endpoint}"]
-	if len(parts) < 3 {
+	// Expected formats:
+	//   - ["mcp", "{serverID}", "{endpoint}"] (3 parts for SSE)
+	//   - ["mcp", "{serverID}"] (2 parts for streamable)
+	if len(parts) < 2 {
 		return ""
 	}
 
 	if parts[0] != "mcp" {
 		return ""
+	}
+
+	// If only 2 parts, validate the second part isn't a known endpoint
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "sse", "messages":
+			// These are SSE endpoints without server ID
+			return ""
+		}
 	}
 
 	return parts[1]

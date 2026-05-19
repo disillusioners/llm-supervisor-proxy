@@ -4,7 +4,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -19,15 +18,12 @@ func (s *Server) handleStreamableHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract serverID from URL path (e.g., /mcp/{serverID} or /mcp/{serverID}/)
-	path := strings.TrimPrefix(r.URL.Path, "/mcp/")
-	path = strings.TrimSuffix(path, "/")
-	if path == "" || path == r.URL.Path {
-		// /mcp/ without serverID
+	// Extract serverID from URL path
+	serverID := extractServerID(r.URL.Path)
+	if serverID == "" {
 		http.Error(w, "Server ID required", http.StatusBadRequest)
 		return
 	}
-	serverID := path
 
 	// Look up server config from store
 	ctx := r.Context()
