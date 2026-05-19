@@ -25,27 +25,42 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
   const [upstreamUrl, setUpstreamUrl] = useState(server?.upstream_url || '');
   const [transportType, setTransportType] = useState<'sse' | 'streamable_http'>(server?.transport_type || 'sse');
   const [authType, setAuthType] = useState<'none' | 'bearer' | 'basic' | 'api_key'>(server?.auth_type || 'none');
-  const [authToken, setAuthToken] = useState(server?.auth_token || '');
+  const [authToken, setAuthToken] = useState('');
+  const [tokenModified, setTokenModified] = useState(false);
   const [headers, setHeaders] = useState(server?.headers || '');
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; latency?: number; error?: string } | null>(null);
 
   const handleSubmit = async (e: Event) => {
     e.preventDefault();
     try {
       setSaving(true);
       setStatus(null);
-      await onSave({
+      const payload: {
+        name: string;
+        description: string;
+        upstream_url: string;
+        transport_type: 'sse' | 'streamable_http';
+        auth_type: 'none' | 'bearer' | 'basic' | 'api_key';
+        auth_token?: string;
+        headers: string;
+        enabled: boolean;
+      } = {
         name,
         description,
         upstream_url: upstreamUrl,
         transport_type: transportType,
         auth_type: authType,
-        auth_token: authType !== 'none' ? authToken : undefined,
         headers,
         enabled,
-      });
+      };
+      // Only include auth_token if it's create mode or user actually modified it
+      if (!isEdit || tokenModified) {
+        payload.auth_token = authType !== 'none' ? authToken : undefined;
+      }
+      await onSave(payload);
     } finally {
       setSaving(false);
     }
@@ -56,18 +71,19 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
       setStatus({ type: 'error', message: 'Please enter an upstream URL' });
       return;
     }
+    setTestResult(null);
     try {
       setTesting(true);
       setStatus(null);
-      // For new servers, we can't test without saving first
-      // So we'll just validate the URL format
-      try {
-        new URL(upstreamUrl);
-      } catch {
-        setStatus({ type: 'error', message: 'Invalid URL format' });
+      if (!server) {
+        // Can't test without saving first - no server ID
+        setTestResult({ success: false, error: 'Save the server first, then test the connection' });
         return;
       }
-      setStatus({ type: 'success', message: 'URL format is valid' });
+      const result = await testMCPServer(server.id);
+      setTestResult({ success: result.success, latency: result.latency });
+    } catch (err) {
+      setTestResult({ success: false, error: String(err) });
     } finally {
       setTesting(false);
     }
@@ -159,10 +175,13 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
             </label>
             <input
               type="password"
-              value={authToken}
-              onInput={(e) => setAuthToken((e.target as HTMLInputElement).value)}
+              value={tokenModified ? authToken : ''}
+              onInput={(e) => {
+                setAuthToken((e.target as HTMLInputElement).value);
+                setTokenModified(true);
+              }}
               class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder={authType === 'bearer' ? 'Bearer token' : authType === 'basic' ? 'username:password' : 'API key'}
+              placeholder={isEdit ? 'Token set (hidden)' : authType === 'bearer' ? 'Bearer token' : authType === 'basic' ? 'username:password' : 'API key'}
             />
           </div>
         )}
@@ -193,6 +212,13 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
             </svg>
             {testing ? 'Testing...' : 'Test Connection'}
           </button>
+          {testResult && (
+            testResult.success ? (
+              <span class="text-sm text-green-400">Connected ({testResult.latency}ms)</span>
+            ) : (
+              <span class="text-sm text-red-400">{testResult.error}</span>
+            )
+          )}
         </div>
 
         <div class="flex items-center gap-2">

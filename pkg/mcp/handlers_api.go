@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 )
 
 // maskAuthToken masks an auth token for display.
@@ -59,7 +61,7 @@ type TestConnectionResponse struct {
 // handleMCPStatus returns the MCP server status (enabled/disabled and port).
 func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -73,14 +75,14 @@ func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 // handleListMCPServers returns all MCP servers.
 func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	ctx := r.Context()
 	servers, err := s.store.ListServers(ctx)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to list servers: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to list servers: %v", err))
 		return
 	}
 
@@ -91,25 +93,25 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 // handleGetMCPServer returns a single MCP server by ID.
 func (s *Server) handleGetMCPServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	// Extract ID from path: /fe/api/mcp-servers/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/fe/api/mcp-servers/")
 	if id == "" {
-		http.Error(w, "Missing ID", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing ID")
 		return
 	}
 
 	ctx := r.Context()
 	server, err := s.store.GetServer(ctx, id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get server: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get server: %v", err))
 		return
 	}
 	if server == nil {
-		http.Error(w, "Server not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Server not found")
 		return
 	}
 
@@ -120,7 +122,7 @@ func (s *Server) handleGetMCPServer(w http.ResponseWriter, r *http.Request) {
 // handleCreateMCPServer creates a new MCP server.
 func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -129,20 +131,20 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 
 	var req CreateMCPServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid JSON: %v", err))
 		return
 	}
 
 	// Validate the request
 	if err := ValidateMCPServerConfig(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Validation failed: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Validation failed: %v", err))
 		return
 	}
 
 	ctx := r.Context()
 	server, err := s.store.CreateServer(ctx, req)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create server: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create server: %v", err))
 		return
 	}
 
@@ -154,14 +156,14 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 // handleUpdateMCPServer updates an existing MCP server.
 func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	// Extract ID from path: /fe/api/mcp-servers/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/fe/api/mcp-servers/")
 	if id == "" {
-		http.Error(w, "Missing ID", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing ID")
 		return
 	}
 
@@ -170,11 +172,11 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	// Fetch existing server first
 	existing, err := s.store.GetServer(ctx, id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get server: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get server: %v", err))
 		return
 	}
 	if existing == nil {
-		http.Error(w, "Server not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Server not found")
 		return
 	}
 
@@ -183,23 +185,23 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 
 	var req UpdateMCPServerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid JSON: %v", err))
 		return
 	}
 
 	// Validate the update request
 	if err := ValidateUpdateMCPServerConfig(&req, existing); err != nil {
-		http.Error(w, fmt.Sprintf("Validation failed: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Validation failed: %v", err))
 		return
 	}
 
 	server, err := s.store.UpdateServer(ctx, id, req)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to update server: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update server: %v", err))
 		return
 	}
 	if server == nil {
-		http.Error(w, "Server not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Server not found")
 		return
 	}
 
@@ -210,14 +212,14 @@ func (s *Server) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 // handleDeleteMCPServer deletes an MCP server.
 func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	// Extract ID from path: /fe/api/mcp-servers/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/fe/api/mcp-servers/")
 	if id == "" {
-		http.Error(w, "Missing ID", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing ID")
 		return
 	}
 
@@ -229,8 +231,16 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	if err := s.store.DeleteServer(ctx, id); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to delete server: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete server: %v", err))
 		return
+	}
+
+	// Publish event for deletion
+	if s.bus != nil {
+		s.bus.Publish(events.Event{
+			Type: "mcp_server_deleted",
+			Data: map[string]interface{}{"server_id": id, "connections_closed": closed},
+		})
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -239,7 +249,7 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 // handleTestMCPServer tests the connection to an MCP server.
 func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -247,7 +257,7 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/fe/api/mcp-servers/")
 	id := strings.TrimSuffix(path, "/test")
 	if id == "" {
-		http.Error(w, "Missing ID", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing ID")
 		return
 	}
 

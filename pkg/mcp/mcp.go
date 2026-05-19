@@ -100,7 +100,7 @@ func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
 			s.handleDeleteMCPServer(w, r)
 
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		}
 	})
 }

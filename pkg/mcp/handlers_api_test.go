@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
@@ -1153,6 +1154,160 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Errorf("Delete route: status code = %d, want %d", w.Code, http.StatusNoContent)
 	}
+}
+
+// =============================================================================
+// Timeout and CloseConnections Tests
+// =============================================================================
+
+func TestHandleTestMCPServer_Timeout(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "timeout-server",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportSSE,
+		AuthType:      AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// Create mock upstream server that sleeps for 6 seconds (exceeds 5s timeout)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(6 * time.Second)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockUpstream.Close()
+
+	// Update server URL to mock server
+	updatedURL := mockUpstream.URL + "/sse"
+	newURL := updatedURL
+	_, err = store.UpdateServer(ctx, created.ID, UpdateMCPServerRequest{
+		UpstreamURL: &newURL,
+	})
+	if err != nil {
+		t.Fatalf("failed to update server URL: %v", err)
+	}
+
+	server.store = store
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/"+created.ID+"/test", nil)
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServer(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for timeout")
+	}
+
+	// Error should indicate a timeout
+	if resp.Error == "" {
+		t.Error("Error should not be empty for timeout")
+	}
+	// The error should mention timeout or context deadline exceeded
+	if resp.Error != "" && !containsTimeoutError(resp.Error) {
+		t.Errorf("Error = %q, want timeout-related error", resp.Error)
+	}
+}
+
+// containsTimeoutError checks if the error message indicates a timeout
+func containsTimeoutError(errMsg string) bool {
+	return contains(errMsg, "timeout") ||
+		contains(errMsg, "deadline") ||
+		contains(errMsg, "context deadline exceeded") ||
+		contains(errMsg, "i/o timeout")
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
+}
+
+func containsSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+func TestHandleDeleteMCPServer_ClosesConnections(t *testing.T) {
+	server, store, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		Name:          "delete-with-connections",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportSSE,
+		AuthType:      AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// Register a mock cancel function in the connection registry
+	registry := server.connMgr.GetRegistry()
+	cancelCalled := false
+	mockCancel := func() {
+		cancelCalled = true
+	}
+	registry.Register(created.ID, mockCancel)
+
+	// Verify the connection is registered
+	connections := getConnectionsForServer(registry, created.ID)
+	if len(connections) != 1 {
+		t.Fatalf("Expected 1 connection registered, got %d", len(connections))
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/"+created.ID, nil)
+	w := httptest.NewRecorder()
+
+	server.handleDeleteMCPServer(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusNoContent)
+	}
+
+	// Verify the connection was closed
+	if !cancelCalled {
+		t.Error("cancelCalled should be true after delete")
+	}
+
+	// Verify the connection is no longer in the registry
+	connections = getConnectionsForServer(registry, created.ID)
+	if len(connections) != 0 {
+		t.Errorf("Expected 0 connections after delete, got %d", len(connections))
+	}
+}
+
+// getConnectionsForServer returns the cancel functions registered for a server
+// This is a test helper that accesses internal state
+func getConnectionsForServer(registry *ConnectionRegistry, serverID string) []context.CancelFunc {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	cancels, ok := registry.registry[serverID]
+	if !ok {
+		return nil
+	}
+	result := make([]context.CancelFunc, len(cancels))
+	copy(result, cancels)
+	return result
 }
 
 // Helper to suppress unused import warning

@@ -102,6 +102,11 @@ func ValidateUpdateMCPServerConfig(req *UpdateMCPServerRequest, existing *MCPSer
 		return nil
 	}
 
+	// C1: Check for masked token (user sent back a masked value from UI)
+	if req.AuthToken != nil && strings.Contains(*req.AuthToken, "***") {
+		return fmt.Errorf("auth_token appears to be a masked value, please provide the actual token")
+	}
+
 	// C3: Check if empty token would clear a non-none auth type
 	if req.AuthToken != nil && *req.AuthToken == "" {
 		effectiveAuthType := AuthNone
