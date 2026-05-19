@@ -109,6 +109,17 @@ func main() {
 	// Setup Server
 	mux := http.NewServeMux()
 
+	// Always register a basic MCP status endpoint (for checking if MCP module is available)
+	mux.HandleFunc("/fe/api/mcp/status", func(w http.ResponseWriter, r *http.Request) {
+		mcpPort := mcp.GetMCPProxyPort()
+		status := map[string]interface{}{
+			"enabled": mcpPort > 0,
+			"port":    mcpPort,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
+	})
+
 	// Initialize MCP Proxy Server (optional — only if MCP_PROXY_PORT is set)
 	var mcpServer *mcp.Server
 	if mcpPort := mcp.GetMCPProxyPort(); mcpPort > 0 {
