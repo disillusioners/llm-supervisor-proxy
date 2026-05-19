@@ -3,19 +3,78 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	_ "modernc.org/sqlite"
 )
 
-// setupAuthTest creates an in-memory SQLite database with the auth_tokens table
-// and a TokenStore with a test token
-func setupAuthTest(t *testing.T) (*auth.TokenStore, string) {
+// mockAuthTokenStore implements auth.TokenStoreInterface for testing
+type mockAuthTokenStore struct {
+	validPlaintext string
+	token          *auth.AuthToken
+}
+
+func (m *mockAuthTokenStore) ValidateToken(ctx context.Context, plaintext string) (*auth.AuthToken, error) {
+	if plaintext == m.validPlaintext {
+		return m.token, nil
+	}
+	return nil, auth.ErrTokenNotFound
+}
+
+func (m *mockAuthTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
+	return "", nil, nil
+}
+
+func (m *mockAuthTokenStore) DeleteToken(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *mockAuthTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, error) {
+	return nil, nil
+}
+
+func (m *mockAuthTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
+	return nil, nil
+}
+
+func (m *mockAuthTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
+	return nil
+}
+
+// setupAuthTest creates a test Server with mock token store
+func setupAuthTest(t *testing.T) (*Server, string) {
+	t.Helper()
+
+	// Generate a valid test token
+	validToken := "sk-" + strings.Repeat("a", 64)
+	tokenHash := auth.HashToken(validToken)
+
+	mockStore := &mockAuthTokenStore{
+		validPlaintext: validToken,
+		token: &auth.AuthToken{
+			ID:        "test-token-id",
+			Name:      "test-token",
+			TokenHash: tokenHash,
+			CreatedBy: "test",
+		},
+	}
+
+	bus := events.NewBus()
+	server := NewServer(0, nil, bus, mockStore)
+
+	return server, validToken
+}
+
+// setupAuthTestWithSQLite creates a test Server with SQLite-backed token store
+func setupAuthTestWithSQLite(t *testing.T) (*Server, string) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", ":memory:")
@@ -24,21 +83,20 @@ func setupAuthTest(t *testing.T) (*auth.TokenStore, string) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	// Create the auth_tokens table with all required columns
-	// Schema based on migrations 004, 020, 022, 023
+	// Create the auth_tokens table
 	createTable := `
-	CREATE TABLE auth_tokens (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		token_hash TEXT NOT NULL UNIQUE,
-		expires_at TEXT,
-		created_at TEXT NOT NULL,
-		created_by TEXT NOT NULL,
-		enabled INTEGER NOT NULL DEFAULT 1,
-		ultimate_model_enabled INTEGER NOT NULL DEFAULT 0,
-		ultimate_model TEXT,
-		allowed_models TEXT
-	);
+		CREATE TABLE auth_tokens (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TEXT,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			ultimate_model_enabled INTEGER NOT NULL DEFAULT 0,
+			ultimate_model TEXT,
+			allowed_models TEXT
+		)
 	`
 	_, err = db.Exec(createTable)
 	if err != nil {
@@ -46,22 +104,24 @@ func setupAuthTest(t *testing.T) (*auth.TokenStore, string) {
 	}
 
 	// Create token store
-	store := auth.NewTokenStore(db, database.SQLite)
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
 
 	// Create a test token
-	plaintext, _, err := store.CreateToken(context.Background(), "test-token", nil, "test", false, "", nil)
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "test-token", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("failed to create test token: %v", err)
 	}
 
-	return store, plaintext
+	bus := events.NewBus()
+	server := NewServer(0, nil, bus, tokenStore)
+
+	return server, plaintext
 }
 
 func TestProxyAuthMiddleware(t *testing.T) {
 	t.Parallel()
 
-	tokenStore, validToken := setupAuthTest(t)
-	middleware := proxyAuthMiddleware(tokenStore)
+	server, validToken := setupAuthTest(t)
 
 	// Next handler that returns 200 OK
 	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,10 +129,10 @@ func TestProxyAuthMiddleware(t *testing.T) {
 	})
 
 	tests := []struct {
-		name           string
-		authHeader     string
-		wantStatus     int
-		wantBodyContains string
+		name               string
+		authHeader         string
+		wantStatus         int
+		wantBodyContains   string
 	}{
 		{
 			name:       "Valid token",
@@ -80,34 +140,50 @@ func TestProxyAuthMiddleware(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:           "Invalid token",
-			authHeader:     "Bearer invalid-token",
-			wantStatus:     http.StatusUnauthorized,
+			name:             "Invalid token",
+			authHeader:       "Bearer invalid-token",
+			wantStatus:       http.StatusUnauthorized,
 			wantBodyContains: "invalid or expired token",
 		},
 		{
-			name:           "Missing header",
-			authHeader:     "",
-			wantStatus:     http.StatusUnauthorized,
+			name:             "Missing header",
+			authHeader:       "",
+			wantStatus:       http.StatusUnauthorized,
 			wantBodyContains: "missing authorization header",
 		},
 		{
-			name:           "Malformed header - Basic auth",
-			authHeader:     "Basic abc123",
-			wantStatus:     http.StatusUnauthorized,
+			name:             "Malformed header - Basic auth",
+			authHeader:       "Basic abc123",
+			wantStatus:       http.StatusUnauthorized,
 			wantBodyContains: "invalid authorization header format",
 		},
 		{
-			name:           "Empty bearer token",
-			authHeader:     "Bearer ",
-			wantStatus:     http.StatusUnauthorized,
+			name:             "Empty bearer token",
+			authHeader:       "Bearer ",
+			wantStatus:       http.StatusUnauthorized,
 			wantBodyContains: "missing bearer token",
 		},
 		{
-			name:           "No scheme - just a string",
-			authHeader:     "just-a-string",
-			wantStatus:     http.StatusUnauthorized,
+			name:             "No scheme - just a string",
+			authHeader:       "just-a-string",
+			wantStatus:       http.StatusUnauthorized,
 			wantBodyContains: "invalid authorization header format",
+		},
+		{
+			name:             "Wrong auth type - Digest",
+			authHeader:       "Digest username",
+			wantStatus:       http.StatusUnauthorized,
+			wantBodyContains: "invalid authorization header format",
+		},
+		{
+			name:       "Case insensitive bearer",
+			authHeader: "bearer " + validToken,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "BEARER uppercase",
+			authHeader: "BEARER " + validToken,
+			wantStatus: http.StatusOK,
 		},
 	}
 
@@ -121,7 +197,7 @@ func TestProxyAuthMiddleware(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			handler := middleware(nextHandler)
+			handler := server.proxyAuthMiddleware(nextHandler)
 			handler.ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
@@ -138,7 +214,166 @@ func TestProxyAuthMiddleware(t *testing.T) {
 	}
 }
 
+func TestProxyAuthMiddleware_TokenInContext(t *testing.T) {
+	t.Parallel()
+
+	server, validToken := setupAuthTest(t)
+
+	// Next handler that checks context for token
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify token info is in context
+		tokenInfo, ok := r.Context().Value(tokenContextKey).(*auth.AuthToken)
+		if !ok {
+			t.Error("token info not found in context")
+			return
+		}
+		if tokenInfo.ID != "test-token-id" {
+			t.Errorf("token ID = %q, want %q", tokenInfo.ID, "test-token-id")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+validToken)
+
+	rec := httptest.NewRecorder()
+	handler := server.proxyAuthMiddleware(nextHandler)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestProxyAuthMiddleware_WithSQLiteStore(t *testing.T) {
+	t.Parallel()
+
+	server, validToken := setupAuthTestWithSQLite(t)
+
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+validToken)
+
+	rec := httptest.NewRecorder()
+	handler := server.proxyAuthMiddleware(nextHandler)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d. body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestWriteJSONError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		status     int
+		message    string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "401 Unauthorized",
+			status:     http.StatusUnauthorized,
+			message:    "test error",
+			wantStatus: http.StatusUnauthorized,
+			wantBody:   `{"error":"test error"}`,
+		},
+		{
+			name:       "500 Internal Server Error",
+			status:     http.StatusInternalServerError,
+			message:    "server error",
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   `{"error":"server error"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+
+			writeJSONError(rec, tt.status, tt.message)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+
+			contentType := rec.Header().Get("Content-Type")
+			if !strings.Contains(contentType, "application/json") {
+				t.Errorf("Content-Type = %q, want to contain 'application/json'", contentType)
+			}
+
+			body := strings.TrimSpace(rec.Body.String())
+			if body != tt.wantBody {
+				t.Errorf("body = %q, want %q", body, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestProxyAuthMiddleware_ContextPropagation(t *testing.T) {
+	t.Parallel()
+
+	server, validToken := setupAuthTest(t)
+
+	// Next handler that modifies context and continues
+	var ctxTokenInfo *auth.AuthToken
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctxTokenInfo, _ = r.Context().Value(tokenContextKey).(*auth.AuthToken)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+validToken)
+
+	rec := httptest.NewRecorder()
+	handler := server.proxyAuthMiddleware(nextHandler)
+	handler.ServeHTTP(rec, req)
+
+	if ctxTokenInfo == nil {
+		t.Fatal("token info should be in context")
+	}
+
+	// Verify it's the correct token info
+	if ctxTokenInfo.Name != "test-token" {
+		t.Errorf("token Name = %q, want %q", ctxTokenInfo.Name, "test-token")
+	}
+}
+
 // containsIgnoreCase checks if s contains substr, case-insensitive
 func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// Verify error responses are valid JSON
+func TestWriteJSONError_ValidJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{"simple", "with spaces", "special chars: !@#$", "unicode: 日本語"}
+
+	for _, msg := range tests {
+		t.Run(msg, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+
+			writeJSONError(rec, http.StatusUnauthorized, msg)
+
+			var resp map[string]string
+			err := json.Unmarshal(rec.Body.Bytes(), &resp)
+			if err != nil {
+				t.Errorf("response is not valid JSON: %v", err)
+			}
+
+			if resp["error"] != msg {
+				t.Errorf("error = %q, want %q", resp["error"], msg)
+			}
+		})
+	}
 }

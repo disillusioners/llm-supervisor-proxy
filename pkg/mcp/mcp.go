@@ -23,18 +23,13 @@ func GetMCPProxyPort() int {
 	return port
 }
 
-// ConnectionManager placeholder for Phase 2
-type ConnectionManager struct {
-	// Will be implemented in Phase 2
-}
-
 // Server is the MCP Proxy Server
 type Server struct {
 	port       int
 	store      *MCPStore
 	bus        *events.Bus
 	tokenStore auth.TokenStoreInterface
-	connMgr    *ConnectionManager
+	connMgr    *connectionManagerImpl
 	httpServer *http.Server
 }
 
@@ -45,16 +40,23 @@ func NewServer(port int, store *MCPStore, bus *events.Bus, tokenStore auth.Token
 		store:      store,
 		bus:        bus,
 		tokenStore: tokenStore,
+		connMgr:    NewConnectionManager(),
 	}
 }
 
-// setupRoutes registers MCP proxy routes — stub for Phase 2 to fill
-func (s *Server) setupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})
-	// Phase 2 will add: /mcp/{id}/sse, /mcp/{id}/messages, /mcp/{id}/http
+// setupRoutes registers MCP proxy routes
+func (s *Server) setupRoutes() {
+	mux := http.NewServeMux()
+
+	// SSE transport routes
+	mux.HandleFunc("/mcp/{id}/sse", s.proxyAuthMiddleware(s.handleSSEConnection))
+	mux.HandleFunc("/mcp/{id}/messages", s.proxyAuthMiddleware(s.handleSSEMessage))
+
+	// Streamable HTTP transport routes
+	mux.HandleFunc("/mcp/{id}/", s.proxyAuthMiddleware(s.handleStreamableHTTP))
+	mux.HandleFunc("/mcp/{id}", s.proxyAuthMiddleware(s.handleStreamableHTTP))
+
+	s.httpServer.Handler = mux
 }
 
 // RegisterAPIHandlers registers management API routes — stub for Phase 3 to fill
@@ -64,12 +66,10 @@ func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
 
 // Start creates and starts the HTTP server
 func (s *Server) Start() error {
-	mux := http.NewServeMux()
-	s.setupRoutes(mux)
 	s.httpServer = &http.Server{
-		Addr:    ":" + strconv.Itoa(s.port),
-		Handler: mux,
+		Addr: ":" + strconv.Itoa(s.port),
 	}
+	s.setupRoutes()
 	return s.httpServer.ListenAndServe()
 }
 
