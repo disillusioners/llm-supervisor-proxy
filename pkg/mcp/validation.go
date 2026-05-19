@@ -73,8 +73,8 @@ func ValidateCustomHeaders(headersJSON string) error {
 	return nil
 }
 
-// ValidateMcpServerConfig validates a CreateMCPServerRequest
-func ValidateMcpServerConfig(req *CreateMCPServerRequest) error {
+// ValidateMCPServerConfig validates a CreateMCPServerRequest
+func ValidateMCPServerConfig(req *CreateMCPServerRequest) error {
 	if req.Name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -96,8 +96,8 @@ func ValidateMcpServerConfig(req *CreateMCPServerRequest) error {
 	return nil
 }
 
-// ValidateUpdateMcpServerConfig validates an UpdateMCPServerRequest
-func ValidateUpdateMcpServerConfig(req *UpdateMCPServerRequest, existing *MCPServer) error {
+// ValidateUpdateMCPServerConfig validates an UpdateMCPServerRequest
+func ValidateUpdateMCPServerConfig(req *UpdateMCPServerRequest, existing *MCPServer) error {
 	if req == nil {
 		return nil
 	}

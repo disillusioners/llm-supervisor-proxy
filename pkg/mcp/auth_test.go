@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
@@ -139,34 +140,5 @@ func TestProxyAuthMiddleware(t *testing.T) {
 
 // containsIgnoreCase checks if s contains substr, case-insensitive
 func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || containsIgnoreCaseHelper(s, substr))
-}
-
-func containsIgnoreCaseHelper(s, substr string) bool {
-	if len(s) == 0 || len(substr) == 0 {
-		return false
-	}
-	// Simple implementation - convert both to lowercase and check
-	sLower := make([]byte, len(s))
-	substrLower := make([]byte, len(substr))
-	for i := range s {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		sLower[i] = c
-	}
-	for i := range substr {
-		c := substr[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		substrLower[i] = c
-	}
-	for i := 0; i <= len(sLower)-len(substrLower); i++ {
-		if string(sLower[i:i+len(substrLower)]) == string(substrLower) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }

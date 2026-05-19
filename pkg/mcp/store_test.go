@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	_ "modernc.org/sqlite"
 )
@@ -417,11 +416,6 @@ func TestCreateServerAuthTokenEncrypted(t *testing.T) {
 	if retrieved.AuthToken != "super-secret-token" {
 		t.Errorf("retrieved.AuthToken = %q, want %q (decrypted on read)", retrieved.AuthToken, "super-secret-token")
 	}
-
-	// Verify that encryption pass-through works (no key configured = plaintext)
-	// If a key were configured, the stored value would be different from plaintext
-	// This test confirms the token round-trips correctly
-	_ = crypto.ResetEncryptionState // For documentation purposes - tests run without encryption key
 }
 
 func TestCreateServerNameUniqueness(t *testing.T) {
