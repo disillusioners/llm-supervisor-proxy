@@ -18,6 +18,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -108,6 +109,28 @@ func main() {
 	// Setup Server
 	mux := http.NewServeMux()
 
+	// Initialize MCP Proxy Server (optional — only if MCP_PROXY_PORT is set)
+	var mcpServer *mcp.Server
+	if mcpPort := mcp.GetMCPProxyPort(); mcpPort > 0 {
+		mcpStore := mcp.NewMCPStore(dbStore.DB, dbStore.Dialect)
+		mcpServer = mcp.NewServer(mcpPort, mcpStore, bus, tokenStore)
+
+		// Register MCP management API routes on the main mux (for frontend access)
+		mcpServer.RegisterAPIHandlers(mux)
+
+		// Start MCP proxy server on separate port (goroutine)
+		go func() {
+			log.Printf("[MCP] Starting MCP proxy server on port %d", mcpPort)
+			log.Printf("[MCP] SSE endpoint: http://localhost:%d/mcp/{server_id}/sse", mcpPort)
+			log.Printf("[MCP] HTTP endpoint: http://localhost:%d/mcp/{server_id}/http", mcpPort)
+			if err := mcpServer.Start(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[MCP] MCP proxy server error: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("[MCP] MCP proxy disabled (set MCP_PROXY_PORT to enable)")
+	}
+
 	// Register UI handlers (root /, /api/...)
 	uiServer.RegisterHandlers(mux)
 
@@ -175,6 +198,15 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server...")
+
+	// Shutdown MCP proxy server first
+	if mcpServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := mcpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[MCP] MCP proxy shutdown error: %v", err)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
