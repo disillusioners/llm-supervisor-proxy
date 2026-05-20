@@ -99,56 +99,22 @@ func newSQLiteConnection() (*Store, error) {
 	return newSQLiteConnectionAtPath(dbPath)
 }
 
-// configureSQLite applies SQLite-specific settings for concurrency
-func configureSQLite(db *sql.DB) error {
-	pragmaQueries := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA synchronous = NORMAL",
-	}
-	for _, pragma := range pragmaQueries {
-		if _, err := db.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to execute %s: %w", pragma, err)
-		}
-	}
-	return nil
-}
-
-// applySQLitePoolSettings sets SQLite-specific pool settings after configurePool
-func applySQLitePoolSettings(db *sql.DB) {
-	// SQLite WAL mode allows concurrent reads but only single writer
-	// Set MaxOpenConns to 1 to prevent multiple writers (WAL handles concurrency)
-	db.SetMaxOpenConns(1)
-}
-
 func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// DSN with pragmas for WAL mode, synchronous=FULL, foreign keys
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
-	// Configure SQLite-specific settings for concurrency
-	if err := configureSQLite(db); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	// Enable foreign keys for SQLite
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
-	}
-
-	// Configure connection pool
-	configurePool(db)
-
-	// Apply SQLite-specific pool settings (must be after configurePool to override MaxOpenConns)
-	applySQLitePoolSettings(db)
+	// SQLite WAL mode allows concurrent reads but only single writer
+	// Set MaxOpenConns to 1 to serialize writes and prevent SQLITE_BUSY
+	db.SetMaxOpenConns(1)
 
 	return &Store{DB: db, Dialect: SQLite, dbPath: dbPath}, nil
 }

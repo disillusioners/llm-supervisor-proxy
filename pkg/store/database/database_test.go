@@ -28,8 +28,8 @@ func TestSQLiteConnection(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Verify SQLite pragmas for concurrency
-	var journalMode, busyTimeout, synchronous string
+	// Verify SQLite pragmas are set via DSN
+	var journalMode, busyTimeout, synchronous, foreignKeys string
 	err = store.DB.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
 	if err != nil {
 		t.Fatalf("Failed to get journal_mode: %v", err)
@@ -42,16 +42,24 @@ func TestSQLiteConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get busy_timeout: %v", err)
 	}
-	if busyTimeout != "5000" {
-		t.Errorf("Expected busy_timeout=5000, got: %s", busyTimeout)
+	if busyTimeout != "0" {
+		t.Errorf("Expected busy_timeout=0, got: %s", busyTimeout)
 	}
 
 	err = store.DB.QueryRow("PRAGMA synchronous").Scan(&synchronous)
 	if err != nil {
 		t.Fatalf("Failed to get synchronous: %v", err)
 	}
-	if synchronous != "1" { // NORMAL = 1
-		t.Errorf("Expected synchronous=1 (NORMAL), got: %s", synchronous)
+	if synchronous != "2" { // FULL = 2
+		t.Errorf("Expected synchronous=2 (FULL), got: %s", synchronous)
+	}
+
+	err = store.DB.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys)
+	if err != nil {
+		t.Fatalf("Failed to get foreign_keys: %v", err)
+	}
+	if foreignKeys != "1" { // ON = 1
+		t.Errorf("Expected foreign_keys=1 (ON), got: %s", foreignKeys)
 	}
 
 	// Verify MaxOpenConns is set to 1
