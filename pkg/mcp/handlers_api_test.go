@@ -511,6 +511,52 @@ func TestHandleCreateMCPServer_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleCreateMCPServer_DuplicateID(t *testing.T) {
+	server, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	// First, create a server with ID "test-dup"
+	reqBody := CreateMCPServerRequest{
+		ID:            "test-dup",
+		Name:          "test-dup",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthNone,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("First create: status code = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	// Attempt to create another server with the same ID
+	req2Body := CreateMCPServerRequest{
+		ID:            "test-dup",
+		Name:          "test-dup-2",
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: TransportStreamableHTTP,
+		AuthType:      AuthNone,
+	}
+	body2, _ := json.Marshal(req2Body)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+
+	server.handleCreateMCPServer(w2, req2)
+
+	// Should return 409 Conflict
+	if w2.Code != http.StatusConflict {
+		t.Errorf("Second create with duplicate ID: status code = %d, want %d", w2.Code, http.StatusConflict)
+	}
+}
+
 func TestHandleCreateMCPServer_WrongMethod(t *testing.T) {
 	server, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()

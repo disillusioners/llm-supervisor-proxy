@@ -19,9 +19,9 @@ interface MCPServerFormProps {
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
 
-// ID validation: lowercase alphanumeric, hyphens, underscores, must start with letter or number
-const ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
-const ID_PATTERN_MSG = 'Lowercase letters, numbers, hyphens, and underscores. Must start with a letter or number.';
+// ID validation: lowercase alphanumeric, hyphens, underscores, must start and end with letter or number
+const ID_PATTERN = /^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$/;
+const ID_PATTERN_MSG = 'Lowercase letters, numbers, hyphens, and underscores. Must start and end with a letter or number.';
 
 function validateServerId(id: string): string | null {
   if (!id.trim()) {

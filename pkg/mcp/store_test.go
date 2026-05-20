@@ -458,6 +458,38 @@ func TestCreateServerNameUniqueness(t *testing.T) {
 	}
 }
 
+func TestCreateServerIDUniqueness(t *testing.T) {
+	db, cleanup := newTestDB(t)
+	defer cleanup()
+
+	store := NewMCPStore(db.DB, database.SQLite)
+	ctx := context.Background()
+
+	// Create first server with ID "test-dup"
+	_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-dup",
+		Name:        "first-server",
+		UpstreamURL: "https://api.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+	if err != nil {
+		t.Fatalf("First CreateServer() error = %v", err)
+	}
+
+	// Try to create second server with the same ID "test-dup"
+	_, err = store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-dup",
+		Name:        "second-server",
+		UpstreamURL: "https://other.example.com/mcp",
+		AuthType:    AuthNone,
+	})
+
+	// Should fail due to UNIQUE constraint on id column
+	if err == nil {
+		t.Error("Second CreateServer() with duplicate ID should fail, got nil error")
+	}
+}
+
 func TestCreateServerDefaultsTransportType(t *testing.T) {
 	db, cleanup := newTestDB(t)
 	defer cleanup()
