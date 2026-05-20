@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
@@ -44,6 +46,47 @@ func NewCounter(db *sql.DB, dialect database.Dialect) *Counter {
 	}
 }
 
+// isBusyError checks if the error is a database busy/locked error
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "SQLITE_BUSY") || strings.Contains(errStr, "database is locked")
+}
+
+// execWithRetry executes a query with retry logic for busy database errors
+func (c *Counter) execWithRetry(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	backoffs := []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+
+	for i, backoff := range backoffs {
+		result, err := c.db.ExecContext(ctx, query, args...)
+		if err == nil {
+			return result, nil
+		}
+
+		// If this is the last attempt, return immediately without sleeping
+		if i == len(backoffs)-1 {
+			return result, err
+		}
+
+		// Only retry on busy errors
+		if !isBusyError(err) {
+			return result, err
+		}
+
+		// Sleep before retry, but check context cancellation
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-time.After(backoff):
+			// Continue to next attempt
+		}
+	}
+
+	return nil, fmt.Errorf("execWithRetry: unexpected error after all retries")
+}
+
 // Increment increments usage counters for a token within an hour bucket
 // Uses UPSERT to atomically add counts to the existing values
 func (c *Counter) Increment(ctx context.Context, tokenID, hourBucket string, reqCount, promptTok, completionTok, totalTok int) error {
@@ -68,7 +111,7 @@ func (c *Counter) Increment(ctx context.Context, tokenID, hourBucket string, req
 
 	args := []interface{}{tokenID, hourBucket, reqCount, promptTok, completionTok, totalTok}
 
-	_, err := c.db.ExecContext(ctx, query, args...)
+	_, err := c.execWithRetry(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to increment usage: %w", err)
 	}
@@ -138,7 +181,7 @@ func (c *Counter) IncrementModelUsage(ctx context.Context, modelID, hourBucket s
 
 	args := []interface{}{modelID, hourBucket, reqCount, promptTok, completionTok, totalTok}
 
-	_, err := c.db.ExecContext(ctx, query, args...)
+	_, err := c.execWithRetry(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to increment model usage: %w", err)
 	}

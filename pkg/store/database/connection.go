@@ -99,6 +99,28 @@ func newSQLiteConnection() (*Store, error) {
 	return newSQLiteConnectionAtPath(dbPath)
 }
 
+// configureSQLite applies SQLite-specific settings for concurrency
+func configureSQLite(db *sql.DB) error {
+	pragmaQueries := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA synchronous = NORMAL",
+	}
+	for _, pragma := range pragmaQueries {
+		if _, err := db.Exec(pragma); err != nil {
+			return fmt.Errorf("failed to execute %s: %w", pragma, err)
+		}
+	}
+	return nil
+}
+
+// applySQLitePoolSettings sets SQLite-specific pool settings after configurePool
+func applySQLitePoolSettings(db *sql.DB) {
+	// SQLite WAL mode allows concurrent reads but only single writer
+	// Set MaxOpenConns to 1 to prevent multiple writers (WAL handles concurrency)
+	db.SetMaxOpenConns(1)
+}
+
 func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -110,6 +132,12 @@ func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
+	// Configure SQLite-specific settings for concurrency
+	if err := configureSQLite(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	// Enable foreign keys for SQLite
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
@@ -118,6 +146,9 @@ func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 
 	// Configure connection pool
 	configurePool(db)
+
+	// Apply SQLite-specific pool settings (must be after configurePool to override MaxOpenConns)
+	applySQLitePoolSettings(db)
 
 	return &Store{DB: db, Dialect: SQLite, dbPath: dbPath}, nil
 }
