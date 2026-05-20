@@ -3,6 +3,7 @@ package mcp
 import (
 	"net"
 	neturl "net/url"
+	"strings"
 	"testing"
 )
 
@@ -320,6 +321,159 @@ func TestValidateCustomHeaders(t *testing.T) {
 	}
 }
 
+func TestValidateServerID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		// Valid IDs
+		{
+			name:    "simple alphanumeric",
+			id:      "abc123",
+			wantErr: false,
+		},
+		{
+			name:    "lowercase with hyphen",
+			id:      "my-server",
+			wantErr: false,
+		},
+		{
+			name:    "lowercase with underscore",
+			id:      "my_server",
+			wantErr: false,
+		},
+		{
+			name:    "mixed hyphens and underscores",
+			id:      "my-server_v2",
+			wantErr: false,
+		},
+		{
+			name:    "single character",
+			id:      "a",
+			wantErr: false,
+		},
+		{
+			name:    "single digit",
+			id:      "1",
+			wantErr: false,
+		},
+		{
+			name:    "starts with letter",
+			id:      "server1",
+			wantErr: false,
+		},
+		{
+			name:    "starts with digit",
+			id:      "1server",
+			wantErr: false,
+		},
+		{
+			name:    "max length (128 chars)",
+			id:      "a" + strings.Repeat("b", 127),
+			wantErr: false,
+		},
+
+		// Invalid IDs - empty
+		{
+			name:    "empty string",
+			id:      "",
+			wantErr: true,
+		},
+
+		// Invalid IDs - too long
+		{
+			name:    "too long (129 chars)",
+			id:      "a" + strings.Repeat("b", 128),
+			wantErr: true,
+		},
+
+		// Invalid IDs - uppercase
+		{
+			name:    "uppercase letter",
+			id:      "Server",
+			wantErr: true,
+		},
+		{
+			name:    "all uppercase",
+			id:      "SERVER",
+			wantErr: true,
+		},
+
+		// Invalid IDs - invalid characters
+		{
+			name:    "contains space",
+			id:      "my server",
+			wantErr: true,
+		},
+		{
+			name:    "contains dot",
+			id:      "my.server",
+			wantErr: true,
+		},
+		{
+			name:    "contains @",
+			id:      "my@server",
+			wantErr: true,
+		},
+		{
+			name:    "contains colon",
+			id:      "my:server",
+			wantErr: true,
+		},
+		{
+			name:    "starts with hyphen",
+			id:      "-server",
+			wantErr: true,
+		},
+		{
+			name:    "starts with underscore",
+			id:      "_server",
+			wantErr: true,
+		},
+
+		// Edge cases
+		{
+			name:    "trailing hyphen",
+			id:      "server-",
+			wantErr: true,
+		},
+		{
+			name:    "trailing underscore",
+			id:      "server_",
+			wantErr: true,
+		},
+		{
+			name:    "consecutive hyphens",
+			id:      "server--name",
+			wantErr: false,
+		},
+		{
+			name:    "consecutive underscores",
+			id:      "server__name",
+			wantErr: false,
+		},
+		{
+			name:    "hyphen then underscore",
+			id:      "server-_name",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateServerID(tt.id)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateServerID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateMCPServerConfig(t *testing.T) {
 	t.Parallel()
 
@@ -332,6 +486,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "valid config passes",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -344,6 +499,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "valid config with SSE transport",
 			req: &CreateMCPServerRequest{
+				ID:            "sse-server",
 				Name:          "sse-server",
 				UpstreamURL:   "https://sse.example.com/stream",
 				TransportType: TransportSSE,
@@ -355,6 +511,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "valid config with no auth",
 			req: &CreateMCPServerRequest{
+				ID:            "no-auth-server",
 				Name:          "no-auth-server",
 				UpstreamURL:   "http://internal.example.com:8080/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -363,10 +520,31 @@ func TestValidateMCPServerConfig(t *testing.T) {
 			wantErr: false,
 		},
 
+		// Invalid ID
+		{
+			name: "empty ID fails",
+			req: &CreateMCPServerRequest{
+				ID:          "",
+				Name:        "test-server",
+				UpstreamURL: "https://api.example.com/mcp",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid ID format fails",
+			req: &CreateMCPServerRequest{
+				ID:          "Invalid-ID",
+				Name:        "test-server",
+				UpstreamURL: "https://api.example.com/mcp",
+			},
+			wantErr: true,
+		},
+
 		// Invalid name
 		{
 			name: "empty name fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "",
 				UpstreamURL: "https://api.example.com/mcp",
 			},
@@ -377,6 +555,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "invalid upstream URL fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: "http://localhost:3000",
 			},
@@ -385,6 +564,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "empty upstream URL fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: "",
 			},
@@ -395,6 +575,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "invalid transport type fails",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: "invalid",
@@ -406,6 +587,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "invalid auth type fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: "https://api.example.com/mcp",
 				AuthType:    "invalid",
@@ -417,6 +599,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "bearer auth with empty token fails",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -428,6 +611,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "basic auth with empty token fails",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -439,6 +623,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "api_key auth with empty token fails",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -450,6 +635,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "none auth with empty token passes",
 			req: &CreateMCPServerRequest{
+				ID:            "test-server",
 				Name:          "test-server",
 				UpstreamURL:   "https://api.example.com/mcp",
 				TransportType: TransportStreamableHTTP,
@@ -463,6 +649,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "invalid headers JSON fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: "https://api.example.com/mcp",
 				AuthType:    AuthNone,
@@ -473,6 +660,7 @@ func TestValidateMCPServerConfig(t *testing.T) {
 		{
 			name: "blocked header fails",
 			req: &CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: "https://api.example.com/mcp",
 				AuthType:    AuthNone,

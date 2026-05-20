@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -54,6 +55,27 @@ var blockedHeaders = map[string]bool{
 	"proxy-authorization":  true,
 }
 
+// MaxServerIDLength is the maximum allowed length for a server ID
+const MaxServerIDLength = 128
+
+// serverIDPattern allows lowercase alphanumeric, hyphens, and underscores
+// Must start with alphanumeric, cannot end with hyphen or underscore
+var serverIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*[a-z0-9]$|^[a-z0-9]$`)
+
+// ValidateServerID validates a server ID string
+func ValidateServerID(id string) error {
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	if len(id) > MaxServerIDLength {
+		return fmt.Errorf("id must be at most %d characters", MaxServerIDLength)
+	}
+	if !serverIDPattern.MatchString(id) {
+		return fmt.Errorf("id must start with a lowercase letter or number and contain only lowercase letters, numbers, hyphens, and underscores")
+	}
+	return nil
+}
+
 func ValidateCustomHeaders(headersJSON string) error {
 	if headersJSON == "" || headersJSON == "{}" {
 		return nil
@@ -75,6 +97,9 @@ func ValidateCustomHeaders(headersJSON string) error {
 
 // ValidateMCPServerConfig validates a CreateMCPServerRequest
 func ValidateMCPServerConfig(req *CreateMCPServerRequest) error {
+	if err := ValidateServerID(req.ID); err != nil {
+		return fmt.Errorf("invalid id: %w", err)
+	}
 	if req.Name == "" {
 		return fmt.Errorf("name is required")
 	}

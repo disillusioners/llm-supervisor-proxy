@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult } from '../types';
+import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -705,7 +705,7 @@ export function useMCPStatus() {
   return { status, loading, error };
 }
 
-export async function createMCPServer(data: Omit<MCPServer, 'id' | 'created_at' | 'updated_at'>): Promise<MCPServer> {
+export async function createMCPServer(data: CreateMCPServerRequest): Promise<MCPServer> {
   const server = await apiFetch<MCPServer>('/mcp-servers', {
     method: 'POST',
     body: JSON.stringify(data),

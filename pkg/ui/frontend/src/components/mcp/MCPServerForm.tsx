@@ -5,6 +5,7 @@ import { testMCPServer } from '../../hooks/useApi';
 interface MCPServerFormProps {
   server?: MCPServer | null;
   onSave: (data: {
+    id?: string; // Only included for create operations
     name: string;
     description: string;
     upstream_url: string;
@@ -18,8 +19,28 @@ interface MCPServerFormProps {
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
 
+// ID validation: lowercase alphanumeric, hyphens, underscores, must start with letter or number
+const ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+const ID_PATTERN_MSG = 'Lowercase letters, numbers, hyphens, and underscores. Must start with a letter or number.';
+
+function validateServerId(id: string): string | null {
+  if (!id.trim()) {
+    return 'Server ID is required';
+  }
+  if (id.length > 128) {
+    return 'Server ID must be at most 128 characters';
+  }
+  if (!ID_PATTERN.test(id)) {
+    return ID_PATTERN_MSG;
+  }
+  return null;
+}
+
 export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServerFormProps) {
   const isEdit = !!server;
+  const [serverId, setServerId] = useState(server?.id || '');
+  const [serverIdTouched, setServerIdTouched] = useState(false);
+  const [serverIdError, setServerIdError] = useState<string | null>(null);
   const [name, setName] = useState(server?.name || '');
   const [description, setDescription] = useState(server?.description || '');
   const [upstreamUrl, setUpstreamUrl] = useState(server?.upstream_url || '');
@@ -33,12 +54,32 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; latency?: number; error?: string } | null>(null);
 
+  // Validate server ID when it changes
+  const handleServerIdChange = (value: string) => {
+    setServerId(value);
+    setServerIdTouched(true);
+    setServerIdError(validateServerId(value));
+  };
+
   const handleSubmit = async (e: Event) => {
     e.preventDefault();
+
+    // Validate server ID for create mode
+    if (!isEdit) {
+      const idError = validateServerId(serverId);
+      setServerIdError(idError);
+      setServerIdTouched(true);
+      if (idError) {
+        setStatus({ type: 'error', message: idError });
+        return;
+      }
+    }
+
     try {
       setSaving(true);
       setStatus(null);
       const payload: {
+        id?: string;
         name: string;
         description: string;
         upstream_url: string;
@@ -48,6 +89,8 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
         headers: string;
         enabled: boolean;
       } = {
+        // Only include id for create operations (immutable after creation)
+        ...(isEdit ? {} : { id: serverId }),
         name,
         description,
         upstream_url: upstreamUrl,
@@ -95,6 +138,40 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
         {isEdit ? 'Edit MCP Server' : 'Add MCP Server'}
       </h3>
       <form onSubmit={handleSubmit} class="space-y-4">
+        {isEdit ? (
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Server ID
+            </label>
+            <div class="px-3 py-2 bg-gray-900 border border-gray-600 rounded-md text-gray-400 font-mono text-sm">
+              {server?.id}
+            </div>
+            <p class="text-xs text-gray-500 mt-1">Server ID cannot be changed after creation</p>
+          </div>
+        ) : (
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Server ID <span class="text-red-400">*</span>
+            </label>
+            <input
+              type="text"
+              value={serverId}
+              onInput={(e) => handleServerIdChange((e.target as HTMLInputElement).value)}
+              required
+              maxLength={128}
+              class={`w-full px-3 py-2 bg-gray-700 border rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono ${
+                serverIdError && serverIdTouched ? 'border-red-500' : 'border-gray-600'
+              }`}
+              placeholder="my-first-mcp-server"
+            />
+            {serverIdError && serverIdTouched ? (
+              <p class="text-xs text-red-400 mt-1">{serverIdError}</p>
+            ) : (
+              <p class="text-xs text-gray-500 mt-1">{ID_PATTERN_MSG}</p>
+            )}
+          </div>
+        )}
+
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1">
             Name <span class="text-red-400">*</span>
@@ -247,8 +324,8 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
           </button>
           <button
             type="submit"
-            class="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors font-medium border border-blue-500/50 shadow shadow-blue-900/20"
-            disabled={saving || !name || !upstreamUrl}
+            class="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors font-medium border-blue-500/50 shadow shadow-blue-900/20"
+            disabled={saving || !name || !upstreamUrl || (!isEdit && (serverIdError !== null || !serverId.trim()))}
           >
             {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Add Server'}
           </button>

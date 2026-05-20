@@ -142,6 +142,7 @@ func TestHandleListMCPServers_ReturnsServers(t *testing.T) {
 	// Create some servers
 	for i := 0; i < 3; i++ {
 		_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+			ID:          fmt.Sprintf("list-test-server-%d", i),
 			Name:        fmt.Sprintf("server-%d", i),
 			UpstreamURL: "https://api.example.com/mcp",
 			AuthType:    AuthNone,
@@ -200,6 +201,7 @@ func TestHandleListMCPServers_MasksTokens(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "server-with-token",
 		Name:        "server-with-token",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthBearer,
@@ -252,6 +254,7 @@ func TestHandleGetMCPServer_Existing(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthBearer,
@@ -340,6 +343,7 @@ func TestHandleCreateMCPServer_Success(t *testing.T) {
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
+		ID:            "new-server",
 		Name:          "new-server",
 		Description:   "A new test server",
 		UpstreamURL:   "https://api.example.com/mcp",
@@ -389,6 +393,7 @@ func TestHandleCreateMCPServer_EmptyName(t *testing.T) {
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:   AuthNone,
@@ -423,6 +428,7 @@ func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reqBody := CreateMCPServerRequest{
+				ID:          "test-server",
 				Name:        "test-server",
 				UpstreamURL: tt.upstreamURL,
 				AuthType:   AuthNone,
@@ -447,6 +453,7 @@ func TestHandleCreateMCPServer_InvalidTransportType(t *testing.T) {
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
+		ID:            "test-server",
 		Name:          "test-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: "invalid_transport",
@@ -470,6 +477,7 @@ func TestHandleCreateMCPServer_MissingTokenForAuth(t *testing.T) {
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:   AuthBearer,
@@ -528,6 +536,7 @@ func TestHandleUpdateMCPServer_Success(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "original-name",
 		Name:        "original-name",
 		Description: "Original description",
 		UpstreamURL: "https://api.example.com/mcp",
@@ -597,6 +606,7 @@ func TestHandleUpdateMCPServer_InvalidURL(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -629,6 +639,7 @@ func TestHandleUpdateMCPServer_EmptyName(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -661,6 +672,7 @@ func TestHandleUpdateMCPServer_InvalidJSON(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "test-server",
 		Name:        "test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -705,6 +717,7 @@ func TestHandleDeleteMCPServer_Success(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "delete-me",
 		Name:        "delete-me",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -769,6 +782,7 @@ func TestHandleTestMCPServer_SSE_Success(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "sse-server",
 		Name:          "sse-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,
@@ -833,6 +847,7 @@ func TestHandleTestMCPServer_StreamableHTTP_Success(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "http-server",
 		Name:          "http-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportStreamableHTTP,
@@ -889,6 +904,7 @@ func TestHandleTestMCPServer_Unreachable(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "unreachable-server",
 		Name:          "unreachable-server",
 		UpstreamURL:   "https://api.unreachable.example.com:9999/mcp",
 		TransportType: TransportStreamableHTTP,
@@ -1070,6 +1086,7 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 
 	// Create a server
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "api-test-server",
 		Name:        "api-test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -1107,6 +1124,7 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 
 	// Test create route
 	createReq := CreateMCPServerRequest{
+		ID:            "new-api-server",
 		Name:          "new-api-server",
 		UpstreamURL:   "https://httpbin.org/post",
 		TransportType: TransportStreamableHTTP,
@@ -1155,6 +1173,7 @@ func TestHandleTestMCPServer_Timeout(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "timeout-server",
 		Name:          "timeout-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,
@@ -1228,6 +1247,7 @@ func TestHandleDeleteMCPServer_ClosesConnections(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "delete-with-connections",
 		Name:          "delete-with-connections",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,

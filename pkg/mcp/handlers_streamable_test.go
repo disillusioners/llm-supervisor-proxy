@@ -28,7 +28,8 @@ func createStreamableServer(t *testing.T, store *MCPStore, upstreamURL string, e
 	ctx := context.Background()
 
 	req := CreateMCPServerRequest{
-		Name:          "test-streamable-" + time.Now().Format("150405.000"),
+		ID:            "test-streamable-" + time.Now().Format("150405.000000"),
+		Name:          "test-streamable-" + time.Now().Format("150405.000000"),
 		UpstreamURL:   upstreamURL,
 		TransportType: TransportStreamableHTTP,
 		AuthType:      AuthNone,
@@ -290,7 +291,8 @@ func TestHandleStreamableHTTP_ServerDisabled(t *testing.T) {
 	// Create disabled server
 	ctx := context.Background()
 	testServer, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:          "disabled-server-" + time.Now().Format("150405.000"),
+		ID:            "disabled-server-" + time.Now().Format("150405.000000"),
+		Name:          "disabled-server-" + time.Now().Format("150405.000000"),
 		UpstreamURL:   upstream.URL,
 		TransportType: TransportStreamableHTTP,
 		AuthType:      AuthNone,
@@ -418,7 +420,8 @@ func TestHandleStreamableHTTP_AuthBearer(t *testing.T) {
 	// Create server with bearer auth
 	ctx := context.Background()
 	testServer, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:          "auth-bearer-server-" + time.Now().Format("150405.000"),
+		ID:            "auth-bearer-server-" + time.Now().Format("150405.000000"),
+		Name:          "auth-bearer-server-" + time.Now().Format("150405.000000"),
 		UpstreamURL:   upstream.URL,
 		TransportType: TransportStreamableHTTP,
 		AuthType:      AuthBearer,
@@ -459,7 +462,8 @@ func TestHandleStreamableHTTP_AuthBasic(t *testing.T) {
 	// Create server with basic auth
 	ctx := context.Background()
 	testServer, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:          "auth-basic-server-" + time.Now().Format("150405.000"),
+		ID:            "auth-basic-server-" + time.Now().Format("150405.000000"),
+		Name:          "auth-basic-server-" + time.Now().Format("150405.000000"),
 		UpstreamURL:   upstream.URL,
 		TransportType: TransportStreamableHTTP,
 		AuthType:      AuthBasic,
@@ -500,7 +504,8 @@ func TestHandleStreamableHTTP_AuthAPIKey(t *testing.T) {
 	// Create server with API key auth
 	ctx := context.Background()
 	testServer, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:          "auth-apikey-server-" + time.Now().Format("150405.000"),
+		ID:            "auth-apikey-server-" + time.Now().Format("150405.000000"),
+		Name:          "auth-apikey-server-" + time.Now().Format("150405.000000"),
 		UpstreamURL:   upstream.URL,
 		TransportType: TransportStreamableHTTP,
 		AuthType:      AuthAPIKey,

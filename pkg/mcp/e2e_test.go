@@ -223,6 +223,7 @@ func TestE2E_SSEProxyFlow(t *testing.T) {
 	// Create MCP server config via store
 	ctx := context.Background()
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "e2e-sse-server",
 		Name:          "e2e-sse-server",
 		Description:   "E2E SSE Test Server",
 		UpstreamURL:   upstream.URL,
@@ -343,6 +344,7 @@ func TestE2E_StreamableHTTPFlow(t *testing.T) {
 	// Create MCP server config
 	ctx := context.Background()
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "e2e-streamable-server",
 		Name:          "e2e-streamable-server",
 		Description:   "E2E Streamable HTTP Test Server",
 		UpstreamURL:   upstream.URL,
@@ -419,6 +421,7 @@ func TestE2E_AuthOnTransport(t *testing.T) {
 	// Create MCP server config
 	ctx := context.Background()
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "e2e-auth-server",
 		Name:          "e2e-auth-server",
 		UpstreamURL:   upstream.URL,
 		TransportType: TransportSSE,
@@ -544,6 +547,7 @@ func TestE2E_EncryptionRoundTrip(t *testing.T) {
 	plaintextToken := "super-secret-upstream-token-12345"
 	ctx := context.Background()
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "e2e-encryption-server",
 		Name:          "e2e-encryption-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,
@@ -623,6 +627,7 @@ func TestE2E_ConnectionTestAPI(t *testing.T) {
 
 		// Create server pointing to reachable upstream
 		mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+			ID:            "reachable-sse-" + time.Now().Format("150405.000"),
 			Name:          "reachable-sse-" + time.Now().Format("150405.000"),
 			UpstreamURL:   reachableUpstream.URL + "/sse",
 			TransportType: TransportSSE,
@@ -663,6 +668,7 @@ func TestE2E_ConnectionTestAPI(t *testing.T) {
 	t.Run("unreachable_upstream", func(t *testing.T) {
 		// Create server pointing to unreachable host
 		mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+			ID:            "unreachable-" + time.Now().Format("150405.000"),
 			Name:          "unreachable-" + time.Now().Format("150405.000"),
 			UpstreamURL:   "http://192.0.2.1:9999/mcp", // TEST-NET-1, should be unreachable
 			TransportType: TransportSSE,
@@ -703,6 +709,7 @@ func TestE2E_ConnectionTestAPI(t *testing.T) {
 		defer reachableUpstream.Close()
 
 		mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+			ID:            "reachable-http-" + time.Now().Format("150405.000"),
 			Name:          "reachable-http-" + time.Now().Format("150405.000"),
 			UpstreamURL:   reachableUpstream.URL,
 			TransportType: TransportStreamableHTTP,
@@ -746,6 +753,7 @@ func TestE2E_DeleteCleanup(t *testing.T) {
 	// Create MCP server config
 	ctx := context.Background()
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "e2e-delete-server",
 		Name:          "e2e-delete-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,
@@ -883,6 +891,7 @@ func TestE2E_MultipleServers(t *testing.T) {
 	// Create multiple servers
 	for i := 0; i < 3; i++ {
 		_, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+			ID:            fmt.Sprintf("multi-server-%d", i),
 			Name:          fmt.Sprintf("multi-server-%d", i),
 			UpstreamURL:   "https://api.example.com/mcp",
 			TransportType: TransportStreamableHTTP,
@@ -947,6 +956,7 @@ func TestE2E_ServerDisabled(t *testing.T) {
 	// Create disabled server
 	disabled := false
 	mcpServer, err := env.mcpStore.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "disabled-server",
 		Name:          "disabled-server",
 		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportSSE,

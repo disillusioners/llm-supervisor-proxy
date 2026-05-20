@@ -33,7 +33,8 @@ func createTestServerInStore(t *testing.T, store *MCPStore, upstreamURL string, 
 	ctx := context.Background()
 
 	server, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:          "test-sse-server-" + time.Now().Format("150405.000"),
+		ID:            "test-sse-server-" + time.Now().Format("150405.000000"),
+		Name:          "test-sse-server-" + time.Now().Format("150405.000000"),
 		Description:   "Test SSE server",
 		UpstreamURL:   upstreamURL,
 		TransportType: transportType,

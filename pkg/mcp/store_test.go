@@ -125,6 +125,7 @@ func TestListServersReturnsAll(t *testing.T) {
 	// Create multiple servers
 	for i := 0; i < 3; i++ {
 		req := CreateMCPServerRequest{
+			ID:          "list-test-server-" + string(rune('a'+i)),
 			Name:        "server-" + string(rune('a'+i)),
 			UpstreamURL: "https://api.example.com/mcp",
 			AuthType:    AuthNone,
@@ -154,8 +155,10 @@ func TestListServersOrderedByName(t *testing.T) {
 
 	// Create servers with names that would not be in order if sorted by ID
 	names := []string{"zebra", "alpha", "middle"}
-	for _, name := range names {
+	ids := []string{"zebra-server", "alpha-server", "middle-server"}
+	for i, name := range names {
 		req := CreateMCPServerRequest{
+			ID:          ids[i],
 			Name:        name,
 			UpstreamURL: "https://api.example.com/mcp",
 			AuthType:    AuthNone,
@@ -192,6 +195,7 @@ func TestGetServerExisting(t *testing.T) {
 
 	// Create a server
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "get-test-server",
 		Name:        "get-test-server",
 		Description: "A test server",
 		UpstreamURL: "https://api.example.com/mcp",
@@ -272,21 +276,22 @@ func TestCreateServer(t *testing.T) {
 	ctx := context.Background()
 
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:        "create-test-server",
-		Description: "Test description",
-		UpstreamURL: "https://api.example.com/mcp",
+		ID:            "create-test-server",
+		Name:          "create-test-server",
+		Description:   "Test description",
+		UpstreamURL:   "https://api.example.com/mcp",
 		TransportType: TransportStreamableHTTP,
-		AuthType:    AuthBearer,
-		AuthToken:   "my-secret-token",
-		Headers:     `{"X-Header": "value"}`,
+		AuthType:     AuthBearer,
+		AuthToken:    "my-secret-token",
+		Headers:      `{"X-Header": "value"}`,
 	})
 	if err != nil {
 		t.Fatalf("CreateServer() error = %v, want nil", err)
 	}
 
-	// UUID is generated
-	if created.ID == "" {
-		t.Error("created.ID is empty")
+	// ID is user-provided
+	if created.ID != "create-test-server" {
+		t.Errorf("created.ID = %q, want %q", created.ID, "create-test-server")
 	}
 
 	// Timestamps are set
@@ -348,6 +353,7 @@ func TestCreateServerDefaultsEnabled(t *testing.T) {
 
 	// Create server without specifying enabled
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "default-enabled-test",
 		Name:        "default-enabled-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -370,6 +376,7 @@ func TestCreateServerWithEnabledFalse(t *testing.T) {
 
 	enabled := false
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "disabled-server-test",
 		Name:        "disabled-server-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -393,7 +400,8 @@ func TestCreateServerAuthTokenEncrypted(t *testing.T) {
 
 	// Create server with auth token
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:       "token-encryption-test",
+		ID:          "token-encryption-test",
+		Name:        "token-encryption-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:   AuthBearer,
 		AuthToken:  "super-secret-token",
@@ -427,6 +435,7 @@ func TestCreateServerNameUniqueness(t *testing.T) {
 
 	// Create first server
 	_, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "unique-name-test-1",
 		Name:        "unique-name-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -437,6 +446,7 @@ func TestCreateServerNameUniqueness(t *testing.T) {
 
 	// Try to create second server with same name
 	_, err = store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "unique-name-test-2",
 		Name:        "unique-name-test",
 		UpstreamURL: "https://other.example.com/mcp",
 		AuthType:    AuthNone,
@@ -457,6 +467,7 @@ func TestCreateServerDefaultsTransportType(t *testing.T) {
 
 	// Create server without specifying transport type
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "default-transport-test",
 		Name:        "default-transport-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -479,6 +490,7 @@ func TestCreateServerDefaultsAuthType(t *testing.T) {
 
 	// Create server without specifying auth type
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "default-auth-test",
 		Name:        "default-auth-test",
 		UpstreamURL: "https://api.example.com/mcp",
 	})
@@ -500,6 +512,7 @@ func TestCreateServerDefaultsHeaders(t *testing.T) {
 
 	// Create server without specifying headers
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "default-headers-test",
 		Name:        "default-headers-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -526,6 +539,7 @@ func TestUpdateServer(t *testing.T) {
 
 	// Create a server
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "update-test-server",
 		Name:        "update-test-server",
 		Description: "Original description",
 		UpstreamURL: "https://original.example.com/mcp",
@@ -572,7 +586,8 @@ func TestUpdateServerAuthToken(t *testing.T) {
 
 	// Create a server without auth token
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
-		Name:       "update-token-test",
+		ID:          "update-token-test",
+		Name:        "update-token-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:   AuthBearer,
 		AuthToken:  "original-token",
@@ -615,6 +630,7 @@ func TestUpdateServerEnabled(t *testing.T) {
 
 	// Create a server (enabled = true by default)
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "update-enabled-test",
 		Name:        "update-enabled-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -681,6 +697,7 @@ func TestUpdateServerPartialUpdate(t *testing.T) {
 
 	// Create a server with all fields set
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "partial-update-test",
 		Name:          "partial-update-test",
 		Description:   "Original description",
 		UpstreamURL:   "https://original.example.com/mcp",
@@ -742,6 +759,7 @@ func TestUpdateServerEmptyTokenPreservesExisting(t *testing.T) {
 
 	// Create server with auth_token="secret123"
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:            "test-server",
 		Name:          "test-server",
 		UpstreamURL:   "https://example.com/mcp",
 		TransportType: TransportStreamableHTTP,
@@ -798,6 +816,7 @@ func TestDeleteServer(t *testing.T) {
 
 	// Create a server
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "delete-test-server",
 		Name:        "delete-test-server",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -846,6 +865,7 @@ func TestDeleteServerAfterDeleteGetServerReturnsNil(t *testing.T) {
 
 	// Create a server
 	created, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "delete-verify-test",
 		Name:        "delete-verify-test",
 		UpstreamURL: "https://api.example.com/mcp",
 		AuthType:    AuthNone,
@@ -917,6 +937,7 @@ func TestMCPStoreFullCRUD(t *testing.T) {
 
 	// CREATE
 	server1, err := store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "crud-server-1",
 		Name:        "crud-server-1",
 		Description: "First server",
 		UpstreamURL: "https://server1.example.com/mcp",
@@ -927,6 +948,7 @@ func TestMCPStoreFullCRUD(t *testing.T) {
 	}
 
 	_, err = store.CreateServer(ctx, CreateMCPServerRequest{
+		ID:          "crud-server-2",
 		Name:        "crud-server-2",
 		Description: "Second server",
 		UpstreamURL: "https://server2.example.com/mcp",

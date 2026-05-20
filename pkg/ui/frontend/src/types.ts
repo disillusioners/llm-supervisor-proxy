@@ -413,6 +413,19 @@ export interface MCPServer {
   updated_at: string;
 }
 
+// Request payload for creating a new MCP server (requires user-provided id)
+export interface CreateMCPServerRequest {
+  id: string;
+  name: string;
+  description: string;
+  upstream_url: string;
+  transport_type: 'sse' | 'streamable_http';
+  auth_type: 'none' | 'bearer' | 'basic' | 'api_key';
+  auth_token?: string;
+  headers: string;
+  enabled: boolean;
+}
+
 export interface MCPServerStatus {
   enabled: boolean;
   port: number;

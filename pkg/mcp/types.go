@@ -40,6 +40,7 @@ type MCPServer struct {
 
 // For create requests
 type CreateMCPServerRequest struct {
+	ID            string        `json:"id"`
 	Name          string        `json:"name"`
 	Description   string        `json:"description"`
 	UpstreamURL   string        `json:"upstream_url"`

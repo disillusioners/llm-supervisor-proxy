@@ -9,7 +9,6 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
-	"github.com/google/uuid"
 )
 
 // MCPStore handles CRUD operations for MCP servers
@@ -132,7 +131,7 @@ func (s *MCPStore) GetServer(ctx context.Context, id string) (*MCPServer, error)
 
 // CreateServer creates a new MCP server
 func (s *MCPStore) CreateServer(ctx context.Context, req CreateMCPServerRequest) (*MCPServer, error) {
-	id := uuid.New().String()
+	id := req.ID
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Encrypt auth_token if provided

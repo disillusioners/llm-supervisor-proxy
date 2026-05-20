@@ -144,6 +144,12 @@ func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	server, err := s.store.CreateServer(ctx, req)
 	if err != nil {
+		// Check for duplicate ID (UNIQUE constraint violation)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "UNIQUE constraint") || strings.Contains(errMsg, "unique") || strings.Contains(errMsg, "duplicate") {
+			writeJSONError(w, http.StatusConflict, fmt.Sprintf("Server with ID '%s' already exists", req.ID))
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create server: %v", err))
 		return
 	}
