@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,29 +191,43 @@ func (m *connectionManagerImpl) ConnectUpstream(ctx context.Context, server *MCP
 func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *MCPServer, r *http.Request) (*http.Response, error) {
 	upstreamURL := m.getUpstreamURL(server)
 
+	authTokenPreview := ""
+	if len(server.AuthToken) > 10 {
+		authTokenPreview = server.AuthToken[:10] + "..."
+	} else if len(server.AuthToken) > 0 {
+		authTokenPreview = server.AuthToken
+	}
+	log.Printf("[MCP DEBUG] ForwardHTTPRequest: upstreamURL=%s, authType=%s, authToken=%s", upstreamURL, server.AuthType, authTokenPreview)
+
 	// C1: Strip /v1/mcp/{id} prefix from path before constructing upstream URL
 	// Client POSTs to /v1/mcp/{id}/messages, upstream expects /messages
 	path := r.URL.Path
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	var upstreamPath string
 	if len(parts) >= 3 && parts[0] == "v1" && parts[1] == "mcp" && len(parts[2]) > 0 {
-		// /v1/mcp/{id}/messages → /messages, /v1/mcp/{id}/ → /, /v1/mcp/{id} → /
 		if len(parts) == 3 {
-			// /v1/mcp/{id} → /
-			upstreamPath = "/"
+			// /v1/mcp/{id} or /v1/mcp/{id}/ → no sub-path, use upstream URL as-is
+			upstreamPath = ""
 		} else {
-			// /v1/mcp/{id}/... → /...
+			// /v1/mcp/{id}/messages → /messages, /v1/mcp/{id}/foo → /foo
 			upstreamPath = "/" + strings.Join(parts[3:], "/")
 		}
 	} else {
 		upstreamPath = path
 	}
 
-	// Build the full URL
-	url := strings.TrimSuffix(upstreamURL, "/") + upstreamPath
+	// Build the full URL: respect the configured upstream URL without adding trailing slash
+	var url string
+	if upstreamPath == "" {
+		url = upstreamURL
+	} else {
+		url = strings.TrimSuffix(upstreamURL, "/") + upstreamPath
+	}
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
+
+	log.Printf("[MCP DEBUG] ForwardHTTPRequest: final URL=%s, method=%s", url, r.Method)
 
 	// Create new request, preserving method and body
 	req, err := http.NewRequestWithContext(ctx, r.Method, url, r.Body)
@@ -235,8 +250,18 @@ func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *
 		}
 	}
 
+	// Ensure Accept header is set for streamable HTTP (MCP spec requires both content types)
+	if server.TransportType == TransportStreamableHTTP {
+		accept := req.Header.Get("Accept")
+		if !strings.Contains(accept, "application/json") || !strings.Contains(accept, "text/event-stream") {
+			req.Header.Set("Accept", "application/json, text/event-stream")
+		}
+	}
+
 	// Inject auth headers (overrides any client-supplied auth)
 	m.injectAuth(req, server)
+
+	log.Printf("[MCP DEBUG] ForwardHTTPRequest: Authorization header after inject = %s", req.Header.Get("Authorization"))
 
 	return m.httpClient.Do(req)
 }

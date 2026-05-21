@@ -708,7 +708,7 @@ func TestForwardHTTPRequest_StripsMCPPrefixWithTrailingSlash(t *testing.T) {
 
 	server.UpstreamURL = upstream.URL
 
-	// Client requests /v1/mcp/{id}/, upstream should receive /
+	// Client requests /v1/mcp/{id}/, upstream should receive / (no extra slash beyond httptest default)
 	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/", strings.NewReader(`{"test":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
