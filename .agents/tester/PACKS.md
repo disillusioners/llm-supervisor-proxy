@@ -23,7 +23,7 @@
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-05-08 | PASS |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-08 | PASS |
 | token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-08 | PASS |
-| mcp_unit_test | test/packs/mcp_unit_test.sh (or inline) | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e | 120s | 2026-05-19 | PASS |
+| mcp_unit_test | test/packs/mcp_unit_test.sh (or inline) | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-05-20 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-18 | PASS |
 
 ## Mock Test Packs
