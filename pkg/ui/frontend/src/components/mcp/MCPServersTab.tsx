@@ -91,7 +91,7 @@ export function MCPServersTab({ setStatus }: MCPServersTabProps) {
           <div>
             <h3 class="text-blue-300 font-medium mb-1">MCP Proxy is not enabled</h3>
             <p class="text-blue-200/80 text-sm">
-              Set the MCP_PROXY_PORT environment variable to enable MCP server proxying.
+              Set MCP_ENABLED=true environment variable to enable MCP server proxying.
             </p>
           </div>
         </div>
@@ -107,9 +107,6 @@ export function MCPServersTab({ setStatus }: MCPServersTabProps) {
           <div class="flex justify-between items-center mb-2">
             <div class="flex items-center gap-2">
               <h3 class="text-white font-medium">MCP Servers</h3>
-              <span class="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">
-                Port {status?.port}
-              </span>
             </div>
             <button
               onClick={handleOpenAdd}

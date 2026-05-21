@@ -428,7 +428,6 @@ export interface CreateMCPServerRequest {
 
 export interface MCPServerStatus {
   enabled: boolean;
-  port: number;
 }
 
 export interface MCPServerTestResult {
