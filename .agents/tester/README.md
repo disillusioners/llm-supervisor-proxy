@@ -44,6 +44,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | MCP Endpoint Split | 2026-05-20 | ✅ PASS | 23/23 packages, 15 new functional tests (664 lines), all 7 areas verified, branch `feature/mcp-endpoint-split` |
 | MCP Test Connection Fix | 2026-05-21 | ✅ PASS | 25/25 packages, 4146 tests, browser 3/3, quick fix `ab85359`, branch `fix/mcp-test-connection` |
 | SQLite BUSY Fix | 2026-05-21 | ✅ PASS | 25/25 packages, 2698 tests, 7 new stress tests (670 lines), zero SQLITE_BUSY errors, branch `fix/sqlite-busy-usage-counter` |
+| MCP Accept Header Fix | 2026-05-21 | ✅ PASS | 27/27 packages, browser verified zai-web-read SUCCESS (not 400), commit `3729f5d` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
