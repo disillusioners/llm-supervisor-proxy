@@ -127,7 +127,7 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
         const effectiveAuthToken = authType !== 'none' && tokenModified ? authToken : undefined;
         result = await testMCPServerDirect(upstreamUrl, transportType, effectiveAuthType, effectiveAuthToken);
       }
-      setTestResult({ success: result.success, latency: result.latency_ms });
+      setTestResult({ success: result.success, latency: result.latency_ms, error: result.error });
     } catch (err) {
       setTestResult({ success: false, error: String(err) });
     } finally {
