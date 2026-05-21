@@ -3,14 +3,17 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
@@ -20,9 +23,9 @@ import (
 // =============================================================================
 
 // setupAPITestEnv creates a test Server for API handler testing.
-// Returns the server, cleanup function, and test mux.
+// Returns the server, MCPStore, valid auth token, and a cleanup function.
 // Note: Uses newTestDB from store_test.go (same package = white-box testing).
-func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, func()) {
+func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, string, func()) {
 	t.Helper()
 
 	// Create in-memory SQLite (using helper from store_test.go)
@@ -33,13 +36,57 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, func()) {
 
 	bus := events.NewBus()
 
-	server := &Server{
-		store:   mcpStore,
-		bus:     bus,
-		connMgr: NewConnectionManager(),
+	// Create auth token store
+	authDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		cleanup()
+		t.Fatalf("failed to open auth database: %v", err)
 	}
 
-	return server, mcpStore, cleanup
+	// Create auth_tokens table
+	createTable := `
+		CREATE TABLE auth_tokens (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TEXT,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			ultimate_model_enabled INTEGER NOT NULL DEFAULT 0,
+			ultimate_model TEXT,
+			allowed_models TEXT
+		)
+	`
+	if _, err := authDB.Exec(createTable); err != nil {
+		authDB.Close()
+		cleanup()
+		t.Fatalf("failed to create auth_tokens table: %v", err)
+	}
+
+	tokenStore := auth.NewTokenStore(authDB, database.SQLite)
+
+	// Create a test token
+	plaintext, _, err := tokenStore.CreateToken(context.Background(), "api-test-token", nil, "api-test", false, "", nil)
+	if err != nil {
+		authDB.Close()
+		cleanup()
+		t.Fatalf("failed to create test token: %v", err)
+	}
+
+	server := &Server{
+		store:      mcpStore,
+		bus:        bus,
+		tokenStore: tokenStore,
+		connMgr:    NewConnectionManager(),
+	}
+
+	fullCleanup := func() {
+		cleanup()
+		authDB.Close()
+	}
+
+	return server, mcpStore, plaintext, fullCleanup
 }
 
 // =============================================================================
@@ -47,7 +94,7 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, func()) {
 // =============================================================================
 
 func TestHandleMCPStatus_WithPort(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	server.port = 4322
@@ -75,7 +122,7 @@ func TestHandleMCPStatus_WithPort(t *testing.T) {
 }
 
 func TestHandleMCPStatus_WithoutPort(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	server.port = 0
@@ -103,7 +150,7 @@ func TestHandleMCPStatus_WithoutPort(t *testing.T) {
 }
 
 func TestHandleMCPStatus_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	tests := []struct {
@@ -134,7 +181,7 @@ func TestHandleMCPStatus_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleListMCPServers_ReturnsServers(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -172,7 +219,7 @@ func TestHandleListMCPServers_ReturnsServers(t *testing.T) {
 }
 
 func TestHandleListMCPServers_Empty(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
@@ -195,7 +242,7 @@ func TestHandleListMCPServers_Empty(t *testing.T) {
 }
 
 func TestHandleListMCPServers_MasksTokens(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -230,7 +277,7 @@ func TestHandleListMCPServers_MasksTokens(t *testing.T) {
 }
 
 func TestHandleListMCPServers_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", nil)
@@ -248,7 +295,7 @@ func TestHandleListMCPServers_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleGetMCPServer_Existing(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -291,7 +338,7 @@ func TestHandleGetMCPServer_Existing(t *testing.T) {
 }
 
 func TestHandleGetMCPServer_NotFound(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/nonexistent-id", nil)
@@ -305,7 +352,7 @@ func TestHandleGetMCPServer_NotFound(t *testing.T) {
 }
 
 func TestHandleGetMCPServer_MissingID(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	// Path without ID: /fe/api/mcp-servers/ with trailing slash but no ID
@@ -321,7 +368,7 @@ func TestHandleGetMCPServer_MissingID(t *testing.T) {
 }
 
 func TestHandleGetMCPServer_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/some-id", nil)
@@ -339,7 +386,7 @@ func TestHandleGetMCPServer_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleCreateMCPServer_Success(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
@@ -389,7 +436,7 @@ func TestHandleCreateMCPServer_Success(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_EmptyName(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
@@ -412,7 +459,7 @@ func TestHandleCreateMCPServer_EmptyName(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	tests := []struct {
@@ -449,7 +496,7 @@ func TestHandleCreateMCPServer_InvalidURL(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_InvalidTransportType(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
@@ -473,7 +520,7 @@ func TestHandleCreateMCPServer_InvalidTransportType(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_MissingTokenForAuth(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	reqBody := CreateMCPServerRequest{
@@ -497,7 +544,7 @@ func TestHandleCreateMCPServer_MissingTokenForAuth(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_InvalidJSON(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader([]byte("invalid json")))
@@ -512,7 +559,7 @@ func TestHandleCreateMCPServer_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_DuplicateID(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	// First, create a server with ID "test-dup"
@@ -558,7 +605,7 @@ func TestHandleCreateMCPServer_DuplicateID(t *testing.T) {
 }
 
 func TestHandleCreateMCPServer_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
@@ -576,7 +623,7 @@ func TestHandleCreateMCPServer_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleUpdateMCPServer_Success(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -625,7 +672,7 @@ func TestHandleUpdateMCPServer_Success(t *testing.T) {
 }
 
 func TestHandleUpdateMCPServer_NotFound(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	newName := "updated-name"
@@ -646,7 +693,7 @@ func TestHandleUpdateMCPServer_NotFound(t *testing.T) {
 }
 
 func TestHandleUpdateMCPServer_InvalidURL(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -679,7 +726,7 @@ func TestHandleUpdateMCPServer_InvalidURL(t *testing.T) {
 }
 
 func TestHandleUpdateMCPServer_EmptyName(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -712,7 +759,7 @@ func TestHandleUpdateMCPServer_EmptyName(t *testing.T) {
 }
 
 func TestHandleUpdateMCPServer_InvalidJSON(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -739,7 +786,7 @@ func TestHandleUpdateMCPServer_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleUpdateMCPServer_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id", nil)
@@ -757,7 +804,7 @@ func TestHandleUpdateMCPServer_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleDeleteMCPServer_Success(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -789,7 +836,7 @@ func TestHandleDeleteMCPServer_Success(t *testing.T) {
 }
 
 func TestHandleDeleteMCPServer_NotFound(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/nonexistent-id", nil)
@@ -804,7 +851,7 @@ func TestHandleDeleteMCPServer_NotFound(t *testing.T) {
 }
 
 func TestHandleDeleteMCPServer_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id", nil)
@@ -822,7 +869,7 @@ func TestHandleDeleteMCPServer_WrongMethod(t *testing.T) {
 // =============================================================================
 
 func TestHandleTestMCPServer_SSE_Success(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -887,7 +934,7 @@ func TestHandleTestMCPServer_SSE_Success(t *testing.T) {
 }
 
 func TestHandleTestMCPServer_StreamableHTTP_Success(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -944,7 +991,7 @@ func TestHandleTestMCPServer_StreamableHTTP_Success(t *testing.T) {
 }
 
 func TestHandleTestMCPServer_Unreachable(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -984,7 +1031,7 @@ func TestHandleTestMCPServer_Unreachable(t *testing.T) {
 }
 
 func TestHandleTestMCPServer_NotFound(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/nonexistent-id/test", nil)
@@ -1011,7 +1058,7 @@ func TestHandleTestMCPServer_NotFound(t *testing.T) {
 }
 
 func TestHandleTestMCPServer_WrongMethod(t *testing.T) {
-	server, _, cleanup := setupAPITestEnv(t)
+	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/some-id/test", nil)
@@ -1125,7 +1172,7 @@ func TestMaskServers_NilSlice(t *testing.T) {
 // =============================================================================
 
 func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, validToken, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1144,7 +1191,14 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 	mux := http.NewServeMux()
 	server.RegisterAPIHandlers(mux)
 
-	// Test status route
+	// Helper to create authenticated request
+	authReq := func(method, path string) *http.Request {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+validToken)
+		return req
+	}
+
+	// Test status route (unprotected)
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -1152,23 +1206,23 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 		t.Errorf("Status route: status code = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	// Test list route
-	req = httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/", nil)
+	// Test list route (requires auth)
+	req = authReq(http.MethodGet, "/fe/api/mcp-servers/")
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("List route: status code = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	// Test get route
-	req = httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/"+created.ID, nil)
+	// Test get route (requires auth)
+	req = authReq(http.MethodGet, "/fe/api/mcp-servers/"+created.ID)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Get route: status code = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	// Test create route
+	// Test create route (requires auth)
 	createReq := CreateMCPServerRequest{
 		ID:            "new-api-server",
 		Name:          "new-api-server",
@@ -1177,7 +1231,8 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 		AuthType:      AuthNone,
 	}
 	body, _ := json.Marshal(createReq)
-	req = httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/", bytes.NewReader(body))
+	req = authReq(http.MethodPost, "/fe/api/mcp-servers/")
+	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -1185,13 +1240,14 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 		t.Errorf("Create route: status code = %d, want %d. Body: %s", w.Code, http.StatusCreated, w.Body.String())
 	}
 
-	// Test update route
+	// Test update route (requires auth)
 	newName := "updated-api-server"
 	updateReq := UpdateMCPServerRequest{
 		Name: &newName,
 	}
 	body, _ = json.Marshal(updateReq)
-	req = httptest.NewRequest(http.MethodPut, "/fe/api/mcp-servers/"+created.ID, bytes.NewReader(body))
+	req = authReq(http.MethodPut, "/fe/api/mcp-servers/"+created.ID)
+	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -1199,8 +1255,8 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 		t.Errorf("Update route: status code = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	// Test delete route
-	req = httptest.NewRequest(http.MethodDelete, "/fe/api/mcp-servers/"+created.ID, nil)
+	// Test delete route (requires auth)
+	req = authReq(http.MethodDelete, "/fe/api/mcp-servers/"+created.ID)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusNoContent {
@@ -1209,11 +1265,139 @@ func TestRegisterAPIHandlers_RoutesCorrectly(t *testing.T) {
 }
 
 // =============================================================================
+// Authentication Tests
+// =============================================================================
+
+func TestRegisterAPIHandlers_RequiresAuth(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{"GET list - no auth", http.MethodGet, "/fe/api/mcp-servers/", http.StatusUnauthorized},
+		{"GET single - no auth", http.MethodGet, "/fe/api/mcp-servers/test-id", http.StatusUnauthorized},
+		{"POST create - no auth", http.MethodPost, "/fe/api/mcp-servers/", http.StatusUnauthorized},
+		{"PUT update - no auth", http.MethodPut, "/fe/api/mcp-servers/test-id", http.StatusUnauthorized},
+		{"DELETE - no auth", http.MethodDelete, "/fe/api/mcp-servers/test-id", http.StatusUnauthorized},
+		{"POST test - no auth", http.MethodPost, "/fe/api/mcp-servers/test-id/test", http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Errorf("status code = %d, want %d. Body: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterAPIHandlers_InvalidToken(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		authHeader string
+		wantStatus int
+	}{
+		{"GET list - invalid token", http.MethodGet, "/fe/api/mcp-servers/", "Bearer invalid-token-xyz", http.StatusUnauthorized},
+		{"GET list - malformed header", http.MethodGet, "/fe/api/mcp-servers/", "Basic abc123", http.StatusUnauthorized},
+		{"GET list - empty bearer", http.MethodGet, "/fe/api/mcp-servers/", "Bearer ", http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Authorization", tt.authHeader)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Errorf("status code = %d, want %d. Body: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterAPIHandlers_ValidToken(t *testing.T) {
+	server, _, validToken, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	// All routes should work with valid token
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{"GET list", http.MethodGet, "/fe/api/mcp-servers/", http.StatusOK},
+		{"GET single", http.MethodGet, "/fe/api/mcp-servers/test-id", http.StatusNotFound}, // 404 because server doesn't exist
+		{"POST test", http.MethodPost, "/fe/api/mcp-servers/test-id/test", http.StatusOK},   // Returns OK with error
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+validToken)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Errorf("status code = %d, want %d. Body: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterAPIHandlers_StatusUnprotected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	server.port = 4322
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	// Status endpoint should NOT require auth
+	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("status route without auth: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Should also work WITH auth (auth doesn't hurt)
+	req = httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("status route with auth: status code = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+// =============================================================================
 // Timeout and CloseConnections Tests
 // =============================================================================
 
 func TestHandleTestMCPServer_Timeout(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1287,7 +1471,7 @@ func containsTimeoutError(errMsg string) bool {
 
 
 func TestHandleDeleteMCPServer_ClosesConnections(t *testing.T) {
-	server, store, cleanup := setupAPITestEnv(t)
+	server, store, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
 	ctx := context.Background()

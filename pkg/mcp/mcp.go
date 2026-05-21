@@ -62,11 +62,18 @@ func (s *Server) setupRoutes() {
 
 // RegisterAPIHandlers registers management API routes for MCP servers.
 func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
-	// Status endpoint (must be registered before the catch-all to avoid path conflicts)
+	if s.store == nil || s.tokenStore == nil {
+		return
+	}
+
+	// Status endpoint - unprotected (only returns {enabled, port})
 	mux.HandleFunc("/fe/api/mcp-servers/status", s.handleMCPStatus)
 
+	// Apply auth middleware to all /fe/api/mcp-servers/ routes (except status above)
+	authMW := s.proxyAuthMiddleware
+
 	// CRUD + test endpoints - handle all paths under /fe/api/mcp-servers/
-	mux.HandleFunc("/fe/api/mcp-servers/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/fe/api/mcp-servers/", authMW(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
 		// Route based on method and path pattern
@@ -102,7 +109,7 @@ func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
 		default:
 			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		}
-	})
+	})))
 }
 
 // Start creates and starts the HTTP server
