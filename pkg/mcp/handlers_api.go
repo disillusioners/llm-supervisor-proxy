@@ -413,6 +413,8 @@ func (s *Server) testServerConnection(w http.ResponseWriter, r *http.Request, se
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// MCP spec requires Accept header for streamable HTTP to specify acceptable response types
+		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("Mcp-Session-Id", "") // Empty session ID for initial request
 		s.injectTestAuth(req, server)
 
