@@ -21,8 +21,9 @@ type sseEvent struct {
 }
 
 // rewriteEndpointData rewrites URLs in endpoint event data to proxy paths
+// The proxy endpoint is always /v1/mcp/{id}/messages
 func rewriteEndpointData(dataLines []string, serverID string) []string {
-	proxyPath := fmt.Sprintf("/mcp/%s/messages", serverID)
+	proxyPath := fmt.Sprintf("/v1/mcp/%s/messages", serverID)
 	result := make([]string, 0, len(dataLines))
 
 	for _, line := range dataLines {
@@ -152,10 +153,10 @@ const maxSSEEventSize = 10 * 1024 * 1024
 // handleSSEConnection handles SSE endpoint connections to upstream MCP servers
 func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 	// Extract serverID from URL path
-	serverID := extractServerID(r.URL.Path)
-	if serverID == "" {
-		log.Printf("[MCP] SSE: missing server ID in path %s", r.URL.Path)
-		http.Error(w, "missing server ID", http.StatusBadRequest)
+	serverID, err := extractServerID(r.URL.Path)
+	if err != nil {
+		log.Printf("[MCP] SSE: %v in path %s", err, r.URL.Path)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -333,10 +334,10 @@ func (s *Server) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract serverID from URL path
-	serverID := extractServerID(r.URL.Path)
-	if serverID == "" {
-		log.Printf("[MCP] Messages: missing server ID in path %s", r.URL.Path)
-		http.Error(w, "missing server ID", http.StatusBadRequest)
+	serverID, err := extractServerID(r.URL.Path)
+	if err != nil {
+		log.Printf("[MCP] Messages: %v in path %s", err, r.URL.Path)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -387,13 +388,24 @@ func (s *Server) handleSSEMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reservedEndpointNames are reserved words that cannot be used as server IDs
+// because they are valid endpoint names in the MCP protocol
+var reservedEndpointNames = map[string]bool{
+	"messages": true,
+	"sse":      true,
+}
+
 // extractServerID extracts the server ID from the URL path
 // Handles paths like:
-//   - /mcp/{id}/sse → extracts id
-//   - /mcp/{id}/messages → extracts id
-//   - /mcp/{id} → extracts id
-//   - /mcp/{id}/ → extracts id
-func extractServerID(path string) string {
+//   - /v1/mcp/{id}/sse → extracts id
+//   - /v1/mcp/{id}/messages → extracts id
+//   - /v1/mcp/{id}/ → extracts id
+//   - /v1/mcp/{id} → extracts id
+// Returns empty string and error if the extracted ID is a reserved endpoint name
+func extractServerID(path string) (string, error) {
+	// Remove leading "/v1/" prefix
+	path = strings.TrimPrefix(path, "/v1/")
+
 	// Normalize path - remove leading/trailing slashes
 	path = strings.Trim(path, "/")
 	parts := strings.Split(path, "/")
@@ -402,21 +414,22 @@ func extractServerID(path string) string {
 	//   - ["mcp", "{serverID}", "{endpoint}"] (3 parts for SSE)
 	//   - ["mcp", "{serverID}"] (2 parts for streamable)
 	if len(parts) < 2 {
-		return ""
+		return "", fmt.Errorf("invalid path format")
 	}
 
 	if parts[0] != "mcp" {
-		return ""
+		return "", fmt.Errorf("invalid path format")
 	}
 
-	// If only 2 parts, validate the second part isn't a known endpoint
-	if len(parts) == 2 {
-		switch parts[1] {
-		case "sse", "messages":
-			// These are SSE endpoints without server ID
-			return ""
-		}
+	serverID := parts[1]
+	if serverID == "" {
+		return "", fmt.Errorf("missing server ID")
 	}
 
-	return parts[1]
+	// Check if the extracted ID is a reserved endpoint name
+	if reservedEndpointNames[serverID] {
+		return "", fmt.Errorf("'%s' is a reserved endpoint name and cannot be used as a server ID", serverID)
+	}
+
+	return serverID, nil
 }

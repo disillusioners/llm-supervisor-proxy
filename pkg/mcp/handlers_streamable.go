@@ -19,9 +19,10 @@ func (s *Server) handleStreamableHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract serverID from URL path
-	serverID := extractServerID(r.URL.Path)
-	if serverID == "" {
-		http.Error(w, "Server ID required", http.StatusBadRequest)
+	serverID, err := extractServerID(r.URL.Path)
+	if err != nil {
+		log.Printf("[MCP] streamable: %v in path %s", err, r.URL.Path)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

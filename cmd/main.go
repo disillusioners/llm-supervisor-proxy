@@ -109,37 +109,26 @@ func main() {
 	// Setup Server
 	mux := http.NewServeMux()
 
-	// Always register a basic MCP status endpoint (for checking if MCP module is available)
-	mux.HandleFunc("/fe/api/mcp/status", func(w http.ResponseWriter, r *http.Request) {
-		mcpPort := mcp.GetMCPProxyPort()
-		status := map[string]interface{}{
-			"enabled": mcpPort > 0,
-			"port":    mcpPort,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
-	})
+	// Check for deprecated MCP_PROXY_PORT env var
+	if os.Getenv("MCP_PROXY_PORT") != "" {
+		log.Printf("[MCP] WARNING: MCP_PROXY_PORT is deprecated, use MCP_ENABLED=true instead. MCP now runs on the main port.")
+	}
 
-	// Initialize MCP Proxy Server (optional — only if MCP_PROXY_PORT is set)
+	// Initialize MCP Proxy Server (optional — only if MCP_ENABLED is set)
 	var mcpServer *mcp.Server
-	if mcpPort := mcp.GetMCPProxyPort(); mcpPort > 0 {
+	if os.Getenv("MCP_ENABLED") == "true" {
 		mcpStore := mcp.NewMCPStore(dbStore.DB, dbStore.Dialect)
-		mcpServer = mcp.NewServer(mcpPort, mcpStore, bus, tokenStore)
+		mcpServer = mcp.NewServer(mcpStore, bus, tokenStore)
 
 		// Register MCP management API routes on the main mux (for frontend access)
 		mcpServer.RegisterAPIHandlers(mux)
 
-		// Start MCP proxy server on separate port (goroutine)
-		go func() {
-			log.Printf("[MCP] Starting MCP proxy server on port %d", mcpPort)
-			log.Printf("[MCP] SSE endpoint: http://localhost:%d/mcp/{server_id}/sse", mcpPort)
-			log.Printf("[MCP] HTTP endpoint: http://localhost:%d/mcp/{server_id}/http", mcpPort)
-			if err := mcpServer.Start(); err != nil && err != http.ErrServerClosed {
-				log.Printf("[MCP] MCP proxy server error: %v", err)
-			}
-		}()
+		// Register MCP proxy routes on the main mux (for client access)
+		mcpServer.RegisterProxyHandlers(mux)
+
+		log.Printf("[MCP] MCP proxy enabled")
 	} else {
-		log.Printf("[MCP] MCP proxy disabled (set MCP_PROXY_PORT to enable)")
+		log.Printf("[MCP] MCP proxy disabled (set MCP_ENABLED=true to enable)")
 	}
 
 	// Register UI handlers (root /, /api/...)
@@ -210,12 +199,10 @@ func main() {
 	<-quit
 	log.Println("Shutting down server...")
 
-	// Shutdown MCP proxy server first
+	// Shutdown MCP server (connection cleanup only)
 	if mcpServer != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
-		if err := mcpServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("[MCP] MCP proxy shutdown error: %v", err)
+		if err := mcpServer.Shutdown(context.Background()); err != nil {
+			log.Printf("[MCP] MCP shutdown error: %v", err)
 		}
 	}
 

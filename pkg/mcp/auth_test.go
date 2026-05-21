@@ -65,7 +65,7 @@ func setupAuthTest(t *testing.T) (*Server, string) {
 	}
 
 	bus := events.NewBus()
-	server := NewServer(0, nil, bus, mockStore)
+	server := NewServer(nil, bus, mockStore)
 
 	return server, validToken
 }

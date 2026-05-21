@@ -71,6 +71,19 @@ func (r *ConnectionRegistry) CloseConnections(serverID string) int {
 	return count
 }
 
+// CloseAll cancels all contexts for all servers
+func (r *ConnectionRegistry) CloseAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, cancels := range r.registry {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}
+	r.registry = make(map[string][]context.CancelFunc)
+}
+
 // connectionManagerImpl is the internal implementation with actual fields
 // Note: The ConnectionManager struct in mcp.go is a placeholder from Phase 1.
 // For Phase 2, the placeholder must be removed or replaced with this implementation.

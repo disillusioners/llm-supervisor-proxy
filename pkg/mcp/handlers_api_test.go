@@ -93,12 +93,11 @@ func setupAPITestEnv(t *testing.T) (*Server, *MCPStore, string, func()) {
 // Status Endpoint Tests
 // =============================================================================
 
-func TestHandleMCPStatus_WithPort(t *testing.T) {
+func TestHandleMCPStatus_WithStore(t *testing.T) {
 	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
-	server.port = 4322
-
+	// Server already has store set from setupAPITestEnv
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
 	w := httptest.NewRecorder()
 
@@ -114,18 +113,15 @@ func TestHandleMCPStatus_WithPort(t *testing.T) {
 	}
 
 	if !resp.Enabled {
-		t.Error("resp.Enabled should be true when port > 0")
-	}
-	if resp.Port != 4322 {
-		t.Errorf("resp.Port = %d, want 4322", resp.Port)
+		t.Error("resp.Enabled should be true when store is set")
 	}
 }
 
-func TestHandleMCPStatus_WithoutPort(t *testing.T) {
+func TestHandleMCPStatus_WithoutStore(t *testing.T) {
 	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
-	server.port = 0
+	server.store = nil
 
 	req := httptest.NewRequest(http.MethodGet, "/fe/api/mcp-servers/status", nil)
 	w := httptest.NewRecorder()
@@ -142,10 +138,7 @@ func TestHandleMCPStatus_WithoutPort(t *testing.T) {
 	}
 
 	if resp.Enabled {
-		t.Error("resp.Enabled should be false when port is 0")
-	}
-	if resp.Port != 0 {
-		t.Errorf("resp.Port = %d, want 0", resp.Port)
+		t.Error("resp.Enabled should be false when store is nil")
 	}
 }
 
@@ -1369,7 +1362,7 @@ func TestRegisterAPIHandlers_StatusUnprotected(t *testing.T) {
 	server, _, _, cleanup := setupAPITestEnv(t)
 	defer cleanup()
 
-	server.port = 4322
+	// Store is already set from setupAPITestEnv
 
 	mux := http.NewServeMux()
 	server.RegisterAPIHandlers(mux)

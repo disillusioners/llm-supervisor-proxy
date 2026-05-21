@@ -47,7 +47,6 @@ func maskServers(servers []*MCPServer) []*MCPServer {
 // MCPStatusResponse represents the status response for MCP server.
 type MCPStatusResponse struct {
 	Enabled bool `json:"enabled"`
-	Port    int  `json:"port"`
 }
 
 // TestConnectionResponse represents the response for testing MCP server connection.
@@ -58,7 +57,7 @@ type TestConnectionResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// handleMCPStatus returns the MCP server status (enabled/disabled and port).
+// handleMCPStatus returns the MCP server status (enabled/disabled).
 func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -67,8 +66,7 @@ func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(MCPStatusResponse{
-		Enabled: s.port > 0,
-		Port:    s.port,
+		Enabled: s.store != nil,
 	})
 }
 

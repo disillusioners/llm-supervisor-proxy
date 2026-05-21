@@ -53,7 +53,10 @@ func createTestServerInStore(t *testing.T, store *MCPStore, upstreamURL string, 
 func TestExtractServerID_ValidPath(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/mcp/server123/sse")
+	got, err := extractServerID("/mcp/server123/sse")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "server123"
 	if got != want {
 		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server123/sse", got, want)
@@ -63,7 +66,10 @@ func TestExtractServerID_ValidPath(t *testing.T) {
 func TestExtractServerID_WithMessages(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/mcp/server456/messages")
+	got, err := extractServerID("/mcp/server456/messages")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "server456"
 	if got != want {
 		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server456/messages", got, want)
@@ -90,9 +96,9 @@ func TestExtractServerID_InvalidPath_TooShort(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := extractServerID(tt.path)
-			if got != "" {
-				t.Errorf("extractServerID(%q) = %q, want empty string", tt.path, got)
+			got, err := extractServerID(tt.path)
+			if err == nil {
+				t.Errorf("extractServerID(%q) = %q, want error", tt.path, got)
 			}
 		})
 	}
@@ -101,9 +107,9 @@ func TestExtractServerID_InvalidPath_TooShort(t *testing.T) {
 func TestExtractServerID_WrongPrefix(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/api/server/sse")
-	if got != "" {
-		t.Errorf("extractServerID(%q) = %q, want empty string", "/api/server/sse", got)
+	_, err := extractServerID("/api/server/sse")
+	if err == nil {
+		t.Errorf("extractServerID(%q) should return error, got nil", "/api/server/sse")
 	}
 }
 
@@ -112,7 +118,10 @@ func TestExtractServerID_TrailingSlash(t *testing.T) {
 
 	// Note: extractServerID trims trailing slashes, so "/mcp/server789/" becomes "mcp/server789"
 	// which has 2 parts. With the streamable endpoint support, this is now valid.
-	got := extractServerID("/mcp/server789/")
+	got, err := extractServerID("/mcp/server789/")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "server789"
 	if got != want {
 		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server789/", got, want)
@@ -122,7 +131,10 @@ func TestExtractServerID_TrailingSlash(t *testing.T) {
 func TestExtractServerID_LongerPath(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/mcp/my-server/sse/extra/path")
+	got, err := extractServerID("/mcp/my-server/sse/extra/path")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "my-server"
 	if got != want {
 		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/my-server/sse/extra/path", got, want)
@@ -132,7 +144,10 @@ func TestExtractServerID_LongerPath(t *testing.T) {
 func TestExtractServerID_NoLeadingSlash(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("mcp/server123/sse")
+	got, err := extractServerID("mcp/server123/sse")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "server123"
 	if got != want {
 		t.Errorf("extractServerID(%q) = %q, want %q", "mcp/server123/sse", got, want)
@@ -1277,7 +1292,10 @@ func TestSSEIntegration_MessageRoundTrip(t *testing.T) {
 func TestExtractServerID_UUID(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/mcp/550e8400-e29b-41d4-a716-446655440000/sse")
+	got, err := extractServerID("/mcp/550e8400-e29b-41d4-a716-446655440000/sse")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "550e8400-e29b-41d4-a716-446655440000"
 	if got != want {
 		t.Errorf("extractServerID() = %q, want %q", got, want)
@@ -1287,10 +1305,41 @@ func TestExtractServerID_UUID(t *testing.T) {
 func TestExtractServerID_SpecialCharacters(t *testing.T) {
 	t.Parallel()
 
-	got := extractServerID("/mcp/my_server-123/messages")
+	got, err := extractServerID("/mcp/my_server-123/messages")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	want := "my_server-123"
 	if got != want {
 		t.Errorf("extractServerID() = %q, want %q", got, want)
+	}
+}
+
+// TestExtractServerID_ReservedEndpointNames tests that reserved endpoint names are rejected
+func TestExtractServerID_ReservedEndpointNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"sse as server ID", "/v1/mcp/sse"},
+		{"messages as server ID", "/v1/mcp/messages"},
+		{"sse with sse endpoint", "/v1/mcp/sse/sse"},
+		{"messages with sse endpoint", "/v1/mcp/messages/sse"},
+		{"sse with messages endpoint", "/v1/mcp/sse/messages"},
+		{"messages with messages endpoint", "/v1/mcp/messages/messages"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := extractServerID(tt.path)
+			if err == nil {
+				t.Errorf("extractServerID(%q) = %q, want error for reserved endpoint name", tt.path, got)
+			}
+		})
 	}
 }
 

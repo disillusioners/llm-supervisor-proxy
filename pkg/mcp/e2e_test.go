@@ -101,28 +101,12 @@ func setupE2EEnv(t *testing.T) *e2eTestEnv {
 
 	bus := events.NewBus()
 
-	// Create proxy server - use port 0 for auto-assign
-	proxyPort := 0
-	env.proxyServer = NewServer(proxyPort, env.mcpStore, bus, env.authTokenStore)
+	// Create proxy server - no port needed, runs on main mux
+	env.proxyServer = NewServer(env.mcpStore, bus, env.authTokenStore)
 
-	// Start the proxy server in a goroutine
-	var serverErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		serverErr = env.proxyServer.Start()
-	}()
-
-	// Give the server time to start and get its actual port
-	time.Sleep(100 * time.Millisecond)
-
-	// Get the actual port by making a test request
-	// First, create a temporary listener to find available port if needed
-	if serverErr != nil && !strings.Contains(serverErr.Error(), "use of closed network connection") {
-		t.Fatalf("failed to start proxy server: %v", serverErr)
-	}
+	// Register proxy handlers on a test mux
+	testMux := http.NewServeMux()
+	env.proxyServer.RegisterProxyHandlers(testMux)
 
 	// For httptest.Server approach - create a test server that routes to our proxy
 	// We'll use httptest.Server for the proxy itself
@@ -819,9 +803,7 @@ func TestE2E_StatusEndpoint(t *testing.T) {
 		env := setupE2EEnv(t)
 		defer env.cleanup()
 
-		// Set the server port to simulate a running server
-		// (httptest.Server assigns its own port, but our Server struct has port 0)
-		env.proxyServer.port = 5432
+		// Server is enabled when store is not nil (already set up in setupE2EEnv)
 
 		req := httptest.NewRequest(http.MethodGet,
 			env.proxyURL+"/fe/api/mcp-servers/status", nil)
@@ -837,20 +819,17 @@ func TestE2E_StatusEndpoint(t *testing.T) {
 		json.Unmarshal(w.Body.Bytes(), &resp)
 
 		if !resp.Enabled {
-			t.Error("Enabled should be true when server has valid port")
-		}
-		if resp.Port != 5432 {
-			t.Errorf("Port = %d, want 5432", resp.Port)
+			t.Error("Enabled should be true when server has valid store")
 		}
 	})
 
-	// Test with port = 0 (disabled)
-	t.Run("port_zero", func(t *testing.T) {
+	// Test with nil store (disabled)
+	t.Run("store_nil", func(t *testing.T) {
 		env := setupE2EEnv(t)
 		defer env.cleanup()
 
-		// Set port to 0 to simulate disabled state
-		env.proxyServer.port = 0
+		// Set store to nil to simulate disabled state
+		env.proxyServer.store = nil
 
 		req := httptest.NewRequest(http.MethodGet,
 			env.proxyURL+"/fe/api/mcp-servers/status", nil)
@@ -866,10 +845,7 @@ func TestE2E_StatusEndpoint(t *testing.T) {
 		json.Unmarshal(w.Body.Bytes(), &resp)
 
 		if resp.Enabled {
-			t.Error("Enabled should be false when port is 0")
-		}
-		if resp.Port != 0 {
-			t.Errorf("Port = %d, want 0 when disabled", resp.Port)
+			t.Error("Enabled should be false when store is nil")
 		}
 	})
 }

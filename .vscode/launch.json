@@ -19,7 +19,7 @@
                 // "MAX_UPSTREAM_ERROR_RETRIES": "1",
                 // "MAX_IDLE_RETRIES": "2",
                 // "MAX_GENERATION_RETRIES": "1"
-                "MCP_PROXY_PORT": "4122",
+                "MCP_ENABLED": "true",
             }
         }
     ]
