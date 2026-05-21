@@ -23,7 +23,7 @@
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-05-08 | PASS |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-08 | PASS |
 | token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-08 | PASS |
-| mcp_unit_test | test/packs/mcp_unit_test.sh (or inline) | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-05-20 | PASS |
+| mcp_unit_test | test/packs/mcp_unit_test.sh (or inline) | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-05-21 | PASS |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-18 | PASS |
 
 ## Mock Test Packs
@@ -139,3 +139,19 @@ Update after each test run:
 **Quick fixes applied:**
 - `2f15b2c` — Fix race condition in TestHeartbeat (safeResponseWriter wrapper)
 - `02f1b84` — Fix race condition in TestRaceScenario_FallbackWins (atomic.Int64)
+
+### Commits 725b115 + d5fe2d7 + ab85359 - MCP Test Connection Button Fix (Branch: fix/mcp-test-connection)
+
+| Category | Status | Details |
+|----------|--------|---------|
+| Go Build | ✅ PASS | `go build ./cmd/main.go` |
+| Go Unit Tests | ✅ PASS | 25/25 packages, 4146 tests |
+| Go Vet | ✅ PASS | No issues |
+| Frontend Build | ✅ PASS | Built in 2.84s |
+| Browser Tests | ✅ 3/3 | Add Server, Edit Server, SSRF protection |
+| Quick Fixes | 1 | Missing error field in testResult (commit `ab85359`) |
+
+**Browser automation verified:**
+- Test A: Add Server mode — button calls `/fe/api/mcp-servers/test-connection` ✅
+- Test B: Edit Server mode — button calls API ✅
+- Test C: SSRF protection — localhost URLs blocked ✅
