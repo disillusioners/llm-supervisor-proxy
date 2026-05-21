@@ -731,3 +731,11 @@ export async function deleteMCPServer(id: string): Promise<void> {
 export async function testMCPServer(id: string): Promise<MCPServerTestResult> {
   return apiFetch<MCPServerTestResult>(`/mcp-servers/${id}/test`, { method: 'POST' });
 }
+
+export async function testMCPServerDirect(upstreamUrl: string, transportType: string): Promise<MCPServerTestResult> {
+  return apiFetch<MCPServerTestResult>('/mcp-servers/test-connection', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ upstream_url: upstreamUrl, transport_type: transportType }),
+  });
+}

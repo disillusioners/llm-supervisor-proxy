@@ -1432,4 +1432,379 @@ func getConnectionsForServer(registry *ConnectionRegistry, serverID string) []co
 	return result
 }
 
+// =============================================================================
+// Direct Test Connection Tests (no saved server required)
+// =============================================================================
+
+// TestHandleTestMCPServerDirect_SSE_SSRFProtected verifies that SSRF protection blocks localhost URLs.
+func TestHandleTestMCPServerDirect_SSE_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://127.0.0.1:8080/sse",
+		TransportType: "sse",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked URL")
+	}
+
+	if !strings.Contains(resp.Error, "localhost") && !strings.Contains(resp.Error, "private") {
+		t.Errorf("Error should mention SSRF rejection, got: %s", resp.Error)
+	}
+}
+
+// TestHandleTestMCPServerDirect_StreamableHTTP_SSRFProtected verifies that SSRF protection blocks localhost URLs.
+func TestHandleTestMCPServerDirect_StreamableHTTP_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://localhost:8080/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked URL")
+	}
+
+	if !strings.Contains(resp.Error, "localhost") && !strings.Contains(resp.Error, "private") {
+		t.Errorf("Error should mention SSRF rejection, got: %s", resp.Error)
+	}
+}
+
+// TestHandleTestMCPServerDirect_PrivateIP_SSRFProtected verifies that private IP ranges are blocked.
+func TestHandleTestMCPServerDirect_PrivateIP_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	// Test 10.x.x.x private range
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://10.0.0.1:8080/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked private IP")
+	}
+
+	if !strings.Contains(resp.Error, "private") {
+		t.Errorf("Error should mention private IP rejection, got: %s", resp.Error)
+	}
+}
+
+func TestHandleTestMCPServerDirect_Unreachable(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "https://api.unreachable.example.com:9999/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for unreachable server")
+	}
+
+	if resp.Error == "" {
+		t.Error("Error should not be empty for unreachable server")
+	}
+}
+
+func TestHandleTestMCPServerDirect_MissingUpstreamURL(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "",
+		TransportType: "sse",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleTestMCPServerDirect_InvalidTransportType(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "https://api.example.com/mcp",
+		TransportType: "invalid_transport",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleTestMCPServerDirect_InvalidJSON(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader([]byte("invalid json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleTestMCPServerDirect_WrongMethod(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	tests := []struct {
+		name   string
+		method string
+	}{
+		{"GET", http.MethodGet},
+		{"PUT", http.MethodPut},
+		{"DELETE", http.MethodDelete},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqBody := TestConnectionDirectRequest{
+				UpstreamURL:   "https://api.example.com/mcp",
+				TransportType: "sse",
+			}
+			body, _ := json.Marshal(reqBody)
+
+			req := httptest.NewRequest(tt.method, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			server.handleTestMCPServerDirect(w, req)
+
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status code = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+			}
+		})
+	}
+}
+
+// TestHandleTestMCPServerDirect_192168_SSRFProtected verifies 192.168.x.x private IPs are blocked.
+func TestHandleTestMCPServerDirect_192168_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://192.168.1.1:8080/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked private IP")
+	}
+
+	if !strings.Contains(resp.Error, "private") {
+		t.Errorf("Error should mention private IP rejection, got: %s", resp.Error)
+	}
+}
+
+// TestHandleTestMCPServerDirect_IPv6Loopback_SSRFProtected verifies IPv6 loopback is blocked.
+func TestHandleTestMCPServerDirect_IPv6Loopback_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://[::1]:8080/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked IPv6 loopback")
+	}
+
+	if !strings.Contains(resp.Error, "loopback") && !strings.Contains(resp.Error, "private") && !strings.Contains(resp.Error, "localhost") {
+		t.Errorf("Error should mention loopback rejection, got: %s", resp.Error)
+	}
+}
+
+// TestHandleTestMCPServerDirect_172Private_SSRFProtected verifies 172.16.x.x private IPs are blocked.
+func TestHandleTestMCPServerDirect_172Private_SSRFProtected(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://172.16.0.1:8080/mcp",
+		TransportType: "streamable_http",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleTestMCPServerDirect(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status code = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF-blocked private IP")
+	}
+
+	if !strings.Contains(resp.Error, "private") {
+		t.Errorf("Error should mention private IP rejection, got: %s", resp.Error)
+	}
+}
+
+// TestRegisterAPIHandlers_DirectTestConnectionRoute tests that the route exists and SSRF validation works.
+func TestRegisterAPIHandlers_DirectTestConnectionRoute(t *testing.T) {
+	server, _, _, cleanup := setupAPITestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	server.RegisterAPIHandlers(mux)
+
+	// Test that SSRF validation is applied to the route
+	reqBody := TestConnectionDirectRequest{
+		UpstreamURL:   "http://127.0.0.1:8080/sse",
+		TransportType: "sse",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/fe/api/mcp-servers/test-connection", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// Should get SSRF validation error, not 404 (route exists)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Direct test-connection route: status code = %d, want %d. Body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	var resp TestConnectionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.Success {
+		t.Error("Success = true, want false for SSRF validation")
+	}
+}
+
 

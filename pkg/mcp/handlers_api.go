@@ -57,6 +57,12 @@ type TestConnectionResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// TestConnectionDirectRequest represents the request body for direct test connection.
+type TestConnectionDirectRequest struct {
+	UpstreamURL   string `json:"upstream_url"`
+	TransportType string `json:"transport_type"`
+}
+
 // handleMCPStatus returns the MCP server status (enabled/disabled).
 func (s *Server) handleMCPStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -270,13 +276,70 @@ func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 	// Fetch server by ID
 	server, err := s.store.GetServer(ctx, id)
 	if err != nil {
-		writeTestResponse(w, false, 0, string(server.TransportType), fmt.Sprintf("Failed to get server: %v", err))
+		writeTestResponse(w, false, 0, "", fmt.Sprintf("Failed to get server: %v", err))
 		return
 	}
 	if server == nil {
 		writeTestResponse(w, false, 0, "", "Server not found")
 		return
 	}
+
+	// Use shared test logic
+	s.testServerConnection(w, r, server)
+}
+
+// handleTestMCPServerDirect tests the connection to an MCP server without requiring a saved server.
+// Accepts POST /fe/api/mcp-servers/test-connection with JSON body:
+// { "upstream_url": string, "transport_type": string }
+func (s *Server) handleTestMCPServerDirect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req TestConnectionDirectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid JSON: %v", err))
+		return
+	}
+
+	// Validate upstream_url is non-empty
+	if req.UpstreamURL == "" {
+		writeJSONError(w, http.StatusBadRequest, "upstream_url is required")
+		return
+	}
+
+	// Validate transport type
+	transportType := TransportType(req.TransportType)
+	if !transportType.Valid() {
+		writeJSONError(w, http.StatusBadRequest, "Invalid transport_type: must be 'sse' or 'streamable_http'")
+		return
+	}
+
+	// SSRF protection: validate upstream URL before making any HTTP request
+	if err := ValidateUpstreamURL(req.UpstreamURL); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upstream_url: %v", err))
+		return
+	}
+
+	// Create a minimal server object for the shared test logic
+	server := &MCPServer{
+		UpstreamURL:   req.UpstreamURL,
+		TransportType: transportType,
+		AuthType:      AuthNone,
+	}
+
+	// Use shared test logic
+	s.testServerConnection(w, r, server)
+}
+
+// testServerConnection performs the actual connection test.
+// This is shared between handleTestMCPServer and handleTestMCPServerDirect.
+func (s *Server) testServerConnection(w http.ResponseWriter, r *http.Request, server *MCPServer) {
+	ctx := r.Context()
 
 	// Create HTTP client with short timeout
 	client := &http.Client{

@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import type { MCPServer } from '../../types';
-import { testMCPServer } from '../../hooks/useApi';
+import { testMCPServer, testMCPServerDirect } from '../../hooks/useApi';
 
 interface MCPServerFormProps {
   server?: MCPServer | null;
@@ -118,12 +118,12 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
     try {
       setTesting(true);
       setStatus(null);
-      if (!server) {
-        // Can't test without saving first - no server ID
-        setTestResult({ success: false, error: 'Save the server first, then test the connection' });
-        return;
+      let result;
+      if (server) {
+        result = await testMCPServer(server.id);
+      } else {
+        result = await testMCPServerDirect(upstreamUrl, transportType);
       }
-      const result = await testMCPServer(server.id);
       setTestResult({ success: result.success, latency: result.latency_ms });
     } catch (err) {
       setTestResult({ success: false, error: String(err) });

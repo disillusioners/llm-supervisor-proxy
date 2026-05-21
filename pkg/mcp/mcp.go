@@ -54,6 +54,10 @@ func (s *Server) RegisterAPIHandlers(mux *http.ServeMux) {
 	// Status endpoint - unprotected (only returns {enabled})
 	mux.HandleFunc("/fe/api/mcp-servers/status", s.handleMCPStatus)
 
+	// Direct test connection endpoint - unprotected, works without saved server
+	// Must be registered before the generic /fe/api/mcp-servers/ handler to avoid path conflicts
+	mux.HandleFunc("/fe/api/mcp-servers/test-connection", s.handleTestMCPServerDirect)
+
 	// CRUD + test endpoints - handle all paths under /fe/api/mcp-servers/
 	mux.HandleFunc("/fe/api/mcp-servers/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
