@@ -61,6 +61,8 @@ type TestConnectionResponse struct {
 type TestConnectionDirectRequest struct {
 	UpstreamURL   string `json:"upstream_url"`
 	TransportType string `json:"transport_type"`
+	AuthType      string `json:"auth_type,omitempty"`
+	AuthToken     string `json:"auth_token,omitempty"`
 }
 
 // handleMCPStatus returns the MCP server status (enabled/disabled).
@@ -325,11 +327,22 @@ func (s *Server) handleTestMCPServerDirect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Determine auth type: use provided value or default to AuthNone
+	authType := AuthNone
+	if req.AuthType != "" {
+		authType = AuthType(req.AuthType)
+		if !authType.Valid() {
+			writeJSONError(w, http.StatusBadRequest, "Invalid auth_type: must be 'none', 'bearer', 'basic', or 'api_key'")
+			return
+		}
+	}
+
 	// Create a minimal server object for the shared test logic
 	server := &MCPServer{
 		UpstreamURL:   req.UpstreamURL,
 		TransportType: transportType,
-		AuthType:      AuthNone,
+		AuthType:      authType,
+		AuthToken:     req.AuthToken,
 	}
 
 	// Use shared test logic
@@ -341,9 +354,21 @@ func (s *Server) handleTestMCPServerDirect(w http.ResponseWriter, r *http.Reques
 func (s *Server) testServerConnection(w http.ResponseWriter, r *http.Request, server *MCPServer) {
 	ctx := r.Context()
 
-	// Create HTTP client with short timeout
+	// Create HTTP client with short timeout and redirect protection
+	// This prevents SSRF attacks where a server redirects to internal/private IPs
 	client := &http.Client{
 		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Validate every redirect target URL against SSRF protection
+			if err := ValidateUpstreamURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect to disallowed URL: %w", err)
+			}
+			// Limit to 3 redirects max to prevent redirect loops
+			if len(via) >= 3 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
 	}
 
 	startTime := time.Now()

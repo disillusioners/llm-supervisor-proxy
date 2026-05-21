@@ -122,7 +122,10 @@ export function MCPServerForm({ server, onSave, onCancel, setStatus }: MCPServer
       if (server) {
         result = await testMCPServer(server.id);
       } else {
-        result = await testMCPServerDirect(upstreamUrl, transportType);
+        // Pass auth fields for direct test so users can test authenticated servers
+        const effectiveAuthType = authType !== 'none' ? authType : undefined;
+        const effectiveAuthToken = authType !== 'none' && tokenModified ? authToken : undefined;
+        result = await testMCPServerDirect(upstreamUrl, transportType, effectiveAuthType, effectiveAuthToken);
       }
       setTestResult({ success: result.success, latency: result.latency_ms });
     } catch (err) {
