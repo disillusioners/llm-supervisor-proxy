@@ -190,19 +190,19 @@ func (m *connectionManagerImpl) ConnectUpstream(ctx context.Context, server *MCP
 func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *MCPServer, r *http.Request) (*http.Response, error) {
 	upstreamURL := m.getUpstreamURL(server)
 
-	// C1: Strip /mcp/{id} prefix from path before constructing upstream URL
-	// Client POSTs to /mcp/{id}/messages, upstream expects /messages
+	// C1: Strip /v1/mcp/{id} prefix from path before constructing upstream URL
+	// Client POSTs to /v1/mcp/{id}/messages, upstream expects /messages
 	path := r.URL.Path
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	var upstreamPath string
-	if len(parts) >= 2 && parts[0] == "mcp" && len(parts[1]) > 0 {
-		// /mcp/{id}/messages → /messages, /mcp/{id}/ → /, /mcp/{id} → /
-		if len(parts) == 2 {
-			// /mcp/{id} → /
+	if len(parts) >= 3 && parts[0] == "v1" && parts[1] == "mcp" && len(parts[2]) > 0 {
+		// /v1/mcp/{id}/messages → /messages, /v1/mcp/{id}/ → /, /v1/mcp/{id} → /
+		if len(parts) == 3 {
+			// /v1/mcp/{id} → /
 			upstreamPath = "/"
 		} else {
-			// /mcp/{id}/... → /...
-			upstreamPath = "/" + strings.Join(parts[2:], "/")
+			// /v1/mcp/{id}/... → /...
+			upstreamPath = "/" + strings.Join(parts[3:], "/")
 		}
 	} else {
 		upstreamPath = path

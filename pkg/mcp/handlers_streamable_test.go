@@ -70,7 +70,7 @@ func TestHandleStreamableHTTP_ForwardsPOST(t *testing.T) {
 
 	// Create request
 	reqBody := `{"test":"data"}`
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", strings.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -114,7 +114,7 @@ func TestHandleStreamableHTTP_ResponseStreaming(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -148,7 +148,7 @@ func TestHandleStreamableHTTP_McpSessionIdPassthrough(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	req.Header.Set("Mcp-Session-Id", "client-session-456")
 
@@ -191,7 +191,7 @@ func TestHandleStreamableHTTP_405ForNonPOST(t *testing.T) {
 
 			testServer := createStreamableServer(t, store, upstream.URL, true)
 
-			req := httptest.NewRequest(tt.method, "/mcp/"+testServer.ID+"/", nil)
+			req := httptest.NewRequest(tt.method, "/v1/mcp/"+testServer.ID+"/", nil)
 			req.Header.Set("Authorization", "Bearer "+validToken)
 
 			rec := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestHandleStreamableHTTP_AuthRequired(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	// No Authorization header
 
 	rec := httptest.NewRecorder()
@@ -247,7 +247,7 @@ func TestHandleStreamableHTTP_InvalidToken(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
 
 	rec := httptest.NewRecorder()
@@ -266,7 +266,7 @@ func TestHandleStreamableHTTP_ServerNotFound(t *testing.T) {
 	server, _, validToken, cleanup := setupStreamableTest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/nonexistent/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/nonexistent/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -302,7 +302,7 @@ func TestHandleStreamableHTTP_ServerDisabled(t *testing.T) {
 		t.Fatalf("failed to create test server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -329,7 +329,7 @@ func TestHandleStreamableHTTP_UpstreamError(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -349,8 +349,8 @@ func TestHandleStreamableHTTP_BadRequestMissingServerID(t *testing.T) {
 		name string
 		path string
 	}{
-		{"empty path", "/mcp/"},
-		{"no trailing slash", "/mcp"},
+		{"empty path", "/v1/mcp/"},
+		{"no trailing slash", "/v1/mcp"},
 	}
 
 	for _, tt := range tests {
@@ -391,7 +391,7 @@ func TestHandleStreamableHTTP_ResponseHeadersForwarded(t *testing.T) {
 
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -432,7 +432,7 @@ func TestHandleStreamableHTTP_AuthBearer(t *testing.T) {
 		t.Fatalf("failed to create test server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -474,7 +474,7 @@ func TestHandleStreamableHTTP_AuthBasic(t *testing.T) {
 		t.Fatalf("failed to create test server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -516,7 +516,7 @@ func TestHandleStreamableHTTP_AuthAPIKey(t *testing.T) {
 		t.Fatalf("failed to create test server: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -551,7 +551,7 @@ func TestHandleStreamableHTTP_PathVariants(t *testing.T) {
 	testServer := createStreamableServer(t, store, upstream.URL, true)
 
 	// Test with trailing slash
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()
@@ -573,7 +573,7 @@ func TestHandleStreamableHTTP_UpstreamConnectionFailure(t *testing.T) {
 	// Create server pointing to invalid address
 	testServer := createStreamableServer(t, store, "http://localhost:99999", true)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+testServer.ID+"/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+testServer.ID+"/", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 
 	rec := httptest.NewRecorder()

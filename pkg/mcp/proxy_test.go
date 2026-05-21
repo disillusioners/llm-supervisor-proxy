@@ -673,8 +673,8 @@ func TestForwardHTTPRequest_StripsMCPPrefix(t *testing.T) {
 
 	server.UpstreamURL = upstream.URL
 
-	// Client requests /mcp/{id}/messages, upstream should receive /messages
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages", strings.NewReader(`{"test":true}`))
+	// Client requests /v1/mcp/{id}/messages, upstream should receive /messages
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/messages", strings.NewReader(`{"test":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
@@ -708,8 +708,8 @@ func TestForwardHTTPRequest_StripsMCPPrefixWithTrailingSlash(t *testing.T) {
 
 	server.UpstreamURL = upstream.URL
 
-	// Client requests /mcp/{id}/, upstream should receive /
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/", strings.NewReader(`{"test":true}`))
+	// Client requests /v1/mcp/{id}/, upstream should receive /
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/", strings.NewReader(`{"test":true}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
@@ -745,8 +745,8 @@ func TestForwardHTTPRequest_PreservesQueryString(t *testing.T) {
 
 	server.UpstreamURL = upstream.URL
 
-	// Client requests /mcp/{id}/messages?session=abc&token=123
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages?session=abc&token=123", nil)
+	// Client requests /v1/mcp/{id}/messages?session=abc&token=123
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/messages?session=abc&token=123", nil)
 
 	resp, err := cm.ForwardHTTPRequest(context.Background(), server, req)
 	if err != nil {
@@ -785,7 +785,7 @@ func TestForwardHTTPRequest_ClientBlockedHeadersStripped(t *testing.T) {
 	server.UpstreamURL = upstream.URL
 
 	// Client sends its own Authorization and Host headers
-	req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/messages", nil)
 	req.Header.Set("Authorization", "Bearer client-auth-token")
 	req.Header.Set("Host", "client-host.com")
 	req.Header.Set("Content-Length", "100")

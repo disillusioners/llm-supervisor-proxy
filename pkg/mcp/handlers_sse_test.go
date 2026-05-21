@@ -53,26 +53,26 @@ func createTestServerInStore(t *testing.T, store *MCPStore, upstreamURL string, 
 func TestExtractServerID_ValidPath(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("/mcp/server123/sse")
+	got, err := extractServerID("/v1/mcp/server123/sse")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := "server123"
 	if got != want {
-		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server123/sse", got, want)
+		t.Errorf("extractServerID(%q) = %q, want %q", "/v1/mcp/server123/sse", got, want)
 	}
 }
 
 func TestExtractServerID_WithMessages(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("/mcp/server456/messages")
+	got, err := extractServerID("/v1/mcp/server456/messages")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := "server456"
 	if got != want {
-		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server456/messages", got, want)
+		t.Errorf("extractServerID(%q) = %q, want %q", "/v1/mcp/server456/messages", got, want)
 	}
 }
 
@@ -83,13 +83,13 @@ func TestExtractServerID_InvalidPath_TooShort(t *testing.T) {
 		name string
 		path string
 	}{
-		{"only /mcp", "/mcp"},
-		{"mcp only no slash", "mcp"},
+		{"only /v1/mcp", "/v1/mcp"},
+		{"v1/mcp only no slash", "v1/mcp"},
 		{"empty string", ""},
 		{"single slash", "/"},
-		{"mcp slash only", "/mcp/"},
-		{"SSE endpoint only", "/mcp/sse"},
-		{"messages endpoint only", "/mcp/messages"},
+		{"mcp slash only", "/mcp"},
+		{"SSE endpoint only", "/v1/mcp/sse"},
+		{"messages endpoint only", "/v1/mcp/messages"},
 	}
 
 	for _, tt := range tests {
@@ -107,50 +107,49 @@ func TestExtractServerID_InvalidPath_TooShort(t *testing.T) {
 func TestExtractServerID_WrongPrefix(t *testing.T) {
 	t.Parallel()
 
-	_, err := extractServerID("/api/server/sse")
+	_, err := extractServerID("/v1/api/server/sse")
 	if err == nil {
-		t.Errorf("extractServerID(%q) should return error, got nil", "/api/server/sse")
+		t.Errorf("extractServerID(%q) should return error, got nil", "/v1/api/server/sse")
 	}
 }
 
 func TestExtractServerID_TrailingSlash(t *testing.T) {
 	t.Parallel()
 
-	// Note: extractServerID trims trailing slashes, so "/mcp/server789/" becomes "mcp/server789"
-	// which has 2 parts. With the streamable endpoint support, this is now valid.
-	got, err := extractServerID("/mcp/server789/")
+	// Note: extractServerID trims leading /v1/ and trailing slashes
+	got, err := extractServerID("/v1/mcp/server789/")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := "server789"
 	if got != want {
-		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/server789/", got, want)
+		t.Errorf("extractServerID(%q) = %q, want %q", "/v1/mcp/server789/", got, want)
 	}
 }
 
 func TestExtractServerID_LongerPath(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("/mcp/my-server/sse/extra/path")
+	got, err := extractServerID("/v1/mcp/my-server/sse/extra/path")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := "my-server"
 	if got != want {
-		t.Errorf("extractServerID(%q) = %q, want %q", "/mcp/my-server/sse/extra/path", got, want)
+		t.Errorf("extractServerID(%q) = %q, want %q", "/v1/mcp/my-server/sse/extra/path", got, want)
 	}
 }
 
 func TestExtractServerID_NoLeadingSlash(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("mcp/server123/sse")
+	got, err := extractServerID("/v1/mcp/server123/sse")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := "server123"
 	if got != want {
-		t.Errorf("extractServerID(%q) = %q, want %q", "mcp/server123/sse", got, want)
+		t.Errorf("extractServerID(%q) = %q, want %q", "/v1/mcp/server123/sse", got, want)
 	}
 }
 
@@ -169,8 +168,8 @@ func TestRewriteEndpointData_SingleLineURL(t *testing.T) {
 	}
 
 	// Should contain the proxy path and preserve query string
-	if !strings.Contains(result[0], "/mcp/server123/messages") {
-		t.Errorf("result %q should contain /mcp/server123/messages", result[0])
+	if !strings.Contains(result[0], "/v1/mcp/server123/messages") {
+		t.Errorf("result %q should contain /v1/mcp/server123/messages", result[0])
 	}
 	if !strings.Contains(result[0], "?token=abc") {
 		t.Errorf("result %q should preserve query string ?token=abc", result[0])
@@ -187,8 +186,8 @@ func TestRewriteEndpointData_HTTPSSingleLineURL(t *testing.T) {
 		t.Fatalf("expected 1 result line, got %d", len(result))
 	}
 
-	if !strings.Contains(result[0], "/mcp/server456/messages") {
-		t.Errorf("result %q should contain /mcp/server456/messages", result[0])
+	if !strings.Contains(result[0], "/v1/mcp/server456/messages") {
+		t.Errorf("result %q should contain /v1/mcp/server456/messages", result[0])
 	}
 	if !strings.Contains(result[0], "?token=abc") {
 		t.Errorf("result %q should preserve query string ?token=abc", result[0])
@@ -209,8 +208,8 @@ func TestRewriteEndpointData_MultiLineData(t *testing.T) {
 	}
 
 	for i, line := range result {
-		if !strings.Contains(line, "/mcp/server789/messages") {
-			t.Errorf("result[%d] %q should contain /mcp/server789/messages", i, line)
+		if !strings.Contains(line, "/v1/mcp/server789/messages") {
+			t.Errorf("result[%d] %q should contain /v1/mcp/server789/messages", i, line)
 		}
 	}
 }
@@ -225,8 +224,8 @@ func TestRewriteEndpointData_AbsolutePath(t *testing.T) {
 		t.Fatalf("expected 1 result line, got %d", len(result))
 	}
 
-	if !strings.Contains(result[0], "/mcp/serverID/messages") {
-		t.Errorf("result %q should contain /mcp/serverID/messages", result[0])
+	if !strings.Contains(result[0], "/v1/mcp/serverID/messages") {
+		t.Errorf("result %q should contain /v1/mcp/serverID/messages", result[0])
 	}
 	if !strings.Contains(result[0], "?token=xyz") {
 		t.Errorf("result %q should preserve query string ?token=xyz", result[0])
@@ -282,9 +281,9 @@ func TestRewriteEndpointData_EmptyInput(t *testing.T) {
 func TestRewriteSingleEndpointLine_FullHTTPURL(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteSingleEndpointLine("http://upstream:3001/messages?token=abc", "/mcp/s1/messages")
-	if !strings.Contains(result, "/mcp/s1/messages") {
-		t.Errorf("result %q should contain /mcp/s1/messages", result)
+	result := rewriteSingleEndpointLine("http://upstream:3001/messages?token=abc", "/v1/mcp/s1/messages")
+	if !strings.Contains(result, "/v1/mcp/s1/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s1/messages", result)
 	}
 	if !strings.Contains(result, "?token=abc") {
 		t.Errorf("result %q should contain query string", result)
@@ -294,18 +293,18 @@ func TestRewriteSingleEndpointLine_FullHTTPURL(t *testing.T) {
 func TestRewriteSingleEndpointLine_FullHTTPSURL(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteSingleEndpointLine("https://secure.example.com/messages?key=val", "/mcp/s2/messages")
-	if !strings.Contains(result, "/mcp/s2/messages") {
-		t.Errorf("result %q should contain /mcp/s2/messages", result)
+	result := rewriteSingleEndpointLine("https://secure.example.com/messages?key=val", "/v1/mcp/s2/messages")
+	if !strings.Contains(result, "/v1/mcp/s2/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s2/messages", result)
 	}
 }
 
 func TestRewriteSingleEndpointLine_AbsolutePath(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteSingleEndpointLine("/messages?token=xyz", "/mcp/s3/messages")
-	if !strings.Contains(result, "/mcp/s3/messages") {
-		t.Errorf("result %q should contain /mcp/s3/messages", result)
+	result := rewriteSingleEndpointLine("/messages?token=xyz", "/v1/mcp/s3/messages")
+	if !strings.Contains(result, "/v1/mcp/s3/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s3/messages", result)
 	}
 }
 
@@ -313,7 +312,7 @@ func TestRewriteSingleEndpointLine_PlainText(t *testing.T) {
 	t.Parallel()
 
 	input := "not a url at all"
-	result := rewriteSingleEndpointLine(input, "/mcp/s4/messages")
+	result := rewriteSingleEndpointLine(input, "/v1/mcp/s4/messages")
 	if result != input {
 		t.Errorf("result = %q, want %q (unchanged)", result, input)
 	}
@@ -322,9 +321,9 @@ func TestRewriteSingleEndpointLine_PlainText(t *testing.T) {
 func TestRewriteSingleEndpointLine_WithDataPrefix(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteSingleEndpointLine("data: http://upstream:3001/messages?token=abc", "/mcp/s5/messages")
-	if !strings.Contains(result, "/mcp/s5/messages") {
-		t.Errorf("result %q should contain /mcp/s5/messages", result)
+	result := rewriteSingleEndpointLine("data: http://upstream:3001/messages?token=abc", "/v1/mcp/s5/messages")
+	if !strings.Contains(result, "/v1/mcp/s5/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s5/messages", result)
 	}
 	if !strings.Contains(result, "?token=abc") {
 		t.Errorf("result %q should contain query string", result)
@@ -338,9 +337,9 @@ func TestRewriteSingleEndpointLine_WithDataPrefix(t *testing.T) {
 func TestRewriteFullURL_SimpleHTTP(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteFullURL("http://upstream:3001/messages?token=abc", "/mcp/s1/messages")
-	if !strings.Contains(result, "/mcp/s1/messages") {
-		t.Errorf("result %q should contain /mcp/s1/messages", result)
+	result := rewriteFullURL("http://upstream:3001/messages?token=abc", "/v1/mcp/s1/messages")
+	if !strings.Contains(result, "/v1/mcp/s1/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s1/messages", result)
 	}
 	if !strings.Contains(result, "?token=abc") {
 		t.Errorf("result %q should contain query string", result)
@@ -350,9 +349,9 @@ func TestRewriteFullURL_SimpleHTTP(t *testing.T) {
 func TestRewriteFullURL_HTTPS(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteFullURL("https://secure.example.com:443/messages?session=xyz", "/mcp/s2/messages")
-	if !strings.Contains(result, "/mcp/s2/messages") {
-		t.Errorf("result %q should contain /mcp/s2/messages", result)
+	result := rewriteFullURL("https://secure.example.com:443/messages?session=xyz", "/v1/mcp/s2/messages")
+	if !strings.Contains(result, "/v1/mcp/s2/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s2/messages", result)
 	}
 	if !strings.Contains(result, "?session=xyz") {
 		t.Errorf("result %q should contain query string", result)
@@ -362,21 +361,21 @@ func TestRewriteFullURL_HTTPS(t *testing.T) {
 func TestRewriteFullURL_WithDataPrefix(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteFullURL("data: http://host:8080/messages?key=val", "/mcp/s3/messages")
+	result := rewriteFullURL("data: http://host:8080/messages?key=val", "/v1/mcp/s3/messages")
 	if !strings.Contains(result, "data:") {
 		t.Errorf("result %q should preserve data: prefix", result)
 	}
-	if !strings.Contains(result, "/mcp/s3/messages") {
-		t.Errorf("result %q should contain /mcp/s3/messages", result)
+	if !strings.Contains(result, "/v1/mcp/s3/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s3/messages", result)
 	}
 }
 
 func TestRewriteFullURL_NoQueryString(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteFullURL("http://host:8080/messages", "/mcp/s4/messages")
-	if !strings.Contains(result, "/mcp/s4/messages") {
-		t.Errorf("result %q should contain /mcp/s4/messages", result)
+	result := rewriteFullURL("http://host:8080/messages", "/v1/mcp/s4/messages")
+	if !strings.Contains(result, "/v1/mcp/s4/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s4/messages", result)
 	}
 }
 
@@ -387,9 +386,9 @@ func TestRewriteFullURL_NoQueryString(t *testing.T) {
 func TestRewriteAbsolutePath_MessagesEndpoint(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteAbsolutePath("/messages?token=xyz", "/mcp/s1/messages")
-	if !strings.Contains(result, "/mcp/s1/messages") {
-		t.Errorf("result %q should contain /mcp/s1/messages", result)
+	result := rewriteAbsolutePath("/messages?token=xyz", "/v1/mcp/s1/messages")
+	if !strings.Contains(result, "/v1/mcp/s1/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s1/messages", result)
 	}
 	if !strings.Contains(result, "?token=xyz") {
 		t.Errorf("result %q should contain query string", result)
@@ -399,21 +398,21 @@ func TestRewriteAbsolutePath_MessagesEndpoint(t *testing.T) {
 func TestRewriteAbsolutePath_WithDataPrefix(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteAbsolutePath("data: /messages?token=xyz", "/mcp/s2/messages")
+	result := rewriteAbsolutePath("data: /messages?token=xyz", "/v1/mcp/s2/messages")
 	if !strings.Contains(result, "data:") {
 		t.Errorf("result %q should preserve data: prefix", result)
 	}
-	if !strings.Contains(result, "/mcp/s2/messages") {
-		t.Errorf("result %q should contain /mcp/s2/messages", result)
+	if !strings.Contains(result, "/v1/mcp/s2/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s2/messages", result)
 	}
 }
 
 func TestRewriteAbsolutePath_NoQueryString(t *testing.T) {
 	t.Parallel()
 
-	result := rewriteAbsolutePath("/messages", "/mcp/s3/messages")
-	if !strings.Contains(result, "/mcp/s3/messages") {
-		t.Errorf("result %q should contain /mcp/s3/messages", result)
+	result := rewriteAbsolutePath("/messages", "/v1/mcp/s3/messages")
+	if !strings.Contains(result, "/v1/mcp/s3/messages") {
+		t.Errorf("result %q should contain /v1/mcp/s3/messages", result)
 	}
 }
 
@@ -460,7 +459,7 @@ func TestFlushSSEEvent_EndpointEventRewritten(t *testing.T) {
 	if !strings.Contains(body, "event: endpoint\n") {
 		t.Errorf("body should contain 'event: endpoint', got: %q", body)
 	}
-	if !strings.Contains(body, "/mcp/test-server/messages") {
+	if !strings.Contains(body, "/v1/mcp/test-server/messages") {
 		t.Errorf("body should contain rewritten proxy path, got: %q", body)
 	}
 	if !strings.Contains(body, "?token=abc") {
@@ -522,7 +521,7 @@ func TestHandleSSEMessage_405ForNonPOST(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			t.Parallel()
 
-			req := httptest.NewRequest(method, "/mcp/test-server/messages", nil)
+			req := httptest.NewRequest(method, "/v1/mcp/test-server/messages", nil)
 			req.Header.Set("Authorization", "Bearer test-token")
 			rec := httptest.NewRecorder()
 
@@ -541,7 +540,7 @@ func TestHandleSSEMessage_MissingServerID(t *testing.T) {
 	server, validToken, cleanup := setupSSETest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -559,7 +558,7 @@ func TestHandleSSEMessage_ServerNotFound(t *testing.T) {
 	server, validToken, cleanup := setupSSETest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/nonexistent-server/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/nonexistent-server/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -595,7 +594,7 @@ func TestHandleSSEMessage_ForwardsPOST(t *testing.T) {
 
 	// Build the request
 	requestBody := `{"jsonrpc":"2.0","method":"initialize","id":1}`
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+mcpServer.ID+"/messages", strings.NewReader(requestBody))
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+mcpServer.ID+"/messages", strings.NewReader(requestBody))
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -636,7 +635,7 @@ func TestHandleSSEMessage_McpSessionIdPassthrough(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+mcpServer.ID+"/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+mcpServer.ID+"/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	req.Header.Set("Mcp-Session-Id", "session-abc-123")
 	rec := httptest.NewRecorder()
@@ -668,7 +667,7 @@ func TestHandleSSEMessage_UpstreamError(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+mcpServer.ID+"/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+mcpServer.ID+"/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -689,7 +688,7 @@ func TestHandleSSEMessage_UpstreamUnreachable(t *testing.T) {
 	// Create a server with a URL that can't be reached
 	mcpServer := createTestServerInStore(t, server.store, "http://127.0.0.1:1", TransportSSE)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+mcpServer.ID+"/messages", strings.NewReader("test"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+mcpServer.ID+"/messages", strings.NewReader("test"))
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -737,7 +736,7 @@ func TestHandleSSEMessage_AuthRequired(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			req := httptest.NewRequest(http.MethodPost, "/mcp/test-server/messages", nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/mcp/test-server/messages", nil)
 			if tt.authHeader != "" {
 				req.Header.Set("Authorization", tt.authHeader)
 			}
@@ -763,7 +762,7 @@ func TestHandleSSEConnection_MissingServerID(t *testing.T) {
 	server, _, cleanup := setupSSETest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/sse", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 
@@ -780,7 +779,7 @@ func TestHandleSSEConnection_ServerNotFound(t *testing.T) {
 	server, validToken, cleanup := setupSSETest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/nonexistent-server/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/nonexistent-server/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -821,7 +820,7 @@ func TestHandleSSEConnection_UpstreamConnectionForwarded(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -865,7 +864,7 @@ func TestHandleSSEConnection_EndpointRewriting(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -874,7 +873,7 @@ func TestHandleSSEConnection_EndpointRewriting(t *testing.T) {
 	body := rec.Body.String()
 
 	// The endpoint URL should be rewritten to proxy path
-	expectedProxyPath := "/mcp/" + mcpServer.ID + "/messages"
+	expectedProxyPath := "/v1/mcp/" + mcpServer.ID + "/messages"
 	if !strings.Contains(body, expectedProxyPath) {
 		t.Errorf("body should contain rewritten path %q, got: %q", expectedProxyPath, body)
 	}
@@ -904,7 +903,7 @@ func TestHandleSSEConnection_UpstreamReturnsNon200(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -927,7 +926,7 @@ func TestHandleSSEConnection_UpstreamUnreachable(t *testing.T) {
 	// Create a server pointing to an unreachable port
 	mcpServer := createTestServerInStore(t, server.store, "http://127.0.0.1:1", TransportSSE)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -971,7 +970,7 @@ func TestHandleSSEConnection_MultipleSSEEvents(t *testing.T) {
 
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -988,7 +987,7 @@ func TestHandleSSEConnection_MultipleSSEEvents(t *testing.T) {
 	}
 
 	// Endpoint should be rewritten
-	expectedProxyPath := "/mcp/" + mcpServer.ID + "/messages"
+	expectedProxyPath := "/v1/mcp/" + mcpServer.ID + "/messages"
 	if !strings.Contains(body, expectedProxyPath) {
 		t.Errorf("body should contain rewritten path %q", expectedProxyPath)
 	}
@@ -1037,7 +1036,7 @@ func TestStreamSSEEvents_MultipleEvents(t *testing.T) {
 	body := rec.Body.String()
 
 	// Endpoint should be rewritten
-	if !strings.Contains(body, "/mcp/server123/messages") {
+	if !strings.Contains(body, "/v1/mcp/server123/messages") {
 		t.Errorf("body should contain rewritten endpoint, got: %q", body)
 	}
 
@@ -1205,7 +1204,7 @@ func TestSSEIntegration_EndToEnd(t *testing.T) {
 	mcpServer := createTestServerInStore(t, server.store, upstream.URL, TransportSSE)
 
 	// Make GET request to SSE endpoint
-	req := httptest.NewRequest(http.MethodGet, "/mcp/"+mcpServer.ID+"/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	rec := httptest.NewRecorder()
 
@@ -1222,7 +1221,7 @@ func TestSSEIntegration_EndToEnd(t *testing.T) {
 	body := rec.Body.String()
 
 	// Verify endpoint was rewritten
-	proxyPath := "/mcp/" + mcpServer.ID + "/messages"
+	proxyPath := "/v1/mcp/" + mcpServer.ID + "/messages"
 	if !strings.Contains(body, proxyPath) {
 		t.Errorf("body should contain proxy path %q, got: %s", proxyPath, body)
 	}
@@ -1261,7 +1260,7 @@ func TestSSEIntegration_MessageRoundTrip(t *testing.T) {
 
 	// Send a POST message through the proxy
 	requestBody := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test"},"id":1}`
-	req := httptest.NewRequest(http.MethodPost, "/mcp/"+mcpServer.ID+"/messages", strings.NewReader(requestBody))
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+mcpServer.ID+"/messages", strings.NewReader(requestBody))
 	req.Header.Set("Authorization", "Bearer "+validToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Mcp-Session-Id", "session-xyz")
@@ -1292,7 +1291,7 @@ func TestSSEIntegration_MessageRoundTrip(t *testing.T) {
 func TestExtractServerID_UUID(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("/mcp/550e8400-e29b-41d4-a716-446655440000/sse")
+	got, err := extractServerID("/v1/mcp/550e8400-e29b-41d4-a716-446655440000/sse")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1305,7 +1304,7 @@ func TestExtractServerID_UUID(t *testing.T) {
 func TestExtractServerID_SpecialCharacters(t *testing.T) {
 	t.Parallel()
 
-	got, err := extractServerID("/mcp/my_server-123/messages")
+	got, err := extractServerID("/v1/mcp/my_server-123/messages")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1354,7 +1353,7 @@ func TestRewriteEndpointData_URLWithoutPath(t *testing.T) {
 	}
 
 	// Should be rewritten to proxy path
-	if !strings.Contains(result[0], "/mcp/server123/messages") {
+	if !strings.Contains(result[0], "/v1/mcp/server123/messages") {
 		t.Errorf("result %q should contain proxy path", result[0])
 	}
 }
@@ -1446,7 +1445,7 @@ func TestStreamSSEEvents_BufferedSSEStream(t *testing.T) {
 	body := rec.Body.String()
 
 	// Verify endpoint was rewritten
-	if !strings.Contains(body, "/mcp/testserver/messages") {
+	if !strings.Contains(body, "/v1/mcp/testserver/messages") {
 		t.Errorf("body should contain rewritten proxy path, got: %q", body)
 	}
 
@@ -1478,7 +1477,7 @@ func TestStreamSSEEvents_ParsesUsingBufioScanner(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "/mcp/s1/messages") {
+	if !strings.Contains(body, "/v1/mcp/s1/messages") {
 		t.Errorf("body should contain rewritten path, got: %q", body)
 	}
 	if !strings.Contains(body, "payload") {

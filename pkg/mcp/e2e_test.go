@@ -112,7 +112,7 @@ func setupE2EEnv(t *testing.T) *e2eTestEnv {
 	// We'll use httptest.Server for the proxy itself
 	mux := http.NewServeMux()
 	env.proxyServer.RegisterAPIHandlers(mux)
-	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/mcp/", func(w http.ResponseWriter, r *http.Request) {
 		// Route MCP requests through auth middleware then to handlers
 		handler := env.proxyServer.proxyAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
@@ -219,7 +219,7 @@ func TestE2E_SSEProxyFlow(t *testing.T) {
 	}
 
 	// Test SSE endpoint - verify endpoint rewriting
-	req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+	req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestE2E_SSEProxyFlow(t *testing.T) {
 	bodyStr := string(body)
 
 	// The endpoint URL should be rewritten to proxy path
-	expectedProxyPath := "/mcp/" + mcpServer.ID + "/messages"
+	expectedProxyPath := "/v1/mcp/" + mcpServer.ID + "/messages"
 	if !strings.Contains(bodyStr, expectedProxyPath) {
 		t.Errorf("SSE body should contain rewritten proxy path %q, got: %s", expectedProxyPath, bodyStr)
 	}
@@ -259,7 +259,7 @@ func TestE2E_SSEProxyFlow(t *testing.T) {
 	}
 
 	// Test POST to messages endpoint
-	postReq, err := http.NewRequest(http.MethodPost, env.proxyURL+"/mcp/"+mcpServer.ID+"/messages",
+	postReq, err := http.NewRequest(http.MethodPost, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/messages",
 		strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list","id":1}`))
 	if err != nil {
 		t.Fatalf("failed to create POST request: %v", err)
@@ -341,7 +341,7 @@ func TestE2E_StreamableHTTPFlow(t *testing.T) {
 
 	// POST to streamable HTTP endpoint
 	requestBody := `{"jsonrpc":"2.0","method":"tools/list","id":1}`
-	req, err := http.NewRequest(http.MethodPost, env.proxyURL+"/mcp/"+mcpServer.ID+"/",
+	req, err := http.NewRequest(http.MethodPost, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/",
 		strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
@@ -419,7 +419,7 @@ func TestE2E_AuthOnTransport(t *testing.T) {
 
 	// Test 1: No auth token -> 401
 	t.Run("no_auth_token", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -446,7 +446,7 @@ func TestE2E_AuthOnTransport(t *testing.T) {
 
 	// Test 2: Invalid token -> 401
 	t.Run("invalid_token", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -465,7 +465,7 @@ func TestE2E_AuthOnTransport(t *testing.T) {
 
 	// Test 3: Valid token -> 200 (or connection proceeds)
 	t.Run("valid_token", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -485,7 +485,7 @@ func TestE2E_AuthOnTransport(t *testing.T) {
 
 	// Test 4: Malformed auth header -> 401
 	t.Run("malformed_auth_header", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+		req, err := http.NewRequest(http.MethodGet, env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -901,7 +901,7 @@ func TestE2E_ServerNotFound(t *testing.T) {
 
 	// Try to access non-existent server
 	req, err := http.NewRequest(http.MethodGet,
-		env.proxyURL+"/mcp/nonexistent-id/sse", nil)
+		env.proxyURL+"/v1/mcp/nonexistent-id/sse", nil)
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
@@ -947,7 +947,7 @@ func TestE2E_ServerDisabled(t *testing.T) {
 
 	// Try to access disabled server
 	req, err := http.NewRequest(http.MethodGet,
-		env.proxyURL+"/mcp/"+mcpServer.ID+"/sse", nil)
+		env.proxyURL+"/v1/mcp/"+mcpServer.ID+"/sse", nil)
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
