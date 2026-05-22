@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -191,14 +190,12 @@ func (m *connectionManagerImpl) ConnectUpstream(ctx context.Context, server *MCP
 func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *MCPServer, r *http.Request) (*http.Response, error) {
 	upstreamURL := m.getUpstreamURL(server)
 
-	authTokenPreview := ""
-	if len(server.AuthToken) > 10 {
-		authTokenPreview = server.AuthToken[:10] + "..."
-	} else if len(server.AuthToken) > 0 {
-		authTokenPreview = server.AuthToken
-	}
-	log.Printf("[MCP DEBUG] ForwardHTTPRequest: upstreamURL=%s, authType=%s, authToken=%s", upstreamURL, server.AuthType, authTokenPreview)
-
+	// authTokenPreview := ""
+	// if len(server.AuthToken) > 10 {
+	// 	authTokenPreview = server.AuthToken[:10] + "..."
+	// } else if len(server.AuthToken) > 0 {
+	// 	authTokenPreview = server.AuthToken
+	// }
 	// C1: Strip /v1/mcp/{id} prefix from path before constructing upstream URL
 	// Client POSTs to /v1/mcp/{id}/messages, upstream expects /messages
 	path := r.URL.Path
@@ -226,8 +223,6 @@ func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
-
-	log.Printf("[MCP DEBUG] ForwardHTTPRequest: final URL=%s, method=%s", url, r.Method)
 
 	// Create new request, preserving method and body
 	req, err := http.NewRequestWithContext(ctx, r.Method, url, r.Body)
@@ -260,8 +255,6 @@ func (m *connectionManagerImpl) ForwardHTTPRequest(ctx context.Context, server *
 
 	// Inject auth headers (overrides any client-supplied auth)
 	m.injectAuth(req, server)
-
-	log.Printf("[MCP DEBUG] ForwardHTTPRequest: Authorization header after inject = %s", req.Header.Get("Authorization"))
 
 	return m.httpClient.Do(req)
 }
