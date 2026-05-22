@@ -15,7 +15,7 @@ import (
 // sqliteDSN returns a DSN string with the same pragmas as the production configuration.
 // This is critical for the stress test to replicate the production fix.
 func sqliteDSN(dbPath string) string {
-	return dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
+	return dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
 }
 
 // setupStressTestDB creates a SQLite database with the production DSN configuration
@@ -26,14 +26,13 @@ func setupStressTestDB(t *testing.T) (*sql.DB, func()) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "stress_test.db")
 
-	// Open with the same DSN as production (WAL mode, busy_timeout=0, MaxOpenConns=1)
+	// Open with the same DSN as production (WAL mode, busy_timeout=5000, unlimited connections)
 	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		t.Fatalf("Failed to open SQLite database: %v", err)
 	}
 
-	// CRITICAL: Set MaxOpenConns=1 to serialize writes and prevent SQLITE_BUSY
-	db.SetMaxOpenConns(1)
+	// WAL mode handles concurrency - no need to limit connections
 
 	// Create the token_hourly_usage table
 	_, err = db.ExecContext(context.Background(), `
@@ -77,7 +76,7 @@ func setupStressTestDB(t *testing.T) (*sql.DB, func()) {
 }
 
 // TestConcurrentIncrement_Stress tests concurrent Increment() calls with high concurrency.
-// This test verifies that with MaxOpenConns=1 and WAL mode, we get NO SQLITE_BUSY errors
+// This test verifies that with WAL mode and busy_timeout=5000, we get NO SQLITE_BUSY errors
 // and all increments are counted correctly.
 func TestConcurrentIncrement_Stress(t *testing.T) {
 	db, cleanup := setupStressTestDB(t)
@@ -530,29 +529,30 @@ func TestConcurrentDifferentBuckets_Stress(t *testing.T) {
 	t.Logf("TestConcurrentDifferentBuckets_Stress: %d buckets verified correctly", len(tokenRows))
 }
 
-// TestSQLiteBusyTimeoutZero verifies that busy_timeout is indeed 0 in test setup.
-// This is a sanity check to ensure our test configuration matches production.
-func TestSQLiteBusyTimeoutZero(t *testing.T) {
+// TestSQLiteWALConfiguration verifies that WAL mode and busy_timeout are properly configured.
+// This ensures the test configuration matches production.
+func TestSQLiteWALConfiguration(t *testing.T) {
 	db, cleanup := setupStressTestDB(t)
 	defer cleanup()
 
+	// Verify busy_timeout = 5000
 	var busyTimeout string
 	err := db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout)
 	if err != nil {
 		t.Fatalf("Failed to get busy_timeout: %v", err)
 	}
 
-	if busyTimeout != "0" {
-		t.Errorf("Expected busy_timeout=0, got: %s", busyTimeout)
+	if busyTimeout != "5000" {
+		t.Errorf("Expected busy_timeout=5000, got: %s", busyTimeout)
 	}
 
-	// Verify MaxOpenConns = 1
+	// Verify MaxOpenConns is NOT set to 1 (unlimited, matching production)
 	stats := db.Stats()
-	if stats.MaxOpenConnections != 1 {
-		t.Errorf("Expected MaxOpenConns=1, got: %d", stats.MaxOpenConnections)
+	if stats.MaxOpenConnections == 1 {
+		t.Errorf("Expected MaxOpenConns to be unlimited (not 1), got: %d", stats.MaxOpenConnections)
 	}
 
-	t.Logf("SQLite configuration verified: busy_timeout=0, MaxOpenConns=1")
+	t.Logf("SQLite configuration verified: busy_timeout=5000, MaxOpenConns=%d (unlimited)", stats.MaxOpenConnections)
 }
 
 // TestConcurrentStressWithQueryInterleaving tests concurrent writes while also
@@ -640,7 +640,6 @@ func BenchmarkConcurrentIncrement(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to open database: %v", err)
 	}
-	db.SetMaxOpenConns(1)
 	defer db.Close()
 
 	// Create tables

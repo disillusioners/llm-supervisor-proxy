@@ -106,15 +106,11 @@ func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 	}
 
 	// DSN with pragmas for WAL mode, synchronous=FULL, foreign keys
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
-
-	// SQLite WAL mode allows concurrent reads but only single writer
-	// Set MaxOpenConns to 1 to serialize writes and prevent SQLITE_BUSY
-	db.SetMaxOpenConns(1)
 
 	return &Store{DB: db, Dialect: SQLite, dbPath: dbPath}, nil
 }

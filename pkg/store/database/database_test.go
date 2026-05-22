@@ -42,8 +42,8 @@ func TestSQLiteConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get busy_timeout: %v", err)
 	}
-	if busyTimeout != "0" {
-		t.Errorf("Expected busy_timeout=0, got: %s", busyTimeout)
+	if busyTimeout != "5000" {
+		t.Errorf("Expected busy_timeout=5000, got: %s", busyTimeout)
 	}
 
 	err = store.DB.QueryRow("PRAGMA synchronous").Scan(&synchronous)
@@ -62,16 +62,79 @@ func TestSQLiteConnection(t *testing.T) {
 		t.Errorf("Expected foreign_keys=1 (ON), got: %s", foreignKeys)
 	}
 
-	// Verify MaxOpenConns is set to 1
-	maxOpenConns := store.DB.Stats().MaxOpenConnections
-	if maxOpenConns != 1 {
-		t.Errorf("Expected MaxOpenConns=1, got: %d", maxOpenConns)
+	// Run migrations
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
 	}
+}
+
+func TestSQLiteWALConcurrentReads(t *testing.T) {
+	// Create temp directory for test database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Create connection
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create SQLite connection: %v", err)
+	}
+	defer store.Close()
 
 	// Run migrations
 	if err := store.RunMigrations(context.Background()); err != nil {
 		t.Fatalf("Failed to run migrations: %v", err)
 	}
+
+	// Verify WAL mode is enabled
+	var journalMode string
+	err = store.DB.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
+	if err != nil {
+		t.Fatalf("Failed to get journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("Expected journal_mode=wal, got: %s", journalMode)
+	}
+
+	// Test concurrent reads work without blocking
+	// Run multiple read queries simultaneously
+	const numGoroutines = 5
+	done := make(chan bool, numGoroutines)
+	errChan := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			// Execute a simple read query
+			_, err := store.DB.QueryContext(context.Background(), "SELECT * FROM configs")
+			if err != nil {
+				errChan <- fmt.Errorf("goroutine %d: %w", id, err)
+				done <- false
+				return
+			}
+			done <- true
+		}(i)
+	}
+
+	// Wait for all goroutines with timeout
+	timeout := time.After(5 * time.Second)
+	successCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		select {
+		case success := <-done:
+			if success {
+				successCount++
+			}
+		case err := <-errChan:
+			t.Fatalf("Concurrent read failed: %v", err)
+		case <-timeout:
+			t.Fatal("Concurrent reads timed out - possible deadlock")
+		}
+	}
+
+	if successCount != numGoroutines {
+		t.Errorf("Expected %d successful concurrent reads, got %d", numGoroutines, successCount)
+	}
+
+	t.Logf("Concurrent reads test passed: %d goroutines completed successfully", successCount)
 }
 
 func TestConfigManager(t *testing.T) {
