@@ -68,7 +68,7 @@ func TestSQLiteConnection(t *testing.T) {
 	}
 }
 
-func TestSQLiteWALConcurrentReads(t *testing.T) {
+func TestSQLiteWALConcurrentReadsAreNonBlocking(t *testing.T) {
 	// Create temp directory for test database
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

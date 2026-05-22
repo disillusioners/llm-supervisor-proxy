@@ -112,6 +112,12 @@ func newSQLiteConnectionAtPath(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
+	// Limit connection pool size as a safety guard:
+	// - 10 connections allows concurrent reads (solves the concurrent-read hang with WAL)
+	// - Prevents unbounded connection growth under extreme load (avoids exhausting file descriptors)
+	// - WAL mode handles read/write concurrency internally, but we still limit pool size
+	db.SetMaxOpenConns(10)
+
 	return &Store{DB: db, Dialect: SQLite, dbPath: dbPath}, nil
 }
 
