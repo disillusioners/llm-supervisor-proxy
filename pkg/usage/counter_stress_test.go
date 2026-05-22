@@ -26,13 +26,14 @@ func setupStressTestDB(t *testing.T) (*sql.DB, func()) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "stress_test.db")
 
-	// Open with the same DSN as production (WAL mode, busy_timeout=5000, unlimited connections)
+	// Open with the same DSN as production (WAL mode, busy_timeout=5000, MaxOpenConns=10)
 	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		t.Fatalf("Failed to open SQLite database: %v", err)
 	}
 
-	// WAL mode handles concurrency - no need to limit connections
+	// Limit connection pool size to match production (10 connections)
+	db.SetMaxOpenConns(10)
 
 	// Create the token_hourly_usage table
 	_, err = db.ExecContext(context.Background(), `
@@ -546,13 +547,13 @@ func TestSQLiteWALConfiguration(t *testing.T) {
 		t.Errorf("Expected busy_timeout=5000, got: %s", busyTimeout)
 	}
 
-	// Verify MaxOpenConns is NOT set to 1 (unlimited, matching production)
+	// Verify MaxOpenConns = 10 (matching production)
 	stats := db.Stats()
-	if stats.MaxOpenConnections == 1 {
-		t.Errorf("Expected MaxOpenConns to be unlimited (not 1), got: %d", stats.MaxOpenConnections)
+	if stats.MaxOpenConnections != 10 {
+		t.Errorf("Expected MaxOpenConns=10, got: %d", stats.MaxOpenConnections)
 	}
 
-	t.Logf("SQLite configuration verified: busy_timeout=5000, MaxOpenConns=%d (unlimited)", stats.MaxOpenConnections)
+	t.Logf("SQLite configuration verified: busy_timeout=5000, MaxOpenConns=10")
 }
 
 // TestConcurrentStressWithQueryInterleaving tests concurrent writes while also
