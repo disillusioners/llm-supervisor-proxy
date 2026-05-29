@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -115,13 +116,13 @@ func TestModelConfig_ExcludeFromUltimateSwitching_JSONFieldMatches(t *testing.T)
 	// not camelCase (excludeFromUltimateSwitching)
 	jsonStr := string(data)
 	expectedField := "exclude_from_ultimate_switching"
-	if !containsSubstring(jsonStr, expectedField) {
+	if !strings.Contains(jsonStr, expectedField) {
 		t.Errorf("JSON should contain snake_case field '%s', got: %s", expectedField, jsonStr)
 	}
 
 	// Ensure camelCase is NOT used
 	unexpectedField := "excludeFromUltimateSwitching"
-	if containsSubstring(jsonStr, unexpectedField) {
+	if strings.Contains(jsonStr, unexpectedField) {
 		t.Errorf("JSON should NOT contain camelCase field '%s', got: %s", unexpectedField, jsonStr)
 	}
 }
@@ -173,7 +174,7 @@ func TestModelConfig_ExcludeFromUltimateSwitching_ExplicitFalse(t *testing.T) {
 
 	// When false and omitempty, the field should be omitted from JSON
 	jsonStr := string(data)
-	if containsSubstring(jsonStr, "exclude_from_ultimate_switching") {
+	if strings.Contains(jsonStr, "exclude_from_ultimate_switching") {
 		t.Errorf("False value with omitempty should be omitted from JSON, got: %s", jsonStr)
 	}
 
@@ -187,18 +188,4 @@ func TestModelConfig_ExcludeFromUltimateSwitching_ExplicitFalse(t *testing.T) {
 	if restored.ExcludeFromUltimateSwitching != false {
 		t.Error("Explicit false value should deserialize correctly")
 	}
-}
-
-// containsSubstring is a helper to check if a string contains a substring
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstringHelper(s, substr))
-}
-
-func containsSubstringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
