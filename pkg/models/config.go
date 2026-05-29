@@ -105,6 +105,9 @@ type ModelConfig struct {
 
 	// Secondary upstream model for retry logic (only valid for internal=true)
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
+
+	// ExcludeFromUltimateSwitching prevents this model from being used in ultimate model switching
+	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.

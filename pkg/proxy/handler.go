@@ -534,172 +534,187 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				result = h.ultimateHandler.ShouldTrigger(msgMaps)
 			}
 			if result.Triggered {
-				// Check if retry limit exhausted
-				if result.RetryExhausted {
+				// Exclusion gate: skip ultimate model switching for excluded models
+				// Note: forceUltimate always bypasses exclusion (admin override)
+				if !forceUltimate && rc.resolvedModel != nil && rc.resolvedModel.ExcludeFromUltimateSwitching {
+					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, result.Hash[:8])
+					h.publishEvent("ultimate_model_excluded", map[string]interface{}{
+						"id":    rc.reqID,
+						"model": rc.resolvedModel.ID,
+						"hash":  result.Hash[:8],
+					})
+					// Fall through to normal flow (no ultimate model switch)
+				} else {
+					// Check if retry limit exhausted
+					if result.RetryExhausted {
+						// Resolve ultimate model ID with per-token override
+						ultimateModelID := h.ultimateHandler.GetModelID()
+						if rc.ultimateModelID != "" {
+							ultimateModelID = rc.ultimateModelID
+						}
+
+						log.Printf("[UltimateModel] Retry limit exhausted for hash=%s (attempt %d/%d)",
+							result.Hash[:8], result.CurrentRetry, result.MaxRetries)
+
+						// Determine if streaming
+						isStream := false
+						if stream, ok := rc.requestBody["stream"].(bool); ok {
+							isStream = stream
+						}
+
+						// Update request log
+						rc.reqLog.Status = "failed"
+						rc.reqLog.Error = fmt.Sprintf("Ultimate model retry limit exceeded (attempt %d/%d)", result.CurrentRetry, result.MaxRetries)
+						rc.reqLog.EndTime = time.Now()
+						rc.reqLog.Duration = time.Since(rc.startTime).String()
+						rc.reqLog.UltimateModelUsed = true
+						rc.reqLog.UltimateModelID = ultimateModelID
+						h.store.Add(rc.reqLog)
+
+						// Publish event
+						h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
+							"id":            rc.reqID,
+							"hash":          result.Hash[:8],
+							"current_retry": result.CurrentRetry,
+							"max_retries":   result.MaxRetries,
+						})
+
+						// Send error response (HTTP 200 with JSON stream error)
+						h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentRetry, result.MaxRetries, isStream)
+						return
+					}
+
 					// Resolve ultimate model ID with per-token override
 					ultimateModelID := h.ultimateHandler.GetModelID()
 					if rc.ultimateModelID != "" {
 						ultimateModelID = rc.ultimateModelID
+						log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
 					}
+					log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
+						ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
 
-					log.Printf("[UltimateModel] Retry limit exhausted for hash=%s (attempt %d/%d)",
-						result.Hash[:8], result.CurrentRetry, result.MaxRetries)
+					// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
 
-					// Determine if streaming
-					isStream := false
-					if stream, ok := rc.requestBody["stream"].(bool); ok {
-						isStream = stream
-					}
-
-					// Update request log
-					rc.reqLog.Status = "failed"
-					rc.reqLog.Error = fmt.Sprintf("Ultimate model retry limit exceeded (attempt %d/%d)", result.CurrentRetry, result.MaxRetries)
-					rc.reqLog.EndTime = time.Now()
-					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					// Update request log with ultimate model info
 					rc.reqLog.UltimateModelUsed = true
 					rc.reqLog.UltimateModelID = ultimateModelID
+					rc.reqLog.Status = "running"
 					h.store.Add(rc.reqLog)
 
 					// Publish event
-					h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
-						"id":            rc.reqID,
-						"hash":          result.Hash[:8],
-						"current_retry": result.CurrentRetry,
-						"max_retries":   result.MaxRetries,
-					})
-
-					// Send error response (HTTP 200 with JSON stream error)
-					h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentRetry, result.MaxRetries, isStream)
-					return
-				}
-
-				// Resolve ultimate model ID with per-token override
-				ultimateModelID := h.ultimateHandler.GetModelID()
-				if rc.ultimateModelID != "" {
-					ultimateModelID = rc.ultimateModelID
-					log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
-				}
-				log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
-					ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
-
-				// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
-
-				// Update request log with ultimate model info
-				rc.reqLog.UltimateModelUsed = true
-				rc.reqLog.UltimateModelID = ultimateModelID
-				rc.reqLog.Status = "running"
-				h.store.Add(rc.reqLog)
-
-				// Publish event
-				h.publishEvent("ultimate_model_triggered", map[string]interface{}{
-					"id":             rc.reqID,
-					"ultimate_model": ultimateModelID,
-					"original_model": rc.reqLog.Model,
-					"hash":           result.Hash[:8],
-					"current_retry":  result.CurrentRetry,
-					"max_retries":    result.MaxRetries,
-				})
-
-				// Execute with ultimate model (raw proxy, no retry/fallback)
-				// The Execute method determines streaming from requestBody["stream"]
-				// Heartbeat is started by the ultimate handler after headers are sent
-				usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
-				if err != nil {
-					log.Printf("[UltimateModel] Error: %v", err)
-					rc.reqLog.Status = "failed"
-					rc.reqLog.Error = err.Error()
-					rc.reqLog.EndTime = time.Now()
-					rc.reqLog.Duration = time.Since(rc.startTime).String()
-					h.store.Add(rc.reqLog)
-
-					h.publishEvent("ultimate_model_failed", map[string]interface{}{
+					h.publishEvent("ultimate_model_triggered", map[string]interface{}{
 						"id":             rc.reqID,
 						"ultimate_model": ultimateModelID,
-						"error":          err.Error(),
+						"original_model": rc.reqLog.Model,
+						"hash":           result.Hash[:8],
+						"current_retry":  result.CurrentRetry,
+						"max_retries":    result.MaxRetries,
 					})
 
-					// If headers not sent, send error response
-					if !rc.headersSent {
-						if strings.Contains(err.Error(), "not found") {
-							http.Error(w, "Ultimate model not found in database", http.StatusBadGateway)
+					// Execute with ultimate model (raw proxy, no retry/fallback)
+					// The Execute method determines streaming from requestBody["stream"]
+					// Heartbeat is started by the ultimate handler after headers are sent
+					usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
+					if err != nil {
+						log.Printf("[UltimateModel] Error: %v", err)
+						rc.reqLog.Status = "failed"
+						rc.reqLog.Error = err.Error()
+						rc.reqLog.EndTime = time.Now()
+						rc.reqLog.Duration = time.Since(rc.startTime).String()
+						h.store.Add(rc.reqLog)
+
+						h.publishEvent("ultimate_model_failed", map[string]interface{}{
+							"id":             rc.reqID,
+							"ultimate_model": ultimateModelID,
+							"error":          err.Error(),
+						})
+
+						// If headers not sent, send error response
+						if !rc.headersSent {
+							if strings.Contains(err.Error(), "not found") {
+								http.Error(w, "Ultimate model not found in database", http.StatusBadGateway)
+							} else {
+								http.Error(w, err.Error(), http.StatusBadGateway)
+							}
 						} else {
-							http.Error(w, err.Error(), http.StatusBadGateway)
+							// Headers already sent (streaming) - send SSE error
+							h.sendSSEError(w, models.ErrorTypeUpstreamError, err.Error())
 						}
-					} else {
-						// Headers already sent (streaming) - send SSE error
-						h.sendSSEError(w, models.ErrorTypeUpstreamError, err.Error())
+						return
 					}
-					return
-				}
 
-				// Success - update log with usage
-				rc.reqLog.Status = "completed"
-				rc.reqLog.EndTime = time.Now()
-				rc.reqLog.Duration = time.Since(rc.startTime).String()
-				rc.reqLog.Usage = usage
-				h.store.Add(rc.reqLog)
+					// Success - update log with usage
+					rc.reqLog.Status = "completed"
+					rc.reqLog.EndTime = time.Now()
+					rc.reqLog.Duration = time.Since(rc.startTime).String()
+					rc.reqLog.Usage = usage
+					h.store.Add(rc.reqLog)
 
-				// Fallback token counting: if provider didn't return usage, estimate from request
-				if token.FallbackEnabled() {
-					if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
-						tokenizer := token.GetTokenizer()
-						model := ultimateModelID
-						requestBytes, _ := json.Marshal(rc.requestBody)
-						promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
-						if err != nil {
-							log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, model)
+					// Fallback token counting: if provider didn't return usage, estimate from request
+					if token.FallbackEnabled() {
+						if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
+							tokenizer := token.GetTokenizer()
+							model := ultimateModelID
+							requestBytes, _ := json.Marshal(rc.requestBody)
+							promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
+							if err != nil {
+								log.Printf("failed to count prompt tokens: %v", err)
+							} else {
+								completionTokens := 0
+								if rc.reqLog.Usage != nil {
+									completionTokens = rc.reqLog.Usage.CompletionTokens
+								}
+								rc.reqLog.Usage = &store.Usage{
+									PromptTokens:     promptTokens,
+									CompletionTokens: completionTokens,
+									TotalTokens:      promptTokens + completionTokens,
+								}
+								h.store.Add(rc.reqLog)
+							}
 						}
-						// Note: completion text not available here since response was streamed to client
-						rc.reqLog.Usage = &store.Usage{
-							PromptTokens:     promptTokens,
-							CompletionTokens: 0,
-							TotalTokens:      promptTokens,
-						}
-						log.Printf("[DEBUG][fallback-token-count] model=%s prompt=%d completion=0 (ultimate model, response not buffered)",
-							model, promptTokens)
 					}
-				}
 
-				// Count this request for hourly usage tracking
-				if rc.tokenID != "" && h.counter != nil {
-					var promptTokens, completionTokens, totalTokens int
-					if rc.reqLog.Usage != nil {
-						promptTokens = rc.reqLog.Usage.PromptTokens
-						completionTokens = rc.reqLog.Usage.CompletionTokens
-						totalTokens = rc.reqLog.Usage.TotalTokens
-					}
-					hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
-					go func() {
-						if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
-							log.Printf("failed to increment usage counter: %v", err)
+					// Count this request for hourly usage tracking
+					if rc.tokenID != "" && h.counter != nil {
+						var promptTokens, completionTokens, totalTokens int
+						if rc.reqLog.Usage != nil {
+							promptTokens = rc.reqLog.Usage.PromptTokens
+							completionTokens = rc.reqLog.Usage.CompletionTokens
+							totalTokens = rc.reqLog.Usage.TotalTokens
 						}
-					}()
-				}
-
-				// Count this request for model hourly usage tracking
-				if rc.reqLog.Model != "" && h.counter != nil {
-					var promptTokens, completionTokens, totalTokens int
-					if rc.reqLog.Usage != nil {
-						promptTokens = rc.reqLog.Usage.PromptTokens
-						completionTokens = rc.reqLog.Usage.CompletionTokens
-						totalTokens = rc.reqLog.Usage.TotalTokens
+						hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+						go func() {
+							if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+								log.Printf("failed to increment usage counter: %v", err)
+							}
+						}()
 					}
-					hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
-					go func() {
-						if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
-							log.Printf("failed to increment model usage counter: %v", err)
+
+					// Count this request for model hourly usage tracking
+					if rc.reqLog.Model != "" && h.counter != nil {
+						var promptTokens, completionTokens, totalTokens int
+						if rc.reqLog.Usage != nil {
+							promptTokens = rc.reqLog.Usage.PromptTokens
+							completionTokens = rc.reqLog.Usage.CompletionTokens
+							totalTokens = rc.reqLog.Usage.TotalTokens
 						}
-					}()
+						hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
+						go func() {
+							if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+								log.Printf("failed to increment model usage counter: %v", err)
+							}
+						}()
+					}
+
+					h.publishEvent("request_completed", map[string]interface{}{
+						"id":             rc.reqID,
+						"model":          ultimateModelID,
+						"duration":       rc.reqLog.Duration,
+						"ultimate_model": true,
+					})
+
+					return // DONE - no fallback, no retry
 				}
-
-				h.publishEvent("request_completed", map[string]interface{}{
-					"id":             rc.reqID,
-					"model":          ultimateModelID,
-					"duration":       rc.reqLog.Duration,
-					"ultimate_model": true,
-				})
-
-				return // DONE - no fallback, no retry
 			}
 		}
 	}

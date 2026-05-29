@@ -267,6 +267,106 @@ Execute(ctx, w, r, rc)
                      Return error to client (502 Bad Gateway)
 ```
 
+## 3.4 Per-Model Exclusion
+
+Individual models can opt out of ultimate model switching using the `exclude_from_ultimate_switching` flag.
+
+### 3.4.1 Feature Description
+
+- **Flag**: `exclude_from_ultimate_switching` boolean on model config
+- **Default**: `false` (backward compatible)
+- **When `true`**: Requests to this model skip ultimate model switching, even when detected as duplicates
+- **Hash behavior**: The hash is still stored by `ShouldTrigger()`, so other non-excluded models can still trigger the switch
+
+### 3.4.2 Flow Diagram Update
+
+Updated `ShouldTrigger()` logic:
+
+```
+ShouldTrigger() called
+        │
+        ▼
+┌───────────────────┐     YES     ┌─────────────────────────────┐
+│ Should trigger?   ├────────────►│ Check exclusion flag       │
+│ (hash in cache)   │             │ (from model config)        │
+└───────────────────┘             └─────────────┬─────────────┘
+        │ NO (first request)                     │
+        │                              ┌──────────┴──────────┐
+        │                              │                     │
+        ▼                              ▼ YES                  ▼ NO
+  Return false                    Return false          Return true
+  (normal flow)                   (excluded)             (ultimate mode)
+```
+
+**Logic:**
+```
+if !shouldTrigger → return false (normal flow)
+if shouldTrigger:
+    if model.excluded AND !force → return false (skip)
+    else → return true (ultimate mode)
+```
+
+### 3.4.3 Interaction with Retry Counter
+
+The retry counter is hash-based (message content), not per-model:
+
+- When an excluded model sends a duplicate request, `ShouldTrigger()` still increments the retry counter
+- Same messages sent first to an excluded model, then to a non-excluded model:
+  - The non-excluded model may see higher retry count
+  - May even see `RetryExhausted`
+- **This is accepted behavior** — the counter tracks how many times *these messages* have been seen globally
+
+### 3.4.4 ForceTrigger Behavior
+
+The `X-Force-Ultimate-Model` header bypasses ALL exclusion:
+
+```
+Check order:
+1. !forceUltimate → short-circuit → return false (normal flow)
+2. !shouldTrigger → return false (normal flow)
+3. model.excluded → return false (excluded, skip)
+4. return true (ultimate mode)
+```
+
+Force means **force regardless of per-model config** — exclusion is a user preference, force is an override.
+
+### 3.4.5 Model Config
+
+**Backend (`pkg/config/config.go`):**
+
+```go
+type ModelConfig struct {
+    ID                        string `json:"id"`
+    Name                      string `json:"name"`
+    Enabled                   bool   `json:"enabled"`
+    // ... existing fields
+    ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching"`
+}
+```
+
+**Example JSON config:**
+```json
+{
+  "id": "gpt-4o",
+  "name": "gpt-4o",
+  "enabled": true,
+  "exclude_from_ultimate_switching": true
+}
+```
+
+### 3.4.6 Event
+
+- **Event name**: `ultimate_model_excluded`
+- **Published when**: exclusion activates (triggered AND excluded AND not forced)
+- **Payload**:
+  ```go
+  type UltimateModelExcludedPayload struct {
+      ID    string  // Request ID
+      Model string  // Model name that was excluded
+      Hash  string  // Hash prefix (first 8 chars)
+  }
+  ```
+
 ## 4. Integration Points
 
 ### 4.1 Proxy Handler (`pkg/proxy/handler.go`)

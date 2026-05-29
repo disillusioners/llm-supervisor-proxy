@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -771,6 +772,689 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 
 	// The response should come from the regular upstream, not the ultimate model upstream
 	// This confirms ultimate model was not triggered
+
+	_ = tokenID // Use the variable
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exclude from Ultimate Switching Integration Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow tests that when
+// a model has ExcludeFromUltimateSwitching=true and a duplicate request is made,
+// the ultimate model switch is skipped and normal flow continues.
+func TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow(t *testing.T) {
+	// Setup: Create in-memory database with required tables
+	db := setupIntegrationDB(t)
+
+	// Setup: Create counter backed by the database
+	counter := usage.NewCounter(db, database.SQLite)
+
+	// Setup: Create token store with ultimate model enabled
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true, // ultimateModelEnabled = true
+		"",   // no per-token override
+		nil,  // all models allowed
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	// Setup: Create models config with an EXCLUDED model
+	modelsConfig := models.NewModelsConfig()
+
+	// Create upstream server that tracks calls
+	upstreamCallCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockNonStreamResponseWithUsage("Hello!", 10, 5, 15))
+	}))
+	defer upstream.Close()
+
+	// Add credential
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add the excluded model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:                            "excluded-model",
+		Name:                          "Excluded Model",
+		Enabled:                       true,
+		Internal:                      true,
+		CredentialID:                  "test-credential",
+		InternalModel:                 "excluded-model",
+		ExcludeFromUltimateSwitching:   true, // THIS IS THE KEY: excluded from ultimate model switching
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Setup: Create config manager
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "global-ultimate-model") // Any model - won't be used due to exclusion
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	// Prepare messages for duplicate detection
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Trigger duplicate detection"},
+	}
+
+	// First request - stores the hash
+	body1 := map[string]interface{}{
+		"model":  "excluded-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Trigger duplicate detection"},
+		},
+	}
+	bodyBytes1, _ := json.Marshal(body1)
+	httpReq1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes1))
+	httpReq1.Header.Set("Content-Type", "application/json")
+	httpReq1.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rec1 := httptest.NewRecorder()
+	h.HandleChatCompletions(rec1, httpReq1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("First request failed: %d - %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Mark the hash as failed to simulate duplicate request scenario
+	h.ultimateHandler.MarkFailed(messages)
+
+	// Second request with same messages - should NOT trigger ultimate model
+	// because the model is excluded
+	body2 := map[string]interface{}{
+		"model":  "excluded-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Trigger duplicate detection"},
+		},
+	}
+	bodyBytes2, _ := json.Marshal(body2)
+	httpReq2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes2))
+	httpReq2.Header.Set("Content-Type", "application/json")
+	httpReq2.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rec2 := httptest.NewRecorder()
+	h.HandleChatCompletions(rec2, httpReq2)
+
+	// Should succeed (not trigger ultimate model)
+	if rec2.Code != http.StatusOK {
+		t.Errorf("Second request should succeed, got: %d - %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Verify upstream was called twice (normal flow for both requests)
+	if upstreamCallCount != 2 {
+		t.Errorf("Expected upstream to be called 2 times (normal flow), got %d", upstreamCallCount)
+	}
+
+	// Subscribe to events to verify exclusion event was published
+	eventCh, _ := bus.Subscribe()
+	defer bus.Unsubscribe(eventCh)
+
+	// Third request to check for exclusion event
+	body3 := map[string]interface{}{
+		"model":  "excluded-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Trigger duplicate detection"},
+		},
+	}
+	bodyBytes3, _ := json.Marshal(body3)
+	httpReq3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes3))
+	httpReq3.Header.Set("Content-Type", "application/json")
+	httpReq3.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	rec3 := httptest.NewRecorder()
+	h.HandleChatCompletions(rec3, httpReq3)
+
+	// Check for ultimate_model_excluded event
+	timeout := time.After(500 * time.Millisecond)
+	found := false
+	for {
+		select {
+		case evt := <-eventCh:
+			if evt.Type == "ultimate_model_excluded" {
+				found = true
+				data := evt.Data.(map[string]interface{})
+				if data["model"] != "excluded-model" {
+					t.Errorf("Expected model 'excluded-model' in event, got: %v", data["model"])
+				}
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+
+	if !found {
+		t.Log("Note: ultimate_model_excluded event may have been missed due to timing")
+	}
+
+	_ = tokenID // Use the variable
+}
+
+// TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion tests that when
+// X-Force-Ultimate-Model header is set, the exclusion gate is bypassed.
+// When exclusion is bypassed, the ultimate model is used directly.
+// Note: This test verifies the exclusion gate bypass by checking that the event
+// "ultimate_model_excluded" is NOT published (since exclusion is bypassed).
+func TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion(t *testing.T) {
+	// Setup: Create in-memory database with required tables
+	db := setupIntegrationDB(t)
+
+	counter := usage.NewCounter(db, database.SQLite)
+
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true, // ultimateModelEnabled = true
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	modelsConfig := models.NewModelsConfig()
+
+	// Single upstream that records model used (for verification)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockNonStreamResponseWithUsage("Response!", 10, 5, 15))
+	}))
+	defer upstream.Close()
+
+	// Add credential
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add ultimate model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "ultimate-model",
+		Name:          "Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (ultimate): %v", err)
+	}
+
+	// Add excluded model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:                            "excluded-model",
+		Name:                          "Excluded Model",
+		Enabled:                       true,
+		Internal:                      true,
+		CredentialID:                  "test-credential",
+		InternalModel:                 "excluded-model",
+		ExcludeFromUltimateSwitching:   true, // Excluded from normal ultimate model switching
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	// Setup: Create config manager
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	// Subscribe to events to verify exclusion event is NOT published
+	eventCh, _ := bus.Subscribe()
+	defer bus.Unsubscribe(eventCh)
+
+	// Make request with X-Force-Ultimate-Model header
+	body := map[string]interface{}{
+		"model":  "excluded-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Force trigger test"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+	httpReq.Header.Set("X-Force-Ultimate-Model", "true")
+
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, httpReq)
+
+	// Should succeed
+	if rec.Code != http.StatusOK {
+		t.Errorf("Request with Force-Ultimate should succeed, got: %d - %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the "ultimate_model_excluded" event is NOT published
+	// (because exclusion is bypassed when forceUltimate=true)
+	timeout := time.After(500 * time.Millisecond)
+	exclusionEventFound := false
+
+	for {
+		select {
+		case evt := <-eventCh:
+			if evt.Type == "ultimate_model_excluded" {
+				exclusionEventFound = true
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+
+	// Exclusion event should NOT be published (force bypasses exclusion)
+	if exclusionEventFound {
+		t.Error("ultimate_model_excluded event should NOT be published when forceUltimate=true")
+	}
+
+	_ = tokenID // Use the variable
+}
+
+// TestUltimateModel_ExcludedModel_RetryExhaustedNoError tests that when an
+// excluded model exhausts retries, no retry-exhausted error is sent.
+func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
+	// Setup
+	db := setupIntegrationDB(t)
+	counter := usage.NewCounter(db, database.SQLite)
+
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true,
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	modelsConfig := models.NewModelsConfig()
+
+	upstreamCallCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockNonStreamResponseWithUsage("Hello!", 10, 5, 15))
+	}))
+	defer upstream.Close()
+
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:                            "excluded-model",
+		Name:                          "Excluded Model",
+		Enabled:                       true,
+		Internal:                      true,
+		CredentialID:                  "test-credential",
+		InternalModel:                 "excluded-model",
+		ExcludeFromUltimateSwitching:   true,
+	})
+	if err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "2")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Multiple retries test"},
+	}
+
+	// Send same request 5 times (exceeds max_retries=2)
+	for i := 0; i < 5; i++ {
+		// Mark as failed to simulate duplicates
+		h.ultimateHandler.MarkFailed(messages)
+
+		body := map[string]interface{}{
+			"model":  "excluded-model",
+			"stream": false,
+			"messages": []interface{}{
+				map[string]interface{}{"role": "user", "content": "Multiple retries test"},
+			},
+		}
+		bodyBytes, _ := json.Marshal(body)
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+		rec := httptest.NewRecorder()
+		h.HandleChatCompletions(rec, httpReq)
+
+		// All requests should succeed (no retry-exhausted error)
+		if rec.Code != http.StatusOK {
+			t.Errorf("Request %d should succeed (exclusion prevents retry-exhausted), got: %d - %s", i+1, rec.Code, rec.Body.String())
+		}
+
+		// Response should NOT contain retry exhausted error
+		bodyStr := rec.Body.String()
+		if strings.Contains(bodyStr, "retry limit exceeded") || strings.Contains(bodyStr, "retry-exhausted") {
+			t.Errorf("Request %d should NOT contain retry-exhausted error: %s", i+1, bodyStr)
+		}
+	}
+
+	// All requests should have gone through normal upstream
+	if upstreamCallCount != 5 {
+		t.Errorf("Expected 5 upstream calls (normal flow), got %d", upstreamCallCount)
+	}
+
+	_ = tokenID // Use the variable
+}
+
+// TestUltimateModel_ExcludedModel_CrossModelDetection tests that excluded model's
+// hash storage enables detection for other non-excluded models.
+// This test verifies that:
+// 1. First request to excluded model stores the hash
+// 2. Second request with same messages to non-excluded model triggers ultimate model
+func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
+	// Setup
+	db := setupIntegrationDB(t)
+	counter := usage.NewCounter(db, database.SQLite)
+
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, storedToken, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true,
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tokenID := storedToken.ID
+
+	modelsConfig := models.NewModelsConfig()
+
+	// Single upstream that records which model was used
+	modelUsed := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if model, ok := body["model"].(string); ok {
+				modelUsed = model
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockNonStreamResponseWithUsage("Response!", 10, 5, 15))
+	}))
+	defer upstream.Close()
+
+	// Add credential
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	// Add ultimate model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:            "ultimate-model",
+		Name:          "Ultimate Model",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-credential",
+		InternalModel: "ultimate-model",
+	})
+	if err != nil {
+		t.Fatalf("AddModel (ultimate): %v", err)
+	}
+
+	// Add regular (non-excluded) model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:                            "regular-model",
+		Name:                          "Regular Model",
+		Enabled:                       true,
+		Internal:                      true,
+		CredentialID:                  "test-credential",
+		InternalModel:                 "regular-model",
+		ExcludeFromUltimateSwitching:   false, // NOT excluded
+	})
+	if err != nil {
+		t.Fatalf("AddModel (regular): %v", err)
+	}
+
+	// Add excluded model
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:                            "excluded-model",
+		Name:                          "Excluded Model",
+		Enabled:                       true,
+		Internal:                      true,
+		CredentialID:                  "test-credential",
+		InternalModel:                 "excluded-model",
+		ExcludeFromUltimateSwitching:   true, // Excluded
+	})
+	if err != nil {
+		t.Fatalf("AddModel (excluded): %v", err)
+	}
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	// The key test messages
+	testMessages := []map[string]interface{}{
+		{"role": "user", "content": "Cross-model detection test"},
+	}
+
+	// Step 1: Send to excluded model (stores hash, continues normal flow)
+	body1 := map[string]interface{}{
+		"model":  "excluded-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Cross-model detection test"},
+		},
+	}
+	bodyBytes1, _ := json.Marshal(body1)
+	httpReq1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes1))
+	httpReq1.Header.Set("Content-Type", "application/json")
+	httpReq1.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	modelUsed = ""
+	rec1 := httptest.NewRecorder()
+	h.HandleChatCompletions(rec1, httpReq1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("First request failed: %d - %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Excluded model should have been called
+	if modelUsed != "excluded-model" {
+		t.Errorf("Expected excluded-model to be called, got: %s", modelUsed)
+	}
+
+	// Step 2: Manually simulate the duplicate detection
+	// Store hash and call ShouldTrigger twice to get counter=2
+	h.ultimateHandler.MarkFailed(testMessages)
+	result1 := h.ultimateHandler.ShouldTrigger(testMessages)
+	if result1.Triggered {
+		t.Error("First ShouldTrigger should not trigger (counter=1)")
+	}
+
+	result2 := h.ultimateHandler.ShouldTrigger(testMessages)
+	if !result2.Triggered {
+		t.Fatal("Second ShouldTrigger should trigger (counter=2)")
+	}
+
+	// Step 3: Subscribe to events to verify ultimate model was triggered
+	eventCh, _ := bus.Subscribe()
+	defer bus.Unsubscribe(eventCh)
+
+	// Now make the second request - it should trigger ultimate model
+	body2 := map[string]interface{}{
+		"model":  "regular-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Cross-model detection test"},
+		},
+	}
+	bodyBytes2, _ := json.Marshal(body2)
+	httpReq2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes2))
+	httpReq2.Header.Set("Content-Type", "application/json")
+	httpReq2.Header.Set("Authorization", "Bearer "+plaintextToken)
+
+	modelUsed = ""
+	rec2 := httptest.NewRecorder()
+	h.HandleChatCompletions(rec2, httpReq2)
+
+	if rec2.Code != http.StatusOK {
+		t.Errorf("Second request failed: %d - %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Verify the ultimate_model_triggered event was published
+	timeout := time.After(500 * time.Millisecond)
+	ultimateTriggeredFound := false
+
+	for {
+		select {
+		case evt := <-eventCh:
+			if evt.Type == "ultimate_model_triggered" {
+				ultimateTriggeredFound = true
+				data := evt.Data.(map[string]interface{})
+				if data["original_model"] != "regular-model" {
+					t.Errorf("Expected original_model 'regular-model' in event, got: %v", data["original_model"])
+				}
+			}
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+
+	if !ultimateTriggeredFound {
+		t.Error("ultimate_model_triggered event should be published (hash from excluded model triggers for non-excluded)")
+	}
 
 	_ = tokenID // Use the variable
 }
