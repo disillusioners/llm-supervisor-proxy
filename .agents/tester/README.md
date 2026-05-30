@@ -46,7 +46,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | SQLite BUSY Fix | 2026-05-21 | ✅ PASS | 25/25 packages, 2698 tests, 7 new stress tests (670 lines), zero SQLITE_BUSY errors, branch `fix/sqlite-busy-usage-counter` |
 | MCP Accept Header Fix | 2026-05-21 | ✅ PASS | 27/27 packages, browser verified zai-web-read SUCCESS (not 400), commit `3729f5d` |
 | SQLite Usage Hang Fix | 2026-05-21 | ✅ PASS | 30/30 packages, concurrent reads test PASS, stress tests PASS, frontend PASS, commit `f5a1670`, branch `fix/sqlite-usage-hang` |
-| Exclude from Ultimate Switching | 2026-05-29 | ✅ PASS | 9/9 focused tests (5 unit + 4 integration), 27/27 packages regression, ensure.md 4/4 PASS |
+| Exclude from Ultimate Switching | 2026-05-30 | ✅ PASS | 27/27 packages, 9/9 feature tests, browser E2E ON+OFF persist verified, 2 quick fixes (9560db0, 4ccef35) |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
