@@ -121,6 +121,8 @@ export interface Model {
   peak_hour_end?: string;          // 'HH:MM' format
   peak_hour_timezone?: string;     // UTC offset string like '+7', '-5', '+5.5'
   peak_hour_model?: string;        // Alternative upstream model name
+  // Ultimate model exclusion
+  exclude_from_ultimate_switching?: boolean;
 }
 
 export interface ApiToken {
