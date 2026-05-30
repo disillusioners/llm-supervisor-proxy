@@ -39,12 +39,14 @@ type Model struct {
 	ReleaseStreamChunkDeadline models.Duration `json:"release_stream_chunk_deadline,omitempty"`
 	// Peak hour auto-switch fields
 	PeakHourEnabled  bool   `json:"peak_hour_enabled"`
-	PeakHourStart    string `json:"peak_hour_start"`
-	PeakHourEnd      string `json:"peak_hour_end"`
+	PeakHourStart   string `json:"peak_hour_start"`
+	PeakHourEnd     string `json:"peak_hour_end"`
 	PeakHourTimezone string `json:"peak_hour_timezone"`
-	PeakHourModel    string `json:"peak_hour_model"`
+	PeakHourModel   string `json:"peak_hour_model"`
 	// Secondary upstream model for retry logic
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
+	// Ultimate model exclusion
+	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -545,22 +547,23 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 		// Convert to models.ModelConfig and update
 		modelConfig := models.ModelConfig{
-			ID:                         updatedModel.ID,
-			Name:                       updatedModel.Name,
-			Enabled:                    updatedModel.Enabled,
-			FallbackChain:              updatedModel.FallbackChain,
-			TruncateParams:             updatedModel.TruncateParams,
-			Internal:                   updatedModel.Internal,
-			CredentialID:               updatedModel.CredentialID,
-			InternalBaseURL:            updatedModel.InternalBaseURL,
-			InternalModel:              updatedModel.InternalModel,
-			ReleaseStreamChunkDeadline: updatedModel.ReleaseStreamChunkDeadline,
-			PeakHourEnabled:            updatedModel.PeakHourEnabled,
-			PeakHourStart:              updatedModel.PeakHourStart,
-			PeakHourEnd:                updatedModel.PeakHourEnd,
-			PeakHourTimezone:           updatedModel.PeakHourTimezone,
-			PeakHourModel:              updatedModel.PeakHourModel,
-			SecondaryUpstreamModel:     updatedModel.SecondaryUpstreamModel,
+			ID:                           updatedModel.ID,
+			Name:                         updatedModel.Name,
+			Enabled:                      updatedModel.Enabled,
+			FallbackChain:                updatedModel.FallbackChain,
+			TruncateParams:               updatedModel.TruncateParams,
+			Internal:                     updatedModel.Internal,
+			CredentialID:                 updatedModel.CredentialID,
+			InternalBaseURL:              updatedModel.InternalBaseURL,
+			InternalModel:                updatedModel.InternalModel,
+			ReleaseStreamChunkDeadline:   updatedModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:              updatedModel.PeakHourEnabled,
+			PeakHourStart:                updatedModel.PeakHourStart,
+			PeakHourEnd:                  updatedModel.PeakHourEnd,
+			PeakHourTimezone:             updatedModel.PeakHourTimezone,
+			PeakHourModel:                updatedModel.PeakHourModel,
+			SecondaryUpstreamModel:       updatedModel.SecondaryUpstreamModel,
+			ExcludeFromUltimateSwitching: updatedModel.ExcludeFromUltimateSwitching,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
