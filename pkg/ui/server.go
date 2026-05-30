@@ -397,11 +397,12 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				PeakHourTimezone:           mc.PeakHourTimezone,
 				PeakHourModel:              mc.PeakHourModel,
 				SecondaryUpstreamModel:     mc.SecondaryUpstreamModel,
+				ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
 			}
-		}
+	}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(models)
 
 	case http.MethodPost:
 		// Limit request body to 64KB to prevent memory exhaustion attacks
@@ -465,10 +466,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			PeakHourEnd:                newModel.PeakHourEnd,
 			PeakHourTimezone:           newModel.PeakHourTimezone,
 			PeakHourModel:              newModel.PeakHourModel,
-			SecondaryUpstreamModel:     newModel.SecondaryUpstreamModel,
-		}
+		SecondaryUpstreamModel:       newModel.SecondaryUpstreamModel,
+		ExcludeFromUltimateSwitching: newModel.ExcludeFromUltimateSwitching,
+	}
 
-		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
+	if err := s.modelsConfig.AddModel(modelConfig); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
