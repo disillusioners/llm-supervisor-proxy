@@ -374,8 +374,10 @@ assert_contains "$OUTPUT7B" "error" "Second request: Ultimate model triggered (a
 echo -e "\n${YELLOW}[11/17] Test 8: Retry Limit Exhausted (Consecutive Failures)${NC}"
 echo -e "Expected: After 2 consecutive failures, 3rd attempt returns retry_exhausted error"
 
-# First: Request that will FAIL, creating the hash
-OUTPUT8A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+# curl --max-time 25 > MAX_GENERATION_TIME=20s (set at line 123) keeps curl alive long enough
+# to receive the proxy's error body rather than hanging up at the 5s default.
+# Test 8A: First request that will FAIL, creating the hash (mock returns 500 immediately)
+OUTPUT8A=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
@@ -385,8 +387,8 @@ OUTPUT8A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     }" 2>&1)
 assert_contains "$OUTPUT8A" "error" "First request: Error (hash created, retry 0)"
 
-# Second: Trigger ultimate model (retry 1/2) - will FAIL
-OUTPUT8B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+# Test 8B: Trigger ultimate model (retry 1/2) - will FAIL
+OUTPUT8B=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
@@ -396,8 +398,10 @@ OUTPUT8B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     }" 2>&1)
 assert_contains "$OUTPUT8B" "error" "Second request (retry 1/2): Error from ultimate model"
 
-# Third: Trigger ultimate model (retry 2/2) - will FAIL again
-OUTPUT8C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+# Test 8C: Trigger ultimate model (retry 2/2) - will FAIL again
+# The proxy's MAX_GENERATION_TIME=20s allows the error body to be written well after curl's default;
+# --max-time 25 > MAX_GENERATION_TIME keeps curl alive long enough to receive the error body.
+OUTPUT8C=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
@@ -407,8 +411,8 @@ OUTPUT8C=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
     }" 2>&1)
 assert_contains "$OUTPUT8C" "error" "Third request (retry 2/2): Error from ultimate model"
 
-# Fourth: Trigger ultimate model (retry 3 > 2) - should FAIL with RETRY EXHAUSTED error
-OUTPUT8D=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+# Test 8D: Trigger ultimate model (retry 3 > 2) - should FAIL with RETRY EXHAUSTED error
+OUTPUT8D=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
