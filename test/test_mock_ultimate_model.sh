@@ -47,6 +47,7 @@ TESTS_FAILED=0
 HARD_TIMEOUT=75
 
 cleanup_all() {
+    local exit_code=$?
     echo -e "\n${YELLOW}Cleaning up all processes...${NC}"
     if [ ! -z "$TIMER_PID" ]; then
         kill $TIMER_PID 2>/dev/null || true
@@ -62,6 +63,7 @@ cleanup_all() {
     lsof -ti :$MOCK_PORT | xargs kill -9 2>/dev/null || true
     lsof -ti :$PROXY_PORT | xargs kill -9 2>/dev/null || true
     wait 2>/dev/null || true
+    return "$exit_code"
 }
 trap cleanup_all EXIT
 
