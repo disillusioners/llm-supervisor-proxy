@@ -450,6 +450,10 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 				if toolCallID, ok := msg["tool_call_id"].(string); ok {
 					chatMsg.ToolCallID = toolCallID
 				}
+				// Handle reasoning_content for DeepSeek R1-style thinking models
+				if reasoningContent, ok := msg["reasoning_content"].(string); ok {
+					chatMsg.ReasoningContent = reasoningContent
+				}
 				// Debug log for tool role messages to diagnose MiniMax compatibility issues
 				if chatMsg.Role == "tool" {
 					if chatMsg.ToolCallID == "" {

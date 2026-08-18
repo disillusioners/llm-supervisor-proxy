@@ -576,6 +576,115 @@ func TestConvertRequest_ToolCallsInMessages(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ReasoningContent(t *testing.T) {
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	// Case 1: single assistant message with reasoning_content — must survive conversion.
+	body := map[string]interface{}{
+		"model": "deepseek-r1",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":              "assistant",
+				"content":           "The answer is 42.",
+				"reasoning_content": "Let me think about this step by step...",
+			},
+		},
+	}
+
+	req, err := h.convertRequest(body)
+	if err != nil {
+		t.Fatalf("convertRequest failed: %v", err)
+	}
+
+	if len(req.Messages) != 1 {
+		t.Fatalf("Messages count = %d, want 1", len(req.Messages))
+	}
+
+	if got, want := req.Messages[0].ReasoningContent, "Let me think about this step by step..."; got != want {
+		t.Errorf("Messages[0].ReasoningContent = %q, want %q", got, want)
+	}
+
+	// Case 2: multi-message request where reasoning_content lives on the second message.
+	body = map[string]interface{}{
+		"model": "deepseek-r1",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": "What is 2+2?",
+			},
+			map[string]interface{}{
+				"role":              "assistant",
+				"content":           "4",
+				"reasoning_content": "I need to add 2 and 2 together.",
+			},
+		},
+	}
+
+	req, err = h.convertRequest(body)
+	if err != nil {
+		t.Fatalf("convertRequest failed: %v", err)
+	}
+
+	if len(req.Messages) != 2 {
+		t.Fatalf("Messages count = %d, want 2", len(req.Messages))
+	}
+
+	if got, want := req.Messages[1].ReasoningContent, "I need to add 2 and 2 together."; got != want {
+		t.Errorf("Messages[1].ReasoningContent = %q, want %q", got, want)
+	}
+
+	// Case 3: message without reasoning_content must yield an empty string (no panic, no leak).
+	body = map[string]interface{}{
+		"model": "gpt-4",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":    "user",
+				"content": "Hello",
+			},
+		},
+	}
+
+	req, err = h.convertRequest(body)
+	if err != nil {
+		t.Fatalf("convertRequest failed: %v", err)
+	}
+
+	if len(req.Messages) != 1 {
+		t.Fatalf("Messages count = %d, want 1", len(req.Messages))
+	}
+
+	if got := req.Messages[0].ReasoningContent; got != "" {
+		t.Errorf("Messages[0].ReasoningContent = %q, want empty", got)
+	}
+
+	// Case 4: empty reasoning_content should be preserved as-is (no defaulting to non-empty).
+	body = map[string]interface{}{
+		"model": "deepseek-r1",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":              "assistant",
+				"content":           "Answer",
+				"reasoning_content": "",
+			},
+		},
+	}
+
+	req, err = h.convertRequest(body)
+	if err != nil {
+		t.Fatalf("convertRequest failed: %v", err)
+	}
+
+	if len(req.Messages) != 1 {
+		t.Fatalf("Messages count = %d, want 1", len(req.Messages))
+	}
+
+	if got := req.Messages[0].ReasoningContent; got != "" {
+		t.Errorf("Messages[0].ReasoningContent = %q, want empty", got)
+	}
+}
+
 func TestConvertRequest_ToolChoice(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
