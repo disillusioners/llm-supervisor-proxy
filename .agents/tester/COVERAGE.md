@@ -31,7 +31,8 @@
 | **UI Handlers** | `pkg/ui/handlers_usage_test.go` | ~34 | ✅ PASS |
 | **Ultimate Model** | `pkg/ultimatemodel/handler_test.go`, `pkg/ultimatemodel/usage_test.go`, `pkg/ultimatemodel/hash_cache_test.go` | ~60 | ✅ PASS |
 | **Ultimate Model External** | `pkg/ultimatemodel/handler_external_test.go` | **~27** | ✅ PASS |
-| **Ultimate Model Internal** | `pkg/ultimatemodel/handler_internal_test.go` | **~27** | ✅ PASS |
+| **Ultimate Model Internal** | `pkg/ultimatemodel/handler_internal_test.go` | **~28** | ✅ PASS |
+| **E2E Ultimate-Internal Reasoning** | `test/e2e_ultimate_internal_reasoning/` | 1 (multi-assert) | ✅ PASS (new 2026-08-18, commit `c3a4b35`) |
 | Usage Counter | `pkg/usage/counter_test.go` | ~10 | ✅ PASS |
 | **Total** | | **~819** | |
 
@@ -45,7 +46,7 @@
 | **NEW: handler_internal_test.go** | 897 lines, ~27 tests for internal upstream streaming/non-streaming |
 | **NEW: strategies_test.go** | 407 lines, ~30 tests for tool repair strategies, fixer, schema validation |
 
-### Coverage Gaps (Remaining)
+## Coverage Gaps (Remaining)
 
 | Gap | Risk | Recommendation |
 |-----|------|----------------|
@@ -59,6 +60,11 @@
 
 | Date | Commit | Description |
 |------|--------|-------------|
+| 2026-08-18 | `2f67976` | Ultimate model harness: EXIT-trap exit-code masking (`wait \|\| true` overwrote exit 1) |
+| 2026-08-18 | `d1028be` | Ultimate model harness Test 8: curl `--max-time` 5→25 (> MAX_GENERATION_TIME=20s); pack 47/48→48/48 |
 | 2026-04-06 | `3f5e761` | Fixed go vet errors in handler_external_test.go (resp used before err check) |
+| 2026-03-31 | `5881e6e` | Removed unused imports in handlers_usage.go |
+| 2026-03-31 | `4b1c3ad` | Fixed race condition in counting_hooks_test.go |
+| `3f5e761` | Fixed go vet errors in handler_external_test.go (resp used before err check) |
 | 2026-03-31 | `5881e6e` | Removed unused imports in handlers_usage.go |
 | 2026-03-31 | `4b1c3ad` | Fixed race condition in counting_hooks_test.go |
