@@ -122,3 +122,114 @@ Fix under test: `pkg/ultimatemodel/handler_internal.go` convertRequest (commit 8
 - **Quick Fixes**: env `ULTIMATE_MODEL_MAX_RETRIES` set to `0` so the
   force-trigger fires immediately (default `MaxRetries=2` requires newCount>=2).
 - **Report**: RESULTS/2026-08-18-reasoning-content-ultimate-internal.md
+
+
+---
+
+# Mock Test: MiniMax reasoning_details Shell Harness (P3-4)
+
+### Metadata
+- **Created**: 2026-08-19
+- **Script**: `test/test_mock_minimax_reasoning.sh` (to be created)
+- **Mock server**: `test/mock_llm_minimax_reasoning.go` (Go, per project mock convention — NOT Python)
+- **Language**: Go mock + Bash harness
+- **Status**: ACTIVE (executed 2026-08-19 — see Last Run)
+
+### Configuration
+- **Timeout**: 90s internal (alarm trap) / `timeout 300` outer wrapper
+- **Mock Port**: 4005 (harness-fixed, next pair after 4003/4324; verified free)
+- **Proxy Port**: 4325 (harness-fixed; verified free)
+- **Cleanup**: `source test/test_mock_clean_ports.sh` + `clean_ports 4005 4325`; EXIT trap kills PIDs; **NEVER touch port 8088**
+
+### What It Tests
+Real-process E2E of the `x-proxy-interleaved-thinking` translation feature against a capturing
+mock MiniMax upstream: request-direction translation (reasoning_content → reasoning_details +
+reasoning_split), response-direction translation (non-stream + SSE, incremental AND cumulative),
+flag-absent legacy passthrough, header hygiene on external paths, non-MiniMax inertness,
+error path, usage passthrough, ultimate-path trigger via duplicate-hash retry.
+
+### Mock Services Required
+- Single MiniMax-shaped mock upstream (Go): OpenAI-compatible `/v1/chat/completions`;
+  mode selected by marker in last user message (MODE-NS-DETAILS, MODE-NS-BOTH,
+  MODE-STREAM-INCREMENTAL, MODE-STREAM-CUMULATIVE, MODE-STREAM-BOTH, MODE-EMPTY-TEXT,
+  MODE-MULTI-ENTRY, MODE-PLAIN, MODE-ERROR-500); captures every request (headers + body)
+  to JSONL file for shell assertions.
+
+### Credential / Model Setup (admin API)
+- Credential: `{"id":"mock-minimax-reasoning-cred","provider":"minimax","api_key":"mock-api-key","base_url":"http://localhost:4005/v1"}`
+- Non-MiniMax credential (inertness case): provider `openai`, same shape
+- Models: internal=true, `internal_model`, `internal_base_url` → mock; ultimate model via `ULTIMATE_MODEL_ID` + duplicate-hash retry trigger
+
+### Test Scenarios (target ≥ 14 assertions)
+1. Boot sanity
+2. NS details → client reasoning_content concat, no details leak
+3. Captured upstream req: reasoning_details shape + reasoning_content stripped + reasoning_split:true + monotonic ids
+4. NS both (details+content) → single winner, exactly once
+5. Stream incremental → ordered deltas, valid SSE framing, `data: [DONE]`
+6. Stream cumulative → suffix emission, no duplication
+7. Stream both → single winner
+8. Empty-text entry → no empty delta (H7)
+9. Multi-entry chunk → ordered deltas
+10. Flag absent + MODE-PLAIN → legacy passthrough (captured upstream un-translated, no reasoning_split)
+11. Header hygiene: zero `x-proxy-interleaved-thinking` (any case) in captured upstream headers — race-external AND ultimate-external
+12. Non-MiniMax cred + flag ON → no translation
+13. MODE-ERROR-500 → clean client error, no reasoning leakage
+14. usage passthrough on translated path
+15. Ultimate-path duplicate-hash trigger → translated ultimate upstream request
+
+### Success Criteria
+- [ ] `bash test/test_mock_minimax_reasoning.sh` exits 0 under `timeout 300`
+- [ ] All scenarios PASS with capture-based evidence
+- [ ] Ports freed; no process leaks
+
+### Last Run
+- **Date**: 2026-08-19
+- **Result**: **PASS 53/53** (2026-08-19 final; initial run 47/53 exposed the T3b race-internal product bug — translator writes `[]any{Struct}` but `HydrateReasoningDetails` type-asserted to `map[string]interface{}` → silent empty slice → `omitempty` dropped the wire field. Fixed at hydrate boundary: `068317c`; index-omitempty assertion repaired: `1344380`. Full evidence: `.agents/tester/RESULTS/2026-08-19-minimax-reasoning-details-p3-4.md`)
+- **Session**: worker (MiniMax-M3)
+- **Quick Fixes**: bash heredoc terminator could not have trailing args — switched helpers to env-var passing; mock mode extractor switched to prefix-match (MODE-* in content) so T3/T3b share `MODE-NS-DETAILS` semantics with distinct content suffixes; assertion patterns updated for Go marshaling space (`"key": value` not `"key":value`)
+- **Report**: RESULTS/2026-08-19-minimax-reasoning-details-p3-4.md
+
+---
+
+# Mock Test: MiniMax reasoning_details Go E2E Suite (P3-5)
+
+### Metadata
+- **Created**: 2026-08-19
+- **Script**: `test/e2e_minimax_reasoning/e2e_minimax_reasoning_test.go` (to be created)
+- **Language**: Go, in-process (mirrors `test/e2e_ultimate_internal_reasoning/`)
+- **Status**: PLANNED
+
+### Configuration
+- **Timeout**: `go test -timeout 240s` internal / `timeout 300` outer
+- **Ports**: none fixed — `httptest.NewServer` ephemeral loopback
+- **Cleanup**: `t.Cleanup` + httptest auto-reap
+
+### What It Tests
+All 4 proxy paths (race-internal, race-external, ultimate-internal, ultimate-external) × request/response × stream/non-stream translation behavior, flag quadrants, header hygiene, credential gate, error path, drift counter.
+
+### Key mechanics (from recon @ d5280ce)
+- Ultimate paths: `t.Setenv ULTIMATE_MODEL_ID/MAX_HASH/MAX_RETRIES` + token with `ultimateModelEnabled=true` + `X-Force-Ultimate-Model: true`
+- Race paths: plain token, model `Internal` true/false + `credential_id` → minimax cred
+- Gate: `interleaved && provider=="minimax"` (case-insensitive) at race_executor.go:173/244/939/1221, ultimamodel handler_internal.go:88, handler_external.go:99/171/289
+- Response on internal paths: typed extraction in pkg/providers/openai.go (NOT translator)
+- Drift counter: `translator.FormatDriftCount()` — suite must leave delta == 0
+
+### Test Scenarios (14 groups)
+S1/S2 request translation (race-ext, ult-ext) · S3 typed internal request paths (+negative nil) ·
+S4 NS response external (concat, strip details/audio/name, Q2 both-modes single-winner) ·
+S5 NS response internal (typed extraction) · S6 stream external (incremental+cumulative+multi-entry+H7+H2+[DONE]) ·
+S7 stream internal (thinking events) · S8 flag-absent all 4 paths (legacy identity) ·
+S9 non-MiniMax + flag ON all 4 paths · S10 credential gate (no cred → inert) ·
+S11 error 500 (clean error, no leakage) · S12 usage preservation · S13 drift counter delta==0 ·
+S14 header-value table at integration level (true/1 activate; True/TRUE/false/no/garbage/absent legacy)
+
+### Success Criteria
+- [ ] All scenarios PASS under dual-layer timeout
+- [ ] Captured-upstream assertions slot-precise; client-view assertions leak-free
+- [ ] Commit `test: ...`
+
+### Last Run
+- **Date**: 2026-08-19 · **Worker Instance**: e7e6551c
+- **Result**: **PASS 43/43 subtests** (4.7s; suite commit `166aa7f`; S3 id-parity product fix `b2dfde0` landed after the suite caught the divergence — 42/43 → 43/43)
+- **Quick Fixes**: S3 ultimate-internal monotonic id counter (fix `b2dfde0`); no test expectations changed (no prior test asserted id scheme)
+- **Report**: RESULTS/2026-08-19-minimax-reasoning-details-e2e-gate.md

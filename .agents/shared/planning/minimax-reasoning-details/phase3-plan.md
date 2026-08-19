@@ -1,0 +1,93 @@
+# Phase 3: Tests & E2E
+
+## Objective
+
+Verify the MiniMax reasoning translation feature end-to-end:
+1. Unit tests per translator function — including byte-identical negative cases (R1, Invariants #1-#6) on all 4 paths × both sides (request + response).
+2. E2E mock-MiniMax harness following the `test/test_mock_ultimate_model.sh` pattern, with `reasoning_details` and `reasoning_content` coverage.
+3. Drift trap regression test ensuring all mutations funnel through the translator (R2).
+4. Verification report documenting live MiniMax wire-format observation (Q1, R9) and any deferred decisions.
+
+---
+
+## Prerequisites
+
+- Phase 1 + Phase 2 complete and merged.
+- Translator module (`pkg/proxy/translator/minimax.go` + `minimax_stream.go`) stable.
+- All 4 paths wired with provider gate.
+- Test infrastructure in place: `test/test_mock_ultimate_model.sh` (mock-server harness pattern), `test/e2e_ultimate_internal_reasoning/` (e2e Go test pattern), Go table-driven unit tests in `pkg/proxy/translator/translator_test.go` (Anthropic precedent).
+
+---
+
+## Tasks
+
+| # | Task | Depends On | Acceptance |
+|---|------|------------|------------|
+| **P3-1** | Translator unit tests in `pkg/proxy/translator/minimax_test.go`. Table-driven per Anthropic pattern (`translator_test.go`). Coverage: (a) `TranslateRequestBytes` end-to-end happy path — `reasoning_content` per message maps to `reasoning_details` array AND top-level `reasoning_split: true` is injected, in the documented order (messages first, then split); (b) `TranslateRequestBody` + `TranslateMessagesReasoning` + `InjectReasoningSplit` map-core variants — string→array round-trip with expected `type:"reasoning.text"`, `id:"reasoning-text-<n>"`, `format:"MiniMax-response-v1"`, `index:0`, `text:<string>`; original `reasoning_content` field stripped from output; multi-message input produces monotonic `id` counters (`reasoning-text-1`, `reasoning-text-2`, ...); empty-string `reasoning_content` left as-is (NOT stripped, NOT mapped to empty array); absent `reasoning_content` field left untouched; **empty-input no-op (suggestion):** empty messages array → no-op, no error; invalid `messages` shape returns wrapped error with original map unmutated; no-flag byte-identical negative case (translator NOT invoked at the call-site when flag is off — complement to P1-9's non-MiniMax gate case); (c) `TranslateNonStreamResponseBody` + `TranslateNonStreamResponseBytes` response variants — happy + H2 dedup (`strings.Index` skip on existing `reasoning_content` containment) + H7 empty-text skip + unknown-type handling + non-MiniMax-shape passthrough; (d) `StreamTranslator.ChunkBytes` — single entry, multi-entry array order, empty-text skip (H7), H2 dedup against `state.lastIssued[choiceIdx]`, cumulative-mode suffix emission, stateless-mode passthrough, missing-`reasoning_details` byte-identical, **chunk parse failure → passthrough `(line, nil, nil)`** (§6.4), mid-stream v1→v2 logs WARN + continues + drift counter increments (§6.4), **input contract test (W9):** line WITH `data: ` prefix passes through cleanly after prefix-strip; (e) `extractEntryText` (P2-9) — `text` first, `content` fallback, `""` when both absent; (f) `formatDriftCounter` (P2-9) — increments on unknown format, sampled WARN emitted, no double-increment; (g) `StreamTranslator` constructor + lifetime — `NewStreamTranslator()` returns non-nil with non-nil `lastIssued` map; **no `Reset()` method** (compile-time check); per-stream-lifetime guard asserts fresh instance per request; (h) **W10 — idempotence test:** invoke `TranslateRequestBytes` (or `ChunkBytes`) on its own output; second invocation produces identical bytes to first (`f(f(x)) == f(x)`); (i) **W11 — empty-`[]` round-trip test:** non-MiniMax input carrying `reasoning_details: []` (empty array, NOT absent) round-trips byte-identical; `omitempty` does NOT drop empty arrays. **Refs to P3-3 AST test marked deferred where P1-2 / P2-3 acceptance references it (the AST test cannot pass until P3-3 lands).** | Phase 1 + Phase 2 | All table entries pass; `go test -count=1 ./pkg/proxy/translator/...` is green; openai.go extraction tests (D2) live in `pkg/providers/openai_test.go` (separate file) |
+| **P3-2** | **Byte-identical negative-case tests** (R1, Invariants #1-#6). For each of the 4 paths × 3 negative conditions (no flag, non-MiniMax provider, both), assert outbound **body** bytes equal baseline AND outbound **headers** to mock upstream contain NO `x-proxy-interleaved-thinking` keys (D4 — narrow strip on BOTH external paths at `handler_external.go:79-87` AND `race_executor.go:163-166`; the existing general `x-llmproxy-*` strip at race-ext is unchanged). **W8 — `usage` field preservation:** gated-off paths' response (non-stream + stream) preserves the upstream `usage` field byte-identical to baseline. Use mock credential `cred.Provider="openai"` for non-MiniMax; use empty header for no-flag. **12 body assertions per side × 2 sides = 24 body assertions; plus 4 path × 1 (header-strip) = 4 header assertions; plus 4 path × 1 (usage preservation) = 4 usage assertions (W8).** Path coverage: race-external (`race_executor.go:790-853` non-stream + `:1025-...` stream); race-internal (`race_executor.go:254-323` non-stream + `:326-636` stream); ultimate-internal (`handler_internal.go:56-107` non-stream + `:109-379` stream); ultimate-external (`handler_external.go:114-149` non-stream + `:182-314` stream — strictest invariant on the verbatim paths). The ultim-ext sites test that the gate short-circuits BEFORE any parse/marshal (H5): any re-marshal "for symmetry" on the gated-off path fails these tests because Go map iteration is non-deterministic and `json.Marshal(map)` alphabetizes. | Phase 1 + Phase 2 | 100% of negative-case body assertions pass; 100% of header assertions pass (zero `x-proxy-interleaved-thinking` keys on both external paths); 100% of `usage` preservation assertions pass (W8); `git diff` between pre-feature and post-feature bytes is empty for negative cases |
+| **P3-3** | **Drift trap regression test (R2)** — **Go AST-based test** (architecture §5.6, H10), deterministic, CI-portable. In `pkg/proxy/translator/drift_trap_test.go`, use `go/parser` to parse `race_executor.go`, `internal_handler.go`, `handler_internal.go`, `handler_external.go`. **Per suggestion — narrow target:** walk the AST for `*ast.CompositeLit` whose `Type` matches `&translator.ReasoningDetail{...}` (composite literals only); assert the enclosing `*ast.File` is `minimax.go` or `minimax_stream.go`. Inline field mutation outside the translator module fails the test. Mechanism: pure Go test (no subprocess, no git dependency); runs on `go test ./pkg/proxy/translator/...`. **Optional belt-and-suspenders:** keep the prior `git grep` pattern as a Makefile target for local use (not blocking). **Per suggestion — P1-2 / P2-3 acceptance refs to this test marked DEFERRED** (they cannot pass until P3-3 lands). | Phase 1 + Phase 2 | Test fails CI if any `&translator.ReasoningDetail{...}` composite literal re-appears at a call site outside the translator module; AST walk is deterministic and CI-portable (H10); narrow scope = fewer false positives than broader targets |
+| **P3-4** | **Mock MiniMax upstream harness** at `test/test_mock_minimax_reasoning.sh`. Mirrors `test/test_mock_ultimate_model.sh` structure: bash script that boots a Python mock server implementing OpenAI-compatible endpoints, with the addition of `reasoning_details` array emission on response (non-stream + SSE stream). Mock must support two modes: (i) emit `reasoning_details` array alongside `reasoning_content` (the Q2 "yes" case); (ii) emit `reasoning_details` array without `reasoning_content` (the Q2 "no" case). Both modes tested. | Phase 2 stable | Script runs locally; mock emits wire-format-faithful responses for both modes; `bash test/test_mock_minimax_reasoning.sh` exits 0 |
+| **P3-5** | **E2E Go test** at `test/e2e_minimax_reasoning/e2e_minimax_reasoning_test.go` mirroring `test/e2e_ultimate_internal_reasoning/e2e_ultimate_internal_reasoning_test.go`. Coverage: (a) request body carries `reasoning_split: true` at top level AND `messages[i].reasoning_content` strings are mapped to `messages[i].reasoning_details = [{type:"reasoning.text", id:"reasoning-text-<n>", format:"MiniMax-response-v1", index:0, text:<string>}]` with monotonic `id` counters, original `reasoning_content` stripped (assert via captured outbound body). **D1 — per-path assertions for typed `ReasoningSplit *bool` on internal paths:** race-internal + ultimate-internal mock captures outbound body via the OpenAI client marshaller; assert `reasoning_split == true` is present at the JSON top level. Negative-case: non-MiniMax credential ⇒ `ReasoningSplit` is `nil` and the field is absent from the wire. (b) non-stream response with `reasoning_details` array translates to `reasoning_content` string with no `reasoning_details` leak — **also verify H2 single-winner rule (D2):** when mock emits BOTH `reasoning_details` and `reasoning_content` (mode i) with the same text, client sees the string exactly once (consistent outcome across both path families); (c) stream SSE response with `reasoning_details` deltas translates to per-entry `reasoning_content` deltas in array order — **also verify H2 dedup on stream chunks**; (d) per-entry ordering preserved when multiple entries in one upstream chunk; (e) tool-call / reasoning interleaving preserves order (external paths: translator before tool-call buffer per W3; internal paths: openai.go emits thinking events, case "thinking" consumer unchanged); (f) empty `text` in `reasoning_details` skipped (H7) — assert NO empty `reasoning_content=""` delta appears in the stream; (g) non-MiniMax mock returns `reasoning_content` directly via `case "thinking"` path (unchanged from today); (h) flag absent returns response unchanged; (i) `reasoning_content` absent from request ⇒ message left untouched (no empty `reasoning_details` array added); (j) **outbound headers to mock upstream contain NO `x-proxy-interleaved-thinking` keys** (D4 critical — narrow strip on BOTH external paths); (k) **fresh `StreamTranslator` instance per external-path request** (per-stream-lifetime guard) — assert by reading the trace that `NewStreamTranslator()` is called at external stream-loop entry, NOT shared across requests. **D3 — credential-derived gate on ultimate-external:** ultimate-external with `modelCfg.CredentialID` set to a `cred.Provider` that matches `factory.ProviderMiniMax` (case-insensitive via `strings.ToLower`) ⇒ gate fires; with `CredentialID` set to a `Provider == "openai"` credential ⇒ gate does not fire (byte-identical). **D3 fixture:** a test fixture attaches a `Provider` matching `factory.ProviderMiniMax` to the ultimate external model. Canonical reference: `pkg/providers/factory.go:17`. | Phase 2 + P3-4 (mock harness) | `go test -count=1 ./test/e2e_minimax_reasoning/...` is green; all 11+ scenarios pass; **D1 typed `ReasoningSplit *bool` propagation verified on both internal paths**; **D3 credential-derived gate verified on ultimate-external in all four combinations** |
+| **P3-6** | **Verification report** at `.agents/shared/planning/minimax-reasoning-details/verification-report.md`. Document: (a) AST drift-trap check pass/fail (P3-3); (b) unit test summary (counts); (c) e2e test summary; (d) live MiniMax wire-format observation (Q1, R9) — was `reasoning_details.text` incremental or cumulative on stream?; (e) post-merge acceptance gate results for Q2, Q4; (f) **observed `reasoning_details` format value(s)** seen in the wild — feeds the registered version set in P2-9's `formatDriftCounter`; (g) **drift-counter baseline** (pre-production sample of `formatDriftCounter.Load()`); (h) any deviations from this plan, with rationale; (i) known follow-ups (Q9 admin gating, Q10 dormant converter cleanup, future Anthropic thinking-block translation, **A+B converter unification as post-merge parallel PR per §5.6**). | Phase 1 + Phase 2 + P3-1..P3-5 | Report file exists, all sections filled, signed off by reviewer |
+| **P3-7** | **Header value normalization coverage** (R8). Unit test in `pkg/proxy/handler_test.go` (or a new file) that exercises `X-Proxy-Interleaved-Thinking` with: `"true"` → on, `"1"` → on, `"True"` → off, `"TRUE"` → off, `"yes"` → off, `""` → off, missing → off. Mirror the precedent test for `X-Force-Ultimate-Model` if it exists; if not, add coverage for both flags together. | Phase 1 P1-5 | All 7 cases match `handler.go:465` semantics; test asserts exact match to precedent |
+
+---
+
+## Coupling
+
+- **Depends on Phase 1 + Phase 2** — every test in P3 exercises an artifact built in those phases.
+- **Independent of** future phases.
+
+---
+
+## Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Mock server drift from real MiniMax wire format | Medium | Mock implements BOTH Q2 modes (with/without `reasoning_content` alongside); live MiniMax call validates final shape post-merge |
+| Negative-case test fragility — byte-level equality breaks on unrelated refactors | Medium | Pin the test to the specific code under test; if an unrelated refactor changes bytes, the test should be updated with the refactor (not bypassed); document the invariant |
+| Drift trap test relies on `git grep` — CI without git history fails | Low | Fallback: a static AST check or a code-review checklist; document both mechanisms |
+| Live MiniMax call requires credentials | Low | Verification report P3-6 lists credentials requirement; if unavailable, document as "verification deferred" with rationale |
+| E2E test depends on mock harness running in CI | Medium | Mirror `test/test_mock_ultimate_model.sh` CI integration; if mock harness is local-only, document and add CI integration in P3-4 |
+| Stream chunk fixture data fails to cover edge cases (empty text, multiple entries, cumulative detection) | Low | P3-1 covers all edge cases at translator unit-test level; P3-5 covers integration; coverage matrix documented in verification report |
+
+---
+
+## Exit Criterion
+
+Phase 3 is DONE when **all** of the following hold simultaneously:
+
+1. `go test -count=1 ./...` is fully green — all unit tests + e2e tests pass.
+2. `bash test/test_mock_minimax_reasoning.sh` exits 0.
+3. `git grep` drift trap test (P3-3) passes — no inline mutations at the four call sites.
+4. Negative-case byte-identical assertions (P3-2) pass — 100% match for 12 conditions per side × 2 sides.
+5. Header value normalization test (P3-7) passes — 7 cases match precedent semantics.
+6. Verification report (P3-6) is written, reviewed, and merged.
+7. Live MiniMax wire-format observation is recorded (or explicitly deferred with rationale) in the verification report.
+
+Phase 3 completion marks the feature complete per the Objective sentence in `plan-overview.md`.
+
+---
+
+## Amendment Log (Round 2)
+
+| ID | Change | Anchor | Review item |
+|----|--------|--------|-------------|
+| AM-01 | P3-1: typed variant tests removed (D2 — internal paths extract in openai.go, not the translator). `TranslateNonStreamResponseTyped` is NOT in the API. | D2 | B2 |
+| AM-02 | P3-1 (suggestion): empty-input no-op test added — empty messages array → no-op, no error. | suggestion | suggestion |
+| AM-03 | P3-1 (W10): idempotence test added — `f(f(x)) == f(x)` for `TranslateRequestBytes` and `ChunkBytes`. | W10 | W10 |
+| AM-04 | P3-1 (W11): empty-`[]` round-trip test added — non-MiniMax path preserves `reasoning_details: []` exactly; `omitempty` does NOT drop empty arrays. | W11 | W11 |
+| AM-05 | P3-1 (W9): input contract test added — line WITH `data: ` prefix passes through cleanly after prefix-strip. | W9 | W9 |
+| AM-06 | P3-1 (D2): openai.go extraction tests added — stream parser emits `thinking` per entry; non-stream populates `ReasoningContent` and clears `ReasoningDetails`; single-winner rule applied at extraction. | D2 | B2, W2 |
+| AM-07 | P3-2 (D4): header assertion narrowed to zero `x-proxy-interleaved-thinking` keys on BOTH external paths (was: general `x-proxy-*` / `x-llmproxy-*`). | D4 | B4, W7 |
+| AM-08 | P3-2 (W8): `usage` field preservation criterion added — gated-off paths preserve `usage` byte-identical. | W8 | W8 |
+| AM-09 | P3-3 (suggestion): AST test scope narrowed to `&translator.ReasoningDetail{...}` composite literals only (deterministic; fewer false positives than broader targets). | suggestion | suggestion |
+| AM-10 | P3-3 (suggestion): P1-2 / P2-3 acceptance refs to this test marked **deferred** — they cannot pass until P3-3 lands. | suggestion | suggestion |
+| AM-11 | P3-5 (D1): per-path assertions for typed `ReasoningSplit *bool` on internal paths (race-internal + ultimate-internal) added; negative-case for non-MiniMax credential verifies `ReasoningSplit` is `nil`. | D1 | D1 |
+| AM-12 | P3-5 (D2): H2 single-winner rule assertion added (consistent outcome across both path families). | D2 | W2 |
+| AM-13 | P3-5 (W3): tool-call / reasoning interleaving order documented per W3 — external paths: translator before tool-call buffer; internal paths: openai.go → `case "thinking"` consumer unchanged. | W3 | W3 |
+| AM-14 | P3-5 (D3): credential-derived gate assertion added for ultimate-external — all four combinations (set/unset × minimax/openai). D3 fixture attaches `Provider == "minimax"` credential. | D3 | B5, W1 |
+| AM-15 | P3-5 (D4): outbound header assertion scoped to BOTH external paths for `x-proxy-interleaved-thinking` only (was: ultim-ext only). | D4 | D4 |
+| AM-R3 (R3 layering decision) | No behavioral change to Phase 3. The R3 layering decision (option b: openai.go → translator helper-only import, with `// extractEntryText is a helper-only import ...` comment at the import site) is recorded here for cross-phase traceability. P3-1's openai.go extraction tests (test file `pkg/providers/openai_test.go`, separate from translator tests) verify the helper import compiles and the wrong-layer guard holds. | R3 | R3 layering |
+| AM-R2-D5 (R2-residual D5) | P3-1 openai.go extraction tests gain coverage for the codified single-winner order: feed upstream payload with `reasoning_details` AND `reasoning_content` simultaneously; assert extracted `ReasoningContent` equals `reasoning_details[0].text` (NOT the `reasoning_content` value), confirming "check `reasoning_details` FIRST" order. | R2-residual D5 | D2 locus |
+| AM-06 (ride-alongs) | **AST drift-trap scope:** verified P3-3 already aligned with the per-suggestion narrow target on `&translator.ReasoningDetail{...}` composite literals (deferred until P3-3 lands per AM-10). **No edit needed.** | R3 ride-alongs | provider-constant + citation |

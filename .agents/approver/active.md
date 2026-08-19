@@ -1,5 +1,5 @@
-Current Plan: MCP Endpoint Split
-Tracking File: mcp-endpoint-split-tracking.md
-Iteration: 002
+Current Plan: MiniMax reasoning_details translation
+Tracking File: minimax-reasoning-details-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-05-21 12:27
+Last Updated: 2026-08-19 14:07

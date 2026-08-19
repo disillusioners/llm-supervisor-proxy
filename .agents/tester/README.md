@@ -48,6 +48,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 | SQLite Usage Hang Fix | 2026-05-21 | ✅ PASS | 30/30 packages, concurrent reads test PASS, stress tests PASS, frontend PASS, commit `f5a1670`, branch `fix/sqlite-usage-hang` |
 | Exclude from Ultimate Switching | 2026-05-30 | ✅ PASS | 27/27 packages, 9/9 feature tests, browser E2E ON+OFF persist verified, 2 quick fixes (9560db0, 4ccef35) |
 | Reasoning Content Ultimate-Internal (verify 83814b0) | 2026-08-18 | ✅ PASS | Symptom GONE: new capturing-upstream e2e (`c3a4b35`) PASS→FAIL-on-revert→PASS; ultimatemodel+proxy unit packs PASS; ultimate shell mock 48/48 + buffered 60/60 (after pre-existing Test 8 harness repair `2f67976`+`d1028be`); vet/build clean; 3rd converter probed REACHABLE-but-dormant (no live loss path) |
+| MiniMax reasoning_details E2E Gate (P3-2/4/5/6/7) | 2026-08-19 | ✅ READY | Shell mock 53/53 (`882fa3f`), e2e 43/43 (`166aa7f`), matrix 32/32 (`ee590c1`), header table 21 verified, sweep 12/12 zero flakes, drift 0; **2 product bugs found+fixed**: T3b race-internal reasoning loss (`068317c`) + S3 id parity (`b2dfde0`); verification-report.md written; HEAD `fa8c11d` |
 
 ## Test Commands
 - **Unit tests**: `go test ./... -count=1`
