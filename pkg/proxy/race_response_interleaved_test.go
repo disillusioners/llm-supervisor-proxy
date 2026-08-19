@@ -175,7 +175,7 @@ func TestRaceInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testing.
 			{
 				Index: 0,
 				Message: &providers.ChatMessage{
-					Role: "assistant",
+					Role:    "assistant",
 					Content: "hi",
 				},
 				FinishReason: "stop",
@@ -392,6 +392,238 @@ func TestRaceExternal_StreamResponse_PositiveCase_MiniMaxEmitsReasoning(t *testi
 	}
 	if strings.Contains(combined, `"reasoning_details"`) {
 		t.Errorf("stream should have reasoning_details stripped: %s", combined)
+	}
+}
+
+// TestRaceExternal_StreamResponse_PositiveCase_FramingPreserved
+// (C2a) is the stream-framing regression test for the
+// race-external path. C1 was a BLOCKER because gate-ON
+// passthrough chunks reached the client unframed (raw JSON
+// with no `data: ` prefix, no trailing `\n\n`) — invalid SSE.
+// This test feeds a mixed SSE stream (content + finish +
+// tool_calls + reasoning_details) through the wired path and
+// asserts that EVERY data line in the client-received output
+// starts with `data: ` and the stream terminates with
+// `data: [DONE]`.
+func TestRaceExternal_StreamResponse_PositiveCase_FramingPreserved(t *testing.T) {
+	const upstreamStream = `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"think-1"}]}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{"content":"hello"}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: [DONE]` + "\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(upstreamStream))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfigSnapshot("minimax")
+	cfg.UpstreamURL = upstream.URL
+	cfg.UpstreamCredentialID = "minimax-cred"
+	cfg.ModelsConfig = &mockModelsConfig{
+		credentials: []models.CredentialConfig{
+			{ID: "minimax-cred", Provider: "minimax", APIKey: "test-key"},
+		},
+	}
+
+	inputBody := []byte(`{"model":"minimax","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest("POST", upstream.URL+"/v1/chat/completions", bytes.NewReader(inputBody))
+	req.Header.Set("X-Proxy-Interleaved-Thinking", "true")
+
+	upstreamReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "minimax", 1024*1024)
+
+	if err := executeExternalRequest(context.Background(), cfg, req, inputBody, upstreamReq, true); err != nil {
+		t.Fatalf("executeExternalRequest: %v", err)
+	}
+
+	chunks, _ := upstreamReq.buffer.GetChunksFrom(0)
+	combined := string(bytes.Join(chunks, nil))
+
+	// Split on the SSE event boundary `\n\n`. Each non-empty
+	// split must start with `data: ` (every line is framed).
+	parts := strings.Split(combined, "\n\n")
+	dataLines := 0
+	sawDone := false
+	for _, p := range parts {
+		// Trim trailing whitespace; the [DONE] event
+		// produces a final "data: [DONE]\n\n" which
+		// leaves a trailing empty element after the
+		// split.
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.HasPrefix(p, "data: ") {
+			t.Errorf("C1 BLOCKER regression: unframed line in client output: %q", p)
+			continue
+		}
+		dataLines++
+		if p == "data: [DONE]" {
+			sawDone = true
+		}
+	}
+	if dataLines == 0 {
+		t.Errorf("no data lines received: %s", combined)
+	}
+	if !sawDone {
+		t.Errorf("stream did not terminate with data: [DONE]: %s", combined)
+	}
+	// Reasoning_details was translated.
+	if !strings.Contains(combined, `"reasoning_content":"think-1"`) {
+		t.Errorf("stream missing reasoning_content translation: %s", combined)
+	}
+	// Content survived.
+	if !strings.Contains(combined, `"content":"hello"`) {
+		t.Errorf("stream lost content chunk: %s", combined)
+	}
+	// Tool calls survived (W3 — read-only on tool_calls).
+	if !strings.Contains(combined, `"tool_calls"`) {
+		t.Errorf("stream lost tool_calls chunk: %s", combined)
+	}
+	// reasoning_details stripped everywhere.
+	if strings.Contains(combined, `"reasoning_details"`) {
+		t.Errorf("stream should have reasoning_details stripped: %s", combined)
+	}
+}
+
+// TestRaceExternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator
+// (C2b) is the flag-absent × MiniMax-credential negative test
+// for the race-external non-stream path. The credential is
+// MiniMax (so the credential gate COULD fire) but the flag is
+// absent, so the gate is OFF. The request body must be
+// byte-identical to the canonical re-marshaled input, and
+// the response must NOT be re-marshaled.
+func TestRaceExternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testing.T) {
+	var capturedBody []byte
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = body
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"r","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer upstream.Close()
+
+	cfg := newTestConfigSnapshot("minimax-model")
+	cfg.UpstreamURL = upstream.URL
+	cfg.UpstreamCredentialID = "minimax-cred"
+	cfg.ModelsConfig = &mockModelsConfig{
+		credentials: []models.CredentialConfig{
+			{ID: "minimax-cred", Provider: "minimax", APIKey: "test-key"},
+		},
+	}
+
+	inputBody := []byte(`{
+  "model": "minimax-model",
+  "messages": [
+    {"role": "assistant", "content": "answer", "reasoning_content": "think-1"}
+  ]
+}`)
+
+	req := httptest.NewRequest("POST", upstream.URL+"/v1/chat/completions", bytes.NewReader(inputBody))
+	// NO X-Proxy-Interleaved-Thinking header — flag absent.
+	upstreamReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "minimax-model", 1024*1024)
+
+	// interleaved=false simulates the flag-absent case.
+	if err := executeExternalRequest(context.Background(), cfg, req, inputBody, upstreamReq, false); err != nil {
+		t.Fatalf("executeExternalRequest: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// No reasoning_split, no reasoning_details injected.
+	if strings.Contains(string(capturedBody), "reasoning_split") {
+		t.Errorf("body unexpectedly contains reasoning_split: %s", capturedBody)
+	}
+	if strings.Contains(string(capturedBody), "reasoning_details") {
+		t.Errorf("body unexpectedly contains reasoning_details: %s", capturedBody)
+	}
+	// Original reasoning_content preserved (translator not run).
+	if !strings.Contains(string(capturedBody), "think-1") {
+		t.Errorf("body lost original reasoning_content: %s", capturedBody)
+	}
+	// Byte-identity: upstream body must equal the canonical
+	// re-marshaled input (no translator mutation).
+	var bm map[string]any
+	if err := json.Unmarshal(inputBody, &bm); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	inputCanonical, _ := json.Marshal(bm)
+	if !bytes.Equal(capturedBody, inputCanonical) {
+		t.Errorf("upstream body not byte-identical to canonical input (gate-OFF translator not invoked):\n want=%s\n  got=%s", inputCanonical, capturedBody)
+	}
+}
+
+// TestRaceInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator
+// (C2b) is the flag-absent × MiniMax-credential negative test
+// for the race-internal non-stream path. The provider is
+// MiniMax but the flag is absent, so the typed
+// ReasoningSplit is nil and the messages' reasoning_content
+// is preserved (no reasoning_details synthesized).
+func TestRaceInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testing.T) {
+	origNewProvider := newProviderClient
+	defer func() { newProviderClient = origNewProvider }()
+
+	mock := newTestProvider()
+	mock.SetChatCompletionResponse(&providers.ChatCompletionResponse{
+		ID: "r", Object: "chat.completion", Created: 1, Model: "MiniMax-M1",
+		Choices: []providers.Choice{
+			{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "hi"}, FinishReason: "stop"},
+		},
+		Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+	})
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return mock, nil
+	}
+
+	cfg := newTestConfigSnapshot("minimax-model-internal")
+	cfg.ModelsConfig = &mockModelsConfig{
+		models: []models.ModelConfig{
+			{
+				ID:            "minimax-model-internal",
+				Name:          "minimax-model-internal",
+				Enabled:       true,
+				Internal:      true,
+				CredentialID:  "minimax-cred",
+				InternalModel: "MiniMax-M1",
+			},
+		},
+		credentials: []models.CredentialConfig{
+			{ID: "minimax-cred", Provider: "minimax", APIKey: "test-key"},
+		},
+	}
+
+	inputBody := []byte(`{"model":"minimax-model-internal","messages":[{"role":"assistant","content":"answer","reasoning_content":"think-1"}]}`)
+	upstreamReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "minimax-model-internal", 1024*1024)
+
+	// interleaved=false — flag absent.
+	if err := executeInternalRequest(context.Background(), cfg, inputBody, upstreamReq, false); err != nil {
+		t.Fatalf("executeInternalRequest: %v", err)
+	}
+
+	captured := mock.GetCapturedRequest()
+	if captured == nil {
+		t.Fatal("provider did not capture the request")
+	}
+	// ReasoningSplit MUST be nil (gate is off: flag absent).
+	if captured.ReasoningSplit != nil {
+		t.Errorf("ReasoningSplit = %v, want nil (flag absent)", *captured.ReasoningSplit)
+	}
+	if len(captured.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(captured.Messages))
+	}
+	// ReasoningDetails MUST be empty (translator not run).
+	if len(captured.Messages[0].ReasoningDetails) != 0 {
+		t.Errorf("ReasoningDetails = %+v, want empty (flag absent)", captured.Messages[0].ReasoningDetails)
+	}
+	// ReasoningContent preserved (pre-existing behavior).
+	if captured.Messages[0].ReasoningContent != "think-1" {
+		t.Errorf("ReasoningContent = %q, want think-1", captured.Messages[0].ReasoningContent)
 	}
 }
 

@@ -2731,10 +2731,10 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) 
 
 func TestConvertToProviderRequest_NameField(t *testing.T) {
 	tests := []struct {
-		name         string
-		body         map[string]interface{}
-		model        string
-		wantName     string
+		name          string
+		body          map[string]interface{}
+		model         string
+		wantName      string
 		wantNameInIdx int // Which message should have name
 	}{
 		{
@@ -2748,8 +2748,8 @@ func TestConvertToProviderRequest_NameField(t *testing.T) {
 					},
 				},
 			},
-			model:        "gpt-4",
-			wantName:     "human_user",
+			model:         "gpt-4",
+			wantName:      "human_user",
 			wantNameInIdx: 0,
 		},
 		{
@@ -2767,8 +2767,8 @@ func TestConvertToProviderRequest_NameField(t *testing.T) {
 					},
 				},
 			},
-			model:        "gpt-4",
-			wantName:     "system_prompt",
+			model:         "gpt-4",
+			wantName:      "system_prompt",
 			wantNameInIdx: 1,
 		},
 		{
@@ -2781,8 +2781,8 @@ func TestConvertToProviderRequest_NameField(t *testing.T) {
 					},
 				},
 			},
-			model:        "gpt-4",
-			wantName:     "",
+			model:         "gpt-4",
+			wantName:      "",
 			wantNameInIdx: 0,
 		},
 		{
@@ -2790,15 +2790,15 @@ func TestConvertToProviderRequest_NameField(t *testing.T) {
 			body: map[string]interface{}{
 				"messages": []interface{}{
 					map[string]interface{}{
-						"role":             "assistant",
-						"content":          "The answer is 42.",
-						"name":             "assistant_1",
+						"role":              "assistant",
+						"content":           "The answer is 42.",
+						"name":              "assistant_1",
 						"reasoning_content": "Let me calculate...",
 					},
 				},
 			},
-			model:        "deepseek-r1",
-			wantName:     "assistant_1",
+			model:         "deepseek-r1",
+			wantName:      "assistant_1",
 			wantNameInIdx: 0,
 		},
 	}
@@ -2836,8 +2836,8 @@ func TestConvertToProviderRequest_ReasoningContent(t *testing.T) {
 			body: map[string]interface{}{
 				"messages": []interface{}{
 					map[string]interface{}{
-						"role":             "assistant",
-						"content":          "The answer is 42.",
+						"role":              "assistant",
+						"content":           "The answer is 42.",
 						"reasoning_content": "Let me think about this step by step...",
 					},
 				},
@@ -2855,8 +2855,8 @@ func TestConvertToProviderRequest_ReasoningContent(t *testing.T) {
 						"content": "What is 2+2?",
 					},
 					map[string]interface{}{
-						"role":             "assistant",
-						"content":          "4",
+						"role":              "assistant",
+						"content":           "4",
 						"reasoning_content": "I need to add 2 and 2 together.",
 					},
 				},
@@ -2884,8 +2884,8 @@ func TestConvertToProviderRequest_ReasoningContent(t *testing.T) {
 			body: map[string]interface{}{
 				"messages": []interface{}{
 					map[string]interface{}{
-						"role":             "assistant",
-						"content":          "Answer",
+						"role":              "assistant",
+						"content":           "Answer",
 						"reasoning_content": "",
 					},
 				},

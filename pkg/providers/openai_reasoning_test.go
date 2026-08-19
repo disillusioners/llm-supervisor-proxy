@@ -240,7 +240,7 @@ func TestOpenAIProvider_NonStream_ExtractsReasoningDetails(t *testing.T) {
 				{
 					Index: 0,
 					Message: &ChatMessage{
-						Role: "assistant",
+						Role:    "assistant",
 						Content: "final",
 						ReasoningDetails: []ReasoningDetailEntry{
 							{Type: "reasoning.text", Text: "think-1"},
@@ -280,8 +280,8 @@ func TestOpenAIProvider_NonStream_BothFieldsSingleWinner(t *testing.T) {
 				{
 					Index: 0,
 					Message: &ChatMessage{
-						Role: "assistant",
-						Content: "final",
+						Role:             "assistant",
+						Content:          "final",
 						ReasoningContent: "should-be-ignored",
 						ReasoningDetails: []ReasoningDetailEntry{
 							{Type: "reasoning.text", Text: "details-text"},
@@ -317,8 +317,8 @@ func TestOpenAIProvider_NonStream_NoDetailsLeavesRCAlone(t *testing.T) {
 				{
 					Index: 0,
 					Message: &ChatMessage{
-						Role: "assistant",
-						Content: "final",
+						Role:             "assistant",
+						Content:          "final",
 						ReasoningContent: "upstream-only",
 					},
 					FinishReason: "stop",
@@ -351,7 +351,7 @@ func TestOpenAIProvider_NonStream_EmptyTextSkipped(t *testing.T) {
 				{
 					Index: 0,
 					Message: &ChatMessage{
-						Role: "assistant",
+						Role:    "assistant",
 						Content: "final",
 						ReasoningDetails: []ReasoningDetailEntry{
 							{Type: "reasoning.text", Text: ""},
@@ -390,8 +390,8 @@ func TestOpenAIProvider_NonStream_NonMiniMaxShapeRoundTripsUnchanged(t *testing.
 				{
 					Index: 0,
 					Message: &ChatMessage{
-						Role: "assistant",
-						Content: "hello",
+						Role:             "assistant",
+						Content:          "hello",
 						ReasoningContent: "deepseek-think",
 					},
 					FinishReason: "stop",

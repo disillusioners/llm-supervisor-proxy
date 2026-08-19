@@ -163,6 +163,35 @@ func TestRecordDrift_IncrementIsAtomic(t *testing.T) {
 	}
 }
 
+// TestRecordDrift_ObservationCounterEveryCall (W7) confirms
+// the formatDriftObserved counter increments on EVERY
+// recordDrift call (NOT deduped). The dedup'd formatDriftCounter
+// counts distinct formats; the observation counter counts
+// total observations. The two counters together let the
+// sampled WARN log fire on observation volume (1-in-N) while
+// the dedup counter remains a faithful "distinct formats"
+// metric.
+func TestRecordDrift_ObservationCounterEveryCall(t *testing.T) {
+	base := "MiniMax-response-observed-" + t.Name()
+	before := FormatDriftObservationCount()
+	// Same format value repeated 3 times — observation
+	// counter must increment 3 times, dedup counter must
+	// increment 1 time.
+	for i := 0; i < 3; i++ {
+		recordDrift(map[string]any{"format": base + "-same", "id": fmt.Sprintf("%d", i)})
+	}
+	mid := FormatDriftObservationCount()
+	if mid-before != 3 {
+		t.Errorf("observation counter: repeated identical format should increment 3 times: before=%d mid=%d (want +3)", before, mid)
+	}
+	// Distinct format → observation counter increments again.
+	recordDrift(map[string]any{"format": base + "-distinct", "id": "x"})
+	final := FormatDriftObservationCount()
+	if final-mid != 1 {
+		t.Errorf("observation counter: distinct format should increment 1 time: mid=%d final=%d (want +1)", mid, final)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TranslateNonStreamResponseBody — happy path
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,7 +232,7 @@ func TestTranslateNonStreamResponseBody_BothFieldsDedup(t *testing.T) {
 		"choices": []any{
 			map[string]any{
 				"message": map[string]any{
-					"role": "assistant",
+					"role":              "assistant",
 					"reasoning_content": "should-be-ignored",
 					"reasoning_details": []any{
 						map[string]any{"type": "reasoning.text", "text": "a"},
@@ -304,11 +333,11 @@ func TestTranslateNonStreamResponseBody_StripsAudioAndName(t *testing.T) {
 		"choices": []any{
 			map[string]any{
 				"message": map[string]any{
-					"role":           "assistant",
-					"audio":          map[string]any{"id": "x"},
-					"audio_content":  "speech",
-					"name":           "minimax-thing",
-					"content":        "final",
+					"role":          "assistant",
+					"audio":         map[string]any{"id": "x"},
+					"audio_content": "speech",
+					"name":          "minimax-thing",
+					"content":       "final",
 					"reasoning_details": []any{
 						map[string]any{"type": "reasoning.text", "text": "think"},
 					},
@@ -368,7 +397,7 @@ func TestTranslateNonStreamResponseBody_NoDetailsLeavesReasoningContent(t *testi
 		"choices": []any{
 			map[string]any{
 				"message": map[string]any{
-					"role":             "assistant",
+					"role":              "assistant",
 					"reasoning_content": "upstream-string",
 				},
 			},

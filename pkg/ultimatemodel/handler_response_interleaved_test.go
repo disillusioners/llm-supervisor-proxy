@@ -41,9 +41,9 @@ func TestExecuteExternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:     "ultimate-model",
-		Name:   "ultimate-model",
-		Enabled: true,
+		ID:       "ultimate-model",
+		Name:     "ultimate-model",
+		Enabled:  true,
 		Internal: false,
 	})
 	h := NewHandler(cfg, modelsCfg, nil)
@@ -300,9 +300,9 @@ func TestExecuteExternal_Response_PositiveCase_MiniMaxAppliesTranslator(t *testi
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:     "ultimate-model",
-		Name:   "ultimate-model",
-		Enabled: true,
+		ID:       "ultimate-model",
+		Name:     "ultimate-model",
+		Enabled:  true,
 		Internal: false,
 	})
 	h := NewHandler(cfg, modelsCfg, nil)
@@ -371,6 +371,209 @@ func TestStreamResponse_PositiveCase_MiniMaxEmitsReasoning(t *testing.T) {
 	}
 	if strings.Contains(body, `"reasoning_details"`) {
 		t.Errorf("stream should have reasoning_details stripped: %s", body)
+	}
+}
+
+// TestStreamResponse_PositiveCase_FramingPreserved (C2a) is the
+// stream-framing regression test for the ultimate-external
+// path. C1 was a BLOCKER because gate-ON passthrough chunks
+// reached the client unframed (raw JSON with no `data: `
+// prefix, no trailing `\n\n`) — invalid SSE. This test feeds
+// a mixed SSE stream (content + finish + reasoning_details)
+// through the wired path and asserts that EVERY data line in
+// the client-received output starts with `data: ` and the
+// stream terminates with `data: [DONE]`.
+func TestStreamResponse_PositiveCase_FramingPreserved(t *testing.T) {
+	const upstreamStream = `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"think-1"}]}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{"content":"hello"}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}` + "\n\n" +
+		`data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: [DONE]` + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(upstreamStream))
+	}))
+	defer server.Close()
+
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	w := httptest.NewRecorder()
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true)
+	if err != nil {
+		t.Fatalf("streamResponse: %v", err)
+	}
+
+	body := w.Body.String()
+	// Split on the SSE event boundary `\n\n`. Each non-empty
+	// split must start with `data: `.
+	parts := strings.Split(body, "\n\n")
+	dataLines := 0
+	sawDone := false
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.HasPrefix(p, "data: ") {
+			t.Errorf("C1 BLOCKER regression: unframed line in client output: %q", p)
+			continue
+		}
+		dataLines++
+		if p == "data: [DONE]" {
+			sawDone = true
+		}
+	}
+	if dataLines == 0 {
+		t.Errorf("no data lines received: %s", body)
+	}
+	if !sawDone {
+		t.Errorf("stream did not terminate with data: [DONE]: %s", body)
+	}
+	if !strings.Contains(body, `"reasoning_content":"think-1"`) {
+		t.Errorf("stream missing reasoning_content translation: %s", body)
+	}
+	if !strings.Contains(body, `"content":"hello"`) {
+		t.Errorf("stream lost content chunk: %s", body)
+	}
+	if !strings.Contains(body, `"tool_calls"`) {
+		t.Errorf("stream lost tool_calls chunk: %s", body)
+	}
+	if strings.Contains(body, `"reasoning_details"`) {
+		t.Errorf("stream should have reasoning_details stripped: %s", body)
+	}
+}
+
+// TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator
+// (C2b) is the flag-absent × MiniMax-credential negative test
+// for the ultimate-external non-stream path. The credential
+// is MiniMax but the flag is absent, so the gate is OFF.
+// The outbound body must NOT carry reasoning_split /
+// reasoning_details; the original reasoning_content survives.
+func TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testing.T) {
+	var capturedBody []byte
+	var mu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = body
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"r","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer upstream.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UpstreamURL = upstream.URL
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	// NO X-Proxy-Interleaved-Thinking header — flag absent.
+
+	body := map[string]interface{}{
+		"model": "ultimate-model",
+		"messages": []map[string]interface{}{
+			{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+		},
+	}
+	requestBodyBytes, _ := json.Marshal(body)
+
+	// upstreamProvider="minimax" — credential IS MiniMax. flag is
+	// false. Gate stays off.
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "minimax")
+	if err != nil {
+		t.Fatalf("executeExternal: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(string(capturedBody), "reasoning_split") {
+		t.Errorf("body unexpectedly contains reasoning_split: %s", capturedBody)
+	}
+	if strings.Contains(string(capturedBody), "reasoning_details") {
+		t.Errorf("body unexpectedly contains reasoning_details: %s", capturedBody)
+	}
+	if !strings.Contains(string(capturedBody), "think-1") {
+		t.Errorf("body lost original reasoning_content: %s", capturedBody)
+	}
+}
+
+// TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator
+// (C2b) is the flag-absent × MiniMax-credential negative test
+// for the ultimate-internal non-stream path. The provider
+// is MiniMax but the flag is absent, so the typed
+// ReasoningSplit is nil and per-message reasoning_details is
+// NOT synthesized (the W5 translation does not run).
+func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testing.T) {
+	origNewProvider := newProviderClient
+	defer func() { newProviderClient = origNewProvider }()
+
+	mock := newMockProvider()
+	mock.chatResp = &providers.ChatCompletionResponse{
+		ID: "r", Object: "chat.completion", Model: "MiniMax-M1",
+		Choices: []providers.Choice{
+			{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+		},
+		Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return mock, nil
+	}
+
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	_ = httptest.NewRequest("POST", "/v1/chat/completions", nil) // flag absent
+	// NO X-Proxy-Interleaved-Thinking header — flag absent.
+
+	body := map[string]interface{}{
+		"model": "minimax-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+		},
+	}
+	requestBodyBytes, _ := json.Marshal(body)
+
+	// interleaved=false — flag absent.
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false)
+	if err != nil {
+		t.Fatalf("executeInternal: %v", err)
+	}
+
+	if mock.capturedReq == nil {
+		t.Fatal("provider did not capture the request")
+	}
+
+	// ReasoningSplit MUST be nil (flag absent).
+	if mock.capturedReq.ReasoningSplit != nil {
+		t.Errorf("ReasoningSplit = %v, want nil (flag absent)", *mock.capturedReq.ReasoningSplit)
+	}
+	if len(mock.capturedReq.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(mock.capturedReq.Messages))
+	}
+	// ReasoningDetails MUST be empty (W5 translator not run).
+	if len(mock.capturedReq.Messages[0].ReasoningDetails) != 0 {
+		t.Errorf("ReasoningDetails = %+v, want empty (flag absent)", mock.capturedReq.Messages[0].ReasoningDetails)
+	}
+	// ReasoningContent preserved (pre-existing behavior).
+	if mock.capturedReq.Messages[0].ReasoningContent != "think-1" {
+		t.Errorf("ReasoningContent = %q, want think-1", mock.capturedReq.Messages[0].ReasoningContent)
 	}
 }
 

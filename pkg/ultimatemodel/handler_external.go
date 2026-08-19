@@ -14,10 +14,10 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
@@ -362,15 +362,18 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 
 		// Prepend the translator's emitted chunks (if any) so the
 		// client sees reasoning_content deltas before the stripped
-		// upstream chunk on each loop iteration. Per the W9
-		// contract the translator emits raw JSON data (no
-		// `data: ` prefix, no trailing `\n\n`); the call site
-		// adds the wire framing before the next flush boundary.
+		// upstream chunk on each loop iteration. C1
+		// uniform-framing contract: ChunkBytes frames both
+		// `stripped` and each `emitted[i]` on the mutated path,
+		// and returns the ORIGINAL line VERBATIM (already framed)
+		// on the unchanged path. The call site is therefore
+		// responsible for ZERO framing here — just concatenate in
+		// order. ultim-ext has no mid-stream flush (H8) — all
+		// bytes accumulate in buf and are written in a single
+		// flush at end-of-stream.
 		if len(translatorEmitted) > 0 {
 			full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
-			for _, e := range translatorEmitted {
-				full = append(full, append(append([]byte("data: "), e...), '\n', '\n'))
-			}
+			full = append(full, translatorEmitted...)
 			full = append(full, chunksToEmit...)
 			chunksToEmit = full
 		}

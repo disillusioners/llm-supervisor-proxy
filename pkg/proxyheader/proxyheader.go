@@ -11,15 +11,21 @@ import "net/http"
 // http.Header.Get handles both cases via textproto.CanonicalMIMEHeaderKey.
 const InterleavedThinkingHeader = "X-Proxy-Interleaved-Thinking"
 
-// ParseInterleavedThinkingHeaderValue returns true iff v is exactly "true"
-// or "1" (case-sensitive lowercase). Anything else returns false. Empty
-// string returns false.
+// ParseInterleavedThinkingHeaderValue returns true iff v is exactly
+// one of the two accepted values: "true" or "1". Anything else
+// (including "True", "TRUE", "yes", "0", empty string, or any other
+// variant) returns false. The accepted-value list is intentionally
+// narrow: matches the X-Force-Ultimate-Model precedent at
+// pkg/proxy/handler.go:465 and is used by both pkg/proxy/handler.go
+// (race paths) and pkg/ultimatemodel.Execute (ultimate paths) for
+// identical semantics (R8/Q3 resolution per architecture-
+// recommendation §11). Callers MUST go through this function for
+// the value check — do not parse the header ad hoc; that has
+// produced inconsistent semantics in past iterations.
 //
-// This is the single source of truth for the accepted-value list (R8/Q3
-// resolution per architecture-recommendation §11): matches the
-// X-Force-Ultimate-Model precedent at pkg/proxy/handler.go:465 and is
-// used by both pkg/proxy/handler.go (race paths) and
-// pkg/ultimatemodel.Execute (ultimate paths) for identical semantics.
+// W11 cheap: this godoc explicitly enumerates the two accepted
+// values so a future reader does not have to read the
+// implementation to know the wire contract.
 func ParseInterleavedThinkingHeaderValue(v string) bool {
 	return v == "true" || v == "1"
 }

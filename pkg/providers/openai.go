@@ -833,8 +833,8 @@ type reasoningDetailEmit struct {
 func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit {
 	var rawChunk struct {
 		Choices []struct {
-			Index    float64 `json:"index"`
-			Delta    struct {
+			Index float64 `json:"index"`
+			Delta struct {
 				ReasoningDetails []map[string]any `json:"reasoning_details"`
 			} `json:"delta"`
 			Message struct {

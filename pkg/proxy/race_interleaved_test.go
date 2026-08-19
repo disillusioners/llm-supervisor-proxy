@@ -27,10 +27,11 @@ import (
 // TestRaceExternal_NegativeCase_ByteIdentical_NonMiniMax verifies that when
 // the request carries X-Proxy-Interleaved-Thinking (interleaved=true) but
 // the upstream credential is OpenAI, the translator is NOT invoked:
-//  (a) outbound body bytes equal the input body bytes (modulo the
-//      pre-existing model override which is exercised by every call)
-//  (b) outbound headers do NOT contain x-proxy-interleaved-thinking
-//  (c) the body does NOT carry reasoning_split or reasoning_details
+//
+//	(a) outbound body bytes equal the input body bytes (modulo the
+//	    pre-existing model override which is exercised by every call)
+//	(b) outbound headers do NOT contain x-proxy-interleaved-thinking
+//	(c) the body does NOT carry reasoning_split or reasoning_details
 func TestRaceExternal_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	// Mock upstream that captures the body and headers it receives
 	var capturedBody []byte
@@ -106,6 +107,29 @@ func TestRaceExternal_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	if !strings.Contains(body, "think-1") || !strings.Contains(body, "think-2") {
 		t.Errorf("body lost original reasoning_content: %s", body)
 	}
+
+	// C2c — full byte-identity: the captured upstream body must
+	// equal the input body after a json round-trip (the only
+	// "legitimate framing" is the unmarshal→marshal cycle used
+	// for the pre-existing model override — no translator
+	// mutation occurs because the gate is OFF). Compare against
+	// the canonical re-marshaled form so the assertion is
+	// deterministic regardless of upstream byte quirks.
+	var inputCanonical []byte
+	{
+		var bm map[string]any
+		if err := json.Unmarshal(inputBody, &bm); err != nil {
+			t.Fatalf("inputBody unmarshal: %v", err)
+		}
+		var err error
+		inputCanonical, err = json.Marshal(bm)
+		if err != nil {
+			t.Fatalf("inputBody marshal: %v", err)
+		}
+	}
+	if !bytes.Equal(capturedBody, inputCanonical) {
+		t.Errorf("upstream body not byte-identical to canonical input (gate-OFF translator not invoked):\n want=%s\n  got=%s", inputCanonical, capturedBody)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,11 +171,11 @@ func TestRaceInternal_NegativeCase_TypedFieldsNotSet_NonMiniMax(t *testing.T) {
 	cfg.ModelsConfig = &mockModelsConfig{
 		models: []models.ModelConfig{
 			{
-				ID:           "openai-model-internal",
-				Name:         "openai-model-internal",
-				Enabled:      true,
-				Internal:     true,
-				CredentialID: "openai-cred",
+				ID:            "openai-model-internal",
+				Name:          "openai-model-internal",
+				Enabled:       true,
+				Internal:      true,
+				CredentialID:  "openai-cred",
 				InternalModel: "gpt-4o-mini",
 			},
 		},

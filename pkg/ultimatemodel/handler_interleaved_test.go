@@ -42,9 +42,9 @@ func TestExecuteExternal_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:     "ultimate-model",
-		Name:   "ultimate-model",
-		Enabled: true,
+		ID:       "ultimate-model",
+		Name:     "ultimate-model",
+		Enabled:  true,
 		Internal: false,
 	})
 	h := NewHandler(cfg, modelsCfg, nil)
@@ -120,9 +120,9 @@ func TestExecuteExternal_PositiveCase_MiniMaxAppliesTranslator(t *testing.T) {
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:     "ultimate-model",
-		Name:   "ultimate-model",
-		Enabled: true,
+		ID:       "ultimate-model",
+		Name:     "ultimate-model",
+		Enabled:  true,
 		Internal: false,
 	})
 	h := NewHandler(cfg, modelsCfg, nil)
@@ -282,6 +282,88 @@ func TestExecuteInternal_PositiveCase_TypedFieldsSet_MiniMax(t *testing.T) {
 	// Typed ReasoningSplit MUST be set (gate fires for MiniMax)
 	if mock.capturedReq.ReasoningSplit == nil || *mock.capturedReq.ReasoningSplit != true {
 		t.Errorf("ReasoningSplit = %v, want ptr(true) for MiniMax", mock.capturedReq.ReasoningSplit)
+	}
+}
+
+// TestExecuteInternal_PositiveCase_TranslatesRequestBody_MiniMax
+// (W5 positive) verifies that the ultimate-internal request
+// side (handler_internal.go) applies the full strip-and-replace
+// translation when the gate fires (flag + MiniMax credential):
+//   - ReasoningSplit=true is set on the typed request
+//   - Each message's reasoning_content becomes a one-entry
+//     reasoning_details array
+//   - reasoning_content is cleared (strip-and-replace)
+//
+// Without the W5 fix, only ReasoningSplit was set, leaking
+// reasoning_content on the wire (the SDK does not
+// auto-translate).
+func TestExecuteInternal_PositiveCase_TranslatesRequestBody_MiniMax(t *testing.T) {
+	origNewProvider := newProviderClient
+	defer func() { newProviderClient = origNewProvider }()
+
+	mock := newMockProvider()
+	mock.chatResp = &providers.ChatCompletionResponse{
+		ID: "r", Object: "chat.completion", Model: "MiniMax-M1",
+		Choices: []providers.Choice{
+			{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+		},
+		Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return mock, nil
+	}
+
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
+	h := NewHandler(cfg, modelsCfg, nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("X-Proxy-Interleaved-Thinking", "true")
+
+	body := map[string]interface{}{
+		"model": "minimax-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+		},
+	}
+	requestBodyBytes, _ := json.Marshal(body)
+
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, true)
+	if err != nil {
+		t.Fatalf("executeInternal: %v", err)
+	}
+
+	if mock.capturedReq == nil {
+		t.Fatal("provider did not capture the request")
+	}
+	// ReasoningSplit must be set (gate fires for MiniMax).
+	if mock.capturedReq.ReasoningSplit == nil || *mock.capturedReq.ReasoningSplit != true {
+		t.Errorf("ReasoningSplit = %v, want ptr(true) for MiniMax", mock.capturedReq.ReasoningSplit)
+	}
+	if len(mock.capturedReq.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(mock.capturedReq.Messages))
+	}
+	// Per-message translation: reasoning_details must be
+	// populated from the original reasoning_content; the
+	// original content string must be cleared.
+	if len(mock.capturedReq.Messages[0].ReasoningDetails) != 1 {
+		t.Errorf("ReasoningDetails = %+v, want 1 entry", mock.capturedReq.Messages[0].ReasoningDetails)
+	} else {
+		entry := mock.capturedReq.Messages[0].ReasoningDetails[0]
+		if entry.Type != "reasoning.text" {
+			t.Errorf("entry.Type = %q, want reasoning.text", entry.Type)
+		}
+		if entry.Text != "think-1" {
+			t.Errorf("entry.Text = %q, want think-1", entry.Text)
+		}
+		if entry.Format != "MiniMax-response-v1" {
+			t.Errorf("entry.Format = %q, want MiniMax-response-v1", entry.Format)
+		}
+	}
+	if mock.capturedReq.Messages[0].ReasoningContent != "" {
+		t.Errorf("ReasoningContent = %q, want empty (strip-and-replace)", mock.capturedReq.Messages[0].ReasoningContent)
 	}
 }
 

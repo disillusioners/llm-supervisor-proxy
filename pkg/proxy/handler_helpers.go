@@ -94,7 +94,7 @@ type requestContext struct {
 
 	// Ultimate model permission (from token)
 	ultimateModelEnabled bool
-	ultimateModelID     string // Per-token override model ID (empty = use global config)
+	ultimateModelID      string // Per-token override model ID (empty = use global config)
 
 	// InterleavedThinking indicates the client opted into MiniMax
 	// reasoning_details split-mode translation via X-Proxy-Interleaved-Thinking.

@@ -62,9 +62,6 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 	return strings.ToLower(cred.Provider) == strings.ToLower(string(providers.ProviderMiniMax))
 }
 
-// ptr returns a pointer to v. Convenience for setting *bool fields.
-func ptr[T any](v T) *T { return &v }
-
 // executeRequest performs the actual HTTP call to upstream
 // and streams the response into the request's buffer.
 // It checks if the model is internal and routes accordingly.
@@ -196,7 +193,8 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// json.Marshal(req) would drop the field via omitempty whenever the
 	// struct is re-marshalled (logging, future typed sites, etc.).
 	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) && providerReq.ReasoningSplit == nil {
-		providerReq.ReasoningSplit = ptr(true)
+		t := true
+		providerReq.ReasoningSplit = &t
 	}
 
 	if isStream {
@@ -1361,18 +1359,18 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 
 			// Prepend the translator's emitted chunks (if any) so
 			// the client sees reasoning_content deltas before the
-			// stripped upstream chunk on each loop iteration. Per
-			// the W9 contract, the translator emits raw JSON data
-			// (no `data: ` prefix, no trailing `\n\n`); the
-			// call site is responsible for adding the wire
-			// framing before the next flush boundary. The
+			// stripped upstream chunk on each loop iteration. C1
+			// uniform-framing contract: ChunkBytes frames both
+			// `stripped` and each `emitted[i]` (data: + \n\n) on
+			// the mutated path, and returns the ORIGINAL line
+			// VERBATIM (already framed) on the unchanged path.
+			// The call site is therefore responsible for ZERO
+			// framing here — just concatenate in order. The
 			// stripping pattern matches the SSE shape used by
 			// the race-external path's downstream consumer.
 			if len(translatorEmitted) > 0 {
 				full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
-				for _, e := range translatorEmitted {
-					full = append(full, append(append([]byte("data: "), e...), '\n', '\n'))
-				}
+				full = append(full, translatorEmitted...)
 				full = append(full, chunksToEmit...)
 				chunksToEmit = full
 			}

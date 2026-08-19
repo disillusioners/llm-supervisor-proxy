@@ -116,8 +116,8 @@ func TestTranslateMessagesReasoning_BasicStripAndReplace(t *testing.T) {
 	body := map[string]any{
 		"messages": []any{
 			map[string]any{
-				"role":             "assistant",
-				"content":          "final answer",
+				"role":              "assistant",
+				"content":           "final answer",
 				"reasoning_content": "let me think about this",
 			},
 		},
@@ -560,21 +560,26 @@ func TestTranslateRequestBytes_EmptyDetailsArrayByteIdentical(t *testing.T) {
 	}
 }
 
-// TestTranslateMessagesReasoning_EmptyDetailsOverriddenByContent
-// covers W11 flag-on case: a message that carries BOTH an empty
-// `reasoning_details: []` AND a non-empty `reasoning_content` is
-// driven by the latter (the strip-and-replace semantic). The empty
-// array is replaced by the mapped entry — the translator does NOT
-// merge, does NOT preserve the empty array, and the resulting
-// details array contains exactly the mapped entry.
-func TestTranslateMessagesReasoning_EmptyDetailsOverriddenByContent(t *testing.T) {
+// TestTranslateMessagesReasoning_NonEmptyDetailsReplacedByContent
+// (W6 + W11) covers the strip-and-replace semantic when the
+// message carries BOTH a non-empty `reasoning_details` array
+// AND a non-empty `reasoning_content` string. The translator
+// REPLACES the details array (the client reasoning_content
+// always wins) and STRIPS the content. This is the W6 true
+// single-winner on the request side: the mapped details
+// array from the content string takes precedence, and any
+// pre-existing details are discarded entirely.
+func TestTranslateMessagesReasoning_NonEmptyDetailsReplacedByContent(t *testing.T) {
 	body := map[string]any{
 		"messages": []any{
 			map[string]any{
-				"role":              "assistant",
-				"content":           "final",
-				"reasoning_details": []any{},
-				"reasoning_content": "think-now",
+				"role":    "assistant",
+				"content": "final",
+				"reasoning_details": []any{
+					map[string]any{"type": "reasoning.text", "text": "preexisting-1"},
+					map[string]any{"type": "reasoning.text", "text": "preexisting-2"},
+				},
+				"reasoning_content": "client-text",
 			},
 		},
 	}
@@ -590,17 +595,14 @@ func TestTranslateMessagesReasoning_EmptyDetailsOverriddenByContent(t *testing.T
 		t.Fatalf("reasoning_details key lost: %v", msg["reasoning_details"])
 	}
 	if len(details) != 1 {
-		t.Fatalf("expected 1 mapped entry, got %d: %v", len(details), details)
+		t.Fatalf("W6: pre-existing details must be REPLACED (1 entry from content), got %d: %v", len(details), details)
 	}
 	d, ok := details[0].(ReasoningDetail)
 	if !ok {
 		t.Fatalf("expected ReasoningDetail, got %T", details[0])
 	}
-	if d.Text != "think-now" {
-		t.Errorf("entry text = %q, want think-now", d.Text)
-	}
-	if d.ID != "reasoning-text-1" {
-		t.Errorf("entry ID = %q, want reasoning-text-1", d.ID)
+	if d.Text != "client-text" {
+		t.Errorf("entry text = %q, want client-text (W6: client reasoning wins)", d.Text)
 	}
 }
 

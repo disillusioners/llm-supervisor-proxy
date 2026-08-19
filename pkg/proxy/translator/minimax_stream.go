@@ -413,26 +413,36 @@ func NewStreamTranslator() *StreamTranslator {
 //  3. Walk ALL choices (W3 — was choices[0]-only, leaked details on
 //     choices[1+]). For each choice with delta.reasoning_details:
 //     a. Delete reasoning_details and delta.reasoning_content (W4
-//        single-winner on the wire — when details win, the
-//        content string is discarded entirely).
+//     single-winner on the wire — when details win, the
+//     content string is discarded entirely).
 //     b. For each entry: H7 skip-empty, unknown-type skip, format
-//        drift counter; H2 dedup vs lastIssued[choiceIdx]
-//        (containment); cumulative-suffix mode (text is strict
-//        superset of lastIssued[choiceIdx] → emit suffix only).
+//     drift counter; H2 dedup vs lastIssued[choiceIdx]
+//     (containment); cumulative-suffix mode (text is strict
+//     superset of lastIssued[choiceIdx] → emit suffix only).
 //     c. Emit per-entry chunks (raw JSON, no framing).
 //  4. If no choice had reasoning_details, return the ORIGINAL line
 //     VERBATIM (C1 unchanged-on-passthrough guarantee).
 //  5. Otherwise re-marshal the chunk and return as stripped.
 //
-// C1 framing contract (important for callers):
+// C1 framing contract (uniform across both paths):
 //
-//   - On the UNCHANGED path (step 4), stripped carries the `data: `
-//     prefix and is the verbatim upstream line — callers write
-//     `stripped` directly (it is already framed).
-//   - On the MUTATED path (step 5), stripped is RAW JSON without
-//     prefix and without trailing `\n\n` — callers frame both
-//     stripped and each emitted[i] with `data: ` + `\n\n` before
-//     the next flush boundary.
+//   - On the UNCHANGED path (step 4), stripped is the ORIGINAL
+//     line VERBATIM — the upstream line is returned exactly as
+//     received, including its `data: ` prefix and trailing
+//     newline (or lack thereof, if upstream omitted them). The
+//     caller writes stripped directly: it is already framed.
+//   - On the MUTATED path (step 5), stripped is `data: ` + raw
+//     JSON + `\n\n` (a fully framed SSE line), and each
+//     emitted[i] is also `data: ` + raw JSON + `\n\n`. The
+//     caller writes stripped + each emitted[i] in order; the
+//     framing is done here so the caller has a uniform
+//     "every line is framed" contract and never has to
+//     distinguish mutated vs unchanged for SSE correctness.
+//
+// The C1 fix closes the bug where today the translator
+// re-marshaled unchanged lines and returned raw JSON (no
+// prefix, no trailing newline), causing call sites to write
+// unframed lines to the client and break SSE.
 //
 // Not goroutine-safe; see NewStreamTranslator godoc. The translator
 // does not call into `toolrepair` and does not mutate tool_call state
@@ -606,10 +616,12 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 		return originalLine, nil, nil
 	}
 
-	// Mutation occurred: re-marshal the chunk and return the
-	// mutated (raw JSON, no prefix) as stripped. The CALLER
-	// adds the `data: ` + `\n\n` framing.
-	stripped, mErr := json.Marshal(chunk)
+	// Mutation occurred: re-marshal the chunk and return a
+	// FRAMED SSE line as stripped (`data: ` + raw JSON +
+	// `\n\n`). The C1 uniform-framing contract means callers
+	// never have to distinguish mutated vs unchanged — every
+	// returned line is a fully-framed SSE event.
+	strippedRaw, mErr := json.Marshal(chunk)
 	if mErr != nil {
 		// Marshal failure is unexpected for a chunk we just
 		// parsed; log and return the ORIGINAL line VERBATIM
@@ -619,7 +631,25 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 		log.Printf("[WARN] minimax stream chunk marshal failure: %v", mErr)
 		return originalLine, nil, nil
 	}
+	stripped = frameSSELine(strippedRaw)
+	// Frame each emitted chunk so the uniform-framing contract
+	// holds on the mutated path.
+	for i, e := range emitted {
+		emitted[i] = frameSSELine(e)
+	}
 	return stripped, emitted, nil
+}
+
+// frameSSELine wraps a raw JSON payload as one fully-framed
+// SSE event: `data: ` + payload + `\n\n`. Used by ChunkBytes
+// on the mutated path so callers always receive framed
+// lines (C1 uniform contract).
+func frameSSELine(rawJSON []byte) []byte {
+	out := make([]byte, 0, len(rawJSON)+8)
+	out = append(out, []byte("data: ")...)
+	out = append(out, rawJSON...)
+	out = append(out, '\n', '\n')
+	return out
 }
 
 // buildReasoningContentChunk builds one client chunk from a stripped
