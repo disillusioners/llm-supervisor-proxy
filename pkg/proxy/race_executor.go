@@ -350,14 +350,16 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 	if !isStreaming {
 		// Non-streaming response: read entire body as single chunk
-		return handleNonStreamingResponse(ctx, cfg, resp, req, finalBody)
+		// (interleaved is threaded through P2-4 so the response
+		// translator's MiniMax gate is visible at the call site).
+		return handleNonStreamingResponse(ctx, cfg, resp, req, finalBody, interleaved)
 	}
 
 	// Streaming response
 	req.MarkStreaming()
 	// Detect provider for normalization
 	provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
-	return handleStreamingResponse(ctx, cfg, resp, req, provider, finalBody)
+	return handleStreamingResponse(ctx, cfg, resp, req, provider, finalBody, interleaved)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -927,7 +929,15 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 }
 
 // handleNonStreamingResponse reads a non-streaming JSON response
-func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, rawBody []byte) error {
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag carried from
+// the race coordinator (via executeRequest → executeExternalRequest).
+// P2-4 (a): drives the response-side MiniMax reasoning_details
+// translator on the race-external non-stream path. The gate is
+// (interleaved && raceExtProviderIsMiniMax(cfg)) — short-circuits
+// BEFORE any parse (H5). Gated-off is a pure no-op (preserves
+// byte-identical negative-case invariant).
+func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, rawBody []byte, interleaved bool) error {
 	// Limit body size to 10MB to prevent unbounded memory consumption
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
@@ -941,6 +951,25 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 			body = repairedBody
 			log.Printf("[TOOL-REPAIR] Race attempt %d: repaired malformed tool_call arguments in non-streaming response", req.id)
 		}
+	}
+
+	// P2-4 (a): race-external non-stream — invoke the response
+	// translator on the upstream body BEFORE the final buffer add.
+	// Gate is (interleaved && raceExtProviderIsMiniMax(cfg)) — the
+	// provider check uses the same helper as the request-side gate
+	// (D3). Gate short-circuits BEFORE any parse, so gated-off
+	// preserves byte-identical behavior on this verbatim path.
+	if interleaved && raceExtProviderIsMiniMax(cfg) {
+		translated, terr := translator.TranslateNonStreamResponseBytes(body)
+		if terr != nil {
+			// §6.1 — non-stream KEEPS error return; caller
+			// (race_executor's coordinator) routes to
+			// WriteError 502 api_error. We return the wrapped
+			// error to surface the parse/shape failure to the
+			// client as an upstream error.
+			return fmt.Errorf("race-external response translator: %w", terr)
+		}
+		body = translated
 	}
 
 	// Extract usage from response and store it
@@ -1166,7 +1195,15 @@ func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepai
 // Per the unified race retry design, the main request should continue streaming
 // even after idle timeout - the coordinator will spawn parallel requests.
 // Idle timeout detection is handled by the coordinator via TrackActivity().
-func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string, rawBody []byte) error {
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag carried from
+// the race coordinator (via executeRequest → executeExternalRequest).
+// P2-5 (a): drives the response-side StreamTranslator on the
+// race-external stream path. The gate is (interleaved &&
+// raceExtProviderIsMiniMax(cfg)) — short-circuits BEFORE any parse
+// (H5). Gated-off is a pure no-op: the StreamTranslator instance
+// is only constructed when the gate fires.
+func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string, rawBody []byte, interleaved bool) error {
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
@@ -1197,6 +1234,15 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			req.modelID,
 			fmt.Sprintf("%d", req.id),
 		)
+	}
+
+	// P2-5 (a): race-external stream — construct the StreamTranslator
+	// per-stream instance ONLY when the gate fires. Gated-off ⇒ no
+	// instance ⇒ no per-chunk work ⇒ byte-identical passthrough.
+	// The instance's lifetime is the loop scope (P2-3 / §3.3).
+	var streamTranslator *translator.StreamTranslator
+	if interleaved && raceExtProviderIsMiniMax(cfg) {
+		streamTranslator = translator.NewStreamTranslator()
 	}
 
 	for {
@@ -1280,14 +1326,55 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 				}
 			}
 
+			// P2-5 (a) / P2-7: apply the response-side stream
+			// translator BEFORE the tool call buffer (W3 ordering
+			// — the tool-call buffer sees a chunk already stripped
+			// of reasoning_details so it never has to special-case
+			// the field). The translator returns (stripped,
+			// emitted) — the caller writes stripped first, then
+			// each emitted[i] in order, before the next flush
+			// boundary. The translator is error-free by
+			// construction (§6.1); err is always nil.
+			translatorLine := normalizedLine
+			var translatorEmitted [][]byte
+			if streamTranslator != nil {
+				var terr error
+				translatorLine, translatorEmitted, terr = streamTranslator.ChunkBytes(normalizedLine)
+				if terr != nil {
+					// §6.1: should be impossible. Log + continue
+					// with the original line.
+					log.Printf("[WARN] race-external stream translator: %v", terr)
+					translatorLine = normalizedLine
+					translatorEmitted = nil
+				}
+			}
+
 			// Process through tool call buffer (if enabled)
 			// The buffer accumulates tool call fragments, repairs when complete, and emits
 			// Non-tool-call chunks pass through immediately
 			var chunksToEmit [][]byte
 			if toolCallBuffer != nil {
-				chunksToEmit = toolCallBuffer.ProcessChunk(normalizedLine)
+				chunksToEmit = toolCallBuffer.ProcessChunk(translatorLine)
 			} else {
-				chunksToEmit = [][]byte{normalizedLine}
+				chunksToEmit = [][]byte{translatorLine}
+			}
+
+			// Prepend the translator's emitted chunks (if any) so
+			// the client sees reasoning_content deltas before the
+			// stripped upstream chunk on each loop iteration. Per
+			// the W9 contract, the translator emits raw JSON data
+			// (no `data: ` prefix, no trailing `\n\n`); the
+			// call site is responsible for adding the wire
+			// framing before the next flush boundary. The
+			// stripping pattern matches the SSE shape used by
+			// the race-external path's downstream consumer.
+			if len(translatorEmitted) > 0 {
+				full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
+				for _, e := range translatorEmitted {
+					full = append(full, append(append([]byte("data: "), e...), '\n', '\n'))
+				}
+				full = append(full, chunksToEmit...)
+				chunksToEmit = full
 			}
 
 			// Add all chunks to buffer

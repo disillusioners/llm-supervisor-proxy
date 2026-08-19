@@ -754,7 +754,7 @@ func TestHandleNonStreamingResponse_Success(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestHandleNonStreamingResponse_WithUsage(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -807,7 +807,7 @@ func TestHandleNonStreamingResponse_WithoutUsage(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestHandleNonStreamingResponse_EmptyUsage(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -856,7 +856,7 @@ func TestHandleNonStreamingResponse_ReadError(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -873,7 +873,7 @@ func TestHandleNonStreamingResponse_InvalidJSON(t *testing.T) {
 	body := `not valid json`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -897,7 +897,7 @@ func TestHandleNonStreamingResponse_WithToolRepair(t *testing.T) {
 	body := `{"id":"chatcmpl-123","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Let me check that","tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{bad json}"}}]},"finish_reason":"tool_calls"}]}`
 	resp := newResponse(body)
 
-	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err := handleNonStreamingResponse(context.Background(), cfg, resp, req, []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -943,7 +943,7 @@ func TestHandleStreamingResponse_NormalStream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -988,7 +988,7 @@ func TestHandleStreamingResponse_WithUsage(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1028,7 +1028,7 @@ func TestHandleStreamingResponse_EmptyStream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1076,7 +1076,7 @@ func TestHandleStreamingResponse_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel before calling handler
 
-	err = handleStreamingResponse(ctx, cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(ctx, cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err == nil {
 		t.Fatal("expected error due to context cancellation")
 	}
@@ -1112,7 +1112,7 @@ func TestHandleStreamingResponse_PrematureClose(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err == nil {
 		t.Fatal("expected error due to premature close")
 	}
@@ -1142,7 +1142,7 @@ func TestHandleStreamingResponse_StreamErrorChunk(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err == nil {
 		t.Fatal("expected error due to stream error chunk")
 	}
@@ -1595,7 +1595,7 @@ func TestHandleStreamingResponse_MultipleChunks(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`))
+	err = handleStreamingResponse(context.Background(), cfg, resp, req, "openai", []byte(`{"messages":[{"role":"user","content":"test"}]}`), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
