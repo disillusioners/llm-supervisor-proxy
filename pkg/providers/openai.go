@@ -16,6 +16,18 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
+	// translator is imported HELPER-ONLY for ExtractEntryText (R3
+	// layering decision). The provider → translator direction is an
+	// inversion of the usual translator → providers type flow. This
+	// import must NOT pull any provider types back into translator
+	// (the translator package does not import pkg/providers; the
+	// reasoning shape lives in the local ReasoningDetailEntry type
+	// defined in interface.go). pkg/providers MUST NOT export its
+	// own ReasoningDetail type — the boundary code in openai.go
+	// is responsible for translating between this local type and
+	// the translator's helper-only function. See R3 layering
+	// decision in architecture-recommendation.md §11.
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 )
 
 // OpenAIProvider implements Provider for OpenAI-compatible APIs
@@ -131,6 +143,25 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 				result.Choices[i].Message.ToolCalls[j].Function.Arguments = rc.Arguments
 			}
 		}
+	}
+
+	// D2 + P2-1a: extract reasoning_details on the typed/non-stream
+	// path. Single-winner rule: when Message.ReasoningDetails is
+	// non-empty, it WINS and any pre-existing ReasoningContent is
+	// ignored. When details are absent, ReasoningContent is preserved
+	// untouched (the upstream may have set it as a string already).
+	// ReasoningDetails is set to nil so omitempty drops the key on
+	// the typed Encode (R11 — no leak).
+	//
+	// Provider-agnostic and data-driven (R2-residual D2 wrong-layer
+	// guard): the openai.go parser does not branch on cred.Provider.
+	// Non-MiniMax upstreams do not carry reasoning_details so the
+	// helper is naturally inert.
+	for i := range result.Choices {
+		if result.Choices[i].Message == nil {
+			continue
+		}
+		populateReasoningFromDetails(result.Choices[i].Message)
 	}
 
 	return &result, nil
@@ -391,9 +422,24 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 						Content: contentStr,
 					}
 				}
-				// Handle reasoning_content (DeepSeek-style thinking)
-				// Parse from raw chunk since it's not in the standard struct
-				if reasoningContent := extractReasoningContent([]byte(data)); reasoningContent != "" {
+				// Handle reasoning_details (MiniMax-style
+				// typed thinking). Emit ONE thinking StreamEvent
+				// per entry, in array order. Single-winner rule
+				// (D2): when reasoning_details is present
+				// (non-empty), it WINS and reasoning_content is
+				// NOT extracted (the existing
+				// extractReasoningContent call is skipped). When
+				// reasoning_details is absent, fall back to
+				// reasoning_content (DeepSeek-style).
+				emittedTexts, hasDetails := extractReasoningDetailsFromRawData([]byte(data))
+				if hasDetails {
+					for _, text := range emittedTexts {
+						eventCh <- StreamEvent{
+							Type:             "thinking",
+							ReasoningContent: text,
+						}
+					}
+				} else if reasoningContent := extractReasoningContent([]byte(data)); reasoningContent != "" {
 					eventCh <- StreamEvent{
 						Type:             "thinking",
 						ReasoningContent: reasoningContent,
@@ -436,6 +482,20 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 			}
 			if choice.FinishReason != "" {
 				lastResponse = &chunk
+				// D2 + P2-1a: when the final chunk carries a
+				// Message (some non-OpenAI providers do this),
+				// apply the single-winner rule at extraction
+				// time on the typed path. Reasoning_details wins
+				// over any pre-existing reasoning_content;
+				// ReasoningDetails is set to nil so omitempty
+				// drops the key on the typed done event (R11 —
+				// no leak). For OpenAI the final chunk's Message
+				// is typically nil and this is a no-op; the
+				// per-entry thinking events already carried the
+				// text downstream.
+				if lastResponse.Choices[0].Message != nil {
+					populateReasoningFromDetails(lastResponse.Choices[0].Message)
+				}
 			}
 		}
 	}
@@ -512,4 +572,147 @@ func extractReasoningContent(data []byte) string {
 		return rawChunk.Choices[0].Delta.ReasoningContent
 	}
 	return ""
+}
+
+// extractReasoningDetailsFromRawData walks an upstream SSE chunk's
+// `choices[].delta.reasoning_details` array (or
+// `choices[].message.reasoning_details` for non-stream responses) and
+// returns one emitted-text string per non-empty entry, in array order.
+//
+// The function is DATA-DRIVEN and PROVIDER-AGNOSTIC — it does not
+// branch on cred.Provider (R2-residual D2 wrong-layer guard: provider
+// gating belongs to the caller/flag layer at pkg/proxy/handler.go
+// entry, never the parser). Non-MiniMax upstreams do not carry
+// reasoning_details so this is naturally inert on those providers.
+//
+// Per-entry processing (one emitted-text string per entry):
+//   - type != "reasoning.text" (when type is present) → skip
+//     (forward-compat: MiniMax may add typed entries that map to
+//     different fields; we only emit the plain reasoning text
+//     entries on the OpenAI reasoning_content channel).
+//   - text = translator.ExtractEntryText(entry) (text key wins,
+//     content key is forward-compat fallback per H3 / §6.2).
+//   - empty after strings.TrimSpace → skip (H7).
+//   - contained in alreadyEmitted (strings.Index >= 0) → skip
+//     (H2 dedup; protects against cumulative-mode upstream replay
+//     and the mock harness's "both fields" case at the array level).
+//
+// Returns nil when the input does not carry reasoning_details or when
+// all entries are filtered out — callers distinguish "no details" from
+// "details but no emit" by checking the boolean return.
+func extractReasoningDetailsFromRawData(data []byte) (emittedTexts []string, hasDetails bool) {
+	var rawChunk struct {
+		Choices []struct {
+			Delta struct {
+				ReasoningDetails []map[string]any `json:"reasoning_details"`
+			} `json:"delta"`
+			Message struct {
+				ReasoningDetails []map[string]any `json:"reasoning_details"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &rawChunk); err != nil {
+		return nil, false
+	}
+	if len(rawChunk.Choices) == 0 {
+		return nil, false
+	}
+	// Prefer delta.reasoning_details (stream path); fall back to
+	// message.reasoning_details (non-stream — though the non-stream
+	// typed path uses Message.ReasoningDetails directly and does
+	// not call this helper; this fallback exists for symmetry and
+	// to keep the helper usable from both call sites).
+	entries := rawChunk.Choices[0].Delta.ReasoningDetails
+	if len(entries) == 0 {
+		entries = rawChunk.Choices[0].Message.ReasoningDetails
+	}
+	if len(entries) == 0 {
+		return nil, false
+	}
+	hasDetails = true
+	var acc strings.Builder
+	for _, entry := range entries {
+		// ExtractEntryText is a helper-only import from
+		// pkg/proxy/translator; it must NOT pull provider types
+		// back — see R3 layering decision.
+		text := translator.ExtractEntryText(entry)
+		if strings.TrimSpace(text) == "" {
+			continue // H7 skip-empty
+		}
+		// Type filter: when the entry carries a `type` field that
+		// is non-empty and not "reasoning.text", skip. This is
+		// forward-compat for any future typed entries MiniMax
+		// may add (e.g. reasoning.summary, reasoning.encrypted).
+		if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+			continue
+		}
+		// H2 dedup: skip if text is already contained in
+		// already-emitted text. Containment (strings.Index >= 0)
+		// rather than equality, so cumulative upstream emission
+		// is also detected.
+		if acc.Len() > 0 && strings.Index(acc.String(), text) >= 0 {
+			continue
+		}
+		emittedTexts = append(emittedTexts, text)
+		acc.WriteString(text)
+	}
+	return emittedTexts, hasDetails
+}
+
+// populateReasoningFromDetails applies the single-winner rule (D2) at
+// extraction time on the typed path. When the upstream message carries
+// `reasoning_details` (non-empty), reasoning_details WINS and any
+// pre-existing `reasoning_content` is IGNORED (not concatenated, not
+// duplicated). When reasoning_details is absent or empty, the existing
+// reasoning_content is preserved untouched.
+//
+// For each entry in details: H2 dedup (containment vs the running
+// accumulator + vs any pre-existing reasoning_content), H7 skip-empty,
+// unknown-type skip. The concatenated text is written to
+// msg.ReasoningContent and msg.ReasoningDetails is set to nil so
+// omitempty drops the key on typed encode (R11 — no leak).
+//
+// The function is DATA-DRIVEN and PROVIDER-AGNOSTIC — it does not
+// branch on cred.Provider (R2-residual D2 wrong-layer guard).
+func populateReasoningFromDetails(msg *ChatMessage) {
+	if msg == nil {
+		return
+	}
+	if len(msg.ReasoningDetails) == 0 {
+		// No details ⇒ keep existing ReasoningContent. The
+		// single-winner rule only fires when details are present.
+		return
+	}
+	// Details present ⇒ reasoning_details WINS. We always start
+	// from the entries' text regardless of any pre-existing
+	// reasoning_content.
+	var acc strings.Builder
+	prior := msg.ReasoningContent
+	for _, entry := range msg.ReasoningDetails {
+		// Pass the typed Text through the translator helper as a
+		// map[string]any{"text": ...} so the helper is the
+		// single source of truth for the text-extraction
+		// policy (including the forward-compat `content`
+		// fallback per H3 / §6.2). ExtractEntryText is a
+		// helper-only import from pkg/proxy/translator; it
+		// must NOT pull provider types back — see R3 layering
+		// decision.
+		text := translator.ExtractEntryText(map[string]any{
+			"text": entry.Text,
+		})
+		if strings.TrimSpace(text) == "" {
+			continue // H7 skip-empty
+		}
+		// H2 dedup vs prior reasoning_content (containment).
+		if prior != "" && strings.Index(prior, text) >= 0 {
+			continue
+		}
+		// H2 dedup within our own accumulator.
+		if acc.Len() > 0 && strings.Index(acc.String(), text) >= 0 {
+			continue
+		}
+		acc.WriteString(text)
+	}
+	msg.ReasoningContent = acc.String()
+	msg.ReasoningDetails = nil // omitempty drops the key on encode (R11)
 }
