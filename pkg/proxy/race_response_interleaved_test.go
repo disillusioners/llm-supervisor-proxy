@@ -72,6 +72,14 @@ func TestRaceExternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testing.
 	if !strings.Contains(got, `"content":"hello"`) {
 		t.Errorf("upstream content lost: %s", got)
 	}
+	// N-3: full byte-identity of the client-visible response body
+	// vs the exact upstream bytes. streamBuffer.Add restores the
+	// trailing '\n' it documents as stripped, so the expected bytes
+	// are the upstream body + '\n'. This guards against any future
+	// silent re-marshal on the gate-OFF path.
+	if !bytes.Equal(chunks[len(chunks)-1], append([]byte(upstreamBody), '\n')) {
+		t.Errorf("gate-OFF non-stream body not byte-identical to upstream:\n want=%q\n  got=%q", upstreamBody+"\n", got)
+	}
 	// No translator-injected fields.
 	if strings.Contains(got, "reasoning_split") {
 		t.Errorf("body unexpectedly contains reasoning_split: %s", got)
@@ -126,6 +134,18 @@ func TestRaceExternal_StreamResponse_NegativeCase_ByteIdentical_NonMiniMax(t *te
 	combined := string(bytes.Join(chunks, nil))
 	if !strings.Contains(combined, `"content":"hello"`) {
 		t.Errorf("upstream content lost: %s", combined)
+	}
+	// N-3: byte-identity of the client-visible stream vs the exact
+	// upstream bytes. The race-external stream loop strips each
+	// line's trailing '\n' before buffering and streamBuffer.Add
+	// restores it, and the loop breaks at `data: [DONE]` BEFORE
+	// consuming the blank line after it — so the expected bytes are
+	// the upstream stream minus its FINAL '\n' (the [DONE] line's
+	// own newline is restored by Add). This guards against any
+	// future silent re-marshal on the gate-OFF path.
+	wantStream := upstreamStream[:len(upstreamStream)-1]
+	if !bytes.Equal([]byte(combined), []byte(wantStream)) {
+		t.Errorf("gate-OFF stream not byte-identical to upstream:\n want=%q\n  got=%q", wantStream, combined)
 	}
 	if strings.Contains(combined, "reasoning_content") {
 		t.Errorf("body unexpectedly contains reasoning_content: %s", combined)
@@ -194,6 +214,13 @@ func TestRaceInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testing.
 	// Captured request must not have translator-injected fields
 	// (the response is the upstream's; openai.go extraction is
 	// naturally inert on a non-MiniMax shape).
+	//
+	// N-3 note: no bytes.Equal assertion is possible here — the
+	// race-internal path re-encodes the typed ChatCompletionResponse
+	// (json.Marshal of the struct), so no verbatim upstream bytes
+	// exist on this side. The mock returns a typed struct, not wire
+	// bytes. Existing assertions (no reasoning fields injected)
+	// stand as-is.
 	captured := mock.GetCapturedRequest()
 	if captured == nil {
 		t.Fatal("provider did not capture the request")
@@ -261,6 +288,12 @@ func TestRaceInternal_StreamResponse_NegativeCase_NoThinkingEvents_NonMiniMax(t 
 	if strings.Contains(combined, "reasoning_content") {
 		t.Errorf("stream unexpectedly contains reasoning_content: %s", combined)
 	}
+	// N-3 note: no full bytes.Equal assertion is possible here —
+	// the race-internal stream path synthesizes each SSE line from
+	// typed StreamEvents (id/object/created are regenerated with
+	// time.Now()), so no verbatim upstream bytes exist. The
+	// per-line JSON payload is the only byte-comparable sub-scope,
+	// and it is already covered by the absence assertions above.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
@@ -574,6 +575,26 @@ func extractReasoningContent(data []byte) string {
 	return ""
 }
 
+// unknownTypeDebugN is the inverse sampling rate for the unknown-entry-type
+// debug log below (1 in N invocations are logged). Matches the translator's
+// entryDebugSampling rate (minimax_stream.go, 1 in 64) so both skip sites
+// behave symmetrically per plan §6.1.
+const unknownTypeDebugN = 64
+
+// unknownTypeDebugSeen counts invocations of unknownTypeDebugSamplingAllowed;
+// every Nth invocation is allowed. Atomic so the stream parser's use from
+// concurrent stream loops is race-free.
+var unknownTypeDebugSeen atomic.Uint64
+
+// unknownTypeDebugSamplingAllowed is the local 1-in-N sampling gate for the
+// unknown-entry-type debug log at the openai.go skip site (M-1). Deliberately
+// a minimal local duplicate of the translator's package-private sampler:
+// exporting a sampler helper from translator would add API surface that R3
+// (helper-only provider → translator import) does not require.
+func unknownTypeDebugSamplingAllowed() bool {
+	return unknownTypeDebugSeen.Add(1)%unknownTypeDebugN == 0
+}
+
 // extractReasoningDetailsFromRawData walks an upstream SSE chunk's
 // `choices[].delta.reasoning_details` array (or
 // `choices[].message.reasoning_details` for non-stream responses) and
@@ -643,7 +664,19 @@ func extractReasoningDetailsFromRawData(data []byte) (emittedTexts []string, has
 		// is non-empty and not "reasoning.text", skip. This is
 		// forward-compat for any future typed entries MiniMax
 		// may add (e.g. reasoning.summary, reasoning.encrypted).
+		// M-1: per plan §6.1 the skip is NOT silent — emit a
+		// sampled debug log, symmetric with the translator's
+		// unknown-type handling in minimax_stream.go. The sampler
+		// is a local 1-in-N gate (duplicate of the translator's
+		// package-private sampler) rather than an exported helper:
+		// duplicating ~5 lines costs less surface than exporting a
+		// new translator API (R3 keeps the provider → translator
+		// import helper-only; ExtractEntryText already stretches
+		// that boundary).
 		if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+			if unknownTypeDebugSamplingAllowed() {
+				log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
+			}
 			continue
 		}
 		// H2 dedup: skip if text is already contained in

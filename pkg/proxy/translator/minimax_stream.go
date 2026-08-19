@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -19,7 +20,8 @@ import (
 //
 // Thread safety: NOT goroutine-safe. Each StreamTranslator instance is owned
 // by a single stream loop; multiple instances are independent. The package-
-// level formatDriftCounter is the only shared state and is atomic.
+// level formatDriftCounter (atomic) and its per-format dedup set (a
+// sync.Map) are the only shared state.
 //
 // The MiniMax provider + flag gate is the caller's responsibility; these
 // functions run unconditionally on the input body / line and trust the
@@ -38,8 +40,17 @@ var knownReasoningFormats = map[string]struct{}{
 
 // formatDriftCounter is a process-wide counter incremented once per unique
 // observed unknown format value (best-effort, see ChunkBytes / recordDrift).
-// The getter is exposed for the Phase-3 verification report.
+// It counts DISTINCT unknown format values, not entry volume — repeated
+// entries carrying the same unknown format value increment it only ONCE
+// process-wide (P2-9: "doesn't double-increment for repeated identical
+// drift"). The getter is exposed for the Phase-3 verification report.
 var formatDriftCounter atomic.Uint64
+
+// seenUnknownFormats is the process-wide dedup set backing the
+// distinct-value semantics of formatDriftCounter. LoadOrStore returning
+// loaded=false is the "first time this format value was observed" signal
+// that authorizes exactly one counter increment.
+var seenUnknownFormats sync.Map
 
 // FormatDriftCount returns the current value of the format-drift counter.
 // Exported for verification reporting (P3-6); not used by the proxy itself.
@@ -47,13 +58,21 @@ func FormatDriftCount() uint64 {
 	return formatDriftCounter.Load()
 }
 
-// recordDrift increments the format-drift counter and emits a sampled
-// WARN log. Sampling is best-effort (1 in formatDriftLogEvery invocations)
-// to bound log volume on a hot stream of unknown-format chunks. The
-// counter is incremented unconditionally so verification can see the
-// true drift rate even when WARNs are suppressed.
+// recordDrift records one unknown-format observation. Semantics (P2-9):
+// the format-drift counter counts DISTINCT unknown format values, not
+// entry volume — each distinct format string increments the atomic
+// counter exactly ONCE process-wide; repeated entries with the same
+// already-seen format do NOT re-increment. The sampled WARN log fires
+// regardless of dedup state (log volume is bounded by the 1-in-N
+// sampler, not by the dedup set) so a hot stream of unknown-format
+// chunks remains observable while the counter stays a faithful
+// "how many distinct formats drifted" metric.
 func recordDrift(entry map[string]any) {
-	formatDriftCounter.Add(1)
+	if formatVal, ok := entry["format"].(string); ok {
+		if _, dup := seenUnknownFormats.LoadOrStore(formatVal, struct{}{}); !dup {
+			formatDriftCounter.Add(1)
+		}
+	}
 	if formatDriftCounter.Load()%formatDriftLogEvery != 0 {
 		return
 	}
@@ -124,16 +143,36 @@ func ExtractEntryText(entry map[string]any) string {
 // a wrapped error if the body is nil or `choices` is present but not a
 // `[]any`. On error, the map is left unmutated.
 func TranslateNonStreamResponseBody(body map[string]any) error {
+	_, err := translateNonStreamResponseBody(body)
+	return err
+}
+
+// translateNonStreamResponseBody is the package-private core of
+// TranslateNonStreamResponseBody. It returns the same error semantics and,
+// additionally, whether the body was MUTATED (changed=true) or left
+// untouched (changed=false). "Untouched" means: no reasoning_details key
+// was read-and-processed, no audio/audio_content/name key was deleted, and
+// nothing else was written. TranslateNonStreamResponseBytes uses the flag
+// to skip a pointless re-marshal when the translator is a semantic no-op
+// on the input (N-1/Q3 — data-absent gate-ON responses keep their
+// original byte formatting: key order, number formatting, whitespace).
+//
+// changed=true covers every path that touches the map: the audio/name
+// strip counts as a modification ONLY when one of those keys was actually
+// present (delete of an absent key is a no-op, verified via the
+// two-value map lookup); reading + deleting reasoning_details counts;
+// overwriting reasoning_content under the single-winner rule counts.
+func translateNonStreamResponseBody(body map[string]any) (changed bool, err error) {
 	if body == nil {
-		return fmt.Errorf("TranslateNonStreamResponseBody: body is nil")
+		return false, fmt.Errorf("TranslateNonStreamResponseBody: body is nil")
 	}
 	rawChoices, exists := body["choices"]
 	if !exists {
-		return nil // no choices → nothing to translate
+		return false, nil // no choices → nothing to translate
 	}
 	choices, ok := rawChoices.([]any)
 	if !ok {
-		return fmt.Errorf("TranslateNonStreamResponseBody: choices is %T, expected []any", rawChoices)
+		return false, fmt.Errorf("TranslateNonStreamResponseBody: choices is %T, expected []any", rawChoices)
 	}
 
 	for _, rawChoice := range choices {
@@ -155,9 +194,21 @@ func TranslateNonStreamResponseBody(body map[string]any) error {
 		// because these are MiniMax-only fields and would leak
 		// upstream semantics to OpenAI clients. Done BEFORE the
 		// reasoning pass to keep the rest of the message intact.
-		delete(msg, "audio")
-		delete(msg, "audio_content")
-		delete(msg, "name")
+		// N-1/Q3: the strip only counts as a modification when one
+		// of the keys was actually present — deleting an absent
+		// key is a map no-op and must not force a re-marshal.
+		if _, present := msg["audio"]; present {
+			delete(msg, "audio")
+			changed = true
+		}
+		if _, present := msg["audio_content"]; present {
+			delete(msg, "audio_content")
+			changed = true
+		}
+		if _, present := msg["name"]; present {
+			delete(msg, "name")
+			changed = true
+		}
 
 		// Walk reasoning_details and build the concatenated text
 		// into ReasoningContent. Single-winner: if details are
@@ -175,6 +226,7 @@ func TranslateNonStreamResponseBody(body map[string]any) error {
 			// Wrong type or empty array: clear details and
 			// leave reasoning_content alone.
 			delete(msg, "reasoning_details")
+			changed = true
 			continue
 		}
 
@@ -235,8 +287,9 @@ func TranslateNonStreamResponseBody(body map[string]any) error {
 
 		msg["reasoning_content"] = b.String()
 		delete(msg, "reasoning_details")
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 // TranslateNonStreamResponseBytes is the response-side bytes wrapper. It
@@ -244,6 +297,16 @@ func TranslateNonStreamResponseBody(body map[string]any) error {
 // result. Use this on verbatim-byte call sites that already hold response
 // bytes and have no usable map representation (notably ultim-ext
 // non-stream per §5.3 — the only verbatim path).
+//
+// Data-absent fast path (N-1/Q3): when the map-core translator reports
+// that nothing was modified (no reasoning_details anywhere AND none of
+// the audio/audio_content/name strip keys present), the ORIGINAL input
+// bytes are returned untouched — no re-marshal, so key order, number
+// formatting and whitespace survive exactly as upstream sent them. This
+// keeps gate-ON responses that carry no reasoning_details (ordinary
+// MiniMax responses using reasoning_content only, or neither field)
+// byte-identical to what the upstream produced, instead of reformatted
+// (alphabetized keys, float64 re-encoded) for zero semantic benefit.
 //
 // Not goroutine-safe; the gate is the caller's responsibility.
 //
@@ -256,8 +319,15 @@ func TranslateNonStreamResponseBytes(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, fmt.Errorf("TranslateNonStreamResponseBytes: parse body: %w", err)
 	}
-	if err := TranslateNonStreamResponseBody(m); err != nil {
+	changed, err := translateNonStreamResponseBody(m)
+	if err != nil {
 		return nil, err
+	}
+	if !changed {
+		// N-1/Q3: semantic no-op — pass the original bytes through
+		// without re-marshaling so upstream byte formatting is
+		// preserved on data-absent gate-ON responses.
+		return body, nil
 	}
 	return json.Marshal(m)
 }

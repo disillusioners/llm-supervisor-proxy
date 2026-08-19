@@ -1,7 +1,9 @@
 package translator
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -84,7 +86,7 @@ func TestExtractEntryText(t *testing.T) {
 
 func TestFormatDriftCounter_IncrementsOnUnknownFormat(t *testing.T) {
 	before := FormatDriftCount()
-	recordDrift(map[string]any{"format": "MiniMax-response-v2", "id": "x"})
+	recordDrift(map[string]any{"format": "MiniMax-response-v2-" + t.Name(), "id": "x"})
 	after := FormatDriftCount()
 	if after != before+1 {
 		t.Errorf("counter not incremented: before=%d after=%d", before, after)
@@ -107,35 +109,51 @@ func TestFormatDriftCounter_NoIncrementOnKnownFormat(t *testing.T) {
 	}
 }
 
-func TestFormatDriftCounter_AlwaysIncrementsForUnknown(t *testing.T) {
-	// recordDrift increments unconditionally; the sampling only
-	// affects log emission.
-	entry := map[string]any{"format": "MiniMax-response-v9", "id": "unique-id-" + t.Name()}
+func TestFormatDriftCounter_NoDoubleIncrementForRepeatedIdenticalDrift(t *testing.T) {
+	// P2-9 acceptance: the counter counts DISTINCT unknown format
+	// values, not entry volume. Two entries carrying the SAME
+	// unknown format → +1; a second DISTINCT unknown format → +1
+	// more. Format values are t.Name()-derived so this test stays
+	// independent of any other test's dedup-set pollution.
+	base := "MiniMax-response-drift-" + t.Name()
 	before := FormatDriftCount()
-	// 100 invocations: counter should be +100.
-	for i := 0; i < 100; i++ {
-		recordDrift(entry)
+	recordDrift(map[string]any{"format": base + "-a", "id": "1"})
+	recordDrift(map[string]any{"format": base + "-a", "id": "2"}) // same value — deduped
+	mid := FormatDriftCount()
+	if mid != before+1 {
+		t.Errorf("repeated identical drift double-incremented: before=%d mid=%d (want +1)", before, mid)
 	}
+	recordDrift(map[string]any{"format": base + "-b", "id": "3"}) // distinct value
 	after := FormatDriftCount()
-	if after-before != 100 {
-		t.Errorf("counter increment != 100: before=%d after=%d", before, after)
+	if after != mid+1 {
+		t.Errorf("distinct drift did not increment: mid=%d after=%d (want +1)", mid, after)
+	}
+	// Repeated again after the distinct value — still no re-increment
+	// for either previously-seen value.
+	recordDrift(map[string]any{"format": base + "-a", "id": "4"})
+	recordDrift(map[string]any{"format": base + "-b", "id": "5"})
+	final := FormatDriftCount()
+	if final != after {
+		t.Errorf("repeated known-unknown formats re-incremented: after=%d final=%d", after, final)
 	}
 }
 
 func TestRecordDrift_IncrementIsAtomic(t *testing.T) {
-	// Sanity: hammering recordDrift from multiple goroutines must
-	// produce a deterministic final count.
-	entry := map[string]any{"format": "MiniMax-response-v9", "id": "concurrent"}
-	before := FormatDriftCount()
+	// Sanity: hammering recordDrift from multiple goroutines with
+	// DISTINCT format values must produce a deterministic final
+	// count (one increment per distinct value — the dedup set is a
+	// sync.Map, the counter is atomic).
 	const N = 1000
+	base := "MiniMax-response-atomic-" + t.Name()
+	before := FormatDriftCount()
 	var done atomic.Uint32
 	for i := 0; i < 4; i++ {
-		go func() {
+		go func(i int) {
 			for j := 0; j < N; j++ {
-				recordDrift(entry)
+				recordDrift(map[string]any{"format": fmt.Sprintf("%s-g%d-j%d", base, i, j), "id": "concurrent"})
 			}
 			done.Add(1)
-		}()
+		}(i)
 	}
 	for done.Load() < 4 {
 	}
@@ -327,7 +345,7 @@ func TestTranslateNonStreamResponseBody_FormatDriftCounterIncrements(t *testing.
 				"message": map[string]any{
 					"role": "assistant",
 					"reasoning_details": []any{
-						map[string]any{"type": "reasoning.text", "format": "MiniMax-response-v99", "text": "hi"},
+						map[string]any{"type": "reasoning.text", "format": "MiniMax-response-ns-" + t.Name(), "text": "hi"},
 					},
 				},
 			},
@@ -428,6 +446,55 @@ func TestTranslateNonStreamResponseBytes_RoundTrip(t *testing.T) {
 	}
 	if _, present := msg["reasoning_details"]; present {
 		t.Errorf("reasoning_details should be stripped")
+	}
+}
+
+func TestTranslateNonStreamResponseBytes_DataAbsentBytesIdentical(t *testing.T) {
+	// N-1/Q3: gate-ON-shaped body with NO reasoning_details and NO
+	// audio/audio_content/name keys is a semantic no-op — the
+	// ORIGINAL input bytes must be returned untouched (bytes.Equal),
+	// not a re-marshaled copy (alphabetized keys, float64 numbers).
+	// The fixture deliberately uses non-alphabetical key order and
+	// compact separators so a re-marshal would produce visibly
+	// different bytes.
+	in := []byte(`{"id":"r","object":"chat.completion","created":1,"model":"minimax","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	out, err := TranslateNonStreamResponseBytes(in)
+	if err != nil {
+		t.Fatalf("TranslateNonStreamResponseBytes: %v", err)
+	}
+	if !bytes.Equal(in, out) {
+		t.Errorf("data-absent body was re-marshaled:\n in=%s\nout=%s", in, out)
+	}
+}
+
+func TestTranslateNonStreamResponseBytes_ReasoningContentOnlyBytesIdentical(t *testing.T) {
+	// N-1/Q3 variant: reasoning_content-only response (ordinary
+	// MiniMax shape without reasoning_details) is also a no-op —
+	// pre-existing reasoning_content is preserved verbatim.
+	in := []byte(`{"choices":[{"message":{"reasoning_content":"already-here","role":"assistant"}}]}`)
+	out, err := TranslateNonStreamResponseBytes(in)
+	if err != nil {
+		t.Fatalf("TranslateNonStreamResponseBytes: %v", err)
+	}
+	if !bytes.Equal(in, out) {
+		t.Errorf("reasoning_content-only body was re-marshaled:\n in=%s\nout=%s", in, out)
+	}
+}
+
+func TestTranslateNonStreamResponseBytes_AudioKeyPresentStillRemarshals(t *testing.T) {
+	// N-1/Q3 boundary: the audio/audio_content/name strip counts as
+	// a modification when any of those keys IS present — the body
+	// must still be re-marshaled (current behavior preserved).
+	in := []byte(`{"choices":[{"message":{"role":"assistant","audio":{"id":"x"}}}]}`)
+	out, err := TranslateNonStreamResponseBytes(in)
+	if err != nil {
+		t.Fatalf("TranslateNonStreamResponseBytes: %v", err)
+	}
+	if bytes.Equal(in, out) {
+		t.Errorf("audio key present but output unchanged: %s", out)
+	}
+	if strings.Contains(string(out), `"audio"`) {
+		t.Errorf("audio should be stripped: %s", out)
 	}
 }
 
@@ -714,7 +781,7 @@ func TestStreamTranslator_FreshInstancePerRequest(t *testing.T) {
 func TestStreamTranslator_ChunkBytes_FormatDriftCounterIncrements(t *testing.T) {
 	before := FormatDriftCount()
 	tr := NewStreamTranslator()
-	line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","format":"MiniMax-response-v99","text":"x"}]}}]}`)
+	line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","format":"MiniMax-response-st-` + t.Name() + `","text":"x"}]}}]}`)
 	_, _, _ = tr.ChunkBytes(line)
 	after := FormatDriftCount()
 	if after != before+1 {

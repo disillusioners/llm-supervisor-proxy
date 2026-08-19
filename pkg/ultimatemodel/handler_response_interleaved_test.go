@@ -1,6 +1,7 @@
 package ultimatemodel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -71,6 +72,15 @@ func TestExecuteExternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 	if !strings.Contains(got, `"content":"hello"`) {
 		t.Errorf("upstream content lost: %s", got)
 	}
+	// N-3: full byte-identity of the client-received response body
+	// vs the exact upstream bytes. executeExternal writes bodyBytes
+	// to the client verbatim on gate-OFF (no translator, no tool
+	// repair on this path in the test config), so the recorder body
+	// must equal the upstream mock's response byte-for-byte. This
+	// guards against any future silent re-marshal regression.
+	if !bytes.Equal(w.Body.Bytes(), []byte(upstreamBody)) {
+		t.Errorf("gate-OFF non-stream body not byte-identical to upstream:\n want=%q\n  got=%q", upstreamBody, got)
+	}
 	// No translator-injected fields.
 	if strings.Contains(got, "reasoning_split") {
 		t.Errorf("body unexpectedly contains reasoning_split: %s", got)
@@ -131,6 +141,17 @@ func TestStreamResponse_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	if !strings.Contains(body, `"content":"hello"`) {
 		t.Errorf("upstream content lost: %s", body)
 	}
+	// N-3: full byte-identity of the client-received stream vs the
+	// exact upstream bytes. Unlike the race-external loop (which
+	// strips the trailing '\n' per line and breaks before the blank
+	// line after [DONE]), the ultimate-external streamResponse reads
+	// lines WITH their '\n' and buffers them unmodified on gate-OFF
+	// (normalizers and toolCallBuffer pass these lines through
+	// untouched), so the entire upstream stream — including the
+	// final blank line — must round-trip byte-for-byte.
+	if !bytes.Equal(w.Body.Bytes(), []byte(upstreamStream)) {
+		t.Errorf("gate-OFF stream not byte-identical to upstream:\n want=%q\n  got=%q", upstreamStream, body)
+	}
 	if strings.Contains(body, "reasoning_content") {
 		t.Errorf("body unexpectedly contains reasoning_content: %s", body)
 	}
@@ -187,6 +208,12 @@ func TestExecuteInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 	got := w.Body.String()
 	// No reasoning fields injected (openai.go's extraction is
 	// naturally inert on a non-MiniMax shape).
+	//
+	// N-3 note: no bytes.Equal assertion is possible here — the
+	// ultimate-internal path re-encodes the typed
+	// ChatCompletionResponse via json.Marshal of the struct, so no
+	// verbatim upstream bytes exist (the mock returns a typed
+	// struct, not wire bytes). Existing assertions stand as-is.
 	if strings.Contains(got, "reasoning_split") {
 		t.Errorf("body unexpectedly contains reasoning_split: %s", got)
 	}
@@ -250,6 +277,10 @@ func TestExecuteInternal_StreamResponse_NegativeCase_NoThinkingEvents_NonMiniMax
 	if strings.Contains(got, "reasoning_details") {
 		t.Errorf("stream unexpectedly contains reasoning_details: %s", got)
 	}
+	// N-3 note: no bytes.Equal assertion is possible here — the
+	// ultimate-internal stream path synthesizes SSE lines from typed
+	// StreamEvents (regenerated id/created), so no verbatim upstream
+	// bytes exist. Absence assertions above stand as-is.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
