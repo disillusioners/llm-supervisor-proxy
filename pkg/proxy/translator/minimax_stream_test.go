@@ -810,6 +810,39 @@ func TestStreamTranslator_ChunkBytes_EmptyDetailsArrayStrips(t *testing.T) {
 	}
 }
 
+// TestStreamTranslator_ChunkBytes_EmptyDetailsArrayPreservesReasoningContent
+// is the W11 boundary case for the stream path, mirroring
+// TestTranslateNonStreamResponseBody_EmptyDetailsArrayPreservesReasoningContent:
+// when reasoning_details is present but empty AND reasoning_content
+// is already on the delta, the empty array is stripped (R11 — no
+// leak) and the pre-existing reasoning_content survives UNTOUCHED
+// (the single-winner rule only fires when details are non-empty).
+// Output is framed per the C1 contract (mutated path: stripped is
+// `data: ` + raw JSON + `\n\n`).
+func TestStreamTranslator_ChunkBytes_EmptyDetailsArrayPreservesReasoningContent(t *testing.T) {
+	tr := NewStreamTranslator()
+	line := []byte(`{"id":"1","choices":[{"index":0,"delta":{"reasoning_content":"keep me","reasoning_details":[]}}]}`)
+	stripped, emitted, err := tr.ChunkBytes(line)
+	if err != nil {
+		t.Fatalf("ChunkBytes err: %v", err)
+	}
+	if len(emitted) != 0 {
+		t.Errorf("empty details array: no emitted, got %d", len(emitted))
+	}
+	if strings.Contains(string(stripped), "reasoning_details") {
+		t.Errorf("stripped still has reasoning_details: %s", stripped)
+	}
+	if !strings.Contains(string(stripped), `"reasoning_content":"keep me"`) {
+		t.Errorf("reasoning_content deleted on empty-details path (single-winner should be inactive): %s", stripped)
+	}
+	if !strings.HasPrefix(string(stripped), "data: ") {
+		t.Errorf("C1 mutated path: stripped must be framed with data: prefix, got %q", stripped)
+	}
+	if !strings.HasSuffix(string(stripped), "\n\n") {
+		t.Errorf("C1 mutated path: stripped must end with \\n\\n, got %q", stripped)
+	}
+}
+
 func TestStreamTranslator_ChunkBytes_WrongDetailsTypeStrips(t *testing.T) {
 	tr := NewStreamTranslator()
 	line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":"not-an-array"}}]}`)

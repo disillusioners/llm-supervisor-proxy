@@ -512,21 +512,22 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 		}
 		mutated = true
 
-		// W4 — when reasoning_details is present, delete the
-		// delta's reasoning_content (true single-winner on the
-		// wire: the details array wins, the string is discarded).
-		// Mirrors the W6 single-winner rule on the non-stream
-		// path and on the typed openai.go path.
-		delete(delta, "reasoning_content")
-
 		details, ok := rawDetails.([]any)
 		if !ok || len(details) == 0 {
-			// Wrong type or empty: strip the key (R11 — no
-			// leak) and continue. delta.reasoning_content
-			// has already been deleted above.
+			// Wrong type or empty: strip the key (R11 — no leak) and
+			// continue. Per symmetry with the non-stream path, leave
+			// delta.reasoning_content untouched here — the single-winner
+			// rule only fires when details are present AND non-empty.
 			delete(delta, "reasoning_details")
 			continue
 		}
+
+		// W4 — when reasoning_details is present and non-empty, delete
+		// the delta's reasoning_content (true single-winner on the
+		// wire: the details array wins, the string is discarded).
+		// Mirrors the W6 single-winner rule on the non-stream path
+		// and on the typed openai.go path.
+		delete(delta, "reasoning_content")
 
 		// Determine the choice index from the choice map.
 		choiceIdx := 0
