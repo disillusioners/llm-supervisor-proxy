@@ -37,16 +37,43 @@ type ChatCompletionRequest struct {
 	Tools            []Tool                 `json:"tools,omitempty"`
 	ToolChoice       interface{}            `json:"tool_choice,omitempty"` // "none", "auto", "required", or specific tool
 	Extra            map[string]interface{} `json:"-"`                     // Provider-specific extra fields
+
+	// ReasoningSplit is the typed transport for the MiniMax top-level
+	// reasoning_split flag (D1). Pointer type so absent-vs-false stays
+	// distinguishable; omitempty drops the wire key when nil.
+	ReasoningSplit *bool `json:"reasoning_split,omitempty"`
+}
+
+// ReasoningDetailEntry mirrors the wire shape of a single MiniMax
+// reasoning_details entry on internal request paths. It is defined here
+// (not imported from pkg/proxy/translator) because R3 forbids pkg/providers
+// from depending on pkg/proxy/translator types — the translator→providers
+// direction is the allowed one. The boundary code (convertRequest,
+// extractReasoningContent) is responsible for translating between this
+// local type and the translator's ReasoningDetail when needed.
+type ReasoningDetailEntry struct {
+	Type   string `json:"type,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Format string `json:"format,omitempty"`
+	Index  int    `json:"index,omitempty"`
+	Text   string `json:"text,omitempty"`
 }
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role            string      `json:"role"`
-	Content         interface{} `json:"content"` // string or []ContentPart for multimodal
-	Name            string      `json:"name,omitempty"`
-	ToolCalls       []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID      string      `json:"tool_call_id,omitempty"` // Required for tool role messages
-	ReasoningContent string     `json:"reasoning_content,omitempty"` // For DeepSeek R1-style thinking models
+	Role             string               `json:"role"`
+	Content          interface{}          `json:"content"` // string or []ContentPart for multimodal
+	Name             string               `json:"name,omitempty"`
+	ToolCalls        []ToolCall           `json:"tool_calls,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"` // Required for tool role messages
+	ReasoningContent string               `json:"reasoning_content,omitempty"` // For DeepSeek R1-style thinking models
+
+	// ReasoningDetails carries MiniMax-format per-message reasoning_details
+	// on request-side map→struct hydration (D1). It is intentionally NOT
+	// exported on StreamEvent (D2: openai.go's stream parser emits one
+	// thinking StreamEvent per entry directly, making the field dead surface
+	// on the stream type). omitempty drops the key when nil.
+	ReasoningDetails []ReasoningDetailEntry `json:"reasoning_details,omitempty"`
 }
 
 // Tool represents a tool definition
