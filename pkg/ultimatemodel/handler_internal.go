@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -21,12 +22,11 @@ import (
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
 // Execute (B3). When true AND the credential provider is MiniMax, the
-// caller (this function's caller in executeInternalRequest-equivalent
-// path) sets the typed ReasoningSplit *bool = ptr(true) on the hydrated
-// *ChatCompletionRequest and convertRequest populates
-// ChatMessage.ReasoningDetails from the input map. The gate (provider +
-// flag) belongs to the caller, not here — this function remains pure
-// (W6).
+// caller sets the typed ReasoningSplit *bool = ptr(true) on the hydrated
+// *ChatCompletionRequest after convertRequest returns, and convertRequest
+// populates ChatMessage.ReasoningDetails from the input map. The gate
+// (provider + flag) belongs to the caller, not here — this function
+// remains pure (W6).
 func (h *Handler) executeInternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -52,6 +52,17 @@ func (h *Handler) executeInternal(
 	req, err := h.convertRequest(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	// P1-8(d): twin B — typed-field setter. When the gate fires (flag
+	// AND credential is MiniMax), set ReasoningSplit = ptr(true) so the
+	// typed openai.go marshaler emits the wire field. Provider compare
+	// is case-insensitive per handler_anthropic.go:297 precedent. The
+	// provider string comes from ResolveInternalConfig (already a
+	// normalized canonical value from the credential).
+	if interleaved && strings.ToLower(provider) == strings.ToLower(string(providers.ProviderMiniMax)) {
+		t := true
+		req.ReasoningSplit = &t
 	}
 
 	// Override model with internal model name
@@ -463,6 +474,37 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 				// Handle reasoning_content for DeepSeek R1-style thinking models
 				if reasoningContent, ok := msg["reasoning_content"].(string); ok {
 					chatMsg.ReasoningContent = reasoningContent
+				}
+				// D1 carry: hydrate MiniMax per-message reasoning_details into
+				// ChatMessage.ReasoningDetails. The field exists so the typed
+				// openai.go marshaler emits reasoning_details on the wire
+				// (P1-8 d). R3 — pkg/providers does not import pkg/proxy/translator;
+				// the translator's ReasoningDetail is kept separate from this
+				// local ReasoningDetailEntry shape. convertRequest translates
+				// shape-by-shape here.
+				if reasoningDetails, ok := msg["reasoning_details"].([]interface{}); ok {
+					chatMsg.ReasoningDetails = make([]providers.ReasoningDetailEntry, 0, len(reasoningDetails))
+					for _, rd := range reasoningDetails {
+						if rdMap, ok := rd.(map[string]interface{}); ok {
+							entry := providers.ReasoningDetailEntry{}
+							if t, ok := rdMap["type"].(string); ok {
+								entry.Type = t
+							}
+							if id, ok := rdMap["id"].(string); ok {
+								entry.ID = id
+							}
+							if format, ok := rdMap["format"].(string); ok {
+								entry.Format = format
+							}
+							if index, ok := rdMap["index"].(float64); ok {
+								entry.Index = int(index)
+							}
+							if text, ok := rdMap["text"].(string); ok {
+								entry.Text = text
+							}
+							chatMsg.ReasoningDetails = append(chatMsg.ReasoningDetails, entry)
+						}
+					}
 				}
 				// Debug log for tool role messages to diagnose MiniMax compatibility issues
 				if chatMsg.Role == "tool" {

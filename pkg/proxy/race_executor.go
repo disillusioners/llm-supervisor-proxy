@@ -26,6 +26,45 @@ import (
 // newProviderClient is a variable that can be overridden in tests to inject mock providers
 var newProviderClient = providers.NewProvider
 
+// raceExtProviderIsMiniMax returns true iff cfg.UpstreamCredentialID is set
+// and resolves to a credential whose Provider matches providers.ProviderMiniMax
+// (case-insensitive). Empty UpstreamCredentialID or missing credential ⇒
+// false (D3). Used by the race-external 5th-site gate (P1-8 b).
+func raceExtProviderIsMiniMax(cfg *ConfigSnapshot) bool {
+	if cfg == nil || cfg.ModelsConfig == nil || cfg.UpstreamCredentialID == "" {
+		return false
+	}
+	cred := cfg.ModelsConfig.GetCredential(cfg.UpstreamCredentialID)
+	if cred == nil {
+		return false
+	}
+	return strings.ToLower(cred.Provider) == strings.ToLower(string(providers.ProviderMiniMax))
+}
+
+// raceIntProviderIsMiniMax returns true iff the resolved internal model
+// has a CredentialID that resolves to a MiniMax credential. modelID is
+// the upstream model id from the race coordinator. modelCfg may be nil
+// for the call before resolveInternalConfig runs; we re-resolve by ID to
+// keep the helper stateless. Used by the race-internal twin A gate
+// (P1-8 a).
+func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
+	if cfg == nil || cfg.ModelsConfig == nil || modelID == "" {
+		return false
+	}
+	mc := cfg.ModelsConfig.GetModel(modelID)
+	if mc == nil || mc.CredentialID == "" {
+		return false
+	}
+	cred := cfg.ModelsConfig.GetCredential(mc.CredentialID)
+	if cred == nil {
+		return false
+	}
+	return strings.ToLower(cred.Provider) == strings.ToLower(string(providers.ProviderMiniMax))
+}
+
+// ptr returns a pointer to v. Convenience for setting *bool fields.
+func ptr[T any](v T) *T { return &v }
+
 // executeRequest performs the actual HTTP call to upstream
 // and streams the response into the request's buffer.
 // It checks if the model is internal and routes accordingly.
@@ -126,10 +165,36 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		isStream = stream
 	}
 
+	// P1-8(a): twin A — gate runs in this CALLER of convertToProviderRequest
+	// per W6 (converter stays pure). When the gate fires, the translator
+	// mutates bodyMap in place (top-level reasoning_split + per-message
+	// reasoning_details) BEFORE the converter hydrates the typed
+	// *ChatCompletionRequest; the converter then carries the mutations
+	// through map→struct hydration (D1 reasoning_details on ChatMessage +
+	// top-level reasoning_split is set by the caller after convertRequest
+	// returns — see the typed-field setter below).
+	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) {
+		if err := translator.TranslateRequestBody(bodyMap); err != nil {
+			return fmt.Errorf("race-internal translator: %w", err)
+		}
+	}
+
 	// Convert to provider request
 	providerReq, err := convertToProviderRequest(bodyMap, internalModel)
 	if err != nil {
 		return fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	// P1-8(d) on race-internal (typed-field setter — symmetric with twin B
+	// on ultimate-internal). When the gate fired above, bodyMap now
+	// carries reasoning_split at the top level; we also set the typed
+	// *bool on the request struct so any codepath that re-marshals the
+	// struct (e.g. logging, future typed sites) emits the field. The
+	// translator already injected the same value into bodyMap for the
+	// primary path; the typed field is a belt-and-suspenders carry for
+	// downstream consumers that bypass the map.
+	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) && providerReq.ReasoningSplit == nil {
+		providerReq.ReasoningSplit = ptr(true)
 	}
 
 	if isStream {
@@ -165,6 +230,20 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 	finalBody := rawBody
 	if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
 		bodyMap["model"] = req.modelID
+
+		// P1-8(b): 5th wiring site — race-external body-map mutation.
+		// Gate = interleaved && upstream credential is MiniMax. Empty
+		// UpstreamCredentialID ⇒ providerIsMiniMax=false (D3) — body
+		// unchanged from a parse/marshal perspective, model name still
+		// overwritten above (pre-existing behavior). Gate short-circuits
+		// BEFORE any extra parse/marshal: the gated-on translator is the
+		// only extra parse/marshal, and it only runs when the gate fires.
+		if interleaved && raceExtProviderIsMiniMax(cfg) {
+			if err := translator.TranslateRequestBody(bodyMap); err != nil {
+				return fmt.Errorf("race-external translator: %w", err)
+			}
+		}
+
 		if b, err := json.Marshal(bodyMap); err == nil {
 			finalBody = b
 		}
@@ -747,6 +826,36 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 				// Handle reasoning_content for DeepSeek R1-style thinking models
 				if reasoningContent, ok := msg["reasoning_content"].(string); ok {
 					chatMsg.ReasoningContent = reasoningContent
+				}
+				// D1 carry: hydrate MiniMax per-message reasoning_details
+				// into ChatMessage.ReasoningDetails (local ReasoningDetailEntry
+				// per R3 — pkg/providers does not import pkg/proxy/translator).
+				// The field exists for request-side map→struct hydration so
+				// the typed openai.go marshaler emits reasoning_details on
+				// the wire (P1-8 d).
+				if reasoningDetails, ok := msg["reasoning_details"].([]interface{}); ok {
+					chatMsg.ReasoningDetails = make([]providers.ReasoningDetailEntry, 0, len(reasoningDetails))
+					for _, rd := range reasoningDetails {
+						if rdMap, ok := rd.(map[string]interface{}); ok {
+							entry := providers.ReasoningDetailEntry{}
+							if t, ok := rdMap["type"].(string); ok {
+								entry.Type = t
+							}
+							if id, ok := rdMap["id"].(string); ok {
+								entry.ID = id
+							}
+							if format, ok := rdMap["format"].(string); ok {
+								entry.Format = format
+							}
+							if index, ok := rdMap["index"].(float64); ok {
+								entry.Index = int(index)
+							}
+							if text, ok := rdMap["text"].(string); ok {
+								entry.Text = text
+							}
+							chatMsg.ReasoningDetails = append(chatMsg.ReasoningDetails, entry)
+						}
+					}
 				}
 				// Handle name field for preserving message sender identity
 				if name, ok := msg["name"].(string); ok {
