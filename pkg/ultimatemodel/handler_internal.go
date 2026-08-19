@@ -90,11 +90,24 @@ func (h *Handler) executeInternal(
 		req.ReasoningSplit = &t
 		// W5 — mirror the race-internal twin A
 		// translation on the typed struct.
+		//
+		// The id counter is MONOTONIC over reasoning-carrying
+		// messages only (starting at 1), matching the
+		// translator's canonical TranslateMessagesReasoning
+		// (pkg/proxy/translator/minimax.go): messages with
+		// empty reasoning_content are skipped and consume NO
+		// counter slot. Using the message index here (the
+		// pre-fix scheme) made [user, assistant w/ rc, user]
+		// emit reasoning-text-2 on this path while every other
+		// path emitted reasoning-text-1 — the S3 cross-path
+		// divergence caught by test/e2e_minimax_reasoning.
+		n := 0
 		for i := range req.Messages {
 			msg := &req.Messages[i]
 			if msg.ReasoningContent == "" {
 				continue
 			}
+			n++
 			// Strip-and-replace: build the new
 			// details entry from the existing content,
 			// then clear the content string. The
@@ -112,7 +125,7 @@ func (h *Handler) executeInternal(
 			// helper-only precedent).
 			msg.ReasoningDetails = []providers.ReasoningDetailEntry{{
 				Type:   translator.ReasoningTextType,
-				ID:     fmt.Sprintf("%s%d", translator.ReasoningTextIDPrefix, i+1),
+				ID:     fmt.Sprintf("%s%d", translator.ReasoningTextIDPrefix, n),
 				Format: translator.ReasoningTextFormat,
 				Index:  0,
 				Text:   msg.ReasoningContent,
