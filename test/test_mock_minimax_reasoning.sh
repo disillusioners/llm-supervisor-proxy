@@ -468,7 +468,10 @@ assert_contains "$T3B_CAPTURED" '"reasoning_split": true' "T3b: top-level reason
 assert_contains "$T3B_CAPTURED" '"reasoning_details"' "T3b: reasoning_details array present (BUG: omitted on race-internal path)"
 assert_contains "$T3B_CAPTURED" '"type": "reasoning.text"' "T3b: reasoning_details type=reasoning.text (BUG: HydrateReasoningDetails type-asserts to map, fails on struct values from translator)"
 assert_contains "$T3B_CAPTURED" '"format": "MiniMax-response-v1"' "T3b: format=MiniMax-response-v1 (BUG)"
-assert_contains "$T3B_CAPTURED" '"index": 0' "T3b: index=0 (BUG)"
+# Index uses omitempty on the typed structs (translator.ReasoningDetail /
+# providers.ReasoningDetailEntry) — encoding/json drops the key when zero.
+# Translator always emits Index=0, so the wire key is correctly ABSENT.
+assert_not_contains "$T3B_CAPTURED" '"index"' "T3b: index omitted via omitempty (wire contract)"
 assert_contains "$T3B_CAPTURED" '"text": "earlier-think"' "T3b: text=earlier-think preserved (BUG)"
 assert_contains "$T3B_CAPTURED" '"reasoning-text-1"' "T3b: monotonic id reasoning-text-1 (BUG)"
 # reasoning_content on the assistant message should be STRIPPED — only the
