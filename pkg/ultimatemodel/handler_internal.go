@@ -59,15 +59,56 @@ func (h *Handler) executeInternal(
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
-	// P1-8(d): twin B — typed-field setter. When the gate fires (flag
-	// AND credential is MiniMax), set ReasoningSplit = ptr(true) so the
-	// typed openai.go marshaler emits the wire field. Provider compare
-	// is case-insensitive per handler_anthropic.go:297 precedent. The
-	// provider string comes from ResolveInternalConfig (already a
-	// normalized canonical value from the credential).
+	// P1-8(d) / W5: twin B — typed-field setter AND
+	// message-level reasoning_content→reasoning_details
+	// translation. When the gate fires (flag AND credential is
+	// MiniMax), the typed openai.go marshaler emits the wire
+	// field AND each per-message `reasoning_content` is
+	// translated to a `reasoning_details` array. The
+	// reasoning_content→reasoning_details translation is the
+	// W5 mirror of the race-internal twin A behavior — without
+	// it, the typed path carried reasoning_content on the
+	// wire (the SDK does not auto-translate), which leaked
+	// OpenAI semantics to MiniMax and produced the
+	// reasoning_content silent drop reported in
+	// c3a4b35/83814b0. The translation is done on the typed
+	// struct directly (not via translator.TranslateRequestBytes)
+	// because the input is already a typed request after
+	// convertRequest; using the bytes wrapper would require a
+	// parse→mutate→re-marshal round-trip we already paid
+	// once. The result is the same: each
+	// ChatMessage.ReasoningContent that is non-empty becomes
+	// a one-entry ChatMessage.ReasoningDetails array, and
+	// ReasoningContent is cleared (strip-and-replace).
+	// Provider compare is case-insensitive per
+	// handler_anthropic.go:297 precedent. The provider string
+	// comes from ResolveInternalConfig (already a normalized
+	// canonical value from the credential).
 	if interleaved && strings.ToLower(provider) == strings.ToLower(string(providers.ProviderMiniMax)) {
 		t := true
 		req.ReasoningSplit = &t
+		// W5 — mirror the race-internal twin A
+		// translation on the typed struct.
+		for i := range req.Messages {
+			msg := &req.Messages[i]
+			if msg.ReasoningContent == "" {
+				continue
+			}
+			// Strip-and-replace: build the new
+			// details entry from the existing content,
+			// then clear the content string. The
+			// wire field is MiniMax-response-v1
+			// (matches the external translator's
+			// format).
+			msg.ReasoningDetails = []providers.ReasoningDetailEntry{{
+				Type:   "reasoning.text",
+				ID:     fmt.Sprintf("reasoning-text-%d", i+1),
+				Format: "MiniMax-response-v1",
+				Index:  0,
+				Text:   msg.ReasoningContent,
+			}}
+			msg.ReasoningContent = ""
+		}
 	}
 
 	// Override model with internal model name

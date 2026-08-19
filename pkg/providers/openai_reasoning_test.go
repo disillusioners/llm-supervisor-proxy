@@ -136,8 +136,11 @@ func TestPopulateReasoningFromDetails_BasicConcat(t *testing.T) {
 	}
 }
 
-func TestPopulateReasoningFromDetails_Dedup(t *testing.T) {
-	// H2 dedup: existing reasoning_content contains the entry.
+func TestPopulateReasoningFromDetails_TrueSingleWinner(t *testing.T) {
+	// W6 true single-winner: pre-existing reasoning_content is
+	// DISCARDED entirely (no dedup-vs-prior, no concatenation,
+	// no O(n²) containment). The result is the entries
+	// concatenated, with intra-accumulator dedup applied.
 	msg := &ChatMessage{
 		ReasoningContent: "abc",
 		ReasoningDetails: []ReasoningDetailEntry{
@@ -146,12 +149,11 @@ func TestPopulateReasoningFromDetails_Dedup(t *testing.T) {
 		},
 	}
 	populateReasoningFromDetails(msg)
-	// reasoning_details WINS (D2 single-winner): pre-existing
-	// reasoning_content is IGNORED, NOT preserved. So the result is
-	// just "new" (the dedup'd "abc" is dropped by intra-accumulator
-	// check too).
-	if msg.ReasoningContent != "new" {
-		t.Errorf("ReasoningContent = %q, want new", msg.ReasoningContent)
+	// "abc" (pre-existing) is discarded; entries are concatenated
+	// in order with intra-array dedup: "abc" and "new" are
+	// distinct ⇒ both kept. Result: "abcnew".
+	if msg.ReasoningContent != "abcnew" {
+		t.Errorf("ReasoningContent = %q, want abcnew (W6 true single-winner)", msg.ReasoningContent)
 	}
 }
 

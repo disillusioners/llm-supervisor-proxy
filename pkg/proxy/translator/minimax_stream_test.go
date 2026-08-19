@@ -481,20 +481,52 @@ func TestTranslateNonStreamResponseBytes_ReasoningContentOnlyBytesIdentical(t *t
 	}
 }
 
-func TestTranslateNonStreamResponseBytes_AudioKeyPresentStillRemarshals(t *testing.T) {
-	// N-1/Q3 boundary: the audio/audio_content/name strip counts as
-	// a modification when any of those keys IS present — the body
-	// must still be re-marshaled (current behavior preserved).
+// TestTranslateNonStreamResponseBytes_AudioKeyOnlyIsPassthrough
+// covers the W8 boundary case: a body with audio (or name or
+// audio_content) but NO reasoning_details must NOT be
+// re-marshaled. Previously the audio strip counted as a
+// modification whenever the key was present, forcing a
+// re-marshal of every gate-ON response even when there was
+// nothing to translate. The W8 fix ties the strip to the
+// "translation actually fired for this message" condition
+// (reasoning_details present, in any form). A body with
+// only audio is now byte-identical to upstream.
+func TestTranslateNonStreamResponseBytes_AudioKeyOnlyIsPassthrough(t *testing.T) {
 	in := []byte(`{"choices":[{"message":{"role":"assistant","audio":{"id":"x"}}}]}`)
 	out, err := TranslateNonStreamResponseBytes(in)
 	if err != nil {
 		t.Fatalf("TranslateNonStreamResponseBytes: %v", err)
 	}
+	if !bytes.Equal(in, out) {
+		t.Errorf("audio-only body should NOT be re-marshaled (W8):\n in=%s\nout=%s", in, out)
+	}
+}
+
+// TestTranslateNonStreamResponseBytes_NameAndAudioStrippedWhenDetailsPresent
+// is the W8 positive case: a body with reasoning_details AND
+// audio/name must have all of them translated/stripped in a
+// single re-marshal pass. Confirms the strip still fires
+// when the message also has reasoning_details.
+func TestTranslateNonStreamResponseBytes_NameAndAudioStrippedWhenDetailsPresent(t *testing.T) {
+	in := []byte(`{"choices":[{"message":{"role":"assistant","name":"synth","audio":{"id":"x"},"reasoning_details":[{"type":"reasoning.text","text":"think-1"}]}}]}`)
+	out, err := TranslateNonStreamResponseBytes(in)
+	if err != nil {
+		t.Fatalf("TranslateNonStreamResponseBytes: %v", err)
+	}
 	if bytes.Equal(in, out) {
-		t.Errorf("audio key present but output unchanged: %s", out)
+		t.Errorf("body with reasoning_details should be re-marshaled (stripped): %s", out)
 	}
 	if strings.Contains(string(out), `"audio"`) {
 		t.Errorf("audio should be stripped: %s", out)
+	}
+	if strings.Contains(string(out), `"name"`) {
+		t.Errorf("name should be stripped: %s", out)
+	}
+	if !strings.Contains(string(out), `"reasoning_content":"think-1"`) {
+		t.Errorf("reasoning_content should be set: %s", out)
+	}
+	if strings.Contains(string(out), `"reasoning_details"`) {
+		t.Errorf("reasoning_details should be stripped: %s", out)
 	}
 }
 
@@ -541,6 +573,12 @@ func TestStreamTranslator_ChunkBytes_NoDetailsPassthrough(t *testing.T) {
 }
 
 func TestStreamTranslator_ChunkBytes_StripsDataPrefix(t *testing.T) {
+	// C1 — the data: prefix is preserved on the unchanged
+	// passthrough path (the line is returned VERBATIM when no
+	// reasoning_details was present). The prefix-strip at
+	// ChunkBytes' top exists only to handle input that
+	// unexpectedly includes the prefix; on the unchanged path
+	// the prefix survives unchanged in stripped.
 	tr := NewStreamTranslator()
 	line := []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"content":"hello"}}]}`)
 	stripped, emitted, err := tr.ChunkBytes(line)
@@ -550,8 +588,11 @@ func TestStreamTranslator_ChunkBytes_StripsDataPrefix(t *testing.T) {
 	if len(emitted) != 0 {
 		t.Errorf("no reasoning_details ⇒ no emitted chunks")
 	}
-	if strings.HasPrefix(string(stripped), "data: ") {
-		t.Errorf("prefix not stripped: %q", stripped)
+	if !strings.HasPrefix(string(stripped), "data: ") {
+		t.Errorf("C1 passthrough: prefix should be preserved on unchanged path: %q", stripped)
+	}
+	if !bytes.Equal(stripped, line) {
+		t.Errorf("C1 passthrough: stripped should be byte-identical to input on unchanged path:\n want=%q\n  got=%q", line, stripped)
 	}
 	if !strings.Contains(string(stripped), `"content":"hello"`) {
 		t.Errorf("content not preserved: %s", stripped)
@@ -1040,54 +1081,45 @@ func TestTranslateNonStreamResponseBody_EmptyDetailsArrayPreservesReasoningConte
 // Task 4 — multi-choice chunk shape (documented contract)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestStreamTranslator_ChunkBytes_MultiChoiceChunk_DocumentedContract
-// asserts the documented single-choice contract:
-//
-//   - StreamTranslator godoc: ChunkBytes processes at most one
-//     delta per call; multi-choice streams use per-entry state
-//     keyed by choice index.
-//   - extractReasoningDetailsFromRawData godoc (openai.go): walks
-//     `choices[].delta.reasoning_details` and emits one text per
-//     non-empty entry in array order — but the StreamTranslator's
-//     own behavior reads choices[0] only (the godoc explicitly says
-//     "We process at most one delta per call").
-//
-// This test pins the documented behavior: choices[0]'s reasoning
-// entries are emitted normally; choices[1+] is IGNORED on the
-// StreamTranslator path (its details are simply dropped — they
-// don't appear in stripped or emitted). If a future change starts
-// walking choices[1+], the test will fail and force the change to
-// be reflected in the godoc + this contract test.
-//
-// Per the task brief: if observed behavior VIOLATES the documented
-// contract, STOP and report — but here the contract is "process
-// choices[0] only" and that IS what we observe, so the test passes
-// and locks the contract.
-func TestStreamTranslator_ChunkBytes_MultiChoiceChunk_DocumentedContract(t *testing.T) {
+// TestStreamTranslator_ChunkBytes_MultiChoiceChunk_AllChoicesTranslated
+// asserts the W3 contract: a chunk with multiple choices, each
+// carrying its own reasoning_details, must have EVERY choice's
+// reasoning_details translated to reasoning_content and stripped
+// from the output. Previously the StreamTranslator walked only
+// choices[0], silently leaking choices[1+].reasoning_details
+// into the stripped line. The test pins the fix: choices[1+]
+// reasoning_details is also translated, none remain in output.
+func TestStreamTranslator_ChunkBytes_MultiChoiceChunk_AllChoicesTranslated(t *testing.T) {
 	tr := NewStreamTranslator()
 	line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"from-choice-0"}]}},{"index":1,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"from-choice-1"}]}}]}`)
 	stripped, emitted, err := tr.ChunkBytes(line)
 	if err != nil {
 		t.Fatalf("ChunkBytes err: %v", err)
 	}
-	// Documented contract: choices[0] is processed; its reasoning_details
-	// is stripped from stripped, and its entries are emitted.
-	if len(emitted) != 1 {
-		t.Fatalf("expected 1 emitted chunk (choices[0] entry), got %d", len(emitted))
+	// W3: both choices must be translated. Each entry produces
+	// one emit.
+	if len(emitted) != 2 {
+		t.Fatalf("expected 2 emitted chunks (one per choice), got %d", len(emitted))
 	}
+	// First emit carries choice[0]'s text.
 	if !strings.Contains(string(emitted[0]), `"reasoning_content":"from-choice-0"`) {
-		t.Errorf("emitted[0] missing choices[0] text: %s", emitted[0])
+		t.Errorf("emitted[0] missing choice[0] text: %s", emitted[0])
 	}
+	// Second emit carries choice[1]'s text.
+	if !strings.Contains(string(emitted[1]), `"reasoning_content":"from-choice-1"`) {
+		t.Errorf("emitted[1] missing choice[1] text: %s", emitted[1])
+	}
+	// W3 — NO reasoning_details leak in the stripped line for
+	// any choice. Neither choice[0] nor choice[1] may carry
+	// reasoning_details after translation.
 	if strings.Contains(string(stripped), "from-choice-0") {
-		t.Errorf("stripped still carries choices[0] reasoning_details: %s", stripped)
+		t.Errorf("stripped still carries choice[0] reasoning_details: %s", stripped)
 	}
-	// Documented contract: choices[1+] is NOT walked on the
-	// StreamTranslator path. Its reasoning_details are NOT
-	// emitted AND they remain in the stripped line (the
-	// StreamTranslator only strips the choices[0] delta).
-	// We assert this is the observed (and documented) behavior:
-	if !strings.Contains(string(stripped), "from-choice-1") {
-		t.Errorf("documented behavior broken: choices[1] reasoning_details should remain in stripped (StreamTranslator walks choices[0] only): %s", stripped)
+	if strings.Contains(string(stripped), "from-choice-1") {
+		t.Errorf("stripped still carries choice[1] reasoning_details (W3 leak): %s", stripped)
+	}
+	if strings.Contains(string(stripped), "reasoning_details") {
+		t.Errorf("stripped still carries reasoning_details (W3 leak): %s", stripped)
 	}
 }
 
@@ -1183,9 +1215,11 @@ func TestStreamTranslator_EmptyInputNoOp(t *testing.T) {
 
 	t.Run("ChunkBytes_data_prefix_only", func(t *testing.T) {
 		// A line that is JUST the `data: ` prefix with no payload.
-		// The prefix-strip leaves an empty buffer; the empty-line
-		// guard at the top of ChunkBytes handles it. Assert no
-		// panic, no error, no emitted.
+		// The empty-line guard at the top of ChunkBytes handles
+		// it (after prefix-strip the line is empty). Assert no
+		// panic, no error, no emitted. C1 — the prefix is
+		// preserved on the unchanged path (the line is returned
+		// VERBATIM when no reasoning_details was present).
 		tr := NewStreamTranslator()
 		line := []byte(`data: `)
 		stripped, emitted, err := tr.ChunkBytes(line)
@@ -1195,10 +1229,12 @@ func TestStreamTranslator_EmptyInputNoOp(t *testing.T) {
 		if len(emitted) != 0 {
 			t.Errorf("data-prefix-only: no emitted, got %d", len(emitted))
 		}
-		// After prefix-strip the line is empty; per the empty-line
-		// guard, stripped is the empty line itself.
-		if string(stripped) != "" {
-			t.Errorf("data-prefix-only: stripped should be empty, got %q", stripped)
+		// The empty-line guard at the top returns the
+		// original line verbatim. After prefix-strip the
+		// remaining line is empty, so the function returns
+		// the original line (which is the prefix alone).
+		if string(stripped) != "data: " {
+			t.Errorf("data-prefix-only: stripped should be %q, got %q", "data: ", stripped)
 		}
 	})
 }

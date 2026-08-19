@@ -125,6 +125,10 @@ func (rc *requestContext) reset() {
 	rc.streamIDSet = false
 	rc.streamingNonRetryable = false
 	rc.currentModelIndex = 0
+	// W5-cheap: clear the P1-6 interleavedThinking field on
+	// reset so a recycled requestContext cannot leak the flag
+	// from a prior request lifecycle.
+	rc.interleavedThinking = false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

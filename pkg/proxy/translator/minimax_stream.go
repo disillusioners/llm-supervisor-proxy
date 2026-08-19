@@ -58,22 +58,43 @@ func FormatDriftCount() uint64 {
 	return formatDriftCounter.Load()
 }
 
-// recordDrift records one unknown-format observation. Semantics (P2-9):
-// the format-drift counter counts DISTINCT unknown format values, not
-// entry volume — each distinct format string increments the atomic
-// counter exactly ONCE process-wide; repeated entries with the same
-// already-seen format do NOT re-increment. The sampled WARN log fires
-// regardless of dedup state (log volume is bounded by the 1-in-N
-// sampler, not by the dedup set) so a hot stream of unknown-format
-// chunks remains observable while the counter stays a faithful
-// "how many distinct formats drifted" metric.
+// package-private counter incremented by recordDrift on every
+// observation (not deduped). The deduped formatDriftCounter
+// (above) counts DISTINCT values; this one counts TOTAL
+// observations. The sampled WARN log is gated on this counter
+// (1-in-N) so a hot stream of unknown-format chunks remains
+// observable while the dedup counter stays a faithful "how many
+// distinct formats drifted" metric.
+var formatDriftObserved atomic.Uint64
+
+// FormatDriftObservationCount returns the current value of the
+// format-drift observation counter (one increment per recordDrift
+// call, NOT deduped). Exported for tests (W7).
+func FormatDriftObservationCount() uint64 {
+	return formatDriftObserved.Load()
+}
+
+// recordDrift records one unknown-format observation. The deduped
+// formatDriftCounter counts DISTINCT unknown format values
+// (each distinct value increments it exactly ONCE process-wide);
+// the formatDriftObserved counter increments on every call so
+// the sampled WARN log is gated on a counter that reflects
+// actual observation volume (W7 — without this, the sampled
+// WARN could never fire when the dedup counter alone is used:
+// dedup of repeated format values would suppress the log
+// signal even on heavy drift).
 func recordDrift(entry map[string]any) {
+	formatDriftObserved.Add(1)
 	if formatVal, ok := entry["format"].(string); ok {
 		if _, dup := seenUnknownFormats.LoadOrStore(formatVal, struct{}{}); !dup {
 			formatDriftCounter.Add(1)
 		}
 	}
-	if formatDriftCounter.Load()%formatDriftLogEvery != 0 {
+	// Sample the WARN log on the observation counter (NOT the
+	// dedup counter) so volume-of-observations drives the log
+	// rate. 1-in-64 keeps line ratio tolerable for live
+	// verification.
+	if formatDriftObserved.Load()%formatDriftLogEvery != 0 {
 		return
 	}
 	log.Printf("[WARN] minimax reasoning_details unknown format=%v id=%v",
@@ -188,106 +209,99 @@ func translateNonStreamResponseBody(body map[string]any) (changed bool, err erro
 		if !ok {
 			continue
 		}
-		// Always strip the sibling metadata fields the MiniMax
-		// response-side wire format can carry (the plan names audio
-		// and name as the targets). Stripping is unconditional
-		// because these are MiniMax-only fields and would leak
-		// upstream semantics to OpenAI clients. Done BEFORE the
-		// reasoning pass to keep the rest of the message intact.
-		// N-1/Q3: the strip only counts as a modification when one
-		// of the keys was actually present — deleting an absent
-		// key is a map no-op and must not force a re-marshal.
-		if _, present := msg["audio"]; present {
-			delete(msg, "audio")
-			changed = true
-		}
-		if _, present := msg["audio_content"]; present {
-			delete(msg, "audio_content")
-			changed = true
-		}
-		if _, present := msg["name"]; present {
-			delete(msg, "name")
-			changed = true
-		}
-
-		// Walk reasoning_details and build the concatenated text
-		// into ReasoningContent. Single-winner: if details are
-		// present (non-empty), they win; reasoning_content (if any)
-		// is ignored.
+		// Per-message changed flag (W8). The strip of MiniMax-only
+		// sibling metadata (audio / audio_content / name) is
+		// GATED on translation having actually fired for THIS
+		// message — we do not strip on messages that have no
+		// reasoning_details at all. This keeps gate-ON
+		// responses that carry no reasoning_details byte-identical
+		// to upstream (no strip = no re-marshal). Translation
+		// "fired" here means: the message had a reasoning_details
+		// key (any value — non-empty array, empty array, or
+		// wrong type all count).
+		msgChanged := false
 		rawDetails, hasDetails := msg["reasoning_details"]
-		if !hasDetails {
-			// No details ⇒ leave reasoning_content untouched
-			// (preserves pre-existing upstream reasoning_content
-			// when the upstream chose to send it without details).
-			continue
+		if hasDetails {
+			msgChanged = true
+			// Walk reasoning_details and build the concatenated
+			// text into ReasoningContent. Single-winner (W6/D2):
+			// when details are present and non-empty, the details
+			// array WINS and any pre-existing reasoning_content
+			// is DISCARDED entirely (no dedup-to-nothing, no
+			// O(n²) containment drops — just replace). When
+			// details are absent, the existing reasoning_content
+			// is preserved untouched.
+			details, ok := rawDetails.([]any)
+			if !ok || len(details) == 0 {
+				// Wrong type or empty array: clear details
+				// and leave reasoning_content alone.
+				delete(msg, "reasoning_details")
+			} else {
+				// details present and non-empty → reasoning_details WINS.
+				// Build a fresh accumulator from the entries'
+				// text. Any pre-existing reasoning_content is
+				// DISCARDED (W6 true single-winner — no dedup,
+				// no concatenation). Per-entry processing:
+				// H7 skip-empty, unknown-type skip,
+				// intra-array dedup via containment.
+				var b strings.Builder
+				for _, rawEntry := range details {
+					entry, ok := rawEntry.(map[string]any)
+					if !ok {
+						continue
+					}
+					// Unknown entry type → log-and-skip.
+					t, _ := entry["type"].(string)
+					if t != "" && t != reasoningTextType {
+						if entryDebugSamplingAllowed() {
+							log.Printf("[DEBUG] minimax reasoning_details unknown entry type=%q", t)
+						}
+						continue
+					}
+					// Format-drift counter (P2-9).
+					if formatVal, hasFormat := entry["format"].(string); hasFormat && formatVal != "" {
+						if _, known := knownReasoningFormats[formatVal]; !known {
+							recordDrift(entry)
+						}
+					}
+					text := ExtractEntryText(entry)
+					if strings.TrimSpace(text) == "" {
+						// H7 skip-empty.
+						continue
+					}
+					// Intra-array dedup (containment): if we
+					// already emitted this text in the same
+					// array, skip. Protects against
+					// cumulative-mode replay and duplicates
+					// within a single details array.
+					if b.Len() > 0 && strings.Index(b.String(), text) >= 0 {
+						continue
+					}
+					b.WriteString(text)
+				}
+				msg["reasoning_content"] = b.String()
+				delete(msg, "reasoning_details")
+			}
 		}
-		details, ok := rawDetails.([]any)
-		if !ok || len(details) == 0 {
-			// Wrong type or empty array: clear details and
-			// leave reasoning_content alone.
-			delete(msg, "reasoning_details")
+		if msgChanged {
+			// Translation actually fired for this message —
+			// strip the MiniMax-only sibling metadata fields so
+			// they do not leak upstream semantics to OpenAI
+			// clients. Done AFTER the reasoning pass to keep the
+			// rest of the message intact. Each strip counts as
+			// a modification only when the key was actually
+			// present (delete of an absent key is a map no-op).
+			if _, present := msg["audio"]; present {
+				delete(msg, "audio")
+			}
+			if _, present := msg["audio_content"]; present {
+				delete(msg, "audio_content")
+			}
+			if _, present := msg["name"]; present {
+				delete(msg, "name")
+			}
 			changed = true
-			continue
 		}
-
-		// details present and non-empty → reasoning_details WINS.
-		// Start from an empty reasoning_content regardless of any
-		// pre-existing value (single-winner rule, D2).
-		existing := ""
-		if v, ok := msg["reasoning_content"].(string); ok {
-			existing = v
-		}
-
-		var b strings.Builder
-		for _, rawEntry := range details {
-			entry, ok := rawEntry.(map[string]any)
-			if !ok {
-				continue
-			}
-			// Unknown entry type → log-and-skip.
-			t, _ := entry["type"].(string)
-			if t != "" && t != reasoningTextType {
-				if entryDebugSampling.Allow() {
-					log.Printf("[DEBUG] minimax reasoning_details unknown entry type=%q", t)
-				}
-				continue
-			}
-			// Format-drift counter (P2-9).
-			if formatVal, hasFormat := entry["format"].(string); hasFormat && formatVal != "" {
-				if _, known := knownReasoningFormats[formatVal]; !known {
-					recordDrift(entry)
-				}
-			}
-			text := ExtractEntryText(entry)
-			if strings.TrimSpace(text) == "" {
-				// H7 skip-empty.
-				continue
-			}
-			// H2 dedup: skip if text is contained in the
-			// pre-existing reasoning_content (which we're
-			// discarding, but it's the right comparison target
-			// — the pre-existing value reflects what an earlier
-			// phase of the conversation sent up). Note: when
-			// reasoning_details wins, we ignore reasoning_content
-			// entirely, so this dedup only protects against
-			// intra-array duplicates from upstream cumulative
-			// emission.
-			if existing != "" && strings.Index(existing, text) >= 0 {
-				continue
-			}
-			// Also dedup within our own accumulation: if we
-			// already emitted this text, skip (covers both
-			// cumulative-mode intra-array replay and the mock
-			// harness's "both fields" case at the array level).
-			if b.Len() > 0 && strings.Index(b.String(), text) >= 0 {
-				continue
-			}
-			b.WriteString(text)
-		}
-
-		msg["reasoning_content"] = b.String()
-		delete(msg, "reasoning_details")
-		changed = true
 	}
 	return changed, nil
 }
@@ -359,50 +373,66 @@ func NewStreamTranslator() *StreamTranslator {
 	}
 }
 
-// ChunkBytes processes one SSE line. The input is an SSE line WITHOUT
-// the `data: ` prefix and WITHOUT the trailing `\n\n` (W9 — mirrors
-// the call-site pattern at translator/stream.go:42-46). If the prefix
-// is present, it is stripped first.
+// ChunkBytes processes one SSE line. The input is an SSE line WITH or
+// WITHOUT the `data: ` prefix and WITHOUT the trailing `\n\n` (W9 —
+// mirrors the call-site pattern at translator/stream.go:42-46). If the
+// prefix is present, it is stripped first.
 //
 // Returned values:
 //
-//   - stripped: the line as it should be written downstream — same
-//     upstream line with `reasoning_details` removed. tool_calls /
-//     content / finish_reason survive unchanged. If the line had no
-//     `reasoning_details`, stripped is the original line and emitted
-//     is nil (passthrough).
-//   - emitted: zero or more client chunks to write IN ORDER, with the
-//     caller responsible for adding the `data: ` prefix + trailing
-//     `\n\n` before the next flush boundary (P2-2 godoc, H8 single-
-//     flush on ultim-ext).
+//   - stripped: the line as it should be written downstream. When the
+//     translator made NO mutation for this line (no reasoning_details
+//     anywhere), stripped is the ORIGINAL input line bytes VERBATIM
+//     (C1 — mirrors the non-stream fast-path behavior from commit
+//     3e7eba9): prefix, key order, number formatting, whitespace all
+//     preserved exactly. When the line DID carry reasoning_details
+//     (the translator fired for at least one choice), stripped is the
+//     re-marshaled line with the reasoning_details stripped and
+//     delta.reasoning_content deleted (W4 single-winner on the wire).
+//     In that case emitted is non-nil.
+//   - emitted: zero or more client chunks to write IN ORDER, with
+//     each chunk being the raw JSON payload (no `data: ` prefix, no
+//     trailing `\n\n`). The CALLER is responsible for adding the
+//     `data: ` prefix + trailing `\n\n` before the next flush
+//     boundary (P2-2 godoc, H8 single-flush on ultim-ext). The
+//     caller is ALSO responsible for the same framing on stripped
+//     (which is also raw JSON without prefix on the mutation path —
+//     see C1 framing notes below).
 //   - err: ALWAYS nil. Per §6.1, the stream translator is error-free
 //     by construction; anomalies are logged as sampled WARN and the
 //     line is passed through (or with reasoning_details stripped if
 //     the line parsed). The error return is preserved on the API for
 //     future-proofing the §6.1 contract.
 //
-// Algorithm:
+// Algorithm (C1, W3, W4, W6):
 //
-//  1. Strip the `data: ` prefix if present.
-//  2. Parse the remainder as `map[string]any`. Parse-failure →
-//     (line, nil, nil) passthrough. (Does not strip; caller may want
-//     the raw line downstream.)
-//  3. Locate `delta.reasoning_details` (or `message.reasoning_details`
-//     for non-stream — but on the stream path it's always delta).
-//     Absent → (line, nil, nil) passthrough.
-//  4. For each entry in array order:
-//     - extractEntryText → "" after TrimSpace → skip (H7)
-//     - recordDrift if format is non-empty and unknown
-//     - H2 dedup vs state.lastIssued[choiceIdx] (containment check)
-//     - Cumulative-suffix mode: if text is strict superset of
-//       lastIssued[choiceIdx], emit only the suffix and update state
-//     - Else: emit the text and update state
-//  5. Strip reasoning_details from a copy of the line and return as
-//     stripped (tool_calls + content survive unchanged).
+//  1. Parse-failure → (line, nil, nil) passthrough VERBATIM (C1
+//     guard — never re-marshal a line we did not parse).
+//  2. If no choices array → return the ORIGINAL line VERBATIM
+//     (no mutation occurred; passthrough byte-identical to upstream).
+//  3. Walk ALL choices (W3 — was choices[0]-only, leaked details on
+//     choices[1+]). For each choice with delta.reasoning_details:
+//     a. Delete reasoning_details and delta.reasoning_content (W4
+//        single-winner on the wire — when details win, the
+//        content string is discarded entirely).
+//     b. For each entry: H7 skip-empty, unknown-type skip, format
+//        drift counter; H2 dedup vs lastIssued[choiceIdx]
+//        (containment); cumulative-suffix mode (text is strict
+//        superset of lastIssued[choiceIdx] → emit suffix only).
+//     c. Emit per-entry chunks (raw JSON, no framing).
+//  4. If no choice had reasoning_details, return the ORIGINAL line
+//     VERBATIM (C1 unchanged-on-passthrough guarantee).
+//  5. Otherwise re-marshal the chunk and return as stripped.
 //
-// Boundary documentation (P2-7): reasoning translation is read-only on
-// tool_calls and only touches `reasoning_details`; per-event ordering
-// is preserved by chunk-level emission in array order.
+// C1 framing contract (important for callers):
+//
+//   - On the UNCHANGED path (step 4), stripped carries the `data: `
+//     prefix and is the verbatim upstream line — callers write
+//     `stripped` directly (it is already framed).
+//   - On the MUTATED path (step 5), stripped is RAW JSON without
+//     prefix and without trailing `\n\n` — callers frame both
+//     stripped and each emitted[i] with `data: ` + `\n\n` before
+//     the next flush boundary.
 //
 // Not goroutine-safe; see NewStreamTranslator godoc. The translator
 // does not call into `toolrepair` and does not mutate tool_call state
@@ -418,137 +448,176 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 		return line, nil, nil
 	}
 
+	// Step 0: remember the original line for verbatim passthrough.
+	// The C1 guarantee is that when the translator made NO mutation
+	// for this line, the original bytes are returned — prefix,
+	// key order, number formatting, whitespace all preserved.
+	originalLine := line
+
 	// Step 1: strip `data: ` prefix if present. W9 — the caller's
 	// contract is to pass the line WITHOUT the prefix, but we strip
-	// it if it's there to mirror translator/stream.go:42-46 precedent
-	// (chunks can be normalized with or without prefix upstream).
+	// it if it's there to mirror translator/stream.go:42-46
+	// precedent (chunks can be normalized with or without prefix
+	// upstream).
 	prefix := []byte("data: ")
-	if bytesHasPrefix(line, prefix) {
+	hadPrefix := bytesHasPrefix(line, prefix)
+	if hadPrefix {
 		line = line[len(prefix):]
 	}
 
-	// Step 2: parse the JSON payload.
+	// Step 2: parse the JSON payload. Parse-failure → passthrough
+	// VERBATIM (C1 — never re-marshal a line we did not parse, so
+	// upstream byte formatting survives exactly).
 	var chunk map[string]any
 	if jerr := json.Unmarshal(line, &chunk); jerr != nil {
-		// Parse-fail → passthrough unmodified. No stripped/emitted.
 		log.Printf("[WARN] minimax stream chunk parse failure: %v", jerr)
-		return line, nil, nil
+		return originalLine, nil, nil
 	}
 
 	// Step 3: locate choices[].delta.reasoning_details.
-	// The MiniMax wire shape (and OpenAI's) is
-	//   { "choices": [ { "index": N, "delta": { "reasoning_details": [...] } } ] }
-	// so we walk choices to find the delta map. We process at most
-	// one delta per call (the wire format's typical shape); for
-	// multi-choice streams the per-entry state is keyed by choice
-	// index so callers should make one call per chunk.
+	// W3 — walk ALL choices, not just choices[0]. The per-choice
+	// lastIssued state map is keyed by choice index, so this is a
+	// natural extension.
 	rawChoices, hasChoices := chunk["choices"].([]any)
 	if !hasChoices || len(rawChoices) == 0 {
-		// No choices array at all → passthrough.
-		return marshalChunkForPassthrough(chunk, line)
-	}
-	c0, _ := rawChoices[0].(map[string]any)
-	delta, hasDelta := c0["delta"].(map[string]any)
-	if !hasDelta {
-		// No delta → nothing to do. Return the original line
-		// (with prefix stripped if it was there) and no
-		// emitted chunks.
-		return marshalChunkForPassthrough(chunk, line)
+		// No choices array at all → C1 verbatim passthrough.
+		return originalLine, nil, nil
 	}
 
-	rawDetails, hasDetails := delta["reasoning_details"]
-	if !hasDetails {
-		// No reasoning_details → passthrough.
-		return marshalChunkForPassthrough(chunk, line)
-	}
-	details, ok := rawDetails.([]any)
-	if !ok || len(details) == 0 {
-		// Wrong type or empty: strip the key (R11 — no leak) and
-		// return the line as stripped.
-		delete(delta, "reasoning_details")
-		return marshalChunkForPassthrough(chunk, line)
-	}
-
-	// Step 4: per-entry emission.
-	// Determine the choice index from choices[0].index.
-	choiceIdx := 0
-	if v, ok := c0["index"].(float64); ok {
-		choiceIdx = int(v)
-	}
-
-	// Build emitted chunks in array order. We have to be careful
-	// that emit-time and state-update are atomic w.r.t. each entry
-	// so a future change can re-derive state.lastIssued from
-	// emitted text if needed.
-	for _, rawEntry := range details {
-		entry, ok := rawEntry.(map[string]any)
+	// Walk all choices. If NO choice carries reasoning_details,
+	// this is a no-op and we return the ORIGINAL line VERBATIM.
+	mutated := false
+	for _, rawChoice := range rawChoices {
+		choice, ok := rawChoice.(map[string]any)
 		if !ok {
 			continue
 		}
-		// Unknown entry type → log-and-skip.
-		t2, _ := entry["type"].(string)
-		if t2 != "" && t2 != reasoningTextType {
-			if entryDebugSampling.Allow() {
-				log.Printf("[DEBUG] minimax stream reasoning_details unknown entry type=%q", t2)
-			}
+		delta, hasDelta := choice["delta"].(map[string]any)
+		if !hasDelta {
 			continue
 		}
-		// Format-drift counter.
-		if formatVal, hasFormat := entry["format"].(string); hasFormat && formatVal != "" {
-			if _, known := knownReasoningFormats[formatVal]; !known {
-				recordDrift(entry)
-			}
+		rawDetails, hasDetails := delta["reasoning_details"]
+		if !hasDetails {
+			continue
 		}
-		text := ExtractEntryText(entry)
-		if strings.TrimSpace(text) == "" {
-			continue // H7 skip-empty
-		}
+		mutated = true
 
-		// H2 dedup vs the last emitted text for this choice.
-		// Containment (strings.Index) — not equality — so cumulative
-		// upstream emission (which contains the prior text) is
-		// detected and emitted as a suffix only.
-		prior := t.lastIssued[choiceIdx]
-		if prior != "" && strings.Index(prior, text) >= 0 {
-			// Already covered by prior emission → skip.
+		// W4 — when reasoning_details is present, delete the
+		// delta's reasoning_content (true single-winner on the
+		// wire: the details array wins, the string is discarded).
+		// Mirrors the W6 single-winner rule on the non-stream
+		// path and on the typed openai.go path.
+		delete(delta, "reasoning_content")
+
+		details, ok := rawDetails.([]any)
+		if !ok || len(details) == 0 {
+			// Wrong type or empty: strip the key (R11 — no
+			// leak) and continue. delta.reasoning_content
+			// has already been deleted above.
+			delete(delta, "reasoning_details")
 			continue
 		}
 
-		var emittedText string
-		if prior != "" && strings.HasPrefix(text, prior) {
-			// Cumulative-suffix mode: text is a strict superset
-			// of prior. Emit only the suffix to avoid
-			// quadratic growth.
-			emittedText = text[len(prior):]
-		} else {
-			emittedText = text
+		// Determine the choice index from the choice map.
+		choiceIdx := 0
+		if v, ok := choice["index"].(float64); ok {
+			choiceIdx = int(v)
 		}
-		if emittedText == "" {
-			// Cumulative mode + identical text → no new
-			// emission. Update state to the longer text and
-			// continue.
+
+		// Build emitted chunks in array order. We have to be
+		// careful that emit-time and state-update are atomic
+		// w.r.t. each entry so a future change can re-derive
+		// state.lastIssued from emitted text if needed.
+		for _, rawEntry := range details {
+			entry, ok := rawEntry.(map[string]any)
+			if !ok {
+				continue
+			}
+			// Unknown entry type → log-and-skip.
+			t2, _ := entry["type"].(string)
+			if t2 != "" && t2 != reasoningTextType {
+				if entryDebugSamplingAllowed() {
+					log.Printf("[DEBUG] minimax stream reasoning_details unknown entry type=%q", t2)
+				}
+				continue
+			}
+			// Format-drift counter.
+			if formatVal, hasFormat := entry["format"].(string); hasFormat && formatVal != "" {
+				if _, known := knownReasoningFormats[formatVal]; !known {
+					recordDrift(entry)
+				}
+			}
+			text := ExtractEntryText(entry)
+			if strings.TrimSpace(text) == "" {
+				continue // H7 skip-empty
+			}
+
+			// H2 dedup vs the last emitted text for this
+			// choice. Containment (strings.Index) — not
+			// equality — so cumulative upstream emission
+			// (which contains the prior text) is detected
+			// and emitted as a suffix only.
+			prior := t.lastIssued[choiceIdx]
+			if prior != "" && strings.Index(prior, text) >= 0 {
+				// Already covered by prior emission →
+				// skip.
+				continue
+			}
+
+			var emittedText string
+			if prior != "" && strings.HasPrefix(text, prior) {
+				// Cumulative-suffix mode: text is a
+				// strict superset of prior. Emit only
+				// the suffix to avoid quadratic growth.
+				emittedText = text[len(prior):]
+			} else {
+				emittedText = text
+			}
+			if emittedText == "" {
+				// Cumulative mode + identical text →
+				// no new emission. Update state to
+				// the longer text and continue.
+				t.lastIssued[choiceIdx] = text
+				continue
+			}
+
+			// Build the emitted client chunk: same shape
+			// as the original line, but with
+			// reasoning_details removed and
+			// delta.reasoning_content set to the suffix.
+			emittedLine := buildReasoningContentChunk(chunk, choiceIdx, emittedText)
+			emitted = append(emitted, emittedLine)
 			t.lastIssued[choiceIdx] = text
-			continue
 		}
 
-		// Build the emitted client chunk: same shape as the
-		// original line, but with reasoning_details removed and
-		// delta.reasoning_content set to the suffix.
-		emittedLine := buildReasoningContentChunk(chunk, choiceIdx, emittedText)
-		emitted = append(emitted, emittedLine)
-		t.lastIssued[choiceIdx] = text
+		// Strip reasoning_details from this choice's delta
+		// (the corresponding emitted chunks already carry
+		// the content via delta.reasoning_content).
+		delete(delta, "reasoning_details")
 	}
 
-	// Step 5: strip reasoning_details from the original chunk and
-	// return as stripped. The caller writes stripped first, then
-	// each emitted[i] in order.
-	delete(delta, "reasoning_details")
+	if !mutated {
+		// C1 — no choice had reasoning_details ⇒ no mutation
+		// occurred. Return the ORIGINAL line VERBATIM. This
+		// is the byte-identical fast path that mirrors the
+		// non-stream fast path from commit 3e7eba9: gate-ON
+		// passthrough lines become byte-identical to upstream
+		// (today they are mangled by an unnecessary re-marshal).
+		return originalLine, nil, nil
+	}
+
+	// Mutation occurred: re-marshal the chunk and return the
+	// mutated (raw JSON, no prefix) as stripped. The CALLER
+	// adds the `data: ` + `\n\n` framing.
 	stripped, mErr := json.Marshal(chunk)
 	if mErr != nil {
 		// Marshal failure is unexpected for a chunk we just
-		// parsed; log and passthrough.
+		// parsed; log and return the ORIGINAL line VERBATIM
+		// (C1 — never write re-marshaled bytes we cannot
+		// produce; fall back to the upstream line so the
+		// client still sees valid SSE).
 		log.Printf("[WARN] minimax stream chunk marshal failure: %v", mErr)
-		return line, nil, nil
+		return originalLine, nil, nil
 	}
 	return stripped, emitted, nil
 }
@@ -557,7 +626,9 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 // source chunk by setting delta.reasoning_content and copying the rest
 // of the envelope (id / object / created / model / usage if present).
 // It does NOT include reasoning_details (the caller already deleted
-// that key from the source chunk before calling this).
+// that key from the source chunk before calling this). It also does
+// NOT carry finish_reason (the chunk is mid-stream reasoning; the
+// finish_reason stays on the final chunk).
 func buildReasoningContentChunk(source map[string]any, choiceIdx int, content string) []byte {
 	chunk := make(map[string]any, len(source))
 	for k, v := range source {
@@ -567,36 +638,28 @@ func buildReasoningContentChunk(source map[string]any, choiceIdx int, content st
 		chunk[k] = v
 	}
 	// Build the choices array with a single entry for our choiceIdx.
-	// For choice index 0 (the overwhelming majority of cases) we copy
-	// the rest of choice[0] verbatim. For non-zero indices, we still
-	// build a single-entry array; the wire format expects the
-	// choices array to align with the chunk in question.
+	// The wire format expects the choices array to align with the
+	// chunk in question.
 	srcChoices, _ := source["choices"].([]any)
 	choice := make(map[string]any)
-	finishReason := ""
 	if choiceIdx < len(srcChoices) {
 		if c0, ok := srcChoices[choiceIdx].(map[string]any); ok {
 			for k, v := range c0 {
 				if k == "delta" {
 					continue
 				}
+				// Per-entry emission must NOT carry a
+				// finish_reason (the chunk is mid-stream
+				// reasoning — finish_reason stays on
+				// the final chunk).
+				if k == "finish_reason" {
+					continue
+				}
 				choice[k] = v
-			}
-			if v, ok := c0["finish_reason"].(string); ok {
-				finishReason = v
 			}
 		}
 	}
 	choice["index"] = float64(choiceIdx)
-	// Per-entry emission must NOT carry a finish_reason (the chunk
-	// is mid-stream reasoning — finish_reason stays on the final
-	// chunk). If the source happened to have finish_reason set we
-	// preserve it only when no reasoning is emitted; here we always
-	// strip it from the emitted reasoning chunk to keep the
-	// semantics clean.
-	if finishReason != "" {
-		// omit — chunk is for a reasoning delta only
-	}
 	// delta: copy siblings if present (content, role, tool_calls)
 	// and overlay reasoning_content.
 	delta := make(map[string]any)
@@ -621,22 +684,6 @@ func buildReasoningContentChunk(source map[string]any, choiceIdx int, content st
 	return out
 }
 
-// marshalChunkForPassthrough returns the original line bytes if it
-// round-trips through the parsed map cleanly, or re-marshals the map
-// if the keys are in canonical form. The intent is to avoid a
-// re-marshal when possible (byte-identical on the hot path), and fall
-// back to re-marshal when needed. For simplicity here we always
-// re-marshal the parsed chunk — the marshal preserves the source's
-// numeric float64 representations and the result is byte-equal to
-// the original for OpenAI-shaped JSON (which is what we receive).
-func marshalChunkForPassthrough(chunk map[string]any, original []byte) ([]byte, [][]byte, error) {
-	out, err := json.Marshal(chunk)
-	if err != nil {
-		return original, nil, nil
-	}
-	return out, nil, nil
-}
-
 // bytesHasPrefix is the bytes.HasPrefix import-free equivalent. Tiny
 // helper to keep the import list focused on the standard library
 // packages we use.
@@ -652,15 +699,18 @@ func bytesHasPrefix(s, prefix []byte) bool {
 	return true
 }
 
+// entryDebugSeen is the atomic counter backing entryDebugSampling.
+// It mirrors the openai.go:584-595 pattern (atomic.Uint64 + Add(1)
+// + modulo) so concurrent stream loops can call Allow() race-free.
+var entryDebugSeen atomic.Uint64
+
 // entryDebugSampling is a tiny per-process sampling guard for
 // unknown-entry-type debug logs. The hot path is reasoning.text only;
 // unknown types are rare so a 1-in-N rate is fine.
-var entryDebugSampling = newSampler(64)
+const entryDebugSamplingN = 64
 
-type sampler struct {
-	n  uint64
-	of uint64
+// entryDebugSamplingAllowed returns true 1 in N invocations. The
+// counter is atomic so concurrent stream loops are race-free.
+func entryDebugSamplingAllowed() bool {
+	return entryDebugSeen.Add(1)%entryDebugSamplingN == 0
 }
-
-func newSampler(of uint64) sampler { return sampler{of: of} }
-func (s *sampler) Allow() bool     { s.n++; return s.n%s.of == 0 }

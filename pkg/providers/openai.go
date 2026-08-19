@@ -298,6 +298,18 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 	accumulatedToolCalls := make(map[int]*ToolCall)
 	argumentsBuilders := make(map[int]*strings.Builder)
 
+	// W4 — per-stream emitted-text map for reasoning_details
+	// cross-chunk dedup. Mirrors the external StreamTranslator's
+	// lastIssued field (minimax_stream.go): cumulative-mode
+	// upstreams double-emit the same text inside a growing
+	// reasoning_details array; without per-stream state the
+	// typed path would emit the same text twice (once per
+	// chunk). The map is keyed by choice index and stores the
+	// most recently emitted text per choice; per-entry emission
+	// uses containment (strict-superset → suffix-only) so the
+	// dedup is conservative.
+	streamReasoningLastIssued := make(map[int]string)
+
 	// sendDoneEvent sends the done event with the final response
 	// This is called when we see [DONE] or when stream ends with a finish_reason
 	sendDoneEvent := func() {
@@ -426,18 +438,52 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				// Handle reasoning_details (MiniMax-style
 				// typed thinking). Emit ONE thinking StreamEvent
 				// per entry, in array order. Single-winner rule
-				// (D2): when reasoning_details is present
+				// (W4 + D2): when reasoning_details is present
 				// (non-empty), it WINS and reasoning_content is
 				// NOT extracted (the existing
 				// extractReasoningContent call is skipped). When
 				// reasoning_details is absent, fall back to
 				// reasoning_content (DeepSeek-style).
-				emittedTexts, hasDetails := extractReasoningDetailsFromRawData([]byte(data))
-				if hasDetails {
-					for _, text := range emittedTexts {
+				emittedPerChoice := extractReasoningDetailsByChoiceForStream([]byte(data))
+				if len(emittedPerChoice) > 0 {
+					// W4 — per-choice cross-chunk dedup
+					// (mirrors the external path's
+					// StreamTranslator.lastIssued):
+					// strict-superset → suffix-only,
+					// containment → skip. The
+					// per-entry intra-chunk dedup
+					// inside
+					// extractReasoningDetailsByChoice
+					// covers duplicates within a
+					// single array; this loop adds
+					// the cross-chunk suffix-mode
+					// for cumulative-mode upstreams.
+					for _, item := range emittedPerChoice {
+						prior := streamReasoningLastIssued[item.choiceIdx]
+						if prior != "" && strings.Contains(prior, item.text) {
+							// Already covered
+							// by prior
+							// emission →
+							// skip.
+							continue
+						}
+						var outText string
+						if prior != "" && strings.HasPrefix(item.text, prior) {
+							// Cumulative-suffix
+							// mode →
+							// suffix-only.
+							outText = item.text[len(prior):]
+						} else {
+							outText = item.text
+						}
+						if outText == "" {
+							streamReasoningLastIssued[item.choiceIdx] = item.text
+							continue
+						}
+						streamReasoningLastIssued[item.choiceIdx] = item.text
 						eventCh <- StreamEvent{
 							Type:             "thinking",
-							ReasoningContent: text,
+							ReasoningContent: outText,
 						}
 					}
 				} else if reasoningContent := extractReasoningContent([]byte(data)); reasoningContent != "" {
@@ -638,56 +684,68 @@ func extractReasoningDetailsFromRawData(data []byte) (emittedTexts []string, has
 	if len(rawChunk.Choices) == 0 {
 		return nil, false
 	}
-	// Prefer delta.reasoning_details (stream path); fall back to
-	// message.reasoning_details (non-stream — though the non-stream
-	// typed path uses Message.ReasoningDetails directly and does
-	// not call this helper; this fallback exists for symmetry and
-	// to keep the helper usable from both call sites).
-	entries := rawChunk.Choices[0].Delta.ReasoningDetails
-	if len(entries) == 0 {
-		entries = rawChunk.Choices[0].Message.ReasoningDetails
-	}
-	if len(entries) == 0 {
-		return nil, false
-	}
-	hasDetails = true
+	// W3 — walk ALL choices, not just choices[0]. Previously
+	// choices[1+] was silently dropped on the typed path; now we
+	// accumulate entries from every choice in array order so a
+	// multi-choice chunk's reasoning_details all surface. The
+	// per-choice emitted list is flattened in the order of
+	// choices[].
 	var acc strings.Builder
-	for _, entry := range entries {
-		// ExtractEntryText is a helper-only import from
-		// pkg/proxy/translator; it must NOT pull provider types
-		// back — see R3 layering decision.
-		text := translator.ExtractEntryText(entry)
-		if strings.TrimSpace(text) == "" {
-			continue // H7 skip-empty
+	for _, c := range rawChunk.Choices {
+		// Prefer delta.reasoning_details (stream path); fall
+		// back to message.reasoning_details (non-stream — though
+		// the non-stream typed path uses Message.ReasoningDetails
+		// directly and does not call this helper; this fallback
+		// exists for symmetry and to keep the helper usable from
+		// both call sites).
+		entries := c.Delta.ReasoningDetails
+		if len(entries) == 0 {
+			entries = c.Message.ReasoningDetails
 		}
-		// Type filter: when the entry carries a `type` field that
-		// is non-empty and not "reasoning.text", skip. This is
-		// forward-compat for any future typed entries MiniMax
-		// may add (e.g. reasoning.summary, reasoning.encrypted).
-		// M-1: per plan §6.1 the skip is NOT silent — emit a
-		// sampled debug log, symmetric with the translator's
-		// unknown-type handling in minimax_stream.go. The sampler
-		// is a local 1-in-N gate (duplicate of the translator's
-		// package-private sampler) rather than an exported helper:
-		// duplicating ~5 lines costs less surface than exporting a
-		// new translator API (R3 keeps the provider → translator
-		// import helper-only; ExtractEntryText already stretches
-		// that boundary).
-		if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
-			if unknownTypeDebugSamplingAllowed() {
-				log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
+		if len(entries) == 0 {
+			continue
+		}
+		hasDetails = true
+		for _, entry := range entries {
+			// ExtractEntryText is a helper-only import from
+			// pkg/proxy/translator; it must NOT pull provider
+			// types back — see R3 layering decision.
+			text := translator.ExtractEntryText(entry)
+			if strings.TrimSpace(text) == "" {
+				continue // H7 skip-empty
 			}
-			continue
+			// Type filter: when the entry carries a `type`
+			// field that is non-empty and not
+			// "reasoning.text", skip. This is forward-compat
+			// for any future typed entries MiniMax may add
+			// (e.g. reasoning.summary, reasoning.encrypted).
+			// M-1: per plan §6.1 the skip is NOT silent —
+			// emit a sampled debug log, symmetric with the
+			// translator's unknown-type handling in
+			// minimax_stream.go. The sampler is a local
+			// 1-in-N gate (duplicate of the translator's
+			// package-private sampler) rather than an
+			// exported helper: duplicating ~5 lines costs
+			// less surface than exporting a new translator
+			// API (R3 keeps the provider → translator import
+			// helper-only; ExtractEntryText already stretches
+			// that boundary).
+			if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+				if unknownTypeDebugSamplingAllowed() {
+					log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
+				}
+				continue
+			}
+			// H2 dedup: skip if text is already contained in
+			// already-emitted text. Containment
+			// (strings.Index >= 0) rather than equality, so
+			// cumulative upstream emission is also detected.
+			if acc.Len() > 0 && strings.Index(acc.String(), text) >= 0 {
+				continue
+			}
+			emittedTexts = append(emittedTexts, text)
+			acc.WriteString(text)
 		}
-		// H2 dedup: skip if text is already contained in
-		// already-emitted text. Containment (strings.Index >= 0)
-		// rather than equality, so cumulative upstream emission
-		// is also detected.
-		if acc.Len() > 0 && strings.Index(acc.String(), text) >= 0 {
-			continue
-		}
-		emittedTexts = append(emittedTexts, text)
-		acc.WriteString(text)
 	}
 	return emittedTexts, hasDetails
 }
@@ -716,11 +774,13 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 		// single-winner rule only fires when details are present.
 		return
 	}
-	// Details present ⇒ reasoning_details WINS. We always start
-	// from the entries' text regardless of any pre-existing
-	// reasoning_content.
+	// Details present ⇒ reasoning_details WINS. W6 true
+	// single-winner: any pre-existing reasoning_content is
+	// DISCARDED entirely (no dedup-to-nothing, no O(n²)
+	// containment drops — just replace). Per-entry processing:
+	// H7 skip-empty, unknown-type skip, intra-array dedup via
+	// containment.
 	var acc strings.Builder
-	prior := msg.ReasoningContent
 	for _, entry := range msg.ReasoningDetails {
 		// Pass the typed Text through the translator helper as a
 		// map[string]any{"text": ...} so the helper is the
@@ -736,11 +796,10 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 		if strings.TrimSpace(text) == "" {
 			continue // H7 skip-empty
 		}
-		// H2 dedup vs prior reasoning_content (containment).
-		if prior != "" && strings.Index(prior, text) >= 0 {
-			continue
-		}
-		// H2 dedup within our own accumulator.
+		// Intra-array dedup (containment): if we already
+		// emitted this text in the same array, skip. Protects
+		// against cumulative-mode replay and duplicates within
+		// a single details array.
 		if acc.Len() > 0 && strings.Index(acc.String(), text) >= 0 {
 			continue
 		}
@@ -748,4 +807,81 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 	}
 	msg.ReasoningContent = acc.String()
 	msg.ReasoningDetails = nil // omitempty drops the key on encode (R11)
+}
+
+// reasoningDetailEmit is one emitted-text string for the
+// cross-chunk dedup pass, tagged with the choice index it came
+// from so the caller can apply per-choice lastIssued state.
+type reasoningDetailEmit struct {
+	choiceIdx int
+	text      string
+}
+
+// extractReasoningDetailsByChoiceForStream parses an upstream SSE
+// chunk and returns one emit per non-empty reasoning_details
+// entry across ALL choices, in array order. W3 — walks every
+// choice (the previous implementation read choices[0] only,
+// silently dropping reasoning_details on choices[1+]). W4 — the
+// returned slice is per-choice-indexed so the caller can apply
+// the cross-chunk lastIssued map.
+//
+// Per-entry processing mirrors the external StreamTranslator's
+// behavior: H7 skip-empty, unknown-type skip, intra-array dedup
+// via containment. Cross-chunk dedup (suffix mode) is the
+// caller's job — see processStream's use of
+// streamReasoningLastIssued.
+func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit {
+	var rawChunk struct {
+		Choices []struct {
+			Index    float64 `json:"index"`
+			Delta    struct {
+				ReasoningDetails []map[string]any `json:"reasoning_details"`
+			} `json:"delta"`
+			Message struct {
+				ReasoningDetails []map[string]any `json:"reasoning_details"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &rawChunk); err != nil {
+		return nil
+	}
+	if len(rawChunk.Choices) == 0 {
+		return nil
+	}
+	var out []reasoningDetailEmit
+	for _, c := range rawChunk.Choices {
+		// Prefer delta.reasoning_details (stream path); fall back
+		// to message.reasoning_details (kept for symmetry with
+		// extractReasoningDetailsFromRawData).
+		entries := c.Delta.ReasoningDetails
+		if len(entries) == 0 {
+			entries = c.Message.ReasoningDetails
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		choiceIdx := int(c.Index)
+		// Per-choice intra-array dedup via containment.
+		var seen strings.Builder
+		for _, entry := range entries {
+			text := translator.ExtractEntryText(entry)
+			if strings.TrimSpace(text) == "" {
+				continue // H7 skip-empty
+			}
+			// Unknown-type skip (forward-compat for
+			// non-"reasoning.text" typed entries).
+			if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+				if unknownTypeDebugSamplingAllowed() {
+					log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
+				}
+				continue
+			}
+			if seen.Len() > 0 && strings.Index(seen.String(), text) >= 0 {
+				continue
+			}
+			seen.WriteString(text)
+			out = append(out, reasoningDetailEmit{choiceIdx: choiceIdx, text: text})
+		}
+	}
+	return out
 }
