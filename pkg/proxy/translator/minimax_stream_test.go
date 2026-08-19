@@ -835,3 +835,370 @@ func TestStreamTranslator_ChunkBytes_ContentFallback(t *testing.T) {
 		t.Errorf("content fallback not used: %s", emitted[0])
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W10 — idempotence (translate-twice equals translate-once) — response side
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslateNonStreamResponseBody_Idempotent covers AM-03/W10 on
+// the response side: a body whose reasoning_details has been
+// translated to reasoning_content, fed back through the translator,
+// must produce identical output (no double concatenation, no
+// re-strip of the now-absent details array, no spurious entries).
+func TestTranslateNonStreamResponseBody_Idempotent(t *testing.T) {
+	body := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": float64(0),
+				"message": map[string]any{
+					"role": "assistant",
+					"reasoning_details": []any{
+						map[string]any{"type": "reasoning.text", "text": "a"},
+						map[string]any{"type": "reasoning.text", "text": "b"},
+						map[string]any{"type": "reasoning.text", "text": "c"},
+					},
+				},
+			},
+		},
+	}
+	if err := TranslateNonStreamResponseBody(body); err != nil {
+		t.Fatalf("first TranslateNonStreamResponseBody: %v", err)
+	}
+	// Snapshot the first-pass state.
+	firstMsg := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	firstContent := firstMsg["reasoning_content"]
+	// Deep-copy via Marshal/Unmarshal to mimic a real second-pass
+	// call site observing the bytes round-tripped through JSON.
+	firstBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("first marshal: %v", err)
+	}
+	var copy map[string]any
+	if err := json.Unmarshal(firstBytes, &copy); err != nil {
+		t.Fatalf("deep-copy unmarshal: %v", err)
+	}
+	if err := TranslateNonStreamResponseBody(copy); err != nil {
+		t.Fatalf("second TranslateNonStreamResponseBody: %v", err)
+	}
+	secondMsg := copy["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if secondMsg["reasoning_content"] != firstContent {
+		t.Errorf("idempotence broken: first=%q, second=%q", firstContent, secondMsg["reasoning_content"])
+	}
+	if _, present := secondMsg["reasoning_details"]; present {
+		t.Errorf("reasoning_details re-appeared on second pass: %v", secondMsg["reasoning_details"])
+	}
+}
+
+// TestTranslateNonStreamResponseBytes_Idempotent is the bytes-wrapper
+// counterpart. Two passes of TranslateNonStreamResponseBytes must
+// produce byte-equal output — once the data has been translated
+// (details → content + audio/name strip), the second pass observes
+// no reasoning_details to translate, so the data-absent fast path
+// returns the input untouched (3e7eba9). Bytes.Equal is exact here:
+// both passes re-marshal the same map topology and json.Marshal is
+// deterministic for a fixed topology.
+func TestTranslateNonStreamResponseBytes_Idempotent(t *testing.T) {
+	in := []byte(`{"choices":[{"index":0,"message":{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"think-1"},{"type":"reasoning.text","text":"think-2"}]}}]}`)
+	first, err := TranslateNonStreamResponseBytes(in)
+	if err != nil {
+		t.Fatalf("first TranslateNonStreamResponseBytes: %v", err)
+	}
+	// Parse-and-verify the first pass: details were translated.
+	var firstMap map[string]any
+	if err := json.Unmarshal(first, &firstMap); err != nil {
+		t.Fatalf("first unmarshal: %v", err)
+	}
+	msg := firstMap["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if got := msg["reasoning_content"]; got != "think-1think-2" {
+		t.Errorf("first pass reasoning_content = %q, want think-1think-2", got)
+	}
+	// Second pass on the result of the first pass.
+	second, err := TranslateNonStreamResponseBytes(first)
+	if err != nil {
+		t.Fatalf("second TranslateNonStreamResponseBytes: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Errorf("TranslateNonStreamResponseBytes idempotence broken:\n first=%s\nsecond=%s", first, second)
+	}
+}
+
+// TestStreamTranslator_ChunkBytes_Idempotent_FreshInstance covers
+// AM-03/W10 for the stream path: feeding the SAME chunk stream
+// through TWO FRESH StreamTranslator instances (no shared state)
+// must produce byte-identical full-output sequences (the stripped
+// line followed by all emitted chunks, in order).
+//
+// This catches state leak between instances — the W3 / §3.3 rule
+// that stream state is per-stream-lifetime, not cross-stream. If a
+// future change accidentally promotes state to a package-level
+// var, the two runs would diverge on cumulative-mode dedup.
+func TestStreamTranslator_ChunkBytes_Idempotent_FreshInstance(t *testing.T) {
+	chunks := []string{
+		// single entry
+		`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"a"}]}}]}`,
+		// multi-entry array
+		`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"b"},{"type":"reasoning.text","text":"c"}]}}]}`,
+		// cumulative-superset: prior was "a", new is "abc" → emit "bc"
+		`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"abc"}]}}]}`,
+		// tool_calls + details mix
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{}"}}],"reasoning_details":[{"type":"reasoning.text","text":"d"}]}}]}`,
+	}
+	runOnce := func(tr *StreamTranslator) [][]byte {
+		var seq [][]byte
+		for _, c := range chunks {
+			stripped, emitted, err := tr.ChunkBytes([]byte(c))
+			if err != nil {
+				t.Fatalf("ChunkBytes err: %v", err)
+			}
+			seq = append(seq, stripped)
+			seq = append(seq, emitted...)
+		}
+		return seq
+	}
+	seq1 := runOnce(NewStreamTranslator())
+	seq2 := runOnce(NewStreamTranslator())
+	if len(seq1) != len(seq2) {
+		t.Fatalf("sequence length differs: %d vs %d", len(seq1), len(seq2))
+	}
+	for i := range seq1 {
+		if !bytes.Equal(seq1[i], seq2[i]) {
+			t.Errorf("step %d differs:\n run1=%s\n run2=%s", i, seq1[i], seq2[i])
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W11 — empty `reasoning_details: []` round-trip (response side)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestTranslateNonStreamResponseBody_EmptyDetailsArrayNoOp covers
+// W11 on the response side: a body whose choices[].message carries
+// an empty `reasoning_details: []` array (and no reasoning_content)
+// is a no-op for TranslateNonStreamResponseBody. The empty array
+// must be stripped (no `reasoning_details: []` leak), no
+// reasoning_content is fabricated, and no error is returned.
+//
+// Note: this is distinct from `TestStreamTranslator_ChunkBytes_EmptyDetailsArrayStrips`
+// which covers the stream path. The non-stream path's empty-array
+// branch lives in translateNonStreamResponseBody (delete the empty
+// array, continue without setting reasoning_content).
+func TestTranslateNonStreamResponseBody_EmptyDetailsArrayNoOp(t *testing.T) {
+	body := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"index": float64(0),
+				"message": map[string]any{
+					"role":              "assistant",
+					"reasoning_details": []any{},
+				},
+			},
+		},
+	}
+	if err := TranslateNonStreamResponseBody(body); err != nil {
+		t.Fatalf("TranslateNonStreamResponseBody: %v", err)
+	}
+	msg := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if _, present := msg["reasoning_details"]; present {
+		t.Errorf("empty reasoning_details array not stripped: %v", msg["reasoning_details"])
+	}
+	if _, present := msg["reasoning_content"]; present {
+		t.Errorf("spurious reasoning_content fabricated on empty details: %v", msg["reasoning_content"])
+	}
+}
+
+// TestTranslateNonStreamResponseBody_EmptyDetailsArrayPreservesReasoningContent
+// is the W11 boundary case: when reasoning_details is empty but
+// reasoning_content IS already present, the empty array is stripped
+// (no leak) and the pre-existing reasoning_content survives
+// untouched (the single-winner rule only fires when details are
+// non-empty).
+func TestTranslateNonStreamResponseBody_EmptyDetailsArrayPreservesReasoningContent(t *testing.T) {
+	body := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"role":              "assistant",
+					"reasoning_content": "pre-existing",
+					"reasoning_details": []any{},
+				},
+			},
+		},
+	}
+	if err := TranslateNonStreamResponseBody(body); err != nil {
+		t.Fatalf("TranslateNonStreamResponseBody: %v", err)
+	}
+	msg := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if got := msg["reasoning_content"]; got != "pre-existing" {
+		t.Errorf("reasoning_content = %q, want pre-existing (single-winner inactive on empty details)", got)
+	}
+	if _, present := msg["reasoning_details"]; present {
+		t.Errorf("empty reasoning_details array not stripped: %v", msg["reasoning_details"])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 4 — multi-choice chunk shape (documented contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestStreamTranslator_ChunkBytes_MultiChoiceChunk_DocumentedContract
+// asserts the documented single-choice contract:
+//
+//   - StreamTranslator godoc: ChunkBytes processes at most one
+//     delta per call; multi-choice streams use per-entry state
+//     keyed by choice index.
+//   - extractReasoningDetailsFromRawData godoc (openai.go): walks
+//     `choices[].delta.reasoning_details` and emits one text per
+//     non-empty entry in array order — but the StreamTranslator's
+//     own behavior reads choices[0] only (the godoc explicitly says
+//     "We process at most one delta per call").
+//
+// This test pins the documented behavior: choices[0]'s reasoning
+// entries are emitted normally; choices[1+] is IGNORED on the
+// StreamTranslator path (its details are simply dropped — they
+// don't appear in stripped or emitted). If a future change starts
+// walking choices[1+], the test will fail and force the change to
+// be reflected in the godoc + this contract test.
+//
+// Per the task brief: if observed behavior VIOLATES the documented
+// contract, STOP and report — but here the contract is "process
+// choices[0] only" and that IS what we observe, so the test passes
+// and locks the contract.
+func TestStreamTranslator_ChunkBytes_MultiChoiceChunk_DocumentedContract(t *testing.T) {
+	tr := NewStreamTranslator()
+	line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"from-choice-0"}]}},{"index":1,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"from-choice-1"}]}}]}`)
+	stripped, emitted, err := tr.ChunkBytes(line)
+	if err != nil {
+		t.Fatalf("ChunkBytes err: %v", err)
+	}
+	// Documented contract: choices[0] is processed; its reasoning_details
+	// is stripped from stripped, and its entries are emitted.
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 emitted chunk (choices[0] entry), got %d", len(emitted))
+	}
+	if !strings.Contains(string(emitted[0]), `"reasoning_content":"from-choice-0"`) {
+		t.Errorf("emitted[0] missing choices[0] text: %s", emitted[0])
+	}
+	if strings.Contains(string(stripped), "from-choice-0") {
+		t.Errorf("stripped still carries choices[0] reasoning_details: %s", stripped)
+	}
+	// Documented contract: choices[1+] is NOT walked on the
+	// StreamTranslator path. Its reasoning_details are NOT
+	// emitted AND they remain in the stripped line (the
+	// StreamTranslator only strips the choices[0] delta).
+	// We assert this is the observed (and documented) behavior:
+	if !strings.Contains(string(stripped), "from-choice-1") {
+		t.Errorf("documented behavior broken: choices[1] reasoning_details should remain in stripped (StreamTranslator walks choices[0] only): %s", stripped)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 5 — empty-input no-op table for the stream path
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestStreamTranslator_EmptyInputNoOp consolidates the empty/nil/
+// minimal-input edges for NewStreamTranslator + ChunkBytes. Some of
+// these are individually covered (TestStreamTranslator_ChunkBytes_
+// EmptyLine covers nil/empty; TestStreamTranslator_ChunkBytes_
+// ParseFailurePassthrough covers non-JSON; TestNewStreamTranslator_
+// InitialState covers the constructor). This table adds the cases
+// not yet covered: empty `{}` body, empty choices array, missing
+// delta, and a sanity check that ChunkBytes is safe on a nil
+// *StreamTranslator receiver (the defensive guard at the top of
+// ChunkBytes).
+func TestStreamTranslator_EmptyInputNoOp(t *testing.T) {
+	t.Run("NewStreamTranslator", func(t *testing.T) {
+		tr := NewStreamTranslator()
+		if tr == nil {
+			t.Fatal("NewStreamTranslator returned nil")
+		}
+		if tr.lastIssued == nil {
+			t.Errorf("lastIssued should be non-nil (per W9)")
+		}
+	})
+
+	t.Run("ChunkBytes_nil_receiver", func(t *testing.T) {
+		// Defensive: a hand-crafted nil *StreamTranslator must not
+		// panic. The ChunkBytes method has an explicit nil check.
+		var tr *StreamTranslator
+		line := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"x"}]}}]}`)
+		stripped, emitted, err := tr.ChunkBytes(line)
+		if err != nil {
+			t.Errorf("nil receiver should not return error, got: %v", err)
+		}
+		if len(emitted) != 0 {
+			t.Errorf("nil receiver should produce no emitted chunks, got %d", len(emitted))
+		}
+		if !bytes.Equal(stripped, line) {
+			t.Errorf("nil receiver should passthrough the original line, got %s", stripped)
+		}
+	})
+
+	t.Run("ChunkBytes_empty_choices", func(t *testing.T) {
+		// empty choices array → no emitted, stripped is the line
+		// re-marshaled (the no-choices early-return path).
+		tr := NewStreamTranslator()
+		line := []byte(`{"choices":[]}`)
+		stripped, emitted, err := tr.ChunkBytes(line)
+		if err != nil {
+			t.Errorf("empty choices: %v", err)
+		}
+		if len(emitted) != 0 {
+			t.Errorf("empty choices: no emitted, got %d", len(emitted))
+		}
+		if !strings.Contains(string(stripped), `"choices":[]`) {
+			t.Errorf("empty choices: stripped lost the array: %s", stripped)
+		}
+	})
+
+	t.Run("ChunkBytes_empty_object", func(t *testing.T) {
+		// empty object `{}` is a minimal valid chunk — no choices,
+		// no delta, no reasoning_details. Should be a no-op.
+		tr := NewStreamTranslator()
+		line := []byte(`{}`)
+		stripped, emitted, err := tr.ChunkBytes(line)
+		if err != nil {
+			t.Errorf("empty object: %v", err)
+		}
+		if len(emitted) != 0 {
+			t.Errorf("empty object: no emitted, got %d", len(emitted))
+		}
+		if !bytes.Equal(stripped, []byte(`{}`)) {
+			t.Errorf("empty object: stripped should be {}, got %s", stripped)
+		}
+	})
+
+	t.Run("ChunkBytes_choices_no_delta", func(t *testing.T) {
+		// choices present, delta absent → no-op (the hasDelta
+		// early-return path).
+		tr := NewStreamTranslator()
+		line := []byte(`{"choices":[{"index":0}]}`)
+		_, emitted, err := tr.ChunkBytes(line)
+		if err != nil {
+			t.Errorf("no-delta: %v", err)
+		}
+		if len(emitted) != 0 {
+			t.Errorf("no-delta: no emitted, got %d", len(emitted))
+		}
+	})
+
+	t.Run("ChunkBytes_data_prefix_only", func(t *testing.T) {
+		// A line that is JUST the `data: ` prefix with no payload.
+		// The prefix-strip leaves an empty buffer; the empty-line
+		// guard at the top of ChunkBytes handles it. Assert no
+		// panic, no error, no emitted.
+		tr := NewStreamTranslator()
+		line := []byte(`data: `)
+		stripped, emitted, err := tr.ChunkBytes(line)
+		if err != nil {
+			t.Errorf("data-prefix-only: %v", err)
+		}
+		if len(emitted) != 0 {
+			t.Errorf("data-prefix-only: no emitted, got %d", len(emitted))
+		}
+		// After prefix-strip the line is empty; per the empty-line
+		// guard, stripped is the empty line itself.
+		if string(stripped) != "" {
+			t.Errorf("data-prefix-only: stripped should be empty, got %q", stripped)
+		}
+	})
+}
