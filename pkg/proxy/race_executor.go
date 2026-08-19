@@ -187,12 +187,14 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 
 	// P1-8(d) on race-internal (typed-field setter — symmetric with twin B
 	// on ultimate-internal). When the gate fired above, bodyMap now
-	// carries reasoning_split at the top level; we also set the typed
-	// *bool on the request struct so any codepath that re-marshals the
-	// struct (e.g. logging, future typed sites) emits the field. The
-	// translator already injected the same value into bodyMap for the
-	// primary path; the typed field is a belt-and-suspenders carry for
-	// downstream consumers that bypass the map.
+	// carries reasoning_split at the top level.
+	//
+	// This typed setter is REQUIRED, not belt-and-suspenders:
+	// convertToProviderRequest does not propagate top-level reasoning_split
+	// from bodyMap into the typed struct, so without this explicit
+	// assignment providerReq.ReasoningSplit would stay nil and
+	// json.Marshal(req) would drop the field via omitempty whenever the
+	// struct is re-marshalled (logging, future typed sites, etc.).
 	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) && providerReq.ReasoningSplit == nil {
 		providerReq.ReasoningSplit = ptr(true)
 	}
@@ -233,11 +235,14 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 
 		// P1-8(b): 5th wiring site — race-external body-map mutation.
 		// Gate = interleaved && upstream credential is MiniMax. Empty
-		// UpstreamCredentialID ⇒ providerIsMiniMax=false (D3) — body
-		// unchanged from a parse/marshal perspective, model name still
-		// overwritten above (pre-existing behavior). Gate short-circuits
-		// BEFORE any extra parse/marshal: the gated-on translator is the
-		// only extra parse/marshal, and it only runs when the gate fires.
+		// UpstreamCredentialID ⇒ providerIsMiniMax=false (D3).
+		//
+		// The pre-existing model-override unmarshal (above) and marshal
+		// (below) run unconditionally regardless of the gate — the model
+		// field is always overwritten. The NEW translator call is the
+		// only mutation gated on interleaved && raceExtProviderIsMiniMax(cfg);
+		// gated-off means the translator is not invoked, so no new body
+		// change occurs beyond the pre-existing model-override behavior.
 		if interleaved && raceExtProviderIsMiniMax(cfg) {
 			if err := translator.TranslateRequestBody(bodyMap); err != nil {
 				return fmt.Errorf("race-external translator: %w", err)

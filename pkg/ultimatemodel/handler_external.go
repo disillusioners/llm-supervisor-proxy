@@ -40,7 +40,7 @@ var sharedHTTPClient = &http.Client{
 // interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
 // Execute (B3). upstreamProvider is the lowercase credential provider
 // name when CredentialID is set on modelCfg (D3); empty otherwise.
-// The gate fires iff interleaved && upstreamProvider == factory.ProviderMiniMax
+// The gate fires iff interleaved && upstreamProvider == providers.ProviderMiniMax
 // (case-insensitive). Gate lives in this function so H5 (short-circuit
 // BEFORE parse/marshal) is guaranteed at the strongest no-op site.
 func (h *Handler) executeExternal(
