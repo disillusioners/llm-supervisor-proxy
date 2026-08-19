@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -616,5 +618,38 @@ func TestOpenAIProvider_Stream_NonMiniMaxShapePassthrough(t *testing.T) {
 	}
 	if len(think) != 0 {
 		t.Errorf("non-MiniMax-shape: no thinking events, got %v", think)
+	}
+}
+
+// TestHydrateReasoningDetails_AcceptsTranslatorStruct (T3b regression):
+// race-internal path writes `[]any{translator.ReasoningDetail{…}}` into
+// bodyMap (pkg/proxy/translator/minimax.go:133-141); HydrateReasoningDetails
+// must accept struct entries so the typed ChatMessage.ReasoningDetails
+// survives the final marshal (omitempty on an empty slice drops the
+// wire key). Without this branch, every multi-turn internal request
+// with prior reasoning silently loses it on the wire.
+func TestHydrateReasoningDetails_AcceptsTranslatorStruct(t *testing.T) {
+	msg := map[string]any{
+		"reasoning_details": []interface{}{
+			translator.ReasoningDetail{
+				Type: translator.ReasoningTextType,
+				ID: "reasoning-text-1",
+				Format: translator.ReasoningTextFormat,
+				Index: 0,
+				Text: "earlier-think",
+			},
+		},
+	}
+	got := HydrateReasoningDetails(msg)
+	if len(got) != 1 {
+		t.Fatalf("HydrateReasoningDetails returned %d entries, want 1", len(got))
+	}
+	e := got[0]
+	if e.Type != translator.ReasoningTextType ||
+		e.ID != "reasoning-text-1" ||
+		e.Format != translator.ReasoningTextFormat ||
+		e.Index != 0 ||
+		e.Text != "earlier-think" {
+		t.Errorf("entry mismatch: %+v", e)
 	}
 }

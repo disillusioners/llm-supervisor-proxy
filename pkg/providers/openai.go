@@ -823,6 +823,19 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 // present field by reflection-free type assertion. Returns nil if the
 // key is absent or the value is not `[]interface{}`.
 //
+// Inputs are accepted in two equivalent shapes:
+//   - `map[string]interface{}` entries (the normal JSON-decoded case;
+//     both race-external and pre-translated request bodies land here).
+//   - `translator.ReasoningDetail` struct entries (race-internal path:
+//     pkg/proxy/race_executor.go:843 calls this helper AFTER
+//     translator.TranslateRequestBody mutates bodyMap in place at
+//     race_executor.go:174 — the translator writes
+//     `[]any{translator.ReasoningDetail{…}}` so this helper must accept
+//     struct values to avoid a silent empty-slice return and a downstream
+//     omitempty drop on the final marshal — see T3b findings
+//     2026-08-19). Struct entries are converted to a per-element map
+//     here so the field extraction below stays single-path.
+//
 // Twin-divergence analysis: the two near-duplicate hydration blocks in
 // pkg/proxy/race_executor.go (~836-864) and
 // pkg/ultimatemodel/handler_internal.go (~525-560) were byte-identical
@@ -843,8 +856,19 @@ func HydrateReasoningDetails(msg map[string]any) []ReasoningDetailEntry {
 	}
 	out := make([]ReasoningDetailEntry, 0, len(raw))
 	for _, rd := range raw {
-		rdMap, ok := rd.(map[string]interface{})
-		if !ok {
+		var rdMap map[string]interface{}
+		switch typed := rd.(type) {
+		case map[string]interface{}:
+			rdMap = typed
+		case translator.ReasoningDetail:
+			rdMap = map[string]interface{}{
+				"type":   typed.Type,
+				"id":     typed.ID,
+				"format": typed.Format,
+				"index":  typed.Index,
+				"text":   typed.Text,
+			}
+		default:
 			continue
 		}
 		entry := ReasoningDetailEntry{}
