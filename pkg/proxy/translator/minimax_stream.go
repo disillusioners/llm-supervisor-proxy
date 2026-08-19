@@ -35,7 +35,7 @@ import (
 // continues; the strip (R11) is total regardless of format. This is a
 // forward-compat hedge, not a contract.
 var knownReasoningFormats = map[string]struct{}{
-	reasoningTextFormat: {}, // "MiniMax-response-v1"
+	ReasoningTextFormat: {}, // "MiniMax-response-v1" — see translator.ReasoningTextFormat
 }
 
 // formatDriftCounter is a process-wide counter incremented once per unique
@@ -141,7 +141,10 @@ func ExtractEntryText(entry map[string]any) string {
 // Non-stream response translator (P2-1b / P2-6 / D2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TranslateNonStreamResponseBody is the response-side map-core translator.
+// TranslateNonStreamResponseBody is the response-side map-core translator;
+// production entry point is the TranslateNonStreamResponseBytes wrapper
+// (adds parse + re-marshal + the data-absent byte-identity short-circuit).
+//
 // It mutates the supplied body in place to convert
 // `choices[i].message.reasoning_details` (array of typed entries) into
 // `choices[i].message.reasoning_content` (concatenated string) and to
@@ -150,15 +153,19 @@ func ExtractEntryText(entry map[string]any) string {
 //
 // Operational order of the single-winner rule (D2): when both
 // `reasoning_details` and `reasoning_content` are present, the
-// `reasoning_details` array WINS and `reasoning_content` is ignored
+// `reasoning_details` array WINS and `reasoning_content` is discarded
 // (not concatenated, not duplicated). This matches the typed/internal
 // path's extraction-time single-winner.
 //
-// H2 dedup: per-entry `strings.Index` containment check vs the
-// (possibly-existing) `reasoning_content` — entries whose text is
-// already contained in `reasoning_content` are dropped. H7 skip-empty:
-// entries whose text is empty after TrimSpace are dropped. Unknown entry
-// types (not "reasoning.text") are sampled-debug-logged and dropped.
+// Per-entry processing (matches the W6 implementation at lines 529-554):
+// H7 skip-empty (entries whose text is empty after TrimSpace are
+// dropped), unknown-type skip (non-"reasoning.text" entries are
+// debug-logged and dropped), and intra-array dedup via containment
+// (an entry whose text is already contained in the running accumulator
+// is skipped). NOTE: this dedup is INTRA-ARRAY only — it never compares
+// against any pre-existing reasoning_content. When details are
+// present and non-empty, that string is DISCARDED entirely (W6 true
+// single-winner — no dedup-to-nothing, no O(n²) containment drops).
 //
 // Not goroutine-safe; the gate is the caller's responsibility. Returns
 // a wrapped error if the body is nil or `choices` is present but not a
@@ -252,7 +259,7 @@ func translateNonStreamResponseBody(body map[string]any) (changed bool, err erro
 					}
 					// Unknown entry type → log-and-skip.
 					t, _ := entry["type"].(string)
-					if t != "" && t != reasoningTextType {
+					if t != "" && t != ReasoningTextType {
 						if entryDebugSamplingAllowed() {
 							log.Printf("[DEBUG] minimax reasoning_details unknown entry type=%q", t)
 						}
@@ -393,12 +400,13 @@ func NewStreamTranslator() *StreamTranslator {
 //
 //     (b) MUTATED path — when ANY choice's delta carried
 //     reasoning_details present-and-non-empty (single-winner rule
-//     at line 515): stripped is the re-marshaled line, FRAMED as a
-//     complete SSE event (`data: ` + raw JSON + `\n\n`), with the
-//     details stripped from the delta and delta.reasoning_content
-//     deleted (W4 single-winner on the wire). emitted is non-nil
-//     and contains the per-entry reasoning_content chunks, each
-//     ALSO framed as `data: ` + raw JSON + `\n\n`.
+//     at lines 529-554 — delta extraction through the
+//     delta.reasoning_content discard): stripped is the re-marshaled
+//     line, FRAMED as a complete SSE event (`data: ` + raw JSON +
+//     `\n\n`), with the details stripped from the delta and
+//     delta.reasoning_content deleted (W4 single-winner on the wire).
+//     emitted is non-nil and contains the per-entry reasoning_content
+//     chunks, each ALSO framed as `data: ` + raw JSON + `\n\n`.
 //
 //   - emitted: zero or more client chunks to write IN ORDER, each
 //     ALREADY framed as `data: ` + raw JSON + `\n\n` on the mutated
@@ -566,7 +574,7 @@ func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][
 			}
 			// Unknown entry type → log-and-skip.
 			t2, _ := entry["type"].(string)
-			if t2 != "" && t2 != reasoningTextType {
+			if t2 != "" && t2 != ReasoningTextType {
 				if entryDebugSamplingAllowed() {
 					log.Printf("[DEBUG] minimax stream reasoning_details unknown entry type=%q", t2)
 				}

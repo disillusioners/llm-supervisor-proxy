@@ -1,5 +1,59 @@
 package proxy
 
+// ─────────────────────────────────────────────────────────────────────────────
+// race_coordinator.go — race lifecycle coordination (owner of attempt
+// orchestration, coordinator construction, and event fan-out)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - Coordinator construction ........ newRaceCoordinator,
+//                                         newRaceCoordinatorWithEvents
+//                                         (raceCoordinator constructors,
+//                                         eventBus wiring, snapshot of
+//                                         the ConfigSnapshot for the
+//                                         race lifetime).
+//
+//   - Attempt orchestration ........... Start, spawn, manage (the
+//                                         select-loop that ticks the
+//                                         race forward — spawn-replicas,
+//                                         pick-winner, hand-back via
+//                                         completion channels),
+//                                         handleStreamingDeadline,
+//                                         handleHardDeadline,
+//                                         cancelAll / cancelAllExcept.
+//
+//   - Event fan-out .................... publishEvent (the race state
+//                                         publishes to the events.Bus
+//                                         so observability / metrics
+//                                         layers can subscribe without
+//                                         touching the race itself).
+//
+//   - Finalization + introspection ..... execute (the racing proxy's
+//                                         single-attempt trampoline
+//                                         into race_executor.go),
+//                                         GetWinner / WaitForWinner
+//                                         (winner hand-back to the
+//                                         caller), GetStats,
+//                                         GetRequestStatuses,
+//                                         GetStreamDeadlineError,
+//                                         GetFinalErrorInfo (post-race
+//                                         diagnostics), FinalErrorInfo,
+//                                         RaceStats types.
+//
+// Companion file:
+//
+//   - race_executor.go: per-attempt EXECUTION — the upstream HTTP
+//     round-trip for ONE model attempt (header construction, request
+//     body hydration via providers.convertRequest, response handling,
+//     tool-call repair, reasoning translation, SSE streaming). The
+//     coordinator calls into the executor's runOne helper once per
+//     spawned attempt and routes the per-attempt result back through
+//     the orchestration loop. If you are adding a per-upstream-call
+//     behavior, you are in the wrong file — race_coordinator owns the
+//     RACE; race_executor owns each ATTEMPT.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"context"
 	"fmt"

@@ -446,7 +446,7 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				// ANY choice carried a non-empty array, regardless
 				// of whether any entries survived filtering — so
 				// the internal typed path matches the external
-				// translator at minimax_stream.go:515-530
+				// translator at minimax_stream.go:529-554
 				// (single-winner fires on presence, not on entry
 				// survival). When reasoning_details is absent,
 				// fall back to reasoning_content (DeepSeek-style).
@@ -736,7 +736,7 @@ func extractReasoningDetailsFromRawData(data []byte) (emittedTexts []string, has
 			// API (R3 keeps the provider → translator import
 			// helper-only; ExtractEntryText already stretches
 			// that boundary).
-			if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+			if t, ok := entry["type"].(string); ok && t != "" && t != translator.ReasoningTextType {
 				if unknownTypeDebugSamplingAllowed() {
 					log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
 				}
@@ -764,10 +764,11 @@ func extractReasoningDetailsFromRawData(data []byte) (emittedTexts []string, has
 // reasoning_content is preserved untouched.
 //
 // For each entry in details: H2 dedup (containment vs the running
-// accumulator + vs any pre-existing reasoning_content), H7 skip-empty,
-// unknown-type skip. The concatenated text is written to
-// msg.ReasoningContent and msg.ReasoningDetails is set to nil so
-// omitempty drops the key on typed encode (R11 — no leak).
+// accumulator only — never vs any pre-existing reasoning_content, which
+// is discarded entirely under W6), H7 skip-empty, unknown-type skip.
+// The concatenated text is written to msg.ReasoningContent and
+// msg.ReasoningDetails is set to nil so omitempty drops the key on
+// typed encode (R11 — no leak).
 //
 // The function is DATA-DRIVEN and PROVIDER-AGNOSTIC — it does not
 // branch on cred.Provider (R2-residual D2 wrong-layer guard).
@@ -815,6 +816,58 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 	msg.ReasoningDetails = nil // omitempty drops the key on encode (R11)
 }
 
+// HydrateReasoningDetails is the shared request-side map→struct hydration
+// for `msg["reasoning_details"]` (D1 carry). It returns a fresh
+// []ReasoningDetailEntry slice populated from a JSON-decoded
+// `[]interface{}` of `map[string]interface{}` entries, copying each
+// present field by reflection-free type assertion. Returns nil if the
+// key is absent or the value is not `[]interface{}`.
+//
+// Twin-divergence analysis: the two near-duplicate hydration blocks in
+// pkg/proxy/race_executor.go (~836-864) and
+// pkg/ultimatemodel/handler_internal.go (~525-560) were byte-identical
+// at extraction time; this helper collapses them to a single source of
+// truth. Kills the recurrence vector for the reasoning_content
+// silent-drop bug class (origin: commit 83814b0 fixed a twin-divergence
+// in convertRequest hydration) — both sites now share the same code
+// path so the next divide-and-conquer fork produces one bug fix, not
+// two.
+//
+// Used by the type-stripped reasoning_details hydration on the
+// race-internal (pkg/proxy/race_executor.go) and ultimate-internal
+// (pkg/ultimatemodel/handler_internal.go) request paths.
+func HydrateReasoningDetails(msg map[string]any) []ReasoningDetailEntry {
+	raw, ok := msg["reasoning_details"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]ReasoningDetailEntry, 0, len(raw))
+	for _, rd := range raw {
+		rdMap, ok := rd.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		entry := ReasoningDetailEntry{}
+		if t, ok := rdMap["type"].(string); ok {
+			entry.Type = t
+		}
+		if id, ok := rdMap["id"].(string); ok {
+			entry.ID = id
+		}
+		if format, ok := rdMap["format"].(string); ok {
+			entry.Format = format
+		}
+		if index, ok := rdMap["index"].(float64); ok {
+			entry.Index = int(index)
+		}
+		if text, ok := rdMap["text"].(string); ok {
+			entry.Text = text
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // reasoningDetailEmit is one emitted-text string for the
 // cross-chunk dedup pass, tagged with the choice index it came
 // from so the caller can apply per-choice lastIssued state.
@@ -843,7 +896,7 @@ type reasoningDetailEmit struct {
 // when ANY choice had a non-empty reasoning_details array
 // regardless of whether any entries survived filtering (H7
 // skip-empty, unknown-type skip). This mirrors the external
-// translator's presence-based logic at minimax_stream.go:515-530
+// translator's presence-based logic at minimax_stream.go:529-554
 // (single-winner rule fires when details are present AND non-empty
 // on the wire). The caller uses hasDetails — NOT len(emits)>0 —
 // to gate the reasoning_content fallback so the internal typed
@@ -880,7 +933,7 @@ func extractReasoningDetailsByChoiceForStream(data []byte) (emits []reasoningDet
 		}
 		// Mark presence-and-non-empty for this choice. The single-winner
 		// rule fires on presence alone — see external path
-		// (minimax_stream.go:515-530) and the W4 contract. Set the
+		// (minimax_stream.go:529-554) and the W4 contract. Set the
 		// flag here so all-skipped-entries (H7 skip-empty, unknown-type
 		// skip) still gate off the reasoning_content fallback at the
 		// call site.
@@ -895,7 +948,7 @@ func extractReasoningDetailsByChoiceForStream(data []byte) (emits []reasoningDet
 			}
 			// Unknown-type skip (forward-compat for
 			// non-"reasoning.text" typed entries).
-			if t, ok := entry["type"].(string); ok && t != "" && t != "reasoning.text" {
+			if t, ok := entry["type"].(string); ok && t != "" && t != translator.ReasoningTextType {
 				if unknownTypeDebugSamplingAllowed() {
 					log.Printf("[DEBUG] openai.go reasoning_details unknown entry type=%q (skipped)", t)
 				}

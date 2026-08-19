@@ -1,5 +1,55 @@
 package translator
 
+// ─────────────────────────────────────────────────────────────────────────────
+// minimax_stream_test.go — sub-suite map
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Translation-under-test map (find by sub-suite banner above each block):
+//
+//   - ExtractEntryText .............. TestExtractEntryText (table-driven,
+//     single-line entry-shape reads: text-wins / content fallback / spacing
+//     fold / future-field forward-compat).
+//
+//   - Non-stream response translation  TranslateNonStreamResponseBody and
+//     TranslateNonStreamResponseBytes (basic concat, single-winner
+//     details-vs-content, intra-array dedup, H7 skip-empty, unknown-type
+//     skip, audio/audio_content/name strip, format-drift counter
+//     increments, no-details preservation, nil body, invalid choices,
+//     missing-choices no-op, non-map choice skip, bytes round-trip,
+//     data-absent fast path byte-identity, invalid JSON/choices).
+//
+//   - StreamTranslator.ChunkBytes .... TestStreamTranslator_ChunkBytes_* and
+//     TestNewStreamTranslator_InitialState (initial-state, no-details
+//     passthrough, data-prefix preservation on unchanged path,
+//     single-entry / multi-entry emission in array order, intra-array
+//     dedup, skip-empty, unknown-type skip, W6 true single-winner,
+//     cross-chunk dedup / cumulative suffix, all-skipped-entries gate,
+//     per-choice indexed chunks, content fallback for v2-style entries).
+//
+//   - Format-drift counter ........... TestFormatDriftCounter_* and
+//     TestRecordDrift_* (known format = no increment, unknown format =
+//     one increment per unique value, repeated identical drift is
+//     idempotent on the unique counter, observation counter is per-call,
+//     increment is atomic under concurrent producers).
+//
+// Anchor references:
+//
+//   - P2-8 (per-stream lifetime, no Reset): the StreamTranslator is
+//     constructed fresh by the call site per stream and has NO Reset —
+//     reusing an instance across streams would replay lastIssued into
+//     the new stream and silently drop everything covered. Tests in the
+//     StreamTranslator sub-suite construct one instance per test, mirroring
+//     production.
+//
+//   - Architecture §6.1 (error-free-by-construction): the translator
+//     package's runOnInput functions avoid returning errors for the
+//     common-shape reject cases (nil body / missing / wrong-type choices
+//     / non-map entries / invalid JSON variants) so the call sites
+//     remain inline-able. The InvalidChoices / NilBody / InvalidJSON
+//     tests pin this behavior.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"bytes"
 	"encoding/json"
@@ -97,7 +147,7 @@ func TestFormatDriftCounter_NoIncrementOnKnownFormat(t *testing.T) {
 	// Use the helper directly so we don't pollute the counter on
 	// internal re-marshal paths.
 	before := FormatDriftCount()
-	entry := map[string]any{"format": reasoningTextFormat}
+	entry := map[string]any{"format": ReasoningTextFormat}
 	if formatVal, hasFormat := entry["format"].(string); hasFormat && formatVal != "" {
 		if _, known := knownReasoningFormats[formatVal]; !known {
 			recordDrift(entry)
