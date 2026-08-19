@@ -181,6 +181,15 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Host") || strings.HasPrefix(strings.ToLower(k), "x-llmproxy-") {
 			continue
 		}
+		// D4: NARROW strip of exactly x-proxy-interleaved-thinking on the
+		// race-external path. Case-insensitive via strings.EqualFold. The
+		// general x-proxy-* strip is REJECTED (would change flag-absent
+		// forwarding behavior — old clients never send this header, so
+		// the narrow strip preserves the flag-absent invariant). Mirrors
+		// the same strip in pkg/ultimatemodel/handler_external.go:79-87.
+		if strings.EqualFold(k, "x-proxy-interleaved-thinking") {
+			continue
+		}
 		upstreamReq.Header[k] = v
 	}
 	upstreamReq.Host = u.Host
