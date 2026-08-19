@@ -380,29 +380,67 @@ func NewStreamTranslator() *StreamTranslator {
 //
 // Returned values:
 //
-//   - stripped: the line as it should be written downstream. When the
-//     translator made NO mutation for this line (no reasoning_details
-//     anywhere), stripped is the ORIGINAL input line bytes VERBATIM
-//     (C1 — mirrors the non-stream fast-path behavior from commit
-//     3e7eba9): prefix, key order, number formatting, whitespace all
-//     preserved exactly. When the line DID carry reasoning_details
-//     (the translator fired for at least one choice), stripped is the
-//     re-marshaled line with the reasoning_details stripped and
-//     delta.reasoning_content deleted (W4 single-winner on the wire).
-//     In that case emitted is non-nil.
-//   - emitted: zero or more client chunks to write IN ORDER, with
-//     each chunk being the raw JSON payload (no `data: ` prefix, no
-//     trailing `\n\n`). The CALLER is responsible for adding the
-//     `data: ` prefix + trailing `\n\n` before the next flush
-//     boundary (P2-2 godoc, H8 single-flush on ultim-ext). The
-//     caller is ALSO responsible for the same framing on stripped
-//     (which is also raw JSON without prefix on the mutation path —
-//     see C1 framing notes below).
+//   - stripped: the line as it should be written downstream.
+//
+//     (a) UNCHANGED path — when the translator made NO mutation for
+//     this line (no choice carried reasoning_details): stripped is
+//     the ORIGINAL input line bytes VERBATIM, including whatever
+//     framing the caller supplied (the `data: ` prefix and any
+//     trailing newline). C1 mirrors the non-stream fast-path
+//     behavior from commit 3e7eba9: prefix, key order, number
+//     formatting, whitespace all preserved exactly. In this case
+//     emitted is nil.
+//
+//     (b) MUTATED path — when ANY choice's delta carried
+//     reasoning_details present-and-non-empty (single-winner rule
+//     at line 515): stripped is the re-marshaled line, FRAMED as a
+//     complete SSE event (`data: ` + raw JSON + `\n\n`), with the
+//     details stripped from the delta and delta.reasoning_content
+//     deleted (W4 single-winner on the wire). emitted is non-nil
+//     and contains the per-entry reasoning_content chunks, each
+//     ALSO framed as `data: ` + raw JSON + `\n\n`.
+//
+//   - emitted: zero or more client chunks to write IN ORDER, each
+//     ALREADY framed as `data: ` + raw JSON + `\n\n` on the mutated
+//     path (per (b) above). On the unchanged path, emitted is nil.
+//     The caller writes stripped followed by each emitted[i] in
+//     order; because the translator pre-frames both, the caller
+//     performs ZERO additional framing — the C1 uniform contract
+//     holds at the call-site level: every returned line is a
+//     fully-framed SSE event, mutated or unchanged.
+//
 //   - err: ALWAYS nil. Per §6.1, the stream translator is error-free
 //     by construction; anomalies are logged as sampled WARN and the
 //     line is passed through (or with reasoning_details stripped if
 //     the line parsed). The error return is preserved on the API for
 //     future-proofing the §6.1 contract.
+//
+// Call-site newline handling is the CALLER's concern, not the
+// translator's. Two of the three call sites today have slightly
+// different input shapes (documented here, NOT normalized — see C1
+// framing nuance note below):
+//
+//   - ultimate-external (handler_external.go:300-309) reads via
+//     `reader.ReadString('\n')`, so the input line INCLUDES its
+//     trailing `\n`. The translator's `\n\n` terminator on the
+//     mutated path adds a second `\n`, producing `…\n\n` (SSE-legal).
+//     On the unchanged path the verbatim return carries the
+//     caller's `\n` (SSE-legal terminator).
+//   - race-external (race_executor.go:1294-1301) strips the trailing
+//     `\n` BEFORE passing to the translator, then appends a `\n` via
+//     streamBuffer.Add (stream_buffer.go:119) when the chunk is
+//     queued. The translator's `\n\n` terminator on the mutated
+//     path adds the missing framing, then the buffer adds its `\n`,
+//     producing `…\n\n\n` (triple-newline, SSE-legal — multiple
+//     consecutive `\n` are valid message terminators per SSE spec).
+//     On the unchanged path the verbatim return is newline-stripped
+//     by the caller, then the buffer adds its `\n`, producing
+//     `…\n` (SSE-legal).
+//
+// The framing contract from the translator's perspective is
+// uniform: every returned line is fully framed. The `\n\n\n`
+// vs `\n` variance is a property of the caller's input + buffer
+// combination, not a translator contract.
 //
 // Algorithm (C1, W3, W4, W6):
 //
@@ -419,30 +457,12 @@ func NewStreamTranslator() *StreamTranslator {
 //     drift counter; H2 dedup vs lastIssued[choiceIdx]
 //     (containment); cumulative-suffix mode (text is strict
 //     superset of lastIssued[choiceIdx] → emit suffix only).
-//     c. Emit per-entry chunks (raw JSON, no framing).
+//     c. Emit per-entry chunks (raw JSON, framed by frameSSELine
+//     in step 5).
 //  4. If no choice had reasoning_details, return the ORIGINAL line
 //     VERBATIM (C1 unchanged-on-passthrough guarantee).
-//  5. Otherwise re-marshal the chunk and return as stripped.
-//
-// C1 framing contract (uniform across both paths):
-//
-//   - On the UNCHANGED path (step 4), stripped is the ORIGINAL
-//     line VERBATIM — the upstream line is returned exactly as
-//     received, including its `data: ` prefix and trailing
-//     newline (or lack thereof, if upstream omitted them). The
-//     caller writes stripped directly: it is already framed.
-//   - On the MUTATED path (step 5), stripped is `data: ` + raw
-//     JSON + `\n\n` (a fully framed SSE line), and each
-//     emitted[i] is also `data: ` + raw JSON + `\n\n`. The
-//     caller writes stripped + each emitted[i] in order; the
-//     framing is done here so the caller has a uniform
-//     "every line is framed" contract and never has to
-//     distinguish mutated vs unchanged for SSE correctness.
-//
-// The C1 fix closes the bug where today the translator
-// re-marshaled unchanged lines and returned raw JSON (no
-// prefix, no trailing newline), causing call sites to write
-// unframed lines to the client and break SSE.
+//  5. Otherwise re-marshal the chunk, frame it (data: + \n\n), and
+//     frame each emitted chunk the same way (uniform contract).
 //
 // Not goroutine-safe; see NewStreamTranslator godoc. The translator
 // does not call into `toolrepair` and does not mutate tool_call state
@@ -691,19 +711,18 @@ func buildReasoningContentChunk(source map[string]any, choiceIdx int, content st
 		}
 	}
 	choice["index"] = float64(choiceIdx)
-	// delta: copy siblings if present (content, role, tool_calls)
-	// and overlay reasoning_content.
-	delta := make(map[string]any)
-	if c0Delta, ok := source["delta"].(map[string]any); ok {
-		for k, v := range c0Delta {
-			if k == "reasoning_details" || k == "reasoning_content" {
-				continue
-			}
-			delta[k] = v
-		}
-	}
-	delta["reasoning_content"] = content
-	choice["delta"] = delta
+	// Build the per-entry reasoning delta. The emitted reasoning
+	// chunk is reasoning-only — it does NOT carry other delta
+	// siblings from the source choice (content / role / tool_calls
+	// stay on the stripped chunk at the top of ChunkBytes' loop,
+	// not on these per-entry chunks). An earlier draft of this
+	// function tried to copy siblings from source["delta"], but
+	// the lookup is at the wrong level (delta is nested at
+	// source["choices"][choiceIdx]["delta"], not at the chunk
+	// root), so the block was dead — it never executed and
+	// emitted chunks have always been reasoning-only. Removed to
+	// stop misleading future readers.
+	choice["delta"] = map[string]any{"reasoning_content": content}
 	chunk["choices"] = []any{choice}
 
 	out, err := json.Marshal(chunk)
@@ -730,18 +749,21 @@ func bytesHasPrefix(s, prefix []byte) bool {
 	return true
 }
 
-// entryDebugSeen is the atomic counter backing entryDebugSampling.
-// It mirrors the openai.go:584-595 pattern (atomic.Uint64 + Add(1)
-// + modulo) so concurrent stream loops can call Allow() race-free.
+// entryDebugSeen is the atomic counter backing the 1-in-N
+// per-process sampling gate for unknown-entry-type debug logs.
+// It mirrors the openai.go:639-647 pattern (atomic.Uint64 +
+// Add(1) + modulo) so concurrent stream loops can call the
+// Allow()-style helper race-free.
 var entryDebugSeen atomic.Uint64
 
-// entryDebugSampling is a tiny per-process sampling guard for
-// unknown-entry-type debug logs. The hot path is reasoning.text only;
+// entryDebugSamplingN is the inverse sampling rate (1 in N
+// invocations are logged). The hot path is reasoning.text only;
 // unknown types are rare so a 1-in-N rate is fine.
 const entryDebugSamplingN = 64
 
 // entryDebugSamplingAllowed returns true 1 in N invocations. The
-// counter is atomic so concurrent stream loops are race-free.
+// counter is atomic (entryDebugSeen) so concurrent stream loops
+// are race-free.
 func entryDebugSamplingAllowed() bool {
 	return entryDebugSeen.Add(1)%entryDebugSamplingN == 0
 }

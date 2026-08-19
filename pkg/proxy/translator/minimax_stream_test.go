@@ -601,7 +601,7 @@ func TestStreamTranslator_ChunkBytes_NoDetailsPassthrough(t *testing.T) {
 	}
 }
 
-func TestStreamTranslator_ChunkBytes_StripsDataPrefix(t *testing.T) {
+func TestStreamTranslator_ChunkBytes_PreservesDataPrefix_OnUnchangedPath(t *testing.T) {
 	// C1 — the data: prefix is preserved on the unchanged
 	// passthrough path (the line is returned VERBATIM when no
 	// reasoning_details was present). The prefix-strip at
