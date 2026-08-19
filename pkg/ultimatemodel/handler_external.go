@@ -153,13 +153,30 @@ func (h *Handler) executeExternal(
 
 	if isStream {
 		// Stream response directly
-		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes)
+		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes, interleaved, providerIsMiniMax)
 	}
 
-	// Non-streaming: read body, extract usage, then copy to response
+	// Non-streaming: read body, extract usage, then translate + copy to response
 	bodyBytes, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// P2-4 (d): ultim-ext non-stream — invoke the response
+	// translator on the upstream body BEFORE writing to the client.
+	// Gate is (interleaved && providerIsMiniMax) — short-circuits
+	// BEFORE any parse (H5). Gated-off is a pure no-op on this
+	// verbatim-byte path (strictest invariant — the gate must
+	// guarantee byte-identical behavior on ultim-ext non-stream).
+	if interleaved && providerIsMiniMax {
+		translated, terr := translator.TranslateNonStreamResponseBytes(bodyBytes)
+		if terr != nil {
+			// §6.1: non-stream KEEPS error return; caller routes
+			// to WriteError 502 api_error. Surface as wrapped
+			// upstream error.
+			return nil, fmt.Errorf("ultimate-external response translator: %w", terr)
+		}
+		bodyBytes = translated
 	}
 
 	// Extract usage from response
@@ -224,7 +241,14 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 }
 
 // streamResponse streams the upstream response directly to client
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte) (*store.Usage, error) {
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag (re-parsed
+// from r.Header in Execute, threaded through executeExternal).
+// providerIsMiniMax is the credential-derived provider gate. Both
+// must be true to construct a StreamTranslator instance; gated-off
+// is a pure no-op (H5 — strictest invariant on this verbatim-byte
+// path; gate short-circuits BEFORE any parse).
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool) (*store.Usage, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -257,6 +281,15 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		)
 	}
 
+	// P2-5 (b): ultim-ext stream — construct the StreamTranslator
+	// per-stream instance ONLY when the gate fires. Gated-off ⇒ no
+	// instance ⇒ no per-chunk work ⇒ byte-identical passthrough.
+	// The instance's lifetime is the loop scope (P2-3 / §3.3).
+	var streamTranslator *translator.StreamTranslator
+	if interleaved && providerIsMiniMax {
+		streamTranslator = translator.NewStreamTranslator()
+	}
+
 	// Track the last chunk containing usage data
 	var lastUsageChunk []byte
 
@@ -282,7 +315,9 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			lineBytes = normalizedLine
 		}
 
-		// Extract usage from data lines
+		// Extract usage from data lines (BEFORE the translator
+		// strips reasoning_details — usage is in a different
+		// location and is not affected by the strip).
 		if bytes.HasPrefix(lineBytes, []byte("data: ")) {
 			data := bytes.TrimPrefix(lineBytes, []byte("data: "))
 			if len(data) > 0 &&
@@ -294,12 +329,50 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			}
 		}
 
-		// Process through tool call buffer
+		// P2-5 (b) / W3: apply the response-side stream translator
+		// BEFORE the tool call buffer. The translator returns
+		// (stripped, emitted) — the caller writes stripped first,
+		// then each emitted[i] in order, before the next flush
+		// boundary. The translator is error-free by construction
+		// (§6.1); err is always nil. ultim-ext has no mid-stream
+		// flush (H8) — all bytes accumulate in buf and are written
+		// in a single flush at end-of-stream.
+		translatorLine := lineBytes
+		var translatorEmitted [][]byte
+		if streamTranslator != nil {
+			var terr error
+			translatorLine, translatorEmitted, terr = streamTranslator.ChunkBytes(lineBytes)
+			if terr != nil {
+				// §6.1: should be impossible. Log + continue
+				// with the original line.
+				log.Printf("[WARN] ultimate-external stream translator: %v", terr)
+				translatorLine = lineBytes
+				translatorEmitted = nil
+			}
+		}
+
+		// Process through tool call buffer (translatorLine carries
+		// reasoning_details stripped, if any — see W3 ordering).
 		var chunksToEmit [][]byte
 		if toolCallBuffer != nil {
-			chunksToEmit = toolCallBuffer.ProcessChunk(lineBytes)
+			chunksToEmit = toolCallBuffer.ProcessChunk(translatorLine)
 		} else {
-			chunksToEmit = [][]byte{lineBytes}
+			chunksToEmit = [][]byte{translatorLine}
+		}
+
+		// Prepend the translator's emitted chunks (if any) so the
+		// client sees reasoning_content deltas before the stripped
+		// upstream chunk on each loop iteration. Per the W9
+		// contract the translator emits raw JSON data (no
+		// `data: ` prefix, no trailing `\n\n`); the call site
+		// adds the wire framing before the next flush boundary.
+		if len(translatorEmitted) > 0 {
+			full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
+			for _, e := range translatorEmitted {
+				full = append(full, append(append([]byte("data: "), e...), '\n', '\n'))
+			}
+			full = append(full, chunksToEmit...)
+			chunksToEmit = full
 		}
 
 		// Buffer all chunks

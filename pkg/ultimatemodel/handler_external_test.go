@@ -409,7 +409,7 @@ func TestStreamResponse_SSEHeadersSet(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -453,7 +453,7 @@ func TestStreamResponse_DataForwarding(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -489,7 +489,7 @@ func TestStreamResponse_DONEMarker(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -522,7 +522,7 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	usage, err := h.streamResponse(w, resp, "ultimate-model", nil)
+	usage, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -556,7 +556,7 @@ func TestStreamResponse_EmptyStream(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -592,7 +592,7 @@ func TestStreamResponse_MultipleChunks(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -634,7 +634,7 @@ func TestStreamResponse_WithToolCallBuffer(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false)
 
 	if err != nil {
 		t.Errorf("streamResponse with tool buffer returned error: %v", err)
