@@ -438,14 +438,20 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				// Handle reasoning_details (MiniMax-style
 				// typed thinking). Emit ONE thinking StreamEvent
 				// per entry, in array order. Single-winner rule
-				// (W4 + D2): when reasoning_details is present
-				// (non-empty), it WINS and reasoning_content is
-				// NOT extracted (the existing
-				// extractReasoningContent call is skipped). When
-				// reasoning_details is absent, fall back to
-				// reasoning_content (DeepSeek-style).
-				emittedPerChoice := extractReasoningDetailsByChoiceForStream([]byte(data))
-				if len(emittedPerChoice) > 0 {
+				// (W4 + D2 + Round-2): when reasoning_details
+				// is present and non-empty (hasDetails == true),
+				// it WINS and reasoning_content is NOT extracted
+				// (the existing extractReasoningContent call is
+				// skipped). The flag is presence-based — set when
+				// ANY choice carried a non-empty array, regardless
+				// of whether any entries survived filtering — so
+				// the internal typed path matches the external
+				// translator at minimax_stream.go:515-530
+				// (single-winner fires on presence, not on entry
+				// survival). When reasoning_details is absent,
+				// fall back to reasoning_content (DeepSeek-style).
+				emittedPerChoice, hasDetails := extractReasoningDetailsByChoiceForStream([]byte(data))
+				if hasDetails {
 					// W4 — per-choice cross-chunk dedup
 					// (mirrors the external path's
 					// StreamTranslator.lastIssued):
@@ -623,7 +629,7 @@ func extractReasoningContent(data []byte) string {
 
 // unknownTypeDebugN is the inverse sampling rate for the unknown-entry-type
 // debug log below (1 in N invocations are logged). Matches the translator's
-// entryDebugSampling rate (minimax_stream.go, 1 in 64) so both skip sites
+// entryDebugSeen counter (minimax_stream.go, 1 in 64) so both skip sites
 // behave symmetrically per plan §6.1.
 const unknownTypeDebugN = 64
 
@@ -819,18 +825,30 @@ type reasoningDetailEmit struct {
 
 // extractReasoningDetailsByChoiceForStream parses an upstream SSE
 // chunk and returns one emit per non-empty reasoning_details
-// entry across ALL choices, in array order. W3 — walks every
-// choice (the previous implementation read choices[0] only,
-// silently dropping reasoning_details on choices[1+]). W4 — the
-// returned slice is per-choice-indexed so the caller can apply
-// the cross-chunk lastIssued map.
+// entry across ALL choices, in array order, plus a hasDetails
+// flag indicating whether ANY choice carried a present-and-non-empty
+// reasoning_details array. W3 — walks every choice (the previous
+// implementation read choices[0] only, silently dropping
+// reasoning_details on choices[1+]). W4 — the returned slice is
+// per-choice-indexed so the caller can apply the cross-chunk
+// lastIssued map.
 //
 // Per-entry processing mirrors the external StreamTranslator's
 // behavior: H7 skip-empty, unknown-type skip, intra-array dedup
 // via containment. Cross-chunk dedup (suffix mode) is the
 // caller's job — see processStream's use of
 // streamReasoningLastIssued.
-func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit {
+//
+// hasDetails is the W4/Round-2 single-winner signal: it is set
+// when ANY choice had a non-empty reasoning_details array
+// regardless of whether any entries survived filtering (H7
+// skip-empty, unknown-type skip). This mirrors the external
+// translator's presence-based logic at minimax_stream.go:515-530
+// (single-winner rule fires when details are present AND non-empty
+// on the wire). The caller uses hasDetails — NOT len(emits)>0 —
+// to gate the reasoning_content fallback so the internal typed
+// path matches the external path on the all-skipped-entries edge.
+func extractReasoningDetailsByChoiceForStream(data []byte) (emits []reasoningDetailEmit, hasDetails bool) {
 	var rawChunk struct {
 		Choices []struct {
 			Index float64 `json:"index"`
@@ -843,10 +861,10 @@ func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &rawChunk); err != nil {
-		return nil
+		return nil, false
 	}
 	if len(rawChunk.Choices) == 0 {
-		return nil
+		return nil, false
 	}
 	var out []reasoningDetailEmit
 	for _, c := range rawChunk.Choices {
@@ -860,6 +878,13 @@ func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit
 		if len(entries) == 0 {
 			continue
 		}
+		// Mark presence-and-non-empty for this choice. The single-winner
+		// rule fires on presence alone — see external path
+		// (minimax_stream.go:515-530) and the W4 contract. Set the
+		// flag here so all-skipped-entries (H7 skip-empty, unknown-type
+		// skip) still gate off the reasoning_content fallback at the
+		// call site.
+		hasDetails = true
 		choiceIdx := int(c.Index)
 		// Per-choice intra-array dedup via containment.
 		var seen strings.Builder
@@ -883,5 +908,5 @@ func extractReasoningDetailsByChoiceForStream(data []byte) []reasoningDetailEmit
 			out = append(out, reasoningDetailEmit{choiceIdx: choiceIdx, text: text})
 		}
 	}
-	return out
+	return out, hasDetails
 }

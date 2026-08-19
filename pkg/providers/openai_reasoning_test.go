@@ -543,6 +543,52 @@ func TestOpenAIProvider_Stream_EmptyDetailsSkipped(t *testing.T) {
 	}
 }
 
+// Round-2 single-winner: when reasoning_details is present and
+// non-empty but ALL entries are filtered (H7 skip-empty after
+// TrimSpace) AND reasoning_content is also present, the
+// reasoning_details WINS and reasoning_content is NOT extracted
+// (mirroring the external translator at
+// minimax_stream.go:515-530 — presence-based single-winner, not
+// survival-based). The previous implementation conflated
+// "details present" with "any entry survived filtering" via
+// `len(emittedPerChoice) > 0` and silently emitted the
+// reasoning_content on this edge, diverging from the external
+// path. This test pins the corrected contract.
+func TestOpenAIProvider_Stream_AllDetailsEntriesSkipped_DiscardsReasoningContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Both fields in the SAME chunk. reasoning_details is
+		// present and non-empty (two entries), but every entry's
+		// text is empty / whitespace-only so H7 skip-empty
+		// filters them all out. reasoning_content carries a
+		// real value ("gold"). Per the presence-based
+		// single-winner, details wins → reasoning_content is
+		// discarded → no thinking event is emitted.
+		w.Write([]byte(`data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":""},{"type":"reasoning.text","text":"   "}],"reasoning_content":"gold"}}]}` + "\n\n"))
+		w.Write([]byte(`data: {"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider("k", server.URL)
+	evCh, err := p.StreamChatCompletion(context.Background(), &ChatCompletionRequest{
+		Model: "m", Stream: true,
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamChatCompletion: %v", err)
+	}
+	var think []string
+	for ev := range evCh {
+		if ev.Type == "thinking" {
+			think = append(think, ev.ReasoningContent)
+		}
+	}
+	if len(think) != 0 {
+		t.Errorf("thinking events = %v, want [] (single-winner: details present ⇒ reasoning_content discarded regardless of entry survival)", think)
+	}
+}
+
 func TestOpenAIProvider_Stream_NonMiniMaxShapePassthrough(t *testing.T) {
 	// A non-MiniMax shape (no reasoning_details, no reasoning_content)
 	// produces no thinking events.
