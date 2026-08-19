@@ -288,8 +288,8 @@ func respondNSPlain(w http.ResponseWriter) {
 			{
 				"index": 0,
 				"message": map[string]interface{}{
-					"role":             "assistant",
-					"content":          "hello",
+					"role":              "assistant",
+					"content":           "hello",
 					"reasoning_content": "legacy-think",
 				},
 				"finish_reason": "stop",

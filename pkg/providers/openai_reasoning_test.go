@@ -632,11 +632,11 @@ func TestHydrateReasoningDetails_AcceptsTranslatorStruct(t *testing.T) {
 	msg := map[string]any{
 		"reasoning_details": []interface{}{
 			translator.ReasoningDetail{
-				Type: translator.ReasoningTextType,
-				ID: "reasoning-text-1",
+				Type:   translator.ReasoningTextType,
+				ID:     "reasoning-text-1",
 				Format: translator.ReasoningTextFormat,
-				Index: 0,
-				Text: "earlier-think",
+				Index:  0,
+				Text:   "earlier-think",
 			},
 		},
 	}
