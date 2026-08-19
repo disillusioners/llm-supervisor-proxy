@@ -17,6 +17,11 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
 
+// newProviderClient is a package-level variable that creates a provider.
+// Tests can override it to inject a mock provider; production callers use
+// providers.NewProvider.
+var newProviderClient = providers.NewProvider
+
 // executeInternal handles requests to internal providers (bypassing upstream)
 // This is a RAW PROXY - no retry, no fallback, no buffering, no loop detection
 //
@@ -43,7 +48,7 @@ func (h *Handler) executeInternal(
 	}
 
 	// Create provider
-	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)
+	providerClient, err := newProviderClient(provider, apiKey, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}

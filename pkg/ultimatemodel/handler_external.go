@@ -74,12 +74,22 @@ func (h *Handler) executeExternal(
 		bodyCopy["model"] = modelCfg.ID
 	}
 
-	// D3 + H5: provider gate. When flag absent or upstreamProvider is not
-	// MiniMax, the translator is skipped entirely (H5 short-circuit BEFORE
-	// parse/marshal) and the body is left unchanged from its bodyCopy- +
-	// json.Marshal form. When the gate fires, the translator mutates the
-	// body in place on a fresh parse, then re-marshals — the only place
-	// a re-marshal occurs in this function, and only on the gated-on path.
+	// Marshal bodyCopy (carries the model override). bodyBytes is what
+	// gets sent upstream. Pre-existing behavior: gated-off and gated-on
+	// paths both produce bodyBytes via this step; the difference is
+	// whether the translator runs on bodyBytes AFTER this marshal (so the
+	// model override is preserved through the parse→mutate→re-marshal
+	// round-trip the translator performs).
+	bodyBytes, err := json.Marshal(bodyCopy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// D3 + H5: provider gate. When the gate fires, the translator mutates
+	// the already-model-overridden bodyBytes (top-level reasoning_split +
+	// per-message reasoning_details); when the gate is off, bodyBytes is
+	// used unchanged. Gated-off is a pure no-op from the translator's
+	// perspective.
 	//
 	// upstreamProvider is already lowercased in Execute (per D3). Compare
 	// against the canonical ProviderMiniMax constant (providers.ProviderMiniMax
@@ -87,18 +97,11 @@ func (h *Handler) executeExternal(
 	// match per handler_anthropic.go:297 precedent.
 	providerIsMiniMax := upstreamProvider != "" && upstreamProvider == strings.ToLower(string(providers.ProviderMiniMax))
 	if interleaved && providerIsMiniMax {
-		outBytes, terr := translator.TranslateRequestBytes(requestBodyBytes)
+		outBytes, terr := translator.TranslateRequestBytes(bodyBytes)
 		if terr != nil {
 			return nil, fmt.Errorf("ultimate-external translator: %w", terr)
 		}
-		requestBodyBytes = outBytes
-	}
-
-	// Marshal request body (preserves bodyCopy-as-modified; gated-off
-	// path leaves bodyCopy == requestBody so this is the original bytes)
-	bodyBytes, err := json.Marshal(bodyCopy)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		bodyBytes = outBytes
 	}
 
 	// Create upstream request

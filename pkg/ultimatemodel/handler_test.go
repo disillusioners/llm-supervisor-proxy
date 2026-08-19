@@ -218,6 +218,8 @@ type mockProvider struct {
 	chatResp     *providers.ChatCompletionResponse
 	chatErr      error
 	streamEvents []providers.StreamEvent
+	mu           sync.Mutex
+	capturedReq  *providers.ChatCompletionRequest // last request captured by ChatCompletion
 }
 
 func newMockProvider() *mockProvider {
@@ -231,6 +233,9 @@ func (p *mockProvider) Name() string {
 }
 
 func (p *mockProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	p.capturedReq = req
+	p.mu.Unlock()
 	if p.chatErr != nil {
 		return nil, p.chatErr
 	}
