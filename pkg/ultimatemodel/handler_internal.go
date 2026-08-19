@@ -13,6 +13,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
@@ -97,13 +98,22 @@ func (h *Handler) executeInternal(
 			// Strip-and-replace: build the new
 			// details entry from the existing content,
 			// then clear the content string. The
-			// wire field is MiniMax-response-v1
-			// (matches the external translator's
-			// format).
+			// wire-literal identifiers
+			// (translator.ReasoningTextType /
+			// .ReasoningTextFormat /
+			// .ReasoningTextIDPrefix) are imported
+			// here for the constant-not-literal
+			// invariant — single source of truth
+			// for the MiniMax wire vocabulary
+			// lives in pkg/proxy/translator
+			// (R3 carve-out — providers/ultimatemodel
+			// may import these constants; see
+			// ExtractEntryText for the established
+			// helper-only precedent).
 			msg.ReasoningDetails = []providers.ReasoningDetailEntry{{
-				Type:   "reasoning.text",
-				ID:     fmt.Sprintf("reasoning-text-%d", i+1),
-				Format: "MiniMax-response-v1",
+				Type:   translator.ReasoningTextType,
+				ID:     fmt.Sprintf("%s%d", translator.ReasoningTextIDPrefix, i+1),
+				Format: translator.ReasoningTextFormat,
 				Index:  0,
 				Text:   msg.ReasoningContent,
 			}}
@@ -526,32 +536,10 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 				// openai.go marshaler emits reasoning_details on the wire
 				// (P1-8 d). R3 — pkg/providers does not import pkg/proxy/translator;
 				// the translator's ReasoningDetail is kept separate from this
-				// local ReasoningDetailEntry shape. convertRequest translates
-				// shape-by-shape here.
-				if reasoningDetails, ok := msg["reasoning_details"].([]interface{}); ok {
-					chatMsg.ReasoningDetails = make([]providers.ReasoningDetailEntry, 0, len(reasoningDetails))
-					for _, rd := range reasoningDetails {
-						if rdMap, ok := rd.(map[string]interface{}); ok {
-							entry := providers.ReasoningDetailEntry{}
-							if t, ok := rdMap["type"].(string); ok {
-								entry.Type = t
-							}
-							if id, ok := rdMap["id"].(string); ok {
-								entry.ID = id
-							}
-							if format, ok := rdMap["format"].(string); ok {
-								entry.Format = format
-							}
-							if index, ok := rdMap["index"].(float64); ok {
-								entry.Index = int(index)
-							}
-							if text, ok := rdMap["text"].(string); ok {
-								entry.Text = text
-							}
-							chatMsg.ReasoningDetails = append(chatMsg.ReasoningDetails, entry)
-						}
-					}
-				}
+				// local ReasoningDetailEntry shape. convertRequest delegates to
+				// providers.HydrateReasoningDetails (M4 dedup — twin with the
+				// race-internal hydration in pkg/proxy/race_executor.go).
+				chatMsg.ReasoningDetails = providers.HydrateReasoningDetails(msg)
 				// Debug log for tool role messages to diagnose MiniMax compatibility issues
 				if chatMsg.Role == "tool" {
 					if chatMsg.ToolCallID == "" {

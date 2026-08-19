@@ -837,31 +837,10 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 				// per R3 — pkg/providers does not import pkg/proxy/translator).
 				// The field exists for request-side map→struct hydration so
 				// the typed openai.go marshaler emits reasoning_details on
-				// the wire (P1-8 d).
-				if reasoningDetails, ok := msg["reasoning_details"].([]interface{}); ok {
-					chatMsg.ReasoningDetails = make([]providers.ReasoningDetailEntry, 0, len(reasoningDetails))
-					for _, rd := range reasoningDetails {
-						if rdMap, ok := rd.(map[string]interface{}); ok {
-							entry := providers.ReasoningDetailEntry{}
-							if t, ok := rdMap["type"].(string); ok {
-								entry.Type = t
-							}
-							if id, ok := rdMap["id"].(string); ok {
-								entry.ID = id
-							}
-							if format, ok := rdMap["format"].(string); ok {
-								entry.Format = format
-							}
-							if index, ok := rdMap["index"].(float64); ok {
-								entry.Index = int(index)
-							}
-							if text, ok := rdMap["text"].(string); ok {
-								entry.Text = text
-							}
-							chatMsg.ReasoningDetails = append(chatMsg.ReasoningDetails, entry)
-						}
-					}
-				}
+				// the wire (P1-8 d). Delegated to providers.HydrateReasoningDetails
+				// to eliminate the twin-divergence duplication with the
+				// ultimate-internal convertRequest path (M4 dedup).
+				chatMsg.ReasoningDetails = providers.HydrateReasoningDetails(msg)
 				// Handle name field for preserving message sender identity
 				if name, ok := msg["name"].(string); ok {
 					chatMsg.Name = name

@@ -31,15 +31,20 @@ type ReasoningDetail struct {
 	Text   string `json:"text,omitempty"`
 }
 
-// reasoningTextType is the MiniMax wire type for plain reasoning text.
-const reasoningTextType = "reasoning.text"
+// ReasoningTextType is the MiniMax wire type for plain reasoning text.
+// Exported (R3 carve-out — providers/ultimatemodel may import this
+// constant directly to avoid duplicating the wire-literal in the
+// reasoning_details hydration paths).
+const ReasoningTextType = "reasoning.text"
 
-// reasoningTextFormat is the MiniMax wire format identifier for v1.
-const reasoningTextFormat = "MiniMax-response-v1"
+// ReasoningTextFormat is the MiniMax wire format identifier for v1.
+// Exported (R3 carve-out — see ReasoningTextType for the rationale).
+const ReasoningTextFormat = "MiniMax-response-v1"
 
-// reasoningTextIDPrefix is prepended to the per-message counter to build a
-// stable identifier (e.g. "reasoning-text-1").
-const reasoningTextIDPrefix = "reasoning-text-"
+// ReasoningTextIDPrefix is prepended to the per-message counter to
+// build a stable identifier (e.g. "reasoning-text-1"). Exported
+// (R3 carve-out — see ReasoningTextType for the rationale).
+const ReasoningTextIDPrefix = "reasoning-text-"
 
 // TranslateRequestBody is the request-side map-core translator. It mutates
 // the supplied body in place to convert client-supplied
@@ -80,6 +85,10 @@ func TranslateRequestBytes(body []byte) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// TranslateMessagesReasoning is the request-side map-core decomposition
+// of the reasoning_content→reasoning_details translation; production
+// entry point is the TranslateRequestBytes wrapper.
+//
 // TranslateMessagesReasoning walks body["messages"] and, for each message
 // carrying a non-empty reasoning_content string, replaces it with a
 // reasoning_details array of one entry (type "reasoning.text",
@@ -123,9 +132,9 @@ func TranslateMessagesReasoning(body map[string]any) error {
 		counter++
 		msg["reasoning_details"] = []any{
 			ReasoningDetail{
-				Type:   reasoningTextType,
-				ID:     fmt.Sprintf("%s%d", reasoningTextIDPrefix, counter),
-				Format: reasoningTextFormat,
+				Type:   ReasoningTextType,
+				ID:     fmt.Sprintf("%s%d", ReasoningTextIDPrefix, counter),
+				Format: ReasoningTextFormat,
 				Index:  0,
 				Text:   text,
 			},
@@ -136,6 +145,10 @@ func TranslateMessagesReasoning(body map[string]any) error {
 	return nil
 }
 
+// InjectReasoningSplit is the request-side map-core decomposition of
+// the top-level reasoning_split flag injection; production entry point
+// is the TranslateRequestBytes wrapper.
+//
 // InjectReasoningSplit sets body["reasoning_split"] = true at the top
 // level. Top-level placement is the documented choice (Q8, R7): the MiniMax
 // SDK reads reasoning_split from the body root, not from inside any nested
