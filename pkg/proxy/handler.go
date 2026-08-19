@@ -468,6 +468,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
 	}
 
+	// Header-driven flag for MiniMax reasoning_details split-mode translation.
+	// Mirrors the X-Force-Ultimate-Model value-list semantics (R8/Q3):
+	// accepted values are case-sensitive lowercase "true" or "1" only.
+	// Parsed via parseInterleavedThinkingHeader (single source of truth
+	// shared with pkg/ultimatemodel.Execute). Stored on rc for race paths;
+	// ultimate paths re-parse the header because rc does not cross the
+	// pkg/proxy → pkg/ultimatemodel package boundary.
+	rc.interleavedThinking = parseInterleavedThinkingHeader(r)
+
 	// === ULTIMATE MODEL ACCESS CHECK ===
 	// For ultimate model, we need to check access control separately
 	// because the ultimate model might not be in the original request's model list

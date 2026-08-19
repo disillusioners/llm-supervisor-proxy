@@ -95,6 +95,16 @@ type requestContext struct {
 	// Ultimate model permission (from token)
 	ultimateModelEnabled bool
 	ultimateModelID     string // Per-token override model ID (empty = use global config)
+
+	// InterleavedThinking indicates the client opted into MiniMax
+	// reasoning_details split-mode translation via X-Proxy-Interleaved-Thinking.
+	// True iff the request carried X-Proxy-Interleaved-Thinking: true|1
+	// (case-sensitive lowercase; matches X-Force-Ultimate-Model precedent
+	// at handler.go:465). Drives the race-path gate alongside the credential
+	// MiniMax check. Per B3 (architecture §4), ultimate paths re-parse the
+	// header in ultimatemodel.Execute and pass an explicit parameter down,
+	// rather than reading from rc (which never crosses the package boundary).
+	interleavedThinking bool
 }
 
 // reset clears all accumulated state in the request context.
