@@ -135,8 +135,11 @@ func ExecuteInternalRequestWithProvider(
 		return provider, nil
 	}
 
-	// Execute the request
-	err := executeInternalRequest(ctx, cfg, rawBody, req)
+	// Execute the request (interleaved flag off by default — tests do
+	// not exercise the MiniMax reasoning_details split-mode path; the
+	// 5th-site race-ext body-map mutation is exercised separately
+	// via P1-9 byte-identical negative tests).
+	err := executeInternalRequest(ctx, cfg, rawBody, req, false)
 
 	// Restore original
 	newProviderClient = originalNewProvider

@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
@@ -471,11 +472,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// Header-driven flag for MiniMax reasoning_details split-mode translation.
 	// Mirrors the X-Force-Ultimate-Model value-list semantics (R8/Q3):
 	// accepted values are case-sensitive lowercase "true" or "1" only.
-	// Parsed via parseInterleavedThinkingHeader (single source of truth
-	// shared with pkg/ultimatemodel.Execute). Stored on rc for race paths;
-	// ultimate paths re-parse the header because rc does not cross the
-	// pkg/proxy → pkg/ultimatemodel package boundary.
-	rc.interleavedThinking = parseInterleavedThinkingHeader(r)
+	// Parsed via proxyheader.ParseInterleavedThinkingHeader (single source
+	// of truth shared with pkg/ultimatemodel.Execute). Stored on rc for
+	// race paths; ultimate paths re-parse the header because rc does not
+	// cross the pkg/proxy → pkg/ultimatemodel package boundary.
+	rc.interleavedThinking = proxyheader.ParseInterleavedThinkingHeader(r)
 
 	// === ULTIMATE MODEL ACCESS CHECK ===
 	// For ultimate model, we need to check access control separately
@@ -771,7 +772,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	// Unified Race Retry Design (Parallel Race)
 	log.Printf("[RACE] Parallel race retry started for request %s", rc.reqID)
-	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID)
+	// rc.interleavedThinking parsed at handler entry (handler.go:465+) is
+	// threaded here so race-internal sites can read it via executeRequest
+	// without taking a *requestContext dependency (B3 — executeInternalRequest
+	// has neither rc nor *http.Request).
+	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()

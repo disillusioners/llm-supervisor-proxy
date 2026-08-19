@@ -33,7 +33,7 @@ func TestExecuteExternal_UpstreamURLNotConfigured(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err == nil {
 		t.Error("executeExternal should return error when upstream URL is empty")
@@ -94,7 +94,7 @@ func TestExecuteExternal_SuccessfulNonStreaming(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -155,7 +155,7 @@ func TestExecuteExternal_SuccessfulStreaming(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), true)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), true, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -188,7 +188,7 @@ func TestExecuteExternal_UpstreamError(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err == nil {
 		t.Error("executeExternal should return error for upstream failure")
@@ -219,7 +219,7 @@ func TestExecuteExternal_UpstreamReturns400(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err == nil {
 		t.Error("executeExternal should return error for 400 response")
@@ -254,7 +254,7 @@ func TestExecuteExternal_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := h.executeExternal(ctx, w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(ctx, w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err == nil {
 		t.Error("executeExternal should return error for cancelled context")
@@ -287,7 +287,7 @@ func TestExecuteExternal_ResponseHeadersForwarded(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -331,7 +331,7 @@ func TestExecuteExternal_ModelIDOverride(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -374,7 +374,7 @@ func TestExecuteExternal_HeadersHopByHopSkipped(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -785,7 +785,7 @@ func TestExecuteExternal_Integration(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false)
+	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Fatalf("executeExternal failed: %v", err)
@@ -819,7 +819,7 @@ func TestExecuteExternal_RequestBodyMarshalingError(t *testing.T) {
 		"unmarshalable": make(chan int),
 	}
 
-	_, err := h.executeExternal(context.Background(), w, r, body, nil, modelsCfg.GetModel("ultimate-model"), false)
+	_, err := h.executeExternal(context.Background(), w, r, body, nil, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err == nil {
 		t.Error("executeExternal should return error for unmarshalable body")

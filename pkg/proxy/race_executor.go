@@ -29,7 +29,12 @@ var newProviderClient = providers.NewProvider
 // executeRequest performs the actual HTTP call to upstream
 // and streams the response into the request's buffer.
 // It checks if the model is internal and routes accordingly.
-func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag carried from the
+// race coordinator. Drives the MiniMax reasoning_details split-mode gate
+// inside the executed sub-paths; flag-absent calls short-circuit the gate
+// (H5) so non-MiniMax / non-flagged requests stay byte-identical.
+func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
 	req.MarkStarted()
 
 	log.Printf("[PEAK-DBG] executeRequest ENTRY: req.modelID=%q, req.modelType=%v", req.modelID, req.modelType)
@@ -41,16 +46,22 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 
 		log.Printf("[PEAK-DBG] executeRequest: modelConfig found, Internal=%v, modelID=%q", modelConfig != nil && modelConfig.Internal, req.modelID)
 		if modelConfig != nil && modelConfig.Internal {
-			return executeInternalRequest(ctx, cfg, rawBody, req)
+			return executeInternalRequest(ctx, cfg, rawBody, req, interleaved)
 		}
 	}
 
 	// External upstream: use the configured upstream URL
-	return executeExternalRequest(ctx, cfg, originalReq, rawBody, req)
+	return executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
 }
 
-// executeInternalRequest handles requests to internal providers (bypassing external upstream)
-func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest) error {
+// executeInternalRequest handles requests to internal providers (bypassing external upstream).
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
+// entry, threaded via executeRequest). Drives the MiniMax
+// reasoning_details split-mode gate for race-internal; passed down to
+// convertToProviderRequest's caller (W6) which decides whether to call
+// the translator.
+func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest, interleaved bool) error {
 	// Check if we should use secondary upstream model (for modelTypeSecond)
 	useSecondary := req.UseSecondaryUpstream()
 
@@ -131,8 +142,13 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
 }
 
-// executeExternalRequest handles requests to external upstream (LiteLLM, etc.)
-func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest) error {
+// executeExternalRequest handles requests to external upstream (LiteLLM, etc.).
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
+// entry, threaded via executeRequest). Drives the MiniMax
+// reasoning_details split-mode gate for race-external; when gated on, the
+// translator mutates bodyMap before re-marshalling.
+func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
 	// 1. Prepare upstream request
 	// Check for test upstream header (for testing with mock servers)
 	upstreamURL := cfg.UpstreamURL

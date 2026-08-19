@@ -759,7 +759,7 @@ func TestExecuteInternal_ResolveFailure(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	requestBodyBytes, _ := json.Marshal(body)
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelCfg, false)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelCfg, false, false)
 
 	if err == nil {
 		t.Fatal("Expected error for unresolved internal config")

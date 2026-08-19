@@ -37,6 +37,13 @@ type raceCoordinator struct {
 	req     *http.Request
 	rawBody []byte
 
+	// interleaved is the X-Proxy-Interleaved-Thinking flag parsed from the
+	// incoming request header (handler.go entry). Threaded down through
+	// executeRequest → executeInternalRequest / executeExternalRequest so
+	// race-internal sites have the flag without needing *requestContext
+	// (which never crosses into race_executor). See B3 (architecture §4.1).
+	interleaved bool
+
 	requests    []*upstreamRequest
 	models      []string
 	winner      *upstreamRequest
@@ -61,11 +68,11 @@ type raceCoordinator struct {
 	streamDeadlineError *FinalErrorInfo
 }
 
-func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string) *raceCoordinator {
-	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "")
+func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
+	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved)
 }
 
-func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, eventBus *events.Bus, requestID string) *raceCoordinator {
+func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, eventBus *events.Bus, requestID string, interleaved bool) *raceCoordinator {
 	if len(models) == 0 {
 		models = []string{cfg.ModelID}
 	}
@@ -74,6 +81,7 @@ func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req 
 		cfg:           cfg,
 		req:           req,
 		rawBody:       rawBody,
+		interleaved:   interleaved,
 		models:        models,
 		requests:      make([]*upstreamRequest, 0, len(models)),
 		winnerIdx:     -1,
@@ -529,7 +537,7 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	ctx, cancel := context.WithCancel(c.baseCtx)
 	req.SetContext(ctx, cancel)
 
-	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req)
+	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req, c.interleaved)
 
 	if err != nil {
 		req.MarkFailed(err)

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -269,6 +271,27 @@ func (h *Handler) Execute(
 		isStream = stream
 	}
 
+	// B3 + H4: parse the X-Proxy-Interleaved-Thinking flag here (Handler
+	// has r, requestContext does not cross this package boundary). Use the
+	// shared helper from pkg/proxyheader for identical semantics with the
+	// race path parser at pkg/proxy/handler.go. Empty/missing/wrong-case
+	// values resolve to false here too (defence in depth — the gate also
+	// rechecks via providerIsMiniMax).
+	interleaved := proxyheader.ParseInterleavedThinkingHeaderValue(r.Header.Get(proxyheader.InterleavedThinkingHeader))
+
+	// D3: derive upstream provider from credential when available so the
+	// executeExternal gate can short-circuit non-MiniMax paths without
+	// touching the request body (H5 invariant). CredentialID empty ⇒
+	// upstreamProvider="" ⇒ gate=false (caller of executeExternal treats
+	// empty as not-MiniMax).
+	var upstreamProvider string
+	if modelCfg.CredentialID != "" {
+		cred := h.modelsMgr.GetCredential(modelCfg.CredentialID)
+		if cred != nil {
+			upstreamProvider = strings.ToLower(cred.Provider)
+		}
+	}
+
 	// Start heartbeat for streaming requests - runs until request ends
 	// Heartbeat is started here (after headers are set) to keep connection alive
 	var heartbeatCancel context.CancelFunc
@@ -291,9 +314,9 @@ func (h *Handler) Execute(
 	// Route to internal or external handler
 	var usage *store.Usage
 	if modelCfg.Internal {
-		usage, err = h.executeInternal(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream)
+		usage, err = h.executeInternal(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved)
 	} else {
-		usage, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream)
+		usage, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider)
 	}
 
 	// Stop heartbeat

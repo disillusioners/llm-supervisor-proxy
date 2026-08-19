@@ -79,7 +79,7 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -144,7 +144,7 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 	// Provide two models so the coordinator can spawn a second request when the first fails
 	models := []string{"test-model", "test-model-fallback"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -190,7 +190,7 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -250,7 +250,7 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -294,7 +294,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -346,7 +346,7 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	// Cancel after a short delay (simulating client disconnect)
@@ -412,7 +412,7 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -525,7 +525,7 @@ func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
 	rawBody := []byte(`{"model":"test-model"}`)
 	models := []string{"test-model", "fallback-model"}
 
-	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models)
+	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()

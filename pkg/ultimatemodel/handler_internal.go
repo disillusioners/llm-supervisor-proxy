@@ -18,6 +18,15 @@ import (
 
 // executeInternal handles requests to internal providers (bypassing upstream)
 // This is a RAW PROXY - no retry, no fallback, no buffering, no loop detection
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
+// Execute (B3). When true AND the credential provider is MiniMax, the
+// caller (this function's caller in executeInternalRequest-equivalent
+// path) sets the typed ReasoningSplit *bool = ptr(true) on the hydrated
+// *ChatCompletionRequest and convertRequest populates
+// ChatMessage.ReasoningDetails from the input map. The gate (provider +
+// flag) belongs to the caller, not here — this function remains pure
+// (W6).
 func (h *Handler) executeInternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -25,6 +34,7 @@ func (h *Handler) executeInternal(
 	requestBodyBytes []byte,
 	modelCfg *models.ModelConfig,
 	isStream bool,
+	interleaved bool,
 ) (*store.Usage, error) {
 	// Resolve internal config (including credential lookup)
 	provider, apiKey, baseURL, internalModel, ok := h.modelsMgr.ResolveInternalConfig(modelCfg.ID)

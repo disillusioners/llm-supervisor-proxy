@@ -9,12 +9,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 )
@@ -33,6 +36,13 @@ var sharedHTTPClient = &http.Client{
 
 // executeExternal handles requests to external upstream (proxy mode)
 // This is a RAW PROXY - no retry, no fallback, no buffering, no loop detection
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
+// Execute (B3). upstreamProvider is the lowercase credential provider
+// name when CredentialID is set on modelCfg (D3); empty otherwise.
+// The gate fires iff interleaved && upstreamProvider == factory.ProviderMiniMax
+// (case-insensitive). Gate lives in this function so H5 (short-circuit
+// BEFORE parse/marshal) is guaranteed at the strongest no-op site.
 func (h *Handler) executeExternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -41,6 +51,8 @@ func (h *Handler) executeExternal(
 	requestBodyBytes []byte,
 	modelCfg *models.ModelConfig,
 	isStream bool,
+	interleaved bool,
+	upstreamProvider string,
 ) (*store.Usage, error) {
 	cfg := h.config.Get()
 	var _ config.Config = cfg // Ensure config package is used
@@ -62,7 +74,28 @@ func (h *Handler) executeExternal(
 		bodyCopy["model"] = modelCfg.ID
 	}
 
-	// Marshal request body
+	// D3 + H5: provider gate. When flag absent or upstreamProvider is not
+	// MiniMax, the translator is skipped entirely (H5 short-circuit BEFORE
+	// parse/marshal) and the body is left unchanged from its bodyCopy- +
+	// json.Marshal form. When the gate fires, the translator mutates the
+	// body in place on a fresh parse, then re-marshals — the only place
+	// a re-marshal occurs in this function, and only on the gated-on path.
+	//
+	// upstreamProvider is already lowercased in Execute (per D3). Compare
+	// against the canonical ProviderMiniMax constant (providers.ProviderMiniMax
+	// == "minimax"; package is imported above) for the case-insensitive
+	// match per handler_anthropic.go:297 precedent.
+	providerIsMiniMax := upstreamProvider != "" && upstreamProvider == strings.ToLower(string(providers.ProviderMiniMax))
+	if interleaved && providerIsMiniMax {
+		outBytes, terr := translator.TranslateRequestBytes(requestBodyBytes)
+		if terr != nil {
+			return nil, fmt.Errorf("ultimate-external translator: %w", terr)
+		}
+		requestBodyBytes = outBytes
+	}
+
+	// Marshal request body (preserves bodyCopy-as-modified; gated-off
+	// path leaves bodyCopy == requestBody so this is the original bytes)
 	bodyBytes, err := json.Marshal(bodyCopy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -79,6 +112,15 @@ func (h *Handler) executeExternal(
 	for key, values := range r.Header {
 		// Skip hop-by-hop headers
 		if key == "Host" || key == "Content-Length" || key == "Transfer-Encoding" {
+			continue
+		}
+		// D4: NARROW strip of exactly x-proxy-interleaved-thinking on
+		// the ultimate-external path. Case-insensitive via
+		// strings.EqualFold. The general x-proxy-* strip is REJECTED
+		// (would change flag-absent forwarding behavior — old clients
+		// never set this header so the narrow strip preserves the
+		// flag-absent invariant).
+		if strings.EqualFold(key, "x-proxy-interleaved-thinking") {
 			continue
 		}
 		for _, value := range values {

@@ -1779,7 +1779,7 @@ func TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream(t *testing.T) {
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
 
 	// Call executeInternalRequest
-	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed: %v", err)
 	}
@@ -1873,7 +1873,7 @@ func TestExecuteInternalRequest_SecondaryModelSwap_E2E_Stream(t *testing.T) {
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":true}`)
 
 	// Call executeInternalRequest
-	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed: %v", err)
 	}
@@ -1974,7 +1974,7 @@ func TestExecuteInternalRequest_NoSecondary_UsesPrimary_E2E(t *testing.T) {
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
 
 	// Call executeInternalRequest
-	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed: %v", err)
 	}
@@ -2072,7 +2072,7 @@ func TestExecuteInternalRequest_SecondaryFalse_UsesPrimary_E2E(t *testing.T) {
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
 
 	// Call executeInternalRequest
-	err := executeInternalRequest(context.Background(), cfg, rawBody, req)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, req, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed: %v", err)
 	}
@@ -2505,7 +2505,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_NonStream(t *testing.
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":false}`)
 
 	// Call executeInternalRequest for main request
-	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed for main request: %v", err)
 	}
@@ -2552,7 +2552,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_NonStream(t *testing.
 	secondReq.SetUseSecondaryUpstream(true)
 
 	// Call executeInternalRequest for second request
-	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq)
+	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed for second request: %v", err)
 	}
@@ -2676,7 +2676,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) 
 
 	rawBody := []byte(`{"messages":[{"role":"user","content":"test"}],"stream":true}`)
 
-	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq)
+	err := executeInternalRequest(context.Background(), cfg, rawBody, mainReq, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed for streaming main request: %v", err)
 	}
@@ -2713,7 +2713,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) 
 	secondReq := newUpstreamRequest(1, modelTypeSecond, "peak-secondary-stream", 1024*1024)
 	secondReq.SetUseSecondaryUpstream(true)
 
-	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq)
+	err = executeInternalRequest(context.Background(), cfg, rawBody, secondReq, false)
 	if err != nil {
 		t.Fatalf("executeInternalRequest failed for streaming second request: %v", err)
 	}
