@@ -325,18 +325,357 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_ExternalStream(t *tes
 		t.Fatalf("request failed: %d - %s", rec.Code, rec.Body.String())
 	}
 
-	// Client-received bytes must contain both content + reasoning
-	// deltas (capture-vs-wire proof at the proxy level).
-	clientBody := rec.Body.String()
-	if !bytes.Contains([]byte(clientBody), []byte(wantContent)) {
-		t.Errorf("client bytes missing content %q: %s", wantContent, clientBody)
-	}
-	if !bytes.Contains([]byte(clientBody), []byte(wantThinking)) {
-		t.Errorf("client bytes missing reasoning_content %q: %s", wantThinking, clientBody)
+	// Client-received bytes must be EXACTLY the upstream SSE stream
+	// (capture-vs-wire proof at the proxy level). Previously this
+	// was a bytes.Contains check on wantContent + wantThinking which
+	// would silently pass if the proxy injected interior '\n' bytes,
+	// duplicated chunks, or stripped any framing lines. The W3
+	// hardening is a full bytes.Equal against the expected SSE
+	// body — the upstream writes 4 data lines (reasoning, content,
+	// final-chunk-with-usage, [DONE]) separated by SSE-style "\n\n"
+	// delimiters, and the proxy must write them verbatim.
+	wantBody := []byte(
+		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"" + wantThinking + "\"}}]}\n\n" +
+			"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"" + wantContent + "\"}}]}\n\n" +
+			"data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n" +
+			"data: [DONE]\n\n",
+	)
+	if got := rec.Body.Bytes(); !bytes.Equal(got, wantBody) {
+		t.Errorf("client bytes drifted from golden\n got: %q (%d bytes)\nwant: %q (%d bytes)", got, len(got), wantBody, len(wantBody))
 	}
 
 	// Find the ultimate request log and verify the persisted
 	// assistant message.
+	all := reqStore.List()
+	var log *store.RequestLog
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].UltimateModelUsed {
+			log = all[i]
+			break
+		}
+	}
+	if log == nil {
+		t.Fatal("no ultimate request log found")
+	}
+	var assistantMsg *store.Message
+	for i := len(log.Messages) - 1; i >= 0; i-- {
+		if log.Messages[i].Role == "assistant" {
+			assistantMsg = &log.Messages[i]
+			break
+		}
+	}
+	if assistantMsg == nil {
+		t.Fatalf("no assistant message persisted; log messages: %+v", log.Messages)
+	}
+	if assistantMsg.Content != wantContent {
+		t.Errorf("persisted Content = %q, want %q", assistantMsg.Content, wantContent)
+	}
+	if assistantMsg.Thinking != wantThinking {
+		t.Errorf("persisted Thinking = %q, want %q", assistantMsg.Thinking, wantThinking)
+	}
+}
+
+// mockUltimateInternalResponse builds a non-stream upstream body in
+// OpenAI chat-completions shape with content + reasoning_content. It is
+// the internal-path counterpart of mockUltimateExternalResponse: the
+// internal path is reached when modelCfg.Internal=true and the proxy
+// routes through ultimatemodel.executeInternal, which constructs an
+// OpenAIProvider that calls <credential.BaseURL>/chat/completions. The
+// provider's typed JSON decode reads `reasoning_content` directly into
+// ChatMessage.ReasoningContent, which executeInternal then copies
+// verbatim into ExecuteResult.Thinking (the outer handler persists it
+// as store.Message.Thinking).
+func mockUltimateInternalResponse(content, thinking string, prompt, completion, total int) string {
+	resp := map[string]interface{}{
+		"id":      "chatcmpl-internal-test",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   "internal-model",
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":              "assistant",
+					"content":           content,
+					"reasoning_content": thinking,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]int{
+			"prompt_tokens":     prompt,
+			"completion_tokens": completion,
+			"total_tokens":      total,
+		},
+	}
+	b, _ := json.Marshal(resp)
+	return string(b)
+}
+
+// TestUltimateModel_PersistsAssistantContentAndThinking_Internal is the
+// internal-path counterpart of the External non-stream persistence test.
+//
+// Sets up an INTERNAL ultimate model (Internal=true, provider=openai)
+// whose credential BaseURL points at a mock upstream. The OpenAI
+// provider constructed by ultimatemodel.executeInternal calls the
+// upstream, parses the response into a typed ChatCompletionResponse
+// (with ReasoningContent populated), and executeInternal copies the
+// fields verbatim into ExecuteResult. The outer handler then persists
+// store.Message{Role: "assistant", Content, Thinking} (handler.go:660-705).
+//
+// Closes the W2 gap: prior to this test, the internal path had only
+// structural coverage in handler_capture_persistence_test.go and the
+// executeInternal capture was exercised only at the ultimatemodel
+// package level. This test verifies the OUTER persistence contract.
+func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T) {
+	const wantContent = "internal assistant reply"
+	const wantThinking = "internal reasoning trail"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, mockUltimateInternalResponse(wantContent, wantThinking, 7, 3, 10))
+	}))
+	defer upstream.Close()
+
+	// Same bootstrap as TestUltimateModel_PersistsAssistantContentAndThinking_External,
+	// but the ultimate model is Internal=true so executeInternal runs
+	// (it constructs an OpenAIProvider against the credential BaseURL
+	// which is our httptest upstream).
+	db := setupIntegrationDB(t)
+	counter := usage.NewCounter(db, database.SQLite)
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, _, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true, // ultimateModelEnabled
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	modelsConfig := models.NewModelsConfig()
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:              "ultimate-model",
+		Name:            "Ultimate Model",
+		Enabled:         true,
+		Internal:        true, // INTERNAL — routes through executeInternal
+		CredentialID:    "test-credential",
+		InternalModel:   "internal-model",
+		InternalBaseURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddModel (ultimate): %v", err)
+	}
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+	// MaxRetries=0 ⇒ ForceTrigger triggers immediately (mirrors the
+	// external-path test rationale).
+	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	body := map[string]interface{}{
+		"model":  "any-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hello"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+	httpReq.Header.Set("X-Force-Ultimate-Model", "true")
+
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request failed: %d - %s", rec.Code, rec.Body.String())
+	}
+
+	all := reqStore.List()
+	if len(all) == 0 {
+		t.Fatal("no request logs persisted")
+	}
+	var log *store.RequestLog
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].UltimateModelUsed {
+			log = all[i]
+			break
+		}
+	}
+	if log == nil {
+		t.Fatal("no ultimate request log found")
+	}
+
+	var assistantMsg *store.Message
+	for i := len(log.Messages) - 1; i >= 0; i-- {
+		if log.Messages[i].Role == "assistant" {
+			assistantMsg = &log.Messages[i]
+			break
+		}
+	}
+	if assistantMsg == nil {
+		t.Fatalf("no assistant message persisted; log messages: %+v", log.Messages)
+	}
+
+	if assistantMsg.Content != wantContent {
+		t.Errorf("persisted Content = %q, want %q", assistantMsg.Content, wantContent)
+	}
+	if assistantMsg.Thinking != wantThinking {
+		t.Errorf("persisted Thinking = %q, want %q", assistantMsg.Thinking, wantThinking)
+	}
+
+	if log.Usage == nil {
+		t.Error("Usage was not persisted")
+	} else if log.Usage.TotalTokens != 10 {
+		t.Errorf("Usage.TotalTokens = %d, want 10", log.Usage.TotalTokens)
+	}
+}
+
+// TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream is
+// the streaming counterpart of TestUltimateModel_PersistsAssistantContentAndThinking_Internal.
+//
+// The upstream emits SSE chunks with content + reasoning_content deltas.
+// The OpenAI provider's processStream path turns each `data:` line into
+// a typed StreamEvent; ultimatemodel.executeInternalStream copies
+// content + reasoning_content deltas into ExecuteResult.Content and
+// ExecuteResult.Thinking, and the outer handler persists the assembled
+// store.Message.
+func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *testing.T) {
+	const wantContent = "internal streamed answer"
+	const wantThinking = "internal streamed reasoning"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"%s\"}}]}\n\n", wantThinking)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n\n", wantContent)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	db := setupIntegrationDB(t)
+	counter := usage.NewCounter(db, database.SQLite)
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, _, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true,
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	modelsConfig := models.NewModelsConfig()
+	err = modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	err = modelsConfig.AddModel(models.ModelConfig{
+		ID:              "ultimate-model",
+		Name:            "Ultimate Model",
+		Enabled:         true,
+		Internal:        true,
+		CredentialID:    "test-credential",
+		InternalModel:   "internal-model",
+		InternalBaseURL: upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("AddModel (ultimate): %v", err)
+	}
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsConfig,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+
+	body := map[string]interface{}{
+		"model":  "any-model",
+		"stream": true,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hello"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+plaintextToken)
+	httpReq.Header.Set("X-Force-Ultimate-Model", "true")
+
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request failed: %d - %s", rec.Code, rec.Body.String())
+	}
+
 	all := reqStore.List()
 	var log *store.RequestLog
 	for i := len(all) - 1; i >= 0; i-- {

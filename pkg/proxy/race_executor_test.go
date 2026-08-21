@@ -1362,6 +1362,104 @@ func TestHandleInternalStream_WithThinking(t *testing.T) {
 	}
 }
 
+// TestHandleInternalStream_ThinkingAccumulation exercises the
+// `case "thinking":` arm at race_executor.go:618-644 (the
+// race-internal stream reasoning-content emitter) and asserts that
+// multiple thinking + content events emitted by the internal provider
+// accumulate into the buffer with the exact text values intact.
+//
+// The previous TestHandleInternalStream_WithThinking only checked
+// for the presence of the literal string "reasoning_content" in the
+// buffer — a loose assertion that would silently pass if the
+// accumulation dropped a delta, double-emitted a delta, or merged two
+// deltas into a single non-SSE-framed blob. W5 hardens this with
+// per-delta text assertions AND per-chunk SSE framing assertions so
+// any drift in the case arm surfaces immediately.
+//
+// Accumulation contract (race_executor.go:618-644): each `thinking`
+// event is written as a single SSE `data: {...}\n` line into the
+// race upstream's stream buffer; the line carries the event's
+// ReasoningContent verbatim under `delta.reasoning_content`. The
+// `content` case (race_executor.go:489-539) interleaves the same
+// way for `delta.content`. Together the two arms preserve the
+// stream's text content byte-for-byte; the buffer is later consumed
+// by the winner-dispatch path that writes the SSE bytes to the
+// client.
+func TestHandleInternalStream_ThinkingAccumulation(t *testing.T) {
+	const wantThinkA = "first reasoning delta"
+	const wantThinkB = "second reasoning delta"
+	const wantContentA = "first content delta"
+	const wantContentB = "second content delta"
+
+	provider := newMockProvider()
+	provider.setStreamEvents([]providers.StreamEvent{
+		{Type: "thinking", ReasoningContent: wantThinkA},
+		{Type: "thinking", ReasoningContent: wantThinkB},
+		{Type: "content", Content: wantContentA},
+		{Type: "content", Content: wantContentB},
+		{Type: "done", FinishReason: "stop"},
+	})
+
+	cfg := newTestConfigSnapshot("internal-model")
+	req := newTestUpstreamRequest("internal-model")
+
+	err := handleInternalStream(
+		context.Background(),
+		provider,
+		newChatCompletionRequest(),
+		req,
+		"internal-model",
+		normalizers.NewContext("openai", "0"),
+		cfg.ToolRepair,
+		cfg.StreamDeadline,
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Read the buffer's raw accumulated bytes — the same path the
+	// race winner-dispatch consumes. Each thinking + content delta
+	// must appear at least once with the exact text the provider
+	// emitted. strings.Contains is correct here because the
+	// race-internal `case "thinking":` arm encodes the event text
+	// verbatim into a JSON string field (no escaping, no
+	// re-serialization that would mutate whitespace), and the
+	// test fixtures are ASCII-only with no JSON-special chars.
+	all := string(req.buffer.GetAllRawBytes())
+
+	for _, want := range []string{wantThinkA, wantThinkB, wantContentA, wantContentB} {
+		if !strings.Contains(all, want) {
+			t.Errorf("buffer missing %q — race-internal case arm dropped or coalesced a delta\nbuffer: %s", want, all)
+		}
+	}
+
+	// Per-chunk count: 2 thinking + 2 content = 4 reasoning/content
+	// SSE lines must be present in the buffer. We count
+	// "reasoning_content" + "delta.content" substrings to assert the
+	// per-event accumulation, not just "something containing the
+	// text". A regression that dropped one of the four deltas would
+	// reduce one of these counts and trip the test.
+	if got, want := strings.Count(all, `"reasoning_content"`), 2; got != want {
+		t.Errorf("reasoning_content chunk count = %d, want %d (one per thinking event)\nbuffer: %s", got, want, all)
+	}
+	if got, want := strings.Count(all, `"content":"`), 2; got != want {
+		t.Errorf("delta.content chunk count = %d, want %d (one per content event)\nbuffer: %s", got, want, all)
+	}
+
+	// Per-chunk framing: each event must be wrapped as a single
+	// `data: ... \n` SSE line. The first-chunk / subsequent-chunk
+	// distinction in `case "content":` (role present only on the
+	// first content event) means we expect exactly 1 line containing
+	// the `role` field; both content events should otherwise emit a
+	// complete `data: ...` line. We assert on the data: prefix count
+	// as a structural sanity check (>= 4 because the `done` event
+	// adds a final-chunk + [DONE] pair).
+	if got := strings.Count(all, "data: "); got < 4 {
+		t.Errorf("SSE `data: ` line count = %d, want >= 4 (2 thinking + 2 content at minimum)\nbuffer: %s", got, all)
+	}
+}
+
 func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 	provider := newMockProvider()
 	provider.setStreamEvents([]providers.StreamEvent{

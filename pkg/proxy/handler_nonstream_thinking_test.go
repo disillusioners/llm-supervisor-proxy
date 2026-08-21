@@ -1,11 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -23,9 +23,21 @@ import (
 // Capture-side ONLY: the wire response written to the client must remain
 // byte-identical to what the upstream sent (extractNonStreamContent only
 // feeds the store-side rc.accumulatedThinking; the original finalBody is
-// still written verbatim at handler.go:1355).
+// still written verbatim at handler.go:1355). handleNonStreamResult
+// always appends a single trailing '\n' to the buffer-chunked finalBody,
+// so the on-the-wire golden is upstreamResponse + "\n" — the exact
+// bytes.Equal below proves that the production code path emits ONLY that
+// single trailing newline and nothing else, so any interior mutation
+// (e.g. a stray "\n" injected mid-body) trips the golden.
 func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 	upstreamResponse := `{"id":"chatcmpl-x","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"the answer","reasoning_content":"my chain of thought"},"finish_reason":"stop"}]}`
+
+	// Exact golden: upstream body + the single trailing '\n' that
+	// handleNonStreamResult always appends via the buffer-chunked
+	// finalBody path. Stored as a []byte so bytes.Equal is a true
+	// byte-by-byte comparison (not a string compare that could mask
+	// differences in encoding or whitespace handling).
+	wantBody := []byte(upstreamResponse + "\n")
 
 	upstreamHandler := func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
@@ -60,14 +72,15 @@ func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 		t.Fatalf("expected status 200, got %d (body=%s)", rr.Code, rr.Body.String())
 	}
 
-	// Wire response must be byte-identical to upstream minus any pre-existing
-// chunk-concatenation whitespace that handleNonStreamResult always added
-// (a single trailing '\n' from buffer chunking). My fix only changes the
-// store-side rc.accumulatedThinking path; the finalBody that goes on the
-// wire is untouched at handler.go:1355. So TrimSpace suffices to confirm
-// the capture-side-only invariant.
-	if got := strings.TrimSpace(rr.Body.String()); got != upstreamResponse {
-		t.Errorf("wire response changed\n got: %q\nwant: %q", got, upstreamResponse)
+	// Exact byte comparison. bytes.Equal is a constant-time byte-by-byte
+	// compare on equal-length slices, so any interior drift (extra '\n'
+	// in the middle, a different number of trailing newlines, or any
+	// other mutation) trips this assertion. Previously this was a
+	// TrimSpace-based string compare that masked any interior '\n'
+	// injection — the W3 hardening is to lock the body to the exact
+	// byte sequence produced by handleNonStreamResult.
+	if got := rr.Body.Bytes(); !bytes.Equal(got, wantBody) {
+		t.Errorf("wire response drifted from golden\n got: %q (%d bytes)\nwant: %q (%d bytes)", got, len(got), wantBody, len(wantBody))
 	}
 
 	// Stored assistant message must carry BOTH Content and Thinking.
