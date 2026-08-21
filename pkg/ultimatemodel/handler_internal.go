@@ -201,14 +201,13 @@ func (h *Handler) handleInternalNonStream(
 	//
 	// ChatMessage.Content is typed as interface{} in the provider
 	// because it can be a string OR []ContentPart (multimodal);
-	// the type-assertion to string is safe here because the
-	// upstream non-stream OpenAI response is always string-typed
-	// for text completions (the []ContentPart form is request-only).
+	// the shared coerceContentString helper (S1) yields "" for the
+	// non-string forms, which is safe here because the upstream
+	// non-stream OpenAI response is always string-typed for text
+	// completions (the []ContentPart form is request-only).
 	var capturedContent, capturedThinking string
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		if s, ok := resp.Choices[0].Message.Content.(string); ok {
-			capturedContent = s
-		}
+		capturedContent = coerceContentString(resp.Choices[0].Message.Content)
 		capturedThinking = resp.Choices[0].Message.ReasoningContent
 	}
 

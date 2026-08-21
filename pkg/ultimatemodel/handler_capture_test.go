@@ -222,9 +222,13 @@ func TestCapture_InternalNonStream_ReturnsContentAndThinking(t *testing.T) {
 
 // TestCapture_InternalStream_ReturnsContentAndThinking asserts
 // that the internal stream path accumulates Content + Thinking
-// from typed events as they are emitted. Also asserts that the
-// capture ordering matches the wire ordering (content delta
-// emitted first ⇒ content accumulator grows before thinking).
+// from typed events as they are emitted (events here deliberately
+// interleave thinking/content; each accumulator collects its own
+// field). It also spot-checks that the wire body still carries
+// every content and reasoning delta AFTER the capture loop ran
+// alongside the write loop — a presence check, not an ordering or
+// byte-identity proof (full stream byte-identity is covered by the
+// external-path golden tests in this file).
 func TestCapture_InternalStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
@@ -390,24 +394,24 @@ func TestCapture_Helpers_PureFunctions(t *testing.T) {
 	})
 }
 
-// TestExecute_PersistsAssistantMessage verifies the outer-handler
-// persistence step. Sets up a minimal mock ultimate handler that
-// returns an ExecuteResult with non-empty Content + Thinking,
-// and asserts that calling Handler.Execute on a request context
-// via a wrapper test stub persists a store.Message.
+// TestExecute_PersistsAssistantMessage_Contract verifies the
+// persistence half of the ExecuteResult contract at the
+// ultimatemodel layer: the outer proxy handler (pkg/proxy) builds
+// store.Message{Role: "assistant", Content, Thinking} from the
+// ExecuteResult and the store persists that message as JSON for
+// the Web UI.
 //
-// Because pkg/proxy/handler_test.go is in a different package,
-// this test verifies the contract at the ultimatemodel layer
-// only — the proxy-package integration is covered by an
-// in-package test in pkg/proxy (added separately). The contract
-// the outer proxy handler depends on is: Execute returns
-// *ExecuteResult with Content + Thinking set whenever the
-// wire path produced any assistant text or reasoning.
+// S6: this test was previously a tautology — it assigned
+// res.Content to msg.Content and asserted the constant back
+// against itself, which can never fail (the compiler already
+// guarantees the field assignment). It now asserts the REAL
+// contract: a populated ExecuteResult maps onto a store.Message
+// whose JSON serialization carries exactly the field names the
+// store and Web UI read (role/content/thinking), and empty
+// Thinking is omitted (omitempty) so capture-less paths do not
+// persist an empty thinking field. The pkg/proxy integration
+// itself is covered by in-package tests in pkg/proxy.
 func TestExecute_PersistsAssistantMessage_Contract(t *testing.T) {
-	// This test verifies that ExecuteResult is shaped so that the
-	// outer handler can persist store.Message{Role: "assistant",
-	// Content, Thinking} from it. We verify the field round-trip
-	// directly without spinning up the full proxy machinery.
 	res := &ExecuteResult{
 		Usage:    &store.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
 		Content:  "captured content",
@@ -423,11 +427,41 @@ func TestExecute_PersistsAssistantMessage_Contract(t *testing.T) {
 		Content:  res.Content,
 		Thinking: res.Thinking,
 	}
-	if msg.Content != "captured content" || msg.Thinking != "captured thinking" || msg.Role != "assistant" {
-		t.Errorf("assistant message contract broken: %+v", msg)
+
+	// Serialize exactly as the store does and assert the persisted
+	// shape — this fails if store.Message's JSON tags drift away
+	// from what the persistence layer and Web UI expect.
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal store.Message: %v", err)
 	}
-	if res.Usage.TotalTokens != 3 {
-		t.Errorf("Usage.TotalTokens = %d, want 3", res.Usage.TotalTokens)
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("persisted message is not valid JSON: %v", err)
+	}
+	if got["role"] != "assistant" {
+		t.Errorf("persisted role = %v, want \"assistant\"", got["role"])
+	}
+	if got["content"] != "captured content" {
+		t.Errorf("persisted content = %v, want %q", got["content"], "captured content")
+	}
+	if got["thinking"] != "captured thinking" {
+		t.Errorf("persisted thinking = %v, want %q", got["thinking"], "captured thinking")
+	}
+
+	// omitempty contract: a message with no captured thinking must
+	// not persist an empty thinking key.
+	emptyThinking := store.Message{Role: "assistant", Content: res.Content}
+	rawEmpty, err := json.Marshal(emptyThinking)
+	if err != nil {
+		t.Fatalf("marshal empty-thinking message: %v", err)
+	}
+	var gotEmpty map[string]interface{}
+	if err := json.Unmarshal(rawEmpty, &gotEmpty); err != nil {
+		t.Fatalf("empty-thinking message is not valid JSON: %v", err)
+	}
+	if _, present := gotEmpty["thinking"]; present {
+		t.Errorf("empty Thinking should be omitted (omitempty), got %s", rawEmpty)
 	}
 }
 

@@ -180,6 +180,22 @@ type ExecuteResult struct {
 	Thinking string
 }
 
+// coerceContentString coerces a possibly-string interface{} value
+// to a string (S1). It is the single shared content-coercion point
+// for all passive capture paths: JSON-decoded map values (delta
+// fields, message fields) and the provider struct's interface{}
+// ChatMessage.Content all funnel through here, so the "what counts
+// as capturable text" rule lives in exactly one place.
+//
+// Non-string values (nil, numbers, []interface{} multimodal parts)
+// coerce to "" — capture is best-effort and must never fail or
+// alter the wire path. Append-only callers simply skip the write
+// when the result is empty.
+func coerceContentString(v interface{}) string {
+	s, _ := v.(string)
+	return s
+}
+
 // captureFromSSEChunk parses a single SSE `data: <json>` payload
 // (WITHOUT the `data: ` prefix) and appends any delta.content /
 // delta.reasoning_content it finds into the provided builders.
@@ -220,10 +236,10 @@ func captureFromSSEChunk(data []byte, content, thinking *strings.Builder) {
 	if !ok {
 		return
 	}
-	if s, ok := delta["content"].(string); ok && s != "" {
+	if s := coerceContentString(delta["content"]); s != "" {
 		content.WriteString(s)
 	}
-	if s, ok := delta["reasoning_content"].(string); ok && s != "" {
+	if s := coerceContentString(delta["reasoning_content"]); s != "" {
 		thinking.WriteString(s)
 	}
 }
@@ -299,12 +315,8 @@ func captureFromNonStreamResponse(bodyBytes []byte) (content, thinking string) {
 	if !ok {
 		return "", ""
 	}
-	if s, ok := msg["content"].(string); ok {
-		content = s
-	}
-	if s, ok := msg["reasoning_content"].(string); ok {
-		thinking = s
-	}
+	content = coerceContentString(msg["content"])
+	thinking = coerceContentString(msg["reasoning_content"])
 	return content, thinking
 }
 
