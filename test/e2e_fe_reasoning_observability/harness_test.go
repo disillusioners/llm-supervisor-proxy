@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -102,19 +103,47 @@ const (
 	// externalCredID is the credential bound to UPSTREAM_CREDENTIAL_ID so
 	// the race-external path resolves it for upstream auth/base URL.
 	externalCredID = "external-cred"
+
+	// raceIntModel is registered Internal:true with the openai credential
+	// ⇒ race-internal path via the race coordinator.
+	raceIntModel = "matrix-race-internal"
+
+	// ultExtModel is the X-Force-Ultimate-Model target with Internal:false
+	// ⇒ ultimate-external path.
+	ultExtModel = "matrix-ultimate-external"
+
+	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
+	// ⇒ ultimate-internal path.
+	ultIntModel = "matrix-ultimate-internal"
+
+	// ultExtModelMiniMax is an ultimate-external target bound to the
+	// MiniMax credential: the ultimate-external translation gate reads the
+	// MODEL's CredentialID (not the global upstream credential), so the M2
+	// row must use a MiniMax-credentialed ultimate model.
+	ultExtModelMiniMax = "matrix-ultimate-external-minimax"
+
+	// minimaxCredID drives the MiniMax translation gate rows (M1/M2):
+	// credential provider must be "minimax" AND the request must carry
+	// X-Proxy-Interleaved-Thinking.
+	minimaxCredID = "matrix-minimax-cred"
+
+	// anthropicIntModel is registered Internal:true for the anthropic-client
+	// stream row (R9): HandleAnthropicMessages → doAnthropicInternalRequest.
+	anthropicIntModel = "matrix-anthropic-internal"
 )
 
 // testEnv holds all wired dependencies for one test.
 type testEnv struct {
-	t            *testing.T
-	db           *sql.DB
-	dbStore      *database.Store
-	tokenStore   *auth.TokenStore
-	upstream     *httptest.Server
-	mockUp       *mockUpstream
-	handler      *proxy.Handler
-	modelsConfig *models.ModelsConfig
-	plainToken   string // plaintext token (ultimateModelEnabled=false)
+	t             *testing.T
+	db            *sql.DB
+	dbStore       *database.Store
+	tokenStore    *auth.TokenStore
+	upstream      *httptest.Server
+	mockUp        *mockUpstream
+	handler       *proxy.Handler
+	modelsConfig  *models.ModelsConfig
+	ultimateToken string // plaintext token with ultimateModelEnabled=true
+	plainToken    string // plaintext token (ultimateModelEnabled=false)
 
 	// reqStore is the SAME *store.RequestStore the proxy handler writes
 	// into — the store the FE API must read from.
@@ -123,12 +152,20 @@ type testEnv struct {
 	feSrv *httptest.Server
 }
 
-// setupTestEnv wires a full proxy.Handler against a capturing upstream and
-// mounts the FE API on a real httptest.Server sharing the same reqStore.
-//
-// Registered models: none with Internal semantics relevant here — glm-5.3 is
-// deliberately UNREGISTERED to take the race-external path.
-func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
+// matrixOptions customizes setupMatrixEnv per matrix row group.
+type matrixOptions struct {
+	// ultimateModelID overrides ULTIMATE_MODEL_ID (ultimate rows). Empty
+	// means "no ultimate model configured".
+	ultimateModelID string
+	// upstreamProviderMinimax binds UPSTREAM_CREDENTIAL_ID to the MiniMax
+	// credential so the race-external translation gate fires (M1).
+	upstreamProviderMinimax bool
+}
+
+// setupMatrixEnv wires the path-matrix environment: everything setupTestEnv
+// builds, plus the registered models the R/N/M rows route through and BOTH
+// tokens (plain + ultimate-enabled).
+func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixOptions) *testEnv {
 	t.Helper()
 
 	mockUp := newMockUpstream(upstreamHandler)
@@ -155,8 +192,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 
 	modelsConfig := models.NewModelsConfig()
 
-	// External credential (provider irrelevant to the bug — a generic
-	// OpenAI-shaped upstream) bound as the global upstream credential.
+	// Generic openai-shaped external credential.
 	if err := modelsConfig.AddCredential(models.CredentialConfig{
 		ID:       externalCredID,
 		Provider: "openai",
@@ -166,13 +202,92 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 		t.Fatalf("add external cred: %v", err)
 	}
 
-	// Env: fast deadlines, external upstream URL + credential.
+	// MiniMax credential — drives the translation-gate rows (M1/M2) and
+	// internal model wiring for those rows.
+	if err := modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       minimaxCredID,
+		Provider: "minimax",
+		APIKey:   "test-key",
+		BaseURL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("add minimax cred: %v", err)
+	}
+
+	addModel := func(m models.ModelConfig) {
+		t.Helper()
+		if err := modelsConfig.AddModel(m); err != nil {
+			t.Fatalf("add model %s: %v", m.ID, err)
+		}
+	}
+
+	// Race-internal model (openai credential ⇒ internal OpenAI handler).
+	addModel(models.ModelConfig{
+		ID:            raceIntModel,
+		Name:          "Matrix Race Internal",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  externalCredID,
+		InternalModel: "matrix-race-internal-upstream",
+	})
+
+	// Ultimate-external model (Internal:false ⇒ executeExternal).
+	addModel(models.ModelConfig{
+		ID:           ultExtModel,
+		Name:         "Matrix Ultimate External",
+		Enabled:      true,
+		Internal:     false,
+		CredentialID: externalCredID,
+	})
+
+	// Ultimate-internal model (Internal:true ⇒ executeInternal).
+	addModel(models.ModelConfig{
+		ID:            ultIntModel,
+		Name:          "Matrix Ultimate Internal",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  externalCredID,
+		InternalModel: "matrix-ult-internal-upstream",
+	})
+
+	// Ultimate-external model bound to the MiniMax credential — the M2
+	// translation-gate row. The ultimate-external gate resolves
+	// upstreamProvider from THIS model's CredentialID.
+	addModel(models.ModelConfig{
+		ID:           ultExtModelMiniMax,
+		Name:         "Matrix Ultimate External MiniMax",
+		Enabled:      true,
+		Internal:     false,
+		CredentialID: minimaxCredID,
+	})
+
+	// Anthropic-client internal model (openai provider ⇒ translation mode,
+	// NOT anthropic passthrough — R9/R10 translate OpenAI→Anthropic).
+	addModel(models.ModelConfig{
+		ID:            anthropicIntModel,
+		Name:          "Matrix Anthropic Internal",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  externalCredID,
+		InternalModel: "matrix-anthropic-internal-upstream",
+	})
+
+	// Env: fast deadlines + ultimate trigger-on-first-call (MaxRetries=0).
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
 	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
+	if opts.ultimateModelID != "" {
+		t.Setenv("ULTIMATE_MODEL_ID", opts.ultimateModelID)
+	}
+
+	// External upstream URL + credential. M rows bind the MiniMax
+	// credential so the race-external translation gate fires.
+	credID := externalCredID
+	if opts.upstreamProviderMinimax {
+		credID = minimaxCredID
+	}
 	t.Setenv("UPSTREAM_URL", upstream.URL)
-	t.Setenv("UPSTREAM_CREDENTIAL_ID", externalCredID)
+	t.Setenv("UPSTREAM_CREDENTIAL_ID", credID)
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {
@@ -185,10 +300,6 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
 
 	// ── FE API over real HTTP, sharing reqStore ─────────────────────────
-	// ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, store,
-	// bufferStore, tokenStore, dbStore) — pkg/ui/server.go:75. The /fe/api
-	// routes have NO auth middleware (server.go:130-151), so a plain GET
-	// works. RegisterHandlers mounts both /ui/ static and /fe/api/*.
 	uiSrv := ui.NewServer(bus, cfgMgr, proxyCfg, modelsConfig, reqStore, nil, tokenStore, dbStore)
 	feMux := http.NewServeMux()
 	uiSrv.RegisterHandlers(feMux)
@@ -213,8 +324,20 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 	if err != nil {
 		t.Fatalf("create plain token: %v", err)
 	}
+	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", true, "", nil)
+	if err != nil {
+		t.Fatalf("create ultimate token: %v", err)
+	}
 
 	return env
+}
+
+// setupTestEnv wires the minimal closure-gate environment (Scenarios A–D):
+// no registered internal models, glmModel stays unregistered for the
+// race-external path.
+func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
+	t.Helper()
+	return setupMatrixEnv(t, upstreamHandler, matrixOptions{})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +349,8 @@ type chatRequest struct {
 	model    string
 	stream   *bool // nil ⇒ omit the "stream" field entirely (original bug shape)
 	messages []map[string]interface{}
+	flag     bool   // send X-Proxy-Interleaved-Thinking: true
+	forceUlt bool   // send X-Force-Ultimate-Model: true
 	token    string
 }
 
@@ -245,6 +370,12 @@ func (cr chatRequest) build(t *testing.T) (*http.Request, *httptest.ResponseReco
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cr.token)
+	if cr.flag {
+		req.Header.Set("X-Proxy-Interleaved-Thinking", "true")
+	}
+	if cr.forceUlt {
+		req.Header.Set("X-Force-Ultimate-Model", "true")
+	}
 	return req, httptest.NewRecorder()
 }
 
@@ -252,6 +383,37 @@ func (cr chatRequest) build(t *testing.T) (*http.Request, *httptest.ResponseReco
 func (e *testEnv) run(cr chatRequest) *httptest.ResponseRecorder {
 	req, rr := cr.build(e.t)
 	e.handler.HandleChatCompletions(rr, req)
+	return rr
+}
+
+// anthropicRequest describes one /v1/messages client request.
+type anthropicRequest struct {
+	model    string
+	stream   bool
+	token    string
+	messages []map[string]interface{}
+}
+
+// runAnthropic drives HandleAnthropicMessages directly (same in-process
+// pattern as run(), but on the Anthropic Messages endpoint).
+func (e *testEnv) runAnthropic(ar anthropicRequest) *httptest.ResponseRecorder {
+	e.t.Helper()
+	body := map[string]interface{}{
+		"model":      ar.model,
+		"max_tokens": 1024,
+		"stream":     ar.stream,
+		"messages":   ar.messages,
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		e.t.Fatalf("marshal anthropic: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", ar.token)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	rr := httptest.NewRecorder()
+	e.handler.HandleAnthropicMessages(rr, req)
 	return rr
 }
 
@@ -350,6 +512,116 @@ func plainNonStreamHandler() http.HandlerFunc {
 			"id": "chatcmpl-mock", "object": "chat.completion", "created": 1700000000, "model": "mock",
 			"choices": []map[string]interface{}{
 				{"index": 0, "message": map[string]interface{}{"role": "assistant", "content": "ok"}, "finish_reason": "stop"},
+			},
+		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSE stream mock builders (path matrix)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// matrixSSEStream frames each line as an SSE data event.
+func matrixSSEStream(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString("data: " + l + "\n\n")
+	}
+	return b.String()
+}
+
+// reasoningDeltaChunk emits a stream chunk carrying delta.reasoning_content.
+func reasoningDeltaChunk(text string) string {
+	return `{"id":"1","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"reasoning_content":"` + text + `"}}]}`
+}
+
+// streamContentChunk emits a stream chunk carrying delta.content.
+func streamContentChunk(text string) string {
+	return `{"id":"1","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"content":"` + text + `"}}]}`
+}
+
+// matrixFinishChunk is the finish_reason carrier.
+var matrixFinishChunk = `{"id":"1","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+
+// reasoningStreamHandler serves an SSE stream with reasoning_content deltas
+// (split across two chunks so accumulation is exercised) + content + finish.
+func reasoningStreamHandler(reasoningPart1, reasoningPart2 string) http.HandlerFunc {
+	up := matrixSSEStream(
+		reasoningDeltaChunk(reasoningPart1),
+		reasoningDeltaChunk(reasoningPart2),
+		streamContentChunk("final"),
+		matrixFinishChunk,
+		"[DONE]",
+	)
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(up))
+	}
+}
+
+// plainStreamHandler serves an SSE stream with NO reasoning anywhere.
+func plainStreamHandler() http.HandlerFunc {
+	up := matrixSSEStream(
+		streamContentChunk("ok"),
+		matrixFinishChunk,
+		"[DONE]",
+	)
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(up))
+	}
+}
+
+// minimaxDetailsEntry is the MiniMax reasoning_details entry fixture.
+func minimaxDetailsEntry(id, text string) string {
+	return `{"type":"reasoning.text","id":"` + id + `","format":"MiniMax-response-v1","index":0,"text":"` + text + `"}`
+}
+
+// minimaxDetailsStreamChunk emits a stream chunk with delta.reasoning_details.
+func minimaxDetailsStreamChunk(details string) string {
+	return `{"id":"1","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"reasoning_details":[` + details + `]}}]}`
+}
+
+// minimaxDetailsStreamHandler serves an SSE stream whose reasoning arrives as
+// reasoning_details (the MiniMax shape the translator converts to
+// reasoning_content deltas for the client).
+func minimaxDetailsStreamHandler(entry1ID, entry1Text, entry2ID, entry2Text string) http.HandlerFunc {
+	up := matrixSSEStream(
+		minimaxDetailsStreamChunk(minimaxDetailsEntry(entry1ID, entry1Text)),
+		minimaxDetailsStreamChunk(minimaxDetailsEntry(entry2ID, entry2Text)),
+		streamContentChunk("final"),
+		matrixFinishChunk,
+		"[DONE]",
+	)
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(up))
+	}
+}
+
+// minimaxDetailsNonStreamHandler serves a non-stream response carrying
+// message.reasoning_details (translated to reasoning_content for the client).
+func minimaxDetailsNonStreamHandler(entry1Text, entry2Text string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-mock-mm", "object": "chat.completion", "created": 1700000000, "model": "mock",
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": "final",
+						"reasoning_details": []map[string]interface{}{
+							{"type": "reasoning.text", "id": "reasoning-text-1", "format": "MiniMax-response-v1", "index": 0, "text": entry1Text},
+							{"type": "reasoning.text", "id": "reasoning-text-2", "format": "MiniMax-response-v1", "index": 0, "text": entry2Text},
+						},
+					},
+					"finish_reason": "stop",
+				},
 			},
 		})
 	}
