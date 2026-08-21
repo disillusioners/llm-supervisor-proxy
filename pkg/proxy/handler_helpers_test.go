@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -158,6 +159,70 @@ func TestExtractUsageFromChunk(t *testing.T) {
 			}
 			if got.TotalTokens != tt.wantUsage.TotalTokens {
 				t.Errorf("extractUsageFromChunk().TotalTokens = %d, want %d", got.TotalTokens, tt.wantUsage.TotalTokens)
+			}
+		})
+	}
+}
+
+// TestExtractNonStreamContent verifies that the helper used by
+// handleNonStreamResult correctly extracts content AND reasoning variants
+// from non-stream response bodies. The "none" case must match legacy behavior
+// (content extracted, thinking empty).
+func TestExtractNonStreamContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantContent string
+		wantThinking string
+	}{
+		{
+			name: "reasoning_content top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning_content":"thought-A"}}]}`,
+			wantContent: "answer",
+			wantThinking: "thought-A",
+		},
+		{
+			name: "reasoning top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning":"thought-B"}}]}`,
+			wantContent: "answer",
+			wantThinking: "thought-B",
+		},
+		{
+			name: "thinking top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","thinking":"thought-C"}}]}`,
+			wantContent: "answer",
+			wantThinking: "thought-C",
+		},
+		{
+			name: "provider_specific_fields.reasoning_content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","provider_specific_fields":{"reasoning_content":"thought-D"}}}]}`,
+			wantContent: "answer",
+			wantThinking: "thought-D",
+		},
+		{
+			name: "none - legacy plain content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"plain answer"}}]}`,
+			wantContent: "plain answer",
+			wantThinking: "",
+		},
+		{
+			name: "empty content + reasoning_content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"thought-E"}}]}`,
+			wantContent: "",
+			wantThinking: "thought-E",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp, thinking strings.Builder
+			extractNonStreamContent([]byte(tt.body), &resp, &thinking)
+
+			if got := resp.String(); got != tt.wantContent {
+				t.Errorf("content: got %q, want %q", got, tt.wantContent)
+			}
+			if got := thinking.String(); got != tt.wantThinking {
+				t.Errorf("thinking: got %q, want %q", got, tt.wantThinking)
 			}
 		})
 	}

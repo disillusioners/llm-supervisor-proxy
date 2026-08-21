@@ -1354,20 +1354,15 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	w.WriteHeader(http.StatusOK)
 	w.Write(finalBody)
 
-	// Extract content for logging
+	// Extract content AND thinking for logging. The helper handles
+	// reasoning_content / reasoning / thinking / provider_specific_fields.reasoning_content
+	// variants in addition to plain string content, so non-stream race-path
+	// responses now persist thinking alongside content (S3 cross-path parity).
+	extractNonStreamContent(finalBody, &rc.accumulatedResponse, &rc.accumulatedThinking)
+
+	// Extract usage from response
 	var resp map[string]interface{}
 	if err := json.Unmarshal(finalBody, &resp); err == nil {
-		if choices, ok := resp["choices"].([]interface{}); ok && len(choices) > 0 {
-			if choice, ok := choices[0].(map[string]interface{}); ok {
-				if msg, ok := choice["message"].(map[string]interface{}); ok {
-					if content, ok := msg["content"].(string); ok {
-						rc.accumulatedResponse.WriteString(content)
-					}
-				}
-			}
-		}
-
-		// Extract usage from response
 		if usageData, ok := resp["usage"].(map[string]interface{}); ok {
 			usage := &store.Usage{}
 			if v, ok := usageData["prompt_tokens"].(float64); ok {
@@ -1419,8 +1414,9 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	rc.reqLog.Duration = time.Since(rc.startTime).String()
 
 	assistantMsg := store.Message{
-		Role:    "assistant",
-		Content: rc.accumulatedResponse.String(),
+		Role:     "assistant",
+		Content:  rc.accumulatedResponse.String(),
+		Thinking: rc.accumulatedThinking.String(),
 	}
 	rc.reqLog.Messages = append(rc.reqLog.Messages, assistantMsg)
 	h.store.Add(rc.reqLog)
