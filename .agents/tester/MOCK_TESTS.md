@@ -1,3 +1,56 @@
+# Mock Test: E2E FE Reasoning Observability (closure gate for glm-5.3 non-stream)
+
+### Metadata
+- **Created**: 2026-08-21
+- **Script**: `test/e2e_fe_reasoning_observability/` (Go in-process test: harness_test.go + e2e_fe_reasoning_observability_test.go)
+- **Language**: Go (mirrors `test/e2e_minimax_reasoning/` harness; FE API mounted on real `httptest.Server`)
+- **Status**: ACTIVE — closure gate for fix branch `fix/ui-reasoning-observability` @ db7aca0
+
+### Configuration
+- **Timeout**: dual-layer — outer `timeout 300 go test ./test/e2e_fe_reasoning_observability/ -v -count=1 -timeout 240s`
+- **Ports**: NONE fixed — `httptest.NewServer` ephemeral loopback only (mock upstream + FE API); no port cleanup needed; never touches 8088
+- **Cleanup**: Go test process exit reaps httptest servers; `t.Cleanup` for DB/store
+
+### What It Tests
+The ORIGINAL user bug end-to-end: glm-5.3 NON-STREAM response carrying
+`choices[0].message.reasoning_content` showed in raw server JSON but `GET /fe/api/requests/{id}`
+returned ZERO occurrences of "thinking" and the 🧠 UI block never rendered.
+The fix (10 commits on fea5874, head db7aca0) populates `store.Message.Thinking` on previously
+non-capturing paths. This suite proves: proxy handler → reqStore → ui.Server FE API (real HTTP) →
+payload shape the 🧠 block renders.
+
+### Mock Services Required
+- Capturing mock upstream (httptest, ephemeral): OpenAI-shaped non-stream responses, with or without `reasoning_content`.
+- FE API server (httptest, ephemeral): `ui.NewServer(...)` + `RegisterHandlers` on a `http.ServeMux`, sharing the SAME `*store.RequestStore` the proxy handler was built with.
+
+### Test Scenarios
+1. **A — CLOSURE GATE (glm-5.3 non-stream, race-external)**: unregistered model `glm-5.3`, upstream returns non-stream 200 with multi-sentence `reasoning_content` (fixed constant). After client 200: GET list `GET /fe/api/requests` (newest-first, take [0]) → GET detail → assert assistant `thinking` == EXACT string (byte-exact), raw body contains `"thinking"`, and `reqStore.Get(id).Messages` belt-and-braces.
+2. **B — request-side capture (DeepSeek-replay shape)**: messages = [user, assistant WITH reasoning_content, user]; upstream returns NO reasoning. Assert FE API: request-side messages[1].thinking == sent value; response-side (last) thinking ABSENT (omitempty).
+3. **C — negative cleanliness**: upstream returns NO reasoning; assert FE API detail payload has ZERO occurrences of substring `thinking`; assistant message decodes without a thinking field.
+4. **D — payload-shape static check**: read `pkg/ui/frontend/src/components/RequestDetail.tsx` (🧠 block, line ~697) and assert it renders `message.thinking` — matching FE API `messages[i].thinking`. Different field name ⇒ FAIL reported loudly.
+
+### Success Criteria
+- [ ] All scenarios PASS with byte-exact thinking equality
+- [ ] Suite runtime well under 240s (expected seconds)
+- [ ] No process leaks (in-process httptest; reaped on exit)
+- [ ] Negative control: Scenario C proves omitempty keeps payload clean when absent
+
+### Implementation Notes
+- Model `glm-5.3` is UNREGISTERED ⇒ `initRequestContext` leaves resolvedModel nil ⇒ race-external path (same trick as `raceExtModel` in minimax harness).
+- FE API is unauthenticated (no middleware) — direct GET works.
+- List endpoint newest-first: `store.List()` reverses insertion order (memory.go:131-142).
+- Request bodies OMIT the "stream" field for A/C scenario realism (original bug was non-streaming).
+
+### Last Run
+- **Date**: 2026-08-21
+- **Session**: Worker (executor session)
+- **Result**: PASS — 4/4 scenarios, suite runtime 0.443s (under 240s/300s caps)
+- **Quick Fixes**: Scenario D path was package-relative (`../../pkg/ui/...`) — harness bug, fixed (no assertion changed)
+- **Report**: RESULTS/2026-08-21-fe-reasoning-observability.md
+
+
+---
+
 # Mock Test: Peak Hour Fallback
 
 ### Metadata
