@@ -41,7 +41,12 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	reqID := uuid.New().String()
 	startTime := time.Now()
 
-	storeMessages := parseMessages(requestBody)
+	// Capture request messages via the OpenAI adapter so that reasoning_content
+	// (request-side thinking) is preserved on store.Message. Thinking. The legacy
+	// parseMessages helper dropped reasoning_content, so the Web UI never showed
+	// request-side thinking. This is capture-side only; the request body forwarded
+	// upstream is unchanged.
+	storeMessages := NewOpenAIAdapter().ToStoreMessages(requestBody)
 	model, _ := requestBody["model"].(string)
 	originalModel := model
 
