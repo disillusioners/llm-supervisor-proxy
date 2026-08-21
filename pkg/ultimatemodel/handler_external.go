@@ -53,7 +53,7 @@ func (h *Handler) executeExternal(
 	isStream bool,
 	interleaved bool,
 	upstreamProvider string,
-) (*store.Usage, error) {
+) (*ExecuteResult, error) {
 	cfg := h.config.Get()
 	var _ config.Config = cfg // Ensure config package is used
 
@@ -205,10 +205,23 @@ func (h *Handler) executeExternal(
 		}
 	}
 
+	// Passive capture: parse content + reasoning_content from the
+	// post-translation response bytes (the bytes that are about to
+	// be written to the client). This is purely observational —
+	// bodyBytes is read-only here and w.Write(bodyBytes) below is
+	// unchanged. The captured strings are returned to the outer
+	// handler via ExecuteResult.Content / .Thinking so it can
+	// persist a store.Message for the Web UI.
+	content, thinking := captureFromNonStreamResponse(bodyBytes)
+
 	// Write response
 	w.WriteHeader(resp.StatusCode)
 	_, err = w.Write(bodyBytes)
-	return usage, err
+	return &ExecuteResult{
+		Usage:    usage,
+		Content:  content,
+		Thinking: thinking,
+	}, err
 }
 
 // extractUsageFromResponse parses usage data from a non-streaming response body.
@@ -248,7 +261,7 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 // must be true to construct a StreamTranslator instance; gated-off
 // is a pure no-op (H5 — strictest invariant on this verbatim-byte
 // path; gate short-circuits BEFORE any parse).
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool) (*store.Usage, error) {
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool) (*ExecuteResult, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -292,6 +305,13 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 
 	// Track the last chunk containing usage data
 	var lastUsageChunk []byte
+
+	// Capture-side only: accumulate Content + Thinking from
+	// each chunk that gets written to the client. The builders
+	// below are populated passively alongside the existing
+	// write-to-buf loop; nothing in the wire path is touched.
+	var capturedContent strings.Builder
+	var capturedThinking strings.Builder
 
 	// Create buffer to batch all writes like race executor does
 	var buf bytes.Buffer
@@ -378,8 +398,13 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			chunksToEmit = full
 		}
 
-		// Buffer all chunks
+		// Capture-side only: observe the chunks that are about to
+		// be buffered to the client and accumulate any content /
+		// reasoning_content deltas. captureFromSSEChunkBytes is
+		// best-effort and never mutates the chunk bytes — it just
+		// parses them. Wire bytes to buf are unchanged.
 		for _, chunk := range chunksToEmit {
+			captureFromSSEChunkBytes(chunk, &capturedContent, &capturedThinking)
 			buf.Write(chunk)
 		}
 	}
@@ -388,6 +413,12 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	if toolCallBuffer != nil {
 		flushChunks := toolCallBuffer.Flush()
 		for _, chunk := range flushChunks {
+			// Capture-side only: also observe the tool-buffer's
+			// post-flush chunks (typically the tool_call delta
+			// + finish chunk). captureFromSSEChunkBytes silently
+			// ignores chunks without delta.content /
+			// delta.reasoning_content, so this is safe.
+			captureFromSSEChunkBytes(chunk, &capturedContent, &capturedThinking)
 			buf.Write(chunk)
 		}
 
@@ -431,7 +462,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	w.Write(buf.Bytes())
 	flusher.Flush()
 
-	return usage, nil
+	return &ExecuteResult{
+		Usage:    usage,
+		Content:  capturedContent.String(),
+		Thinking: capturedThinking.String(),
+	}, nil
 }
 
 // extractUsageFromChunk parses usage data from an SSE chunk JSON payload.

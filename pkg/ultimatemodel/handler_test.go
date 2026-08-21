@@ -744,7 +744,7 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 
 	hash := "testhash123"
 	headersSent := false
-	usage, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	execResult, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -758,14 +758,16 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 		t.Error("Headers should have been sent")
 	}
 
-	if usage == nil {
+	if execResult == nil {
+		t.Error("ExecuteResult should not be nil")
+	} else if execResult.Usage == nil {
 		t.Error("Usage should be extracted")
 	} else {
-		if usage.PromptTokens != 10 {
-			t.Errorf("PromptTokens = %d, want 10", usage.PromptTokens)
+		if execResult.Usage.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d, want 10", execResult.Usage.PromptTokens)
 		}
-		if usage.CompletionTokens != 5 {
-			t.Errorf("CompletionTokens = %d, want 5", usage.CompletionTokens)
+		if execResult.Usage.CompletionTokens != 5 {
+			t.Errorf("CompletionTokens = %d, want 5", execResult.Usage.CompletionTokens)
 		}
 	}
 

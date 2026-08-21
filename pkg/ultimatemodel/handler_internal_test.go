@@ -62,17 +62,21 @@ func TestHandleInternalNonStream_Success(t *testing.T) {
 	}
 
 	if result == nil {
-		t.Fatal("Expected usage to be returned")
+		t.Fatal("Expected ExecuteResult to be returned")
 	}
 
-	if result.PromptTokens != 10 {
-		t.Errorf("PromptTokens = %d, want 10", result.PromptTokens)
+	if result.Usage == nil {
+		t.Fatal("Expected Usage to be returned")
 	}
-	if result.CompletionTokens != 5 {
-		t.Errorf("CompletionTokens = %d, want 5", result.CompletionTokens)
+
+	if result.Usage.PromptTokens != 10 {
+		t.Errorf("PromptTokens = %d, want 10", result.Usage.PromptTokens)
 	}
-	if result.TotalTokens != 15 {
-		t.Errorf("TotalTokens = %d, want 15", result.TotalTokens)
+	if result.Usage.CompletionTokens != 5 {
+		t.Errorf("CompletionTokens = %d, want 5", result.Usage.CompletionTokens)
+	}
+	if result.Usage.TotalTokens != 15 {
+		t.Errorf("TotalTokens = %d, want 15", result.Usage.TotalTokens)
 	}
 
 	// Check Content-Type header
@@ -155,8 +159,11 @@ func TestHandleInternalNonStream_EmptyUsage(t *testing.T) {
 		t.Fatalf("handleInternalNonStream returned error: %v", err)
 	}
 
-	if result.PromptTokens != 0 {
-		t.Errorf("PromptTokens = %d, want 0", result.PromptTokens)
+	if result.Usage == nil {
+		t.Fatal("Expected Usage to be returned")
+	}
+	if result.Usage.PromptTokens != 0 {
+		t.Errorf("PromptTokens = %d, want 0", result.Usage.PromptTokens)
 	}
 }
 
@@ -192,10 +199,13 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 
 	// Check usage was extracted
 	if usage == nil {
-		t.Fatal("Expected usage to be returned")
+		t.Fatal("Expected ExecuteResult to be returned")
 	}
-	if usage.PromptTokens != 10 {
-		t.Errorf("PromptTokens = %d, want 10", usage.PromptTokens)
+	if usage.Usage == nil {
+		t.Fatal("Expected Usage to be returned")
+	}
+	if usage.Usage.PromptTokens != 10 {
+		t.Errorf("PromptTokens = %d, want 10", usage.Usage.PromptTokens)
 	}
 
 	// Check SSE headers
@@ -266,7 +276,10 @@ func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 	}
 
 	if usage == nil {
-		t.Fatal("Expected usage to be returned")
+		t.Fatal("Expected ExecuteResult to be returned")
+	}
+	if usage.Usage == nil {
+		t.Fatal("Expected Usage to be returned")
 	}
 
 	// Check SSE body
@@ -959,19 +972,22 @@ func TestHandleInternalStream_UsageFromDoneEvent(t *testing.T) {
 	}
 
 	if usage == nil {
-		t.Fatal("Expected usage")
+		t.Fatal("Expected ExecuteResult")
 	}
 
 	// Verify usage from done event was extracted correctly
 	expected := &store.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150}
-	if usage.PromptTokens != expected.PromptTokens {
-		t.Errorf("PromptTokens = %d, want %d", usage.PromptTokens, expected.PromptTokens)
+	if usage.Usage == nil {
+		t.Fatal("Expected Usage to be extracted")
 	}
-	if usage.CompletionTokens != expected.CompletionTokens {
-		t.Errorf("CompletionTokens = %d, want %d", usage.CompletionTokens, expected.CompletionTokens)
+	if usage.Usage.PromptTokens != expected.PromptTokens {
+		t.Errorf("PromptTokens = %d, want %d", usage.Usage.PromptTokens, expected.PromptTokens)
 	}
-	if usage.TotalTokens != expected.TotalTokens {
-		t.Errorf("TotalTokens = %d, want %d", usage.TotalTokens, expected.TotalTokens)
+	if usage.Usage.CompletionTokens != expected.CompletionTokens {
+		t.Errorf("CompletionTokens = %d, want %d", usage.Usage.CompletionTokens, expected.CompletionTokens)
+	}
+	if usage.Usage.TotalTokens != expected.TotalTokens {
+		t.Errorf("TotalTokens = %d, want %d", usage.Usage.TotalTokens, expected.TotalTokens)
 	}
 }
 
@@ -1004,12 +1020,12 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	// when no usage is provided in the done event.
 	// Since requestBodyBytes is nil and no content was streamed, both should be 0.
 	if usage == nil {
+		t.Errorf("ExecuteResult should not be nil")
+	} else if usage.Usage == nil {
 		t.Errorf("Usage should not be nil - fallback should return zero-usage struct")
-	}
-	if usage.PromptTokens != 0 {
-		t.Errorf("PromptTokens = %d, want 0 (no requestBodyBytes for fallback)", usage.PromptTokens)
-	}
-	if usage.CompletionTokens != 0 {
-		t.Errorf("CompletionTokens = %d, want 0 (empty stream for fallback)", usage.CompletionTokens)
+	} else if usage.Usage.PromptTokens != 0 {
+		t.Errorf("PromptTokens = %d, want 0 (no requestBodyBytes for fallback)", usage.Usage.PromptTokens)
+	} else if usage.Usage.CompletionTokens != 0 {
+		t.Errorf("CompletionTokens = %d, want 0 (empty stream for fallback)", usage.Usage.CompletionTokens)
 	}
 }

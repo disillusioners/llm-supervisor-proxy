@@ -94,7 +94,7 @@ func TestExecuteExternal_SuccessfulNonStreaming(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	usage, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
+	execResult, err := h.executeExternal(context.Background(), w, r, body, requestBodyBytes, modelsCfg.GetModel("ultimate-model"), false, false, "")
 
 	if err != nil {
 		t.Errorf("executeExternal returned error: %v", err)
@@ -102,17 +102,19 @@ func TestExecuteExternal_SuccessfulNonStreaming(t *testing.T) {
 	if !upstreamCalled {
 		t.Error("Upstream server should have been called")
 	}
-	if usage == nil {
+	if execResult == nil {
+		t.Error("ExecuteResult should not be nil")
+	} else if execResult.Usage == nil {
 		t.Error("Usage should be extracted")
 	} else {
-		if usage.PromptTokens != 10 {
-			t.Errorf("PromptTokens = %d, want 10", usage.PromptTokens)
+		if execResult.Usage.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d, want 10", execResult.Usage.PromptTokens)
 		}
-		if usage.CompletionTokens != 5 {
-			t.Errorf("CompletionTokens = %d, want 5", usage.CompletionTokens)
+		if execResult.Usage.CompletionTokens != 5 {
+			t.Errorf("CompletionTokens = %d, want 5", execResult.Usage.CompletionTokens)
 		}
-		if usage.TotalTokens != 15 {
-			t.Errorf("TotalTokens = %d, want 15", usage.TotalTokens)
+		if execResult.Usage.TotalTokens != 15 {
+			t.Errorf("TotalTokens = %d, want 15", execResult.Usage.TotalTokens)
 		}
 	}
 	if w.Code != http.StatusOK {
@@ -164,7 +166,9 @@ func TestExecuteExternal_SuccessfulStreaming(t *testing.T) {
 		t.Error("Response should contain SSE data")
 	}
 	// Usage may be nil if no usage in streaming chunks
-	_ = usage
+	if usage != nil {
+		_ = usage.Usage
+	}
 }
 
 func TestExecuteExternal_UpstreamError(t *testing.T) {
@@ -529,9 +533,11 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	}
 	if usage == nil {
 		t.Log("Usage was nil - may be expected if chunk parsing failed")
+	} else if usage.Usage == nil {
+		t.Log("Usage was nil - may be expected if chunk parsing failed")
 	} else {
-		if usage.PromptTokens != 10 {
-			t.Errorf("PromptTokens = %d, want 10", usage.PromptTokens)
+		if usage.Usage.PromptTokens != 10 {
+			t.Errorf("PromptTokens = %d, want 10", usage.Usage.PromptTokens)
 		}
 	}
 }
@@ -791,10 +797,13 @@ func TestExecuteExternal_Integration(t *testing.T) {
 		t.Fatalf("executeExternal failed: %v", err)
 	}
 	if usage == nil {
+		t.Fatal("ExecuteResult should not be nil")
+	}
+	if usage.Usage == nil {
 		t.Fatal("Usage should not be nil")
 	}
-	if usage.TotalTokens != 8 {
-		t.Errorf("TotalTokens = %d, want 8", usage.TotalTokens)
+	if usage.Usage.TotalTokens != 8 {
+		t.Errorf("TotalTokens = %d, want 8", usage.Usage.TotalTokens)
 	}
 	if w.Header().Get("X-Upstream-Header") != "test-value" {
 		t.Errorf("Upstream header not forwarded")

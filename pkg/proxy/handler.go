@@ -624,7 +624,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					// Execute with ultimate model (raw proxy, no retry/fallback)
 					// The Execute method determines streaming from requestBody["stream"]
 					// Heartbeat is started by the ultimate handler after headers are sent
-					usage, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
+					//
+					// execResult carries both the existing usage stats AND the
+					// passively-captured assistant Content / Thinking (Fix 3 of
+					// the reasoning-observability effort). The ultimatemodel
+					// package observes bytes/events as they are written to the
+					// client and never mutates the wire path — see
+					// pkg/ultimatemodel/handler_capture_test.go for the
+					// byte-identity proofs.
+					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
 					if err != nil {
 						log.Printf("[UltimateModel] Error: %v", err)
 						rc.reqLog.Status = "failed"
@@ -657,7 +665,28 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					rc.reqLog.Status = "completed"
 					rc.reqLog.EndTime = time.Now()
 					rc.reqLog.Duration = time.Since(rc.startTime).String()
-					rc.reqLog.Usage = usage
+					if execResult != nil {
+						rc.reqLog.Usage = execResult.Usage
+					}
+
+					// Fix 3 (reasoning-observability): ultimate paths
+					// previously persisted NO assistant message at all,
+					// so the Web UI showed no reply (neither content nor
+					// reasoning). Now we persist
+					// store.Message{Role: assistant, Content, Thinking}
+					// from the passively-captured result. Only persist
+					// when there is something to persist — an empty
+					// capture (e.g. an error path that returned early
+					// without a body) leaves the Messages slice as it
+					// was so we don't pollute the Web UI with blank
+					// assistant entries.
+					if execResult != nil && (execResult.Content != "" || execResult.Thinking != "") {
+						rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
+							Role:     "assistant",
+							Content:  execResult.Content,
+							Thinking: execResult.Thinking,
+						})
+					}
 					h.store.Add(rc.reqLog)
 
 					// Fallback token counting: if provider didn't return usage, estimate from request

@@ -41,7 +41,7 @@ func (h *Handler) executeInternal(
 	modelCfg *models.ModelConfig,
 	isStream bool,
 	interleaved bool,
-) (*store.Usage, error) {
+) (*ExecuteResult, error) {
 	// Resolve internal config (including credential lookup)
 	provider, apiKey, baseURL, internalModel, ok := h.modelsMgr.ResolveInternalConfig(modelCfg.ID)
 	if !ok {
@@ -151,7 +151,7 @@ func (h *Handler) handleInternalNonStream(
 	w http.ResponseWriter,
 	internalModel string,
 	requestBodyBytes []byte,
-) (*store.Usage, error) {
+) (*ExecuteResult, error) {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		return nil, err
@@ -193,7 +193,30 @@ func (h *Handler) handleInternalNonStream(
 		}
 	}
 
-	return usage, nil
+	// Passive capture: pull content + reasoning_content from the
+	// typed response. The wire bytes have ALREADY been written
+	// above (json.NewEncoder(w).Encode(resp)) — this is pure
+	// read-only access to the in-memory response struct, so the
+	// client output is unchanged.
+	//
+	// ChatMessage.Content is typed as interface{} in the provider
+	// because it can be a string OR []ContentPart (multimodal);
+	// the type-assertion to string is safe here because the
+	// upstream non-stream OpenAI response is always string-typed
+	// for text completions (the []ContentPart form is request-only).
+	var capturedContent, capturedThinking string
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		if s, ok := resp.Choices[0].Message.Content.(string); ok {
+			capturedContent = s
+		}
+		capturedThinking = resp.Choices[0].Message.ReasoningContent
+	}
+
+	return &ExecuteResult{
+		Usage:    usage,
+		Content:  capturedContent,
+		Thinking: capturedThinking,
+	}, nil
 }
 
 // handleInternalStream handles streaming requests for internal providers
@@ -204,7 +227,7 @@ func (h *Handler) handleInternalStream(
 	w http.ResponseWriter,
 	internalModel string,
 	requestBodyBytes []byte,
-) (*store.Usage, error) {
+) (*ExecuteResult, error) {
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return nil, err
@@ -245,6 +268,14 @@ func (h *Handler) handleInternalStream(
 
 	// Track usage from done event
 	var extractedUsage *store.Usage
+
+	// Capture-side only: accumulate Content + Thinking from
+	// typed provider events as we write them out. Builders
+	// stay local; nothing here is sent to the client. The
+	// string-builder pattern avoids the += memory trap across
+	// many stream chunks.
+	var capturedContent strings.Builder
+	var capturedThinking strings.Builder
 
 	// Accumulate raw SSE chunks for fallback token counting
 	var rawChunks bytes.Buffer
@@ -295,6 +326,14 @@ func (h *Handler) handleInternalStream(
 			buf.Write(data)
 			buf.WriteString("\n\n")
 			firstChunk = false
+			// Capture-side only: accumulate content delta. The
+			// typed event.Content field is the same string the
+			// proxy just wrote into the chunk above, so
+			// capturing here is exactly equivalent to parsing
+			// the wire bytes — without an extra JSON pass.
+			if event.Content != "" {
+				capturedContent.WriteString(event.Content)
+			}
 
 		case "tool_call":
 			if len(event.ToolCalls) > 0 {
@@ -370,6 +409,14 @@ func (h *Handler) handleInternalStream(
 			buf.WriteString("data: ")
 			buf.Write(data)
 			buf.WriteString("\n\n")
+			// Capture-side only: accumulate thinking delta. The
+			// typed event.ReasoningContent field is the same
+			// string the proxy just wrote into the chunk above
+			// (mirroring the d7300cb internal-path reasoning
+			// emission).
+			if event.ReasoningContent != "" {
+				capturedThinking.WriteString(event.ReasoningContent)
+			}
 
 		case "done":
 			// Flush remaining tool calls
@@ -446,7 +493,11 @@ func (h *Handler) handleInternalStream(
 			w.Write(buf.Bytes())
 			flusher.Flush()
 
-			return extractedUsage, nil
+			return &ExecuteResult{
+				Usage:    extractedUsage,
+				Content:  capturedContent.String(),
+				Thinking: capturedThinking.String(),
+			}, nil
 
 		case "error":
 			errMsg := ""
