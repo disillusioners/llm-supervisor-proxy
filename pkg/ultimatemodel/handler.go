@@ -228,16 +228,44 @@ func captureFromSSEChunk(data []byte, content, thinking *strings.Builder) {
 	}
 }
 
-// captureFromSSEChunkBytes is the `data: `-prefixed variant of
-// captureFromSSEChunk. It strips the `data: ` prefix if present
-// before delegating. Used by the external stream path which
-// already operates on lines that start with `data: `.
+// captureFromSSEChunkBytes parses a chunk written on the wire and
+// appends any delta.content / delta.reasoning_content it finds into
+// the provided builders. It is a pure reader: it never mutates the
+// chunk bytes and has zero effect on what the client receives.
+//
+// SSE FRAMING COUPLING (W6): this helper assumes OpenAI SSE framing
+// (`data: {...}\n\n`). Historically it hard-stripped a `data: `
+// prefix; a chunk not starting with that prefix was treated as a
+// non-data line and silently captured NOTHING — meaning that if an
+// upstream ever changes its framing convention, capture would
+// silently yield empty content/thinking. That silent degradation is
+// ACCEPTED by design: capture is best-effort and observational, so
+// it must never log per-chunk noise on the hot path, never error,
+// and above all never mutate or re-frame the wire bytes to make
+// parsing easier. A missing capture is a UI observability gap, not
+// a protocol failure.
+//
+// The coupling is softened capture-side only: if the chunk does NOT
+// start with `data: `, the bytes are attempted as bare JSON (some
+// upstreams emit unframed JSON lines). If that parse also fails,
+// the chunk is silently ignored (no error, no capture) — identical
+// to the pre-fallback behavior for garbage input. This fallback is
+// parse-only: it reads the bytes and cannot affect them, so wire
+// byte-identity is preserved by construction.
 func captureFromSSEChunkBytes(line []byte, content, thinking *strings.Builder) {
 	payload := line
 	if bytes.HasPrefix(payload, []byte("data: ")) {
 		payload = bytes.TrimPrefix(payload, []byte("data: "))
 		// Trim trailing newline if present (lines include the trailing \n
 		// because reader.ReadString('\n') keeps it).
+		payload = bytes.TrimRight(payload, "\r\n")
+	} else {
+		// Bare-JSON fallback (W6): attempt the raw bytes directly as
+		// JSON. captureFromSSEChunk already ignores anything that is
+		// not a parseable chat-completion chunk ([DONE], event lines,
+		// whitespace, garbage) — so delegating with the unstripped
+		// bytes gives us "capture if parseable, silent otherwise"
+		// with no framing knowledge required on this branch.
 		payload = bytes.TrimRight(payload, "\r\n")
 	}
 	captureFromSSEChunk(payload, content, thinking)

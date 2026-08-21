@@ -325,6 +325,69 @@ func TestCapture_Helpers_PureFunctions(t *testing.T) {
 			t.Errorf("garbage should be ignored, got (%q,%q)", c2.String(), t2.String())
 		}
 	})
+
+	// W6: bare-JSON fallback. Some upstreams emit unframed JSON
+	// lines; captureFromSSEChunkBytes must still harvest
+	// delta.content / delta.reasoning_content from them, while
+	// `data: `-framed chunks and true garbage keep their existing
+	// behaviors (captured / silently ignored).
+	t.Run("captureFromSSEChunkBytes_bareJSONFallback", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			chunk        string
+			wantContent  string
+			wantThinking string
+		}{
+			{
+				name:         "bare JSON line is captured",
+				chunk:        `{"choices":[{"index":0,"delta":{"content":"hello ","reasoning_content":"think "}}]}` + "\n",
+				wantContent:  "hello ",
+				wantThinking: "think ",
+			},
+			{
+				name:         "bare JSON no trailing newline is captured",
+				chunk:        `{"choices":[{"index":0,"delta":{"content":"there"}}]}`,
+				wantContent:  "there",
+				wantThinking: "",
+			},
+			{
+				name:         "data-prefixed chunk unchanged (captured)",
+				chunk:        `data: {"choices":[{"index":0,"delta":{"content":"framed"}}]}` + "\n",
+				wantContent:  "framed",
+				wantThinking: "",
+			},
+			{
+				name:        "data-prefixed [DONE] still ignored",
+				chunk:       `data: [DONE]` + "\n",
+				wantContent: "",
+			},
+			{
+				name:        "bare [DONE] still ignored",
+				chunk:       `[DONE]` + "\n",
+				wantContent: "",
+			},
+			{
+				name:        "garbage is silently ignored",
+				chunk:       `not json at all`,
+				wantContent: "",
+			},
+			{
+				name:        "valid JSON but not a chat chunk is ignored",
+				chunk:       `{"event":"ping"}`,
+				wantContent: "",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var content, thinking strings.Builder
+				captureFromSSEChunkBytes([]byte(tc.chunk), &content, &thinking)
+				if content.String() != tc.wantContent || thinking.String() != tc.wantThinking {
+					t.Errorf("got (%q,%q), want (%q,%q)",
+						content.String(), thinking.String(), tc.wantContent, tc.wantThinking)
+				}
+			})
+		}
+	})
 }
 
 // TestExecute_PersistsAssistantMessage verifies the outer-handler
