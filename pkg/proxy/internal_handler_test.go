@@ -356,7 +356,11 @@ func runHandleStreamWithEvents(t *testing.T, events []providers.StreamEvent, sin
 		resolver: &mockModelsConfig{},
 	}
 	if sink != nil {
-		handler.SetThinkingSink(sink)
+		// A fresh handler has no prior sink, so double-set is impossible
+		// here; a failure is a test-harness bug.
+		if err := handler.SetThinkingSink(sink); err != nil {
+			t.Fatalf("SetThinkingSink: %v", err)
+		}
 	}
 
 	req := &providers.ChatCompletionRequest{
@@ -530,5 +534,78 @@ func TestInternalHandler_handleStream_ThinkingByteIdentity(t *testing.T) {
 	normB := normalizeSSERecorderBody(bodyWithoutThinking)
 	if normA != normB {
 		t.Errorf("recorder body must be byte-identical (modulo id/created) when thinking events are present vs absent; diff:\nwith=%q\nwithout=%q", normA, normB)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W1: Thinking-sink invariant tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestInternalHandler_SetThinkingSink_DoubleSetError asserts the W1
+// invariant: a second SetThinkingSink call without an intervening
+// ResetThinkingSink is a programming error and must return an error while
+// leaving the ORIGINAL sink installed (the second builder must never receive
+// any bytes — a double-set would otherwise split the captured thinking text
+// across two builders).
+func TestInternalHandler_SetThinkingSink_DoubleSetError(t *testing.T) {
+	handler := &InternalHandler{
+		config:   &models.ModelConfig{ID: "test-model"},
+		resolver: &mockModelsConfig{},
+	}
+
+	var first strings.Builder
+	if err := handler.SetThinkingSink(&first); err != nil {
+		t.Fatalf("first SetThinkingSink must succeed, got error: %v", err)
+	}
+
+	var second strings.Builder
+	err := handler.SetThinkingSink(&second)
+	if err == nil {
+		t.Fatal("second SetThinkingSink without intervening reset must return an error")
+	}
+
+	// The original sink must remain installed and usable.
+	if handler.thinkingSink != &first {
+		t.Error("double-set must leave the original sink installed")
+	}
+	handler.thinkingSink.WriteString("still the first sink")
+	if got := first.String(); got != "still the first sink" {
+		t.Errorf("original sink must stay functional; got %q", got)
+	}
+	if got := second.String(); got != "" {
+		t.Errorf("second builder must never receive bytes; got %q", got)
+	}
+
+	// Reset is the sanctioned way to make a subsequent set succeed.
+	handler.ResetThinkingSink()
+	var third strings.Builder
+	if err := handler.SetThinkingSink(&third); err != nil {
+		t.Fatalf("SetThinkingSink after ResetThinkingSink must succeed, got error: %v", err)
+	}
+	if handler.thinkingSink != &third {
+		t.Error("post-reset SetThinkingSink must install the new sink")
+	}
+}
+
+// TestInternalHandler_handleStream_NilSinkNoPanic asserts the W1 nil-sink
+// invariant: with NO sink installed, a stream containing thinking events must
+// not panic and must keep the recorder byte-clean of thinking — the
+// documented base behaviour of fea5874 (thinking silently not captured).
+func TestInternalHandler_handleStream_NilSinkNoPanic(t *testing.T) {
+	body := runHandleStreamWithEvents(t, []providers.StreamEvent{
+		{Type: "thinking", ReasoningContent: "partial internal thinking"},
+		{Type: "content", Content: "visible answer"},
+		{Type: "thinking", ReasoningContent: " more thinking"},
+		{Type: "done", FinishReason: "stop"},
+	}, nil)
+
+	if strings.Contains(body, "reasoning_content") {
+		t.Errorf("nil-sink stream must not contain reasoning_content on the wire; body=%q", body)
+	}
+	if strings.Contains(body, "partial internal thinking") {
+		t.Errorf("thinking text must never leak to the wire, even without a sink; body=%q", body)
+	}
+	if !strings.Contains(body, `"content":"visible answer"`) {
+		t.Errorf("content chunks must stay wire-visible under nil sink; body=%q", body)
 	}
 }

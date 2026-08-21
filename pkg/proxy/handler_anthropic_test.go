@@ -855,3 +855,167 @@ func TestExtractOpenAIResponseContentFromJSON_NoMessage(t *testing.T) {
 		t.Errorf("expected nil tool calls, got %v", toolCalls)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W4: Fallback thinking-isolation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// newInternalFallbackTestHandler builds a Handler whose ModelsConfig maps
+// model "internal-primary" (internal, credential provider=openai pointed at
+// internalUpstream) with fallback chain ["external-fallback"], and whose
+// external upstream is externalUpstream. Used by the W4 isolation tests to
+// drive the real HandleAnthropicMessages flow: internal attempt first, then
+// external fallback.
+func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpstream http.HandlerFunc) *Handler {
+	t.Helper()
+	internalSrv := httptest.NewServer(internalUpstream)
+	externalSrv := httptest.NewServer(externalUpstream)
+	t.Cleanup(func() { internalSrv.Close(); externalSrv.Close() })
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", externalSrv.URL)
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	modelsCfg := models.NewModelsConfig()
+	if err := modelsCfg.AddCredential(models.CredentialConfig{
+		ID:       "test-openai-cred",
+		Provider: "openai",
+		APIKey:   "sk-test",
+		BaseURL:  internalSrv.URL,
+	}); err != nil {
+		t.Fatalf("add credential: %v", err)
+	}
+	if err := modelsCfg.AddModel(models.ModelConfig{
+		ID:            "internal-primary",
+		Name:          "Internal Primary",
+		Enabled:       true,
+		Internal:      true,
+		CredentialID:  "test-openai-cred",
+		InternalModel: "gpt-4o-internal",
+		FallbackChain: []string{"external-fallback"},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+
+	cfg := &Config{
+		ConfigMgr:    mgr,
+		ModelsConfig: modelsCfg,
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	return NewHandler(cfg, bus, reqStore, nil, nil, nil)
+}
+
+// anthropicTestRequestStore retrieves the request store behind the handler
+// so tests can inspect the persisted RequestLog (assistant message + thinking).
+func anthropicTestRequestStore(h *Handler) *store.RequestStore {
+	return h.store
+}
+
+// TestAnthropic_FailedInternalFallbackThinkingIsolation exercises the W4
+// sequence: the internal (OpenAI-provider) attempt streams SOME thinking
+// deltas, then dies mid-stream WITHOUT [DONE]/finish_reason (the provider
+// layer surfaces "stream ended without [DONE] marker"), so the internal
+// attempt fails AFTER partial thinking was already captured into the sink.
+// The external fallback then succeeds and streams its own thinking + content.
+//
+// The persisted store.Message.Thinking must contain ONLY the fallback's
+// thinking — the internal partial thinking must not appear (neither
+// concatenated, nor duplicated, nor polluting).
+func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
+	const internalPartialThinking = "INTERNAL PARTIAL THINKING TOKEN"
+	const fallbackThinking = "fallback reasoning"
+	const fallbackContent = "fallback answer"
+
+	internalUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		// One reasoning delta is consumed and captured by the sink...
+		fmt.Fprintf(w, "data: %s\n\n", mockOpenAIReasoningChunk(internalPartialThinking))
+		flusher.Flush()
+		// ...then the connection dies mid-stream: no further chunks, no
+		// finish_reason, no [DONE]. The provider layer turns this into a
+		// terminal error ("stream ended without [DONE] marker"), failing the
+		// internal attempt AFTER the partial thinking was captured.
+		return
+	})
+
+	externalUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", mockOpenAIReasoningChunk(fallbackThinking))
+		flusher.Flush()
+		fmt.Fprintf(w, "data: %s\n\n", mockOpenAICreateChunk(fallbackContent))
+		flusher.Flush()
+		finalChunk := map[string]interface{}{
+			"id": "chatcmpl-test",
+			"choices": []interface{}{
+				map[string]interface{}{
+					"delta":         map[string]interface{}{},
+					"index":         0,
+					"finish_reason": "stop",
+				},
+			},
+		}
+		b, _ := json.Marshal(finalChunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(b))
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+
+	h := newInternalFallbackTestHandler(t, internalUpstream, externalUpstream)
+
+	body := anthropicBody("internal-primary", true, []map[string]interface{}{
+		{"role": "user", "content": "Hello"},
+	})
+	req := makeAnthropicRequest(t, body)
+	rr := httptest.NewRecorder()
+
+	h.HandleAnthropicMessages(rr, req)
+
+	// Sanity: the fallback succeeded and produced a valid Anthropic SSE body.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 from fallback, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), fallbackContent) {
+		t.Errorf("expected fallback content on the wire; body=%q", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "thinking") {
+		t.Errorf("expected fallback thinking on the wire (fallback is external; its reasoning is translated normally); body=%q", rr.Body.String())
+	}
+
+	// Core W4 assertion: the persisted assistant message must carry ONLY the
+	// fallback's thinking.
+	reqStore := anthropicTestRequestStore(h)
+	logs := reqStore.List()
+	if len(logs) == 0 {
+		t.Fatal("expected a persisted request log")
+	}
+	var assistant *store.Message
+	for i := range logs[len(logs)-1].Messages {
+		if logs[len(logs)-1].Messages[i].Role == "assistant" {
+			assistant = &logs[len(logs)-1].Messages[i]
+		}
+	}
+	if assistant == nil {
+		t.Fatal("expected a persisted assistant message after fallback success")
+	}
+
+	if got := assistant.Thinking; got != fallbackThinking {
+		t.Errorf("persisted thinking must be EXACTLY the fallback's thinking %q; got %q (internal partial=%q)",
+			fallbackThinking, got, internalPartialThinking)
+	}
+	if strings.Contains(assistant.Thinking, internalPartialThinking) {
+		t.Errorf("internal partial thinking must NOT appear in persisted thinking; got %q", assistant.Thinking)
+	}
+	if !strings.Contains(assistant.Content, fallbackContent) {
+		t.Errorf("persisted content must carry fallback content; got %q", assistant.Content)
+	}
+}

@@ -250,6 +250,14 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.credentialAPIKey = savedCredentialAPIKey
 		arc.requestBody = savedRequestBody
 		arc.anthropicReq.Model = savedAnthropicReqModel
+		// W4: a failed attempt (internal or otherwise) may have left partial
+		// accumulation in arc.accumulatedThinking — e.g. a failed internal
+		// attempt captures thinking into its sink mid-stream before the
+		// failure. Persisting that would double-accumulate or pollute the
+		// fallback's persisted thinking, so drop it before the next
+		// attempt: the fallback's persisted thinking must carry ONLY the
+		// fallback's own thinking.
+		arc.accumulatedThinking.Reset()
 
 		arc.reqLog.Status = "failed"
 		arc.reqLog.Error = "Model failed"
@@ -468,7 +476,15 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
-	internalHandler.SetThinkingSink(&capturedThinking)
+	// The handler is created fresh above, so it has no prior sink and this
+	// call can never double-set; treat an error as a programming bug and
+	// abort the internal attempt rather than persisting missing thinking.
+	if err := internalHandler.SetThinkingSink(&capturedThinking); err != nil {
+		log.Printf("[DEBUG ANTHROPIC] Failed to install thinking sink (programming error): %v", err)
+		arc.lastError = []byte(err.Error())
+		arc.lastStatusCode = http.StatusBadGateway
+		return false
+	}
 	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
@@ -477,21 +493,29 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		return false
 	}
 
-	// Persist any captured thinking text (side channel) so the final
-	// store.Message.Thinking field still gets populated. This runs BEFORE
-	// the response handler because handleAnthropicInternalStreamResponse
-	// calls extractOpenAIResponseContentFromSSE, which will now return an
-	// empty thinking string (the recorder no longer carries thinking SSE).
-	if capturedThinking.Len() > 0 {
-		arc.accumulatedThinking.WriteString(capturedThinking.String())
-	}
-
 	// Check response status
 	if recorder.Code != http.StatusOK {
 		arc.lastError = recorder.Body.Bytes()
 		arc.lastStatusCode = recorder.Code
 		log.Printf("[DEBUG ANTHROPIC] Internal request returned %d: %s", recorder.Code, string(arc.lastError))
 		return false
+	}
+
+	// Persist any captured thinking text (side channel) so the final
+	// store.Message.Thinking field still gets populated. This runs BEFORE
+	// the response handler because handleAnthropicInternalStreamResponse
+	// calls extractOpenAIResponseContentFromSSE, which will now return an
+	// empty thinking string (the recorder no longer carries thinking SSE).
+	//
+	// W4: this copy is deliberately gated under the SUCCESS path
+	// (HandleRequest returned nil AND recorder is 200). A failed internal
+	// attempt may have partially captured thinking before the failure;
+	// copying it here would leave the partial text in
+	// arc.accumulatedThinking and pollute the fallback's persisted
+	// thinking. Partial captures from failed attempts are discarded along
+	// with the local builder.
+	if capturedThinking.Len() > 0 {
+		arc.accumulatedThinking.WriteString(capturedThinking.String())
 	}
 
 	log.Printf("[DEBUG ANTHROPIC] Recorder body length: %d bytes", recorder.Body.Len())

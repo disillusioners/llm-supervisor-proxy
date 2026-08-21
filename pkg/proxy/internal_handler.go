@@ -26,7 +26,16 @@ type InternalHandler struct {
 	requestID     string                         // Optional: request ID for buffer naming
 	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
-	thinkingSink  *strings.Builder               // Optional: side-channel sink for case "thinking" reasoning text (never written to w)
+	// thinkingSink is an OPTIONAL, capture-only side channel for case
+	// "thinking" reasoning text. INVARIANT: thinking bytes must NEVER be
+	// written to the ResponseWriter `w` — the recorder body is consumed
+	// downstream by translator.TranslateBufferedStream, which would convert
+	// any reasoning_content delta written here into Anthropic thinking
+	// blocks leaked onto the client wire. Base fea5874 DROPPED thinking
+	// events entirely; the sink exists only so persistence
+	// (store.Message.Thinking) can still observe them. When nil, thinking
+	// events are silently not captured (the documented base behaviour).
+	thinkingSink *strings.Builder
 
 	// Tool call buffer configuration
 	toolCallBufferMaxSize  int64              // Max size for tool call buffer
@@ -64,8 +73,31 @@ func (h *InternalHandler) SetToolCallBufferConfig(maxSize int64, disabled bool, 
 // the sink ONLY — no SSE chunk is emitted on the wire (w). Callers use the
 // sink to persist store.Message.Thinking without leaking thinking deltas
 // into the OpenAI stream that gets translated to Anthropic.
-func (h *InternalHandler) SetThinkingSink(sink *strings.Builder) {
+//
+// INVARIANT: the sink is capture-only. Thinking bytes must NEVER be written
+// to the ResponseWriter `w`, because the recorder body feeds
+// translator.TranslateBufferedStream and any thinking delta written there
+// leaks to the client wire as Anthropic thinking blocks. Base fea5874
+// DROPPED thinking events entirely; a nil sink preserves that documented
+// base behaviour (thinking is silently not captured).
+//
+// Double-set is a programming error: a second call without an intervening
+// ResetThinkingSink returns an error and leaves the existing sink installed.
+// This guards against two callers racing to capture the same stream into
+// different builders (which would split the thinking text).
+func (h *InternalHandler) SetThinkingSink(sink *strings.Builder) error {
+	if h.thinkingSink != nil {
+		return fmt.Errorf("SetThinkingSink: sink already set; call ResetThinkingSink before installing a new one (double-set is a programming error)")
+	}
 	h.thinkingSink = sink
+	return nil
+}
+
+// ResetThinkingSink removes the installed sink, returning thinking capture
+// to the documented base behaviour (silently not captured). It is the only
+// sanctioned way to make a subsequent SetThinkingSink succeed.
+func (h *InternalHandler) ResetThinkingSink() {
+	h.thinkingSink = nil
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -199,6 +231,11 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			// contract with the pre-fix behaviour, so we deliberately stay
 			// silent on the wire and accumulate event.ReasoningContent into
 			// the optional thinkingSink for persistence instead.
+			//
+			// NIL-SINK INVARIANT (W1): with no sink installed this arm is a
+			// no-op — thinking is silently not captured, exactly the
+			// documented base behaviour of fea5874 (which dropped thinking
+			// events entirely). No panic, no wire write, ever.
 			if h.thinkingSink != nil {
 				h.thinkingSink.WriteString(event.ReasoningContent)
 			}
