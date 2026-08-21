@@ -1,3 +1,49 @@
+# Mock Test: E2E FE Reasoning Observability PATH MATRIX (Task 2)
+
+### Metadata
+- **Created**: 2026-08-21
+- **Script**: `test/e2e_fe_reasoning_observability/path_matrix_test.go` (+ harness extension in `harness_test.go`)
+- **Language**: Go (in-process; reuses the FE-API-over-real-HTTP harness from the closure-gate suite)
+- **Status**: ACTIVE — 16/16 matrix rows pass
+
+### Configuration
+- **Timeout**: dual-layer — outer `timeout 300 go test ./test/e2e_fe_reasoning_observability/ -v -count=1 -timeout 240s`
+- **Ports**: NONE fixed — `httptest` ephemeral loopback only; no 8088
+- **Cleanup**: in-process; reaped on test exit
+
+### What It Tests
+Thinking visible in the FE API `GET /fe/api/requests/{id}` on EVERY capture
+path: race x stream/non-stream, ultimate x stream/non-stream x internal/external,
+anthropic-client (internal stream + external non-stream), plus MiniMax
+translated rows (reasoning_details → reasoning_content) and negative
+omitempty-cleanliness rows.
+
+### Test Scenarios
+- R1..R10 positive core matrix (byte-exact thinking via FE API)
+- N1..N4 negative rows (ZERO "thinking" occurrences when no reasoning upstream)
+- M1 minimax race-external stream translated; M2 minimax ultimate-external non-stream translated
+
+### Success Criteria
+- [x] All 16 rows pass; byte-exact equality on positives; strict absence on negatives
+- [x] Suite runtime 1.764s (well under caps)
+- [x] No process/port leaks
+
+### Implementation Notes
+- Ultimate rows: X-Force-Ultimate-Model + ultimateModelEnabled token + ULTIMATE_MODEL_MAX_RETRIES=0 (ForceTrigger fires on first call)
+- Anthropic rows: HandleAnthropicMessages with x-api-key + anthropic-version headers
+- **GOTCHA (cost one fail/re-run)**: the ultimate-external MiniMax translation gate reads the MODEL's CredentialID, NOT the global upstream credential — M2 needs a minimax-credentialed ultimate model (`matrix-ultimate-external-minimax`)
+- R1 is the closure-gate scenario kept as matrix row 1 (Scenario A test still exists)
+
+### Last Run
+- **Date**: 2026-08-21
+- **Session**: Worker (executor session)
+- **Result**: PASS — 16/16 rows + 4/4 closure gate, runtime 1.764s (stable across 2 runs)
+- **Quick Fixes**: M2 harness wiring (minimax-credentialed ultimate model) — harness-only, no assertion weakened
+- **Report**: RESULTS/2026-08-21-fe-reasoning-observability-path-matrix.md
+
+
+---
+
 # Mock Test: E2E FE Reasoning Observability (closure gate for glm-5.3 non-stream)
 
 ### Metadata
