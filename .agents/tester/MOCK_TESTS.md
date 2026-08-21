@@ -332,3 +332,50 @@ S14 header-value table at integration level (true/1 activate; True/TRUE/false/no
 - **Result**: **PASS 43/43 subtests** (4.7s; suite commit `166aa7f`; S3 id-parity product fix `b2dfde0` landed after the suite caught the divergence — 42/43 → 43/43)
 - **Quick Fixes**: S3 ultimate-internal monotonic id counter (fix `b2dfde0`); no test expectations changed (no prior test asserted id scheme)
 - **Report**: RESULTS/2026-08-19-minimax-reasoning-details-e2e-gate.md
+
+---
+
+## Mock Test: E2E Anthropic Thinking-Leak Spot-Check (byte-identity constraint, Task 4)
+
+### Metadata
+- **Created**: 2026-08-21
+- **Script**: `test/e2e_anthropic_thinking_leak/` (Go test package: `harness_test.go` + `e2e_anthropic_thinking_leak_test.go`)
+- **Language**: Go (in-process handler harness, httptest mock upstream)
+- **Status**: IMPLEMENTED
+
+### Configuration
+- **Timeout**: dual-layer — outer `timeout 300` wrapping `go test ... -timeout 240s` (inner)
+- **Service Port**: N/A (in-process `proxy.Handler.HandleAnthropicMessages` driven directly via `httptest.NewRecorder`; no production port used, 8088 never touched)
+- **Mock Ports**: httptest ephemeral only (mock upstream + SQLite temp file)
+- **Cleanup**: `t.Cleanup` closes httptest servers; `t.TempDir` auto-removes SQLite DBs; no port residue by construction
+
+### What It Tests
+Closes the specific leak the dev-verify pass caught pre-fix on `fix/ui-reasoning-observability` (fix `2e183d3`): **anthropic-format client streaming with thinking events must send ZERO thinking blocks/bytes to the client wire** on the INTERNAL path (thinking-sink invariant at `internal_handler.go:225-242` + sink install at `handler_anthropic.go:482`), while the EXTERNAL path still translates reasoning_content → thinking_delta by design (`TestAnthropic_ThinkingStream` contract).
+
+### Mock Services Required
+- Mock OpenAI SSE upstream (httptest): emits `delta.reasoning_content` chunks (multi-chunk reasoning "Hmm, internal deliberation..." split across ≥2 chunks) + content delta + finish chunk + `[DONE]`; non-stream variant returns 200 JSON with `message.reasoning_content`.
+- Temp SQLite + migrations (real `database.Store`), real `auth.TokenStore` with created tokens.
+
+### Test Scenarios
+1. **S1 INTERNAL stream — the leak spot-check**: registered model `internal:true` (openai-provider credential → mock SSE with reasoning). Anthropic streaming request. Assert (a) wire (recorder body) contains ZERO occurrences of the reasoning substrings, `"thinking_delta"`, `"type":"thinking"`; (b) persisted assistant `Thinking` (in-memory reqStore) non-empty AND equal to concatenated reasoning (both sides of the sink invariant); (c) content intact on wire.
+2. **S2 EXTERNAL stream — over-swallow regression guard**: unregistered model → external credential at mock SSE. Anthropic streaming. Assert wire DOES contain `thinking_delta` matching upstream reasoning (by-design translation) — proves the sink did not over-swallow.
+3. **S3 INTERNAL non-stream**: same internal model, mock 200 JSON with `message.reasoning_content`. Assert persisted thinking == reasoning value; wire semantics verified against pre-fix base (`fea5874`) differential — the non-stream translator (`response.go`, unchanged since base) may emit an Anthropic thinking block by design; a base-vs-fix differential run classifies any occurrence as pre-existing (byte-identity OK) vs fix-introduced (FAIL).
+
+### Success Criteria
+- [ ] S1 zero-leak + captured-thinking (both sides) + content intact
+- [ ] S2 thinking_delta present (external translation alive)
+- [ ] S3 persisted thinking exact; wire classified via base differential
+- [ ] All scenarios pass under dual-layer timeout; runtime ≪ cap
+- [ ] Commit `test: e2e anthropic thinking leak spot-check ...`
+
+### Implementation Notes
+- Driver calls `h.HandleAnthropicMessages(rr, req)` directly (NOT HandleChatCompletions).
+- Request: `POST /v1/messages`, headers `Content-Type: application/json`, `x-api-key: <token>`, `anthropic-version: 2023-06-01`; body model/max_tokens/stream/messages (makeAnthropicRequest shape).
+- Auth on the anthropic endpoint is passthrough (no tokenStore check in `HandleAnthropicMessages`); the harness keeps the real tokenStore anyway for parity with T1.
+
+### Last Run
+- **Date**: 2026-08-21 · **Session**: Task-4 spot-check (worker instance f7ddb362)
+- **Result**: **PASS 3/3 scenarios** (~0.11s; dual-layer timeout 300s/240s; commit on `fix/ui-reasoning-observability`)
+- **Non-vacuity**: leak re-injected in isolated worktree → S1 FAILs with 4 detections (leak shape confirmed); S3 wire thinking block classified pre-existing via base differential at `effc345` (identical 371-byte wire; `response.go` unchanged since base `fea5874`)
+- **Quick Fixes**: none to production code; harness compile-fix iteration only
+- **Report**: RESULTS/2026-08-21-anthropic-thinking-leak-spotcheck.md
