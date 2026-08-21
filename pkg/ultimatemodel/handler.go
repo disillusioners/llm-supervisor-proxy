@@ -163,21 +163,26 @@ func (h *Handler) OnConfigChange(event events.Event) {
 // ExecuteResult bundles the outcome of an ultimate-model request.
 //
 // In addition to the token usage the outer proxy handler already
-// consumes, it carries the passively-captured assistant content
-// and thinking text so the outer handler can persist a
-// store.Message{Role: "assistant", Content, Thinking} alongside
-// the existing usage store. Without this, ultimate-model paths
-// persisted NO assistant message and the Web UI showed no reply
-// at all (Fix 3 of the reasoning-observability effort).
+// consumes, it carries the passively-captured assistant content,
+// thinking text, AND tool calls so the outer handler can persist a
+// store.Message{Role: "assistant", Content, Thinking, ToolCalls}
+// alongside the existing usage store. Without this, ultimate-model
+// paths persisted NO assistant message and the Web UI showed no
+// reply at all — visible especially when the assistant turn was
+// purely a tool call (empty Content + empty Thinking + real
+// tool_calls): Fix 3 closed the Content/Thinking hole; W7 extends
+// the same capture contract to tool calls so tool-call-only turns
+// also persist.
 //
 // Capture is purely passive: it observes bytes / events that are
 // already being written to the client and never mutates them.
 // Wire bytes to the client are byte-identical with or without
 // capture enabled — see pkg/ultimatemodel/handler_capture_test.go.
 type ExecuteResult struct {
-	Usage    *store.Usage
-	Content  string
-	Thinking string
+	Usage     *store.Usage
+	Content   string
+	Thinking  string
+	ToolCalls []store.ToolCall
 }
 
 // coerceContentString coerces a possibly-string interface{} value
@@ -318,6 +323,181 @@ func captureFromNonStreamResponse(bodyBytes []byte) (content, thinking string) {
 	content = coerceContentString(msg["content"])
 	thinking = coerceContentString(msg["reasoning_content"])
 	return content, thinking
+}
+
+// captureToolCallsFromNonStreamResponse parses the post-write
+// non-stream response body (bodyBytes, including any translator
+// mutations applied before write) and returns the assembled
+// choices[0].message.tool_calls as []store.ToolCall — or nil if
+// none are present or the body is not a chat-completion JSON.
+//
+// The body is read-only — bytes that the proxy writes to the
+// client are unchanged. W7: this is the capture-side hook that
+// lets outer handler.go persist a store.Message when the
+// assistant turn is purely a tool call (empty Content + empty
+// Thinking), which previously left the UI with nothing to show.
+func captureToolCallsFromNonStreamResponse(bodyBytes []byte) []store.ToolCall {
+	if len(bodyBytes) == 0 {
+		return nil
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
+		return nil
+	}
+	choices, ok := resp["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	c, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	msg, ok := c["message"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	rawCalls, ok := msg["tool_calls"].([]interface{})
+	if !ok || len(rawCalls) == 0 {
+		return nil
+	}
+	out := make([]store.ToolCall, 0, len(rawCalls))
+	for _, raw := range rawCalls {
+		tcMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		var tc store.ToolCall
+		if id, ok := tcMap["id"].(string); ok {
+			tc.ID = id
+		}
+		if typ, ok := tcMap["type"].(string); ok {
+			tc.Type = typ
+		}
+		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+			if name, ok := fn["name"].(string); ok {
+				tc.Function.Name = name
+			}
+			if args, ok := fn["arguments"].(string); ok {
+				tc.Function.Arguments = args
+			}
+		}
+		out = append(out, tc)
+	}
+	return out
+}
+
+// captureToolCallsFromSSEChunk extracts delta.tool_calls from a
+// single SSE payload (the SAME parsed JSON content+thinking were
+// observed from in captureFromSSEChunkBytes — see that helper for
+// the byte-identity contract this shares) and merges them into
+// the provided accumulator and per-index arguments builder.
+//
+// W7 mirror of pkg/proxy/handler_helpers.go's
+// extractStreamChunkContent tool-call accumulation: across OpenAI
+// streaming events, the first delta for a given index carries
+// ID/Type/Name and subsequent deltas carry additional arguments
+// fragments that are concatenated into the per-index builder. The
+// caller is responsible for collapsing the argument builders
+// into store.ToolCall.Function.Arguments once streaming ends.
+//
+// The chunk is read-only — bytes are never mutated. Chunks that
+// are not data lines, [DONE], or have parse failures are silently
+// ignored, matching captureFromSSEChunkBytes's best-effort
+// posture.
+func captureToolCallsFromSSEChunk(data []byte, accum *[]store.ToolCall, argBuilders *[]*strings.Builder) {
+	if len(data) == 0 || accum == nil || argBuilders == nil {
+		return
+	}
+	// W7: mirror the framing-coupling of captureFromSSEChunkBytes
+	// — strip the leading `data: ` SSE prefix and trailing newlines
+	// before parsing. Some upstreams emit unframed JSON lines (the
+	// bare-JSON fallback at W6); for tool-call chunks in
+	// practice these are always `data: ` framed (OpenAI SSE)
+	// because the encoding is hard-wired into the tool-buffer's
+	// emitToolCall output. Try the framed path first; if that
+	// fails, retry against the un-stripped bytes so capture is
+	// best-effort across both shapes.
+	payload := data
+	if bytes.HasPrefix(payload, []byte("data: ")) {
+		payload = bytes.TrimPrefix(payload, []byte("data: "))
+		payload = bytes.TrimRight(payload, "\r\n")
+	} else {
+		payload = bytes.TrimRight(payload, "\r\n")
+	}
+	var chunk map[string]interface{}
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return
+	}
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return
+	}
+	delta, ok := choice["delta"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	rawCalls, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(rawCalls) == 0 {
+		return
+	}
+	for _, raw := range rawCalls {
+		tcMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Get index (fallback to 0 if missing per OpenAI
+		// streaming convention).
+		index := 0
+		if idx, ok := tcMap["index"].(float64); ok {
+			index = int(idx)
+		}
+		if index < 0 {
+			index = 0
+		}
+		// Ensure accumulator has enough capacity for this index.
+		for len(*accum) <= index {
+			*accum = append(*accum, store.ToolCall{})
+			b := &strings.Builder{}
+			b.Grow(1024)
+			*argBuilders = append(*argBuilders, b)
+		}
+		tc := &(*accum)[index]
+		if id, ok := tcMap["id"].(string); ok && id != "" {
+			tc.ID = id
+		}
+		if typ, ok := tcMap["type"].(string); ok && typ != "" {
+			tc.Type = typ
+		}
+		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+			if name, ok := fn["name"].(string); ok && name != "" {
+				tc.Function.Name = name
+			}
+			if args, ok := fn["arguments"].(string); ok {
+				(*argBuilders)[index].WriteString(args)
+			}
+		}
+	}
+}
+
+// finalizeAccumulatedToolCalls collapses the per-index
+// arguments builders into store.ToolCall.Function.Arguments on
+// each accumulated tool call, returning the assembled slice.
+// Empty-builder slots leave Arguments as-is (already-empty
+// default).
+func finalizeAccumulatedToolCalls(accum []store.ToolCall, argBuilders []*strings.Builder) []store.ToolCall {
+	if len(accum) == 0 {
+		return nil
+	}
+	for i := range accum {
+		if i < len(argBuilders) && argBuilders[i] != nil {
+			accum[i].Function.Arguments = argBuilders[i].String()
+		}
+	}
+	return accum
 }
 
 // SendRetryExhaustedError sends a JSON stream error response.

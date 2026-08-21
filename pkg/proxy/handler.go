@@ -673,18 +673,33 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					// previously persisted NO assistant message at all,
 					// so the Web UI showed no reply (neither content nor
 					// reasoning). Now we persist
-					// store.Message{Role: assistant, Content, Thinking}
-					// from the passively-captured result. Only persist
-					// when there is something to persist — an empty
-					// capture (e.g. an error path that returned early
-					// without a body) leaves the Messages slice as it
-					// was so we don't pollute the Web UI with blank
+					// store.Message{Role: assistant, Content, Thinking,
+					// ToolCalls} from the passively-captured result.
+					// Only persist when there is something to persist:
+					// any of Content, Thinking, or ToolCalls must be
+					// non-empty. An empty capture (e.g. an error path
+					// that returned early without a body, or a
+					// successful response with no observable assistant
+					// turn at all) leaves the Messages slice as it was
+					// so we don't pollute the Web UI with blank
 					// assistant entries.
-					if execResult != nil && (execResult.Content != "" || execResult.Thinking != "") {
+					//
+					// W7 extends the Fix 3 conditional with the
+					// ToolCalls presence check: a tool-call-only
+					// assistant turn (empty Content + empty Thinking
+					// + real tool_calls) used to fall through this
+					// gate, leaving the UI blank for that turn. The
+					// ExecuteResult.ToolCalls are populated by the
+					// capture-side hooks at all four Execute paths.
+					if execResult != nil &&
+						(execResult.Content != "" ||
+							execResult.Thinking != "" ||
+							len(execResult.ToolCalls) > 0) {
 						rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
-							Role:     "assistant",
-							Content:  execResult.Content,
-							Thinking: execResult.Thinking,
+							Role:      "assistant",
+							Content:   execResult.Content,
+							Thinking:  execResult.Thinking,
+							ToolCalls: execResult.ToolCalls,
 						})
 					}
 					h.store.Add(rc.reqLog)

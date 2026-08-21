@@ -205,22 +205,31 @@ func (h *Handler) executeExternal(
 		}
 	}
 
-	// Passive capture: parse content + reasoning_content from the
-	// post-translation response bytes (the bytes that are about to
-	// be written to the client). This is purely observational —
-	// bodyBytes is read-only here and w.Write(bodyBytes) below is
-	// unchanged. The captured strings are returned to the outer
-	// handler via ExecuteResult.Content / .Thinking so it can
+	// Passive capture: parse content + reasoning_content +
+	// tool_calls from the post-translation response bytes (the
+	// bytes that are about to be written to the client). This is
+	// purely observational — bodyBytes is read-only here and
+	// w.Write(bodyBytes) below is unchanged. The captured strings
+	// / tool calls are returned to the outer handler via
+	// ExecuteResult.Content / .Thinking / .ToolCalls so it can
 	// persist a store.Message for the Web UI.
+	//
+	// W7: tool-call-only responses (empty Content + empty Thinking
+	// + real tool_calls) previously left the UI empty because the
+	// outer persistence conditional skipped them. Now that we
+	// observe the tool_calls here, the outer conditional can also
+	// persist when ToolCalls is non-empty.
 	content, thinking := captureFromNonStreamResponse(bodyBytes)
+	toolCalls := captureToolCallsFromNonStreamResponse(bodyBytes)
 
 	// Write response
 	w.WriteHeader(resp.StatusCode)
 	_, err = w.Write(bodyBytes)
 	return &ExecuteResult{
-		Usage:    usage,
-		Content:  content,
-		Thinking: thinking,
+		Usage:     usage,
+		Content:   content,
+		Thinking:  thinking,
+		ToolCalls: toolCalls,
 	}, err
 }
 
@@ -306,12 +315,21 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	// Track the last chunk containing usage data
 	var lastUsageChunk []byte
 
-	// Capture-side only: accumulate Content + Thinking from
-	// each chunk that gets written to the client. The builders
-	// below are populated passively alongside the existing
-	// write-to-buf loop; nothing in the wire path is touched.
+	// Capture-side only: accumulate Content + Thinking +
+	// ToolCalls from each chunk that gets written to the client.
+	// The builders / accumulators below are populated passively
+	// alongside the existing write-to-buf loop; nothing in the
+	// wire path is touched.
 	var capturedContent strings.Builder
 	var capturedThinking strings.Builder
+
+	// W7: tool calls arrive as delta.tool_calls arrays in SSE
+	// chunks. Accumulate by index (mirrors
+	// pkg/proxy/handler_helpers.go's extractStreamChunkContent)
+	// so the outer persistence layer sees fully-assembled
+	// tool calls when streaming completes.
+	var capturedToolCalls []store.ToolCall
+	var capturedToolCallArgBuilders []*strings.Builder
 
 	// Create buffer to batch all writes like race executor does
 	var buf bytes.Buffer
@@ -400,11 +418,17 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 
 		// Capture-side only: observe the chunks that are about to
 		// be buffered to the client and accumulate any content /
-		// reasoning_content deltas. captureFromSSEChunkBytes is
-		// best-effort and never mutates the chunk bytes — it just
-		// parses them. Wire bytes to buf are unchanged.
+		// reasoning_content / tool_calls deltas.
+		// captureFromSSEChunkBytes is best-effort and never
+		// mutates the chunk bytes — it just parses them. Wire
+		// bytes to buf are unchanged.
 		for _, chunk := range chunksToEmit {
 			captureFromSSEChunkBytes(chunk, &capturedContent, &capturedThinking)
+			// W7: same shape of observation for tool calls —
+			// the wire bytes the client sees are the SAME
+			// bytes we are parsing here. captureFromSSEChunk*
+			// helpers below are read-only and best-effort.
+			captureToolCallsFromSSEChunk(chunk, &capturedToolCalls, &capturedToolCallArgBuilders)
 			buf.Write(chunk)
 		}
 	}
@@ -419,6 +443,13 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			// ignores chunks without delta.content /
 			// delta.reasoning_content, so this is safe.
 			captureFromSSEChunkBytes(chunk, &capturedContent, &capturedThinking)
+			// W7: same shape for tool calls — the
+			// tool-buffer's flush chunks ARE the bytes
+			// the client sees; observing them here is
+			// equivalent to parsing the wire output and
+			// cannot diverge from what capture-from-raw
+			// would see.
+			captureToolCallsFromSSEChunk(chunk, &capturedToolCalls, &capturedToolCallArgBuilders)
 			buf.Write(chunk)
 		}
 
@@ -463,9 +494,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	flusher.Flush()
 
 	return &ExecuteResult{
-		Usage:    usage,
-		Content:  capturedContent.String(),
-		Thinking: capturedThinking.String(),
+		Usage:     usage,
+		Content:   capturedContent.String(),
+		Thinking:  capturedThinking.String(),
+		ToolCalls: finalizeAccumulatedToolCalls(capturedToolCalls, capturedToolCallArgBuilders),
 	}, nil
 }
 

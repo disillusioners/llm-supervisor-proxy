@@ -193,9 +193,9 @@ func (h *Handler) handleInternalNonStream(
 		}
 	}
 
-	// Passive capture: pull content + reasoning_content from the
-	// typed response. The wire bytes have ALREADY been written
-	// above (json.NewEncoder(w).Encode(resp)) — this is pure
+	// Passive capture: pull content + reasoning_content + tool_calls
+	// from the typed response. The wire bytes have ALREADY been
+	// written above (json.NewEncoder(w).Encode(resp)) — this is pure
 	// read-only access to the in-memory response struct, so the
 	// client output is unchanged.
 	//
@@ -205,16 +205,39 @@ func (h *Handler) handleInternalNonStream(
 	// non-string forms, which is safe here because the upstream
 	// non-stream OpenAI response is always string-typed for text
 	// completions (the []ContentPart form is request-only).
+	//
+	// W7: tool calls come back fully assembled on the typed
+	// non-stream response (no streaming-accumulation needed). The
+	// providers.ToolCall carries an extra "index" field compared
+	// to store.ToolCall; we copy the persistence-relevant fields
+	// (id, type, function name + arguments) explicitly so the
+	// store.Message.ToolCalls shape is exactly what the Web UI
+	// reads (pkg/ui/frontend/src/components/RequestDetail.tsx).
 	var capturedContent, capturedThinking string
+	var capturedToolCalls []store.ToolCall
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		capturedContent = coerceContentString(resp.Choices[0].Message.Content)
 		capturedThinking = resp.Choices[0].Message.ReasoningContent
+		if len(resp.Choices[0].Message.ToolCalls) > 0 {
+			capturedToolCalls = make([]store.ToolCall, len(resp.Choices[0].Message.ToolCalls))
+			for i, tc := range resp.Choices[0].Message.ToolCalls {
+				capturedToolCalls[i] = store.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: store.Function{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
 	}
 
 	return &ExecuteResult{
-		Usage:    usage,
-		Content:  capturedContent,
-		Thinking: capturedThinking,
+		Usage:     usage,
+		Content:   capturedContent,
+		Thinking:  capturedThinking,
+		ToolCalls: capturedToolCalls,
 	}, nil
 }
 
@@ -268,13 +291,25 @@ func (h *Handler) handleInternalStream(
 	// Track usage from done event
 	var extractedUsage *store.Usage
 
-	// Capture-side only: accumulate Content + Thinking from
-	// typed provider events as we write them out. Builders
-	// stay local; nothing here is sent to the client. The
+	// Capture-side only: accumulate Content + Thinking +
+	// ToolCalls from typed provider events as we write them out.
+	// Builders stay local; nothing here is sent to the client. The
 	// string-builder pattern avoids the += memory trap across
 	// many stream chunks.
 	var capturedContent strings.Builder
 	var capturedThinking strings.Builder
+
+	// W7: tool calls arrive incrementally across "tool_call"
+	// events as partial providers.ToolCall deltas (index, ID,
+	// type, function name appear once; arguments fragments
+	// concatenate). Accumulate by index using the same
+	// shape-pattern as pkg/proxy/handler_helpers.go's
+	// extractStreamChunkContent — by-index Builder slice for
+	// arguments, parallel store.ToolCall slice for fixed fields
+	// (ID/Type/Name). finalise collapses arg builders into
+	// Function.Arguments at end-of-stream.
+	var capturedToolCalls []store.ToolCall
+	var capturedToolCallArgBuilders []*strings.Builder
 
 	// Accumulate raw SSE chunks for fallback token counting
 	var rawChunks bytes.Buffer
@@ -358,6 +393,40 @@ func (h *Handler) handleInternalStream(
 							"name":      tc.Function.Name,
 							"arguments": tc.Function.Arguments,
 						},
+					}
+
+					// W7: capture-side only. Mirror the same
+					// per-index accumulation pattern that
+					// pkg/proxy/handler_helpers.go's
+					// extractStreamChunkContent uses so the
+					// outer persistence layer sees the
+					// fully-assembled ToolCalls. The typed
+					// event.ToolCalls slice is the SAME data
+					// the proxy just wrote into `toolCalls`
+					// above (delta fields), so capturing here
+					// is observationally equivalent to parsing
+					// the wire bytes — without an extra JSON
+					// pass. The `index` here is the
+					// proxy-internal reassigned index (seenToolCallIDs)
+					// that the wire observer will see.
+					for len(capturedToolCalls) <= index {
+						capturedToolCalls = append(capturedToolCalls, store.ToolCall{})
+						b := &strings.Builder{}
+						b.Grow(1024)
+						capturedToolCallArgBuilders = append(capturedToolCallArgBuilders, b)
+					}
+					ctc := &capturedToolCalls[index]
+					if tc.ID != "" {
+						ctc.ID = tc.ID
+					}
+					if tc.Type != "" {
+						ctc.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
+						ctc.Function.Name = tc.Function.Name
+					}
+					if tc.Function.Arguments != "" {
+						capturedToolCallArgBuilders[index].WriteString(tc.Function.Arguments)
 					}
 				}
 				chunk := map[string]interface{}{
@@ -493,9 +562,10 @@ func (h *Handler) handleInternalStream(
 			flusher.Flush()
 
 			return &ExecuteResult{
-				Usage:    extractedUsage,
-				Content:  capturedContent.String(),
-				Thinking: capturedThinking.String(),
+				Usage:     extractedUsage,
+				Content:   capturedContent.String(),
+				Thinking:  capturedThinking.String(),
+				ToolCalls: finalizeAccumulatedToolCalls(capturedToolCalls, capturedToolCallArgBuilders),
 			}, nil
 
 		case "error":
