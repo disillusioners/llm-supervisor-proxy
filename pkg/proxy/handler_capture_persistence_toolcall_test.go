@@ -49,8 +49,8 @@ func mockUltimateExternalToolCallResponse(toolCalls []map[string]interface{}, pr
 			{
 				"index": 0,
 				"message": map[string]interface{}{
-					"role":    "assistant",
-					"content": "",
+					"role":       "assistant",
+					"content":    "",
 					"tool_calls": toolCalls,
 				},
 				"finish_reason": "tool_calls",

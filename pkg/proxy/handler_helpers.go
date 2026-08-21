@@ -162,6 +162,28 @@ func extractParameters(requestBody map[string]interface{}) map[string]interface{
 // parseMessages converts the raw JSON "messages" array to store.Message slice.
 // Handles both string content and array content (OpenAI multimodal format).
 // Also extracts tool_calls for assistant messages.
+//
+// TEST-ONLY ORACLE — NOT FOR PRODUCTION USE.
+//
+// This function is retained ONLY as a regression oracle for the request-
+// side message adapter. The production request-capture path was migrated
+// to the OpenAI adapter (NewOpenAIAdapter().ToStoreMessages, see
+// handler_functions.go:49) in 8185c76, which also captures
+// reasoning_content → Thinking (the legacy path below silently dropped
+// it). The two paths DIVERGE on one specific input:
+//   - parseMessages keeps messages whose `role` is the empty string
+//     (Role: ""), preserving them in the returned slice verbatim.
+//   - parseOpenAIMessages (the new adapter path) SKIPS those
+//     messages — see adapter_helpers.go:60-63.
+//
+// New production code MUST call NewOpenAIAdapter().ToStoreMessages, not
+// this function. The only legitimate callers are the regression test
+// at handler_functions_test.go (TestInitRequestContext_NoRegressionOnMissingReasoningContent)
+// which uses parseMessages to compute the "expected" output of the new
+// path on legacy-shaped inputs, and any future test that needs to assert
+// pre-migration behavior. The S3 pin test
+// (TestInitRequestContext_ToStoreMessagesDropsEmptyRole) documents the
+// intentional empty-role divergence between the two paths.
 func parseMessages(requestBody map[string]interface{}) []store.Message {
 	var storeMessages []store.Message
 	if msgs, ok := requestBody["messages"].([]interface{}); ok {

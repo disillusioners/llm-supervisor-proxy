@@ -100,6 +100,105 @@ func TestInitRequestContext_CapturesRequestReasoningContent(t *testing.T) {
 	}
 }
 
+// TestInitRequestContext_ToStoreMessagesDropsEmptyRole is the S3 pin
+// test: it documents the INTENTIONAL divergence between the legacy
+// parseMessages (kept as a test oracle) and the new production
+// adapter path (NewOpenAIAdapter().ToStoreMessages →
+// parseOpenAIMessages) on a request body that contains a message
+// with role == "".
+//
+// Legacy parseMessages KEPT such a message in the returned slice
+// verbatim (Role: ""), while the new adapter path SKIPS it (see
+// adapter_helpers.go:60-63 — `if role == "" { continue }`). The
+// new behavior is the desired one: messages with no role carry no
+// information the store or Web UI can render, and the previous
+// behavior of preserving a Role: "" entry was a side effect of the
+// original parser's permissive loop, not a designed contract.
+//
+// This test pins that divergence so any future change to either
+// path is forced to make the divergence decision explicitly (instead
+// of accidentally re-aligning them via a refactor).
+func TestInitRequestContext_ToStoreMessagesDropsEmptyRole(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := newTestHandlerWithURL(t, upstream.URL)
+
+	// Mix of empty-role and well-formed messages; the empty-role
+	// entry has non-empty content + tool_calls (so the divergence
+	// is about role, not about content presence).
+	body := map[string]interface{}{
+		"model": "test-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "system", "content": "You are helpful."},
+			map[string]interface{}{"role": "", "content": "orphan with empty role"}, // dropped by new path
+			map[string]interface{}{"role": "user", "content": "Hello"},
+			map[string]interface{}{"role": "", "content": "second orphan"}, // dropped by new path
+		},
+	}
+
+	// 1. Reference: legacy parseMessages KEEPS the empty-role
+	//    entries (Role: "" in the output). This is the pre-8185c76
+	//    behavior the test oracle preserves.
+	legacy := parseMessages(body)
+	if len(legacy) != 4 {
+		t.Fatalf("legacy parseMessages returned %d messages, want 4 (it must keep empty-role entries)", len(legacy))
+	}
+	emptyRoleCount := 0
+	for _, m := range legacy {
+		if m.Role == "" {
+			emptyRoleCount++
+		}
+	}
+	if emptyRoleCount != 2 {
+		t.Fatalf("legacy parseMessages kept %d empty-role messages, want 2 (sanity check on oracle behavior)", emptyRoleCount)
+	}
+
+	// 2. Production: h.initRequestContext calls
+	//    NewOpenAIAdapter().ToStoreMessages which routes through
+	//    parseOpenAIMessages. The empty-role entries MUST be
+	//    dropped — only the 2 well-formed messages survive.
+	req := buildRequestBodyForInitContext(t, body)
+	rc, err := h.initRequestContext(req)
+	if err != nil {
+		t.Fatalf("initRequestContext() error = %v", err)
+	}
+	got := rc.reqLog.Messages
+	if len(got) != 2 {
+		t.Fatalf("got %d store messages, want 2 (the new adapter path drops empty-role entries)\ngot: %+v", len(got), got)
+	}
+
+	// 3. Explicit empty-role assertion: the new path must NOT
+	//    contain a Role: "" entry under any index.
+	for i, m := range got {
+		if m.Role == "" {
+			t.Errorf("got[%d].Role = %q, want non-empty (new adapter path must drop empty-role messages)", i, m.Role)
+		}
+	}
+
+	// 4. Content sanity: the surviving messages are the
+	//    system + user entries, in order.
+	if got[0].Role != "system" || got[0].Content != "You are helpful." {
+		t.Errorf("got[0] = %+v, want {Role: system, Content: You are helpful.}", got[0])
+	}
+	if got[1].Role != "user" || got[1].Content != "Hello" {
+		t.Errorf("got[1] = %+v, want {Role: user, Content: Hello}", got[1])
+	}
+
+	// 5. Adapter-direct comparison: calling the production
+	//    adapter without going through initRequestContext must
+	//    produce the same drop. This guards against an
+	//    initRequestContext refactor that silently re-aligns the
+	//    behavior.
+	direct := NewOpenAIAdapter().ToStoreMessages(body)
+	if len(direct) != 2 {
+		t.Errorf("OpenAIAdapter().ToStoreMessages returned %d messages, want 2 (empty-role entries must be dropped)", len(direct))
+	}
+}
+
 // TestInitRequestContext_NoRegressionOnMissingReasoningContent is the
 // regression guard: for request bodies that do NOT contain reasoning_content,
 // the store messages produced by initRequestContext must be IDENTICAL to what
