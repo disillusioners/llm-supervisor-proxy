@@ -26,6 +26,7 @@ type InternalHandler struct {
 	requestID     string                         // Optional: request ID for buffer naming
 	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
+	thinkingSink  *strings.Builder               // Optional: side-channel sink for case "thinking" reasoning text (never written to w)
 
 	// Tool call buffer configuration
 	toolCallBufferMaxSize  int64              // Max size for tool call buffer
@@ -56,6 +57,15 @@ func (h *InternalHandler) SetToolCallBufferConfig(maxSize int64, disabled bool, 
 	h.toolCallBufferMaxSize = maxSize
 	h.toolCallBufferDisabled = disabled
 	h.toolRepairConfig = repairConfig
+}
+
+// SetThinkingSink installs a side-channel sink for reasoning/thinking text
+// captured during streaming. When set, case "thinking" events are written to
+// the sink ONLY — no SSE chunk is emitted on the wire (w). Callers use the
+// sink to persist store.Message.Thinking without leaking thinking deltas
+// into the OpenAI stream that gets translated to Anthropic.
+func (h *InternalHandler) SetThinkingSink(sink *strings.Builder) {
+	h.thinkingSink = sink
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -179,6 +189,20 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			logger.Debugf("[DEBUG INTERNAL] Writing chunk: %s", string(data))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+
+		case "thinking":
+			// Capture reasoning/thinking text via side channel ONLY.
+			// The recorder (`w`) is consumed downstream by
+			// translator.TranslateBufferedStream, which would convert any
+			// reasoning_content delta we wrote here into Anthropic thinking
+			// blocks the client would receive. That violates the byte-identity
+			// contract with the pre-fix behaviour, so we deliberately stay
+			// silent on the wire and accumulate event.ReasoningContent into
+			// the optional thinkingSink for persistence instead.
+			if h.thinkingSink != nil {
+				h.thinkingSink.WriteString(event.ReasoningContent)
+			}
+			logger.Debugf("[DEBUG INTERNAL] Captured thinking (side channel): %s", event.ReasoningContent)
 
 		case "tool_call":
 			// Write tool_call delta

@@ -457,14 +457,33 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 
 	log.Printf("[DEBUG ANTHROPIC] Creating InternalHandler for model: %s", modelConfig.ID)
 
+	// Side-channel sink for thinking/reasoning text. The InternalHandler's
+	// case "thinking" arm deliberately does NOT write reasoning_content SSE
+	// chunks to `w`, because the recorder body is fed to
+	// translator.TranslateBufferedStream which would emit Anthropic thinking
+	// blocks to the client (violating byte-identity with the pre-fix
+	// behaviour). Instead we accumulate the thinking text in this builder and
+	// copy it into arc.accumulatedThinking below for persistence.
+	var capturedThinking strings.Builder
+
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
+	internalHandler.SetThinkingSink(&capturedThinking)
 	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
 		arc.lastError = []byte(err.Error())
 		arc.lastStatusCode = http.StatusBadGateway
 		return false
+	}
+
+	// Persist any captured thinking text (side channel) so the final
+	// store.Message.Thinking field still gets populated. This runs BEFORE
+	// the response handler because handleAnthropicInternalStreamResponse
+	// calls extractOpenAIResponseContentFromSSE, which will now return an
+	// empty thinking string (the recorder no longer carries thinking SSE).
+	if capturedThinking.Len() > 0 {
+		arc.accumulatedThinking.WriteString(capturedThinking.String())
 	}
 
 	// Check response status

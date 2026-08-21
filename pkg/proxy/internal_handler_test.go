@@ -1,11 +1,39 @@
 package proxy
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
+
+// streamEventProvider is a minimal providers.Provider that emits a scripted
+// list of StreamEvents on StreamChatCompletion. Used by handleStream unit tests.
+type streamEventProvider struct {
+	events []providers.StreamEvent
+}
+
+func (p *streamEventProvider) Name() string { return "stream-event-mock" }
+
+func (p *streamEventProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	return nil, nil
+}
+
+func (p *streamEventProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	ch := make(chan providers.StreamEvent, len(p.events))
+	for _, e := range p.events {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (p *streamEventProvider) IsRetryable(err error) bool { return false }
 
 // mockModelsConfig implements models.ModelsConfigInterface for testing
 type mockModelsConfig struct {
@@ -310,5 +338,197 @@ func TestNewInternalHandler(t *testing.T) {
 	}
 	if handler.resolver != mockResolver {
 		t.Error("handler resolver mismatch")
+	}
+}
+
+// runHandleStreamWithEvents drives handleStream with a scripted provider
+// and returns the captured SSE bytes plus the optional thinking sink. Pass
+// sink=nil when the test does not care about captured thinking; pass a fresh
+// strings.Builder to wire the side channel exactly as doAnthropicInternalRequest
+// does at runtime. The body is returned verbatim so each test can assert on
+// its own assertions.
+func runHandleStreamWithEvents(t *testing.T, events []providers.StreamEvent, sink *strings.Builder) string {
+	t.Helper()
+
+	provider := &streamEventProvider{events: events}
+	handler := &InternalHandler{
+		config:   &models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		resolver: &mockModelsConfig{},
+	}
+	if sink != nil {
+		handler.SetThinkingSink(sink)
+	}
+
+	req := &providers.ChatCompletionRequest{
+		Model: "test-model",
+		Messages: []providers.ChatMessage{
+			{Role: "user", Content: "Hi"},
+		},
+		Stream: true,
+	}
+
+	rec := &flushingResponseRecorder{httptest.NewRecorder()}
+	if err := handler.handleStream(context.Background(), provider, req, rec, "gpt-4"); err != nil {
+		t.Fatalf("handleStream returned error: %v", err)
+	}
+	return rec.Body.String()
+}
+
+// TestInternalHandler_handleStream_ThinkingCaptured asserts that thinking
+// StreamEvents are captured via the side-channel sink (so they reach the
+// persisted store.Message.Thinking field via doAnthropicInternalRequest's
+// wiring) and that the recorder body is BYTE-FREE of thinking — no
+// reasoning_content, no thinking SSE chunks. Content deltas remain wire-visible
+// exactly as before. This is the corrective test for d7300cb: it fixes the
+// regression where reasoning_content leaked into the recorder and got
+// translated into Anthropic thinking blocks on the wire.
+func TestInternalHandler_handleStream_ThinkingCaptured(t *testing.T) {
+	var sink strings.Builder
+	body := runHandleStreamWithEvents(t, []providers.StreamEvent{
+		{Type: "thinking", ReasoningContent: "Let me think about this..."},
+		{Type: "content", Content: "Hello, world!"},
+		{Type: "thinking", ReasoningContent: " More thinking."},
+		{Type: "done", FinishReason: "stop"},
+	}, &sink)
+
+	// Negative: thinking text MUST NOT appear in the recorder body (wire).
+	// The downstream translator.TranslateBufferedStream would otherwise turn
+	// these into Anthropic thinking blocks the client would receive.
+	if strings.Contains(body, "reasoning_content") {
+		t.Errorf("recorder must not contain reasoning_content; body=%q", body)
+	}
+	if strings.Contains(body, `"thinking":`) {
+		t.Errorf("recorder must not contain thinking delta; body=%q", body)
+	}
+	if strings.Contains(body, "Let me think about this") {
+		t.Errorf("thinking text must not leak into recorder body; body=%q", body)
+	}
+
+	// Positive: content chunk is still wire-visible and unaffected.
+	if !strings.Contains(body, `"content":"Hello, world!"`) {
+		t.Errorf("expected content chunk to be captured; body=%q", body)
+	}
+
+	// Positive: side-channel sink has the concatenated thinking text. This
+	// is the value doAnthropicInternalRequest copies into
+	// arc.accumulatedThinking so the persisted store.Message.Thinking gets
+	// populated.
+	if got := sink.String(); got != "Let me think about this... More thinking." {
+		t.Errorf("expected sink to receive concatenated thinking; got %q", got)
+	}
+
+	// Negative: extractOpenAIResponseContentFromSSE on the recorder body now
+	// returns empty thinking (no longer carries reasoning_content), which
+	// proves the recorder is the wire-clean surface — the persistence path
+	// uses the sink instead.
+	_, thinking, _ := extractOpenAIResponseContentFromSSE([]byte(body))
+	if thinking != "" {
+		t.Errorf("recorder-based extraction must now yield empty thinking; got %q", thinking)
+	}
+}
+
+// TestInternalHandler_handleStream_NoThinkingUnchanged is the regression
+// guard: a stream without thinking events must produce a body that does not
+// contain any reasoning_content fields, and content extraction is unaffected.
+func TestInternalHandler_handleStream_NoThinkingUnchanged(t *testing.T) {
+	body := runHandleStreamWithEvents(t, []providers.StreamEvent{
+		{Type: "content", Content: "Hello, world!"},
+		{Type: "done", FinishReason: "stop"},
+	}, nil)
+
+	if strings.Contains(body, `reasoning_content`) {
+		t.Errorf("unexpected reasoning_content in body when no thinking events emitted; body=%q", body)
+	}
+	if !strings.Contains(body, `"content":"Hello, world!"`) {
+		t.Errorf("expected content chunk to be captured; body=%q", body)
+	}
+
+	content, thinking, _ := extractOpenAIResponseContentFromSSE([]byte(body))
+	if content != "Hello, world!" {
+		t.Errorf("expected extracted content 'Hello, world!', got %q", content)
+	}
+	if thinking != "" {
+		t.Errorf("expected empty thinking, got %q", thinking)
+	}
+}
+
+// normalizeSSERecorderBody strips the per-chunk non-deterministic fields
+// (id, created, chunk index inside model timestamp) from a recorder SSE body
+// so two structurally-identical streams can be byte-compared. The function
+// preserves the wire shape (line layout, content, tool_calls, finish_reason,
+// [DONE] marker) so any drift in those fields would still show up.
+func normalizeSSERecorderBody(s string) string {
+	var out strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(s))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			out.WriteString(line)
+			out.WriteByte('\n')
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			out.WriteString(line)
+			out.WriteByte('\n')
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			// Leave the line unchanged so the comparison catches malformed bytes.
+			out.WriteString(line)
+			out.WriteByte('\n')
+			continue
+		}
+		delete(chunk, "id")
+		delete(chunk, "created")
+		normalized, _ := json.Marshal(chunk)
+		out.WriteString("data: ")
+		out.Write(normalized)
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+// TestInternalHandler_handleStream_ThinkingByteIdentity is the byte-identity
+// regression that guards the hard constraint: a thinking-event stream must
+// produce a recorder body that, when normalized, is byte-identical to a
+// stream that emits only the same content events (i.e. thinking contributes
+// zero bytes to the recorder — exactly the pre-fix behaviour). Per-chunk
+// `id`/`created` are stripped from both bodies so the comparison is stable
+// across runs.
+func TestInternalHandler_handleStream_ThinkingByteIdentity(t *testing.T) {
+	contentA := "Hello, world!"
+	contentB := "Goodbye!"
+
+	// Stream WITH thinking events. Side channel is wired but irrelevant for
+	// the byte-identity comparison — we only look at the recorder body.
+	var sink strings.Builder
+	bodyWithThinking := runHandleStreamWithEvents(t, []providers.StreamEvent{
+		{Type: "thinking", ReasoningContent: "deep thought A"},
+		{Type: "content", Content: contentA},
+		{Type: "thinking", ReasoningContent: " even deeper thought A"},
+		{Type: "content", Content: contentB},
+		{Type: "done", FinishReason: "stop"},
+	}, &sink)
+
+	// Stream WITHOUT thinking events (control).
+	bodyWithoutThinking := runHandleStreamWithEvents(t, []providers.StreamEvent{
+		{Type: "content", Content: contentA},
+		{Type: "content", Content: contentB},
+		{Type: "done", FinishReason: "stop"},
+	}, nil)
+
+	// Sanity: the sink must have the thinking text on the thinking stream
+	// (catches a future regression where someone drops the sink wiring).
+	if sink.String() == "" {
+		t.Errorf("expected sink to be populated on thinking stream")
+	}
+
+	normA := normalizeSSERecorderBody(bodyWithThinking)
+	normB := normalizeSSERecorderBody(bodyWithoutThinking)
+	if normA != normB {
+		t.Errorf("recorder body must be byte-identical (modulo id/created) when thinking events are present vs absent; diff:\nwith=%q\nwithout=%q", normA, normB)
 	}
 }
