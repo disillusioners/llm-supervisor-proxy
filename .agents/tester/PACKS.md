@@ -15,16 +15,16 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-05-30 | PASS |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-05-30 | PASS |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-05-30 | PASS |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-05-30 | PASS |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-05-08 | PASS |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-05-08 | PASS |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-05-08 | PASS |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-05-08 | PASS |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-21 | PASS (376 top-level, 7 intentional skips; @ ec1efb6 reasoning-observability regression gate) |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-21 | PASS (142 top-level incl. rewritten-capture gate tests) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-21 | PASS (77 + 4 PG-gated skips) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-21 | PASS (87 top-level funcs) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-21 | PASS (17 funcs / 105 subtests) |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-21 | PASS (31/31) |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-21 | PASS (48 top-level) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-21 | PASS (14 funcs / 100% subtests) |
 | mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-21 | PASS |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-05-18 | PASS |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-21 | PASS (348 incl. pkg/ui FE API surface) |
 
 ## Mock Test Packs
 
@@ -34,13 +34,15 @@
 | frontend_api_cache_mock | test/mock_frontend_api_cache.mjs | Unit | 60s | 2026-04-09 | PASS |
 | allowed_models_integration | test/integration_allowed_models_test.go | Integration | N/A (Go test) | 2026-05-01 | PASS |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E | N/A (Go test) | 2026-05-05 | PASS |
-| ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-18 | PASS (48/48; after harness repairs `2f67976`+`d1028be` — Test 8 pre-existing timeout mismatch, not a regression of 83814b0) |
-| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-18 | PASS (60/60) |
-| e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-18 | PASS (commit `c3a4b35`; negative-control proven: fails with fix reverted) |
-| minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 90s internal / `timeout 300` outer | 2026-08-19 | **PASS 53/53** — found + verified + fixed T3b product bug (race-internal reasoning destruction; fix `068317c`, harness repair `1344380`, harness commit `882fa3f`). Header hygiene 0 leaks/13 captures, cumulative suffix, single-winner, usage, ultimate path all green |
-| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-19 | **PASS 43/43** @ `b2dfde0` (suite commit `166aa7f`; found + fixed S3 cross-path id divergence, fix `b2dfde0`; drift counter delta 0) |
+| ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-21 | PASS (48/48 @ db7aca0+; Test 8 clean, harness repairs held) |
+| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-21 | PASS (60/60 @ db7aca0+) |
+| e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-21 | PASS @ db7aca0+ (negative-control suite stays green through capture rewrite) |
+| minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 90s internal / `timeout 300` outer | 2026-08-21 | **PASS 53/53** @ db7aca0+ (header hygiene 0 leaks, cumulative suffix, single-winner, usage, ultimate path; T3b fix `068317c` still green) |
+| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS 43/43** @ db7aca0+ (drift counter delta 0; S14 header hygiene 0 leaks; unchanged from 2026-08-19 baseline) |
 | minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
 | proxyheader_header_table | inline: `go test ./pkg/proxyheader/ -run 'Interleaved' -count=1` | Unit (P3-7 header value truth table verify) | `timeout 300` | 2026-08-19 | **PASS** — satisfied by existing 21 sub-cases (all 7 plan values covered, file:line-cited); precedent match confirmed; single-source semantics confirmed (2 call sites via proxyheader.*); NO gap-fill needed |
+| fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS** — closure gate 4/4 (glm-5.3 non-stream → FE `messages[last].thinking` byte-exact, request-side, negative-omitempty, TSX field-shape match) + matrix 16/16 (R1-R10 all paths × modes, N1-N4 zero-thinking cleanliness, M1-M2 minimax translated) @ commits `2a3cf7e`/`2317a59` |
+| anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS** — 3/3 scenarios @ `63b7701`; mutation-proven non-vacuous (leak re-injected in worktree → S1 FAILs with 4 detections); S3 wire byte-identical at parent `effc345` (translated block pre-existing from translator/response.go, not fix-introduced) |
 
 #### minimax_interleaved_matrix — exact runnable command
 
