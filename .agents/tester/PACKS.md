@@ -39,8 +39,19 @@
 | e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-18 | PASS (commit `c3a4b35`; negative-control proven: fails with fix reverted) |
 | minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 90s internal / `timeout 300` outer | 2026-08-19 | **PASS 53/53** — found + verified + fixed T3b product bug (race-internal reasoning destruction; fix `068317c`, harness repair `1344380`, harness commit `882fa3f`). Header hygiene 0 leaks/13 captures, cumulative suffix, single-winner, usage, ultimate path all green |
 | e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-19 | **PASS 43/43** @ `b2dfde0` (suite commit `166aa7f`; found + fixed S3 cross-path id divergence, fix `b2dfde0`; drift counter delta 0) |
-| minimax_interleaved_matrix | inline: `go test ./pkg/proxy/ ./pkg/ultimatemodel/ -run 'Interleaved\|MiniMax\|Reasoning' -count=1` | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-19 | **PASS** — 32/32 cells (12 gap-fills in `*_matrix_test.go` ×2, commit `ee590c1`; 2 N/A cells: internal-N3 errors before response side; ultim-int stream baseline emits NO usage final-chunk → W8 asserts absence) |
+| minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
 | proxyheader_header_table | inline: `go test ./pkg/proxyheader/ -run 'Interleaved' -count=1` | Unit (P3-7 header value truth table verify) | `timeout 300` | 2026-08-19 | **PASS** — satisfied by existing 21 sub-cases (all 7 plan values covered, file:line-cited); precedent match confirmed; single-source semantics confirmed (2 call sites via proxyheader.*); NO gap-fill needed |
+
+#### minimax_interleaved_matrix — exact runnable command
+
+```bash
+# ⚠️ NOT 'Interleaved\|MiniMax\|Reasoning' — in single quotes, go's RE2 reads
+# \| as an ESCAPED LITERAL PIPE and matches ZERO tests (vacuous exit-0 PASS).
+# The `\|` form only ever worked unquoted, where the shell strips the backslash.
+timeout 300 go test ./pkg/proxy/ ./pkg/ultimatemodel/ -run 'Interleaved|MiniMax|Reasoning' -count=1 -timeout 280s
+```
+
+Expected: 17 test funcs in `pkg/proxy` + 17 in `pkg/ultimatemodel` = **34 test functions** (46 `--- PASS` lines incl. 12 subtests), exit 0. If output says `[no tests to run]`, the quoting regression has returned — see `LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md`.
 
 ---
 
