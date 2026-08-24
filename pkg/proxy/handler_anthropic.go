@@ -581,7 +581,7 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 	// Send headers if not already sent
 	if !arc.headersSent {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
@@ -647,7 +647,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 	// Send headers immediately for TTFB
 	if !arc.headersSent {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
@@ -1058,7 +1058,7 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 	// Send headers immediately for TTFB
 	if !arc.headersSent {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)

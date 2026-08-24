@@ -146,7 +146,7 @@ func mockOpenAIHandler(t *testing.T) http.HandlerFunc {
 
 		// Streaming response
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 

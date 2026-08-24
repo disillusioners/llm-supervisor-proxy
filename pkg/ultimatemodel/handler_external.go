@@ -273,7 +273,7 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool) (*ExecuteResult, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 

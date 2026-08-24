@@ -26,7 +26,7 @@ import (
 func mockHeartbeatTestHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -52,7 +52,7 @@ func mockHeartbeatTestHandler() http.HandlerFunc {
 func mockSlowDataHandler(stopCh <-chan struct{}, chunkInterval time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -396,7 +396,7 @@ func min(a, b int) int {
 func mockDelayedUpstream(delay time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -511,7 +511,7 @@ func TestHeartbeat_StartsBeforeWaitForWinner(t *testing.T) {
 func mockNeverEndingUpstream(stopCh <-chan struct{}, dataInterval time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 

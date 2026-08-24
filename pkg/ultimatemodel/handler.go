@@ -541,7 +541,7 @@ func (h *Handler) SendRetryExhaustedError(
 	if isStream {
 		// SSE format for streaming requests
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
 		fmt.Fprintf(w, "data: %s\n\n", string(errorJSON))

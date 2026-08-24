@@ -136,7 +136,7 @@ func mockLLMHandler(t *testing.T) http.HandlerFunc {
 
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 
@@ -1004,7 +1004,7 @@ func mockLoopExactHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -1036,7 +1036,7 @@ func mockLoopSimilarHandler() http.HandlerFunc {
 		msg := variations[(callCount-1)%len(variations)]
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -1125,7 +1125,7 @@ func TestLoopDetection_ToolCallExtraction(t *testing.T) {
 		r.Body.Close()
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 

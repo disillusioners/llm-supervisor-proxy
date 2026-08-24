@@ -212,8 +212,8 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
-	if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache")
+	if cc := w.Header().Get("Cache-Control"); cc != "no-cache, no-transform" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache, no-transform")
 	}
 
 	// Check SSE body contains expected events

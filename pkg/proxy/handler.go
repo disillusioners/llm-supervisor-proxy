@@ -780,8 +780,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// This ensures client receives heartbeats during race retry wait time
 	var heartbeatCancel context.CancelFunc
 	if rc.isStream {
+		// SSE headers — Cache-Control: no-cache alone is insufficient
+		// for Cloudflare (and similar CDNs). `no-transform` is required
+		// to disable CF's response buffering and asset optimization, otherwise
+		// even frequent SSE heartbeats sit in CF's buffer until CF's
+		// 100/180s read timeout triggers (524 — proxy disconnects the
+		// client even though the upstream response is still streaming).
+		// See: CF docs §"no-transform" + §"Streaming responses".
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)

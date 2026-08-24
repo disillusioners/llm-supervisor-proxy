@@ -328,7 +328,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 
 	flusher, ok := w.(http.Flusher)
