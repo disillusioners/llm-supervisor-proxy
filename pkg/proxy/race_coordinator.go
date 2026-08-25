@@ -168,8 +168,6 @@ func (c *raceCoordinator) publishEvent(eventType string, data map[string]interfa
 func (c *raceCoordinator) Start() {
 	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
 
-	log.Printf("[PEAK-DBG] race_coordinator.Start: models=%v, len=%d", c.models, len(c.models))
-
 	// Publish race_started event
 	c.publishEvent("race_started", map[string]interface{}{
 		"models": c.models,
@@ -226,7 +224,6 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	c.spawnTriggers = append(c.spawnTriggers, triggerInfo)
 
 	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, triggerInfo.trigger)
-	log.Printf("[PEAK-DBG] race_coordinator.spawn: mType=%v, idx=%d, modelID=%q", mType, idx, modelID)
 
 	// Build event data with detailed error info if available
 	eventData := map[string]interface{}{

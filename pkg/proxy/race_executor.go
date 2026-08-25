@@ -77,14 +77,11 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
 	req.MarkStarted()
 
-	log.Printf("[PEAK-DBG] executeRequest ENTRY: req.modelID=%q, req.modelType=%v", req.modelID, req.modelType)
-
 	// Check if this model uses internal upstream
 	// Note: ModelsConfig may be nil in tests, so check first
 	if cfg.ModelsConfig != nil {
 		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
 
-		log.Printf("[PEAK-DBG] executeRequest: modelConfig found, Internal=%v, modelID=%q", modelConfig != nil && modelConfig.Internal, req.modelID)
 		if modelConfig != nil && modelConfig.Internal {
 			return executeInternalRequest(ctx, cfg, rawBody, req, interleaved)
 		}
@@ -141,7 +138,6 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		provider, apiKey, baseURL, internalModel, ok = cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
 	}
 
-	log.Printf("[PEAK-DBG] executeInternalRequest: req.modelID=%q -> ResolveInternalConfig returned internalModel=%q, ok=%v", req.modelID, internalModel, ok)
 	if !ok {
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
 	}
