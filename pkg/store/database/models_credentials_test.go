@@ -83,7 +83,7 @@ func TestModelsCredentials_CRUD_RoundTrip(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestModelsCredentials_ValidationMatrix(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	_, err := NewModelsManager(store)
+	_, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestModelsCredentials_InUseGuard(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestModelsCredentials_SingleCredentialGoldenTuple(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestModelsCredentials_PeakHourGoldenTuple(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestModelsCredentials_M1ShadowWriteContract(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestModelsCredentials_ValidationMatrix_DB(t *testing.T) {
 	store, cleanup := newStoreWithMigrations(t)
 	defer cleanup()
 
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("NewModelsManager: %v", err)
 	}

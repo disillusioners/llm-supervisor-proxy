@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -452,10 +453,10 @@ type dbModelRow struct {
 	UpdatedAt                  string
 	ReleaseStreamChunkDeadline int64 // Deadline in milliseconds for releasing stream chunks
 	// Internal upstream fields
-	Internal          interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
-	CredentialsJSON   string      // JSON array of CredentialRef; column = credentials_json (M-1)
-	InternalBaseURL   string      // Base URL override (optional)
-	InternalModel     string
+	Internal        interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	CredentialsJSON string      // JSON array of CredentialRef; column = credentials_json (M-1)
+	InternalBaseURL string      // Base URL override (optional)
+	InternalModel   string
 	// Peak hour configuration
 	PeakHourEnabled  interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
 	PeakHourStart    string
@@ -593,30 +594,140 @@ func marshalCredentialsJSON(refs []models.CredentialRef) string {
 // thread, and the comments above (this contract and the Task 13
 // test are deleted together).
 //
-// Engine field is the Phase 2 forward seam: added here as an
-// unexported pointer + nil-safe accessor so the proxy.NewHandler
-// wiring site can pick it up without a separate Phase 1 commit.
-// The pointer is `nil` for legacy / single-credential fast path.
+// Phase 2 wiring: ModelsManager OWNS the credentiallb.Engine —
+// constructed in NewModelsManager (24h TTL / 5m sweep / time-seeded
+// RNG / 60s default cooldown), seeded via RebindFromStore for every
+// persisted model at startup, invalidated after every successful
+// credentials write, and exposed to Phase 3 via the typed Engine()
+// accessor (for the proxy.NewHandler 7th constructor arg). The
+// engine itself never imports pkg/events: ModelsManager subscribes
+// to model.credentials.changed ON BEHALF of the engine (P2-3) and
+// forwards events into engine method calls by re-reading the model.
 type ModelsManager struct {
-	store  *Store
-	qb     *QueryBuilder
-	mu     sync.RWMutex
-	engine interface{} // *credentiallb.Engine (forward seam, Phase 2 wires it)
+	store     *Store
+	qb        *QueryBuilder
+	mu        sync.RWMutex
+	engine    *credentiallb.Engine
+	eventBus  *events.Bus
+	subCh     chan events.Event // nil when constructed without a bus
+	closeOnce sync.Once
 }
 
-// Engine returns the underlying *credentiallb.Engine. Returns nil if
-// the ModelsManager was constructed without an engine (legacy /
-// tests / Phase 1 fast path). Callers must handle the nil case.
-func (m *ModelsManager) Engine() interface{} {
+// Engine returns the underlying *credentiallb.Engine. It is non-nil
+// for every ModelsManager built via NewModelsManager; it returns nil
+// only for hand-constructed instances (legacy tests). Callers must
+// still handle the nil case — the engine's own methods are nil-safe
+// no-ops, and ResolveInternalConfigWithAffinity delegates to the
+// legacy single-credential resolution when the engine is nil.
+func (m *ModelsManager) Engine() *credentiallb.Engine {
 	return m.engine
 }
 
-// NewModelsManager creates a new database-backed models manager
-func NewModelsManager(store *Store) (*ModelsManager, error) {
-	return &ModelsManager{
-		store: store,
-		qb:    NewQueryBuilder(store.Dialect),
-	}, nil
+// NewModelsManager creates a new database-backed models manager with
+// an owned credential-LB engine (Phase 2).
+//
+// The engine is constructed with the production defaults (24h
+// sliding-idle TTL, 5m janitor sweep, time-based RNG seed, 60s
+// default cooldown) and seeded from the persisted models via
+// RebindFromStore (startup rebind — last call wins, no bindings
+// exist yet).
+//
+// eventBus may be nil: the engine then runs with direct-call
+// invalidation only (AddModel/UpdateModel/RemoveModel/
+// RemoveCredential still notify it synchronously) and a WARN is
+// logged — the defensive still-in-config lookup check inside
+// GetOrSelect bounds the damage of any missed invalidation to one
+// request (P2-8). When non-nil, ModelsManager subscribes to
+// model.credentials.changed on the engine's behalf; the drain
+// goroutine exits when Close unsubscribes (the bus closes the
+// channel) — call Close to release it.
+func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error) {
+	m := &ModelsManager{
+		store:    store,
+		qb:       NewQueryBuilder(store.Dialect),
+		eventBus: eventBus,
+		engine:   credentiallb.NewEngine(credentiallb.DefaultBindingTTL, credentiallb.DefaultSweepInterval, credentiallb.DefaultCredentialSeed, credentiallb.DefaultCooldown),
+	}
+
+	// Startup rebind: seed engine state for every persisted model so
+	// the first request after boot resolves without a cold miss.
+	for _, mc := range m.GetModels() {
+		m.engine.RebindFromStore(mc.ID, mc.Credentials)
+	}
+
+	if eventBus == nil {
+		log.Printf("[WARN] [credentiallb] ModelsManager constructed without an event bus — engine invalidation limited to direct write-path calls")
+		return m, nil
+	}
+
+	ch, err := eventBus.Subscribe()
+	if err != nil {
+		// Non-fatal: subscription is belt-and-braces on top of the
+		// synchronous write-path invalidation.
+		log.Printf("[WARN] [credentiallb] credentials-changed subscription failed (%v) — engine invalidation limited to direct write-path calls", err)
+		return m, nil
+	}
+	m.subCh = ch
+	go m.drainCredentialsChanged(ch)
+	return m, nil
+}
+
+// drainCredentialsChanged is the on-behalf-of-the-engine subscription
+// loop (P2-3). The engine must not import pkg/events, so this loop
+// lives here: it receives model.credentials.changed events published
+// by AddModel/UpdateModel (and any future same-process writer) and
+// refreshes the engine state by RE-READING the model — the DB is the
+// source of truth, so a replayed or racing event converges to the
+// committed state. OnModelChanged is idempotent (filter-survivors),
+// making the direct write-path call plus this bus refresh a safe
+// double-apply.
+//
+// The loop exits when the channel closes (Close → bus.Unsubscribe
+// closes it). It must never call back into ModelsManager write
+// paths: GetModel takes m.mu.RLock only, and Bus.Publish sends are
+// non-blocking, so a publisher holding m.mu cannot deadlock with a
+// drain iteration waiting on that RLock.
+func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
+	for evt := range ch {
+		if evt.Type != credentiallb.EventCredentialsChanged {
+			continue
+		}
+		data, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			// Malformed payload (nil or non-map Data) must not panic
+			// this goroutine: a dead drain loop would silently kill
+			// bus-driven invalidation for the process lifetime.
+			log.Printf("[WARN] [credentiallb] credentials-changed event with malformed Data (type %T) — skipping engine refresh", evt.Data)
+			continue
+		}
+		modelID, _ := data["model_id"].(string)
+		if modelID == "" {
+			continue
+		}
+		mc := m.GetModel(modelID)
+		if mc == nil {
+			// Model removed between publish and drain (or removed by
+			// another writer): drop the engine state entirely.
+			m.engine.OnModelChanged(modelID, nil)
+			continue
+		}
+		m.engine.OnModelChanged(modelID, mc.Credentials)
+	}
+}
+
+// Close releases the ModelsManager's engine resources: it
+// unsubscribes the credentials-changed listener (the bus closes the
+// channel, terminating the drain goroutine — P2-3) and stops the
+// engine janitor. Idempotent. Engine reads (GetOrSelect) keep
+// working after Close (lazy expiry only). Skipping Close leaks only
+// the janitor + drain goroutines for the remaining process lifetime.
+func (m *ModelsManager) Close() {
+	m.closeOnce.Do(func() {
+		if m.eventBus != nil && m.subCh != nil {
+			m.eventBus.Unsubscribe(m.subCh) // closes subCh → drain loop exits
+		}
+		m.engine.Stop() // nil-safe
+	})
 }
 
 // Load is a no-op for database-backed models (data is always fresh)
@@ -666,20 +777,20 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 		}
 
 		model := models.ModelConfig{
-			ID:                         dbModel.ID,
-			Name:                       dbModel.Name,
-			Enabled:                    dbModel.isEnabled(),
-			ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-			Internal:                   dbModel.isInternal(),
-			Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
-			InternalBaseURL:            dbModel.InternalBaseURL,
-			InternalModel:              dbModel.InternalModel,
-			PeakHourEnabled:            dbModel.isPeakHourEnabled(),
-			PeakHourStart:              dbModel.PeakHourStart,
-			PeakHourEnd:                dbModel.PeakHourEnd,
-			PeakHourTimezone:           dbModel.PeakHourTimezone,
-			PeakHourModel:              dbModel.PeakHourModel,
-			SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+			ID:                           dbModel.ID,
+			Name:                         dbModel.Name,
+			Enabled:                      dbModel.isEnabled(),
+			ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+			Internal:                     dbModel.isInternal(),
+			Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
+			InternalBaseURL:              dbModel.InternalBaseURL,
+			InternalModel:                dbModel.InternalModel,
+			PeakHourEnabled:              dbModel.isPeakHourEnabled(),
+			PeakHourStart:                dbModel.PeakHourStart,
+			PeakHourEnd:                  dbModel.PeakHourEnd,
+			PeakHourTimezone:             dbModel.PeakHourTimezone,
+			PeakHourModel:                dbModel.PeakHourModel,
+			SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 			ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 		}
 
@@ -753,20 +864,20 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:                         dbModel.ID,
-		Name:                       dbModel.Name,
-		Enabled:                    dbModel.isEnabled(),
-		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-		Internal:                   dbModel.isInternal(),
-		Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
-		InternalBaseURL:            dbModel.InternalBaseURL,
-		InternalModel:              dbModel.InternalModel,
-		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
-		PeakHourStart:              dbModel.PeakHourStart,
-		PeakHourEnd:                dbModel.PeakHourEnd,
-		PeakHourTimezone:           dbModel.PeakHourTimezone,
-		PeakHourModel:              dbModel.PeakHourModel,
-		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+		ID:                           dbModel.ID,
+		Name:                         dbModel.Name,
+		Enabled:                      dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                     dbModel.isInternal(),
+		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:              dbModel.InternalBaseURL,
+		InternalModel:                dbModel.InternalModel,
+		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
+		PeakHourStart:                dbModel.PeakHourStart,
+		PeakHourEnd:                  dbModel.PeakHourEnd,
+		PeakHourTimezone:             dbModel.PeakHourTimezone,
+		PeakHourModel:                dbModel.PeakHourModel,
+		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 	}
 
@@ -833,20 +944,20 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:                          dbModel.ID,
-		Name:                        dbModel.Name,
-		Enabled:                     dbModel.isEnabled(),
-		ReleaseStreamChunkDeadline:  models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-		Internal:                    dbModel.isInternal(),
-		Credentials:                 parseCredentialsJSON(dbModel.CredentialsJSON),
-		InternalBaseURL:             dbModel.InternalBaseURL,
-		InternalModel:               dbModel.InternalModel,
-		PeakHourEnabled:             dbModel.isPeakHourEnabled(),
-		PeakHourStart:               dbModel.PeakHourStart,
-		PeakHourEnd:                 dbModel.PeakHourEnd,
-		PeakHourTimezone:            dbModel.PeakHourTimezone,
-		PeakHourModel:               dbModel.PeakHourModel,
-		SecondaryUpstreamModel:      dbModel.SecondaryUpstreamModel,
+		ID:                           dbModel.ID,
+		Name:                         dbModel.Name,
+		Enabled:                      dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                     dbModel.isInternal(),
+		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:              dbModel.InternalBaseURL,
+		InternalModel:                dbModel.InternalModel,
+		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
+		PeakHourStart:                dbModel.PeakHourStart,
+		PeakHourEnd:                  dbModel.PeakHourEnd,
+		PeakHourTimezone:             dbModel.PeakHourTimezone,
+		PeakHourModel:                dbModel.PeakHourModel,
+		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 	}
 
@@ -1058,7 +1169,18 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.SecondaryUpstreamModel,
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 	)
-	return err
+	if err != nil {
+		return err // no engine invalidation on write failure (P2-4)
+	}
+
+	// Phase 2: engine invalidation strictly AFTER the successful DB
+	// write (E-2 filter-survivors semantics — not clear-all), plus the
+	// bus broadcast for the on-behalf-of-the-engine drain loop.
+	// Engine methods are nil-safe, so a hand-constructed manager
+	// without an engine is fine here.
+	m.engine.OnModelChanged(model.ID, model.Credentials)
+	m.publishCredentialsChanged(model.ID)
+	return nil
 }
 
 // UpdateModel updates an existing model configuration.
@@ -1132,7 +1254,17 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 		modelID,
 	)
-	return err
+	if err != nil {
+		return err // no engine invalidation on write failure (P2-4)
+	}
+
+	// Phase 2: engine invalidation strictly AFTER the successful DB
+	// write (E-2 filter-survivors) + bus broadcast. Holding m.mu here
+	// is safe: Bus.Publish sends are non-blocking and the drain loop
+	// only takes m.mu.RLock (no publish→drain cycle).
+	m.engine.OnModelChanged(model.ID, model.Credentials)
+	m.publishCredentialsChanged(model.ID)
+	return nil
 }
 
 // RemoveModel removes a model configuration
@@ -1151,7 +1283,16 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 
 	deleteQuery := m.qb.DeleteModel()
 	_, err = m.store.DB.ExecContext(context.Background(), deleteQuery, modelID)
-	return err
+	if err != nil {
+		return err // no engine invalidation on delete failure (P2-4)
+	}
+
+	// Phase 2: engine invalidation strictly AFTER the successful DB
+	// delete (Task 8) — nil refs drop the model's engine state
+	// (bindings, cooldowns, the e.models entry) so nothing lingers
+	// past removal. A failed delete above leaves engine state intact.
+	m.engine.OnModelChanged(modelID, nil)
+	return nil
 }
 
 // Validate validates the model configuration
@@ -1549,7 +1690,30 @@ func (m *ModelsManager) RemoveCredential(id string) error {
 	if rowsAffected == 0 {
 		return models.ErrCredentialNotFound
 	}
+
+	// Phase 2: clear engine bindings AND cooldowns for the deleted
+	// credential across all models (S6 combined pass). The in-use
+	// guard above makes in-process deletion of a referenced
+	// credential impossible; this hook is the defensive path for
+	// direct external SQL deletes and mid-flight races. Nil-safe.
+	m.engine.OnCredentialDeleted(id)
 	return nil
+}
+
+// publishCredentialsChanged broadcasts model.credentials.changed on
+// the bus (nil-bus tolerant). The on-behalf-of-the-engine drain loop
+// refreshes engine state from these events; the synchronous
+// OnModelChanged call in the write path remains the primary
+// invalidation.
+func (m *ModelsManager) publishCredentialsChanged(modelID string) {
+	if m.eventBus == nil {
+		return
+	}
+	m.eventBus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialsChanged,
+		Timestamp: time.Now().Unix(),
+		Data:      map[string]interface{}{"model_id": modelID},
+	})
 }
 
 // ResolveInternalConfig resolves the full internal upstream configuration.
@@ -1557,8 +1721,9 @@ func (m *ModelsManager) RemoveCredential(id string) error {
 // Legacy single-credential resolution — always uses Credentials[0].
 // The Phase 2 LB engine (pkg/credentiallb) introduces
 // ResolveInternalConfigWithAffinity for multi-credential models with
-// conversation-sticky affinity; for Phase 1 this stays as the
-// single-credential fast path (byte-identical to pre-change behavior).
+// conversation-sticky affinity; this stays as the single-credential
+// fast path (byte-identical to pre-change behavior) and as the
+// nil-engine delegation target.
 func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
 	modelConfig := m.GetModel(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
@@ -1575,6 +1740,19 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
+	provider, apiKey, baseURL, model = resolveWithCredential(modelConfig, cred)
+	return provider, apiKey, baseURL, model, true
+}
+
+// resolveWithCredential resolves every resolution field that depends
+// only on (modelConfig, credential): provider from the credential,
+// baseURL with the model's InternalBaseURL override taking
+// precedence, and InternalModel with peak-hour substitution
+// (ResolvePeakHourModel + the [PEAK-HOUR] log line).
+//
+// SHARED by the legacy 5-tuple path and the affinity struct path
+// (P2-5) so peak-hour substitution cannot drift between them.
+func resolveWithCredential(modelConfig *models.ModelConfig, cred *models.CredentialConfig) (provider, apiKey, baseURL, actualModel string) {
 	// Resolve provider: use credential provider
 	provider = cred.Provider
 
@@ -1585,14 +1763,140 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 	}
 
 	// Determine actual model: check peak hour first
-	actualModel := modelConfig.InternalModel
+	actualModel = modelConfig.InternalModel
 	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
 		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
 			modelConfig.ID, peakModel, modelConfig.InternalModel)
 		actualModel = peakModel
 	}
 
-	return provider, cred.APIKey, baseURL, actualModel, true
+	return provider, cred.APIKey, baseURL, actualModel
+}
+
+// ResolvedCredential is the return shape of ResolveInternalConfigWithAffinity
+// (reviewer pass #3, leader-ruled struct form). Field mapping vs the
+// legacy 5-tuple: Provider/APIKey/BaseURL/InternalModel ↔ the legacy
+// provider/apiKey/baseURL/model; the trailing ok bool of the method ↔
+// the legacy ok. NEW fields: CredentialID (which credential in the
+// model's list was selected — for #16f prompt-cache observability and
+// the phase3 model_credential_selected event payload) and NewlyBound
+// (W-1 signal: true ⇔ this call stored a new engine binding — the
+// only way newlyBound flows from the engine's binding-store side
+// effect through to the proxy/ultimatemodel call sites).
+type ResolvedCredential struct {
+	Provider      string
+	APIKey        string
+	BaseURL       string
+	InternalModel string
+	CredentialID  string
+	NewlyBound    bool
+}
+
+// ResolveInternalConfigWithAffinity resolves a credential for modelID,
+// applying the LB engine when the model has 2+ credentials.
+//
+// Branch table (contract Task 9):
+//   - m.engine == nil            → mirror the legacy single-credential
+//     resolution (struct form); ok=false on failure.
+//   - model nil / non-internal   → (ResolvedCredential{}, false).
+//   - len(Credentials) == 0      → legacy-equivalent: ok=false.
+//   - len(Credentials) == 1      → E-3 fast path: resolve
+//     Credentials[0] directly with NO engine call and NO map writes —
+//     byte-identical to today, zero engine overhead. NewlyBound=false.
+//   - len(Credentials) >= 2      → engine.GetOrSelect(modelID,
+//     conversationKey); ErrNoCredentials → ok=false; the picked
+//     credential's row missing (deleted mid-flight, e.g. direct SQL
+//     delete) → defensive engine invalidation for that credential
+//     (bindings + cooldowns dropped so the NEXT call re-selects a
+//     live credential) and THIS call returns ok=false.
+//
+// W-2: conversationKey == "" ⇒ the engine performs a fresh weighted
+// pick per call with NO binding stored; per C2 the returned
+// NewlyBound is false for empty-key picks (newlyBound ⇔ a binding was
+// stored on this call). DEBUG-log observability for empty-key fresh
+// picks is phase3's responsibility (handler-side) — this layer stays
+// silent for them.
+func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool) {
+	modelConfig := m.GetModel(modelID)
+	if modelConfig == nil || !modelConfig.Internal {
+		return ResolvedCredential{}, false
+	}
+
+	// Nil engine (hand-constructed instances) and empty credential
+	// lists both degrade to the legacy single-credential shape:
+	// PrimaryCredentialID → GetCredential → shared resolver. With no
+	// primary configured this is ok=false, identical to today.
+	if m.engine == nil || len(modelConfig.Credentials) == 0 {
+		primaryID := modelConfig.PrimaryCredentialID()
+		if primaryID == "" {
+			return ResolvedCredential{}, false
+		}
+		cred := m.GetCredential(primaryID)
+		if cred == nil {
+			return ResolvedCredential{}, false
+		}
+		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+		return ResolvedCredential{
+			Provider:      provider,
+			APIKey:        apiKey,
+			BaseURL:       baseURL,
+			InternalModel: actualModel,
+			CredentialID:  primaryID,
+			NewlyBound:    false,
+		}, true
+	}
+
+	// E-3 single-credential fast path: NO engine call, NO map writes.
+	if len(modelConfig.Credentials) == 1 {
+		fastID := modelConfig.Credentials[0].CredentialID
+		cred := m.GetCredential(fastID)
+		if cred == nil {
+			return ResolvedCredential{}, false
+		}
+		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+		return ResolvedCredential{
+			Provider:      provider,
+			APIKey:        apiKey,
+			BaseURL:       baseURL,
+			InternalModel: actualModel,
+			CredentialID:  fastID,
+			NewlyBound:    false, // fast path never stores a binding
+		}, true
+	}
+
+	// 2+ credentials: engine path (affinity for non-empty keys, fresh
+	// weighted pick without binding for empty keys).
+	credID, newlyBound, err := m.engine.GetOrSelect(modelID, conversationKey)
+	if err != nil || credID == "" {
+		return ResolvedCredential{}, false
+	}
+	cred := m.GetCredential(credID)
+	if cred == nil {
+		// Deleted mid-flight (direct SQL delete raced the resolution —
+		// the credentials_json still references the dead row).
+		// Defensive healing: (1) OnCredentialDeleted clears every
+		// binding + cooldown row for the dead credential (S6 hygiene —
+		// it can never be selected again); (2) ExcludeAndReselect
+		// seeds a default-length cooldown on it and rebinds THIS
+		// conversation to a healthy credential, so the NEXT call
+		// deterministically re-selects a live credential instead of
+		// re-picking the dead one until the dangling ref is cleaned
+		// up. Per the contract THIS call still fails with ok=false.
+		log.Printf("[WARN] [credentiallb] credential %s vanished mid-flight for model %s — clearing engine state, resolution fails this call", credID, modelID)
+		m.engine.OnCredentialDeleted(credID)
+		m.engine.ExcludeAndReselect(modelID, conversationKey, credID, 0)
+		return ResolvedCredential{}, false
+	}
+
+	provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+	return ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: actualModel,
+		CredentialID:  credID,
+		NewlyBound:    newlyBound,
+	}, true
 }
 
 // isDbBoolTrue converts a database value (bool or int64) to boolean

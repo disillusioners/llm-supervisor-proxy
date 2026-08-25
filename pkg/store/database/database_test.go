@@ -206,7 +206,7 @@ func TestModelsManager(t *testing.T) {
 	}
 
 	// Create models manager
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("Failed to create models manager: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestPostgreSQLModelsManager(t *testing.T) {
 	defer store.Close()
 
 	// Create models manager
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("Failed to create models manager: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestPostgreSQLBooleanHandling(t *testing.T) {
 	defer store.Close()
 
 	// Create models manager
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		t.Fatalf("Failed to create models manager: %v", err)
 	}
@@ -1547,7 +1547,7 @@ func setupModelsManagerForPeakHour(t *testing.T) (*ModelsManager, func()) {
 	}
 
 	// Create models manager
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		store.Close()
 		t.Fatalf("Failed to create models manager: %v", err)
@@ -1901,7 +1901,7 @@ func setupModelsManagerForSecondary(t *testing.T) (*ModelsManager, func()) {
 	}
 
 	// Create models manager
-	modelsMgr, err := NewModelsManager(store)
+	modelsMgr, err := NewModelsManager(store, nil)
 	if err != nil {
 		store.Close()
 		t.Fatalf("Failed to create models manager: %v", err)
