@@ -58,6 +58,26 @@ func TestMigration028_PGFileLevelTransaction(t *testing.T) {
 		t.Error("PG: credential_id missing post-028 (M-1 derived shadow violated)")
 	}
 
+	// Sentinel lifecycle: the fixed-PK INSERT below is otherwise one-shot
+	// per DB lifetime (a prior run's leftover row makes it fail with
+	// SQLSTATE 23505). Pre-DELETE so every run starts from a known-empty
+	// sentinel state, and defer a teardown so the shared dev DB is left
+	// empty afterwards. defer rather than t.Cleanup because cleanup
+	// functions run after this function's defers — i.e. after
+	// store.Close() — which would no-op the teardown DELETE.
+	if _, err := store.DB.ExecContext(ctx,
+		`DELETE FROM models WHERE id = $1`, "pg-atomic-sentinel",
+	); err != nil {
+		t.Fatalf("pre-clean sentinel: %v", err)
+	}
+	defer func() {
+		if _, err := store.DB.ExecContext(ctx,
+			`DELETE FROM models WHERE id = $1`, "pg-atomic-sentinel",
+		); err != nil {
+			t.Logf("sentinel teardown (non-fatal): %v", err)
+		}
+	}()
+
 	// Insert + read-back sentinel proves the transaction committed.
 	if _, err := store.DB.ExecContext(ctx,
 		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
