@@ -1401,8 +1401,7 @@ ALTER TABLE models ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '[]';
 --    credential_id. Rows with credential_id = '' or NULL stay
 --    with credentials_json = '[]' and shadow = ''.
 UPDATE models
-SET credentials_json = '[{"credential_id":"' || credential_id ||
-                       '","weight":1,"position":0}]',
+SET credentials_json = json_array(json_object('credential_id', credential_id, 'weight', 1, 'position', 0)),
     credential_id   = credential_id  -- shadow (no-op today; load-bearing for 029)
 WHERE credential_id IS NOT NULL
   AND credential_id != '';
@@ -1411,6 +1410,8 @@ WHERE credential_id IS NOT NULL
 
 COMMIT;
 ```
+
+> **Round 3e (2026-08-25) — Phase-1 Review W3:** the SQLite backfill uses the escape-safe JSON1 form `json_array(json_object(...))` instead of raw string concatenation — safe for `credential_id` values containing quotes/control characters, and dialect-parity with PG's escape-safe `jsonb_build_*` form. modernc SQLite bundles JSON1. (PG form unchanged.)
 
 **File: `pkg/store/database/migrations/postgres/028_add_model_credentials.up.sql`**
 
@@ -2940,3 +2941,11 @@ separate accounting + OR-clause, which keeps the existing `:338`
   `rate_limit_exceeded` literal, tried-set home pin, S3 wording
   standardization, OnCredentialDeleted cooldown hygiene). No
   R3-1..R3-8 ruling is overridden.
+
+---
+
+## Round 3e — Phase-1 Review W3 (2026-08-25)
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3e** | Phase-1 Review W3 | SQLite 028 up-path backfill switched from raw string-concat to escape-safe JSON1 form (json_array(json_object(...))); PG unchanged; rationale: escape-safety + dialect parity | Migration SQL 028 (SQLite block) |
