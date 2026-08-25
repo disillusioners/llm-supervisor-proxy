@@ -163,7 +163,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Name:         "ultimate-model",
 			Enabled:      true,
 			Internal:     false,
-			CredentialID: "missing-minimax-cred",
+			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
 		h := NewHandler(cfg, modelsCfg, nil)
 
@@ -217,7 +217,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Name:         "ultimate-model",
 			Enabled:      true,
 			Internal:     false,
-			CredentialID: "missing-minimax-cred",
+			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
 		h := NewHandler(cfg, modelsCfg, nil)
 
@@ -257,7 +257,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Name:         "ultimate-model",
 			Enabled:      true,
 			Internal:     false,
-			CredentialID: "missing-minimax-cred",
+			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
 		h := NewHandler(cfg, modelsCfg, nil)
 
@@ -318,7 +318,7 @@ func TestExecuteExternal_HeaderStrip_NoCredential_CaseVaried(t *testing.T) {
 				Name:         "ultimate-model",
 				Enabled:      true,
 				Internal:     false,
-				CredentialID: "missing-minimax-cred",
+				Credentials: models.TestRefs("missing-minimax-cred"),
 			})
 			h := NewHandler(cfg, modelsCfg, nil)
 

@@ -129,7 +129,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 			Name:          model.name,
 			Enabled:       true,
 			Internal:      true,
-			CredentialID:  "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel: model.internalModel,
 		}); err != nil {
 			t.Fatalf("Failed to add model %s: %v", model.id, err)

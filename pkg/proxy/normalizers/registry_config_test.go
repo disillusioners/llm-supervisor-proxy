@@ -47,7 +47,7 @@ func (m *mockModelsConfig) AddModelForTest(id string, internal bool) {
 		Name:         id,
 		Enabled:      true,
 		Internal:     internal,
-		CredentialID: "cred-1",
+		Credentials: models.TestRefs("cred-1"),
 	}
 }
 

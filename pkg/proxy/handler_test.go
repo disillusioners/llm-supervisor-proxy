@@ -2402,7 +2402,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "claude-3",
 	})
 	if err != nil {
@@ -2415,7 +2415,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2511,7 +2511,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2598,7 +2598,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "any-model",
 	})
 	if err != nil {

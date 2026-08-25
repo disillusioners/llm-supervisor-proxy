@@ -624,12 +624,13 @@ func (h *Handler) Execute(
 
 	// D3: derive upstream provider from credential when available so the
 	// executeExternal gate can short-circuit non-MiniMax paths without
-	// touching the request body (H5 invariant). CredentialID empty ⇒
-	// upstreamProvider="" ⇒ gate=false (caller of executeExternal treats
-	// empty as not-MiniMax).
+	// touching the request body (H5 invariant). Primary credential ID
+	// empty ⇒ upstreamProvider="" ⇒ gate=false (caller of executeExternal
+	// treats empty as not-MiniMax).
 	var upstreamProvider string
-	if modelCfg.CredentialID != "" {
-		cred := h.modelsMgr.GetCredential(modelCfg.CredentialID)
+	primaryCredentialID := modelCfg.PrimaryCredentialID()
+	if primaryCredentialID != "" {
+		cred := h.modelsMgr.GetCredential(primaryCredentialID)
 		if cred != nil {
 			upstreamProvider = strings.ToLower(cred.Provider)
 		}

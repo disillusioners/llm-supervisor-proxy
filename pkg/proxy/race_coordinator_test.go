@@ -1166,7 +1166,7 @@ func newMockModelsConfig() *models.ModelsConfig {
 			Name:                   "Test Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -1202,7 +1202,7 @@ func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
 			Name:                   "Peak Hour Test Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model (cheaper/faster)
 			PeakHourEnabled:        true,
@@ -1289,7 +1289,7 @@ func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
 			Name:             "Peak Only Model",
 			Enabled:          true,
 			Internal:         true,
-			CredentialID:     "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:    "glm-5.0",
 			PeakHourEnabled:  true,
 			PeakHourStart:    "00:00", // Peak all day
@@ -1359,7 +1359,7 @@ func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
 			Name:                   "Combo Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary
 			PeakHourEnabled:        true,
@@ -1434,7 +1434,7 @@ func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
 			Name:                   "No Peak Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 			PeakHourEnabled:        false, // Peak hours DISABLED

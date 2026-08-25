@@ -146,7 +146,7 @@ func bootstrapToolCallUltimateTest(t *testing.T, upstreamURL, wantBody string, s
 		Name:         "Ultimate Model",
 		Enabled:      true,
 		Internal:     false, // EXTERNAL — executes through executeExternal
-		CredentialID: "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 	}); err != nil {
 		t.Fatalf("AddModel (ultimate): %v", err)
 	}

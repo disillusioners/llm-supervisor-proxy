@@ -170,7 +170,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 		Name:          "DeepSeek R1",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "deepseek-cred",
+		Credentials: models.TestRefs("deepseek-cred"),
 		InternalModel: "deepseek-reasoner",
 	}); err != nil {
 		t.Fatalf("Failed to add user model: %v", err)
@@ -183,7 +183,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 		Name:          "Ultimate Internal Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "deepseek-cred",
+		Credentials: models.TestRefs("deepseek-cred"),
 		InternalModel: "ultimate-internal-name",
 	}); err != nil {
 		t.Fatalf("Failed to add ultimate model: %v", err)

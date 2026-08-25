@@ -160,7 +160,7 @@ func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (string, string
 	if model == nil || !model.Internal {
 		return "", "", "", "", false
 	}
-	cred := m.GetCredential(model.CredentialID)
+	cred := m.GetCredential(model.PrimaryCredentialID())
 	if cred == nil {
 		return "", "", "", "", false
 	}
@@ -219,7 +219,7 @@ func TestHandleModels_GET_ReturnsSecondaryUpstreamModel(t *testing.T) {
 		Name:                   "Test Model With Secondary",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "test-cred",
+		Credentials: models.TestRefs("test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	})
@@ -383,7 +383,7 @@ func TestHandleModelDetail_PUT_UpdatesSecondaryUpstreamModel(t *testing.T) {
 		Name:          "Model To Update",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials: models.TestRefs("test-cred"),
 		InternalModel: "glm-5.0",
 	})
 
@@ -486,7 +486,7 @@ func TestHandleModels_GET_ReturnsEmptySecondaryUpstreamModel(t *testing.T) {
 		Name:          "Model Without Secondary",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials: models.TestRefs("test-cred"),
 		InternalModel: "glm-5.0",
 		// SecondaryUpstreamModel not set (empty)
 	})

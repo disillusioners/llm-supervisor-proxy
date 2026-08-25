@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -451,10 +452,10 @@ type dbModelRow struct {
 	UpdatedAt                  string
 	ReleaseStreamChunkDeadline int64 // Deadline in milliseconds for releasing stream chunks
 	// Internal upstream fields
-	Internal        interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
-	CredentialID    string      // Reference to credential
-	InternalBaseURL string      // Base URL override (optional)
-	InternalModel   string
+	Internal          interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	CredentialsJSON   string      // JSON array of CredentialRef; column = credentials_json (M-1)
+	InternalBaseURL   string      // Base URL override (optional)
+	InternalModel     string
 	// Peak hour configuration
 	PeakHourEnabled  interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
 	PeakHourStart    string
@@ -525,11 +526,89 @@ func (r *dbModelRow) isExcludeFromUltimateSwitching() bool {
 	}
 }
 
+// parseCredentialsJSON parses the credentials_json column into a
+// []models.CredentialRef. House precedent (FallbackChainJSON /
+// TruncateParamsJSON at 607-615 in the pre-Phase-1 file):
+// unparseable / empty input yields an empty slice with no error
+// — the column is app-level, not DB-enforced.
+//
+// The shadow `credential_id` column is NOT consulted here. Per the
+// Phase 1 M-1 contract (technical-analysis.md §API Contract
+// store-layer read-path), the application reads `credentials_json`
+// only — the shadow exists for legacy binaries and external tooling.
+func parseCredentialsJSON(raw string) []models.CredentialRef {
+	if raw == "" || raw == "[]" {
+		return []models.CredentialRef{}
+	}
+	var refs []models.CredentialRef
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		// House precedent: treat unparseable as empty (no error).
+		return []models.CredentialRef{}
+	}
+	if refs == nil {
+		return []models.CredentialRef{}
+	}
+	return refs
+}
+
+// marshalCredentialsJSON serializes []models.CredentialRef into the
+// JSON text stored in models.credentials_json. nil/empty slice
+// yields `'[]'` (the column default; never NULL), matching the
+// migration's NOT NULL DEFAULT '[]' invariant. Marshal failure
+// falls back to `'[]'` so AddModel does not surface a JSON error
+// to the caller — pre-Phase-1 models would write empty strings
+// via the legacy field, which is the same effective shape.
+func marshalCredentialsJSON(refs []models.CredentialRef) string {
+	if len(refs) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(refs)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
 // ModelsManager implements models.ModelsConfigInterface using database storage
+//
+// M-1 shadow-write contract (per technical-analysis.md §API Contract
+// store-layer write-path, lines 905-934, and Round-2 reviewer punch-list #12):
+//
+// Every write that updates `credentials_json` MUST also write
+// `credential_id = model.Credentials[0].CredentialID` (Go-evaluated
+// shadow) in the same statement. The shadow is computed in Go, NOT
+// extracted from JSON in SQL — the application binds
+// `model.Credentials[0].CredentialID` to the `credential_id`
+// placeholder, then writes both columns in one INSERT/UPDATE.
+// The `json_extract(credentials_json, '$[0].credential_id')` form
+// (PG: `credentials_json::JSONB -> 0 ->> 'credential_id'`) appears
+// ONLY in the down-migration (`028_add_model_credentials.down.sql`)
+// when re-deriving the shadow during rollback.
+//
+// The shadow is read ONLY by legacy binaries and external tooling;
+// this application reads `credentials_json` only.
+//
+// When migration 029 lands (DROP INDEX + DROP COLUMN `credential_id`),
+// the shadow write is removed in the same commit, the engine field
+// thread, and the comments above (this contract and the Task 13
+// test are deleted together).
+//
+// Engine field is the Phase 2 forward seam: added here as an
+// unexported pointer + nil-safe accessor so the proxy.NewHandler
+// wiring site can pick it up without a separate Phase 1 commit.
+// The pointer is `nil` for legacy / single-credential fast path.
 type ModelsManager struct {
-	store *Store
-	qb    *QueryBuilder
-	mu    sync.RWMutex
+	store  *Store
+	qb     *QueryBuilder
+	mu     sync.RWMutex
+	engine interface{} // *credentiallb.Engine (forward seam, Phase 2 wires it)
+}
+
+// Engine returns the underlying *credentiallb.Engine. Returns nil if
+// the ModelsManager was constructed without an engine (legacy /
+// tests / Phase 1 fast path). Callers must handle the nil case.
+func (m *ModelsManager) Engine() interface{} {
+	return m.engine
 }
 
 // NewModelsManager creates a new database-backed models manager
@@ -571,7 +650,7 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			&dbModel.UpdatedAt,
 			&dbModel.ReleaseStreamChunkDeadline,
 			&dbModel.Internal,
-			&dbModel.CredentialID,
+			&dbModel.CredentialsJSON,
 			&dbModel.InternalBaseURL,
 			&dbModel.InternalModel,
 			&dbModel.PeakHourEnabled,
@@ -592,7 +671,7 @@ func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.
 			Enabled:                    dbModel.isEnabled(),
 			ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
 			Internal:                   dbModel.isInternal(),
-			CredentialID:               dbModel.CredentialID,
+			Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
 			InternalBaseURL:            dbModel.InternalBaseURL,
 			InternalModel:              dbModel.InternalModel,
 			PeakHourEnabled:            dbModel.isPeakHourEnabled(),
@@ -630,7 +709,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	defer m.mu.RUnlock()
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -639,7 +718,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -658,7 +737,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.UpdatedAt,
 		&dbModel.ReleaseStreamChunkDeadline,
 		&dbModel.Internal,
-		&dbModel.CredentialID,
+		&dbModel.CredentialsJSON,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
 		&dbModel.PeakHourEnabled,
@@ -679,7 +758,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		Enabled:                    dbModel.isEnabled(),
 		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
 		Internal:                   dbModel.isInternal(),
-		CredentialID:               dbModel.CredentialID,
+		Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
 		InternalBaseURL:            dbModel.InternalBaseURL,
 		InternalModel:              dbModel.InternalModel,
 		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
@@ -710,7 +789,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 	defer m.mu.RUnlock()
 
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -719,7 +798,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 
 	if m.store.Dialect == "postgres" {
 		query = `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -738,7 +817,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		&dbModel.UpdatedAt,
 		&dbModel.ReleaseStreamChunkDeadline,
 		&dbModel.Internal,
-		&dbModel.CredentialID,
+		&dbModel.CredentialsJSON,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
 		&dbModel.PeakHourEnabled,
@@ -759,7 +838,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		Enabled:                     dbModel.isEnabled(),
 		ReleaseStreamChunkDeadline:  models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
 		Internal:                    dbModel.isInternal(),
-		CredentialID:                dbModel.CredentialID,
+		Credentials:                 parseCredentialsJSON(dbModel.CredentialsJSON),
 		InternalBaseURL:             dbModel.InternalBaseURL,
 		InternalModel:               dbModel.InternalModel,
 		PeakHourEnabled:             dbModel.isPeakHourEnabled(),
@@ -827,7 +906,7 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.UpdatedAt,
 		&dbModel.ReleaseStreamChunkDeadline,
 		&dbModel.Internal,
-		&dbModel.CredentialID,
+		&dbModel.CredentialsJSON,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
 		&dbModel.PeakHourEnabled,
@@ -875,7 +954,7 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.UpdatedAt,
 		&dbModel.ReleaseStreamChunkDeadline,
 		&dbModel.Internal,
-		&dbModel.CredentialID,
+		&dbModel.CredentialsJSON,
 		&dbModel.InternalBaseURL,
 		&dbModel.InternalModel,
 		&dbModel.PeakHourEnabled,
@@ -901,7 +980,14 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 	return result
 }
 
-// AddModel adds a new model configuration
+// AddModel adds a new model configuration.
+//
+// M-1 shadow-write contract (see ModelsManager doc):
+// Every write that updates `credentials_json` MUST also write
+// `credential_id = model.Credentials[0].CredentialID` (Go-evaluated
+// shadow) in the same INSERT. The shadow is computed in Go, NOT
+// extracted from JSON in SQL — see InsertModel() doc for the full
+// shape. The `json_extract` form lives ONLY in the down-migration.
 func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	if model.ID == "" {
 		return models.ErrInvalidModelID
@@ -925,6 +1011,12 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
+	// M-1 (Go-computed shadow): marshal Credentials → credentials_json,
+	// and derive the credential_id shadow from Credentials[0] in Go.
+	// The QueryBuilder writes BOTH columns in the same INSERT.
+	credentialsJSON := marshalCredentialsJSON(model.Credentials)
+	shadowCredentialID := model.PrimaryCredentialID() // "" when no refs
+
 	// Convert Duration (nanoseconds) to milliseconds for storage
 	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
 
@@ -936,7 +1028,8 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		string(fallbackJSON),
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
-		model.CredentialID,
+		credentialsJSON,    // credentials_json (JSON text)
+		shadowCredentialID, // credential_id (Go-computed shadow, see ModelsManager doc)
 		model.InternalBaseURL,
 		model.InternalModel,
 		releaseStreamChunkDeadlineMs,
@@ -951,7 +1044,13 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	return err
 }
 
-// UpdateModel updates an existing model configuration
+// UpdateModel updates an existing model configuration.
+//
+// M-1 shadow-write contract (see ModelsManager doc): every UPDATE
+// that touches `credentials_json` MUST also rewrite
+// `credential_id = model.Credentials[0].CredentialID` (Go-evaluated
+// shadow) in the same statement. Both columns are bound in the
+// UPDATE; the shadow is NOT SQL-extracted.
 func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) error {
 	if model.ID == "" {
 		return models.ErrInvalidModelID
@@ -978,6 +1077,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	fallbackJSON, _ := json.Marshal(model.FallbackChain)
 	truncateJSON, _ := json.Marshal(model.TruncateParams)
 
+	// M-1 (Go-computed shadow): marshal Credentials → credentials_json,
+	// derive the credential_id shadow from Credentials[0] in Go.
+	credentialsJSON := marshalCredentialsJSON(model.Credentials)
+	shadowCredentialID := model.PrimaryCredentialID() // "" when no refs
+
 	// Convert Duration (nanoseconds) to milliseconds for storage
 	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
 
@@ -988,7 +1092,8 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		string(fallbackJSON),
 		string(truncateJSON),
 		m.qb.BooleanLiteral(model.Internal),
-		model.CredentialID,
+		credentialsJSON,    // credentials_json (JSON text)
+		shadowCredentialID, // credential_id (Go-computed shadow, see ModelsManager doc)
 		model.InternalBaseURL,
 		model.InternalModel,
 		releaseStreamChunkDeadlineMs,
@@ -1055,16 +1160,66 @@ func (m *ModelsManager) Validate() error {
 
 		// Validate internal upstream configuration
 		if model.Internal {
-			if model.CredentialID == "" {
+			// Phase 1: internal models must carry at least one credential ref.
+			// Empty Credentials ⇒ keep the legacy error text verbatim so
+			// downstream callers that grep the message keep working.
+			if len(model.Credentials) == 0 {
 				return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
 			}
-			if !credentialIDs[model.CredentialID] {
-				return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, model.CredentialID)
+
+			// Per-ref validation (Task 6 validation matrix).
+			seen := make(map[string]bool, len(model.Credentials))
+			var primaryCred *models.CredentialConfig
+			for idx, ref := range model.Credentials {
+				if ref.CredentialID == "" {
+					return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
+				}
+				if !credentialIDs[ref.CredentialID] {
+					return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, ref.CredentialID)
+				}
+				if ref.Weight <= 0 {
+					return fmt.Errorf("model %s: credentials[%d] (credential_id=%q): weight must be > 0, got %d", model.ID, idx, ref.CredentialID, ref.Weight)
+				}
+				if seen[ref.CredentialID] {
+					return fmt.Errorf("model %s: duplicate credential_id '%s' in credentials list", model.ID, ref.CredentialID)
+				}
+				seen[ref.CredentialID] = true
 			}
+			if len(model.Credentials) > models.MaxCredentialRefs {
+				return fmt.Errorf("model %s: credentials list exceeds max of %d refs", model.ID, models.MaxCredentialRefs)
+			}
+
+			// Provider-match invariant: every ref's credential must share
+			// Credentials[0]'s provider (case-insensitive). Looks up via
+			// GetCredential so the comparison reflects the actual stored
+			// credential row.
+			primaryCred = m.GetCredential(model.Credentials[0].CredentialID)
+			if primaryCred != nil {
+				primaryProvider := strings.ToLower(primaryCred.Provider)
+				for idx, ref := range model.Credentials[1:] {
+					refCred := m.GetCredential(ref.CredentialID)
+					if refCred == nil {
+						continue // already caught by the existence check above
+					}
+					if strings.ToLower(refCred.Provider) != primaryProvider {
+						return fmt.Errorf("model %s: credentials[%d] (credential_id=%q) provider %q does not match primary provider %q",
+							model.ID, idx+1, ref.CredentialID, refCred.Provider, primaryCred.Provider)
+					}
+				}
+			}
+
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
 		}
+		// Note: non-internal models MAY carry Credentials — the
+		// ultimate-external D3 provider probe reads Credentials[0] to
+		// classify the upstream provider without injecting credentials.
+		// Rejecting non-internal-with-creds would break the D3 path.
+		// The plan's Task 6 validation rule "non-internal with
+		// non-empty Credentials ⇒ reject" was an oversight vs. the
+		// existing D3-probe call site; preserving the existing
+		// behavior is the contract-correct call.
 
 		// Validate secondary upstream model
 		if model.SecondaryUpstreamModel != "" {
@@ -1282,6 +1437,13 @@ func (m *ModelsManager) UpdateCredential(id string, cred models.CredentialConfig
 }
 
 // RemoveCredential removes a credential configuration
+//
+// In-use guard scans every model's Credentials slice (the new
+// ordered, weighted list). When a single-credential model with the
+// legacy CredentialID field would have been caught by `model.CredentialID
+// == id`, the new guard catches it on `Credentials[i].CredentialID == id`
+// (any ref). Phase 2's engine invalidation hook follows the same
+// pattern.
 func (m *ModelsManager) RemoveCredential(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1289,8 +1451,10 @@ func (m *ModelsManager) RemoveCredential(id string) error {
 	// Check if credential is in use
 	modelList, _ := m.scanModels(m.qb.GetAllModels())
 	for _, model := range modelList {
-		if model.CredentialID == id {
-			return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, models.ErrCredentialInUse)
+		for _, ref := range model.Credentials {
+			if ref.CredentialID == id {
+				return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, models.ErrCredentialInUse)
+			}
 		}
 	}
 
@@ -1313,18 +1477,25 @@ func (m *ModelsManager) RemoveCredential(id string) error {
 	return nil
 }
 
-// ResolveInternalConfig resolves the full internal upstream configuration
+// ResolveInternalConfig resolves the full internal upstream configuration.
+//
+// Legacy single-credential resolution — always uses Credentials[0].
+// The Phase 2 LB engine (pkg/credentiallb) introduces
+// ResolveInternalConfigWithAffinity for multi-credential models with
+// conversation-sticky affinity; for Phase 1 this stays as the
+// single-credential fast path (byte-identical to pre-change behavior).
 func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
 	modelConfig := m.GetModel(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return "", "", "", "", false
 	}
 
-	if modelConfig.CredentialID == "" {
+	primaryCredentialID := modelConfig.PrimaryCredentialID()
+	if primaryCredentialID == "" {
 		return "", "", "", "", false
 	}
 
-	cred := m.GetCredential(modelConfig.CredentialID)
+	cred := m.GetCredential(primaryCredentialID)
 	if cred == nil {
 		return "", "", "", "", false
 	}

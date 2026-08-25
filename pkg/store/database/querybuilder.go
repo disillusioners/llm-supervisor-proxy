@@ -78,20 +78,31 @@ func (q *QueryBuilder) SelectConfig() string {
 	return `SELECT config_json FROM configs WHERE id = 1`
 }
 
-// InsertModel returns the appropriate INSERT query for a model
+// InsertModel returns the appropriate INSERT query for a model.
+//
+// M-1 shadow write (per technical-analysis.md §API Contract
+// store-layer write-path, lines 905-934, and Round-2 reviewer punch-list
+// #12): the statement writes BOTH `credentials_json` (the new
+// ordered, weighted JSON list) AND `credential_id` (the derived
+// shadow, bound from `model.Credentials[0].CredentialID` evaluated
+// in Go) in the SAME INSERT. The `json_extract` form lives ONLY in
+// the down-migration. Until migration 029 drops the shadow column,
+// every write to `credentials_json` MUST also write `credential_id`;
+// this statement enforces that contractually.
 func (q *QueryBuilder) InsertModel() string {
 	if q.dialect == PostgreSQL {
 		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-			internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
+			internal, credentials_json, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
 			peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
 			secondary_upstream_model, exclude_from_ultimate_switching)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
 				fallback_chain_json = EXCLUDED.fallback_chain_json,
 				truncate_params_json = EXCLUDED.truncate_params_json,
 				internal = EXCLUDED.internal,
+				credentials_json = EXCLUDED.credentials_json,
 				credential_id = EXCLUDED.credential_id,
 				internal_base_url = EXCLUDED.internal_base_url,
 				internal_model = EXCLUDED.internal_model,
@@ -106,13 +117,18 @@ func (q *QueryBuilder) InsertModel() string {
 				updated_at = NOW()`
 	}
 	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
-		internal, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
+		internal, credentials_json, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
 		peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
 		secondary_upstream_model, exclude_from_ultimate_switching)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
-// UpdateModel returns the appropriate UPDATE query for a model
+// UpdateModel returns the appropriate UPDATE query for a model.
+//
+// M-1 shadow write (see InsertModel doc): writes BOTH
+// `credentials_json` AND `credential_id` in the same UPDATE
+// statement. `credential_id` is bound from `model.Credentials[0].CredentialID`
+// computed in Go (NOT SQL-side via json_extract).
 func (q *QueryBuilder) UpdateModel() string {
 	if q.dialect == PostgreSQL {
 		return `UPDATE models SET
@@ -121,19 +137,20 @@ func (q *QueryBuilder) UpdateModel() string {
 			fallback_chain_json = $3,
 			truncate_params_json = $4,
 			internal = $5,
-			credential_id = $6,
-			internal_base_url = $7,
-			internal_model = $8,
-			release_stream_chunk_deadline = $9,
-			peak_hour_enabled = $10,
-			peak_hour_start = $11,
-			peak_hour_end = $12,
-			peak_hour_timezone = $13,
-			peak_hour_model = $14,
-			secondary_upstream_model = $15,
-			exclude_from_ultimate_switching = $16,
+			credentials_json = $6,
+			credential_id = $7,
+			internal_base_url = $8,
+			internal_model = $9,
+			release_stream_chunk_deadline = $10,
+			peak_hour_enabled = $11,
+			peak_hour_start = $12,
+			peak_hour_end = $13,
+			peak_hour_timezone = $14,
+			peak_hour_model = $15,
+			secondary_upstream_model = $16,
+			exclude_from_ultimate_switching = $17,
 			updated_at = NOW()
-		WHERE id = $17`
+		WHERE id = $18`
 	}
 	return `UPDATE models SET
 			name = ?,
@@ -141,6 +158,7 @@ func (q *QueryBuilder) UpdateModel() string {
 			fallback_chain_json = ?,
 			truncate_params_json = ?,
 			internal = ?,
+			credentials_json = ?,
 			credential_id = ?,
 			internal_base_url = ?,
 			internal_model = ?,
@@ -167,9 +185,9 @@ func (q *QueryBuilder) DeleteModel() string {
 // GetModelByID returns the appropriate SELECT query for a model by ID
 func (q *QueryBuilder) GetModelByID() string {
 	if q.dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
-			coalesce(release_stream_chunk_deadline, 0), 
-			coalesce(internal, false), coalesce(credential_id, ''),
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(release_stream_chunk_deadline, 0),
+			coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -177,9 +195,9 @@ func (q *QueryBuilder) GetModelByID() string {
 			coalesce(exclude_from_ultimate_switching, false)
 		FROM models WHERE id = $1`
 	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0),
-		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -191,9 +209,9 @@ func (q *QueryBuilder) GetModelByID() string {
 // GetModelByName returns the appropriate SELECT query for a model by name
 func (q *QueryBuilder) GetModelByName() string {
 	if q.dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
-			coalesce(release_stream_chunk_deadline, 0), 
-			coalesce(internal, false), coalesce(credential_id, ''),
+		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(release_stream_chunk_deadline, 0),
+			coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -201,9 +219,9 @@ func (q *QueryBuilder) GetModelByName() string {
 			coalesce(exclude_from_ultimate_switching, false)
 		FROM models WHERE name = $1`
 	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, 
+	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0),
-		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -217,7 +235,7 @@ func (q *QueryBuilder) GetAllModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
             coalesce(release_stream_chunk_deadline, 0),
-            coalesce(internal, false), coalesce(credential_id, ''),
+            coalesce(internal, false), coalesce(credentials_json, '[]'),
             coalesce(internal_base_url, ''), coalesce(internal_model, ''),
             peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
             coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -227,7 +245,7 @@ func (q *QueryBuilder) GetAllModels() string {
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
         coalesce(release_stream_chunk_deadline, 0),
-        coalesce(internal, 0), coalesce(credential_id, ''),
+        coalesce(internal, 0), coalesce(credentials_json, '[]'),
         coalesce(internal_base_url, ''), coalesce(internal_model, ''),
         peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
         coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -241,7 +259,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 	if q.dialect == PostgreSQL {
 		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 			coalesce(release_stream_chunk_deadline, 0),
-			coalesce(internal, false), coalesce(credential_id, ''),
+			coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
@@ -251,7 +269,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0),
-		coalesce(internal, 0), coalesce(credential_id, ''),
+		coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, coalesce(peak_hour_start, ''), coalesce(peak_hour_end, ''),
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),

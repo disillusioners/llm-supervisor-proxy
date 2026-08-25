@@ -144,7 +144,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential", // Reference the credential
+		Credentials: models.TestRefs("test-credential"), // Reference the credential
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -307,7 +307,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -485,7 +485,7 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		Name:          "Global Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "ultimate-credential",
+		Credentials: models.TestRefs("ultimate-credential"),
 		InternalModel: "global-ultimate-model",
 	})
 	if err != nil {
@@ -498,7 +498,7 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		Name:          "Token Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "ultimate-credential",
+		Credentials: models.TestRefs("ultimate-credential"),
 		InternalModel: "token-ultimate-model",
 	})
 	if err != nil {
@@ -528,7 +528,7 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "regular-credential",
+		Credentials: models.TestRefs("regular-credential"),
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -678,7 +678,7 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 		Name:          "Global Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "ultimate-credential",
+		Credentials: models.TestRefs("ultimate-credential"),
 		InternalModel: "global-ultimate-model",
 	})
 	if err != nil {
@@ -691,7 +691,7 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 		Name:          "Token Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "ultimate-credential",
+		Credentials: models.TestRefs("ultimate-credential"),
 		InternalModel: "token-ultimate-model",
 	})
 	if err != nil {
@@ -714,7 +714,7 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "regular-credential",
+		Credentials: models.TestRefs("regular-credential"),
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -836,7 +836,7 @@ func TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow(t *testing.T) 
 		Name:                          "Excluded Model",
 		Enabled:                       true,
 		Internal:                      true,
-		CredentialID:                  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:                 "excluded-model",
 		ExcludeFromUltimateSwitching:   true, // THIS IS THE KEY: excluded from ultimate model switching
 	})
@@ -1023,7 +1023,7 @@ func TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion(t *testing.T)
 		Name:          "Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "ultimate-model",
 	})
 	if err != nil {
@@ -1036,7 +1036,7 @@ func TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion(t *testing.T)
 		Name:                          "Excluded Model",
 		Enabled:                       true,
 		Internal:                      true,
-		CredentialID:                  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:                 "excluded-model",
 		ExcludeFromUltimateSwitching:   true, // Excluded from normal ultimate model switching
 	})
@@ -1168,7 +1168,7 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 		Name:                          "Excluded Model",
 		Enabled:                       true,
 		Internal:                      true,
-		CredentialID:                  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:                 "excluded-model",
 		ExcludeFromUltimateSwitching:   true,
 	})
@@ -1304,7 +1304,7 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		Name:          "Ultimate Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "ultimate-model",
 	})
 	if err != nil {
@@ -1317,7 +1317,7 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		Name:                          "Regular Model",
 		Enabled:                       true,
 		Internal:                      true,
-		CredentialID:                  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:                 "regular-model",
 		ExcludeFromUltimateSwitching:   false, // NOT excluded
 	})
@@ -1331,7 +1331,7 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		Name:                          "Excluded Model",
 		Enabled:                       true,
 		Internal:                      true,
-		CredentialID:                  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:                 "excluded-model",
 		ExcludeFromUltimateSwitching:   true, // Excluded
 	})

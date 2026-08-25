@@ -299,8 +299,9 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 		// If so, use passthrough mode instead of the internal OpenAI handler
 		var credProvider string
 		var cred *models.CredentialConfig
-		if modelConfig.CredentialID != "" {
-			cred = arc.conf.ModelsConfig.GetCredential(modelConfig.CredentialID)
+		primaryCredentialID := modelConfig.PrimaryCredentialID()
+		if primaryCredentialID != "" {
+			cred = arc.conf.ModelsConfig.GetCredential(primaryCredentialID)
 			if cred != nil {
 				credProvider = strings.ToLower(cred.Provider)
 			}

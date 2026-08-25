@@ -184,7 +184,7 @@ func (m *mockModelsConfig) AddInternalModel(id, provider, apiKey, baseURL, model
 		Name:         id,
 		Enabled:      true,
 		Internal:     true,
-		CredentialID: "cred-1",
+		Credentials: models.TestRefs("cred-1"),
 	}
 	m.internalCfgs[id] = struct {
 		provider, apiKey, baseURL, model string

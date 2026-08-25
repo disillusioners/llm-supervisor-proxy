@@ -21,7 +21,7 @@ func TestValidate_SecondaryUpstreamModelWithInternalTrue(t *testing.T) {
 			Name:                   "Valid Secondary Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model set
 		},
@@ -72,7 +72,7 @@ func TestValidate_SecondaryUpstreamModelEmptyWithInternalTrue(t *testing.T) {
 			Name:                   "Empty Secondary Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "", // Empty secondary model (optional)
 		},
@@ -119,7 +119,7 @@ func TestValidate_SecondaryUpstreamModelMissingCredential(t *testing.T) {
 			Name:                   "Secondary No Credential",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "", // Missing credential
+			Credentials:            nil, // Missing credential
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -145,7 +145,7 @@ func TestValidate_SecondaryUpstreamModelWithPeakHour(t *testing.T) {
 			Name:                   "Peak With Secondary",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 			PeakHourEnabled:        true,
@@ -178,7 +178,7 @@ func TestValidate_SecondaryUpstreamModelWithFallback(t *testing.T) {
 			Name:                   "Secondary With Fallback",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 			FallbackChain:          []string{"fallback-model"},
@@ -212,7 +212,7 @@ func TestValidate_SecondaryUpstreamModel_NonExistentCredential(t *testing.T) {
 			Name:                   "Secondary Bad Credential",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "nonexistent-cred", // Credential doesn't exist
+			Credentials: TestRefs("nonexistent-cred"), // Credential doesn't exist
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -236,7 +236,7 @@ func TestModelConfig_SecondaryUpstreamModelField(t *testing.T) {
 		Name:                   "Test Model",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "test-cred",
+		Credentials: TestRefs("test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
@@ -251,7 +251,7 @@ func TestModelConfig_SecondaryUpstreamModelField(t *testing.T) {
 		Name:          "Test Model 2",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials: TestRefs("test-cred"),
 		InternalModel: "glm-5.0",
 		// SecondaryUpstreamModel not set
 	}
@@ -268,7 +268,7 @@ func TestModelConfigHelper_IsInternal(t *testing.T) {
 		Name:          "Internal Model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials: TestRefs("test-cred"),
 		InternalModel: "glm-5.0",
 	}
 
@@ -305,7 +305,7 @@ func TestResolvePeakHourModel_WithSecondary(t *testing.T) {
 		Name:                   "Peak With Secondary",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "test-cred",
+		Credentials: TestRefs("test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 		PeakHourEnabled:        true,
@@ -338,7 +338,7 @@ func TestResolvePeakHourModel_SecondaryNotAffectedByPeak(t *testing.T) {
 		Name:                   "Secondary Only",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "test-cred",
+		Credentials: TestRefs("test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 		PeakHourEnabled:        true,

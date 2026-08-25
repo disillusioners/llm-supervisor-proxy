@@ -167,11 +167,11 @@ func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (provider, apiK
 		return "", "", "", "", false
 	}
 
-	if modelConfig.CredentialID == "" {
+	if modelConfig.PrimaryCredentialID() == "" {
 		return "", "", "", "", false
 	}
 
-	cred := m.GetCredential(modelConfig.CredentialID)
+	cred := m.GetCredential(modelConfig.PrimaryCredentialID())
 	if cred == nil {
 		return "", "", "", "", false
 	}
@@ -210,7 +210,7 @@ func TestCanHandleInternal(t *testing.T) {
 		},
 		{
 			name:     "internal with credential",
-			config:   &models.ModelConfig{Internal: true, CredentialID: "test-cred"},
+			config:   &models.ModelConfig{Internal: true, Credentials: models.TestRefs("test-cred")},
 			expected: true,
 		},
 	}
@@ -325,7 +325,7 @@ func TestNewInternalHandler(t *testing.T) {
 		ID:            "test-model",
 		Name:          "Test Model",
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials:   models.TestRefs("test-cred"),
 		InternalModel: "gpt-4",
 	}
 

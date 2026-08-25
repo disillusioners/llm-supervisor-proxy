@@ -894,7 +894,7 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 		Name:          "Internal Primary",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-openai-cred",
+		Credentials: models.TestRefs("test-openai-cred"),
 		InternalModel: "gpt-4o-internal",
 		FallbackChain: []string{"external-fallback"},
 	}); err != nil {

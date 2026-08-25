@@ -1582,7 +1582,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourInsideWindow(t *testing.T) 
 		Name:             "Peak Inside Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "peak-hour-test-cred",
+		Credentials: models.TestRefs("peak-hour-test-cred"),
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
 		PeakHourStart:    "00:00",
@@ -1638,7 +1638,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourOutsideWindow(t *testing.T)
 		Name:             "Peak Outside Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "peak-hour-test-cred",
+		Credentials: models.TestRefs("peak-hour-test-cred"),
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
 		PeakHourStart:    fmt.Sprintf("%02d:00", peakStart),
@@ -1679,7 +1679,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourDisabled(t *testing.T) {
 		Name:             "Peak Disabled Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "peak-hour-test-cred",
+		Credentials: models.TestRefs("peak-hour-test-cred"),
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  false, // Disabled
 		PeakHourStart:    "00:00",
@@ -1722,7 +1722,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		Name:             "Cross Midnight Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "peak-hour-test-cred",
+		Credentials: models.TestRefs("peak-hour-test-cred"),
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
 		PeakHourStart:    "00:00",
@@ -1755,7 +1755,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 		Name:             "Normal Window Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "peak-hour-test-cred",
+		Credentials: models.TestRefs("peak-hour-test-cred"),
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  false, // DISABLED
 		PeakHourStart:    "00:00",
@@ -1826,7 +1826,7 @@ func TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential(t *testin
 		Name:             "Missing Credential Test",
 		Enabled:          true,
 		Internal:         true,
-		CredentialID:     "nonexistent-credential", // Doesn't exist
+		Credentials: models.TestRefs("nonexistent-credential"), // Doesn't exist
 		InternalModel:    "normal-db-model",
 		PeakHourEnabled:  true,
 		PeakHourStart:    "00:00",
@@ -1918,7 +1918,7 @@ func TestModelsManager_AddModel_WithSecondaryUpstreamModel(t *testing.T) {
 		Name:                   "Secondary Test Model",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
@@ -1951,7 +1951,7 @@ func TestModelsManager_GetModel_ReturnsSecondaryUpstreamModel(t *testing.T) {
 		Name:                   "Get Secondary Test",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
@@ -1987,7 +1987,7 @@ func TestModelsManager_UpdateModel_SecondaryUpstreamModel(t *testing.T) {
 		Name:                   "Update Secondary Test",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "", // No secondary model initially
 	}
@@ -2097,7 +2097,7 @@ func TestModelsManager_ResolveInternalConfig_WithSecondary(t *testing.T) {
 		Name:                   "Resolve With Secondary",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
@@ -2133,7 +2133,7 @@ func TestModelsManager_SecondaryUpstreamModel_EmptyValid(t *testing.T) {
 		Name:                   "Empty Secondary",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "", // Empty secondary model
 	}
@@ -2168,7 +2168,7 @@ func TestModelsManager_SecondaryUpstreamModel_Roundtrip(t *testing.T) {
 		Name:                   "Roundtrip Secondary",
 		Enabled:                true,
 		Internal:               true,
-		CredentialID:           "secondary-test-cred",
+		Credentials: models.TestRefs("secondary-test-cred"),
 		InternalModel:          "glm-5.0",
 		SecondaryUpstreamModel: "glm-4-flash",
 	}

@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS models (
     internal_base_url TEXT,
     internal_model TEXT,
     internal_key_version INTEGER NOT NULL DEFAULT 0,
-    credential_id TEXT,
+    credentials_json TEXT NOT NULL DEFAULT '[]',
     release_stream_chunk_deadline INTEGER NOT NULL DEFAULT 0
 );
 

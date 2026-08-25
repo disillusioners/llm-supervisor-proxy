@@ -23,7 +23,18 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
-// Model represents a model with its fallback chain
+// Model represents a model with its fallback chain.
+//
+// Phase 1 wire DTO (back-compat shim — Phase 4 swaps the DTO to the
+// multi-credential shape). For now the DTO keeps accepting and
+// returning a single `credential_id` string at the JSON boundary, and
+// the server-side translate layer converts it to/from
+// `models.ModelConfig.Credentials` (a single-ref slice with weight=1,
+// position=0 when a credential is present; nil when absent). The
+// conversion lives in `singleRefFromCredentialID` /
+// `ModelConfigToDTO` (see below); do NOT call m.CredentialID on a
+// `models.ModelConfig` — the field is removed (use
+// `PrimaryCredentialID()`).
 type Model struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
@@ -32,7 +43,7 @@ type Model struct {
 	TruncateParams []string `json:"truncate_params,omitempty"`
 	// Internal upstream fields
 	Internal        bool   `json:"internal"`
-	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential
+	CredentialID    string `json:"credential_id,omitempty"`     // Wire-shape single credential reference (Phase 4 replaces this DTO)
 	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional)
 	InternalModel   string `json:"internal_model,omitempty"`
 	// Stream buffering deadline
@@ -55,6 +66,26 @@ type Credential struct {
 	Provider string `json:"provider"`
 	APIKey   string `json:"api_key"` // Masked API key (e.g., "sk-abcde***")
 	BaseURL  string `json:"base_url,omitempty"`
+}
+
+// singleRefFromCredentialID translates the legacy wire-shape
+// `credential_id` string into a single-ref []models.CredentialRef
+// slice (weight=1, position=0 — the legacy single-credential "primary"
+// semantics). When the wire field is empty, returns nil so the
+// resulting ModelConfig stays consistent with an external / non-internal
+// model. Phase 4 replaces the DTO and removes this helper.
+//
+// This is the Phase 1 back-compat shim that keeps the old UI working
+// while the backend stores the new Credentials shape; it lives in
+// pkg/ui because the wire DTO is the only place the legacy
+// `credential_id` string is still observable.
+func singleRefFromCredentialID(id string) []models.CredentialRef {
+	if id == "" {
+		return nil
+	}
+	return []models.CredentialRef{
+		{CredentialID: id, Weight: 1, Position: 0},
+	}
 }
 
 //go:embed static/*
@@ -387,7 +418,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				FallbackChain:              mc.FallbackChain,
 				TruncateParams:             mc.TruncateParams,
 				Internal:                   mc.Internal,
-				CredentialID:               mc.CredentialID,
+				CredentialID:               mc.PrimaryCredentialID(),
 				InternalBaseURL:            mc.InternalBaseURL,
 				InternalModel:              mc.InternalModel,
 				ReleaseStreamChunkDeadline: mc.ReleaseStreamChunkDeadline,
@@ -457,7 +488,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			FallbackChain:              newModel.FallbackChain,
 			TruncateParams:             newModel.TruncateParams,
 			Internal:                   newModel.Internal,
-			CredentialID:               newModel.CredentialID,
+			Credentials:                singleRefFromCredentialID(newModel.CredentialID),
 			InternalBaseURL:            newModel.InternalBaseURL,
 			InternalModel:              newModel.InternalModel,
 			ReleaseStreamChunkDeadline: newModel.ReleaseStreamChunkDeadline,
@@ -555,7 +586,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			FallbackChain:                updatedModel.FallbackChain,
 			TruncateParams:               updatedModel.TruncateParams,
 			Internal:                     updatedModel.Internal,
-			CredentialID:                 updatedModel.CredentialID,
+			Credentials:                  singleRefFromCredentialID(updatedModel.CredentialID),
 			InternalBaseURL:              updatedModel.InternalBaseURL,
 			InternalModel:                updatedModel.InternalModel,
 			ReleaseStreamChunkDeadline:   updatedModel.ReleaseStreamChunkDeadline,

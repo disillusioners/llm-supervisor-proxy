@@ -49,6 +49,7 @@ var migrations = []migration{
 	{"025", "025_model_hourly_usage.up"},
 	{"026", "026_add_mcp_servers.up"},
 	{"027", "027_add_exclude_from_ultimate_switching.up"},
+	{"028", "028_add_model_credentials.up"},
 }
 
 // RunMigrations executes database schema migrations

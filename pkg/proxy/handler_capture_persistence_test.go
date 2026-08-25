@@ -118,7 +118,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_External(t *testing.T
 		Name:         "Ultimate Model",
 		Enabled:      true,
 		Internal:     false, // EXTERNAL — executes through executeExternal
-		CredentialID: "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 	})
 	if err != nil {
 		t.Fatalf("AddModel (ultimate): %v", err)
@@ -276,7 +276,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_ExternalStream(t *tes
 		Name:         "Ultimate Model",
 		Enabled:      true,
 		Internal:     false,
-		CredentialID: "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 	})
 	if err != nil {
 		t.Fatalf("AddModel (ultimate): %v", err)
@@ -473,7 +473,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 		Name:            "Ultimate Model",
 		Enabled:         true,
 		Internal:        true, // INTERNAL — routes through executeInternal
-		CredentialID:    "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:   "internal-model",
 		InternalBaseURL: upstream.URL,
 	})
@@ -625,7 +625,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 		Name:            "Ultimate Model",
 		Enabled:         true,
 		Internal:        true,
-		CredentialID:    "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel:   "internal-model",
 		InternalBaseURL: upstream.URL,
 	})

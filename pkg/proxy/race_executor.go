@@ -42,20 +42,24 @@ func raceExtProviderIsMiniMax(cfg *ConfigSnapshot) bool {
 }
 
 // raceIntProviderIsMiniMax returns true iff the resolved internal model
-// has a CredentialID that resolves to a MiniMax credential. modelID is
-// the upstream model id from the race coordinator. modelCfg may be nil
-// for the call before resolveInternalConfig runs; we re-resolve by ID to
-// keep the helper stateless. Used by the race-internal twin A gate
-// (P1-8 a).
+// has a primary credential (Credentials[0]) that resolves to a MiniMax
+// credential. modelID is the upstream model id from the race
+// coordinator. modelCfg may be nil for the call before
+// resolveInternalConfig runs; we re-resolve by ID to keep the helper
+// stateless. Used by the race-internal twin A gate (P1-8 a).
 func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 	if cfg == nil || cfg.ModelsConfig == nil || modelID == "" {
 		return false
 	}
 	mc := cfg.ModelsConfig.GetModel(modelID)
-	if mc == nil || mc.CredentialID == "" {
+	if mc == nil {
 		return false
 	}
-	cred := cfg.ModelsConfig.GetCredential(mc.CredentialID)
+	primaryCredentialID := mc.PrimaryCredentialID()
+	if primaryCredentialID == "" {
+		return false
+	}
+	cred := cfg.ModelsConfig.GetCredential(primaryCredentialID)
 	if cred == nil {
 		return false
 	}
