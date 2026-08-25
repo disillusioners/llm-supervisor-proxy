@@ -31,5 +31,18 @@ WHERE credentials_json IS NOT NULL
 
 -- NOTE: we do NOT DROP credentials_json -- it is preserved so a
 -- re-up restores the full multi-credential list.
+--
+-- Operator note (Phase-1 S2): the .down migration is a MANUAL
+-- artifact — it is not auto-run by runMigration(). schema_migrations
+-- records the .up application; the .down is provided here for the
+-- operator to run by hand if they need to roll the shadow write
+-- back. After running .down + .up again, schema_migrations will
+-- show two rows with the same version (one for each up run); the
+-- isMigrationApplied() check guards against re-applying .up on the
+-- second run, so the second .up is a no-op (the ALTER ADD COLUMN
+-- would fail if the column already existed — this is the safety
+-- net). Operators who want a clean record can DELETE FROM
+-- schema_migrations WHERE version = '028' between the .down and
+-- the second .up.
 
 COMMIT;

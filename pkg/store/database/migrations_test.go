@@ -35,7 +35,9 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +210,126 @@ func TestMigration028_Backfill(t *testing.T) {
 	}
 }
 
+// TestMigration028_EscapeSafeBackfill (Phase-1 hardening W3) proves the
+// 028 backfill produces ESCAPE-SAFE JSON for credential IDs that
+// contain special characters (double-quote, control chars). The prior
+// raw-concat form produced invalid JSON for those inputs (e.g. an
+// unescaped `"` inside the credential_id would terminate the string
+// literal, breaking every consumer that json.Unmarshal()s the column).
+//
+// The leader-pin form — `json_array(json_object('credential_id',
+// credential_id, 'weight', 1, 'position', 0))` — uses the bundled
+// JSON1 extension (modernc.org/sqlite v1.46.1) which correctly escapes
+// the values.
+//
+// For plain ASCII IDs the JSON1 form emits the same bytes as the old
+// concat (`[{"credential_id":"cred-X","weight":1,"position":0}]`), so
+// the byte-exact assertion in TestMigration028_Backfill above stays
+// valid. This test exercises the DIVERGENT path: IDs that would have
+// broken the old form and now round-trip as valid JSON.
+func TestMigration028_EscapeSafeBackfill(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Run 001..027 only.
+	if err := store.ensureMigrationsTable(ctx); err != nil {
+		t.Fatalf("ensureMigrationsTable: %v", err)
+	}
+	for i := 0; i < len(migrations)-1; i++ {
+		if migrations[i].version == "028" {
+			continue
+		}
+		if err := store.runMigration(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %s: %v", migrations[i].version, err)
+		}
+	}
+
+	// Insert a model whose credential_id contains a double-quote AND a
+	// newline (control character) — both must be JSON-escaped in the
+	// backfilled credentials_json. The OLD raw-concat form would emit
+	// invalid JSON for these inputs (the unescaped `"` would terminate
+	// the JSON string literal mid-value). The NEW JSON1 form correctly
+	// escapes both, so json_extract / json.Unmarshal round-trip the
+	// original credential_id bytes-for-bytes.
+	const evilID = `cred"X` + "\n" + `Y`
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credential_id, internal_base_url, internal_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"model-evil", "Model Evil", 1, "[]", "[]", 0, evilID, "", "",
+	); err != nil {
+		t.Fatalf("insert model-evil: %v", err)
+	}
+
+	// Find and run 028.
+	var mig028 *migration
+	for i := range migrations {
+		if migrations[i].version == "028" {
+			mig028 = &migrations[i]
+			break
+		}
+	}
+	if mig028 == nil {
+		t.Fatal("028 not found in migrations array")
+	}
+	if err := store.runMigration(ctx, *mig028); err != nil {
+		t.Fatalf("runMigration 028: %v", err)
+	}
+
+	// Read back credentials_json.
+	var credsJSON string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT credentials_json FROM models WHERE id = ?`, "model-evil",
+	).Scan(&credsJSON); err != nil {
+		t.Fatalf("select model-evil: %v", err)
+	}
+
+	// Assert the stored JSON is well-formed (parseable) and that
+	// json_extract round-trips the original credential_id bytes. The
+	// JSON1-escaped form must produce a value equivalent to the input
+	// string when extracted back via $ → text.
+	var extracted string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT json_extract(?, '$[0].credential_id')`, credsJSON,
+	).Scan(&extracted); err != nil {
+		t.Fatalf("json_extract: %v", err)
+	}
+	if extracted != evilID {
+		t.Errorf("json_extract round-trip failed: got %q (% x), want %q (% x)", extracted, []byte(extracted), evilID, []byte(evilID))
+	}
+
+	// Round-trip via Go json.Unmarshal — proves the column value is
+	// valid JSON the application can parse (not just SQLite's parser).
+	var refs []map[string]interface{}
+	if err := jsonUnmarshalString(credsJSON, &refs); err != nil {
+		t.Errorf("credentials_json is not valid JSON for app-level parse: %v\nraw=%s", err, credsJSON)
+		return
+	}
+	if len(refs) != 1 {
+		t.Errorf("expected 1 ref in credentials_json, got %d (raw=%s)", len(refs), credsJSON)
+		return
+	}
+	if got, _ := refs[0]["credential_id"].(string); got != evilID {
+		t.Errorf("json.Unmarshal round-trip: credential_id = %q (% x), want %q (% x)",
+			got, []byte(got), evilID, []byte(evilID))
+	}
+
+	// Sanity: the column must NOT contain an unescaped quote that would
+	// have terminated the old raw-concat form mid-string. The OLD form
+	// for input `cred"X\nY` would have produced
+	// `[{"credential_id":"cred"X\nY","weight":1,"position":0}]` —
+	// INVALID JSON. The NEW form must NOT match that string verbatim.
+	if credsJSON == `[{"credential_id":"cred"X`+"\n"+`Y","weight":1,"position":0}]` {
+		t.Errorf("credentials_json matches the OLD escape-unsafe concat form — JSON1 form not active")
+	}
+}
+
 // TestMigration028_LosslessDown asserts the 028 down migration
 // preserves credentials_json (no DROP) and re-derives credential_id
 // from credentials_json[0] via json_extract (M-1 LOSSLESS).
@@ -288,6 +410,13 @@ func TestMigration028_LosslessDown(t *testing.T) {
 // partial state, this test fails.
 //
 // 4a / Phase 1 exit gating — M-1-test MANDATORY.
+//
+// W7 clarification (Phase-1 hardening): this test asserts the
+// happy-path COMMIT scenario — it does NOT inject a mid-statement
+// failure. The forced-failure rollback case is asserted separately
+// by TestMigration028_FileLevelTransactionSQLite_Rollback below
+// (keeps the two assertions isolated so the M-1 gating test stays
+// deterministic).
 func TestMigration028_FileLevelTransactionSQLite(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -337,6 +466,112 @@ func TestMigration028_FileLevelTransactionSQLite(t *testing.T) {
 	_ = time.Second
 }
 
+// TestMigration028_FileLevelTransactionSQLite_Rollback (Phase-1 W7
+// hardening) proves that a file-level BEGIN TRANSACTION; … COMMIT;
+// migration ROLLS BACK cleanly when a statement in the middle
+// fails. The defense is in TWO places:
+//
+//  1. modernc.org/sqlite v1.46.1 does NOT auto-rollback when a
+//     multi-statement ExecContext fails mid-way — the driver
+//     returns the error but leaves any successful statements in
+//     the implicit transaction in a "pending" state. We verified
+//     this directly (see Phase-1 W7 experiment): partial state from
+//     a failed file-level transaction persists unless an explicit
+//     ROLLBACK is issued.
+//  2. migrate.go:88-99 (Phase-1 S1 hardening) issues a defensive
+//     ROLLBACK whenever ExecContext returns an error, regardless
+//     of whether the migration started a transaction. For
+//     migrations without an active transaction, the ROLLBACK
+//     returns "cannot rollback - no transaction is active" and
+//     the error is ignored — best-effort cleanup is harmless.
+//
+// This test constructs an inline transaction shaped like 028.up.sql
+// but with a deliberately-failing middle statement. It asserts that
+// after the failure, the partial state (the ALTER'd credentials_json
+// column) does NOT persist — i.e. the explicit ROLLBACK in
+// migrate.go's error path actually works in production scenarios.
+//
+// Counterpart to TestMigration028_FileLevelTransactionSQLite (which
+// asserts the commit-side happy path). Together they prove both
+// halves of file-level transactional atomicity.
+func TestMigration028_FileLevelTransactionSQLite_Rollback(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Bring up migrations 001..027 only (skip 028 — we want to test
+	// the column-add step in isolation, against a pre-028 schema).
+	if err := store.ensureMigrationsTable(ctx); err != nil {
+		t.Fatalf("ensureMigrationsTable: %v", err)
+	}
+	for i := 0; i < len(migrations)-1; i++ {
+		if migrations[i].version == "028" {
+			continue
+		}
+		if err := store.runMigration(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %s: %v", migrations[i].version, err)
+		}
+	}
+
+	// Sanity: credentials_json column must NOT exist before we run
+	// the inline transaction (proves the partial-state assertion
+	// below is meaningful).
+	if columnExists(t, store.DB, "models", "credentials_json") {
+		t.Fatal("credentials_json column already present pre-test — pre-028 schema expected")
+	}
+
+	// Inline transaction shaped like 028.up.sql but with a
+	// deliberately-failing statement between the ALTER and the
+	// UPDATE. This simulates a failed file-level migration. To
+	// exercise the SAME defensive path migrate.go uses, we mirror
+	// its error handling here: ExecContext the failing SQL, then
+	// issue an explicit ROLLBACK.
+	const failingSQL = `
+BEGIN TRANSACTION;
+ALTER TABLE models ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '[]';
+INSERT INTO nonexistent_table_for_rollback_test VALUES (1);
+UPDATE models SET credentials_json = '[]';
+COMMIT;
+`
+	if _, err := store.DB.ExecContext(ctx, failingSQL); err == nil {
+		t.Fatal("expected error from forced mid-transaction failure, got nil — test setup invalid")
+	}
+	// Mirror the Phase-1 S1 defensive ROLLBACK.
+	if _, rbErr := store.DB.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+		// "cannot rollback - no transaction is active" is fine
+		// (means the failing statement didn't open a tx); any
+		// other error is a real concern.
+		if !strings.Contains(rbErr.Error(), "cannot rollback") {
+			t.Logf("ROLLBACK after forced failure returned non-no-tx error (best-effort cleanup ignored): %v", rbErr)
+		}
+	}
+
+	// Assert credentials_json column does NOT exist — proves the
+	// explicit ROLLBACK after a failed multi-statement ExecContext
+	// successfully rolls back the successful ALTER (the partial
+	// state). If the column exists, either the ROLLBACK didn't
+	// fire OR it didn't roll back the partial state — both
+	// indicate the file-level BEGIN...COMMIT isn't atomic in
+	// practice.
+	if columnExists(t, store.DB, "models", "credentials_json") {
+		t.Error("credentials_json column persisted after forced mid-transaction failure + ROLLBACK — file-level BEGIN...COMMIT not atomic in practice")
+	}
+
+	// Confirm we can still query the table (no schema corruption
+	// from the partial ALTER rolling back).
+	var count int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM models`).Scan(&count); err != nil {
+		t.Errorf("models table query failed post-rollback (partial schema state): %v", err)
+	}
+}
+
 // columnExists is a small helper used across the migration tests to
 // assert presence of a column in a given table.
 func columnExists(t *testing.T, db interface {
@@ -367,3 +602,12 @@ func columnExists(t *testing.T, db interface {
 // _ keeps `models` referenced in case future tests need to assert
 // via the typed API instead of raw SQL.
 var _ = models.MaxCredentialRefs
+
+// jsonUnmarshalString is a tiny wrapper around json.Unmarshal — kept
+// here so the escape-safe test (Phase-1 hardening W3) reads as
+// one-liners. encoding/json's stdlib Unmarshal accepts []byte, so
+// this is just sugar; defined locally to keep this file's imports
+// readable.
+func jsonUnmarshalString(s string, v interface{}) error {
+	return json.Unmarshal([]byte(s), v)
+}

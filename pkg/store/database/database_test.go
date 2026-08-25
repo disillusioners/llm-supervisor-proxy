@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1782,29 +1783,36 @@ func TestModelsManager_ResolveInternalConfig_PeakHourCrossMidnight(t *testing.T)
 	_ = modelsMgr.RemoveModel(modelID2)
 }
 
-// TestModelsManager_ResolveInternalConfig_PeakHourNonInternal tests that peak hours
-// are ignored for non-internal models in the DB-backed implementation.
+// TestModelsManager_ResolveInternalConfig_PeakHourNonInternal tests that
+// ResolveInternalConfig returns ok=false for a non-internal model
+// regardless of any other configuration (the Internal gate short-
+// circuits before peak-hour resolution).
+//
+// Phase-1 W4: AddModel now rejects PeakHourEnabled=true + Internal=false
+// (the existing Validate rule "peak_hour_enabled requires internal to
+// be true" was previously only run on bulk Validate, not on AddModel).
+// The fixture is updated to a valid non-internal model — the test
+// still covers the same ResolveInternalConfig behavior (non-internal
+// ⇒ ok=false).
 func TestModelsManager_ResolveInternalConfig_PeakHourNonInternal(t *testing.T) {
 	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
 	defer cleanup()
 
-	// Add non-internal model with peak hours enabled
+	// Add non-internal model — no peak-hour fields (those would be
+	// invalid for non-internal). The test is about ResolveInternalConfig's
+	// non-internal short-circuit, not about peak-hour resolution on
+	// non-internal models.
 	testModel := models.ModelConfig{
-		ID:               "non-internal-peak-test",
-		Name:             "Non Internal Peak Test",
-		Enabled:          true,
-		Internal:         false, // Not internal
-		PeakHourEnabled:  true,
-		PeakHourStart:    "00:00",
-		PeakHourEnd:      "23:59",
-		PeakHourTimezone: "+0",
-		PeakHourModel:    "peak-db-model",
+		ID:      "non-internal-peak-test",
+		Name:    "Non Internal Peak Test",
+		Enabled: true,
+		Internal: false, // Not internal — short-circuits in ResolveInternalConfig
 	}
 	if err := modelsMgr.AddModel(testModel); err != nil {
 		t.Fatalf("Failed to add model: %v", err)
 	}
 
-	// Non-internal models return ok=false
+	// Non-internal models return ok=false regardless of any other fields.
 	_, _, _, _, ok := modelsMgr.ResolveInternalConfig("non-internal-peak-test")
 	if ok {
 		t.Error("Expected ResolveInternalConfig to return ok=false for non-internal model")
@@ -1815,27 +1823,38 @@ func TestModelsManager_ResolveInternalConfig_PeakHourNonInternal(t *testing.T) {
 }
 
 // TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential tests that
-// ResolveInternalConfig returns ok=false when the credential doesn't exist.
+// ResolveInternalConfig returns ok=false when the credential referenced by the
+// model is missing from the credentials table.
+//
+// Phase-1 W4: AddModel now rejects a model whose Credentials reference a
+// non-existent credential (the existing Validate rule was previously
+// only run on bulk Validate). The fixture is updated to insert a valid
+// model via raw SQL — bypassing AddModel validation — so we can
+// exercise the runtime ResolveInternalConfig path without first
+// hitting the new write-time validation. This mirrors the
+// seedCredential-style bypass used elsewhere in this file (test fixtures
+// that need to materialize an invalid shape purely to assert a runtime
+// invariant).
 func TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential(t *testing.T) {
 	modelsMgr, cleanup := setupModelsManagerForPeakHour(t)
 	defer cleanup()
 
-	// Add model with non-existent credential
-	testModel := models.ModelConfig{
-		ID:               "missing-cred-peak-test",
-		Name:             "Missing Credential Test",
-		Enabled:          true,
-		Internal:         true,
-		Credentials: models.TestRefs("nonexistent-credential"), // Doesn't exist
-		InternalModel:    "normal-db-model",
-		PeakHourEnabled:  true,
-		PeakHourStart:    "00:00",
-		PeakHourEnd:      "23:59",
-		PeakHourTimezone: "+0",
-		PeakHourModel:    "peak-db-model",
-	}
-	if err := modelsMgr.AddModel(testModel); err != nil {
-		t.Fatalf("Failed to add model: %v", err)
+	// Insert a model that REFERENCES a credential that doesn't exist
+	// in the credentials table. We bypass AddModel via raw SQL because
+	// Phase-1 W4 now enforces the "references non-existent credential"
+	// rule on AddModel — this test's intent is to verify that
+	// ResolveInternalConfig at runtime still returns ok=false in that
+	// state (the runtime path does NOT crash; it returns ok=false via
+	// the GetCredential(...) == nil branch).
+	store := modelsMgr.store
+	if _, err := store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"missing-cred-peak-test", "Missing Credential Test", 1, "[]", "[]", 1,
+		`[{"credential_id":"nonexistent-credential","weight":1,"position":0}]`,
+		"nonexistent-credential", "", "normal-db-model",
+		1, "00:00", "23:59", "+0", "peak-db-model",
+	); err != nil {
+		t.Fatalf("raw insert: %v", err)
 	}
 
 	_, _, _, _, ok := modelsMgr.ResolveInternalConfig("missing-cred-peak-test")
@@ -2028,15 +2047,19 @@ func TestModelsManager_UpdateModel_SecondaryUpstreamModel(t *testing.T) {
 	_ = modelsMgr.RemoveModel("update-secondary-test")
 }
 
-// TestModelsManager_AddModel_SecondaryWithNonInternal tests that AddModel accepts
-// non-internal models with secondary_upstream_model (validation is done separately).
+// TestModelsManager_AddModel_SecondaryWithNonInternal tests that AddModel
+// REJECTS non-internal models with secondary_upstream_model.
+//
+// Phase-1 W4: AddModel now enforces the same per-model rules Validate()
+// does — "secondary_upstream_model requires internal to be true". The
+// pre-Phase-1 assumption that "AddModel does not validate" is no
+// longer true. This test asserts the new reject behavior; the
+// counterpart Validate-only path is exercised below via raw-SQL bypass
+// (TestModelsManager_Validate_SecondaryWithNonInternal).
 func TestModelsManager_AddModel_SecondaryWithNonInternal(t *testing.T) {
 	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
 	defer cleanup()
 
-	// AddModel does NOT validate - just inserts the model
-	// Validation is done separately via Validate()
-	// This test verifies AddModel accepts the model (validation is tested in Validate tests)
 	testModel := models.ModelConfig{
 		ID:                     "invalid-secondary-external",
 		Name:                   "Invalid Secondary External",
@@ -2044,41 +2067,47 @@ func TestModelsManager_AddModel_SecondaryWithNonInternal(t *testing.T) {
 		Internal:               false,
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
+	// Phase-1 W4: AddModel now REJECTS this shape — the rule
+	// "secondary_upstream_model requires internal to be true" is
+	// enforced at write time, not only at Validate time.
 	err := modelsMgr.AddModel(testModel)
-	// AddModel succeeds - validation is separate
-	if err != nil {
-		t.Errorf("AddModel failed: %v", err)
+	if err == nil {
+		t.Errorf("AddModel should reject non-internal model with secondary_upstream_model, got nil error")
+		// cleanup if it accidentally succeeded
+		_ = modelsMgr.RemoveModel("invalid-secondary-external")
+		return
 	}
-
-	// Cleanup
-	_ = modelsMgr.RemoveModel("invalid-secondary-external")
+	if !strings.Contains(err.Error(), "secondary_upstream_model requires internal to be true") {
+		t.Errorf("AddModel error = %q, want substring %q", err.Error(), "secondary_upstream_model requires internal to be true")
+	}
 }
 
-// TestModelsManager_Validate_SecondaryWithNonInternal tests that Validate rejects
-// a model with secondary_upstream_model but internal=false.
+// TestModelsManager_Validate_SecondaryWithNonInternal tests that Validate
+// rejects a model with secondary_upstream_model but internal=false.
+//
+// Phase-1 W4: AddModel now enforces this rule at write time too, so we
+// can't seed an invalid shape via AddModel — we use a raw-SQL INSERT
+// (bypassing AddModel validation) to materialize the invalid shape,
+// then assert Validate() still catches it. Same bypass pattern as
+// TestModelsManager_ResolveInternalConfig_PeakHourMissingCredential.
 func TestModelsManager_Validate_SecondaryWithNonInternal(t *testing.T) {
 	modelsMgr, cleanup := setupModelsManagerForSecondary(t)
 	defer cleanup()
 
-	// Add a model with secondary_upstream_model but internal=false
-	// Note: AddModel doesn't validate, so we need to validate via ModelsManager.Validate()
-	testModel := models.ModelConfig{
-		ID:                     "validate-secondary-external",
-		Name:                   "Validate Secondary External",
-		Enabled:                true,
-		Internal:               false,
-		SecondaryUpstreamModel: "glm-4-flash",
-	}
-	// AddModel succeeds (no validation in AddModel itself)
-	err := modelsMgr.AddModel(testModel)
-	if err != nil {
-		t.Fatalf("AddModel failed: %v", err)
+	store := modelsMgr.store
+	if _, err := store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, secondary_upstream_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"validate-secondary-external", "Validate Secondary External", 1, "[]", "[]", 0, "[]", "", "", "", "glm-4-flash",
+	); err != nil {
+		t.Fatalf("raw insert: %v", err)
 	}
 
-	// Validate() should fail
-	err = modelsMgr.Validate()
+	// Validate() should still fail — the rule is enforced on both paths.
+	err := modelsMgr.Validate()
 	if err == nil {
 		t.Error("Expected Validate to fail for non-internal model with secondary_upstream_model")
+	} else if !strings.Contains(err.Error(), "secondary_upstream_model requires internal to be true") {
+		t.Errorf("Validate error = %q, want substring %q", err.Error(), "secondary_upstream_model requires internal to be true")
 	}
 
 	// Cleanup

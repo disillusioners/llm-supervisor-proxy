@@ -653,10 +653,12 @@ func TestS9_NonMiniMax_FlagOn(t *testing.T) {
 	})
 
 	t.Run("ultimate_external_request_untranslated_response_passthrough", func(t *testing.T) {
-		// Ultimate paths gate on the MODEL's CredentialID (handler.go:291-297
-		// resolves upstreamProvider from modelCfg.CredentialID). Point
-		// ULTIMATE_MODEL_ID at the ultimate-external model bound to the
-		// openai credential ⇒ gate off ⇒ legacy byte passthrough.
+		// Ultimate paths gate on the MODEL's Credentials[0] (handler.go:625-635
+		// resolves upstreamProvider from modelCfg.PrimaryCredentialID() — the
+		// legacy single-credential view via the back-compat shim after the
+		// Phase-1 CredentialID field removal). Point ULTIMATE_MODEL_ID at the
+		// ultimate-external model bound to the openai credential ⇒ gate off
+		// ⇒ legacy byte passthrough.
 		env := setupTestEnv(t, rawStringHandler(http.StatusOK, detailsRespBody, "application/json"), envOptions{ultimateModelID: ultExtModelOpenAI})
 		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
 		if rr.Code != http.StatusOK {

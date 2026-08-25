@@ -39,7 +39,13 @@ var sharedHTTPClient = &http.Client{
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
 // Execute (B3). upstreamProvider is the lowercase credential provider
-// name when CredentialID is set on modelCfg (D3); empty otherwise.
+// name when modelCfg.PrimaryCredentialID() returns a credential ID
+// that resolves in the credentials table (D3 — Credentials[0]
+// provider lookup); empty otherwise. (Phase-1 S3: the field was
+// previously the removed `modelCfg.CredentialID` string; the
+// Phase-1 multi-credential refactor moved to the
+// `modelCfg.PrimaryCredentialID()` back-compat shim that returns
+// Credentials[0].CredentialID or "".)
 // The gate fires iff interleaved && upstreamProvider == providers.ProviderMiniMax
 // (case-insensitive). Gate lives in this function so H5 (short-circuit
 // BEFORE parse/marshal) is guaranteed at the strongest no-op site.

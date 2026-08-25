@@ -258,29 +258,6 @@ func TestModelsCredentials_ValidationMatrix(t *testing.T) {
 			errSubstr: "does not match primary provider",
 		},
 		{
-			name: "17 refs",
-			model: func() models.ModelConfig {
-				// We need 17 distinct credentials to hit the >16 cap.
-				ids := make([]string, 17)
-				for i := range ids {
-					ids[i] = "cred-A" // duplicate trigger instead — but we want len>16
-				}
-				return models.ModelConfig{
-					ID: "v-17refs", Name: "17",
-					Enabled: true, Internal: true, InternalModel: "x",
-					// The duplicate-id check fires first; we want the
-					// 17-ref check, so use unique IDs by padding.
-					Credentials: []models.CredentialRef{
-						{CredentialID: "cred-A", Weight: 1, Position: 0},
-						{CredentialID: "cred-B", Weight: 1, Position: 1},
-						// 15 placeholders we cannot satisfy without
-						// seeding more creds; rebuild via 17 entries:
-					},
-				}
-			}(),
-			wantErr: false, // placeholder — see "valid 3-cred same-provider" below for the canonical 17-ref case
-		},
-		{
 			name: "non-internal with creds (allowed — D3 probe requirement)",
 			model: models.ModelConfig{
 				ID: "v-nonint", Name: "Non-Internal With Creds",
@@ -311,7 +288,20 @@ func TestModelsCredentials_ValidationMatrix(t *testing.T) {
 			// ModelsConfig (the JSON-backed Validate is the canonical
 			// shape) and exercise it.
 			mc := models.NewModelsConfig()
-			seedIntoModelsConfig(mc, store)
+			// Phase-1 S4: a seed failure now surfaces via panic →
+			// t.Fatal rather than silently producing confusing
+			// downstream assertions.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if e, ok := r.(testFixtureSeedError); ok {
+							t.Fatal(e.Error())
+						}
+						panic(r) // not ours — re-raise
+					}
+				}()
+				seedIntoModelsConfig(mc, store)
+			}()
 			mc.Models = append(mc.Models, tc.model)
 			err := mc.Validate()
 			if tc.wantErr {
@@ -355,19 +345,50 @@ func TestModelsCredentials_ValidationMatrix(t *testing.T) {
 // the in-memory ModelsConfig so JSON-backed Validate can resolve
 // the `m.GetCredential(ref.CredentialID, ...)` provider-match
 // lookup. Used by the validation matrix test.
+//
+// Phase-1 S4: a query failure here previously returned silently,
+// producing confusing downstream assertions ("expected error from
+// Validate, got nil" because the credentials map was empty so the
+// existence check never fired). A seed failure should fail the test
+// loudly — the test is operating on fixture state, not real data.
 func seedIntoModelsConfig(mc *models.ModelsConfig, store *Store) {
 	rows, err := store.DB.Query(`SELECT id, provider, api_key, coalesce(base_url, '') FROM credentials`)
 	if err != nil {
-		return
+		// t.Fatalf requires *testing.T; the helper is called from a test
+		// goroutine that already holds the running test's context — we
+		// surface the failure by panicking with a recognizable shape so
+		// the test fails immediately rather than producing misleading
+		// downstream assertions. Use a dedicated type so the test
+		// harness reports a clear "seed failed" message.
+		panic(testFixtureSeedError{what: "query credentials", err: err})
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, provider, apiKey, baseURL string
 		if err := rows.Scan(&id, &provider, &apiKey, &baseURL); err != nil {
-			continue
+			panic(testFixtureSeedError{what: "scan credential row", err: err})
 		}
-		_ = mc.AddCredential(models.CredentialConfig{ID: id, Provider: provider, APIKey: apiKey, BaseURL: baseURL})
+		if err := mc.AddCredential(models.CredentialConfig{ID: id, Provider: provider, APIKey: apiKey, BaseURL: baseURL}); err != nil {
+			panic(testFixtureSeedError{what: "add credential " + id, err: err})
+		}
 	}
+	if err := rows.Err(); err != nil {
+		panic(testFixtureSeedError{what: "iterate credential rows", err: err})
+	}
+}
+
+// testFixtureSeedError is the panic value raised by test-only fixture
+// helpers (seedIntoModelsConfig and friends) when a fixture seed
+// fails. Converted to t.Fatal at the test goroutine via recover() —
+// keeps the helper signature simple (no *testing.T) while still
+// surfacing the failure loudly.
+type testFixtureSeedError struct {
+	what string
+	err  error
+}
+
+func (e testFixtureSeedError) Error() string {
+	return "test fixture seed failed: " + e.what + ": " + e.err.Error()
 }
 
 // TestModelsCredentials_InUseGuard — Task 7 acceptance.
@@ -611,5 +632,217 @@ func assertShadow(t *testing.T, store *Store, modelID, want string) {
 // contains is a tiny strings.Contains wrapper. Defined in
 // querybuilder_test.go in the same package — kept here only as a
 // forward-declaration comment to avoid editor confusion.
+
+// TestModelsCredentials_ValidationMatrix_DB (Phase-1 W5) mirrors the
+// 9-case validation matrix from TestModelsCredentials_ValidationMatrix
+// above against the DB-backed entry point ModelsManager.Validate
+// (store.go ~1132-1280 — Validate()). The original matrix exercised
+// only the JSON-backed ModelsConfig.Validate; this test pins the
+// DB-backed equivalent so any drift between the two surfaces (added
+// in Phase-1 W4) is caught at test time.
+//
+// Each case is materialized via raw SQL INSERT — bypasses AddModel
+// validation (Phase-1 W4 now rejects invalid shapes at write time) so
+// Validate() in isolation can be exercised for both accept and
+// reject cases. Same bypass pattern as
+// TestModelsManager_Validate_SecondaryWithNonInternal.
+func TestModelsCredentials_ValidationMatrix_DB(t *testing.T) {
+	store, cleanup := newStoreWithMigrations(t)
+	defer cleanup()
+
+	modelsMgr, err := NewModelsManager(store)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+
+	// Seed credentials used across cases (same triple as the JSON matrix).
+	seedCredential(t, store, "cred-A", "openai")
+	seedCredential(t, store, "cred-B", "openai")
+	seedCredential(t, store, "cred-Z", "anthropic")
+
+	// cases drives the 9 matrix entries against ModelsManager.Validate.
+	// Each case is inserted raw; the test asserts Validate() returns
+	// the expected error (or nil for accept cases).
+	cases := []struct {
+		name      string
+		model     models.ModelConfig
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "empty+internal",
+			model: models.ModelConfig{
+				ID: "v-db-empty-internal", Name: "Empty Internal",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: nil,
+			},
+			wantErr:   true,
+			errSubstr: "credential_id is required when internal is true",
+		},
+		{
+			name: "unknown ref",
+			model: models.ModelConfig{
+				ID: "v-db-unknown-ref", Name: "Unknown Ref",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: models.TestRefs("cred-A", "cred-DOES-NOT-EXIST"),
+			},
+			wantErr:   true,
+			errSubstr: "references non-existent credential",
+		},
+		{
+			name: "weight 0",
+			model: models.ModelConfig{
+				ID: "v-db-w0", Name: "Weight 0",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: []models.CredentialRef{
+					{CredentialID: "cred-A", Weight: 1, Position: 0},
+					{CredentialID: "cred-B", Weight: 0, Position: 1},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "weight must be > 0",
+		},
+		{
+			name: "weight -1",
+			model: models.ModelConfig{
+				ID: "v-db-wneg", Name: "Weight -1",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: []models.CredentialRef{
+					{CredentialID: "cred-A", Weight: 1, Position: 0},
+					{CredentialID: "cred-B", Weight: -1, Position: 1},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "weight must be > 0",
+		},
+		{
+			name: "duplicate id",
+			model: models.ModelConfig{
+				ID: "v-db-dup", Name: "Dup",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: []models.CredentialRef{
+					{CredentialID: "cred-A", Weight: 1, Position: 0},
+					{CredentialID: "cred-A", Weight: 2, Position: 1},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "duplicate credential_id",
+		},
+		{
+			name: "mixed provider",
+			model: models.ModelConfig{
+				ID: "v-db-mix", Name: "Mixed",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: models.TestRefs("cred-A", "cred-Z"), // A=openai, Z=anthropic
+			},
+			wantErr:   true,
+			errSubstr: "does not match primary provider",
+		},
+		{
+			name: "non-internal with creds (allowed — D3 probe requirement)",
+			model: models.ModelConfig{
+				ID: "v-db-nonint", Name: "Non-Internal With Creds",
+				Enabled: true, Internal: false, InternalModel: "x",
+				Credentials: models.TestRefs("cred-A"),
+			},
+			wantErr: false, // deviation: D3 probe needs this
+		},
+		{
+			name: "valid 3-cred same-provider",
+			model: models.ModelConfig{
+				ID: "v-db-valid-3", Name: "Valid 3",
+				Enabled: true, Internal: true, InternalModel: "x",
+				Credentials: models.TestRefsWeighted(
+					models.CredentialRef{CredentialID: "cred-A", Weight: 1},
+					models.CredentialRef{CredentialID: "cred-B", Weight: 2},
+				),
+			},
+			wantErr: false,
+		},
+	}
+
+	// Insert + Validate each case in isolation. We re-build the
+	// models table to a single-row state per case so cross-case
+	// model-list residue doesn't taint Validate().
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset models table to a single-row state for this case.
+			if _, err := store.DB.ExecContext(context.Background(), `DELETE FROM models`); err != nil {
+				t.Fatalf("clean models: %v", err)
+			}
+			insertModelRaw(t, store, tc.model)
+
+			err := modelsMgr.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.errSubstr != "" && !contains(err.Error(), tc.errSubstr) {
+					t.Errorf("error message = %q, want substring %q", err.Error(), tc.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	// 17-ref cap: ONE model with 17 distinct credentials should fail
+	// when materialized via the DB-backed Validate (same as the JSON
+	// matrix case at the bottom of TestModelsCredentials_ValidationMatrix).
+	t.Run("17 refs", func(t *testing.T) {
+		if _, err := store.DB.ExecContext(context.Background(), `DELETE FROM models`); err != nil {
+			t.Fatalf("clean models: %v", err)
+		}
+		ids17 := []string{"cred-17-A", "cred-17-B", "cred-17-C", "cred-17-D", "cred-17-E", "cred-17-F", "cred-17-G", "cred-17-H", "cred-17-I", "cred-17-J", "cred-17-K", "cred-17-L", "cred-17-M", "cred-17-N", "cred-17-O", "cred-17-P", "cred-17-Q"}
+		for _, id := range ids17 {
+			seedCredential(t, store, id, "openai")
+		}
+		refs17 := make([]models.CredentialRef, 17)
+		for i, id := range ids17 {
+			refs17[i] = models.CredentialRef{CredentialID: id, Weight: 1, Position: i}
+		}
+		insertModelRaw(t, store, models.ModelConfig{
+			ID: "v-db-17-real", Name: "17 Real",
+			Enabled: true, Internal: true, InternalModel: "x",
+			Credentials: refs17,
+		})
+		err := modelsMgr.Validate()
+		if err == nil {
+			t.Error("17-credential model should fail Validate (cap is 16)")
+		} else if !contains(err.Error(), "exceeds max of 16 refs") {
+			t.Errorf("17-ref error = %q, want substring 'exceeds max of 16 refs'", err.Error())
+		}
+	})
+}
+
+// insertModelRaw materializes a single models row via raw SQL,
+// bypassing AddModel's per-model validation (Phase-1 W4). Used by
+// validation matrix tests that need to seed an invalid shape purely
+// to assert Validate() rejects it. Mirrors the seedCredential
+// bypass pattern.
+func insertModelRaw(t *testing.T, store *Store, m models.ModelConfig) {
+	t.Helper()
+	credsJSON := marshalCredentialsJSON(m.Credentials)
+	primary := m.PrimaryCredentialID()
+	if _, err := store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.Name, 1, "[]", "[]", boolToInt(m.Internal), credsJSON, primary, m.InternalBaseURL, m.InternalModel,
+	); err != nil {
+		t.Fatalf("insertModelRaw(%s): %v", m.ID, err)
+	}
+}
+
+// boolToInt is a tiny SQLite-boolean shim for the raw SQL inserts.
+// The committed querybuilder uses BooleanLiteral which adapts per
+// dialect; here we only target the SQLite test path so a plain int is
+// sufficient.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 

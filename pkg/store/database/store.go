@@ -988,12 +988,29 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 // shadow) in the same INSERT. The shadow is computed in Go, NOT
 // extracted from JSON in SQL — see InsertModel() doc for the full
 // shape. The `json_extract` form lives ONLY in the down-migration.
+//
+// Phase-1 W4 hardening: per-model validation (weight>0, dup IDs,
+// 16-cap, provider-match, internal+creds consistency) runs BEFORE
+// the write lock — see validateBeforeWrite. This brings the DB
+// write path to parity with ModelsConfig.Validate() so any model
+// saved via the store manager is enforcement-equivalent to one
+// saved via the JSON-backed manager. Pre-Phase-1 store tests that
+// relied on AddModel accepting an invalid shape (e.g.
+// TestModelsManager_AddModel_SecondaryWithNonInternal) are updated
+// to assert the new reject behavior; the rule is preserved verbatim.
 func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	if model.ID == "" {
 		return models.ErrInvalidModelID
 	}
 	if model.Name == "" {
 		return models.ErrInvalidModelName
+	}
+
+	// Phase-1 W4 hardening — validate before write (cheap guards
+	// above already passed; per-ref rules + secondary + peak-hour
+	// rules live in validateBeforeWrite → validateModelAgainstCredentials).
+	if err := m.validateBeforeWrite(model); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -1051,6 +1068,10 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 // `credential_id = model.Credentials[0].CredentialID` (Go-evaluated
 // shadow) in the same statement. Both columns are bound in the
 // UPDATE; the shadow is NOT SQL-extracted.
+//
+// Phase-1 W4 hardening: per-model validation runs BEFORE the write
+// lock (see validateBeforeWrite). The cheap guards (empty ID /
+// Name, ID-changed, not-found) stay inline and run first.
 func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) error {
 	if model.ID == "" {
 		return models.ErrInvalidModelID
@@ -1060,6 +1081,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	}
 	if model.ID != modelID {
 		return models.ErrCannotChangeModelID
+	}
+
+	// Phase-1 W4 hardening — validate before write.
+	if err := m.validateBeforeWrite(model); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -1158,114 +1184,11 @@ func (m *ModelsManager) Validate() error {
 			}
 		}
 
-		// Validate internal upstream configuration
-		if model.Internal {
-			// Phase 1: internal models must carry at least one credential ref.
-			// Empty Credentials ⇒ keep the legacy error text verbatim so
-			// downstream callers that grep the message keep working.
-			if len(model.Credentials) == 0 {
-				return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
-			}
-
-			// Per-ref validation (Task 6 validation matrix).
-			seen := make(map[string]bool, len(model.Credentials))
-			var primaryCred *models.CredentialConfig
-			for idx, ref := range model.Credentials {
-				if ref.CredentialID == "" {
-					return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
-				}
-				if !credentialIDs[ref.CredentialID] {
-					return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, ref.CredentialID)
-				}
-				if ref.Weight <= 0 {
-					return fmt.Errorf("model %s: credentials[%d] (credential_id=%q): weight must be > 0, got %d", model.ID, idx, ref.CredentialID, ref.Weight)
-				}
-				if seen[ref.CredentialID] {
-					return fmt.Errorf("model %s: duplicate credential_id '%s' in credentials list", model.ID, ref.CredentialID)
-				}
-				seen[ref.CredentialID] = true
-			}
-			if len(model.Credentials) > models.MaxCredentialRefs {
-				return fmt.Errorf("model %s: credentials list exceeds max of %d refs", model.ID, models.MaxCredentialRefs)
-			}
-
-			// Provider-match invariant: every ref's credential must share
-			// Credentials[0]'s provider (case-insensitive). Looks up via
-			// GetCredential so the comparison reflects the actual stored
-			// credential row.
-			primaryCred = m.GetCredential(model.Credentials[0].CredentialID)
-			if primaryCred != nil {
-				primaryProvider := strings.ToLower(primaryCred.Provider)
-				for idx, ref := range model.Credentials[1:] {
-					refCred := m.GetCredential(ref.CredentialID)
-					if refCred == nil {
-						continue // already caught by the existence check above
-					}
-					if strings.ToLower(refCred.Provider) != primaryProvider {
-						return fmt.Errorf("model %s: credentials[%d] (credential_id=%q) provider %q does not match primary provider %q",
-							model.ID, idx+1, ref.CredentialID, refCred.Provider, primaryCred.Provider)
-					}
-				}
-			}
-
-			if model.InternalModel == "" {
-				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
-			}
-		}
-		// Note: non-internal models MAY carry Credentials — the
-		// ultimate-external D3 provider probe reads Credentials[0] to
-		// classify the upstream provider without injecting credentials.
-		// Rejecting non-internal-with-creds would break the D3 path.
-		// The plan's Task 6 validation rule "non-internal with
-		// non-empty Credentials ⇒ reject" was an oversight vs. the
-		// existing D3-probe call site; preserving the existing
-		// behavior is the contract-correct call.
-
-		// Validate secondary upstream model
-		if model.SecondaryUpstreamModel != "" {
-			if !model.Internal {
-				return fmt.Errorf("model %s: secondary_upstream_model requires internal to be true", model.ID)
-			}
-		}
-
-		// Validate peak hour configuration
-		if model.PeakHourEnabled {
-			// Peak hours require internal upstream
-			if !model.Internal {
-				return fmt.Errorf("model %s: peak_hour_enabled requires internal to be true", model.ID)
-			}
-
-			// All peak hour fields must be provided
-			if model.PeakHourStart == "" {
-				return fmt.Errorf("model %s: peak_hour_start is required when peak_hour_enabled is true", model.ID)
-			}
-			if model.PeakHourEnd == "" {
-				return fmt.Errorf("model %s: peak_hour_end is required when peak_hour_enabled is true", model.ID)
-			}
-			if model.PeakHourTimezone == "" {
-				return fmt.Errorf("model %s: peak_hour_timezone is required when peak_hour_enabled is true", model.ID)
-			}
-			if model.PeakHourModel == "" {
-				return fmt.Errorf("model %s: peak_hour_model is required when peak_hour_enabled is true", model.ID)
-			}
-
-			// Validate HH:MM format for start and end
-			if err := models.ValidateTimeFormat(model.PeakHourStart); err != nil {
-				return fmt.Errorf("model %s: invalid peak_hour_start: %w", model.ID, err)
-			}
-			if err := models.ValidateTimeFormat(model.PeakHourEnd); err != nil {
-				return fmt.Errorf("model %s: invalid peak_hour_end: %w", model.ID, err)
-			}
-
-			// Validate UTC offset
-			if err := models.ValidateUTCOffset(model.PeakHourTimezone); err != nil {
-				return fmt.Errorf("model %s: invalid peak_hour_timezone: %w", model.ID, err)
-			}
-
-			// Reject same start and end times (would create empty or full-day window)
-			if model.PeakHourStart == model.PeakHourEnd {
-				return fmt.Errorf("model %s: peak_hour_start and peak_hour_end cannot be the same", model.ID)
-			}
+		// Phase-1 W4 hardening: per-model rules are shared with the
+		// single-write AddModel/UpdateModel path via
+		// validateModelAgainstCredentials (see below).
+		if err := m.validateModelAgainstCredentials(model, credentialIDs); err != nil {
+			return err
 		}
 	}
 
@@ -1277,6 +1200,158 @@ func (m *ModelsManager) Validate() error {
 	}
 
 	return nil
+}
+
+// validateModelAgainstCredentials runs the per-model rules used by
+// both the bulk ModelsManager.Validate() and the single-write paths
+// AddModel/UpdateModel (Phase-1 W4 hardening — wire Validate() into
+// the DB write path so per-ref rules — weight>0, dup IDs, 16-cap,
+// provider-match, internal+creds consistency — are enforced on every
+// store write, not only at Validate() time).
+//
+// `credentialIDs` is a precomputed set built by the caller (snapshot
+// from GetCredentials before the write lock; under read-lock during
+// Validate). The provider-match invariant resolves per-ref via
+// m.GetCredential — the canonical lookup against the persisted
+// credential row.
+//
+// Cheap guards (empty ID / Name, duplicate / not-found) are NOT
+// re-run here — those live in AddModel / UpdateModel (write path) and
+// Validate (bulk path iterates `modelList` from the same source).
+//
+// Returns the same error texts the JSON-backed ModelsConfig.Validate
+// path emits, so downstream callers (pkg/ui/server.go surfaces, the
+// ModelsConfigInterface.Save callers, the existing 9-case validation
+// matrix test) keep matching.
+func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig, credentialIDs map[string]bool) error {
+	if model.Internal {
+		// Phase 1: internal models must carry at least one credential ref.
+		// Empty Credentials ⇒ keep the legacy error text verbatim so
+		// downstream callers that grep the message keep working.
+		if len(model.Credentials) == 0 {
+			return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
+		}
+
+		// Per-ref validation (Task 6 validation matrix).
+		seen := make(map[string]bool, len(model.Credentials))
+		for idx, ref := range model.Credentials {
+			if ref.CredentialID == "" {
+				return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
+			}
+			if !credentialIDs[ref.CredentialID] {
+				return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, ref.CredentialID)
+			}
+			if ref.Weight <= 0 {
+				return fmt.Errorf("model %s: credentials[%d] (credential_id=%q): weight must be > 0, got %d", model.ID, idx, ref.CredentialID, ref.Weight)
+			}
+			if seen[ref.CredentialID] {
+				return fmt.Errorf("model %s: duplicate credential_id '%s' in credentials list", model.ID, ref.CredentialID)
+			}
+			seen[ref.CredentialID] = true
+		}
+		if len(model.Credentials) > models.MaxCredentialRefs {
+			return fmt.Errorf("model %s: credentials list exceeds max of %d refs", model.ID, models.MaxCredentialRefs)
+		}
+
+		// Provider-match invariant: every ref's credential must share
+		// Credentials[0]'s provider (case-insensitive). Looks up via
+		// GetCredential so the comparison reflects the actual stored
+		// credential row.
+		primaryCred := m.GetCredential(model.Credentials[0].CredentialID)
+		if primaryCred != nil {
+			primaryProvider := strings.ToLower(primaryCred.Provider)
+			for idx, ref := range model.Credentials[1:] {
+				refCred := m.GetCredential(ref.CredentialID)
+				if refCred == nil {
+					continue // already caught by the existence check above
+				}
+				if strings.ToLower(refCred.Provider) != primaryProvider {
+					return fmt.Errorf("model %s: credentials[%d] (credential_id=%q) provider %q does not match primary provider %q",
+						model.ID, idx+1, ref.CredentialID, refCred.Provider, primaryCred.Provider)
+				}
+			}
+		}
+
+		if model.InternalModel == "" {
+			return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+		}
+	}
+	// Note: non-internal models MAY carry Credentials — the
+	// ultimate-external D3 provider probe reads Credentials[0] to
+	// classify the upstream provider without injecting credentials.
+	// Rejecting non-internal-with-creds would break the D3 path.
+	// The plan's Task 6 validation rule "non-internal with
+	// non-empty Credentials ⇒ reject" was an oversight vs. the
+	// existing D3-probe call site; preserving the existing
+	// behavior is the contract-correct call.
+
+	// Validate secondary upstream model
+	if model.SecondaryUpstreamModel != "" {
+		if !model.Internal {
+			return fmt.Errorf("model %s: secondary_upstream_model requires internal to be true", model.ID)
+		}
+	}
+
+	// Validate peak hour configuration
+	if model.PeakHourEnabled {
+		// Peak hours require internal upstream
+		if !model.Internal {
+			return fmt.Errorf("model %s: peak_hour_enabled requires internal to be true", model.ID)
+		}
+
+		// All peak hour fields must be provided
+		if model.PeakHourStart == "" {
+			return fmt.Errorf("model %s: peak_hour_start is required when peak_hour_enabled is true", model.ID)
+		}
+		if model.PeakHourEnd == "" {
+			return fmt.Errorf("model %s: peak_hour_end is required when peak_hour_enabled is true", model.ID)
+		}
+		if model.PeakHourTimezone == "" {
+			return fmt.Errorf("model %s: peak_hour_timezone is required when peak_hour_enabled is true", model.ID)
+		}
+		if model.PeakHourModel == "" {
+			return fmt.Errorf("model %s: peak_hour_model is required when peak_hour_enabled is true", model.ID)
+		}
+
+		// Validate HH:MM format for start and end
+		if err := models.ValidateTimeFormat(model.PeakHourStart); err != nil {
+			return fmt.Errorf("model %s: invalid peak_hour_start: %w", model.ID, err)
+		}
+		if err := models.ValidateTimeFormat(model.PeakHourEnd); err != nil {
+			return fmt.Errorf("model %s: invalid peak_hour_end: %w", model.ID, err)
+		}
+
+		// Validate UTC offset
+		if err := models.ValidateUTCOffset(model.PeakHourTimezone); err != nil {
+			return fmt.Errorf("model %s: invalid peak_hour_timezone: %w", model.ID, err)
+		}
+
+		// Reject same start and end times (would create empty or full-day window)
+		if model.PeakHourStart == model.PeakHourEnd {
+			return fmt.Errorf("model %s: peak_hour_start and peak_hour_end cannot be the same", model.ID)
+		}
+	}
+
+	return nil
+}
+
+// validateBeforeWrite runs the per-model validation rules from
+// validateModelAgainstCredentials against a fresh credential-IDs
+// snapshot, BEFORE acquiring the write lock. The snapshot is built
+// outside the write lock (GetCredentials takes RLock; a write Lock
+// would deadlock on the re-entrant read).
+//
+// Phase-1 W4 hardening — AddModel / UpdateModel call this so the
+// store write path enforces the same per-ref rules Validate() does.
+// The cheap guards (empty ID / Name, duplicate / not-found) stay in
+// AddModel / UpdateModel and run before this helper.
+func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
+	creds := m.GetCredentials() // RLock — OK, no write Lock held yet
+	credentialIDs := make(map[string]bool, len(creds))
+	for _, c := range creds {
+		credentialIDs[c.ID] = true
+	}
+	return m.validateModelAgainstCredentials(model, credentialIDs)
 }
 
 // Credential management methods

@@ -86,6 +86,24 @@ func (s *Store) runMigration(ctx context.Context, m migration) error {
 
 	// Execute migration
 	if _, err := s.DB.ExecContext(ctx, sql); err != nil {
+		// Phase-1 S1 hardening: defensive ROLLBACK on error. The
+		// modernc.org/sqlite v1.46.1 driver does NOT auto-rollback
+		// when a multi-statement ExecContext fails mid-way — the
+		// driver returns the error but leaves any successful
+		// statements in the implicit transaction in a "pending"
+		// state. Subsequent statements auto-commit (carrying the
+		// partial state forward) when the next Exec runs. The
+		// explicit ROLLBACK here rolls back partial state from a
+		// failed file-level BEGIN...COMMIT migration (currently
+		// only 028 uses the form); for migrations without an
+		// active transaction, ROLLBACK returns "cannot rollback -
+		// no transaction is active" which we ignore — the
+		// best-effort cleanup is harmless.
+		//
+		// The ROLLBACK error is intentionally discarded; the
+		// original migration error is what the caller wants to
+		// see.
+		_, _ = s.DB.ExecContext(ctx, "ROLLBACK")
 		return fmt.Errorf("migration %s failed: %w", m.version, err)
 	}
 

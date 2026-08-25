@@ -526,6 +526,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModelDetail handles PUT and DELETE /fe/api/models/{id}
+//
+// W6 (Phase-1 hardening): PUT through the legacy UI DTO COLLAPSES a
+// multi-credential model to a single credential ref. The Model DTO
+// (declared above) still carries a single `credential_id` string at
+// the wire boundary; the PUT decode populates it via
+// `singleRefFromCredentialID(updatedModel.CredentialID)` further down,
+// which always returns a 1-element []models.CredentialRef slice when
+// non-empty. So a user editing a 3-credential model via the old UI
+// silently loses 2 refs on save. This is the Phase-1 wire-DTO
+// constraint the contract (technical-analysis.md) acknowledges and
+// Phase 4 replaces with a multi-ref DTO. Do NOT remove this comment
+// when Phase 4 lands — it documents the migration hazard for any
+// in-flight operator upgrades that touch the legacy UI during the
+// deprecation window.
 func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	// /fe/api/models/{id}
 	id := r.URL.Path[len("/fe/api/models/"):]
