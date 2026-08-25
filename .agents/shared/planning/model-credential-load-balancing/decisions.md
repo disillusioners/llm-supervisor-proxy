@@ -1056,6 +1056,1189 @@ port 4001, proxy on 4322).
 
 ---
 
+## F. Rate-Limit Credential Failover (Round 3 — 2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3 — Rate-Limit Failover):** This section is
+> a **surgical, append-only** amendment per the user's verbatim
+> requirement (recorded below) and the eight pre-pinned dispatcher
+> rulings (R3-1..R3-8). Sections A–E and the Secondary Decisions are
+> UNCHANGED. R3-4 includes the full alternatives table (the only ruling
+> in this round where the house style demands one). The companion
+> contract additions live in `technical-analysis.md` under the API
+> Contract region, the new "Rate-Limit Failover Precedence Tree"
+> section, and the Concurrency / Backward-Compat subsections.
+>
+> **User requirement (verbatim, 2026-08-25):**
+> *"One more requirement that: for error case 'rate limiting', we switch
+> to another credential of the same provider first before try reach
+> another model. Loadbalance and HA in the case rate limiting on same
+> kind of provider (example user can add 3 minimax credential, if one got
+> rate limited, we just use another minimax credential)."*
+>
+> **Pre-pinned rulings (dispatcher)** — semantics are FIXED, this section
+> elaborates rationale + alternatives; a sibling worker amends the phase
+> files against the same rulings.
+
+### F.1 Rate-Limit Classifier (R3-1)
+
+**Ruling.** Add a rate-limit classifier and a retry-after extractor to
+`pkg/providers` (the layer that already owns `ProviderError`
+[`pkg/providers/interface.go:155-162`] and `IsRetryable`
+[`pkg/providers/interface.go:168-170`, `pkg/providers/openai.go:217-224`]).
+
+```go
+// pkg/providers/interface.go (additions)
+
+// ProviderError (extended — RetryAfter + ErrorType + ErrorCode fields):
+//
+// Existing struct (pkg/providers/interface.go:155-162) is extended
+// ADDITIVELY. No existing field is renamed, removed, or reordered.
+// Round 3c — W2: ErrorType + ErrorCode are NEW ADDITIVE fields, captured
+// in `handleError` from the already-unmarshaled anonymous-local
+// `{Error:{Message,Type,Code}}` struct (openai.go:238-246 today — the
+// caller unmarshals the body, then discards the anonymous-local shape
+// when constructing ProviderError). Populating ErrorType + ErrorCode
+// makes the Round-3b classifier matrix row 11 (503 + rate-limit body)
+// implementable: row 11 requires reading the body's `code` field even
+// when StatusCode ≠ 429, which the current shape cannot do.
+type ProviderError struct {
+    Provider   string
+    StatusCode int
+    Message    string
+    Retryable  bool
+    BufferID   string
+    // NEW (R3-1): captured from the Retry-After response header when
+    // StatusCode == 429 (or any retryable response that includes it).
+    // Zero when the header is absent or unparseable. Used by R3-2's
+    // ExcludeAndReselect to seed the per-credential cooldown.
+    RetryAfter time.Duration
+    // NEW (Round 3c — W2): captured from the unmarshaled error body's
+    // `type` and `code` fields. Empty string when the body is absent
+    // or unparseable. Used by IsRateLimitError to support the matrix
+    // row 11 case (503 + rate-limit body) AND by the
+    // /v1/messages anthropic-passthrough classifier
+    // (handler_anthropic.go:297-345 → doAnthropicRequest — see W1),
+    // which classifies on `arc.lastStatusCode == 429` OR response-
+    // body `type` substring `rate_limit` and reads the captured
+    // values from these fields. Default-zero (empty string) preserves
+    // existing error-comparison code paths.
+    ErrorType string
+    ErrorCode string
+}
+
+// IsRateLimitError classifies an error as a 429-style rate-limit
+// condition. Returns true for: HTTP 429; OR an unmarshaled
+// OpenAI-compatible error body whose code/type matches the rate-limit
+// vocabulary. MiniMax emits the standard shape `{"error":{message,type,
+// code}}` and flows through the existing unmarshal at
+// pkg/providers/openai.go:238-245, so no new provider integration is
+// required — the classifier just reads the already-decoded fields.
+//
+// Round 3c — W2 + S1: the classifier reads `ProviderError.ErrorType`
+// (substring `rate_limit`) and `ProviderError.ErrorCode` (equality
+// match against `rate_limit`, `rate_limit_error`, or
+// `rate_limit_exceeded` — S1 added the third literal to the
+// code-equality set). HTTP-status fallback is the StatusCode field
+// (already 429 for the OpenAI flow). See technical-analysis.md §
+// `pkg/providers — error-classification additions` for the full
+// vocabulary table + unit-test matrix.
+func IsRateLimitError(err error) bool
+```
+
+**Parser wiring.** `parseRetryAfter` already exists at
+`pkg/providers/openai.go:592-609` (handles seconds + RFC1123 dates) but
+is **DEAD CODE today** — `grep -rn parseRetryAfter pkg/ --include="*.go"`
+returns only the declaration site. Wiring it inside `handleError`
+(`pkg/providers/openai.go:234-279`) is conflict-free: capture
+`RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))` next to
+the existing `Retryable: retryable` field write at line 265.
+
+**Round 3c — W2 wiring (ErrorType + ErrorCode).** Inside the same
+`handleError` (`pkg/providers/openai.go:234-279`), the unmarshal
+target today is an anonymous local struct
+`{Error:{Message,Type,Code}}` (lines 238-246); the unmarshal
+success path constructs `ProviderError` and the anonymous-local
+fields are DISCARDED. Round 3c — W2 pins: the `ProviderError`
+construction populates `ErrorType` and `ErrorCode` from the
+already-decoded anonymous-local fields BEFORE the local goes
+out of scope (or, equivalently, the unmarshal target is
+upgraded to a named local and copied). The wiring is purely
+additive — no existing call site changes; the classifier
+(above) is the only consumer.
+
+**Rationale.** (a) `pkg/providers` is the only layer that already knows
+the OpenAI-compatible error JSON shape (the MiniMax `{"error":{...}}`
+body unmarshals here, not in `pkg/proxy`); classifying upstream is a
+provider concern, not a coordinator concern. (b) Extending
+`ProviderError` (rather than introducing a new error type) keeps the
+existing `errors.As(err, &providerErr)` pattern at
+`pkg/providers/openai.go:219-221` and `pkg/proxy` call sites unchanged.
+(c) Wiring the dead-code `parseRetryAfter` removes a known staleness
+flag without disturbing any caller. (d) The retry-after duration is the
+ONLY upstream-supplied timing signal we have — using it as the cooldown
+seed (R3-2) avoids arbitrary constants when the upstream tells us when
+to come back.
+
+**Classifier vocabulary (cross-ref to technical-analysis.md).** The
+classifier consumes the `ErrorType` (substring `rate_limit`) and
+`ErrorCode` (equality against `rate_limit`, `rate_limit_error`, or
+`rate_limit_exceeded`) fields, plus the `StatusCode` (HTTP 429).
+**Round 3c — S1 vocabulary extension:** the code-equality set is
+extended to include `rate_limit_exceeded` (alongside `rate_limit` and
+`rate_limit_error`); this covers the `OpenAI`-style "rate_limit_exceeded"
+code that some upstream proxies (e.g., third-party OpenAI-compatible
+endpoints) emit instead of `rate_limit`. The full vocabulary table +
+unit-test matrix live in technical-analysis.md §
+`pkg/providers — error-classification additions` (Round 3b — review
+amendment 6 + Round 3c — S1 row 12). **Round 3c — S1 unit-matrix
+pin:** a matching row (row 12 — `code == "rate_limit_exceeded"` ⇒
+`IsRateLimitError == true`) exists in the unit-test matrix; the
+sibling worker owns the phase 5 test row.
+
+**Alternatives considered (brief).** (a) Classifier in `pkg/proxy` near
+the race coordinator — rejected: duplicates the unmarshal logic and
+creates two error-shape definitions. (b) New `RateLimitError` struct —
+rejected: requires every existing `errors.As` site to be widened.
+(c) Ignore the header and use a fixed 60s cooldown — rejected: upstream
+often signals 1-30s for token-bucket refill; fixed 60s is either too
+long (lost throughput) or too short (likely to re-429).
+
+### F.2 Affinity Break + ExcludeAndReselect (R3-2)
+
+> **AMENDED 2026-08-25 (Round 3b — B2 + B3 — signature supersession;
+> Round 3c — C2 unified semantics):** The Round-3 signature
+> `(credentialID string, ok bool)` is SUPERSEDED by the mode-aware
+> signature below. The semantics of the Round-3 rebind, the cooling-set
+> skip, the sliding-TTL `#10` refresh, and the caller-side tried-set
+> are UNCHANGED. **Round 3c — C2 unified `ReselectMode` semantics:**
+> `ReselectNone` is now returned ONLY for single-credential models (no
+> alternative exists) or genuinely-no-candidate (0 credentials valid).
+> The B2 no-op path (current binding already moved off the excluded
+> credential) and the empty-`conversationKey` path BOTH return
+> `ReselectHealthy` — the prior reading (both → `ReselectNone`) was
+> REJECTED because it would force the caller to model-switch while a
+> healthy credential exists, violating R5 (Round-1 reviewer-5). The
+> audit trail of the original Round 3 signature is preserved below
+> marked "superseded Round 3 — B3".**
+
+**Ruling (Round 3b — B3 supersession; Round 3c — C2 unified).** A
+429 BREAKS conversation stickiness for the affected credential.
+Engine gains:
+
+```go
+// pkg/credentiallb/engine.go (Round 3b — B3 SUPERSEDES the Round 3
+// signature below; Round 3c — C2 unifies the ReselectMode semantics).
+// The ok bool cannot express the F.4 single-attempt-then-fall-through
+// contract because the engine does not know the request's tried-set;
+// the mode carries the contract.
+
+// ReselectMode describes the outcome of ExcludeAndReselect. The
+// engine picks the mode; the caller enforces the F.4 fall-through
+// contract based on it. Leader ruling accepted the B3-recommended
+// enum shape (one call, mode in return) over the two-call
+// `ok bool` + `PickSoonestExpiring` alternative (the two-call shape
+// risks an extra all-cooling pick looping the fallback chain to the
+// terminal error incorrectly — the engine has no tried-set awareness).
+//
+// **Round 3c — C2 unified semantics (the four surfaces — this enum,
+// the return-bullets below, the technical-analysis.md precedence-tree
+// pseudocode, and the technical-analysis.md failure-modes table — ALL
+// agree on the mapping):**
+//
+//   - mode == ReselectHealthy: a credential is available for THIS
+//     call. The engine returns a credentialID the caller should
+//     spawn against (or, in the empty-key / B2 no-op sub-cases, the
+//     current/freshly-picked credential). Caller MUST proceed with
+//     credential failover — NOT fall through to model-fallback.
+//   - mode == ReselectSoonestExpiry: ALL credentials are cooling
+//     (0-of-N healthy); the engine picked the soonest-expiring
+//     credential and emits the WARN. Caller MUST treat this as a
+//     SINGLE attempt only — if that attempt also 429s, the cooldown
+//     extends and the caller MUST fall through to model-fallback /
+//     terminal error (no second call to ExcludeAndReselect, no loop).
+//   - mode == ReselectNone: NO credential is available — either the
+//     model has a single credential (no alternative exists) or
+//     genuinely 0 credentials are valid. Caller falls through to
+//     model-fallback.
+type ReselectMode int
+
+const (
+    // ReselectHealthy: a credential is available and the caller MUST
+    // proceed with credential failover. Sub-cases (Round 3c — C2):
+    //   (a) Weighted-random among non-cooling (renormalized) picked a
+    //       fresh healthy credential (the typical happy path).
+    //   (b) B2 no-op (current binding already points at a credential
+    //       OTHER than `excludedCredID`, because a concurrent same-
+    //       conversation request already rebinded away from it) →
+    //       return `(currentBinding.credentialID, ReselectHealthy)`.
+    //       The unchanged binding is the rebind the concurrent
+    //       request already committed; the caller continues with it.
+    //       NOT an error, NOT ReselectNone.
+    //   (c) Empty conversationKey (Round 1 W-2 semantics — no binding
+    //       stored) → fresh NON-COOLING weighted-random (renormalized)
+    //       pick, NO map write, `ReselectHealthy`. Mirrors the
+    //       Round-1 C2 empty-key no-binding fast-path.
+    // Caller spawns the new attempt against this credential; the
+    // standard healthy-skip path applies on subsequent calls.
+    ReselectHealthy ReselectMode = iota
+
+    // ReselectSoonestExpiry: ALL credentials are cooling (0-of-N
+    // healthy — Round 3b 0-of-N pin); the engine picked the
+    // soonest-expiring credential and emits the WARN. Caller MUST
+    // treat this as a SINGLE attempt only — if that attempt also
+    // 429s, the cooldown extends and the caller MUST fall through to
+    // model-fallback / terminal error (no second call to
+    // ExcludeAndReselect, no loop). This is the F.4 contract.
+    ReselectSoonestExpiry
+
+    // ReselectNone: NO credential is available. Either (a) the model
+    // has a single credential (no alternative exists); or (b) zero
+    // credentials are valid (e.g., all credentials are excluded by
+    // the caller via some out-of-band mechanism, or the model was
+    // reconfigured to zero credentials between lookup and reselect).
+    // Caller falls through to model-fallback.
+    //
+    // Round 3c — C2 narrowing: prior readings that returned
+    // ReselectNone for (i) B2 no-op or (ii) empty conversationKey
+    // are REJECTED — both now return ReselectHealthy. ReselectNone
+    // is reserved for "no credential exists / no credential valid".
+    ReselectNone
+)
+
+// ExcludeAndReselect marks `excludedCredID` as cooling for `modelID`
+// (cooldown seeded from `retryAfter`, default 60s if zero), then
+// REBINDS the existing (modelID, conversationKey) entry to the next
+// healthy credential chosen by weighted random among non-cooling
+// (renormalized), skipping cooling credentials. Old binding is
+// rebound (single map write), NOT deleted-then-recreated, under the
+// engine's existing locking discipline (engine outer Lock →
+// per-model write Lock per F.5 / "Concurrency Notes" in
+// technical-analysis.md).
+//
+// Round 3b — B2 PRECONDITION (concurrent double-429 idempotency):
+// the rebind happens ONLY if `bindings[convKey].credentialID ==
+// excludedCredID`. If the current binding already points at a
+// different credential (because a concurrent request on the same
+// conversation already rebinded away from `excludedCredID`), this
+// call is a NO-OP and returns `(currentCredentialID,
+// ReselectHealthy)` — the unchanged binding is returned as
+// `credentialID` with mode `ReselectHealthy` (the caller continues
+// with the unchanged binding, which is the rebind the concurrent
+// request already committed). This prevents the binding-flap that
+// two concurrent double-429 requests would otherwise cause
+// (request 1 rebinds A→B mid-attempt on B while request 2 re-marks
+// A cooling and re-selects C).
+//
+// Returns the new (or unchanged) credentialID plus a ReselectMode:
+//   - mode == ReselectHealthy: a credential is available (sub-cases
+//     per the enum comment above — fresh weighted-random pick OR
+//     B2 no-op OR empty-key fresh pick). Caller MUST proceed with
+//     credential failover — NOT fall through to model-fallback.
+//   - mode == ReselectSoonestExpiry: all credentials cooling; the
+//     engine picked the soonest-expiring one and emitted the WARN;
+//     caller MUST spawn a SINGLE attempt only, and if it 429s,
+//     fall through to model-fallback (F.4 contract — the engine
+//     does NOT know the request's tried-set, so the single-attempt
+//     invariant is caller-enforced via the mode).
+//   - mode == ReselectNone: NO credential is available (single-
+//     credential model, or 0 valid credentials). Caller falls
+//     through to model-fallback.
+//
+// Per-conversation retry accounting (which credentials were already
+// tried this request) lives in the REQUEST context
+// (requestContext / anthropicRequestContext / upstreamRequest),
+// NOT in the engine — the engine stays per-conversation-key stateless
+// about retries. The "tried-this-request" set is owned by the caller.
+// Round 3c — S2 pin: the per-request tried-set is mutated ONLY from
+// the race coordinator's `manage()` loop, serialized by the
+// coordinator mutex (per the Round-3b single-goroutine invariant).
+// The engine never reads or writes the tried-set; the engine NEVER
+// becomes a stateful retry counter.
+func (e *Engine) ExcludeAndReselect(
+    modelID, conversationKey, excludedCredID string,
+    retryAfter time.Duration,
+) (credentialID string, mode ReselectMode)
+```
+
+**Rationale.** (a) **Rebind, not delete-then-create** — a single map
+write preserves the sliding-TTL invariant from #10: the rebind DOES
+refresh `boundAt` for the new credential (same as a fresh
+`GetOrSelect` would), but does NOT touch the cooling credential's
+`boundAt` (the cooldown map is separate from the binding map; see
+F.4). (b) **Per-request retry accounting in the caller, not the
+engine** — the engine already has enough invariants (weighted order,
+cooldown skipping, sliding TTL, filter-survivors invalidation) without
+adding a third responsibility; the caller (race coordinator / ultimate
+handler / internal handler) already owns the request lifecycle, so
+"which credentials were tried this request" belongs there. (c)
+**Mode-aware return (Round 3b — B3) — single-call, enum-shape** —
+the F.4 single-attempt-then-fall-through contract requires the engine
+to distinguish "no healthy pick, go to fallback" from "here is a
+soonest-expiry pick, one attempt only"; the two-call alternative
+(`ok bool` + `PickSoonestExpiring`) was REJECTED because a second
+`ok=false` call after a soonest-expiry pick would return yet another
+all-cooling pick and loop the fallback chain to the terminal error
+incorrectly — the engine does not know the request's tried-set, so
+the mode must carry the contract in a single return value. (d)
+**Idempotent precondition (Round 3b — B2)** — concurrent
+same-conversation double-429 would flap the binding (request 1 rebinds
+A→B mid-attempt on B while request 2 re-marks A cooling and re-selects
+C); the precondition `bindings[convKey].credentialID == excludedCredID`
+makes the operation idempotent-by-construction: only the request
+whose CURRENT binding is the one that 429d proceeds with the rebind;
+the other request is a no-op returning the current unchanged binding.
+
+### F.2 superseded Round 3 — B3 (audit trail, preserved verbatim)
+
+```go
+// pkg/credentiallb/engine.go (additions — Round 3)
+// (superseded Round 3 — B3; the (credentialID string, ok bool) shape
+// cannot express F.4's single-attempt-then-fall-through contract.)
+
+// ExcludeAndReselect marks `excludedCredID` as cooling for `modelID`
+// (cooldown seeded from `retryAfter`, default 60s if zero), then
+// REBINDS the existing (modelID, conversationKey) entry to the next
+// healthy credential chosen in weighted order, skipping cooling
+// credentials. Old binding is rebound (single map write), NOT
+// deleted-then-recreated, under the engine's existing locking
+// discipline (engine outer Lock → per-model write Lock per F.5 /
+// "Concurrency Notes" in technical-analysis.md).
+//
+// Returns the new credentialID + ok=true on success. Returns ok=false
+// when every other credential for the model is also cooling — caller
+// falls through to model-fallback (R3-3).
+//
+// Per-conversation retry accounting (which credentials were already
+// tried this request) lives in the REQUEST context
+// (requestContext / anthropicRequestContext / upstreamRequest),
+// NOT in the engine — the engine stays per-conversation-key stateless
+// about retries. The "tried-this-request" set is owned by the caller.
+func (e *Engine) ExcludeAndReselect(
+    modelID, conversationKey, excludedCredID string,
+    retryAfter time.Duration,
+) (credentialID string, ok bool)
+```
+
+**Original rationale (Round 3 — superseded)**: (a) Rebind, not
+delete-then-create — preserved in the Round 3b ruling above. (b)
+Per-request retry accounting in the caller, not the engine —
+preserved. (c) Returns `ok=false` rather than synthesizing a pick
+when every other credential is cooling — **REPLACED by the Round 3b
+mode-aware return**; the original `ok=false` reading conflated "no
+healthy pick, go to fallback" with "here is a soonest-expiry pick, one
+attempt only" — the F.4 single-attempt-then-fall-through contract
+requires the caller to distinguish them.
+
+### F.3 Precedence Ordering (R3-3)
+
+> **AMENDED 2026-08-25 (Round 3b — B1 + leader ruling iii + symbol
+> fix + canonical naming + Case-1 latest-only pin + Case-2 uniform
+> classification + modelTypeSecond re-key):** R3-3's "credential
+> failover BEFORE model fallback" SEMANTICS STAND. The decision
+> tree, citations, and naming are amended in place per the Round 3
+> architect stress-test. The audit trail of the original Round-3
+> text is preserved below marked "superseded Round 3" for
+> decisions-log history.
+
+**Ruling (Round 3b — supersedes Round 3 wording where corrected).**
+Credential failover (same model, next credential) is attempted
+BEFORE any model-switching machinery. Interception point in the
+race path: `pkg/proxy/race_coordinator.go` `manage()` "Case 1"
+(function def at `race_coordinator.go:252`; Case 1 verified at
+current lines 350-364 — `latestReq.IsDone() && latestReq.GetError()
+!= nil` → currently sets `shouldSpawn=true; triggerInfo=
+spawnTriggerInfo{trigger: triggerMainError, ...}` → falls through
+to `spawn(modelTypeFallback, ...)` at line 409, which picks
+`c.models[1]`).
+
+**Decision tree at that site (Round 3b — exact replacement of Case 1's body; Round 3c — C1 hoisted form, supersedes the Round-3 wording with real guards, the C1 hoisted admission condition, the B1 separate accounting, and canonical naming):**
+
+```
+1. HOISTED CRED-FAILOVER PRE-CHECKS (Round 3c — C1 — these run ABOVE
+   the spawn-window gate at :338 and ABOVE the all-failed check at
+   :420-421; the Round 3b B1 gate exemption is RE-EXPRESSED as this
+   hoisted form, which is the only way the user's core scenario —
+   3 credentials / 1 model / no fallback chain — gets any failover
+   at all):
+
+   If error classifies rate-limit per F.1/R3-1
+   AND failed model is INTERNAL
+   AND has >1 configured credentials
+   AND no CONTENT flushed to client yet (race: c.winner == nil;
+   ultimate: initial-call *ProviderError assertion;
+   /v1/messages: arc.headersSent per handler_anthropic.go:648-654)
+   AND retry budget not exhausted per F.5/R3-5:
+       → spawn SAME-MODEL-NEXT-CREDENTIAL attempt. New canonical
+         Go constant upstreamModelType = "credential_failover" →
+         modelTypeCredFailover (ONE spelling everywhere; supersedes
+         the Round-3 variants `modelTypeCredentialFailover` and
+         `credential_failover`); new spawnTrigger spawnTrigger =
+         "rate_limit" → triggerRateLimit (canonical constant).
+         The spawn reads the cooldown-aware next credential from
+         the engine via ExcludeAndReselect (the model's "current
+         credential" is the rebind target — same modelID, different
+         credential). The credentialID rides the trigger info from
+         Case-1 classification to spawn()/executor (Round 3c —
+         C3(1): `spawnTriggerInfo` additively gains `credentialID
+         string`; verified absent at race_coordinator.go:79 today
+         and is the only way the executor can pre-resolve without
+         re-calling ExcludeAndReselect; absent field yields silent
+         credential lookup failure in spawn()).
+
+       Round 3c — C3(2): the `spawn()` switch (race_coordinator.go
+       ~196-218) additively gains a `case modelTypeCredFailover:
+       modelID = c.models[0]` branch — same model, credential re-
+       selected. Verified today: switch maps only
+       {modelTypeMain, modelTypeSecond → c.models[0];
+       modelTypeFallback → c.models[1]}; an unmapped modelType
+       yields modelID = "" silent misfire. The credFailover case
+       reads `credID` from `spawnTriggerInfo.credentialID` (C3(1))
+       and passes it downstream.
+
+2. OTHERWISE (non-rate-limit, single-credential, post-first-byte,
+   budget exhausted, etc.): the existing model-fallback spawn
+   path is admitted by the C1 HOISTED GATE (replaces the Round-3b
+   "B1 gate exemption" paragraph; semantically equivalent — see
+   note below):
+
+       gate := modelAttempts < len(models) ||
+               credFailoverEligibleWithBudget()
+
+   where:
+       - modelAttempts = SEPARATE accounting counting only
+         modelType ∈ {main, second, fallback} (Round 3b separate
+         accounting; the credential-failover attempts are NOT
+         counted here — they track independently against the
+         per-model credential budget).
+       - credFailoverEligibleWithBudget() = rate-limit classified
+         AND internal AND >1 creds AND c.winner == nil AND
+         retry budget remaining (the hoisted pre-checks above).
+       - When `gate` is true: existing model-fallback spawn
+         unchanged (modelTypeFallback / triggerMainError).
+       - When `gate` is false: terminal "All models rate limited"
+         (the :860-868 guard) — UNCHANGED.
+
+   Round 3c — C1 SEMANTIC-EQUIVALENCE NOTE: the hoisted form
+   `gate := modelAttempts < len(models) ||
+   credFailoverEligibleWithBudget()` is SEMANTICALLY EQUIVALENT
+   to the rejected cap-extension alternative
+   (`cap += len(credentials) − 1`) — both admit
+   `len(credentials) − 1` additional attempts before the
+   terminal. Cap-extension was REJECTED purely as an
+   IMPLEMENTATION (mutation of len-dependent invariants
+   elsewhere — the existing :338 / :420-421 reads of
+   `len(c.models)` would need synchronized widening across
+   multiple sites); the hoisted form is the same semantic
+   admission expressed via a separate accounting + OR-clause,
+   which keeps the existing :338 / :420-421 invariants intact.
+
+   TERMINAL GUARD (Round 3c — C1): `:860-868` "All models rate
+   limited" MUST NOT fire while an untried fallback model OR an
+   untried credential remains. The all-failed check at `:420-421`
+   is amended to: "all fallback models tried **OR** credential
+   budget exhausted with no healthy/soonest-expiry candidate
+   remaining". Phase 5 Task 32 scenario-(a) stays as the
+   regression guard (sibling worker owns the test; this contract
+   owns the statement).
+```
+
+**Pre-first-byte guard — real implementations (Round 3b supersedes
+Round-3 wording; the Round-3 invented state `chunksFlushedToClient`
+and `bytesFlushedToClient` and the vacuous `status !=
+statusStreaming` check are DELETED — they do not exist at HEAD):**
+
+- **Race path**: the expressible guard is `c.winner == nil`
+  (non-stream case is implicit — nothing is written pre-winner).
+  For streaming, the TRUE invariant is **no CONTENT flushes
+  pre-winner** — SSE framing headers + `": connected\n\n"`
+  heartbeat comment DO precede `coordinator.Start()` at
+  `handler.go:783-797` (verify: SSE headers written and
+  `rc.headersSent = true` set at `:797` BEFORE `coordinator.Start()`
+  is called) but they carry NO model content (the `: connected\n\n`
+  line is a no-op SSE comment; the heartbeat is empty bytes).
+  Winner requires `req.IsCompleted() && req.GetError() == nil`
+  (`race_coordinator.go:299`); `streamResult` (call site `:852`,
+  definition `:960`) and `handleNonStreamResult` (call site `:879`,
+  definition `:1327`) run only after `WaitForWinner` returns.
+  Round-3's `latestReq.status != statusStreaming` is **vacuous**
+  (failed attempts are `statusFailed`, not `statusStreaming`); the
+  invented `chunksFlushedToClient` / `bytesFlushedToClient`
+  fields/methods **DO NOT EXIST** at HEAD and are PURGED from this
+  contract.
+
+**All-failed terminal condition (Round 3b — B1; Round 3c — C1
+hoisted form):** the terminal `"All models rate limited"` at
+`race_coordinator.go:860-868` MUST NOT fire while an untried
+fallback model OR an untried credential remains. The all-failed
+check at `race_coordinator.go:420-421` is amended to: "all
+fallback models tried **OR** credential budget exhausted with
+no healthy/soonest-expiry candidate remaining". After credential
+exhaustion, the flow FALLS THROUGH to the existing model-fallback
+spawn (`c.models[1]`) when it exists. The C1 hoisted
+admission gate (above) expresses the same admission explicitly:
+the gate admits model-fallback when EITHER model budget
+remaining OR credential failover is eligible — the user's core
+scenario: 3-credential single-model (no fallback chain) gets the
+FULL failover chain (`len(modelCfg.Credentials)−1` attempts
+before the terminal message); the 2-model case gets up to
+`len(creds)−1` failover attempts and then the existing
+`c.models[1]` model-fallback spawn.
+
+**Case-2 idle-trigger classification (Round 3b — leader ruling iii,
+SUPERSEDES the Round-3 reading):** the Case-2 idle-timeout spawn
+path (`race_coordinator.go:364-395` → spawns `modelTypeSecond` +
+`modelTypeFallback` together at `:399-405`) ALSO classifies
+rate-limit before spawning — the uniform precedence rule is:
+**a rate-limit error ⇒ credential failover first, on EVERY spawn
+path.** The Round-3 "Case-2 idle bypass" reading (model-switching
+can precede the stalled credential's eventual 429) is REJECTED —
+the leader ruled uniform classification in scope. Implementation:
+at the Case-2 spawn site, classify the err that triggered the idle
+(if any) via `providers.IsRateLimitError`; on rate-limit, route to
+credential failover instead of straight-to-second/fallback spawn.
+The original Round-3 "non-goal" reading is preserved below marked
+"superseded Round 3" for audit trail.
+
+**Case-1 latest-only inspection (Round 3b — accepted v1 behavior):**
+Case 1 reads only `c.requests[len(c.requests)−1]` (latest). An
+earlier attempt's 429 (e.g., main idle-stalled while a spawned
+attempt fails first) is not adjudicated for credential failover at
+this site — adjudicating in spawn order would require iterating
+all attempts (not just the latest) and is rare in practice.
+**Accepted v1 behavior** with one-line rationale: race spawn
+ordering + idle timeouts rarely interleave this way, and the
+existing `manage()` loop runs after every attempt completes, so an
+earlier attempt's classification surfaces on a subsequent
+iteration. Documented for operator awareness.
+
+**`modelTypeSecond` re-key (Round 3b — specified behavior):**
+secondary attempts share `c.models[0]`'s modelID but resolve the
+PRIMARY credential (verified at `race_executor.go:112`). A 429 on
+a `modelTypeSecond` attempt re-keys failover to the primary
+credential of `c.models[0]` (the secondary resolves to the primary
+credential at the executor layer; the engine rebind writes the
+primary back). This is **specified behavior, not an accident** —
+it preserves provider-pool consistency within the same model.
+
+**Canonical Go identifier (Round 3b — pin ONE spelling):** the
+failover model-type constant is **`modelTypeCredFailover`** —
+everywhere. The Round-3 variants (`modelTypeCredentialFailover`,
+`credential_failover`) are PURGED from this contract prose. The
+EVENT name stays `model_credential_failover` (R3-8 constant
+`EventCredentialFailover`); the SPAWN-TRIGGER constant stays
+`triggerRateLimit`. Operator-facing surfaces (logs, events,
+exposes) keep the verbose `model_credential_failover` string.
+
+**Operator note (Round 3b — operator-doc only, no code):** 1-of-N
+healthy concentrates load on the last healthy credential — and
+re-distribution after cooldown expiry is gradual (weighted-random
+selection on every subsequent request, no "switch-back" thundering
+herd). Documented for operator awareness; no code change.
+
+**Ultimate-internal and `/v1/messages` internal hooks (equivalent
+sites; the sibling worker maps the exact call sites):**
+
+- `pkg/ultimatemodel/handler_internal.go:36-46` — `executeInternal`
+  call site for `ResolveInternalConfig(modelCfg.ID)`. The Round-3
+  amendment replaces this with `ResolveInternalConfigWithAffinity` (the
+  Round-1 contract) AND adds a top-level error-classification gate on
+  the returned `ProviderError`: if it classifies as rate-limit AND the
+  caller is in pre-first-byte state, call
+  `engine.ExcludeAndReselect(modelID, conversationKey, currentCredID,
+  providerErr.RetryAfter)` and re-attempt with the new credential.
+- `pkg/proxy/internal_handler.go:109-111` — `HandleRequest` call site
+  for `ResolveInternalConfig(h.config.ID)`. Same shape as the
+  ultimate-internal hook: classify the error, check pre-first-byte
+  (initial-call `*ProviderError` type assertion), call
+  `ExcludeAndReselect`, re-attempt.
+- **`/v1/messages` internal — ANTHROPIC-PASSTHROUGH BRANCH (Round
+  3b — leader ruling i, NEW IN SCOPE):** for internal models whose
+  credential provider is `"anthropic"`, the
+  `handler_anthropic.go:297-345` branch BYPASSES
+  `doAnthropicInternalRequest` entirely — it reads the single-cred
+  `modelConfig.CredentialID` + `cred.ResolveAPIKey()` and calls
+  `h.doAnthropicRequest(w, arc)` (a different downstream function
+  path). This branch IS IN SCOPE for R3-3 / R3-6 / R3-7 / F.7 and
+  MUST participate in credential failover. **Implementation note
+  for the sibling phase worker (Task 16 / Task 22 wiring):** this
+  branch currently reads the single-cred `modelConfig.CredentialID`
+  (the Round-1 single-credential shape) and MUST be swapped to the
+  affinity resolver; the contract statement is owned by this
+  document, the task wiring is owned by the sibling phase file.
+  **Real pre-first-byte guard for this branch:** recorder's
+  `arc.Code` + `arc.headersSent` as already specified; **header
+  write cite FIXED (Round 3b)** — the header write is at
+  `handler_anthropic.go:648-654` (`arc.headersSent`), NOT at
+  `adapter_anthropic.go:170-176` (that is `SetStreamHeaders`).
+
+**Race coordinator constructor wiring (Round 3c — C3(3)):**
+
+The `newRaceCoordinatorWithEvents` constructor at
+`race_coordinator.go:129` currently takes 8 params: `(ctx, cfg,
+req, rawBody, models, eventBus, requestID, interleaved)` —
+verified at 8f67bdf. The Round 3c contract requires the constructor
+to ADDITIVELY gain two new params:
+
+- `engine *credentiallb.Engine` — the Round-1 LB engine the
+  coordinator consults for `ExcludeAndReselect` (Case-1
+  classification routing into the precedence tree).
+- `conversationKey string` — the Round-1 conversation key,
+  threaded from `cmd/main.go` through the existing
+  `handler.go:830` call site (no new wiring path).
+
+Constructor-only injection: per Round 3c — W-3 the engine is
+NOT exposed as a `Config.CredEngine` field. The config stays
+flat; the engine and conversation key arrive via the
+constructor arguments exactly as `eventBus` and `requestID`
+already do today. This preserves the existing config-shape
+contract and keeps the engine reference local to the
+coordinator (lifetime = request scope).
+
+Wiring chain (Round 3c — C3(3)):
+
+```
+cmd/main.go
+    credLB := credentiallb.NewEngine(...)         // Round 1
+    credLB.Start(...)
+    ...
+    proxy.NewHandler(cfg, ..., eventBus, credLB)   // Round 1 wiring
+        │
+        ▼
+    pkg/proxy/handler.go:830
+        h.coordinator = newRaceCoordinatorWithEvents(
+            ctx, cfg, req, rawBody, models,
+            eventBus, requestID, interleaved,
+            credLB,                                // NEW (Round 3c — C3(3))
+            h.conversationKey,                     // NEW (Round 3c — C3(3))
+        )
+```
+
+The constructor param order follows the existing convention
+(coordination-state args after the primitive args; engine + key
+after the request-scoped lifecycle args). The sibling worker
+adds the param-list change at the call site; this contract owns
+the param SEMANTICS.
+
+The 10-param constructor is now:
+`newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models,
+eventBus, requestID, interleaved, engine, conversationKey)`.
+
+Verified at 8f67bdf: the existing 8-param signature is the
+ONLY call site at `handler.go:830` — no other callers.
+
+**Rationale.** (a) Same-model credential failover preserves the
+prompt-cache affinity on the OTHER credential of the same provider —
+this is the user's exact requirement (loadbalance + HA within a
+provider). (b) Pre-first-byte constraint is inherent to coordinator
+flows: race path requires `winner` to be selected from completed
+buffers (`Done` status), so no CONTENT flushes before the winner is
+declared (SSE framing headers + `": connected\n\n"` precede
+coordinator start per `handler.go:783-797` but carry NO model
+content). (c) Adding a new `modelTypeCredFailover` (canonical —
+Round 3b; supersedes `modelTypeCredentialFailover`) rather than
+re-using `modelTypeFallback` preserves the existing model-fallback
+semantics (which writes a different `modelList[i]`) and lets
+observers distinguish "credential failover" from "model failover"
+via the spawnTrigger. (d) The B1 gate exemption is the only way
+the user's core scenario (3-credential single-model with no
+fallback chain) gets any failover at all; without it the feature
+silently does nothing in exactly the case it was built for. (e)
+Uniform precedence rule (leader ruling iii) — Case-2 idle-trigger
+must classify rate-limit first, on EVERY spawn path.
+
+**Alternatives considered (brief).** (a) Always spawn credential
+failover first, then model fallback — rejected: would double the
+spawn cost when the next credential also fails; the budget-bounded
+attempt (R3-5) already covers this. (b) Re-attach the existing
+`latestReq` instead of spawning a new attempt — rejected: the
+existing attempt may have been cancelled and its buffer is
+poisoned; a fresh attempt is the only safe re-entry. (c) (Round
+3b) Single shared spawn-window for model and credential attempts
+— rejected (B1): silently strands credential failover at one
+attempt in the exact case the feature was built for (multi-cred
+model, no fallback chain); the separate accounting is the only way
+to deliver the user's HA requirement.
+
+### F.3 superseded Round 3 — Case-2 idle bypass reading (audit trail)
+
+> **superseded Round 3 (preserved for decision-log history)**:
+> the Round-3 contract read Case 2 (`race_coordinator.go:364-395`
+> idle timeout) as a "Case-2 idle bypass" — model-switching can
+> precede the stalled credential's eventual 429, so Case 2 was
+> framed as an "explicit non-goal" for credential failover.
+> **REVERSED 2026-08-25 (Round 3b — leader ruling iii):** the
+> uniform precedence rule applies — a rate-limit error ⇒ credential
+> failover first, on EVERY spawn path. The original Round-3
+> non-goal reading is REJECTED; the implementation MUST classify
+> the err that triggered the idle (if any) via
+> `providers.IsRateLimitError` and route to credential failover on
+> rate-limit before the existing second/fallback spawn.
+
+### F.3 superseded Round 3 — original decision tree (audit trail)
+
+> **superseded Round 3 (preserved for decision-log history)**:
+> the Round-3 decision tree (original §F.3 wording) said
+> `latestReq.status != statusStreaming && !winner.chunksFlushedToClient`
+> for the race-path guard. **REVERSED 2026-08-25 (Round 3b):**
+> `chunksFlushedToClient` / `bytesFlushedToClient` DO NOT EXIST at
+> HEAD (verified `grep -rn` returns zero hits in
+> `pkg/proxy/race_coordinator.go`); the `status != statusStreaming`
+> check is vacuous (failed attempts are `statusFailed`); the
+> expressible race-path guard is `c.winner == nil` (and the TRUE
+> invariant is no CONTENT flushes pre-winner, with SSE framing
+> bytes exempted as no-content). The original Round-3 ultimate
+> guard cited `headersSent`, which is UNUSABLE because
+> `ultimatemodel/handler.go:608-609` pre-sets it before
+> `executeInternal`; the corrected guard is the initial-call
+> `*ProviderError` type assertion (initial-call errors return
+> before any content write).
+
+### F.4 Per-Credential Cooldown State (R3-4)
+
+**Ruling.** Engine maintains an in-memory cooldown map alongside the
+binding map, guarded by the engine's existing locking discipline:
+
+```go
+// pkg/credentiallb/engine.go (engineState additions — Round 3)
+
+type engineState struct {
+    mu         sync.RWMutex
+    credentials []models.CredentialRef
+    prefixSum  []int
+    totalWeight int
+    bindings   map[string]*binding  // existing — keyed by conversationKey
+    rng        *rand.Rand
+
+    // NEW (R3-4): cooldown map. Keyed by modelID → credentialID →
+    // cooldownUntil time.Time. Guarded by the same outer+per-model
+    // locking discipline (E-1): outer RLock for reads + janitor sweep,
+    // per-model write Lock for cooldown updates. The cooldown map is
+    // SEPARATE from the binding map — a cooldown does NOT touch the
+    // binding's boundAt (which is the sliding-TTL anchor per #10);
+    // a rebind via ExcludeAndReselect DOES refresh boundAt (per #10
+    // semantics), independently of the cooldown map.
+    cooldowns  map[string]map[string]time.Time
+    // ... stats counters (existing) ...
+}
+```
+
+**Janitor interaction.** The existing janitor (5-minute sweep, outer
+RLock + per-model write Lock one-at-a-time, E-1) sweeps expired
+cooldowns alongside idle-TTL bindings in the same pass. A cooldown is
+expired iff `cooldownUntil <= now`.
+
+> **AMENDED 2026-08-25 (Round 3b — gauge semantics, amendment 7):
+> `EngineStats.Cooldowns` is a **GAUGE**, NOT a counter — it holds
+> the CURRENT size of the cooldown map, recomputed at each janitor
+> sweep (or read live on `Stats()`). The Round 3 increment-per-removal
+> prose above ("updates a `EngineStats.Cooldowns` counter on each
+> cooldown it removes") is REPLACED. `Failovers` remains a monotonic
+> counter (one increment per successful `ExcludeAndReselect`). The
+> additive-fields-only rule still holds — the new fields are appended
+> at the struct tail; pinned #5 field names `Hits`, `Misses`,
+> `Bindings` are unchanged.**
+
+> **AMENDED 2026-08-25 (Round 3c — S6 — `OnCredentialDeleted`
+> cooldown hygiene):** `OnCredentialDeleted(credentialID)` (defined at
+> `pkg/credentiallb/engine.go`) MUST also clear all cooldown entries
+> for that credential in addition to dropping bindings. Rationale:
+> a deleted credential cannot be selected anyway (it's gone from the
+> model's `credentials` list and `weightedSelector` will skip it on
+> next call), so the cooldown entries are dead weight. Keeping them
+> is hygiene risk against unbounded map growth (in the
+> pathological "many credentials deleted under load" case) and
+> stale `EngineStats.Cooldowns` gauge counts (Round 3b — amendment
+> 7 gauge semantics: the gauge includes the dead entries until the
+> next janitor sweep or live read). The clear is a single-pass
+> `delete(cooldowns, [modelID][credentialID])` loop across all
+> models that have the credential in their cooldowns map,
+> performed under the same outer Lock + per-model write Lock
+> discipline (E-1) already used by the binding drop. The `EngineStats
+> .Cooldowns` gauge is recomputed on the next sweep (or live read
+> via `Stats()`) — the gauge is not mutated directly. Phase 2 task
+> + test added by the sibling worker; this contract owns the
+> statement.
+
+**Selection skip rule.** `weightedSelector` and `ExcludeAndReselect`
+both skip credentials with `cooldowns[modelID][credID] > now`. The
+selection after cooldown skip is **weighted random among non-cooling
+(renormalized)** (Round 3c — S3 standardization: replace any drifted
+wording — "weighted order skipping cooling", "weighted selection",
+"weighted order", "skip-then-pick" — with the single canonical form
+"weighted random among non-cooling (renormalized)" wherever selection
+after cooldown is described in active spec text; audit-trail blocks
+untouched). Weights are renormalized across the healthy set (sum of
+healthy weights becomes the new total).
+
+**All-cooling fallback (R3-4 critical ruling, Round 3b — mode-aware).**
+When ALL of a model's credentials are cooling (i.e., **0-of-N
+healthy** — see clarification below), pick the **SOONEST-EXPIRING**
+credential (availability beats strict cooldown), log a WARN, make
+**a single attempt only (no loop)** — if that attempt also 429s,
+the cooldown extends and the flow falls through to model fallback /
+terminal error.
+
+> **AMENDED 2026-08-25 (Round 3b — B3 mode-aware + 0-of-N pin;
+> Round 3c — C2 narrowing of ReselectNone):** the Round-3 reading
+> "all-cooling = ok=false ⇒ caller falls through to model-fallback"
+> is REPLACED. With the B3 mode-aware `ExcludeAndReselect` signature
+> (F.2), the caller now uses the returned mode to enforce the F.4
+> single-attempt-then-fall-through contract:
+>
+> - `mode == ReselectHealthy` → caller spawns the new attempt
+>   against `credentialID`. **Round 3c — C2**: this includes the
+>   B2 no-op sub-case (current binding already points at a credential
+>   OTHER than the excluded one) and the empty-`conversationKey`
+>   sub-case (fresh weighted random among non-cooling (renormalized)
+>   pick, NO map write). Both proceed with credential failover —
+>   NOT fall through to model-fallback.
+> - `mode == ReselectSoonestExpiry` → engine has already picked the
+>   soonest-expiring credential AND emitted the WARN; caller MUST
+>   spawn a SINGLE attempt only, and if it 429s, MUST fall through
+>   to model fallback / terminal error (no second
+>   `ExcludeAndReselect` call — the engine would return
+>   `ReselectSoonestExpiry` again, looping the fallback chain to
+>   the terminal error incorrectly because the engine has no
+>   tried-set awareness). **Round 3c — W3 single-shot guard** (see
+>   precedence-tree pseudocode): the caller sets a per-request
+>   `soonestExpiryAttempted` flag and `continue`s after the
+>   soonest-expiry attempt, so the NEXT 429 routes to
+>   model-fallback without a second `modelTypeCredFailover` spawn.
+> - `mode == ReselectNone` → NO credential is available. Either
+>   (a) the model has a single credential (no alternative exists);
+>   or (b) zero credentials are valid. **Round 3c — C2 narrowing:**
+>   the B2 no-op and empty-`conversationKey` paths are no longer
+>   "ReselectNone" — they are "ReselectHealthy" (see the F.2
+>   contract). Caller falls through to model-fallback.
+
+> **AMENDED 2026-08-25 (Round 3b — 0-of-N pin):** "all-cooling" in
+> the F.4 ruling means **0-of-N healthy** ONLY. A 1-of-N healthy
+> credential (the common case in a 3-cred setup with 2 rate-limited)
+> takes the normal healthy-skip path — the F.4 soonest-expiry branch
+> does NOT apply. (The 1-of-N case concentrates load on the last
+> healthy credential; this is documented operator behavior, not a
+> code concern.)
+The existing terminal shape at `pkg/proxy/race_coordinator.go:860-868`
+("All models rate limited" → `models.ErrorTypeRateLimit` /
+`models.ErrorCodeRateLimit`, defined at `pkg/models/errors.go:7,17`)
+remains the final client-facing error.
+
+**Alternatives considered (the full table this ruling requires):**
+
+| Criterion | **Soonest-expiry (CHOSEN)** | Fail-fast | Block-until-expiry |
+|---|---|---|---|
+| **Availability (per user's HA requirement)** | Best — picks soonest-expiring so user gets SOME service even when fully cooled | Worst — immediate fail to model fallback even when retry-after is 5s | Worst — request hangs up to max cooldown |
+| **Per-request latency** | Bounded — one extra 429-RTT in the worst case | Best — zero added latency | Worst — unbounded wait (up to N seconds × #retries) |
+| **User-perceived behavior** | Acceptable — partial service preserved; client sees eventual success or 502 after one extra attempt | Acceptable — clean failover to next model, no surprise retries | Poor — request blocks with no client-visible progress |
+| **Repeat-storm risk (re-429 amplification)** | Low — single attempt per credential, no loop; the new 429 EXTENDS the cooldown and falls through to model fallback | None — fails immediately, no retry attempt | High — would block multiple concurrent requests on the same soonest-expiring credential, re-429ing them all |
+| **Correctness under concurrent requests** | High — different requests may pick different soonest-expiring credentials; bounded by retry budget (R3-5) | High — no surprise behavior | Low — request 1 picks cred A, request 2 sees A still cooling and blocks; no progress until A expires, then both stampede |
+| **Complexity / new primitives** | Low — reuses existing janitor sweep, single-attempt invariant, weighted selection | Lowest — no new code | High — needs blocking primitives, condition variables, or polling timers; never requested by any caller today |
+| **Reversibility** | High — easy to switch to fail-fast later by changing the fallback path | High | Low — block-until-expiry would require new API surface (e.g., `WaitForCooldown`) that no other feature needs |
+| **Alignment with R3-5 retry budget** | Strong — "each credential at most once" is the single-attempt invariant; budget bounds total failover attempts | Strong — zero budget consumed | Poor — would consume budget on time-waits, not on actual upstream attempts |
+
+**Recommendation: pick Soonest-expiry.** It is the only option that
+satisfies the user's stated "loadbalance and HA in the case rate
+limiting" requirement without introducing unbounded latency or new
+primitives. Fail-fast is the obvious alternative if latency ever
+trumps availability, but the user did not ask for that tradeoff.
+Block-until-expiry is rejected outright as semantically wrong (HTTP
+requests should not block on credential cooldown timers) and
+operationally dangerous (stampede).
+
+### F.5 Retry Budget (R3-5)
+
+**Ruling.** Each remaining credential is tried **AT MOST ONCE per
+request**. Total credential-failover attempts bounded by
+`len(credentials) - 1`. No repeats, no infinite loops. The caller
+(the request context, per F.2) tracks which credentials have already
+been tried this request and refuses to spawn another attempt for a
+credential that's in its own tried-set.
+
+**Latency note.** Each failover is a fresh upstream round-trip. 429
+responses are typically fast (no body wait, often empty body or a
+short OpenAI-compatible JSON envelope), so worst-case added latency is
+`(N-1) × 429-RTT` where N = number of configured credentials. For N=3
+(minimax A, B, C with one of them rate-limited): at most 2 extra
+attempts, at ~50-200ms each on a healthy network.
+
+**Round 3c — W3 soonest-expiry single-shot guard (pseudocode-level
+contract, not F.4-mode change):** when `ExcludeAndReselect` returns
+`mode == ReselectSoonestExpiry` (Round 3b — 0-of-N pin), the caller
+sets a per-request `soonestExpiryAttempted` boolean flag and
+spawns the SINGLE attempt. After spawning, the caller MUST
+`continue` the loop (no second `modelTypeCredFailover` spawn,
+no second `ExcludeAndReselect` call) so that if the soonest-
+expiry attempt 429s again, the NEXT loop iteration routes
+straight to model-fallback (sequential progression per F.4
+single-attempt-then-fall-through, NOT a soonest-expiry pick loop).
+The pseudocode lives in technical-analysis.md §
+"Rate-Limit Failover Precedence Tree" → Pseudocode (race-internal);
+this paragraph owns the contract statement and the flag's
+lifetime (per-request, initialized false, set true on
+soonest-expiry spawn, never reset within the same request).
+
+**Rationale.** This is the **invariant that makes R3-3 and R3-4 safe**.
+Without a hard cap, an all-cooling fallback loop (R3-4) combined with
+soonest-expiry selection could replay the same credential repeatedly
+in pathological scenarios. The caller-side tried-set (per F.2) is
+cheaper to enforce than a per-engine retry counter, because the
+counter would have to be keyed by `(modelID, conversationKey)` and
+cleaned up on request completion — duplication of work the request
+context already does.
+
+### F.6 Streaming Constraint (R3-6)
+
+> **AMENDED 2026-08-25 (Round 3b — invented-state purge + real
+> guards; Round 3c — W1 passthrough classification):** Round 3's
+> "nothing flushes pre-winner" is **false for SSE framing bytes**.
+> The TRUE invariant is "no CONTENT flushes pre-winner". The
+> invented `chunksFlushedToClient` / `bytesFlushedToClient`
+> fields/methods and the vacuous `status != statusStreaming` check
+> DO NOT EXIST at HEAD and are PURGED from this contract. Round 3's
+> `headersSent` flag for ultimate-internal is UNUSABLE because
+> `ultimatemodel/handler.go:608-609` pre-sets it before
+> `executeInternal` runs. The corrected guards are pinned
+> below.** **Round 3c — W1 passthrough classification contract:**
+> the `/v1/messages` anthropic-passthrough branch
+> (`handler_anthropic.go:297-345` → `doAnthropicRequest`) does NOT
+> flow through `pkg/providers.OpenAIProvider.handleError` — it
+> produces NO `*ProviderError`. The classification contract for
+> this branch is therefore separate from the Round 3 R3-1
+> `IsRateLimitError` classifier: classify on
+> `arc.lastStatusCode == 429` OR response-body `type` substring
+> `rate_limit`. The Retry-After header is captured via a NEW
+> additive `arc.retryAfter time.Duration` field on
+> `anthropicRequestContext` — captured at the point where
+> `arc.lastStatusCode` is set, `handler_anthropic.go:423`. Today
+> `doAnthropicRequest` does NOT touch `resp.Header`; the Retry-After
+> capture is genuinely additive (no existing read site is
+> disturbed).**
+
+**Ruling.** Failover applies ONLY before the first CONTENT byte is
+sent to the client (SSE framing bytes — headers + `": connected\n\n"`
+comment + heartbeat — DO precede coordinator start per
+`handler.go:783-797` but carry no model content; mid-stream credential
+failover is fundamentally unsafe regardless of framing).
+
+- **Race path** (Round 3b — supersedes Round 3): the expressible
+  guard is **`c.winner == nil`** (non-stream case is implicit —
+  nothing is written pre-winner). For streaming, the TRUE invariant
+  is **no CONTENT flushes pre-winner** — `handler.go:783-797` writes
+  SSE headers + `": connected\n\n"` comment and sets
+  `rc.headersSent = true` at `:797` BEFORE `coordinator.Start()` is
+  called (verify at HEAD); these framing bytes carry NO model content.
+  Winner requires `req.IsCompleted() && req.GetError() == nil`
+  (`race_coordinator.go:299`); `streamResult` (call site
+  `handler.go:852`, definition `:960`) and `handleNonStreamResult`
+  (call site `handler.go:879`, definition `:1327`) run only after
+  `WaitForWinner` returns. The Round-3 references to
+  `chunksFlushedToClient` / `bytesFlushedToClient` are DELETED (the
+  fields/methods DO NOT EXIST at HEAD); the `latestReq.status !=
+  statusStreaming` check is DELETED (vacuous — failed attempts are
+  `statusFailed`).
+- **Ultimate-internal path** (Round 3b — supersedes Round 3): retry
+  only when the returned error is the INITIAL-CALL `*ProviderError`
+  (type assertion). The Round-3 `headersSent` flag is UNUSABLE
+  because `ultimatemodel/handler.go:608-609` sets `*headersSent =
+  true` and `:643` starts the SSE heartbeat (writes
+  `": heartbeat\n\n"`) BEFORE `executeInternal` runs; initial-call
+  errors return before any CONTENT write (`handler_internal.go:155-157`
+  non-stream, `:253-255` stream). Mid-stream failures surface as SSE
+  error events and are not retryable.
+- **`/v1/messages` internal path** (Round 3b — fixed cite): retry
+  only when `arc.headersSent == false` AND the recorder's
+  `arc.Code == http.StatusOK` (recorder decouples — `arc.Code !=
+  http.StatusOK` is the failure signal). **Header-write cite FIXED
+  (Round 3b):** the header write is at
+  `handler_anthropic.go:648-654` (`arc.headersSent`), NOT at
+  `adapter_anthropic.go:170-176` (that is `SetStreamHeaders`).
+  Includes the **anthropic-passthrough internal branch** (Round 3b
+  — leader ruling i, NEW IN SCOPE) per F.3 / F.7.
+
+**Rationale.** Mid-stream credential failover is fundamentally
+unsafe: the client has already consumed partial output (potentially
+with `stream: true`), the response has its own streaming headers,
+and a mid-stream swap would corrupt the protocol. The constraint is
+intrinsic to the architecture, not an arbitrary limit — the system
+already has well-defined "winner selected" semantics, and credential
+failover lives entirely in the pre-winner window (or, for the
+ultimate-internal and `/v1/messages` internal paths, the pre-
+first-byte window of the initial provider call).
+
+### F.7 Path Scope (R3-7)
+
+> **AMENDED 2026-08-25 (Round 3b — leader ruling i — anthropic-
+> passthrough internal branch IN SCOPE):** the Round-3 path-scope
+> table omitted the `handler_anthropic.go:297-345` branch (internal
+> model + anthropic-provider credential → `doAnthropicRequest`),
+> which bypasses `doAnthropicInternalRequest` entirely. The leader
+> ruled this branch IN SCOPE for R3-3 / R3-6 / R3-7 / F.7 for C1
+> consistency — the whole `/v1/messages` internal family gets the
+> same LB coverage. The branch currently reads the single-cred
+> `modelConfig.CredentialID` (Round-1 shape) and MUST be swapped to
+> the affinity resolver; the contract statement is owned here, the
+> task wiring is owned by the sibling phase file.**
+
+**Ruling.** Applies to the four LB'd internal paths (Round 3b —
+fourth row added):
+
+| Path | LB-aware? | Rate-limit failover? | Source |
+|---|---|---|---|
+| Race-internal (`executeInternalRequest` via `race_executor.go:137`) | YES (Round 1) | YES (Round 3) | `pkg/proxy/race_executor.go:137` `ResolveInternalConfig(req.modelID)` |
+| Ultimate-internal (`handler_internal.go executeInternal`) | YES (Round 1) | YES (Round 3) | `pkg/ultimatemodel/handler_internal.go:46` |
+| `/v1/messages` internal — `doAnthropicInternalRequest` branch | YES (Round 1, C1) | YES (Round 3) | `pkg/proxy/internal_handler.go:109-111` |
+| **`/v1/messages` internal — anthropic-passthrough branch (Round 3b — leader ruling i, NEW IN SCOPE)** | **YES (Round 3b)** | **YES (Round 3b, Round 3c — W1 classification contract)** | `pkg/proxy/handler_anthropic.go:297-345` — for internal models whose credential provider is `"anthropic"`, this branch BYPASSES `doAnthropicInternalRequest` and calls `h.doAnthropicRequest(w, arc)` directly (reads single-cred `modelConfig.CredentialID` + `cred.ResolveAPIKey()`, sets `arc.credentialAPIKey`). MUST be swapped to the affinity resolver for full LB coverage; the same R3-1 / R3-2 / R3-3 / R3-6 pipeline applies (pre-first-byte guard: `arc.headersSent` per `handler_anthropic.go:648-654` — NOT `adapter_anthropic.go:170-176`). **Round 3c — W1 classification source:** this branch produces NO `*ProviderError` (it does not flow through `pkg/providers.OpenAIProvider.handleError`); classify on `arc.lastStatusCode == 429` OR response-body `type` substring `rate_limit`. `Retry-After` is captured via the NEW additive `arc.retryAfter time.Duration` field at the point where `arc.lastStatusCode` is set, `handler_anthropic.go:423`. |
+| Race-external env path (`cfg.UpstreamCredentialID`) | NO (single env credential) | NO | `pkg/proxy/race_executor.go:279-300` (env-only path; single credential) |
+| Ultimate-external passthrough | NO (client auth passes through; no LB domain) | NO | `pkg/ultimatemodel/handler.go:620-636` (provider probe only; no credential injection) |
+
+**Rationale.** Race-external and ultimate-external do NOT participate
+in the LB domain — they have a single credential (env or passthrough),
+so there is no other credential to fail over to. Adding the
+classification and `ExcludeAndReselect` machinery to those paths would
+be pure overhead with no behavioral change. The path-scope ruling
+mirrors the Round 1 LB-participation ruling in §D exactly. **The
+Round 3b fourth row (anthropic-passthrough branch) IS in the LB
+domain** — internal models with anthropic-provider credentials are
+the same LB-participating family as the other `/v1/messages`
+internal sub-path; excluding this branch would silently strand
+credential failover for the C1-primary Claude Code endpoint when the
+credential provider is `"anthropic"`.
+
+### F.8 Observability (R3-8)
+
+**Ruling.** New event `model_credential_failover` published via the
+existing `events.Bus`; `EngineStats` extended with two additive fields;
+new log line prefix.
+
+```go
+// pkg/credentiallb/events.go (additions)
+
+const (
+    EventBindingDropped            = "model_credential_binding_dropped"  // existing
+    EventCredentialsChanged        = "model.credentials.changed"         // existing
+    EventCredentialFailover        = "model_credential_failover"         // NEW (R3-8)
+)
+
+// Payload (published via events.Bus):
+// {
+//   "model_id":          string,
+//   "from_credential_id": string,         // the credential that 429'd
+//   "to_credential_id":   string,         // the next credential selected
+//   "reason":             "rate_limit",   // constant for v1; future: "auth_expired" etc.
+//   "retry_after_ms":     int64,          // upstream-supplied; 0 if absent
+//   "cooldown_ms":        int64,          // effective cooldown applied (> retry_after_ms for fallback default)
+//   "attempt_index":      int             // 1..N-1 for this request (per R3-5 budget)
+// }
+```
+
+```go
+// pkg/credentiallb/engine.go (EngineStats extension — Round 3b — gauge semantics for Cooldowns)
+
+type EngineStats struct {
+    Hits      uint64  // existing — in-TTL lookup hits
+    Misses    uint64  // existing — lookups that selected a fresh credential
+    Bindings  uint64  // existing — current binding-map size
+    Failovers uint64  // NEW (R3-8) — monotonic counter; total credential failovers (R3-2 calls)
+    Cooldowns uint64  // NEW (R3-8, Round 3b — GAUGE) — current cooldown-map size across all models; recomputed at each janitor sweep or read live on Stats(). NOT a monotonic counter.
+}
+```
+
+**Log line prefix:** `[LB-FAILOVER]` for any log line emitted during
+the R3-2 / R3-3 / R3-4 flow (classification, exclusion, rebind, all-
+cooling fallback). Example:
+`[LB-FAILOVER] model=minimax conv=abc123 from=cred-A to=cred-B reason=rate_limit retry_after=30s attempt=1`.
+
+**Rationale.** (a) Additive `EngineStats` fields preserve the pinned
+#5 shape (`Hits`, `Misses`, `Bindings` per model; field names are
+**locked**) — the two new fields are appended at the struct tail.
+(b) The event payload mirrors the existing
+`model_credential_binding_dropped` precedent (no nested objects;
+flat string/int64 fields). (c) The log prefix is greppable and
+distinct from existing `[RACE]` / `[AUTH]` / `[UltimateModel]` /
+`[credentiallb]` prefixes.
+
+---
+
+## Round 3 Base-Drift Re-Verification (fea5874 → 8f67bdf)
+
+> **AMENDED 2026-08-25 (Round 3 — Base-Drift Re-Verification):** Eleven
+> commits landed on `pkg/proxy/` + `pkg/ultimatemodel/` between the
+> Round 2 base (`fea5874`) and the current working tip (`8f67bdf`,
+> rebased onto `master 396fd12`). The Round 1 + Round 2 citations in
+> §A–§E and in `technical-analysis.md` were re-verified line-by-line.
+> The drift table below lists every site cited in the existing contract
+> that moved; Phase-1 targets (`pkg/models/`, `pkg/store/`,
+> `migrations/`) are UNTOUCHED and `race_executor.go` source is
+> UNTOUCHED (only its test file changed). No contract conflict — every
+> drift is line-number drift, not behavioral drift.
+
+| Site | Old cite @ fea5874 | Current @ 8f67bdf | Drift | Status |
+|---|---|---|---|---|
+| `pkg/proxy/handler.go` post-auth `tokenID` site | 401 | 401 | 0 | ✓ exact |
+| `pkg/proxy/handler.go` `initRequestContext` call | 353 | 352 | −1 | drifted |
+| `pkg/proxy/handler.go` ultimate `Execute` call | 627 | 635 | +8 | drifted |
+| `pkg/proxy/handler_anthropic.go` `doAnthropicInternalRequest` call | 340 | 348 | +8 | drifted |
+| `pkg/proxy/handler_anthropic.go` func def (`doAnthropicInternalRequest`) | 447 | 455 | +8 | drifted |
+| `pkg/proxy/handler_anthropic.go` `NewInternalHandler` construction | 461 | 478 | +17 | drifted |
+| `pkg/proxy/handler_anthropic.go` `anthropicRequestContext` struct | 697 | 740 | +43 | drifted |
+| `pkg/proxy/handler_anthropic.go` `CredentialID` probe (phase1 cite) | 294 | 302-303 | +8 | drifted |
+| `pkg/proxy/internal_handler.go` `NewInternalHandler` | 38 | 48 | +10 | drifted |
+| `pkg/proxy/internal_handler.go` `HandleRequest` signature | 67 | 109 | +42 | drifted |
+| `pkg/proxy/internal_handler.go` `ResolveInternalConfig` seam | 69 | 111 | +42 | drifted |
+| `pkg/proxy/race_executor.go` `executeRequest` / secondary resolve / primary resolve / DEBUG log | 73 / 112 / 137 / 151 | 73 / 112 / 137 / 151 | 0 / 0 / 0 / 0 | ✓ all exact (source unchanged; only test file changed) |
+| `pkg/ultimatemodel/handler_internal.go` `executeInternal` / resolve | 36 / 46 | 36 / 46 | 0 / 0 | ✓ exact |
+| `pkg/ultimatemodel/handler.go` provider probe (D3) | 288-289 | 625-635 | **+337** | **MAJOR drift** |
+| `cmd/main.go` `/v1/messages` route | 139 | 139 | 0 | ✓ exact |
+| `pkg/proxy/handler_functions.go` `initRequestContext` span | 23-126 | 23-131 | end +5 | drifted (end only) |
+| `pkg/proxy/handler_helpers.go` `requestContext` struct | 23-108 | 23-108 | 0 | ✓ exact |
+| `pkg/ui/server.go` DTO cites | 35 / 390 / 460 / 558 / 673 | same | 0 / 0 / 0 / 0 / 0 | ✓ exact (1-line trivial diff since fea5874) |
+| `CredentialID:` sweep (`grep -rn "CredentialID:" --include="*.go"` pkg/ cmd/ test/) | 125 hits / 27 files | **137 hits / 32 files** | +12 / +5 | drifted (expected — new code) |
+
+**New code since fea5874 that the contract must not conflict with.**
+
+| Commit | Feature | Sites | Contract impact |
+|---|---|---|---|
+| `2e183d3` | `SetThinkingSink` + thinking-sink invariant in `internal_handler.go` | `internal_handler.go` | New `SetThinkingSink` method + `thinkingSink *strings.Builder` field. Round 1 contract's "engine stays decoupled from `events.Bus`" is unaffected. **NEW (Round 3)**: ExcludeAndReselect must not touch `thinkingSink`. |
+| `272db86` / `e40db49` | Bare-JSON capture fallback + D3 probe relocation in `ultimatemodel/handler.go` | `ultimatemodel/handler.go:625-635` | D3 provider probe moved from lines 288-289 to 625-635 (+337 line drift). Round 1 contract references the OLD line — must be updated to the new line. **The `modelCfg.CredentialID` probe semantics are unchanged; only the line moved.** |
+| `effc345` | `extractNonStreamContent` reasoning capture | `pkg/proxy/` (non-stream path) | Captures `reasoning_content` for non-stream responses. Round 1 contract does not reference this path; no conflict. |
+| `396fd12` | SSE `Cache-Control: no-transform` | `pkg/proxy/` SSE write paths | Defeats Cloudflare buffering on SSE. Round 1 contract does not reference headers; no conflict. |
+
+**Existing 429 machinery that the Round-3 contract builds on
+(verified).**
+
+| Site | Behavior |
+|---|---|
+| `pkg/providers/interface.go:155-162` | `ProviderError` struct (the type to extend with `RetryAfter` per R3-1) |
+| `pkg/providers/interface.go:168-170` | `ProviderError.IsRetryable()` — existing retry classification |
+| `pkg/providers/openai.go:217-224` | `OpenAIProvider.IsRetryable()` — classifies 429 + 5xx as retryable |
+| `pkg/providers/openai.go:234-279` | `handleError` — the unmarshal site (parse `{"error":{message,type,code}}`) AND the seam for R3-1's `RetryAfter` write |
+| `pkg/providers/openai.go:592-609` | `parseRetryAfter` — **DEAD CODE** today; R3-1 wires it |
+| `pkg/proxy/race_coordinator.go:773-893` | `GetFinalErrorInfo` — terminal-shape 429 → `ErrorTypeRateLimit` / `ErrorCodeRateLimit` ("All models rate limited") |
+| `pkg/proxy/race_coordinator.go:860-868` | The 429-→-rate_limit mapping (preserved as terminal shape by R3-4) |
+| `pkg/models/errors.go:7,17` | `ErrorTypeRateLimit` and `ErrorCodeRateLimit` constants |
+| `pkg/proxy/race_executor.go:73,112,137` | Provider call sites (non-stream + stream + primary resolve) — race-internal 429 source |
+| `pkg/proxy/race_executor.go:279-300` | Race-external env path — UNCHANGED per R3-7 |
+
+**Precedence baseline that R3-3 plugs into.**
+
+| Site | Behavior |
+|---|---|
+| `pkg/proxy/handler.go:830` | `newRaceCoordinatorWithEvents(rc.modelList, ...)` — outer model chain |
+| `pkg/proxy/race_coordinator.go:190-240` | `spawn` — `modelTypeMain/Second` → `c.models[0]`, `modelTypeFallback` → `c.models[1]` |
+| `pkg/proxy/race_coordinator.go:350-364` | `manage()` "Case 1" (function def `:252`) — the interception point for R3-3 |
+| `pkg/proxy/handler_finalize.go:48-69` | `handleModelFailure` — publishes `fallback_triggered` event on model switch (preserved unchanged by R3-3) |
+| `pkg/proxy/handler.go:894` | `handleRaceFailure("all_models_failed")` — terminal entry point (preserved unchanged by R3-3 / R3-4) |
+
+**Phase-1 targets are UNTOUCHED.** Verified by `git diff fea5874..8f67bdf
+--stat -- pkg/models/ pkg/store/ pkg/store/database/`: zero changes to
+`pkg/models/`, `pkg/store/`, or any migration file. Round 1's
+"Phase-1 schema is locked" invariant is preserved. `race_executor.go`
+source is also UNTOUCHED (only its test file changed in this window);
+the Round 1 `ResolveInternalConfig` call sites at lines 73 / 112 / 137
+remain at exactly the same lines.
+
+---
+
 ## Secondary Decisions
 
 ### Package + File Layout
@@ -1311,3 +2494,182 @@ None blocking. Listed for the dispatcher to confirm during planning review:
 | **#16c** | `.down.sql` files are NOT auto-run by the runner | §B Migration Runner Update (new blockquote) | Verified by `pkg/store/database/migrate.go:24-52` (the `migrations` array lists only `.up` names) and `pkg/store/database/migrate.go:62-67` (the `RunMigrations` loop iterates `migrations` only). `.down.sql` files are manual rollback artifacts. |
 | **#16d** | 16-cap rationale — bounded memory + sanity guard, tunable | §C Default Configuration table (the `Max credentials per model` row) | Original rationale ("matches house ceiling on `fallback_chain_json` length") is **wrong** — `pkg/models/config.go:64-66` (deprecated) and `pkg/store/database/store.go:1047` show the actual house ceiling is 1 fallback. The 16-cap is a fresh sanity guard for this feature, tunable. |
 | **#16f** | Credential-scoped upstream prompt-cache note | §A "Problem" section (new blockquote) | Upstream provider prompt caches are keyed per-credential; conversation-sticky affinity is required to keep caches hot. This is the load-bearing reason the §A key formula exists. |
+
+### Round 3 — Rate-Limit Failover (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3 — Rate-Limit Failover):** Eight
+> pre-pinned dispatcher rulings (R3-1..R3-8) applied as a SURGICAL
+> AMENDMENT to the existing contract. Existing rulings (A-1, A-2, M-1,
+> C1, C2, W-1..W-3, E-1..E-4, #3, #5, #6, #10, #16a-d, #16f) are
+> UNCHANGED. Phase-1 schema targets (`pkg/models/`, `pkg/store/`,
+> `migrations/`) are UNTOUCHED. `race_executor.go` source is
+> UNTOUCHED. A sibling worker amends the phase files against the same
+> rulings; the **contract wins** rule (per the plan header) governs.
+
+| # | Ruling | Section(s) added | One-line summary |
+|---|--------|---------------------|------------------|
+| **R3-1** | Rate-limit classifier + retry-after extraction | §F.1 Rate-Limit Classifier | `IsRateLimitError(err error) bool` + `ProviderError.RetryAfter time.Duration` added to `pkg/providers`. Wires the existing-but-dead `parseRetryAfter` (`pkg/providers/openai.go:592-609`) inside `handleError` (`pkg/providers/openai.go:234-279`). Classifier reads the already-unmarshaled `{"error":{message,type,code}}` body — no new provider integration required. |
+| **R3-2** | Affinity break + `ExcludeAndReselect` | §F.2 Affinity Break | Engine gains `ExcludeAndReselect(modelID, conversationKey, excludedCredID, retryAfter) (credentialID, mode ReselectMode)` (**Round 3b — SUPERSEDES Round-3 `(credentialID, ok)` signature, B3 mode-aware**; `ReselectHealthy`/`ReselectSoonestExpiry`/`ReselectNone` enum shape; leader accepted the B3-recommended single-call enum over the two-call `ok bool`+`PickSoonestExpiring` alternative). Marks `excludedCredID` cooling (cooldown seeded from `retryAfter`, else 60s default), REBINDS the existing `(modelID, conversationKey)` entry to next healthy credential in weighted order, skipping cooling credentials. Single map write under existing locking discipline. **Round 3b — B2 idempotent precondition:** rebind only if `bindings[convKey].credentialID == excludedCredID`; otherwise no-op returning the current unchanged binding (mode=ReselectNone). Per-conversation retry accounting (tried-this-request set) lives in the **request context** (not the engine). |
+| **R3-3** | Precedence ordering — credential failover BEFORE model fallback | §F.3 Precedence Ordering | Interception point: `pkg/proxy/race_coordinator.go` `manage()` (function def `:252`) "Case 1" (current lines 350-364). Decision tree: if failed model internal AND >1 creds AND error classifies rate-limit AND no CONTENT flushes pre-winner (race: `c.winner == nil`; ultimate: initial-call `*ProviderError` type assertion; /v1/messages: `arc.headersSent` per `handler_anthropic.go:648-654`) AND remaining non-cooling creds exist AND budget not exhausted → spawn same-model-next-credential attempt (`modelTypeCredFailover` / `triggerRateLimit`); else fall through to existing model fallback. Ultimate-internal (`pkg/ultimatemodel/handler_internal.go:36-46`), `/v1/messages` internal (`pkg/proxy/internal_handler.go:109-111`), and the `/v1/messages` anthropic-passthrough branch (`handler_anthropic.go:297-345`, Round 3b leader ruling i — in scope) get equivalent hooks. **Round 3b:** B1 gate exemption for `modelTypeCredFailover` attempts (separate spawn-window accounting vs model attempts); Case-2 uniform classification (leader ruling iii); Case-1 latest-only inspection (accepted v1 behavior); `modelTypeSecond` re-key (specified); canonical naming `modelTypeCredFailover`. |
+| **R3-4** | Per-credential cooldown state + soonest-expiry all-cooling fallback | §F.4 Cooldown State | In-memory `cooldowns map[modelID]map[credID]time.Time` guarded by engine's existing outer+per-model locking discipline (E-1). Janitor sweeps expired cooldowns alongside idle-TTL bindings in same pass. Weighted selection + `ExcludeAndReselect` skip cooling credentials. **All-cooling fallback** (Round 3b — 0-of-N ONLY pin): pick SOONEST-EXPIRING credential (availability beats strict cooldown), log WARN, **single attempt only (no loop)** — caller enforces via B3 mode-aware `ReselectSoonestExpiry` (engine emits WARN; caller does single-attempt-then-fall-through, no second `ExcludeAndReselect` call). 1-of-N healthy takes the normal healthy-skip path; F.4 prose is clarified. `pkg/proxy/race_coordinator.go:860-868` "All models rate limited" remains terminal. **FULL ALTERNATIVES TABLE**: soonest-expiry vs fail-fast vs block-until-expiry (the only ruling with a full table in this round). Soonest-expiry wins: best availability, bounded latency, no new primitives, aligns with R3-5 retry budget. **Round 3b — amendment 7 (gauge semantics):** `EngineStats.Cooldowns` is a GAUGE (current cooldown-map size, recomputed at each janitor sweep or read live on `Stats()`), NOT a monotonic counter; the Round-3 increment-per-removal prose at `decisions.md:1291-1293` is REPLACED. `Failovers` remains a monotonic counter. |
+| **R3-5** | Retry budget | §F.5 Retry Budget | Each remaining credential tried AT MOST ONCE per request. Total credential-failover attempts bounded by `len(credentials) - 1`. No repeats, no infinite loops. Caller-side (request context) tried-set enforces the cap. Worst-case added latency: `(N-1) × 429-RTT` (429s typically fast, no body wait). |
+| **R3-6** | Streaming constraint | §F.6 Streaming Constraint | Failover applies ONLY before first CONTENT byte sent to client (Round 3b — invented SSE framing bytes exempted: `handler.go:783-797` writes headers + `": connected\n\n"` comment BEFORE `coordinator.Start()`, but these carry no model content). Race path: `c.winner == nil` (Round 3b — invented `chunksFlushedToClient`/`bytesFlushedToClient` PURGED; `status != statusStreaming` vacuous and PURGED). Ultimate-internal: initial-call `*ProviderError` type assertion (Round 3b — `headersSent` UNUSABLE because `ultimatemodel/handler.go:608-609` pre-sets it before `executeInternal`). `/v1/messages`: recorder/`arc.headersSent` per `handler_anthropic.go:648-654` (Round 3b — cite fixed from `adapter_anthropic.go:170-176` which is `SetStreamHeaders`). Three path-specific implementations documented in the precedence tree section. **Round 3b — leader ruling i:** the `/v1/messages` anthropic-passthrough branch (`handler_anthropic.go:297-345`) is in scope and uses the same `arc.headersSent` guard. |
+| **R3-7** | Path scope | §F.7 Path Scope | **Four** LB'd internal paths participate (Round 3b — leader ruling i added the anthropic-passthrough fourth row): race-internal (`executeInternalRequest`), ultimate-internal (`handler_internal.go executeInternal`), `/v1/messages` internal (`internal_handler.go HandleRequest`), and `/v1/messages` anthropic-passthrough branch (`handler_anthropic.go:297-345` — internal model + anthropic-provider credential → `doAnthropicRequest`, bypasses `doAnthropicInternalRequest`; MUST be swapped from single-cred `modelConfig.CredentialID` to the affinity resolver). **UNCHANGED**: race-external env path (`cfg.UpstreamCredentialID`, `race_executor.go:279-300`), ultimate-external passthrough. Single env credential = no LB domain. |
+| **R3-8** | Observability | §F.8 Observability | New event `model_credential_failover` {model_id, from_credential_id, to_credential_id, reason:"rate_limit", retry_after_ms, cooldown_ms, attempt_index} published via existing `events.Bus`. `EngineStats` EXTENDED additively with `Failovers uint64` (monotonic counter — total successful `ExcludeAndReselect`) + `Cooldowns uint64` (**Round 3b — amendment 7 GAUGE**, not a counter; current cooldown-map size recomputed at each janitor sweep; the Round-3 increment-per-removal prose at `decisions.md:1291-1293` is REPLACED). Pinned #5 field names `Hits`, `Misses`, `Bindings` unchanged. New log prefix `[LB-FAILOVER]`. |
+| **R3-drift** | Base-drift re-verification | Round 3 Base-Drift Re-Verification (fea5874 → 8f67bdf) | Eleven commits landed between fea5874 and 8f67bdf. Drift table covers 19 sites (most exact, several line-drifts, one MAJOR drift +337 on `pkg/ultimatemodel/handler.go:288-289 → 625-635`). **Phase-1 schema targets untouched**. `race_executor.go` source untouched. New code since fea5874 (`SetThinkingSink`, bare-JSON capture fallback, D3 probe relocation, `extractNonStreamContent`, SSE no-transform) does NOT conflict with R3-1..R3-8. |
+
+**Round 3 contract wins (cross-reference matrix for sibling workers).**
+
+| Worker concern | Round 3 ruling | Section in this file | Section in technical-analysis.md |
+|---|---|---|---|
+| Provider error type extension | R3-1 | §F.1 | New `### pkg/providers — error-classification additions` |
+| Engine API surface | R3-2 | §F.2 | `### pkg/credentiallb — engine additions (Round 3)` block |
+| Precedence tree wiring | R3-3 | §F.3 | New `## Rate-Limit Failover Precedence Tree` |
+| Cooldown map + locking | R3-4 | §F.4 | `## Concurrency Model` — new "Round-3 Cooldown Map Locking" sub-section |
+| Retry budget invariant | R3-5 | §F.5 | "Rate-Limit Failover Precedence Tree" + `### pkg/providers` |
+| Pre-first-byte guard | R3-6 | §F.6 | "Rate-Limit Failover Precedence Tree" + Backward Compatibility Matrix rows |
+| Path scope | R3-7 | §F.7 | Backward Compatibility Matrix rows |
+| Event/stats/log schema | R3-8 | §F.8 | `### pkg/credentiallb — engine additions (Round 3)` |
+| Drift verification | R3-drift | "Round 3 Base-Drift Re-Verification" | References (drift table appended) |
+
+**Cross-document invariants preserved (Round 3 does not relax any).**
+
+- **#10 (sliding idle TTL, NOT fixed-lifetime)**: A cooldown does NOT touch `boundAt` (cooldown is a separate map). A rebind via `ExcludeAndReselect` DOES refresh `boundAt` for the new credential (same as a fresh `GetOrSelect` would). Pinned explicitly in §F.4 and cross-ref'd in technical-analysis.md Concurrency Model.
+- **#5 (`EngineStats` field names locked)**: New `Failovers` + `Cooldowns` fields are appended at the struct tail; `Hits`, `Misses`, `Bindings` unchanged.
+- **C1 (`/v1/messages` internal path in scope)**: Round 3 R3-3 + R3-7 confirms the path participates; the Round 1 conversation-key wiring (`anthropicRequestContext.conversationKey` → `InternalHandler.HandleRequest` extra arg → `ResolveInternalConfigWithAffinity`) is the entry point that the Round 3 `ExcludeAndReselect` is called from.
+- **W-2 (empty-key ⇔ NO binding stored)**: Empty-key requests cannot trigger `ExcludeAndReselect` because they have no binding to rebind. The request context's tried-set is also empty-key-unaware (no affinity = no per-conversation retry accounting needed). Empty-key 429s fall through directly to model fallback (R3-3's else branch).
+---
+
+## Round 3b — Architect Review Amendments (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3b — Architect Stress-Test):**
+> Round 3 was architect stress-tested against HEAD @ 8f67bdf; the
+> review (`architecture-review-round3.md`) returned
+> **AMEND-AND-ADOPT** with eight consolidated amendments + three
+> leader rulings. **R3-1..R3-8 SEMANTICS STAND** — these are
+> specification-level fixes, not re-decisions. Amendments applied
+> in place per section (preserving audit trail with "superseded
+> Round 3" markers); this changelog documents the mapping for
+> sibling-worker verification. The contract wins rule (per the
+> plan header) governs — sibling phase workers amend against the
+> SAME rulings.
+
+### Amendment-to-Section Mapping (review items + leader rulings)
+
+| # | Source | Title | Files amended (this contract owns) | Sections amended in this file |
+|---|--------|-------|--------------------------------------|---------------------------------|
+| **1 (B1)** | Review blocking finding | **Spawn-window gate exemption for `modelTypeCredFailover`** | decisions.md (this file) + technical-analysis.md | §F.3 Precedence Ordering (B1 gate exemption + all-failed amendment); §F.3 superseded Round-3 audit trail |
+| **2 (B2)** | Review blocking finding | **`ExcludeAndReselect` idempotent precondition** | decisions.md (this file) + technical-analysis.md | §F.2 (B2 precondition + audit trail) |
+| **3 (B3)** | Review blocking finding | **Mode-aware `ExcludeAndReselect` return** (single-call enum shape) | decisions.md (this file) + technical-analysis.md | §F.2 (B3 signature supersession + `ReselectMode` enum); §F.4 (mode-aware all-cooling fallback) |
+| **4** | Review amendment | **Real streaming guards** (purge invented state) | decisions.md (this file) + technical-analysis.md | §F.6 (real guards: race `c.winner == nil`, ultimate initial-call `*ProviderError`, /v1/messages `arc.headersSent` with cite fix to `handler_anthropic.go:648-654`); §F.3 superseded Round-3 audit trail |
+| **5** | Review amendment + **leader ruling i** | **Anthropic-passthrough internal branch in scope** | decisions.md (this file) + technical-analysis.md | §F.7 (fourth row in path-scope table); §F.3 (third hook bullet — leader ruling i) |
+| **6** | Review amendment | **Classifier vocabulary table + 503 row + absent-`Retry-After` flow + HTTP-200 out-of-scope** | technical-analysis.md only (this file's §F.1 unchanged at spec level — the classifier interface is unchanged; the table + matrix are pinned in the contract; the out-of-scope note goes in technical-analysis.md) | (none at decision level — `§F.1` R3-1 semantics unchanged) |
+| **7** | Review amendment | **`EngineStats.Cooldowns` gauge semantics** | decisions.md (this file) + technical-analysis.md | §F.8 (EngineStats extension comment); §F.4 (Janitor interaction — REPLACE increment-per-removal prose) |
+| **8** | Review amendment + leader ruling | **E2E premise correction** (no `--hit-count-file` precedent; build per-credential mock in Round-1 E2E work or defer E2E counterpart) | **sibling phase worker only** (phase5 Task 23); this file is unaffected at the contract level | (none) |
+| **Leader ruling ii** | Leader ruling | **Single-call enum shape for `ExcludeAndReselect` (B3)** — leader accepted the B3-recommended single-call `ReselectMode` enum over the two-call `ok bool` + `PickSoonestExpiring` alternative | decisions.md (this file) + technical-analysis.md | §F.2 (B3 signature, with one-line rationale pinned); §F.4 (mode semantics) |
+| **Leader ruling iii** | Leader ruling | **Case-2 uniform classification — R3-3 SUPERSEDES the review's "non-goal" reading for Case-2 idle bypass** | decisions.md (this file) + technical-analysis.md | §F.3 (Case-2 idle-trigger classification paragraph + audit trail); §F.8 (R3-3 changelog entry) |
+| **Symbol fixes** | Review §1 citation nits | **`monitorLoop` → `manage()` (`:252`), `spawnAttempt` → `spawn()` (`:189`); canonical Go identifier `modelTypeCredFailover`** (purge `modelTypeCredentialFailover`/`credential_failover` from prose where they name the Go constant) | decisions.md (this file) + technical-analysis.md | §F.3 (function/symbol names); §F.7 table; §F.8 R3-3 changelog row; Precedence Baseline table |
+| **Pre-first-byte guard operator docs** | Review §1 sub-finding | **Case-1 latest-only inspection (accepted v1 behavior), `modelTypeSecond` re-key (specified behavior)** | decisions.md (this file) + technical-analysis.md | §F.3 (both pins) |
+| **Operator note** | Review §3 pin | **1-of-N healthy load concentration + gradual re-distribution (no switch-back thundering)** | decisions.md (this file) + technical-analysis.md | §F.3 operator note (no code) |
+
+### Cross-reference matrix (Round 3b — for sibling worker verification)
+
+| Worker concern | Round 3b amendment | decisions.md section | technical-analysis.md section |
+|---|---|---|---|
+| Spawn-window gate exemption | B1 | §F.3 (B1 gate exemption paragraph + all-failed amendment) | Rate-Limit Failover Precedence Tree (gate exemption row) |
+| `ExcludeAndReselect` precondition | B2 | §F.2 (B2 precondition paragraph) | engine-additions ExcludeAndReselect invariants block |
+| Mode-aware return | B3 (leader ruling ii) | §F.2 (B3 supersession + ReselectMode enum) + §F.4 (mode semantics) | engine-additions ExcludeAndReselect (mode-aware signature) + precedence tree (mode-based fall-through) |
+| Real streaming guards | 4 | §F.6 (real guards) | Precedence Tree (real guards) + Pre-First-Byte Guard table (corrected) |
+| Passthrough branch in scope | 5 + leader ruling i | §F.7 (fourth row) + §F.3 (third hook bullet) | Precedence Tree (fourth path) + Backward Compatibility Matrix |
+| Classifier vocabulary table + 503 row + out-of-scope | 6 | (decision-level §F.1 unchanged — pinned in technical-analysis.md) | Classifier section (vocabulary table + 503 row + out-of-scope note) |
+| Gauge semantics | 7 | §F.8 (EngineStats extension) + §F.4 (Janitor interaction REPLACE) | Engine additions block (EngineStats extension) + Cooldown map locking (janitor note) |
+| Case-2 uniform classification | leader ruling iii | §F.3 (Case-2 paragraph + audit trail) | Precedence Tree (Case-2 path) + Three-Path Coverage |
+| Case-1 latest-only / modelTypeSecond re-key | sub-finding pins | §F.3 (both pins) | Precedence Tree pseudocode (Case-1 latest-only) + pseudocode (modelTypeSecond re-key) |
+| Operator docs (1-of-N load + gradual re-distribution) | sub-finding pin | §F.3 (operator note) | operator note in Precedence Tree section |
+
+### Cross-document invariants preserved (Round 3b does NOT relax any)
+
+- **#10 (sliding idle TTL, NOT fixed-lifetime)**: A cooldown does NOT touch `boundAt` (cooldown is a separate map). A rebind via `ExcludeAndReselect` DOES refresh `boundAt` for the new credential (same as a fresh `GetOrSelect` would). Pinned explicitly in §F.4 and cross-ref'd in technical-analysis.md Concurrency Model. Round 3b does NOT change this.
+- **#5 (`EngineStats` field names locked)**: New `Failovers` + `Cooldowns` fields are appended at the struct tail; `Hits`, `Misses`, `Bindings` unchanged. Round 3b only changes `Cooldowns` semantics (counter → gauge), NOT its field name or position. Add-only rule preserved.
+- **C1 (`/v1/messages` internal path in scope)**: Round 3 + Round 3b confirm the path participates. Round 3b (leader ruling i) extends coverage to the anthropic-passthrough sub-branch — same family, same LB coverage.
+- **W-2 (empty-key ⇔ NO binding stored)**: Empty-key requests cannot trigger `ExcludeAndReselect` because they have no binding to rebind. With B3 mode-aware return, empty-key returns `ReselectNone` (caller falls through to model-fallback); Round 3b pins this explicitly in §F.2 invariants. **Round 3c — C2 supersession:** empty-key now returns `ReselectHealthy` with a fresh weighted-random among non-cooling (renormalized) pick and NO map write — see the Round 3c changelog for the rationale (R5: do not model-switch while a healthy credential exists). The Round 3b wording is REPLACED in-place; the Round 3c changelog preserves the audit trail.
+- **E-1 (janitor outer RLock + per-model write locks)**: The Round 3 cooldown sweep uses the SAME locking discipline. Round 3b only changes the `Cooldowns` field semantics (counter → gauge recomputation), NOT the lock ordering.
+- **R3-1..R3-8 SEMANTICS STAND**: every ruling's behavior is unchanged; the eight amendments + three leader rulings are specification-level fixes (gate exemption, idempotent precondition, mode-aware return, real guards, path-scope row, classifier vocabulary, gauge semantics, E2E premise correction, single-call enum shape, Case-2 uniform classification).
+
+## Round 3c — Reviewer Findings (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3c — Reviewer Findings):** A reviewer
+> pass against Round 3b returned APPROVED-WITH-NOTES gated on one
+> mandatory revision: 3 critical pins (C1, C2, C3), 4 warnings
+> (W1, W2, W3, S6 — leader ruled S6 YES), 3 suggestions (S1,
+> S2, S3) — all pin-level. The leader pre-ruled every open
+> decision point (folded below). Amendments applied in place per
+> section; this changelog documents the mapping for sibling-worker
+> verification. The contract wins rule (per the plan header)
+> governs — sibling phase workers amend against the SAME rulings.
+
+### Item → Section Mapping
+
+| # | Source | Title | Sections amended in this file | Sections amended in technical-analysis.md |
+|---|--------|-------|---------------------------------|----------------------------------------------|
+| **C1** | Reviewer critical | **Hoisted credFailover pre-checks (C1) — admission condition** | §F.3 (decision tree REPLACED with hoisted form: pre-checks ABOVE window gate; `gate := modelAttempts < len(models) \|\| credFailoverEligibleWithBudget()`; C1 semantic-equivalence note to rejected cap-extension; terminal guard preserved) | "Rate-Limit Failover Precedence Tree" §Pseudocode (Race-internal) — hoisted form block + admission gate expression |
+| **C2** | Reviewer critical | **`ReselectMode` semantics unified to phase2's reading (C2)** | §F.2 (enum comments + return-bullets REPLACED with C2 mapping: (a) B2 no-op → ReselectHealthy, (b) empty convKey → ReselectHealthy fresh non-cooling pick, (c) ReselectNone only for single-cred or 0 valid creds; S2 pin: tried-set lives in requestContext, not engine); §F.4 (B3 mode-aware bullets updated for C2 narrowing) | engine-additions ReselectMode enum + ExcludeAndReselect invariants; Precedence Tree §Pseudocode (mode handling); Failure Modes table — all four surfaces agree |
+| **C3** | Reviewer critical | **Three nonexistent references (C3)** — `spawnTriggerInfo.credentialID`; `case modelTypeCredFailover: modelID = c.models[0]`; `newRaceCoordinatorWithEvents` gains `engine` + `conversationKey` constructor params (NO `Config.CredEngine` field) | §F.3 (decision tree 1-2: C3(1) + C3(2) inline); new "Race coordinator constructor wiring (Round 3c — C3(3))" sub-section under §F.3 | Precedence Tree §Pseudocode (C3(1)/(2)/(3) inline); Three-Path Coverage (no change — wiring is at the constructor, not the per-path) |
+| **W1** | Reviewer warning | **Passthrough classification source (W1)** — anthropic-passthrough branch produces NO `*ProviderError`; classify on `arc.lastStatusCode == 429` OR response-body `type` substring `rate_limit`; NEW additive `arc.retryAfter time.Duration` captured where `arc.lastStatusCode` is set (handler_anthropic.go:423) | §F.6 (AMENDED blockquote adds W1 passthrough classification contract); §F.7 path-scope table row 4 (W1 classification source pinned in the "Source" column) | Three-Path Coverage row 4 (W1 classification contract appended); Precedence Tree §Pre-First-Byte Guard (passthrough row cross-ref W1) |
+| **W2** | Reviewer warning | **`ProviderError` extension (W2)** — additively gains `ErrorType string` + `ErrorCode string`, populated in `handleError` from already-unmarshaled anonymous-local fields (openai.go:238-246) | §F.1 (ProviderError struct extended additively; Round 3c — W2 wiring paragraph in Parser wiring block) | `pkg/providers — error-classification additions` (ProviderError struct + IsRateLimitError comment updated); classifier vocabulary table cross-ref |
+| **W3** | Reviewer warning | **SoonestExpiry single-shot pseudocode (W3)** — `soonestExpiryAttempted` flag + `continue` after soonest-expiry attempt (no double-spawn; next 429 routes to model-fallback) | §F.4 (Round 3c — W3 paragraph under Latency note); §F.4 mode-aware bullets (W3 cross-ref) | Precedence Tree §Pseudocode (soonestExpiryAttempted set + continue after ReselectSoonestExpiry spawn); Failure Modes table (W3 cross-ref) |
+| **S1** | Suggestion | **`rate_limit_exceeded` literal in code-equality set (S1)** | §F.1 (Classifier vocabulary paragraph cross-refs S1; the vocabulary table itself lives in technical-analysis.md) | `pkg/providers` vocabulary table row added; Match semantics paragraph extended; Unit-test matrix rows 12 + 13 added |
+| **S2** | Suggestion | **Tried-set home in requestContext, not engine (S2)** | §F.2 (one sentence added to ExcludeAndReselect doc-comment: tried-set mutated only from manage() loop, lives in requestContext, engine never reads/writes it) | engine-additions ReselectMode invariants block (S2 pin added); Round-3b Tried-Set Single-Goroutine Mutation Invariant cross-ref |
+| **S3** | Suggestion | **Wording standardization (S3)** — "weighted random among non-cooling (renormalized)" replaces "weighted order skipping cooling" / "weighted selection" / "skip-then-pick" wherever selection-after-cooldown is described in ACTIVE spec text | §F.4 (Selection skip rule paragraph REPLACED with S3 standardized wording + the audit-trail-untouched note) | engine-additions weightedSelector pseudocode (S3 wording inserted); Selection skip rule cross-ref; Precedence Tree §Pseudocode (uses standardized wording inline) |
+| **S6** | Suggestion (leader ruled YES) | **`OnCredentialDeleted` clears cooldowns (S6)** — single-pass loop clears `cooldowns[modelID][credentialID]` across all models; gauge recomputed at next sweep (or live read) | §F.4 (new AMENDED blockquote: S6 cooldown hygiene); §F.8 cross-ref (EngineStats.Cooldowns gauge recomputation note) | Invalidation Semantics table (Credential-deleted row extended with S6 cooldown clear); engine additions invariants block (S6 bullet) |
+
+### Rationale pins (the non-obvious decisions)
+
+- **C2 narrowing rationale (recorded for audit trail):** the prior
+  Round 3b reading that returned `ReselectNone` for both B2 no-op
+  AND empty-`conversationKey` was REJECTED because it would force
+  the caller to model-switch while a healthy credential exists,
+  violating R5 (Round-1 reviewer-5 — "do not model-switch when a
+  healthy credential is available"). The narrow `ReselectNone` to
+  "no credential exists / no credential valid" restores the R5
+  invariant.
+- **C1 semantic-equivalence note:** the hoisted form
+  `gate := modelAttempts < len(models) ||
+  credFailoverEligibleWithBudget()` is SEMANTICALLY EQUIVALENT to
+  the rejected cap-extension alternative (`cap += len(credentials)−1`).
+  Both admit `len(credentials) − 1` additional attempts before the
+  terminal. Cap-extension was REJECTED purely as an IMPLEMENTATION
+  (mutation of len-dependent invariants elsewhere — the existing
+  `:338` / `:420-421` reads of `len(c.models)` would need
+  synchronized widening across multiple sites); the hoisted form
+  is the same semantic admission expressed via a separate
+  accounting + OR-clause, which keeps the existing `:338` /
+  `:420-421` invariants intact.
+
+### Cross-document invariants preserved (Round 3c does NOT relax any)
+
+- **#10 (sliding idle TTL, NOT fixed-lifetime)**: Unchanged. Round 3c
+  S6's `OnCredentialDeleted` cooldown clear does NOT touch any
+  binding's `boundAt`.
+- **#5 (`EngineStats` field names locked)**: Unchanged. Round 3c
+  W2's `ErrorType` + `ErrorCode` are appended to `ProviderError`
+  (a different struct than `EngineStats`); W1's `arc.retryAfter`
+  is appended to `anthropicRequestContext`. Neither alters the
+  pinned `EngineStats` shape.
+- **C1 (`/v1/messages` internal path in scope)**: Unchanged.
+- **E-1 (janitor outer RLock + per-model write locks)**: Unchanged.
+  Round 3c S6's cooldown clear uses the SAME outer Lock +
+  per-model write Lock discipline.
+- **W-3 (constructor-only injection)**: New invariant — the
+  Round 3c C3(3) constructor gains `engine` + `conversationKey`
+  params but NO `Config.CredEngine` field is exposed. The config
+  stays flat; engine + key arrive via constructor args exactly
+  as `eventBus` and `requestID` already do today.
+- **R3-1..R3-8 SEMANTICS STAND**: every ruling's behavior is
+  unchanged; the ten Round 3c items are specification-level
+  fixes (gate hoisting, ReselectMode unification, three
+  nonexistent references, passthrough classification source,
+  ProviderError extension, soonest-expiry single-shot,
+  `rate_limit_exceeded` literal, tried-set home pin, S3 wording
+  standardization, OnCredentialDeleted cooldown hygiene). No
+  R3-1..R3-8 ruling is overridden.

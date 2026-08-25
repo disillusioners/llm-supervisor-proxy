@@ -166,3 +166,36 @@ criteria are unchanged.
 | # | Item | Section(s) updated | One-line summary |
 |---|------|---------------------|------------------|
 | **#9** | Scope the legacy-`credential_id` grep to the Model DTO + model CRUD response handlers; exempt `TestModelRequest` (and the test-endpoint error/lookup strings) | Exit Criterion #5 (REVISED — was over-broad; now scoped + exact grep stated) | The previous grep `grep -rn '"credential_id"' pkg/ui/server.go` was over-broad — it returned `TestModelRequest.CredentialID` (`pkg/ui/server.go:673`) which legitimately carries `credential_id` for the operator-driven connection test, plus the test-endpoint error/lookup strings (`"credential_id is required"`, `"look up the credential"`) in `handleTestModel`. The revised grep excludes those exact patterns; expected result is ZERO matches. The Model DTO (`pkg/ui/server.go` ~line 35 — `Model` struct's `CredentialID string \`json:"credential_id,omitempty"\``) MUST be removed; the model CRUD response handlers MUST emit `credentials: [...]` only. The grep is the Phase 4 merge gate. |
+
+---
+
+## Round 3 — Rate-Limit Failover (2026-08-25)
+
+> **Round 3 note: Phase 4 requires NO functional change for rate-limit failover.** The failover
+> feature (R3-1..R3-8) is runtime-only: cooldown state is engine memory, credential switching is
+> handler/engine work, and the credential *list* a failover rotates through is exactly the
+> weighted `credentials[]` array this phase's editor already produces. Weight-based ordering —
+> already covered by the existing editor (weights drive both distribution and the failover
+> reselection order per R3-2) — needs no UI change. Verified at 8f67bdf:
+>
+> - **EngineStats surfacing**: the UI does **NOT** render engine stats today (verified — zero
+>   `EngineStats`/`Engine()`/`Stats()` references in `pkg/ui/` Go and frontend sources), so the
+>   Round-3 `EngineStats{Failovers, Cooldowns}` extension (phase2 Task 14) has **no Phase-4
+>   surfacing work** — adding an engine-stats panel would be new scope and is explicitly NOT
+>   added here. Operators observe failover via the `model_credential_failover` SSE event +
+>   `[LB-FAILOVER]` logs (Phase 3 Task 20).
+> - **Grep-gate validity @ 8f67bdf**: the Exit Criterion #5 scoped grep
+>   (`grep -n '"credential_id"' pkg/ui/server.go | grep -v 'TestModelRequest' | grep -v
+>   'credential_id is required' | grep -v 'look up the credential'`) returns **ZERO matches at
+>   the current base** — gate remains valid. `git diff fea5874 8f67bdf -- pkg/ui/server.go`
+>   shows exactly ONE trivial line (SSE `Cache-Control: no-cache` → `no-cache, no-transform` in
+>   `handleEvents`, commit 396fd12) — none of the phase-4 cites (`ui/server.go:35, 390, 460,
+>   558, 673`) are affected; all re-verified exact.
+> - **Files/tasks/exit criteria**: unchanged. The optional "credentials: N" badge idea in
+>   ModelsTab.tsx (Out of Scope note) remains optional/deferred as before.
+
+### Round 3 changelog (this file)
+
+| Item | Change |
+|------|--------|
+| Round 3 note (above) | NEW — documents: no UI editor change required for failover; EngineStats surfacing verified out of scope (UI renders no engine stats); grep-gate + cites confirmed valid at 8f67bdf; the one-line ui/server.go diff characterized as out-of-scope-region (SSE header only). |
