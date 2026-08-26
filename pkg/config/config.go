@@ -150,9 +150,8 @@ type LoopDetectionConfig struct {
 // When a duplicate request is detected, the proxy bypasses all normal logic
 // (fallback, retry, buffering) and acts as a raw proxy to this model.
 type UltimateModelConfig struct {
-	ModelID    string `json:"model_id"`    // Model ID to use for duplicate requests (e.g., "claude-3-opus")
-	MaxHash    int    `json:"max_hash"`    // Max hashes in circular buffer (default: 100)
-	MaxRetries int    `json:"max_retries"` // Max ultimate model retries per hash (default: 2, 0 = unlimited)
+	ModelID string `json:"model_id"` // Model ID to use for duplicate requests (e.g., "claude-3-opus")
+	MaxHash int    `json:"max_hash"` // Max hashes in circular buffer (default: 100)
 }
 
 // Defaults - used when env not set and file doesn't exist
@@ -195,9 +194,8 @@ var Defaults = Config{
 		FixerTimeout:            25, // 25 seconds
 	},
 	UltimateModel: UltimateModelConfig{
-		ModelID:    "",
-		MaxHash:    100,
-		MaxRetries: 2, // Default: allow 2 retries
+		ModelID: "",
+		MaxHash: 100,
 	},
 	RaceRetryEnabled:       false,
 	RaceParallelOnIdle:     true,
@@ -257,12 +255,6 @@ func (c *Config) Validate() error {
 		if c.IdleTerminationTimeout < Duration(time.Second) {
 			return fmt.Errorf("idle_termination_timeout must be at least 1 second when enabled")
 		}
-	}
-	if c.UltimateModel.MaxRetries < 0 {
-		return errors.New("ultimate_model.max_retries cannot be negative")
-	}
-	if c.UltimateModel.MaxRetries > 100 {
-		return errors.New("ultimate_model.max_retries cannot exceed 100")
 	}
 	if (c.LogRawUpstreamResponse || c.LogRawUpstreamOnError) && c.BufferStorageDir == "" {
 		// Use default data directory
@@ -400,11 +392,6 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("ULTIMATE_MODEL_MAX_HASH"); v != "" {
 		if r, err := strconv.Atoi(v); err == nil && r > 0 {
 			cfg.UltimateModel.MaxHash = r
-		}
-	}
-	if v := os.Getenv("ULTIMATE_MODEL_MAX_RETRIES"); v != "" {
-		if r, err := strconv.Atoi(v); err == nil && r >= 0 {
-			cfg.UltimateModel.MaxRetries = r
 		}
 	}
 	if v := os.Getenv("RACE_RETRY_ENABLED"); v != "" {

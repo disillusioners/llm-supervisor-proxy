@@ -171,9 +171,8 @@ func TestMockConfigManager_GetUltimateModel(t *testing.T) {
 	mock := NewMockConfigManager()
 	mock.SetConfig(config.Config{
 		UltimateModel: config.UltimateModelConfig{
-			ModelID:    "claude-3-opus",
-			MaxHash:    200,
-			MaxRetries: 5,
+			ModelID: "claude-3-opus",
+			MaxHash: 200,
 		},
 	})
 

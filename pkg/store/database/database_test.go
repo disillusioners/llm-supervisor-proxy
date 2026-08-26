@@ -1406,8 +1406,7 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 		"log_raw_upstream_max_kb": 2048,
 		"ultimate_model": {
 			"model_id": "ultimate-model",
-			"max_hash": 200,
-			"max_retries": 5
+			"max_hash": 200
 		}
 	}`
 
@@ -1518,9 +1517,6 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 	}
 	if loadedCfg.UltimateModel.MaxHash != 200 {
 		t.Errorf("UltimateModel.MaxHash mismatch: got %d, want 200", loadedCfg.UltimateModel.MaxHash)
-	}
-	if loadedCfg.UltimateModel.MaxRetries != 5 {
-		t.Errorf("UltimateModel.MaxRetries mismatch: got %d, want 5", loadedCfg.UltimateModel.MaxRetries)
 	}
 }
 
