@@ -39,11 +39,11 @@ func isTriggerAttempt(count int) bool {
 
 // ShouldTriggerResult contains the result of ShouldTrigger check
 type ShouldTriggerResult struct {
-	Triggered        bool   // True if ultimate model should be used
-	Hash             string // The computed hash
-	AttemptsExhausted bool  // True if the per-hash attempt limit was exceeded
-	CurrentAttempt   int    // Total attempts recorded for this hash
-	MaxAttempts      int    // Absolute per-hash attempt limit (hardcoded)
+	Triggered         bool   // True if ultimate model should be used
+	Hash              string // The computed hash
+	AttemptsExhausted bool   // True if the per-hash attempt limit was exceeded
+	CurrentAttempt    int    // Total attempts recorded for this hash
+	MaxAttempts       int    // Absolute per-hash attempt limit (hardcoded)
 }
 
 // Handler manages ultimate model requests.
@@ -129,10 +129,14 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// hash counts as attempt 1 on the next normal RecordAttempt call.
 	if force {
 		h.hashCache.StoreIfAbsent(hash)
+		// No CurrentAttempt field set: StoreIfAbsent is insert-only, so the
+		// counter was never touched and there is no attempt count to report.
+		// The default zero serializes to "current_retry": 0 on the wire
+		// (intentional — a force trigger must not consume an attempt slot).
 		return ShouldTriggerResult{
-			Triggered:      true,
-			Hash:           hash,
-			MaxAttempts:    maxAttempts,
+			Triggered:   true,
+			Hash:        hash,
+			MaxAttempts: maxAttempts,
 		}
 	}
 
@@ -145,11 +149,11 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// stays structurally identical to the pre-schedule design.
 	if count > maxAttempts {
 		return ShouldTriggerResult{
-			Triggered:        true,
-			Hash:             hash,
+			Triggered:         true,
+			Hash:              hash,
 			AttemptsExhausted: true,
-			CurrentAttempt:   count,
-			MaxAttempts:      maxAttempts,
+			CurrentAttempt:    count,
+			MaxAttempts:       maxAttempts,
 		}
 	}
 
@@ -746,14 +750,14 @@ func (h *Handler) Execute(
 			ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved,
 			conversationKey,
 		)
-	// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): ultimate-EXTERNAL
-	// passthrough is UNCHANGED by credential load-balancing — provider
-	// detection only (getEffectivePrimaryCredentialID shim, Task 7);
-	// client auth passes through; no credential switching, no
-	// ExcludeAndReselect, no rate-limit failover hook on this branch.
-	// The failover family is the four LB'd INTERNAL paths only
-	// (race-internal, ultimate-internal, /v1/messages internal,
-	// anthropic-passthrough internal branch).
+		// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): ultimate-EXTERNAL
+		// passthrough is UNCHANGED by credential load-balancing — provider
+		// detection only (getEffectivePrimaryCredentialID shim, Task 7);
+		// client auth passes through; no credential switching, no
+		// ExcludeAndReselect, no rate-limit failover hook on this branch.
+		// The failover family is the four LB'd INTERNAL paths only
+		// (race-internal, ultimate-internal, /v1/messages internal,
+		// anthropic-passthrough internal branch).
 	} else {
 		result, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider)
 	}

@@ -179,10 +179,10 @@ func (m *mockModelsConfig) AddModel(mc models.ModelConfig) error {
 
 func (m *mockModelsConfig) AddInternalModel(id, provider, apiKey, baseURL, model string) {
 	m.models[id] = &models.ModelConfig{
-		ID:           id,
-		Name:         id,
-		Enabled:      true,
-		Internal:     true,
+		ID:          id,
+		Name:        id,
+		Enabled:     true,
+		Internal:    true,
 		Credentials: models.TestRefs("cred-1"),
 	}
 	m.internalCfgs[id] = struct {
@@ -1652,9 +1652,9 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 	// Add model with ID that matches global config, but different NAME
 	// Global config should find it by ID (GetModel)
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:      "global-model-id",
-		Name:    "totally-different-name", // Different from ID
-		Enabled: true,
+		ID:       "global-model-id",
+		Name:     "totally-different-name", // Different from ID
+		Enabled:  true,
 		Internal: false,
 	})
 
@@ -1727,9 +1727,9 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 	// Add model with UUID-like ID for per-token override
 	modelsCfg.AddModel(models.ModelConfig{
-		ID:      "550e8400-e29b-41d4-a716-446655440000", // UUID-like ID
-		Name:    "per-token-model",                       // Human-readable name
-		Enabled: true,
+		ID:       "550e8400-e29b-41d4-a716-446655440000", // UUID-like ID
+		Name:     "per-token-model",                      // Human-readable name
+		Enabled:  true,
 		Internal: false,
 	})
 
@@ -1846,10 +1846,10 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	tests := []struct {
-		name           string
-		globalModelID  string
-		perTokenModel  *string
-		expectedModel  string
+		name          string
+		globalModelID string
+		perTokenModel *string
+		expectedModel string
 	}{
 		{
 			name:          "global uses ID lookup",

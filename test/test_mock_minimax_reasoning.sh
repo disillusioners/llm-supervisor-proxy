@@ -38,6 +38,7 @@ PROXY_PORT=4325
 MOCK_PID=""
 PROXY_PID=""
 TIMER_PID=""
+TEST_TOKEN_ID=""
 
 # Capture file path (must match what the mock writes to).
 CAPTURE_FILE="/tmp/minimax_reasoning_capture_${MOCK_PORT}.jsonl"
@@ -54,6 +55,12 @@ HARD_TIMEOUT=120
 cleanup_all() {
     local exit_code=$?
     echo -e "\n${YELLOW}[cleanup] Killing all processes...${NC}"
+    # Delete the dedicated mock-minimax-reasoning-test token (proxy must still
+    # be alive for the DELETE call to land). A hard-killed run is healed on
+    # the next run's sweep-before.
+    if [ -n "$TEST_TOKEN_ID" ]; then
+        curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/tokens/$TEST_TOKEN_ID" >/dev/null 2>&1 || true
+    fi
     [ -n "$TIMER_PID" ] && kill "$TIMER_PID" 2>/dev/null || true
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
@@ -193,6 +200,54 @@ MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
     -d "{\"id\":\"mock-ultimate-reasoning-model\",\"name\":\"Mock Ultimate Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-minimax-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
 echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model U (ultimate, minimax) created${NC}" || { echo -e "  ${RED}Model U failed: $MR${NC}"; exit 1; }
+
+# ----------------------------------------------------------------------------
+# Token isolation (review blocker B1):
+# This script shares the developer's persistent SQLite DB, so the inherited
+# TEST_API_KEY resolves to whatever personal token is on file there. If that
+# token carries a per-token ultimate_model_id override pointing at a real
+# provider, the ultimate-path branches (e.g. T15) would dial a REAL upstream
+# — violating the mock-only constraint that already caused one real
+# api.minimax.io call during development.
+#
+# Fix: mint a dedicated test token for this script. The mint payload below
+# carries `ultimate_model_enabled: true` but NO `ultimate_model_id` field, so
+# ultimate resolution falls back to the env-pinned ULTIMATE_MODEL_ID
+# (mock-ultimate-reasoning-model — the local mock). Stale tokens from
+# previously crashed runs are swept BEFORE minting so a hard-killed prior
+# run cannot resurrect a personal token's override.
+# ----------------------------------------------------------------------------
+
+# Sweep stale dedicated tokens from previously crashed runs.
+STALE_TOKEN_IDS=$(curl -s "http://localhost:$PROXY_PORT/fe/api/tokens" | python3 -c '
+import json, sys
+try:
+    for t in json.load(sys.stdin):
+        if t.get("name") == "mock-minimax-reasoning-test":
+            print(t["id"])
+except Exception:
+    pass' 2>/dev/null)
+for tid in $STALE_TOKEN_IDS; do
+    curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/tokens/$tid" >/dev/null 2>&1 || true
+done
+
+# Mint the dedicated test token. NOTE: the payload MUST NOT include a
+# per-token `ultimate_model_id` override — the absence of that field is
+# what binds this script to the env-pinned mock ultimate model. Reviewer-
+# explicit confirmation.
+TOKEN_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/tokens" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "name": "mock-minimax-reasoning-test",
+        "ultimate_model_enabled": true
+    }')
+API_KEY=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
+TEST_TOKEN_ID=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)
+if [ -z "$API_KEY" ] || [ -z "$TEST_TOKEN_ID" ]; then
+    echo -e "${RED}Failed to create dedicated test token: $TOKEN_RESPONSE${NC}"
+    exit 1
+fi
+echo -e "  ${GREEN}Dedicated mock-minimax-reasoning-test token created (ultimate enabled, NO per-token ultimate_model_id override)${NC}"
 
 # ============================================================================
 # Assertion helpers
