@@ -311,6 +311,13 @@ func (r *upstreamRequest) GetUsage() *TokenUsage {
 	return r.usage
 }
 
+// SetResp sets the HTTP response received from upstream
+func (r *upstreamRequest) SetResp(resp *http.Response) {
+	r.mu.Lock()
+	r.resp = resp
+	r.mu.Unlock()
+}
+
 // SetHTTPStatus sets the HTTP status code from upstream
 func (r *upstreamRequest) SetHTTPStatus(code int) {
 	r.mu.Lock()

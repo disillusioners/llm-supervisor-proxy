@@ -523,7 +523,7 @@ func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalRe
 		req.mu.Unlock()
 	}()
 
-	req.resp = resp
+	req.SetResp(resp)
 
 	// Track HTTP status code for error type detection
 	req.SetHTTPStatus(resp.StatusCode)
