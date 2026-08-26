@@ -25,6 +25,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -301,6 +305,10 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 	// the mock (Retry-After: 1) overrides; a no-header 429 falls back
 	// to 60s (we don't shrink it because Phase 3's contract is
 	// well-tested at 60s).
+	// W2 (Phase-5 review): first-credential picks in tests built on
+	// this stack are seed-7 dependent — WHICH credential the engine
+	// picks first is an RNG outcome (deterministic across runs, not
+	// chosen by the test). Tests must stay robust to any first pick.
 	engine := credentiallb.NewEngine(time.Hour, time.Hour, 7, 60*time.Second)
 	t.Cleanup(engine.Stop)
 
@@ -647,6 +655,136 @@ func TestHandler_ShutdownOrder_LIFO(t *testing.T) {
 	}
 }
 
+// readMainGoSource loads cmd/main.go's source at test runtime. Path
+// resolution is robust: the primary candidate is derived from THIS
+// test file's own location via runtime.Caller (immune to CWD
+// differences), with the go-test package-dir CWD fallback
+// (../../cmd/main.go) and a repo-root fallback behind it.
+func readMainGoSource(t *testing.T) (string, error) {
+	t.Helper()
+	var candidates []string
+	if _, thisFile, _, ok := runtime.Caller(0); ok {
+		candidates = append(candidates, filepath.Join(filepath.Dir(thisFile), "..", "..", "cmd", "main.go"))
+	}
+	candidates = append(candidates,
+		filepath.Join("..", "..", "cmd", "main.go"),
+		filepath.Join("cmd", "main.go"),
+	)
+	for _, p := range candidates {
+		if b, err := os.ReadFile(p); err == nil {
+			return string(b), nil
+		}
+	}
+	return "", fmt.Errorf("cmd/main.go not readable; tried candidates: %v", candidates)
+}
+
+// firstDeferLine returns the 1-based line number of the line that
+// registers `defer <call>` as an actual Go statement, or -1 when absent.
+// Only non-comment lines whose trimmed form starts with "defer" are
+// considered — cmd/main.go's teardown-ordering COMMENT block
+// (main.go:58-96) mentions the same calls in prose, and those mentions
+// must never be mistaken for registrations.
+func firstDeferLine(lines []string, callPattern string) int {
+	re := regexp.MustCompile(`^\s*defer\s+` + callPattern)
+	for i, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if re.MatchString(ln) {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// TestShutdownOrder_MainGoDeferRegistrationOrder is the W1 (Phase-5
+// review) grep-gate supplement to TestHandler_ShutdownOrder_LIFO.
+//
+// The behavioral test above wraps hand-sequenced invocations — it
+// asserts the order ITSELF drives and therefore cannot fail when
+// cmd/main.go drifts. This test instead reads the ACTUAL cmd/main.go
+// source at runtime and asserts the Task-20 defer-REGISTRATION
+// contract directly:
+//
+//	dbStore.Close()   registered FIRST  (earliest line)
+//	modelsMgr.Close() registered SECOND
+//	credLB.Stop()     registered LAST   (of the three)
+//
+// so LIFO unwinding at return/panic executes credLB.Stop →
+// modelsMgr.Close → dbStore.Close, after the explicit srv.Shutdown
+// drain (main.go:59-62 comment block describes exactly this). If
+// anyone reorders, wraps, or drops those defers in cmd/main.go, THIS
+// test fails — it is falsifiable against the production file, not
+// self-fulfilling.
+func TestShutdownOrder_MainGoDeferRegistrationOrder(t *testing.T) {
+	src, err := readMainGoSource(t)
+	if err != nil {
+		t.Fatalf("cannot read cmd/main.go for the W1 grep-gate: %v", err)
+	}
+	lines := strings.Split(src, "\n")
+
+	teardowns := []struct {
+		label  string
+		callRe string // regex fragment for the deferred call
+	}{
+		{"dbStore.Close", `dbStore\.Close\(\)`},
+		{"modelsMgr.Close", `modelsMgr\.Close\(\)`},
+		{"credLB.Stop", `credLB\.Stop\(\)`},
+	}
+
+	lineNo := map[string]int{}
+	for _, td := range teardowns {
+		ln := firstDeferLine(lines, td.callRe)
+		if ln < 0 {
+			t.Fatalf("cmd/main.go: no `defer %s` statement found — the Task-20 teardown contract is broken (teardown missing or rewritten)", td.label)
+		}
+		// Ambiguity guard: two real registrations of the same teardown
+		// would make the LIFO contract ill-defined — force a human look.
+		for i, l := range lines {
+			if i+1 == ln {
+				continue
+			}
+			trimmed := strings.TrimSpace(l)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if regexp.MustCompile(`^\s*defer\s+` + td.callRe).MatchString(l) {
+				t.Fatalf("cmd/main.go: `defer %s` registered more than once (lines %d and %d) — ambiguous teardown order", td.label, ln, i+1)
+			}
+		}
+		lineNo[td.label] = ln
+		t.Logf("W1 grep-gate: defer %s REGISTERED at cmd/main.go:%d (%q)", td.label, ln, strings.TrimSpace(lines[ln-1]))
+	}
+
+	// LIFO registration contract (Task 20): dbStore.Close first,
+	// modelsMgr.Close next, credLB.Stop last — so unwinding executes
+	// credLB.Stop → modelsMgr.Close → dbStore.Close.
+	if !(lineNo["dbStore.Close"] < lineNo["modelsMgr.Close"] && lineNo["modelsMgr.Close"] < lineNo["credLB.Stop"]) {
+		t.Errorf("W1 grep-gate: defer registration order violates the Task-20 LIFO contract — dbStore.Close@L%d, modelsMgr.Close@L%d, credLB.Stop@L%d; unwinding would NOT run credLB.Stop → modelsMgr.Close → dbStore.Close",
+			lineNo["dbStore.Close"], lineNo["modelsMgr.Close"], lineNo["credLB.Stop"])
+	}
+
+	// srv.Shutdown must exist in the shutdown path (it runs BEFORE the
+	// defer unwinding drains the teardowns). Presence check on a
+	// non-comment line is enough per the W1 ruling.
+	shutdownRe := regexp.MustCompile(`srv\.Shutdown\(`)
+	shutdownSeen := false
+	for i, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if shutdownRe.MatchString(ln) {
+			shutdownSeen = true
+			t.Logf("W1 grep-gate: srv.Shutdown( present at cmd/main.go:%d (%q)", i+1, trimmed)
+		}
+	}
+	if !shutdownSeen {
+		t.Errorf("W1 grep-gate: no `srv.Shutdown(` call found in cmd/main.go's shutdown path — Task-20 requires the HTTP drain before defer unwinding")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Test 2 — Task 37 (Round 3c W4 re-scope: idle-spawn happens, eventual 429
 // from main IS adjudicated by Case 1 via the C1-hoisted gate; credential
@@ -876,9 +1014,15 @@ func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
 
 	env := buildHandlerStack(t, mock, []string{"m1"})
 
-	// Bias the engine's first pick to cred-A so we know exactly one
-	// credential will be tried.
-	env.credLB.InjectPreconditionStateForTest("m1", "phase5-conv-key-3", "cred-A")
+	// W2 (Phase-5 review): the InjectPreconditionStateForTest call that
+	// used to live here was a silent no-op — its hardcoded placeholder
+	// key ("phase5-conv-key-3") can never equal the real
+	// sha256(modelID|tokenID|firstUserMessage) conversation key computed
+	// at request time, so it biased nothing. Deleted. The test is robust
+	// to EITHER first pick: fail500 hits whichever credential the
+	// engine chooses (seed-7 driven — see buildHandlerStack), the
+	// classifier returns false, and every assertion below is
+	// pick-agnostic.
 
 	// Upstream returns HTTP 500 with a non-rate-limit body for EVERY
 	// call. IsRateLimitError on a 500 with no rate-limit markers
@@ -1124,8 +1268,13 @@ func runB1StructureWithFallback(t *testing.T) {
 	})
 
 	env := buildHandlerStack(t, mock, []string{"m1", "m2"})
-	// Bias first pick so the test is deterministic regardless of RNG.
-	env.credLB.InjectPreconditionStateForTest("m1", "phase5-conv-key-5a", "cred-A")
+	// W2 (Phase-5 review): deleted the InjectPreconditionStateForTest
+	// call — its placeholder key ("phase5-conv-key-5a") never matched
+	// the request-time sha256(modelID|tokenID|firstUserMessage)
+	// conversation key, so the "bias first pick" never took effect.
+	// First pick is seed-7 driven (see buildHandlerStack); every
+	// assertion below is pick-agnostic (pool membership + distinct
+	// credential IDs, never a specific first credential).
 
 	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test B1-with-fallback")
 
@@ -1202,9 +1351,12 @@ func runB1StructureNoChain(t *testing.T) {
 	})
 
 	env := buildHandlerStack(t, mock, []string{"m1"})
-	env.credLB.InjectPreconditionStateForTest("m1", "phase5-conv-key-5b", "cred-A")
+	// W2 (Phase-5 review): deleted the no-op InjectPreconditionStateForTest
+	// call (placeholder key "phase5-conv-key-5b" never matched the real
+	// conversation key — see runB1StructureWithFallback). Assertions are
+	// pick-agnostic; the first pick is seed-7 driven (buildHandlerStack).
 
-	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test B1-no-chain")
+	rec := sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test B1-no-chain")
 
 	recs := recordSpawns(drainAllEvents(env.bus))
 	cfRows := countByType(recs, "cred_failover")
@@ -1221,14 +1373,39 @@ func runB1StructureNoChain(t *testing.T) {
 		t.Errorf("modelTypeFallback rows = %d, want 0 (no fallback chain); full: %v", fbRows, recs)
 	}
 
-	// The terminal error must be reported. The handler returns an HTTP
-	// status; for this scenario all-creds-429 with no chain → 5xx.
-	// We don't pin the exact status — only that the response did NOT
-	// succeed (would imply fallback hit, which the no-chain variant
-	// forbids).
-	// Skipping direct status assertion here since the upstream body's
-	// non-stream 429 response is what the client sees; the recorded
-	// spawn history is the authoritative witness.
+	// B1 cheap green (Phase-5 review): assert the client received the
+	// TERMINAL all-credentials-exhausted error, not just row structure.
+	// All 3 creds 429 (failAll) with no fallback chain → every request
+	// failed with 429 and no success exists → raceCoordinator
+	// GetFinalErrorInfo: common status 429, allModelsExhausted &&
+	// anyModel429 → type=rate_limit, code=rate_limit ("All models rate
+	// limited"), delivered via Handler.sendError → models.NewOpenAIError
+	// for this non-stream request (headers not yet sent).
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("response status = %d, want %d (terminal all-creds-exhausted rate-limit error; body: %s)",
+			rec.Code, http.StatusTooManyRequests, rec.Body.String())
+	}
+	var termErr struct {
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &termErr); err != nil {
+		t.Fatalf("terminal error body is not valid JSON: %v (body: %s)", err, rec.Body.String())
+	}
+	if termErr.Error.Type != models.ErrorTypeRateLimit {
+		t.Errorf("terminal error type = %q, want %q (body: %s)", termErr.Error.Type, models.ErrorTypeRateLimit, rec.Body.String())
+	}
+	if termErr.Error.Code != models.ErrorCodeRateLimit {
+		t.Errorf("terminal error code = %q, want %q — the all-models-exhausted-with-429 code that signals retryability to OpenCode-style clients (body: %s)",
+			termErr.Error.Code, models.ErrorCodeRateLimit, rec.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(termErr.Error.Message), "rate limit") {
+		t.Errorf("terminal error message = %q, want the all-credentials-rate-limited terminal message (body: %s)",
+			termErr.Error.Message, rec.Body.String())
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1301,12 +1478,17 @@ func TestHandler_TwoModelFallback429_WrongModelRegression(t *testing.T) {
 
 	env := buildHandlerStack(t, mock, []string{"m1", "m2"})
 
-	// Bias m1's first pick to cred-A — deterministic primary chain.
-	env.credLB.InjectPreconditionStateForTest("m1", "phase5-conv-key-6", "cred-A")
-	// Bias m2's first pick to cred-Y — so the fallback row's first
-	// attempt uses Y (the reselected credential under the fix would be X,
-	// but Case 1 doesn't fire here per the WIP limitation).
-	env.credLB.InjectPreconditionStateForTest("m2", "phase5-conv-key-6", "cred-Y")
+	// W2 (Phase-5 review): deleted both no-op
+	// InjectPreconditionStateForTest calls — their placeholder key
+	// ("phase5-conv-key-6") never matched the request-time
+	// sha256(modelID|tokenID|firstUserMessage) conversation keys, so
+	// neither bias ever took effect. First picks are seed-7 driven
+	// (see buildHandlerStack) and this test is robust to EITHER pick:
+	// m1 burns exactly len(m1.Creds)-1 = 2 credFailover reselects from
+	// its own pool regardless of which credential was picked first
+	// (the tried-set excludes each failed credential in turn), and
+	// every assertion below is pool-membership based, never
+	// credential-identity based.
 
 	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test 2model-wrongmodel")
 
@@ -1441,8 +1623,15 @@ func TestHandler_RateLimitFailover_ThreeCred_NoFallbackChain(t *testing.T) {
 	})
 
 	env := buildHandlerStack(t, mock, []string{"m1"})
-	// Bias the first pick to cred-A so the test is deterministic.
-	env.credLB.InjectPreconditionStateForTest("m1", "phase5-conv-key-7", "cred-A")
+	// W2 (Phase-5 review): deleted the no-op InjectPreconditionStateForTest
+	// call — its placeholder key ("phase5-conv-key-7") never matched the
+	// request-time conversation key, so the "bias first pick to cred-A"
+	// never took effect (the test only ever passed because seed 7
+	// happened to pick cred-A first). Which credential 429s first is
+	// seed-7 driven; we now derive the FAILED credential dynamically
+	// from the upstream's failedKeys (the
+	// TestHandler_Case1ModelIDPopulation_ManageLoopGuard pattern) so
+	// every assertion below holds for ANY first pick.
 
 	rec := sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test 3cred-no-chain")
 
@@ -1463,18 +1652,48 @@ func TestHandler_RateLimitFailover_ThreeCred_NoFallbackChain(t *testing.T) {
 		t.Errorf("modelTypeCredFailover rows = %d, want exactly 1; full: %v", n, recs)
 	}
 
+	// Derive the FAILED credential dynamically: failFirstN=1 means
+	// exactly one distinct apiKey 429'd — whichever credential the
+	// engine picked first (seed-7 driven). Map the recorded
+	// Authorization header back to its credential ID.
+	upstream.mu.Lock()
+	failedKeySet := make(map[string]bool, len(upstream.failedKeys))
+	for k := range upstream.failedKeys {
+		failedKeySet[k] = true
+	}
+	upstream.mu.Unlock()
+	if len(failedKeySet) != 1 {
+		t.Fatalf("upstream failedKeys has %d entries, want exactly 1 (one credential 429'd); keys: %v", len(failedKeySet), failedKeySet)
+	}
+	keyToCred := map[string]string{
+		"Bearer key-cred-A": "cred-A",
+		"Bearer key-cred-B": "cred-B",
+		"Bearer key-cred-C": "cred-C",
+	}
+	failedCred := ""
+	for k := range failedKeySet {
+		if c, ok := keyToCred[k]; ok {
+			failedCred = c
+			break
+		}
+	}
+	if failedCred == "" {
+		t.Fatalf("failed apiKey %v does not map to any of m1's credentials", failedKeySet)
+	}
+	t.Logf("seed-7 first pick (the 429'd credential): %s", failedCred)
+
 	// The credFailover row's credentialID must be in m1's pool AND
-	// must NOT be the failing key (A). The engine reselects from the
-	// remaining {B, C}.
+	// must NOT be the failed credential — the engine reselects from
+	// the remaining pool {cred-A, cred-B, cred-C} \\ {failedCred}.
 	for _, r := range recs {
 		if r.modelType != "cred_failover" {
 			continue
 		}
-		if r.credentialID == "cred-A" {
-			t.Errorf("credFailover row reselected cred-A (the just-excluded key) — engine re-roll violated", )
+		if r.credentialID == failedCred {
+			t.Errorf("credFailover row reselected %s (the just-excluded key) — engine re-roll violated", failedCred)
 		}
-		if r.credentialID != "cred-B" && r.credentialID != "cred-C" {
-			t.Errorf("credFailover row credentialID = %q, want cred-B or cred-C (m1's remaining pool)", r.credentialID)
+		if r.credentialID != "cred-A" && r.credentialID != "cred-B" && r.credentialID != "cred-C" {
+			t.Errorf("credFailover row credentialID = %q, want a member of m1's remaining pool", r.credentialID)
 		}
 	}
 
@@ -1488,12 +1707,12 @@ func TestHandler_RateLimitFailover_ThreeCred_NoFallbackChain(t *testing.T) {
 		if data == nil {
 			t.Fatalf("failover event Data not a map: %T", evt.Data)
 		}
-		if data["from_credential_id"] != "cred-A" {
-			t.Errorf("failover event from_credential_id = %v, want cred-A", data["from_credential_id"])
+		if data["from_credential_id"] != failedCred {
+			t.Errorf("failover event from_credential_id = %v, want %s (the dynamically-derived failed credential)", data["from_credential_id"], failedCred)
 		}
 		to := asString(data["to_credential_id"])
-		if to != "cred-B" && to != "cred-C" {
-			t.Errorf("failover event to_credential_id = %q, want cred-B or cred-C", to)
+		if to == failedCred || (to != "cred-A" && to != "cred-B" && to != "cred-C") {
+			t.Errorf("failover event to_credential_id = %q, want a member of m1's pool other than %s", to, failedCred)
 		}
 		if data["reason"] != "rate_limit" {
 			t.Errorf("failover event reason = %v, want rate_limit", data["reason"])

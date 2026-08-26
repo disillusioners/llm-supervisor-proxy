@@ -10,15 +10,17 @@
 #   Phase 1 (mocks WITHOUT -fail-429-once):
 #     1.  Affinity — same token, same first-user message ×5
 #     2.  Distribution — same token, 100 unique first-user messages
-#     2b. Templated first message — rotating tokens, same first-user message ×N
+#     2b. Templated first message — N=10 distinct tokens × 1 hit each
+#         (leader-mandated; P[all-same] = 1/19683 ≈ 5.08e-5)
 #     2e. Multimodal affinity — same token, same multimodal content ×5
 #     8.  /v1/messages affinity (Anthropic → OpenAI upstream) ×5
 #
 #   Phase 2 (mocks RESTARTED with -fail-429-once=1, fresh hit files,
 #             fresh model + credentials to keep 429 counters + conversation
 #             keys virgin):
-#     9.  Full failover chain — 3 creds, NO fallback chain, 1 request
-#         Expected walk: cred_pick_1 → 429 → cred_pick_2 → 429 → cred_pick_3 → 200
+#     9.  Full failover chain — 3 creds [A:1e6, B:1e6, C:1], NO fallback chain,
+#         1 request. Expected walk: cred_pick_1 → 429 → cred_pick_2 → 429 →
+#         cred_pick_3 → 200. Council-computed flake ~3e-6 per run.
 #
 # Mock worker sibling (test/mock_llm_lb.go) provides:
 #   -port=4001             (default 4001)
@@ -53,11 +55,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuration
-MOCK_PORT_A=4001
-MOCK_PORT_B=4002
-MOCK_PORT_C=4003
-PROXY_PORT=4322
+# Configuration — env-parameterized so two concurrent runs don't collide on
+# ports. Defaults preserve original behavior when unset.
+MOCK_PORT_A="${PORT_A:-4001}"
+MOCK_PORT_B="${PORT_B:-4002}"
+MOCK_PORT_C="${PORT_C:-4003}"
+PROXY_PORT="${PORT_PROXY:-4322}"
 
 # Test results
 TESTS_PASSED=0
@@ -66,6 +69,15 @@ TEST_NAMES=()
 
 # Hard timeout (seconds)
 HARD_TIMEOUT=90
+
+# Concurrent-run lockfile (mkdir is atomic on POSIX — succeeds for the
+# first runner, fails for any concurrent runner that finds the dir).
+LOCKFILE="/tmp/cred_lb_e2e.lock"
+if ! mkdir "$LOCKFILE" 2>/dev/null; then
+    echo -e "${RED}ERROR: another run holds $LOCKFILE — aborting to avoid killing it.${NC}" >&2
+    echo -e "${RED}       If no other run is active, remove it manually: rm -rf $LOCKFILE${NC}" >&2
+    exit 2
+fi
 
 # tmp workdir (HOME-scoped) — created fresh each run for state isolation
 TMP_HOME="$(mktemp -d -t 'cred_lb_e2e.XXXXXX')"
@@ -203,6 +215,8 @@ cleanup_all() {
     wait 2>/dev/null || true
     # Wipe tmp state (HOME-scoped SQLite + buffers + logs)
     rm -rf "$TMP_HOME" 2>/dev/null || true
+    # Release the concurrent-run lockfile
+    rm -rf "$LOCKFILE" 2>/dev/null || true
     return "$exit_code"
 }
 trap cleanup_all EXIT
@@ -231,21 +245,49 @@ echo -e "  Workdir HOME: $TMP_HOME"
 echo -e "  Mock ports:   $MOCK_PORT_A (A), $MOCK_PORT_B (B), $MOCK_PORT_C (C)"
 echo -e "  Proxy port:   $PROXY_PORT"
 
-# Clean ports before starting (source the helper)
+# Clean ports before starting (source the helper for the primary 2 ports)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/test_mock_clean_ports.sh" "$PROXY_PORT" "$MOCK_PORT_A"
 clean_ports "$PROXY_PORT" "$MOCK_PORT_A" "$MOCK_PORT_B" "$MOCK_PORT_C"
+# Belt-and-braces: test_mock_clean_ports.sh's clean_ports() only handles 2
+# ports, so the helper silently ignores $MOCK_PORT_B / $MOCK_PORT_C. Sweep
+# them explicitly so a stale listener from a prior crash doesn't bind here.
+for port in "$MOCK_PORT_B" "$MOCK_PORT_C"; do
+    lsof -ti ":$port" -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null || true
+done
 
-# Start mock A (identity=A)
+# ─────────────────────────────────────────────────────────────────────────────
+# Build both binaries BEFORE the HOME switch + BEFORE mocks start. With
+# HOME=tmpdir, `go run` would force a fresh GOCACHE and compile every time
+# (sometimes blowing past wait_for_mock's 15s window on Phase-2 restarts).
+# One-time build with the persistent cache is the deterministic fix.
+# ─────────────────────────────────────────────────────────────────────────────
+
+echo -e "\n${YELLOW}Building proxy binary (uses persistent GOPATH/GOMODCACHE before HOME switch)...${NC}"
+PROXY_BIN="$TMP_HOME/proxy-binary"
+if ! go build -o "$PROXY_BIN" ./cmd/main.go >"$TMP_HOME/build.log" 2>&1; then
+    echo -e "${RED}Proxy build failed. Log:${NC}"
+    tail -n 40 "$TMP_HOME/build.log"
+    exit 1
+fi
+
+echo -e "${YELLOW}Building mock binary (one-time, persistent cache)...${NC}"
+MOCK_BIN="$TMP_HOME/mock-binary"
+if ! go build -o "$MOCK_BIN" ./test/mock_llm_lb.go >"$TMP_HOME/mock_build.log" 2>&1; then
+    echo -e "${RED}Mock build failed. Log:${NC}"
+    tail -n 40 "$TMP_HOME/mock_build.log"
+    exit 1
+fi
+
+# Start mock A (identity=A) — invoke the pre-built binary directly (see build
+# note above about why we don't `go run`).
 echo -e "\n${YELLOW}Starting Mock A (port $MOCK_PORT_A, identity=A)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_A" \
     -credential-identity=A \
     -hit-counter-file="$HITS_A_FILE" \
     >"$TMP_HOME/mock_A.log" 2>&1 &
 MOCK_A_PID=$!
-cd "$ROOT_DIR"
 
 if ! wait_for_mock "$MOCK_PORT_A"; then
     echo -e "${RED}Mock A failed to start. Log:${NC}"
@@ -256,14 +298,12 @@ echo -e "${GREEN}Mock A started (PID $MOCK_A_PID)${NC}"
 
 # Start mock B (identity=B)
 echo -e "\n${YELLOW}Starting Mock B (port $MOCK_PORT_B, identity=B)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_B" \
     -credential-identity=B \
     -hit-counter-file="$HITS_B_FILE" \
     >"$TMP_HOME/mock_B.log" 2>&1 &
 MOCK_B_PID=$!
-cd "$ROOT_DIR"
 
 if ! wait_for_mock "$MOCK_PORT_B"; then
     echo -e "${RED}Mock B failed to start. Log:${NC}"
@@ -274,14 +314,12 @@ echo -e "${GREEN}Mock B started (PID $MOCK_B_PID)${NC}"
 
 # Start mock C (identity=C)
 echo -e "\n${YELLOW}Starting Mock C (port $MOCK_PORT_C, identity=C)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_C" \
     -credential-identity=C \
     -hit-counter-file="$HITS_C_FILE" \
     >"$TMP_HOME/mock_C.log" 2>&1 &
 MOCK_C_PID=$!
-cd "$ROOT_DIR"
 
 if ! wait_for_mock "$MOCK_PORT_C"; then
     echo -e "${RED}Mock C failed to start. Log:${NC}"
@@ -303,14 +341,6 @@ export LOOP_DETECTION_ENABLED="false"
 # Sequential credential failover is what we want; disable racing so the failover
 # walk is observable end-to-end rather than shadowed by parallel attempts.
 export RACE_RETRY_ENABLED="false"
-
-echo -e "\n${YELLOW}Building proxy binary (cached after first run)...${NC}"
-PROXY_BIN="$TMP_HOME/proxy-binary"
-if ! go build -o "$PROXY_BIN" ./cmd/main.go >"$TMP_HOME/build.log" 2>&1; then
-    echo -e "${RED}Proxy build failed. Log:${NC}"
-    tail -n 40 "$TMP_HOME/build.log"
-    exit 1
-fi
 
 echo -e "\n${YELLOW}Starting proxy on port $PROXY_PORT (HOME=$HOME)...${NC}"
 "$PROXY_BIN" >"$PROXY_LOG" 2>&1 &
@@ -344,8 +374,10 @@ for entry in "cred-A:$MOCK_PORT_A" "cred-B:$MOCK_PORT_B" "cred-C:$MOCK_PORT_C"; 
 done
 echo -e "  ${GREEN}✓ Created credentials cred-A, cred-B, cred-C${NC}"
 
-# Two distinct tokens for the templated-first-message scenario (Test 2b).
-# Token creation requires only {"name"}; response carries plaintext in .token.
+# TOKEN1 = primary token used by Tests 1/2/2e/8/9. TOKEN2 = legacy pair
+# (Test 2b used to alternate these two — Test 2b now creates its own N=10
+# fresh tokens inline, so TOKEN2 is unused by the assertions). Token
+# creation requires only {"name"}; response carries plaintext in .token.
 T1_RESP=$(curl -s -X POST "http://127.0.0.1:$PROXY_PORT/fe/api/tokens" \
     -H "Content-Type: application/json" \
     -d '{"name":"cred-lb-token-1"}')
@@ -362,7 +394,7 @@ if [ -z "$TOKEN2" ] || [ "$TOKEN2" = "null" ]; then
     echo -e "${RED}Failed to create token 2: $T2_RESP${NC}"
     exit 1
 fi
-echo -e "  ${GREEN}✓ Created 2 tokens (sk-... prefix)${NC}"
+echo -e "  ${GREEN}✓ Created 2 tokens (sk-... prefix) — TOKEN1 used by Tests 1/2/2e/8/9${NC}"
 
 # Multi-credential model — 3 equal-weight creds, internal=true (required by
 # validateCredentials rule (a) when credentials[] is non-empty).
@@ -484,23 +516,51 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2b — Templated first message, rotating tokens (leader-mandated)
+# Test 2b — Templated first message, N independent tokens (leader-mandated)
+#
+# PRE-FIX flake (council refuted): 2 tokens × 25 hits = only 2 INDEPENDENT
+# picks. The 25 hits per token are affinity-bound to the token's first pick,
+# so P[both tokens land on same identity] = 1/3 ≈ 33% — a coin flip per run.
+#
+# POST-FIX design: ≥10 distinct tokens, each sending EXACTLY ONE request
+# with the IDENTICAL templated first-user message. 10 independent picks ⇒
+# P[all 10 land on same identity] = 3 × (1/3)^10 = 1/19683 ≈ 5.08e-5.
+# (We use exactly N_TPL=10; the leader ruling allows ≥10.)
+#
+# Lopsided-distribution guard: "no identity > 7 of 10 hits". For each
+# identity X_i ~ Binomial(10, 1/3), P[X_i ≥ 8] ≈ 0.00339. Union bound over
+# 3 identities: P[max ≥ 8] ≤ ~1.02%. Tighter bounds (e.g. max ≤ 6) raise
+# the flake to ~5.9% (P[X_i ≥ 7] ≈ 0.0196 per identity). 7 is the tightest
+# bound that keeps the per-run flake under ~1%.
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo -e "\n${BLUE}━━━ Test 2b: Templated first message, rotating tokens ━━━${NC}"
-echo "  (Same first message; TWO distinct tokens each send one request;"
-echo "   looped N=50 total — 25 from each token. A-1 token-salted affinity"
-echo "   must distribute the two tokens across ≥2 identities.)"
+echo -e "\n${BLUE}━━━ Test 2b: Templated first message, N independent tokens ━━━${NC}"
+echo "  Pre-fix:  2 tokens × 25 hits ⇒ 2 independent picks; P[all-same] = 1/3 (~33%, coin-flip per run)."
+echo "  Post-fix: 10 tokens × 1 hit each ⇒ 10 independent picks; P[all-same] = ~5.08e-5 (≈ 1 in 20k)."
 truncate_hits
-N_TPL=50
+N_TPL=10
 TPL_MSG="What is the weather today?"
-TPL_OK=true
-for i in $(seq 1 $N_TPL); do
-    if [ $((i % 2)) -eq 1 ]; then
-        TOK="$TOKEN1"
-    else
-        TOK="$TOKEN2"
+
+# Create N_TPL fresh tokens for this scenario (existing TOKEN1/TOKEN2 are
+# still used by Tests 1/2/2e/8/9, so leave them alone). Each new token gets
+# its own POST /fe/api/tokens; the response carries the plaintext once.
+declare -a TPL_TOKENS=()
+for idx in $(seq 1 $N_TPL); do
+    T_RESP=$(curl -s -X POST "http://127.0.0.1:$PROXY_PORT/fe/api/tokens" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"cred-lb-tpl-token-$idx\"}")
+    NEW_TOK="$(json_field "$T_RESP" '.token')"
+    if [ -z "$NEW_TOK" ] || [ "$NEW_TOK" = "null" ]; then
+        echo -e "${RED}Failed to create templated token $idx: $T_RESP${NC}"
+        assert_fail "Test 2b token creation ($idx)" "POST /fe/api/tokens returned no token"
+        TPL_TOKENS=()
+        break
     fi
+    TPL_TOKENS+=("$NEW_TOK")
+done
+
+TPL_OK=true
+for TOK in "${TPL_TOKENS[@]}"; do
     send_chat "$TOK" "$TPL_MSG" false >/dev/null
     if [ "$HTTP_STATUS" != "200" ]; then
         TPL_OK=false
@@ -513,13 +573,19 @@ SC=$(hits_count "$HITS_C_FILE" 'select(.outcome=="success")')
 TOTAL=$((SA + SB + SC))
 echo "  Hit counts:$(hit_summary)"
 NONZERO=0
+MAX_HITS=0
 for V in "$SA" "$SB" "$SC"; do
     if [ "$V" -gt 0 ]; then NONZERO=$((NONZERO + 1)); fi
+    if [ "$V" -gt "$MAX_HITS" ]; then MAX_HITS="$V"; fi
 done
-if [ "$TPL_OK" = true ] && [ "$TOTAL" -eq "$N_TPL" ] && [ "$NONZERO" -ge 2 ]; then
-    assert_pass "Test 2b templated: $N_TPL hits split across $NONZERO identities (A=$SA B=$SB C=$SC)"
+DIST_OK=true
+if [ "$MAX_HITS" -gt 7 ]; then
+    DIST_OK=false
+fi
+if [ "$TPL_OK" = true ] && [ "$TOTAL" -eq "$N_TPL" ] && [ "$NONZERO" -ge 2 ] && [ "$DIST_OK" = true ]; then
+    assert_pass "Test 2b templated: $N_TPL independent picks, ≥2 identities nonzero, max ≤ 7/10 (A=$SA B=$SB C=$SC)"
 else
-    assert_fail "Test 2b templated" "expected $N_TPL hits, ≥2 identities nonzero; got A=$SA B=$SB C=$SC (total=$TOTAL, ok=$TPL_OK)"
+    assert_fail "Test 2b templated" "expected $N_TPL hits, ≥2 identities nonzero, max ≤ 7; got A=$SA B=$SB C=$SC (total=$TOTAL, ok=$TPL_OK, max=$MAX_HITS)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -597,22 +663,34 @@ echo "   C runs WITHOUT the flag — with all 3 fresh mocks 429ing on"
 echo "   first contact, the failover chain walks A→B→C and the"
 echo "   3rd attempt also returns 429, leaving zero successes."
 echo "   With C as the always-200 mock, the chain can complete as"
-echo "   2×429 + 1×200. Weights [A:1000, B:1000, C:1] bias the first"
+echo "   2×429 + 1×200. Weights [A:1e6, B:1e6, C:1] bias the first"
 echo "   pick toward a fail-mock so the chain walks the expected"
-echo "   A→B→C order in ~99.8% of runs.)"
+echo "   A→B→C order. Council-computed flake ~3e-6 per run; P[first"
+echo "   pick lands on C] = 1/2000001 ≈ 5e-7.)"
 
-# Kill Phase 1 mocks
+# Kill Phase 1 mocks (SIGKILL — the mocks have no state to preserve and
+# graceful SIGTERM occasionally leaves the listener bound past the 1s sleep,
+# which makes the new `go run` fail to bind port 4001).
 for PID in "$MOCK_A_PID" "$MOCK_B_PID" "$MOCK_C_PID"; do
-    [ -n "$PID" ] && kill "$PID" 2>/dev/null || true
+    [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null || true
 done
 sleep 1
-# Force-kill any remaining port LISTENERS (CRITICAL: -sTCP:LISTEN — without
-# this, lsof would also match the proxy's ESTABLISHED connections to the
-# mocks and SIGKILL the proxy itself).
+# Belt-and-braces: force-kill any leftover LISTENERS — test_mock_clean_ports.sh's
+# clean_ports() only handles 2 ports, so $MOCK_PORT_B/$MOCK_PORT_C aren't swept
+# by the helper. -sTCP:LISTEN keeps us from SIGKILLing the proxy's ESTABLISHED
+# connections to the mocks.
 for port in "$MOCK_PORT_A" "$MOCK_PORT_B" "$MOCK_PORT_C"; do
     lsof -ti ":$port" -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 sleep 1
+# Verify ports are actually free before the next `go run` tries to bind.
+for port in "$MOCK_PORT_A" "$MOCK_PORT_B" "$MOCK_PORT_C"; do
+    if lsof -ti ":$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo -e "${RED}Port $port still in use after kill sweep — Phase 2 cannot start.${NC}"
+        lsof -i ":$port" -sTCP:LISTEN 2>/dev/null
+        exit 1
+    fi
+done
 MOCK_A_PID=""
 MOCK_B_PID=""
 MOCK_C_PID=""
@@ -625,33 +703,36 @@ truncate_hits
 
 # Restart mock A (with -fail-429-once=1)
 echo -e "${YELLOW}Restarting Mock A (port $MOCK_PORT_A, -fail-429-once=1)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_A" \
     -credential-identity=A \
     -fail-429-once=1 \
     -hit-counter-file="$HITS_A_FILE" \
     >"$TMP_HOME/mock_A2.log" 2>&1 &
 MOCK_A_PID=$!
-cd "$ROOT_DIR"
 if ! wait_for_mock "$MOCK_PORT_A"; then
     echo -e "${RED}Mock A (phase 2) failed to start${NC}"
-    tail -n 30 "$TMP_HOME/mock_A2.log"
+    echo "    --- mock_A2.log ---"
+    if [ -s "$TMP_HOME/mock_A2.log" ]; then
+        cat "$TMP_HOME/mock_A2.log"
+    else
+        echo "(empty or missing — new mock never wrote to it)"
+    fi
+    echo "    --- listening on $MOCK_PORT_A ---"
+    lsof -i ":$MOCK_PORT_A" -sTCP:LISTEN 2>/dev/null || echo "(no listener)"
     exit 1
 fi
 echo -e "${GREEN}Mock A (phase 2) ready (PID $MOCK_A_PID)${NC}"
 
 # Restart mock B (with -fail-429-once=1)
 echo -e "${YELLOW}Restarting Mock B (port $MOCK_PORT_B, -fail-429-once=1)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_B" \
     -credential-identity=B \
     -fail-429-once=1 \
     -hit-counter-file="$HITS_B_FILE" \
     >"$TMP_HOME/mock_B2.log" 2>&1 &
 MOCK_B_PID=$!
-cd "$ROOT_DIR"
 if ! wait_for_mock "$MOCK_PORT_B"; then
     echo -e "${RED}Mock B (phase 2) failed to start${NC}"
     tail -n 30 "$TMP_HOME/mock_B2.log"
@@ -661,14 +742,12 @@ echo -e "${GREEN}Mock B (phase 2) ready (PID $MOCK_B_PID)${NC}"
 
 # Restart mock C — NO -fail-429-once (always returns 200). See PHASE 2 banner.
 echo -e "${YELLOW}Restarting Mock C (port $MOCK_PORT_C, NO -fail-429-once — see banner)${NC}"
-cd "$SCRIPT_DIR"
-go run mock_llm_lb.go \
+"$MOCK_BIN" \
     -port="$MOCK_PORT_C" \
     -credential-identity=C \
     -hit-counter-file="$HITS_C_FILE" \
     >"$TMP_HOME/mock_C2.log" 2>&1 &
 MOCK_C_PID=$!
-cd "$ROOT_DIR"
 if ! wait_for_mock "$MOCK_PORT_C"; then
     echo -e "${RED}Mock C (phase 2) failed to start${NC}"
     tail -n 30 "$TMP_HOME/mock_C2.log"
@@ -699,9 +778,10 @@ echo -e "  ${GREEN}✓ Created credentials cred-A2, cred-B2, cred-C2${NC}"
 # Fresh model — NO fallback chain (single model; failover is credential-internal).
 # NOTE: NO internal_base_url (same reason as Phase-1 model — each cred carries
 # its own base_url so the failover walks separate upstream processes).
-# Weight bias [A:1000, B:1000, C:1] makes the first pick almost always
-# land on a fail-mock (~99.9%), so the always-200 mock (C) gets reached
-# last in the 3-creds walk — see PHASE 2 banner for the full rationale.
+# Weight bias [A:1e6, B:1e6, C:1] makes the first pick almost always
+# land on a fail-mock, so the always-200 mock (C) gets reached last in
+# the 3-creds walk. See PHASE 2 banner above for the full rationale and
+# council-computed flake probability.
 RESP=$(curl -s -X POST "http://127.0.0.1:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
     -d '{
@@ -710,8 +790,8 @@ RESP=$(curl -s -X POST "http://127.0.0.1:$PROXY_PORT/fe/api/models" \
         "enabled": true,
         "internal": true,
         "credentials": [
-            {"credential_id":"cred-A2","position":1,"weight":1000},
-            {"credential_id":"cred-B2","position":2,"weight":1000},
+            {"credential_id":"cred-A2","position":1,"weight":1000000},
+            {"credential_id":"cred-B2","position":2,"weight":1000000},
             {"credential_id":"cred-C2","position":3,"weight":1}
         ],
         "internal_model": "mock-model"
@@ -729,8 +809,8 @@ echo -e "  ${GREEN}✓ Created model 'cred-lb-failover' (no fallback chain)${NC}
 echo -e "\n${BLUE}━━━ Test 9: Full failover chain (3 creds, no fallback model) ━━━${NC}"
 echo "  (Phase 2 mocks: A,B = -fail-429-once=1; C = no flag (always 200))"
 echo "  (Expected walk: cred_pick_1 → 429 → cred_pick_2 → 429 → cred_pick_3 → 200)"
-echo "  (Weights A:1000, B:1000, C:1 bias the chain so cred_C is reached LAST in"
-echo "   ~98% of runs — see PHASE 2 banner above for the rationale.)"
+echo "  (Weights A:1e6, B:1e6, C:1 bias the chain so cred_C is reached LAST in"
+echo "   nearly every run — council-computed flake ~3e-6; see PHASE 2 banner.)"
 truncate_hits
 
 FAIL_MSG="failover-probe-$(date +%s)-$$-$(uuidgen 2>/dev/null || echo $RANDOM)"
