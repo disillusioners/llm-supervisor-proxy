@@ -117,7 +117,7 @@ echo -e "${GREEN}Mock server started (PID: $MOCK_PID)${NC}"
 echo -e "\n${YELLOW}[2/17] Starting Proxy with Ultimate Model enabled (port $PROXY_PORT)...${NC}"
 echo -e "  ULTIMATE_MODEL_ID=mock-ultimate-model (internal model)"
 echo -e "  ULTIMATE_MODEL_MAX_HASH=100"
-echo -e "  ULTIMATE_MODEL_MAX_RETRIES=N/A (schedule fixed at 5/10/20/30/40, 40-attempt cap)"
+echo -e "  Trigger schedule: fixed 5/10/20/30/40 with a 40-attempt cap (no max-retries knob)"
 echo -e "  LOOP_DETECTION_ENABLED=false"
 
 # Export config overrides for testing
