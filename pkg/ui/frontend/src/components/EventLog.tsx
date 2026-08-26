@@ -94,7 +94,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   },
   ultimate_model_retry_exhausted: (e) => {
     const d = e.data;
-    return `Ultimate model retries exhausted: ${d?.current_retry || '?'}/${d?.max_retries || '?'}`;
+    return `Ultimate model attempts exhausted: ${d?.current_retry || '?'}/${d?.max_retries || '?'}`;
   },
   internal_error: (e) => `Internal error: ${e.data?.error || 'Unknown error'}`,
 };
@@ -183,7 +183,7 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   race_all_failed: 'RACE_ALL_FAILED',
   race_secondary_model_used: 'SECONDARY_MODEL_USED',
   tool_repair: 'TOOL_REPAIR',
-  ultimate_model_retry_exhausted: 'ULTIMATE_RETRY_EXHAUSTED',
+  ultimate_model_retry_exhausted: 'ULTIMATE_ATTEMPTS_EXHAUSTED',
   internal_error: 'INTERNAL_ERROR',
 };
 

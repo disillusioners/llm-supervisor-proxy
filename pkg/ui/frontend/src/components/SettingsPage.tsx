@@ -87,7 +87,6 @@ export function SettingsPage({
   // Ultimate model state
   const [ultimateModelId, setUltimateModelId] = useState('');
   const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
-  const [ultimateModelMaxRetries, setUltimateModelMaxRetries] = useState(2);
   // Raw response logging state
   const [logRawUpstreamResponse, setLogRawUpstreamResponse] = useState(false);
   const [logRawUpstreamOnError, setLogRawUpstreamOnError] = useState(false);
@@ -125,7 +124,6 @@ export function SettingsPage({
       // Ultimate model sync
       setUltimateModelId(config.ultimate_model?.model_id || '');
       setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
-      setUltimateModelMaxRetries(config.ultimate_model?.max_retries ?? 2);
       // Raw response logging sync
       setLogRawUpstreamResponse(config.log_raw_upstream_response ?? false);
       setLogRawUpstreamOnError(config.log_raw_upstream_on_error ?? false);
@@ -168,7 +166,6 @@ export function SettingsPage({
         ultimate_model: {
           model_id: ultimateModelId,
           max_hash: ultimateModelMaxHash,
-          max_retries: ultimateModelMaxRetries,
         },
         // Raw response logging
         log_raw_upstream_response: logRawUpstreamResponse,
@@ -384,7 +381,6 @@ export function SettingsPage({
               raceMaxBufferBytes={raceMaxBufferBytes}
               ultimateModelId={ultimateModelId}
               ultimateModelMaxHash={ultimateModelMaxHash}
-              ultimateModelMaxRetries={ultimateModelMaxRetries}
               logRawUpstreamResponse={logRawUpstreamResponse}
               logRawUpstreamOnError={logRawUpstreamOnError}
               logRawUpstreamMaxKB={logRawUpstreamMaxKB}
@@ -402,7 +398,6 @@ export function SettingsPage({
               onRaceMaxBufferBytesChange={setRaceMaxBufferBytes}
               onUltimateModelIdChange={setUltimateModelId}
               onUltimateModelMaxHashChange={setUltimateModelMaxHash}
-              onUltimateModelMaxRetriesChange={setUltimateModelMaxRetries}
               onLogRawUpstreamResponseChange={setLogRawUpstreamResponse}
               onLogRawUpstreamOnErrorChange={setLogRawUpstreamOnError}
               onLogRawUpstreamMaxKBChange={setLogRawUpstreamMaxKB}

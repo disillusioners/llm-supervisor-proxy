@@ -57,7 +57,6 @@ export interface ToolRepairConfig {
 export interface UltimateModelConfig {
   model_id: string;
   max_hash: number;
-  max_retries: number;  // Max ultimate model retries per hash (default: 2)
 }
 
 export interface AppConfig {
