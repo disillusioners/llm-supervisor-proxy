@@ -35,9 +35,8 @@ func newMockConfigManager() *mockConfigManager {
 			StreamDeadline:    config.Duration(110 * time.Second),
 			MaxGenerationTime: config.Duration(300 * time.Second),
 			UltimateModel: config.UltimateModelConfig{
-				ModelID:    "ultimate-model",
-				MaxHash:    100,
-				MaxRetries: 2,
+				ModelID: "ultimate-model",
+				MaxHash: 100,
 			},
 		},
 	}
@@ -355,7 +354,10 @@ func TestShouldTrigger_NewMessage(t *testing.T) {
 	}
 }
 
-func TestShouldTrigger_AfterMarkFailed(t *testing.T) {
+// TestShouldTrigger_TriggerSchedule drives the full hardcoded schedule
+// (§3): attempts 1-4 normal flow; 5/10/20/30/40 trigger (and are NOT
+// exhausted); 41 and 42 are exhausted (exhaustion is strictly > 40).
+func TestShouldTrigger_TriggerSchedule(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -364,111 +366,184 @@ func TestShouldTrigger_AfterMarkFailed(t *testing.T) {
 		{"role": "user", "content": "Hello"},
 	}
 
-	// MarkFailed stores the hash (counter = 0)
-	h.MarkFailed(messages)
+	const maxSeen = 45
+	for attempt := 1; attempt <= maxSeen; attempt++ {
+		r := h.ShouldTrigger(messages)
 
-	// First ShouldTrigger: counter = 1, not triggered (first duplicate = allowed retry)
+		wantTriggered := attempt == 5 || attempt == 10 || attempt == 20 ||
+			attempt == 30 || attempt == 40 || attempt > 40
+		wantExhausted := attempt > 40
+
+		if r.Triggered != wantTriggered {
+			t.Errorf("attempt %d: Triggered=%v, want %v", attempt, r.Triggered, wantTriggered)
+		}
+		if r.AttemptsExhausted != wantExhausted {
+			t.Errorf("attempt %d: AttemptsExhausted=%v, want %v", attempt, r.AttemptsExhausted, wantExhausted)
+		}
+		if r.CurrentAttempt != attempt {
+			t.Errorf("attempt %d: CurrentAttempt=%d, want %d", attempt, r.CurrentAttempt, attempt)
+		}
+		if r.MaxAttempts != 40 {
+			t.Errorf("attempt %d: MaxAttempts=%d, want 40", attempt, r.MaxAttempts)
+		}
+	}
+}
+
+// TestShouldTrigger_ScheduleBoundaries enumerates the boundary cases
+// explicitly: 4 = no trigger; 5/10/20/30/40 = trigger AND NOT exhausted;
+// 41, 42 = exhausted (strictly > 40).
+func TestShouldTrigger_ScheduleBoundaries(t *testing.T) {
+	cases := []struct {
+		attempt       int
+		wantTriggered bool
+		wantExhausted bool
+	}{
+		{4, false, false},
+		{5, true, false},
+		{10, true, false},
+		{20, true, false},
+		{30, true, false},
+		{40, true, false},
+		{41, true, true},
+		{42, true, true},
+	}
+
+	for _, tc := range cases {
+		cfg := newMockConfigManager()
+		modelsCfg := newMockModelsConfig()
+		h := NewHandler(cfg, modelsCfg, nil, nil)
+		messages := []map[string]interface{}{
+			{"role": "user", "content": "boundary"},
+		}
+
+		var r ShouldTriggerResult
+		for i := 0; i < tc.attempt; i++ {
+			r = h.ShouldTrigger(messages)
+		}
+
+		if r.Triggered != tc.wantTriggered {
+			t.Errorf("attempt %d: Triggered=%v, want %v", tc.attempt, r.Triggered, tc.wantTriggered)
+		}
+		if r.AttemptsExhausted != tc.wantExhausted {
+			t.Errorf("attempt %d: AttemptsExhausted=%v, want %v", tc.attempt, r.AttemptsExhausted, tc.wantExhausted)
+		}
+	}
+}
+
+// TestShouldTrigger_FailureAt5KeepsCounterSchedule simulates an ultimate
+// failure at milestone 5 (hash NOT removed): calls 6-9 flow normally and
+// milestone 10 triggers.
+func TestShouldTrigger_FailureAt5KeepsCounterSchedule(t *testing.T) {
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "fail at five"},
+	}
+
+	// Attempts 1-4: normal flow
+	for i := 0; i < 4; i++ {
+		if r := h.ShouldTrigger(messages); r.Triggered {
+			t.Fatalf("attempt %d: should not trigger", i+1)
+		}
+	}
+	// Attempt 5: milestone trigger (ultimate fails — counter kept)
+	if r := h.ShouldTrigger(messages); !r.Triggered {
+		t.Fatal("attempt 5: should trigger")
+	}
+	// Attempts 6-9: normal flow after failure
+	for i := 6; i <= 9; i++ {
+		if r := h.ShouldTrigger(messages); r.Triggered {
+			t.Fatalf("attempt %d: should not trigger after ultimate failure at 5", i)
+		}
+	}
+	// Attempt 10: next milestone triggers
+	if r := h.ShouldTrigger(messages); !r.Triggered {
+		t.Fatal("attempt 10: should trigger after failure at 5")
+	}
+}
+
+// TestShouldTrigger_SuccessAt5ResetsSchedule simulates an ultimate success
+// at milestone 5 (hash removed, counter reset): the next call is attempt 1
+// and the next trigger lands on 5 again (schedule re-arms).
+func TestShouldTrigger_SuccessAt5ResetsSchedule(t *testing.T) {
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "succeed at five"},
+	}
+
+	for i := 0; i < 5; i++ {
+		h.ShouldTrigger(messages)
+	}
+	// Ultimate success: Execute removes the hash on success
+	h.hashCache.Remove(HashMessages(messages))
+
+	// Counter reset: next call is attempt 1 (no trigger), trigger at 5 again
+	for i := 1; i <= 4; i++ {
+		if r := h.ShouldTrigger(messages); r.Triggered || r.CurrentAttempt != i {
+			t.Fatalf("post-reset attempt %d: Triggered=%v CurrentAttempt=%d", i, r.Triggered, r.CurrentAttempt)
+		}
+	}
+	if r := h.ShouldTrigger(messages); !r.Triggered {
+		t.Fatal("post-reset attempt 5: should trigger (schedule re-armed)")
+	}
+}
+
+// TestForceTrigger_FirstCallTriggers is the force-on-first-call regression:
+// force triggers unconditionally on the first call — no env workaround
+// needed under the fixed schedule (previously force on a first-sight hash
+// returned Triggered=false under the default max-retries knob).
+func TestForceTrigger_FirstCallTriggers(t *testing.T) {
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "force me"},
+	}
+
+	r := h.ForceTrigger(messages)
+	if !r.Triggered {
+		t.Fatal("ForceTrigger should trigger on the first call")
+	}
+	if r.AttemptsExhausted {
+		t.Fatal("ForceTrigger should never be exhausted")
+	}
+}
+
+// TestForceTrigger_DoesNotIncrement asserts that force never increments the
+// counter: after a force-seen hash, the next normal call counts as
+// attempt 1 (attempt 2 overall — the force-seen insertion is attempt 1).
+func TestForceTrigger_DoesNotIncrement(t *testing.T) {
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "force no increment"},
+	}
+
+	h.ForceTrigger(messages)
+
+	// First normal call after force: the force-seen insertion itself was
+	// attempt 1 (counter=1), so this call is attempt 2 — not triggered
+	// (2 < milestone 5). Force itself never incremented the counter.
 	r1 := h.ShouldTrigger(messages)
 	if r1.Triggered {
-		t.Error("First ShouldTrigger should not trigger (counter at 1, need 2)")
+		t.Fatal("first normal call after force should not trigger (attempt 2 < milestone 5)")
+	}
+	if r1.CurrentAttempt != 2 {
+		t.Fatalf("first normal call after force: CurrentAttempt=%d, want 2", r1.CurrentAttempt)
 	}
 
-	// Second ShouldTrigger: counter = 2, triggered (second duplicate = triggers)
+	// Second normal call: attempt 3
 	r2 := h.ShouldTrigger(messages)
-	if !r2.Triggered {
-		t.Error("Second ShouldTrigger should trigger (counter at 2)")
-	}
-
-	// Third ShouldTrigger: counter = 3, still triggered
-	result := h.ShouldTrigger(messages)
-	if !result.Triggered {
-		t.Error("Third ShouldTrigger should also trigger")
-	}
-}
-
-func TestShouldTrigger_MaxRetriesZero(t *testing.T) {
-	cfg := newMockConfigManager()
-	cfg.cfg.UltimateModel.MaxRetries = 0 // Unlimited retries
-	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	messages := []map[string]interface{}{
-		{"role": "user", "content": "Hello"},
-	}
-
-	h.MarkFailed(messages)
-	result := h.ShouldTrigger(messages)
-
-	if !result.Triggered {
-		t.Error("Should trigger with unlimited retries")
-	}
-	if result.RetryExhausted {
-		t.Error("Should not be exhausted with MaxRetries=0")
-	}
-}
-
-func TestShouldTrigger_RetryExhausted(t *testing.T) {
-	cfg := newMockConfigManager()
-	cfg.cfg.UltimateModel.MaxRetries = 2
-	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	messages := []map[string]interface{}{
-		{"role": "user", "content": "Hello"},
-	}
-
-	// MarkFailed stores the hash (counter = 0 initially)
-	h.MarkFailed(messages)
-
-	// First call after MarkFailed: counter = 1, not triggered (first duplicate)
-	r1 := h.ShouldTrigger(messages)
-	if r1.Triggered || r1.CurrentRetry != 1 {
-		t.Errorf("First call: triggered=%v (expected false), retry=%d (expected 1)", r1.Triggered, r1.CurrentRetry)
-	}
-
-	// Second call: counter = 2, triggered (second duplicate)
-	r2 := h.ShouldTrigger(messages)
-	if !r2.Triggered || r2.CurrentRetry != 2 {
-		t.Errorf("Second call: triggered=%v (expected true), retry=%d (expected 2)", r2.Triggered, r2.CurrentRetry)
-	}
-
-	// Third call: counter = 3, triggered, exhausted (exceeded MaxRetries=2)
-	r3 := h.ShouldTrigger(messages)
-	if !r3.Triggered || !r3.RetryExhausted || r3.CurrentRetry != 3 {
-		t.Errorf("Third call: triggered=%v (expected true), exhausted=%v (expected true), retry=%d (expected 3)", r3.Triggered, r3.RetryExhausted, r3.CurrentRetry)
-	}
-}
-
-// --- Tests for MarkFailed ---
-
-func TestMarkFailed_EmptyMessages(t *testing.T) {
-	cfg := newMockConfigManager()
-	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	hash := h.MarkFailed([]map[string]interface{}{})
-	if hash != "" {
-		t.Error("MarkFailed should return empty hash for empty messages")
-	}
-}
-
-func TestMarkFailed_ReturnsHash(t *testing.T) {
-	cfg := newMockConfigManager()
-	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	messages := []map[string]interface{}{
-		{"role": "user", "content": "Hello"},
-	}
-
-	hash := h.MarkFailed(messages)
-	if hash == "" {
-		t.Error("MarkFailed should return a hash")
-	}
-
-	// Verify it's stored
-	if !h.hashCache.Contains(hash) {
-		t.Error("Hash should be stored after MarkFailed")
+	if r2.CurrentAttempt != 3 {
+		t.Fatalf("second normal call after force: CurrentAttempt=%d, want 3", r2.CurrentAttempt)
 	}
 }
 
@@ -524,10 +599,10 @@ func TestOnConfigChange_ModelIDChanged(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
-	// Store a hash
-	h.MarkFailed([]map[string]interface{}{
+	// Store a hash (counter=1, hash present)
+	h.hashCache.RecordAttempt(HashMessages([]map[string]interface{}{
 		{"role": "user", "content": "Hello"},
-	})
+	}))
 
 	// Trigger config change
 	event := events.Event{
@@ -550,10 +625,10 @@ func TestOnConfigChange_OtherField(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
-	// Store a hash
-	h.MarkFailed([]map[string]interface{}{
+	// Store a hash (counter=1, hash present)
+	h.hashCache.RecordAttempt(HashMessages([]map[string]interface{}{
 		{"role": "user", "content": "Hello"},
-	})
+	}))
 
 	// Trigger config change for different field
 	event := events.Event{
@@ -576,10 +651,10 @@ func TestOnConfigChange_NoData(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
-	// Store a hash
-	h.MarkFailed([]map[string]interface{}{
+	// Store a hash (counter=1, hash present)
+	h.hashCache.RecordAttempt(HashMessages([]map[string]interface{}{
 		{"role": "user", "content": "Hello"},
-	})
+	}))
 
 	// Trigger config change without data
 	event := events.Event{
@@ -602,7 +677,7 @@ func TestSendRetryExhaustedError_Streaming(t *testing.T) {
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
-	err := h.SendRetryExhaustedError(w, "abc12345", 3, 2, true)
+	err := h.SendRetryExhaustedError(w, "abc12345", 41, 40, true)
 
 	if err != nil {
 		t.Errorf("SendRetryExhaustedError returned error: %v", err)
@@ -635,7 +710,7 @@ func TestSendRetryExhaustedError_NonStreaming(t *testing.T) {
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
-	err := h.SendRetryExhaustedError(w, "abc12345", 3, 2, false)
+	err := h.SendRetryExhaustedError(w, "abc12345", 41, 40, false)
 
 	if err != nil {
 		t.Errorf("SendRetryExhaustedError returned error: %v", err)
@@ -660,7 +735,7 @@ func TestSendRetryExhaustedError_ShortHash(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Pass short hash - should not panic
-	err := h.SendRetryExhaustedError(w, "ab", 3, 2, true)
+	err := h.SendRetryExhaustedError(w, "ab", 41, 40, true)
 
 	if err != nil {
 		t.Errorf("SendRetryExhaustedError returned error: %v", err)
@@ -674,7 +749,7 @@ func TestSendRetryExhaustedError_EmptyHash(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Pass empty hash - should not panic
-	err := h.SendRetryExhaustedError(w, "", 3, 2, true)
+	err := h.SendRetryExhaustedError(w, "", 41, 40, true)
 
 	if err != nil {
 		t.Errorf("SendRetryExhaustedError returned error: %v", err)
@@ -788,10 +863,10 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 		}
 	}
 
-	// Check retry counter was cleared
-	count := h.hashCache.GetRetryCount(hash)
-	if count != 0 {
-		t.Errorf("Retry count should be cleared after success, got %d", count)
+	// Check the attempt counter was cleared by the success-path Remove:
+	// the next attempt for this hash restarts at 1 (schedule re-arms)
+	if count := h.hashCache.RecordAttempt(hash); count != 1 {
+		t.Errorf("Attempt count should restart at 1 after success, got %d", count)
 	}
 }
 
@@ -1087,6 +1162,10 @@ func TestUltimateModelError(t *testing.T) {
 
 // --- Concurrent tests ---
 
+// TestHandler_ConcurrentShouldTrigger asserts the schedule under
+// concurrency: N goroutines calling ShouldTrigger on the same hash receive
+// exactly the attempt counts {1..N} (multiset equality), and only requests
+// landing exactly on a milestone (or beyond the cap) trigger.
 func TestHandler_ConcurrentShouldTrigger(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
@@ -1096,40 +1175,42 @@ func TestHandler_ConcurrentShouldTrigger(t *testing.T) {
 		{"role": "user", "content": "Hello concurrent"},
 	}
 
-	h.MarkFailed(messages)
-
+	const n = 100
 	var wg sync.WaitGroup
-	results := make(chan ShouldTriggerResult, 100)
+	results := make(chan ShouldTriggerResult, n)
 
-	for i := 0; i < 100; i++ {
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result := h.ShouldTrigger(messages)
-			results <- result
+			results <- h.ShouldTrigger(messages)
 		}()
 	}
 
 	wg.Wait()
 	close(results)
 
+	// Expected multiset of counts is exactly {1..n}; a count triggers iff
+	// it lands on a milestone (5/10/20/30/40) or exceeds the 40 cap.
+	counts := make(map[int]int)
 	triggered := 0
-	notTriggered := 0
+	expectedTriggered := 0
 	for r := range results {
+		counts[r.CurrentAttempt]++
 		if r.Triggered {
 			triggered++
-		} else {
-			notTriggered++
 		}
 	}
-
-	// With new logic: first increment gets counter=1 (not triggered),
-	// subsequent increments get counter>=2 (triggered)
-	if triggered != 99 {
-		t.Errorf("Expected 99 triggered (one gets counter=1), got %d", triggered)
+	for want := 1; want <= n; want++ {
+		if counts[want] != 1 {
+			t.Errorf("Expected exactly one goroutine to see attempt=%d, saw %d", want, counts[want])
+		}
+		if isTriggerAttempt(want) || want > maxAttempts {
+			expectedTriggered++
+		}
 	}
-	if notTriggered != 1 {
-		t.Errorf("Expected 1 not triggered, got %d", notTriggered)
+	if triggered != expectedTriggered {
+		t.Errorf("Expected %d triggered (milestones + exhausted), got %d", expectedTriggered, triggered)
 	}
 }
 
@@ -1145,51 +1226,46 @@ func TestHandler_FullFlow(t *testing.T) {
 		{"role": "user", "content": "Test message"},
 	}
 
-	// 1. Should not trigger initially
+	// 1-4. First four requests: normal flow (attempts 1-4, below the first
+	// milestone — no trigger)
+	for i := 0; i < 4; i++ {
+		result := h.ShouldTrigger(messages)
+		if result.Triggered {
+			t.Errorf("Request %d should not trigger (below milestone 5)", i+1)
+		}
+	}
+
+	// 5. Fifth request: milestone trigger (attempt 5)
 	result := h.ShouldTrigger(messages)
-	if result.Triggered {
-		t.Error("Should not trigger on first request")
-	}
-
-	// 2. Mark as failed (stores hash)
-	hash := h.MarkFailed(messages)
-
-	// 3. First ShouldTrigger: counter=1, not triggered
-	result = h.ShouldTrigger(messages)
-	if result.Triggered {
-		t.Error("First ShouldTrigger after MarkFailed should not trigger (counter=1)")
-	}
-
-	// 4. Second ShouldTrigger: counter=2, triggered
-	result = h.ShouldTrigger(messages)
 	if !result.Triggered {
-		t.Error("Second ShouldTrigger after MarkFailed should trigger (counter=2)")
+		t.Error("Fifth ShouldTrigger should trigger (milestone 5)")
+	}
+	if result.AttemptsExhausted {
+		t.Error("Fifth ShouldTrigger should not be exhausted")
 	}
 
-	// 4. GetModelID should work
+	// 6. GetModelID should work
 	if h.GetModelID() != cfg.cfg.UltimateModel.ModelID {
 		t.Error("GetModelID failed")
 	}
 
-	// 5. Config change should reset
+	// 7. Config change should reset
 	h.OnConfigChange(events.Event{
 		Type: "config.change",
 		Data: map[string]interface{}{"field": "ultimate_model.model_id"},
 	})
 
-	// 6. Hash cache should be empty
+	// 8. Hash cache should be empty
 	count, _ := h.hashCache.GetStats()
 	if count != 0 {
 		t.Error("Hash cache should be reset")
 	}
 
-	// 7. Should not trigger anymore
+	// 9. Should not trigger anymore (counter reset — attempt 1 again)
 	result = h.ShouldTrigger(messages)
 	if result.Triggered {
 		t.Error("Should not trigger after cache reset")
 	}
-
-	_ = hash // Use the hash
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

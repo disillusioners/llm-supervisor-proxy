@@ -8,15 +8,15 @@ import (
 
 // HashCache is a circular buffer of request hashes.
 // It stores hashes of message content to detect duplicate requests.
-// When a duplicate is detected, the ultimate model is triggered.
-// Also tracks retry counts per hash for the ultimate model retry limit feature.
+// It also tracks the total attempt count per hash for the hardcoded
+// ultimate-model trigger schedule (5/10/20/30/40, cap 40).
 type HashCache struct {
-	mu           sync.RWMutex
-	hashes       []string        // circular buffer
-	size         int             // max capacity
-	head         int             // next write position
-	count        int             // current count
-	retryCounter map[string]int  // hash -> retry count for ultimate model
+	mu             sync.RWMutex
+	hashes         []string       // circular buffer
+	size           int            // max capacity
+	head           int            // next write position
+	count          int            // current count
+	attemptCounter map[string]int // hash -> total attempt count
 }
 
 // NewHashCache creates a new hash cache with the given max size.
@@ -26,54 +26,87 @@ func NewHashCache(maxSize int) *HashCache {
 		maxSize = 100
 	}
 	return &HashCache{
-		hashes:       make([]string, maxSize),
-		size:         maxSize,
-		head:         0,
-		count:        0,
-		retryCounter: make(map[string]int),
+		hashes:         make([]string, maxSize),
+		size:           maxSize,
+		head:           0,
+		count:          0,
+		attemptCounter: make(map[string]int),
 	}
 }
 
-// StoreAndCheck stores the hash and returns whether it was ALREADY present.
-// This is an ATOMIC operation that prevents race conditions with concurrent requests.
+// RecordAttempt records the hash (inserting on first sight, with circular-
+// buffer eviction cleanup of the counter map) and increments the attempt
+// counter on EVERY call. Returns the total attempt count for this hash.
 //
-// Returns:
-//   - true: hash was already in cache (duplicate detected)
-//   - false: hash was not in cache (first time seeing this request)
-//
-// The hash is always stored after the check, so subsequent calls will return true.
-func (c *HashCache) StoreAndCheck(hash string) bool {
+// First sight: the hash is inserted into the circular buffer (evicting the
+// oldest hash and deleting its counter entry when full) AND the counter is
+// set to 1. Subsequent calls: counter increment only.
+func (c *HashCache) RecordAttempt(hash string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if hash already exists
-	for i := 0; i < c.count; i++ {
-		if c.hashes[i] == hash {
-			return true // Duplicate detected
-		}
+	if c.containsLocked(hash) {
+		c.attemptCounter[hash]++
+		return c.attemptCounter[hash]
 	}
 
-	// If buffer is full, clean up the evicted hash's retry counter
-	// This prevents memory leak in retryCounter map
+	c.insertLocked(hash)
+	c.attemptCounter[hash] = 1
+	return 1
+}
+
+// StoreIfAbsent inserts the hash if not already present WITHOUT
+// incrementing the attempt counter. Used only by the force-trigger
+// branch: the insertion itself counts as attempt 1 (counter → 1), so the
+// next normal RecordAttempt call returns 2.
+//
+// Insert only, no increment — with the same first-sight eviction semantics
+// as RecordAttempt (evicting the oldest hash + counter entry when full).
+// If the hash is already present, this is a no-op.
+func (c *HashCache) StoreIfAbsent(hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.containsLocked(hash) {
+		return
+	}
+
+	c.insertLocked(hash)
+	c.attemptCounter[hash] = 1
+}
+
+// containsLocked reports whether the hash is present in the circular
+// buffer. Callers must hold c.mu.
+func (c *HashCache) containsLocked(hash string) bool {
+	for i := 0; i < c.count; i++ {
+		if c.hashes[i] == hash {
+			return true
+		}
+	}
+	return false
+}
+
+// insertLocked stores the hash in the circular buffer, evicting the oldest
+// hash and deleting its counter entry when the buffer is full (this
+// prevents a memory leak in the attemptCounter map). Callers must hold
+// c.mu and must have checked the hash is not already present.
+func (c *HashCache) insertLocked(hash string) {
 	if c.count >= c.size {
 		evictedHash := c.hashes[c.head]
 		if evictedHash != "" {
-			delete(c.retryCounter, evictedHash)
+			delete(c.attemptCounter, evictedHash)
 		}
 	}
 
-	// Store hash in circular buffer
 	c.hashes[c.head] = hash
 	c.head = (c.head + 1) % c.size
 	if c.count < c.size {
 		c.count++
 	}
-
-	return false // First time
 }
 
 // Remove removes a hash from the cache.
-// This also clears the retry counter for the hash.
+// This also clears the attempt counter for the hash (schedule re-arms).
 // If the hash is not found, this is a no-op.
 func (c *HashCache) Remove(hash string) {
 	c.mu.Lock()
@@ -94,8 +127,8 @@ func (c *HashCache) Remove(hash string) {
 		}
 	}
 
-	// Also clear retry counter
-	delete(c.retryCounter, hash)
+	// Also clear attempt counter
+	delete(c.attemptCounter, hash)
 }
 
 // Contains checks if a hash exists in the cache without storing it.
@@ -120,34 +153,7 @@ func (c *HashCache) Reset() {
 	c.hashes = make([]string, c.size)
 	c.head = 0
 	c.count = 0
-	c.retryCounter = make(map[string]int) // Clear all retry counters
-}
-
-// IncrementAndCheckRetry atomically increments and checks if limit exceeded.
-// This prevents TOCTOU race condition between check and increment.
-// Returns (newCount, exhausted) where exhausted=true if newCount > maxRetries.
-func (c *HashCache) IncrementAndCheckRetry(hash string, maxRetries int) (newCount int, exhausted bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.retryCounter[hash]++
-	newCount = c.retryCounter[hash]
-	return newCount, newCount > maxRetries
-}
-
-// GetRetryCount returns the current retry count for a hash.
-// Returns 0 if hash not found in retry counter.
-func (c *HashCache) GetRetryCount(hash string) int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.retryCounter[hash]
-}
-
-// ClearRetryCount removes the retry counter for a hash.
-// Called when ultimate model succeeds or when hash is removed.
-func (c *HashCache) ClearRetryCount(hash string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.retryCounter, hash)
+	c.attemptCounter = make(map[string]int) // Clear all attempt counters
 }
 
 // HashMessages generates a consistent hash from chat completion messages.

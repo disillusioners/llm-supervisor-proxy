@@ -18,13 +18,32 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
+// triggerAttempts is the hardcoded escalation schedule: request numbers
+// (total, per hash) on which the ultimate model is injected.
+var triggerAttempts = [5]int{5, 10, 20, 30, 40}
+
+// maxAttempts is the absolute per-hash request limit; attempts beyond it
+// receive an un-retryable error.
+const maxAttempts = 40
+
+// isTriggerAttempt reports whether the given total attempt count lands on
+// one of the schedule milestones (5/10/20/30/40).
+func isTriggerAttempt(count int) bool {
+	for _, milestone := range triggerAttempts {
+		if count == milestone {
+			return true
+		}
+	}
+	return false
+}
+
 // ShouldTriggerResult contains the result of ShouldTrigger check
 type ShouldTriggerResult struct {
-	Triggered      bool   // True if ultimate model should be used
-	Hash           string // The computed hash
-	RetryExhausted bool   // True if max retries exceeded (after increment)
-	CurrentRetry   int    // Current retry count (after increment)
-	MaxRetries     int    // Configured max retries
+	Triggered        bool   // True if ultimate model should be used
+	Hash             string // The computed hash
+	AttemptsExhausted bool  // True if the per-hash attempt limit was exceeded
+	CurrentAttempt   int    // Total attempts recorded for this hash
+	MaxAttempts      int    // Absolute per-hash attempt limit (hardcoded)
 }
 
 // Handler manages ultimate model requests.
@@ -72,15 +91,21 @@ func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterf
 }
 
 // ShouldTrigger checks if ultimate model should be triggered.
-// Hash is registered on entry - first call returns false, subsequent calls
-// with same hash trigger ultimate model.
-// On success, hash is removed from cache; on failure, hash remains.
+// Every call records an attempt for the message hash: attempts 1-4 stay in
+// the normal flow; the 5th, 10th, 20th, 30th, and 40th requests with the
+// same hash trigger the ultimate model; requests beyond the 40th receive
+// an un-retryable exhausted error (AttemptsExhausted).
+// On ultimate success, the hash is removed from cache (schedule re-arms);
+// on failure, the hash stays and counting continues to the next milestone.
 func (h *Handler) ShouldTrigger(messages []map[string]interface{}) ShouldTriggerResult {
 	return h.shouldTriggerInternal(messages, false)
 }
 
-// ForceTrigger always triggers ultimate model, bypassing hash cache check.
+// ForceTrigger always triggers ultimate model, bypassing the schedule.
 // Used for testing/debugging via X-Force-Ultimate-Model header.
+// Never increments the attempt counter; still stores the hash if new
+// (insert-only). A force-seen hash counts as attempt 1 on the next normal
+// ShouldTrigger call.
 func (h *Handler) ForceTrigger(messages []map[string]interface{}) ShouldTriggerResult {
 	return h.shouldTriggerInternal(messages, true)
 }
@@ -99,56 +124,50 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// Generate hash from messages (role + content only)
 	hash := HashMessages(messages)
 
-	// Store hash and check if it was already there (atomic operation)
-	// Returns true if duplicate, false if first time
-	alreadyExists := h.hashCache.StoreAndCheck(hash)
-
-	// First time seeing this request - store hash, don't trigger, don't increment
-	if !force && !alreadyExists {
-		return ShouldTriggerResult{Triggered: false, Hash: hash}
-	}
-
-	// Hash was already in cache (duplicate) - increment retry counter
-	maxRetries := cfg.UltimateModel.MaxRetries
-	if maxRetries <= 0 {
-		// MaxRetries=0 means unlimited - trigger on any duplicate after first
+	// Force: trigger immediately, never increment the attempt counter, no
+	// exhaustion. Still store the hash if new (insert-only) — a force-seen
+	// hash counts as attempt 1 on the next normal RecordAttempt call.
+	if force {
+		h.hashCache.StoreIfAbsent(hash)
 		return ShouldTriggerResult{
 			Triggered:      true,
 			Hash:           hash,
-			RetryExhausted: false,
-			CurrentRetry:   1,
-			MaxRetries:     0,
+			MaxAttempts:    maxAttempts,
 		}
 	}
 
-	// ATOMIC increment and check - prevents race condition
-	newCount, exhausted := h.hashCache.IncrementAndCheckRetry(hash, maxRetries)
+	// Normal path: record this request atomically (insert-on-first-sight,
+	// increment on every call) and evaluate the hardcoded schedule.
+	count := h.hashCache.RecordAttempt(hash)
 
-	// Trigger if we've seen this hash 2+ times (3rd call onwards)
-	// This gives 2 retries without ultimate model before triggering
-	shouldTrigger := newCount >= 2
+	// Attempts beyond the cap: exhausted result keeps Triggered=true so the
+	// proxy's control flow (exhausted check inside the triggered branch)
+	// stays structurally identical to the pre-schedule design.
+	if count > maxAttempts {
+		return ShouldTriggerResult{
+			Triggered:        true,
+			Hash:             hash,
+			AttemptsExhausted: true,
+			CurrentAttempt:   count,
+			MaxAttempts:      maxAttempts,
+		}
+	}
+
+	if isTriggerAttempt(count) {
+		return ShouldTriggerResult{
+			Triggered:      true,
+			Hash:           hash,
+			CurrentAttempt: count,
+			MaxAttempts:    maxAttempts,
+		}
+	}
 
 	return ShouldTriggerResult{
-		Triggered:      shouldTrigger,
+		Triggered:      false,
 		Hash:           hash,
-		RetryExhausted: exhausted,
-		CurrentRetry:   newCount,
-		MaxRetries:     maxRetries,
+		CurrentAttempt: count,
+		MaxAttempts:    maxAttempts,
 	}
-}
-
-// MarkFailed stores the hash to mark this request as failed.
-// DEPRECATED: Hash is now stored automatically on ShouldTrigger entry.
-// This function is kept for backward compatibility with existing code.
-// Returns the computed hash for reference.
-func (h *Handler) MarkFailed(messages []map[string]interface{}) string {
-	if len(messages) == 0 {
-		return ""
-	}
-
-	hash := HashMessages(messages)
-	h.hashCache.StoreAndCheck(hash) // Store hash to mark as failed
-	return hash
 }
 
 // GetModelID returns the configured ultimate model ID
@@ -545,11 +564,14 @@ func finalizeAccumulatedToolCalls(accum []store.ToolCall, argBuilders []*strings
 
 // SendRetryExhaustedError sends a JSON stream error response.
 // This uses HTTP 200 with SSE error format to make streaming clients stop gracefully.
+// currentAttempt/maxAttempt report TOTAL attempts for the hash against the
+// hardcoded 40 cap. The wire error type string ("ultimate_model_retry_exhausted")
+// and JSON shape are kept unchanged for client compatibility.
 func (h *Handler) SendRetryExhaustedError(
 	w http.ResponseWriter,
 	hash string,
-	currentRetry int,
-	maxRetries int,
+	currentAttempt int,
+	maxAttempt int,
 	isStream bool,
 ) error {
 	// Safely extract hash prefix (defensive against short/empty hashes)
@@ -559,8 +581,8 @@ func (h *Handler) SendRetryExhaustedError(
 	}
 
 	message := fmt.Sprintf(
-		"Ultimate model retry limit exceeded (attempt %d of %d max). Hash: %s...",
-		currentRetry, maxRetries, hashPrefix,
+		"Request attempt limit exceeded (attempt %d of %d max). Hash: %s...",
+		currentAttempt, maxAttempt, hashPrefix,
 	)
 
 	// Build OpenCode-compatible error response
@@ -577,7 +599,7 @@ func (h *Handler) SendRetryExhaustedError(
 	errorJSON, err := json.Marshal(errorResp)
 	if err != nil {
 		// Fallback to static error message if marshaling fails
-		errorJSON = []byte(`{"type":"error","error":{"type":"ultimate_model_retry_exhausted","code":"exhausted","message":"Ultimate model retry limit exceeded"}}`)
+		errorJSON = []byte(`{"type":"error","error":{"type":"ultimate_model_retry_exhausted","code":"exhausted","message":"Request attempt limit exceeded"}}`)
 	}
 
 	// Set headers based on response type FIRST
@@ -606,8 +628,10 @@ func (h *Handler) SendRetryExhaustedError(
 
 // Execute handles request with ultimate model - RAW PROXY
 // No retry, no fallback, no loop detection, no buffering.
-// On failure: KEEPS retry counter to enforce max retry limit.
-// On success: clears retry counter but keeps hash in cache.
+// On failure: KEEPS the attempt counter — subsequent requests flow normally
+// until the next schedule milestone (5/10/20/30/40).
+// On success: removes the hash (counter cleared) so the schedule re-arms
+// and the same content starts fresh.
 // Returns ExecuteResult with usage statistics extracted from the
 // response AND the passively-captured assistant content and
 // thinking (see ExecuteResult for the capture contract).
@@ -646,7 +670,7 @@ func (h *Handler) Execute(
 
 	if modelCfg == nil {
 		// Model not found - this is a config error, clear everything
-		h.hashCache.Remove(hash) // Also clears retry counter
+		h.hashCache.Remove(hash) // Also clears attempt counter
 		return nil, &ultimateModelError{
 			message:  "ultimate model not found in database",
 			internal: false,
@@ -737,14 +761,14 @@ func (h *Handler) Execute(
 	heartbeatCancel()
 
 	if err != nil {
-		// On failure: KEEP retry counter to enforce limit
-		// DON'T remove hash - client can retry until MaxRetries exhausted
+		// On failure: KEEP the attempt counter — subsequent requests flow
+		// normally until the next schedule milestone (5/10/20/30/40)
 		log.Printf("[UltimateModel] Error executing with %s: %v", modelID, err)
 		return nil, err
 	}
 
-	// On success: remove hash from cache so same content can be processed normally again
-	// This also clears the retry counter for the hash
+	// On success: remove hash from cache so the schedule re-arms and the
+	// same content starts fresh. This also clears the attempt counter.
 	h.hashCache.Remove(hash)
 
 	return result, nil
