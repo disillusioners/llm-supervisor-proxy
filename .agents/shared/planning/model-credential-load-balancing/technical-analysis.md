@@ -828,6 +828,8 @@ func (rc *requestContext) reset() {
 // tokenID is unset at that point (handler.go:353 vs handler.go:401).
 ```
 
+> **Round 3j — W3 anonymous-key semantics:** the conversation key is computed for ALL requests — authenticated (tokenID salt) AND anonymous (unsalted, `tokenID=""`) — HOISTED OUT of the auth branch. The Phase-3 implementation nested the computation inside `if authToken != nil` (handler.go:431-470), so anonymous requests never received a key (fresh pick per request, zero cross-request affinity); the correction hoists the computation below the token-population block but outside the auth conditional, so anonymous conversations get unsalted-key affinity (`sha256(modelID + "|" + "" + "|" + firstUserMessage)`), consistent with A-1's "graceful degradation" intent.
+
 ### `pkg/providers` — error-classification additions (Round 3 — 2026-08-25)
 
 > **AMENDED 2026-08-25 (Round 3 — R3-1)**: Rate-limit classifier
@@ -1330,6 +1332,18 @@ type engineState struct {
 // ErrNoCredentials before any pick); reviewer-walked all 10 return
 // paths. Justification: 'lookups that selected a fresh credential' —
 // a Miss is a selection event, not merely a binding miss.
+//
+// **Round 3i (2026-08-25) — E-3/stats reconciliation:** the two Misses-free
+// paths are pinned: (a) the **E-3 single-credential fast path** performs NO
+// stats ticks at all and zero map writes (byte-identical per E-3;
+// `engine.go:~239-246`); (b) the **in-TTL binding hit** ticks **Hits only**
+// (`engine.go:273/:298`; zero Misses; the only write is the `boundAt`
+// sliding-TTL value refresh). `Misses` remains the selection-performed
+// counter per Round 3h (healthy fresh pick, empty-key fresh pick,
+// SoonestExpiry pick — never on `ErrNoCredentials`). These readings are
+// mutually consistent: every stats tick maps 1:1 to a real event — a
+// binding reuse (Hits) or a selection (Misses) — and the fast path is
+// invisible to stats by design.
 
 // Existing EngineStats (Round 1 — pinned in #5):
 //   type EngineStats struct {
@@ -2250,10 +2264,57 @@ if running < c.cfg.RaceMaxParallel {
                             // replacement rides the trigger info from
                             // classification to spawn()/executor (verified
                             // absent at race_coordinator.go:79 today).
-                            // Round 3c — C3(2): spawn() switch (currently
-                            // ~196-218) gains `case modelTypeCredFailover:
-                            // modelID = c.models[0]` — same model,
-                            // credential re-selected.
+                            // (Round 3j: also `modelID` — see the C3(2)
+                            // correction below; implemented credentialID
+                            // exists at HEAD, modelID does not.)
+                            // Round 3c — C3(2) (SUPERSEDED Round 3j): the
+                            // pin "spawn() switch (currently ~196-218) gains
+                            // `case modelTypeCredFailover: modelID =
+                            // c.models[0]` — same model, credential
+                            // re-selected" was WRONG when a FALLBACK row
+                            // (c.models[1]) is the one that 429'd in a
+                            // multi-model chain (implemented arm at
+                            // race_coordinator.go:269-280 — comment
+                            // "c.models[0] keeps the row on the SAME model
+                            // that just 429'd" — spawns the failover on the
+                            // MAIN model instead of the model whose
+                            // credential was rate-limited).
+                            // Round 3j — Phase-3 Review C1 root-cause,
+                            // correct pin: (i) spawnTriggerInfo gains a
+                            // `modelID` field (alongside credentialID),
+                            // populated from latestReq.modelID at the
+                            // Case-1 spawn site — the failed attempt's OWN
+                            // model, not a positional c.models index;
+                            // (ii) the `case modelTypeCredFailover:` arm
+                            // uses `triggerInfo.modelID` (falling back to
+                            // c.models[0] ONLY if empty, defensively);
+                            // (iii) belt-and-braces: the executor-side
+                            // resolveSpecificInternalCredential check
+                            // (race_executor.go:173) verifies the reselected
+                            // credential is a member of THAT model's
+                            // Credentials — the defense layer catching any
+                            // trigger-population bug.
+                            // Audit trail: Round-3c C3(2) pinned
+                            // modelID = c.models[0] → implemented faithfully
+                            // at 675556f → Phase-3 review caught the
+                            // multi-model defect (fallback-row 429 spawns
+                            // on the wrong model) → corrected in Round 3j
+                            // to trigger-carried modelID.
+                            // Round 3j addendum — REACHABILITY (verify pass
+                            // @ 3d1236d): the C1 defect is PRODUCTION-
+                            // REACHABLE, not latent — the hoisted gate's
+                            // credEligible arm admits fallback-row 429s
+                            // even at modelAttempts >= len(models)
+                            // (race_coordinator.go:452-454), and
+                            // spawnedCredFailover short-circuits the B1
+                            // all-failed check (:508, :595). Under the
+                            // superseded c.models[0] pin the wrong-model
+                            // spawn was therefore LIVE (billing-grade); the
+                            // 3d1236d fix + two-layer regression (Task 18
+                            // gate (m) + Phase 5 Task 32 scenario (c)) are
+                            // LOAD-BEARING, not defensive polish. B1
+                            // rationale + line-ref cleanup landed in
+                            // 7d64ece.
                             // Round 3b — B1: modelTypeCredFailover does NOT
                             // consume the spawn-window slot at :338 and does
                             // NOT count against the all-failed accounting at
@@ -2262,6 +2323,7 @@ if running < c.cfg.RaceMaxParallel {
                                 trigger:       triggerRateLimit,
                                 errorMessage:  err.Error(),
                                 failedRequest: latestReq.id,
+                                modelID:       latestReq.modelID, // Round 3j — the failed attempt's OWN model (not a positional c.models index)
                                 credentialID:  nextCred, // pre-resolved; spawn reads from this, not from the engine
                             })
 
@@ -2282,6 +2344,7 @@ if running < c.cfg.RaceMaxParallel {
                                 trigger:       triggerRateLimit,
                                 errorMessage:  err.Error(),
                                 failedRequest: latestReq.id,
+                                modelID:       latestReq.modelID, // Round 3j — same trigger-carried model semantics as the ReselectHealthy arm
                                 credentialID:  nextCred, // soonest-expiring
                             })
                             c.addToTriedSet(latestReq.modelID, nextCred)
@@ -2947,6 +3010,24 @@ None blocking. For the dispatcher / plan-phase workers to confirm:
 | **S2** | Suggestion | **Tried-set home in requestContext, not engine (S2)** | engine-additions ReselectMode invariants block (S2 pin added); Round-3b Tried-Set Single-Goroutine Mutation Invariant cross-ref | §F.2 (one sentence added to ExcludeAndReselect doc-comment) |
 | **S3** | Suggestion | **Wording standardization (S3)** — "weighted random among non-cooling (renormalized)" | engine-additions weightedSelector pseudocode (S3 wording inserted with audit-trail-untouched note); §Concurrency Model cross-ref (the F.4 Selection skip rule standardization lives in decisions.md) | §F.4 (Selection skip rule paragraph REPLACED with S3 standardized wording) |
 | **S6** | Suggestion (leader ruled YES) | **`OnCredentialDeleted` clears cooldowns (S6)** | Invalidation Semantics table (Credential-deleted row extended with S6 cooldown clear); engine additions invariants block (S6 bullet) | §F.4 (new AMENDED blockquote: S6 cooldown hygiene); §F.8 cross-ref |
+| **W8** | Reviewer warning | **Test-only seams via `pkg/credentiallb/testhooks.go` (W8) — grep gate refined (Round 3i)** | New "W8 — Test hook gating" sub-section under Round 3c (below) | phase2-plan Task 15 (matching exit-grep gate lives there; cross-ref) |
+| **W10** | Reviewer warning | **Exit-grep gate for the dead two-value `(credentialID, ok)` signature shape** — superseded by the Round 3i W8 gate refinement (same gate family) | New "W8 — Test hook gating" sub-section under Round 3c (below) — gate text pinned here | phase2-plan Task 12 acceptance column (Round 3c — W10 cross-ref); phase2-plan Task 15 (Round 3i gate refinement cross-ref) |
+
+### W8 — Test hook gating (Round 3i refinement, 2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3i — Phase-2 gate rulings):** leader-ruled
+> refinement of the W8 `ForTest` gate. The Round 3c-W8 seam
+> (`pkg/credentiallb/testhooks.go`) stands; the gate text is refined
+> to the leader-ruled form:
+>
+> > **Zero `ForTest` identifiers outside `pkg/credentiallb/testhooks.go` and `_test.go` files.**
+>
+> Two code-true clarifications (the gate is greppable; verified at `315f4e8`):
+>
+> 1. **`testhooks.go` is the sanctioned W8 seam** — single file, documented, and **cross-package test callers make relocation impossible** (Phase-5 handler tests call `InjectAllCoolingForTest` etc. from outside the package, so the hooks must live in a non-test file that compiles into the package).
+> 2. **The one `doc.go:86` mention is exempt as the gate's own documentation** — it is prose quoting the grep command in a doc comment, not an identifier call site. State the gate as: zero `ForTest` identifiers outside `testhooks.go`, `_test.go` files, and the single self-referential gate-documentation comment at `doc.go:86`. Verified: 13/13 non-test hits conform (12 `testhooks.go` + 1 `doc.go` prose).
+>
+> The corresponding exit-grep gate is pinned in `phase2-plan.md` Task 15 (matching form; the two files agree on the same refined gate).
 
 ### C2 Four-Surface Consistency Statement
 
@@ -3091,3 +3172,26 @@ separate accounting + OR-clause, which keeps the existing `:338`
 | Round | Source | Title | Sections amended in this file |
 |-------|--------|-------|--------------------------------|
 | **Round 3h** | Misses resolution | Round-3g TODO markers replaced with pinned semantics: Misses ticks on every selection path (healthy, empty-key, SoonestExpiry); no tick on ErrNoCredentials (no pick); developer-landed @ 315f4e8 (engine.go:322/:331 tick, :221/:230 no-tick), 10 return paths reviewer-walked | EngineStats Misses definition + TODO sites |
+
+## Round 3i — Phase-2 gate rulings (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3i):** leader-ruled final Phase-2 sync. Surgical, append-only — no restructuring, no renumbering. Prior round rows kept verbatim. Two items: W8 ForTest gate refined to the leader-ruled form (testhooks.go sanctioned seam + doc.go:86 prose exempt; 13/13 non-test hits conform); E-3/stats reconciliation pinned at the EngineStats block (two Misses-free paths explicit). Trail preserved (Round 3h row above kept verbatim).
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3i** | Phase-2 gate rulings | W8 ForTest gate refined: zero identifiers outside testhooks.go + _test.go (+ doc.go:86 gate-documentation prose exempt); 13/13 non-test hits conform. E-3/stats reconciliation pinned: fast path = zero ticks/zero writes (E-3); binding hit = Hits only (:273/:298); Misses = selection events (Round 3h) — every tick maps 1:1 to a real event | W8/W10 gates; EngineStats block; E-3 fast-path section |
+
+---
+
+## Round 3j — Phase-3 Review C1 root-cause (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3j):** leader-ruled plan correction from the Phase-3 review. Three
+> items in this file: precedence-tree pseudocode C3(2) corrected (trigger-carried modelID, the
+> superseded Round-3c comment is kept visible with a SUPERSEDED marker), the C3(1) comment
+> notes the Round-3j additive `modelID` field, and W3 anonymous-key semantics pinned at the
+> key-computation / A-1 wiring site. Prior round rows preserved verbatim.
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3j** | Phase-3 Review C1 root-cause | Coordinator contract corrected: credFailover spawn resolves modelID from spawnTriggerInfo (latestReq.modelID), superseding the Round-3c c.models[0] pin (multi-model defect: fallback-row 429 spawned on wrong model); audit trail Round-3c → faithful impl → review catch → Round 3j. W3: conversation key computed for ALL requests (authenticated salted + anonymous unsalted), hoisted out of the auth branch | Precedence tree pseudocode; C3 wiring; key-computation section |
+| **Round 3j (addendum)** | Phase-3 verify pass @ 3d1236d | C1 defect REACHABILITY: production-reachable, not latent — hoisted gate's credEligible arm admits fallback-row 429s at modelAttempts >= len(models) (:452-454); spawnedCredFailover short-circuits B1 all-failed (:508/:595) ⇒ wrong-model spawn was LIVE (billing-grade); fix + two-layer regression LOAD-BEARING; B1 rationale + line-ref cleanup in 7d64ece | Precedence tree (reachability note); Round 3j changelog |
