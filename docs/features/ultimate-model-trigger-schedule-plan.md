@@ -10,9 +10,14 @@ Rev. 3 (this revision): completes the MarkFailed deletion sweep across the
 test suite (rev. 2 missed 10 sites in `pkg/ultimatemodel/handler_test.go` plus
 3 dedicated MarkFailed test functions, causing `go build` / `go test` to
 fail after implementation), tightens §4.3/§4.6 enumerations to be exhaustive,
-fixes the phantom-file frontend citation (SettingsPage.tsx → ProxySettings.tsx)
-plus its residual prop-pass/handler-binding sites that were never enumerated,
-rewords the §3 MaxHash decision (config-read with default 100, not hardcoded),
+corrects the §4.5 frontend enumeration: BOTH `components/SettingsPage.tsx`
+(5 sites — state hook, config-sync setter, payload write, prop pass,
+handler binding) AND `components/config/ProxySettings.tsx` (7 sites) must
+be edited together; the leader's original `:387` / `:405` citations were
+exact (rev. 2's `SettingsPage.tsx:128, :171` were correct anchors in the
+real file at `pkg/ui/frontend/src/components/SettingsPage.tsx` — rev. 3
+must not regress them), rewords the §3 MaxHash decision (config-read with
+default 100, not hardcoded),
 fixes the §3 → §5 cross-reference (→ §4.1), pins the SendRetryExhaustedError
 lockstep call site (`pkg/proxy/handler.go:662`), adds first-boot
 `MaxRetries=0` observability verification, and mandates a
@@ -286,17 +291,42 @@ credential-failover (credFailover) attempts never add to the counter.
 
 ### 4.5 Frontend (`pkg/ui/frontend/src`)
 
-> **Phantom-file correction (rev. 3).** Rev. 2 cited `SettingsPage.tsx` —
-> that file does **not** exist (`ls pkg/ui/frontend/src/` shows `App.tsx`,
-> `components/`, `hooks/`, `utils/`, `index.css`, `main.tsx`, `types.ts` —
-> no `SettingsPage.tsx`). The Max-Retries UI is rendered by
-> `components/config/ProxySettings.tsx`. The earlier list
-> (`SettingsPage.tsx:128, :171`) is dropped; the real sites are enumerated
-> below.
+> **Frontend enumeration corrected (rev. 3).** Rev. 2 cited
+> `SettingsPage.tsx:128, :171` and the leader cited `:387, :405`. **Both
+> anchors are exact** — `SettingsPage.tsx` lives at
+> `pkg/ui/frontend/src/components/SettingsPage.tsx` (the rev. 3 "phantom-file
+> correction" blockquote was wrong: the r3 worker only ran
+> `ls pkg/ui/frontend/src/` top-level and missed the `components/` subdir).
+> The Max-Retries UI therefore spans **two** files that must be edited
+> together: `components/SettingsPage.tsx` owns the React state and the
+> prop/handler plumbing into `ProxySettings`, and
+> `components/config/ProxySettings.tsx` consumes those props and renders
+> the input. Removing only one file leaves the other with broken type
+> references and `npm run build` fails.
 
 - `types.ts`: drop `max_retries` from the `ultimate_model` config interface
   (line 60). **Keep** `max_retries?` in the retry-exhausted **event** payload
   interface (line 297 — it is an event field, not config).
+- `components/SettingsPage.tsx` (the parent state file — real, not
+  phantom) — remove every reference to `ultimateModelMaxRetries` and
+  `setUltimateModelMaxRetries`:
+  - **:90** — `useState` hook:
+    `const [ultimateModelMaxRetries, setUltimateModelMaxRetries] = useState(2);`
+    — delete the entire line.
+  - **:128** — config-sync effect setter:
+    `setUltimateModelMaxRetries(config.ultimate_model?.max_retries ?? 2);`
+    — delete the entire line (and drop the `// Ultimate model sync` comment
+    above it if no other synced fields remain in that block).
+  - **:171** — config save payload:
+    `max_retries: ultimateModelMaxRetries,` inside the `ultimate_model: { ... }`
+    block — delete the line.
+  - **:387** — prop pass into `ProxySettings`:
+    `ultimateModelMaxRetries={ultimateModelMaxRetries}` — delete the JSX
+    attribute (and the surrounding whitespace). The leader's `:387`
+    citation was exact.
+  - **:405** — handler binding:
+    `onUltimateModelMaxRetriesChange={setUltimateModelMaxRetries}` — delete
+    the JSX attribute. The leader's `:405` citation was exact.
 - `components/config/ProxySettings.tsx` — remove every reference to
   `ultimateModelMaxRetries` and `onUltimateModelMaxRetriesChange` (literal
   removal of only the previously-listed sites fails the TS compile; all
@@ -564,9 +594,13 @@ Updates to existing tests:
    `e2e_ultimate_internal_reasoning/...:200`,
    `e2e_fe_reasoning_observability/harness_test.go:278`); mock scripts
    (§4.6).
-8. Frontend: `types.ts`, `components/config/ProxySettings.tsx` (real file;
-   no `SettingsPage.tsx`), `components/EventLog.tsx` — verified via the §4.5
-   TS-compile grep gate.
+8. Frontend: `types.ts`, `components/SettingsPage.tsx` (state hook at :90,
+   config-sync setter at :128, payload write at :171, prop pass at :387,
+   handler binding at :405) AND `components/config/ProxySettings.tsx`
+   (:24, :42, :70, :86, :415, :420, :424–436), `components/EventLog.tsx`
+   — verified via the §4.5 TS-compile grep gate. **Both frontend files
+   must be edited together**; the SettingsPage sites are real, not phantom,
+   and the leader's `:387` / `:405` citations were exact.
 9. Docs: `ultimate-model-design.md`, `AGENTS.md`, `README.md`.
 10. **Final build-gate**: `grep -rn 'MarkFailed' pkg/ test/` must return
     zero matches (§4.6 HARD procedure); `go test ./pkg/ultimatemodel/...
