@@ -271,11 +271,11 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		InternalModel: "matrix-anthropic-internal-upstream",
 	})
 
-	// Env: fast deadlines + ultimate trigger-on-first-call (MaxRetries=0).
+	// Env: fast deadlines + ultimate model. X-Force-Ultimate-Model
+	// triggers on the first call under the fixed schedule.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 	if opts.ultimateModelID != "" {
 		t.Setenv("ULTIMATE_MODEL_ID", opts.ultimateModelID)
 	}

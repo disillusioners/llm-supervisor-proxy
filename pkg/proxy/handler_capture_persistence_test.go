@@ -129,13 +129,6 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_External(t *testing.T
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	// MaxRetries=0 ⇒ ForceTrigger triggers immediately on the
-	// first call (see ultimatemodel.shouldTriggerInternal: the
-	// `maxRetries <= 0` branch returns Triggered=true). The
-	// default MaxRetries=2 requires the same hash to be seen
-	// twice — that's the duplicate-detection production path
-	// which isn't the focus of this persistence test.
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -287,7 +280,6 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_ExternalStream(t *tes
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -486,9 +478,6 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	// MaxRetries=0 ⇒ ForceTrigger triggers immediately (mirrors the
-	// external-path test rationale).
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -638,7 +627,6 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	mgr, err := config.NewManager()
 	if err != nil {

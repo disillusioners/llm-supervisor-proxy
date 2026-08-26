@@ -49,7 +49,7 @@ TESTS_SKIPPED=0
 CURRENT_T=""
 
 # Hard timeout (inner alarm). Outer wrapper is `timeout 300`.
-HARD_TIMEOUT=90
+HARD_TIMEOUT=120
 
 cleanup_all() {
     local exit_code=$?
@@ -124,7 +124,6 @@ export RACE_RETRY_ENABLED="false"
 export LOOP_DETECTION_ENABLED="false"
 export ULTIMATE_MODEL_ID="mock-ultimate-reasoning-model"
 export ULTIMATE_MODEL_MAX_HASH="100"
-export ULTIMATE_MODEL_MAX_RETRIES="2"
 
 cd "$ROOT_DIR"
 go run cmd/main.go >/tmp/minimax_reasoning_proxy.log 2>&1 &
@@ -180,19 +179,19 @@ fi
 # Model A — internal user-facing model with minimax cred
 MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
-    -d "{\"id\":\"mock-minimax-reasoning-model\",\"name\":\"Mock MiniMax Reasoning\",\"enabled\":true,\"internal\":true,\"credential_id\":\"mock-minimax-reasoning-cred\",\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
+    -d "{\"id\":\"mock-minimax-reasoning-model\",\"name\":\"Mock MiniMax Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-minimax-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
 echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model A (minimax internal) created${NC}" || { echo -e "  ${RED}Model A failed: $MR${NC}"; exit 1; }
 
 # Model B — internal user-facing model with openai cred (T12)
 MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
-    -d "{\"id\":\"mock-openai-reasoning-model\",\"name\":\"Mock OpenAI Reasoning\",\"enabled\":true,\"internal\":true,\"credential_id\":\"mock-openai-reasoning-cred\",\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
+    -d "{\"id\":\"mock-openai-reasoning-model\",\"name\":\"Mock OpenAI Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-openai-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
 echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model B (openai internal) created${NC}" || { echo -e "  ${RED}Model B failed: $MR${NC}"; exit 1; }
 
 # Model U — ultimate model (MiniMax cred, matches ULTIMATE_MODEL_ID)
 MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
-    -d "{\"id\":\"mock-ultimate-reasoning-model\",\"name\":\"Mock Ultimate Reasoning\",\"enabled\":true,\"internal\":true,\"credential_id\":\"mock-minimax-reasoning-cred\",\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
+    -d "{\"id\":\"mock-ultimate-reasoning-model\",\"name\":\"Mock Ultimate Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-minimax-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
 echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model U (ultimate, minimax) created${NC}" || { echo -e "  ${RED}Model U failed: $MR${NC}"; exit 1; }
 
 # ============================================================================
@@ -762,15 +761,15 @@ assert_contains "$T2_RESP" '"total_tokens":18' "T14: total_tokens=18 passthrough
 # --- T15 ultimate path: duplicate-hash retry trigger ---
 CURRENT_T="T15"
 echo -e "\n${BLUE}=== T15 ultimate path: duplicate-hash retry → ultimate request IS translated ===${NC}"
-# Per template (test_mock_ultimate_model.sh Test 7): hash is created ONLY on
-# failure. So the 1st request fails (MODE-ERROR-500), 2nd request (same body)
-# triggers ultimate model.
-# We use the template's ULTIMATE_MODEL_MAX_RETRIES=2, so after 1 failure we
-# retry (via duplicate hash) — second call should reach the ultimate model.
-# To detect the ultimate request: it has the same body as the first. Both
+# Per template (test_mock_ultimate_model.sh Test 7): with the fixed
+# 5/10/20/30/40 schedule, the 1st-4th identical requests fail in the normal
+# flow (MODE-ERROR-500) and the 5th request (first schedule milestone)
+# triggers the ultimate model.
+# To detect the ultimate request: it has the same body as the primary. Both
 # proxy through the mock at 4005 (which is BOTH the primary and ultimate URL
 # in this setup). The captured request count for "MODE-ERROR-500" should be
-# >= 2 (one failed primary, one ultimate retry — or two ultimates).
+# >= 2 (four failed primaries plus one ultimate — the count only proves the
+# ultimate path was reached and translated).
 T15A=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -780,6 +779,19 @@ T15A=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" 
         \"messages\":[{\"role\":\"user\",\"content\":\"ultimate-t15-trigger MODE-ERROR-500\"}],
         \"stream\":false
     }" 2>&1)
+# Requests 2-4: identical bodies, still below the first milestone
+for _ in 2 3 4; do
+    curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "X-Proxy-Interleaved-Thinking: true" \
+        -d "{
+            \"model\":\"mock-minimax-reasoning-model\",
+            \"messages\":[{\"role\":\"user\",\"content\":\"ultimate-t15-trigger MODE-ERROR-500\"}],
+            \"stream\":false
+        }" >/dev/null 2>&1
+done
+# Request 5: first schedule milestone — ultimate model reached
 T15B=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -790,7 +802,7 @@ T15B=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" 
         \"stream\":false
     }" 2>&1)
 echo "  T15 first: $(truncate "$T15A" 120)"
-echo "  T15 second: $(truncate "$T15B" 120)"
+echo "  T15 fifth: $(truncate "$T15B" 120)"
 T15_COUNT=$(python3 - <<'PY' 2>/dev/null
 import json
 fp="/tmp/minimax_reasoning_capture_4005.jsonl"

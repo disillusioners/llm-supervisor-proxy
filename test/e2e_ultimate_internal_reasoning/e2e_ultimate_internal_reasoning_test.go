@@ -190,14 +190,12 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc) *testEnv {
 	}
 
 	// 4. Env: point ultimate model config at our registered ID.
-	// ULTIMATE_MODEL_MAX_RETRIES=0 → unlimited, so X-Force-Ultimate-Model
-	// triggers the ultimate path on the FIRST call (otherwise the default
-	// MaxRetries=2 would require a second duplicate call to trigger).
+	// X-Force-Ultimate-Model triggers the ultimate path on the FIRST
+	// call unconditionally under the fixed schedule.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("ULTIMATE_MODEL_ID", ultimateModelID)
 	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {

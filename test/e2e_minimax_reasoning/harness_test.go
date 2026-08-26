@@ -284,12 +284,12 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Credentials: models.TestRefs(openaiCredID),
 	})
 
-	// Env: ultimate model + fast deadlines. ULTIMATE_MODEL_MAX_RETRIES=0
-	// makes X-Force-Ultimate-Model trigger on the first call.
+	// Env: ultimate model + fast deadlines. X-Force-Ultimate-Model
+	// triggers unconditionally on the first call under the fixed
+	// schedule — no retry-limit env workaround needed anymore.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	ultimateID := opts.ultimateModelID
 	if ultimateID == "" {

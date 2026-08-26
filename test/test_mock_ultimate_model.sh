@@ -43,12 +43,17 @@ TIMER_PID=""
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Hard timeout: kill everything after 75 seconds
-HARD_TIMEOUT=75
+# Hard timeout: Test 8 now drives 41 sequential requests (schedule
+# verification), which needs more headroom than the old 4-request flow.
+HARD_TIMEOUT=150
 
 cleanup_all() {
     local exit_code=$?
     echo -e "\n${YELLOW}Cleaning up all processes...${NC}"
+    # Delete the dedicated mock test token (needs the proxy still alive)
+    if [ ! -z "$TEST_TOKEN_ID" ]; then
+        curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/tokens/$TEST_TOKEN_ID" >/dev/null 2>&1 || true
+    fi
     if [ ! -z "$TIMER_PID" ]; then
         kill $TIMER_PID 2>/dev/null || true
     fi
@@ -112,7 +117,7 @@ echo -e "${GREEN}Mock server started (PID: $MOCK_PID)${NC}"
 echo -e "\n${YELLOW}[2/17] Starting Proxy with Ultimate Model enabled (port $PROXY_PORT)...${NC}"
 echo -e "  ULTIMATE_MODEL_ID=mock-ultimate-model (internal model)"
 echo -e "  ULTIMATE_MODEL_MAX_HASH=100"
-echo -e "  ULTIMATE_MODEL_MAX_RETRIES=2"
+echo -e "  ULTIMATE_MODEL_MAX_RETRIES=N/A (schedule fixed at 5/10/20/30/40, 40-attempt cap)"
 echo -e "  LOOP_DETECTION_ENABLED=false"
 
 # Export config overrides for testing
@@ -124,7 +129,6 @@ export MAX_GENERATION_TIME="20s"
 export LOOP_DETECTION_ENABLED="false"
 export ULTIMATE_MODEL_ID="mock-ultimate-model"
 export ULTIMATE_MODEL_MAX_HASH="100"
-export ULTIMATE_MODEL_MAX_RETRIES="2"
 
 go run cmd/main.go &
 PROXY_PID=$!
@@ -149,6 +153,19 @@ sleep 1  # Wait for model deletions to complete before deleting credentials
 curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-ultimate-cred" 2>/dev/null || true
 curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/credentials/mock-openai-cred" 2>/dev/null || true
 sleep 1
+
+# Sweep stale mock-ultimate-test tokens from previously crashed runs
+STALE_TOKEN_IDS=$(curl -s "http://localhost:$PROXY_PORT/fe/api/tokens" | python3 -c '
+import json, sys
+try:
+    for t in json.load(sys.stdin):
+        if t.get("name") == "mock-ultimate-test":
+            print(t["id"])
+except Exception:
+    pass' 2>/dev/null)
+for tid in $STALE_TOKEN_IDS; do
+    curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/tokens/$tid" >/dev/null 2>&1 || true
+done
 
 # Create a credential for the mock server
 CREDENTIAL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/credentials" \
@@ -175,7 +192,7 @@ MODEL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
         \"name\": \"Mock Internal Model\",
         \"enabled\": true,
         \"internal\": true,
-        \"credential_id\": \"mock-ultimate-cred\",
+        \"credentials\": [{\"credential_id\": \"mock-ultimate-cred\", \"weight\": 1, \"position\": 0}],
         \"internal_model\": \"mock-model\",
         \"internal_base_url\": \"http://localhost:$MOCK_PORT/v1\"
     }")
@@ -195,7 +212,7 @@ ULTIMATE_MODEL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/m
         \"name\": \"Mock Ultimate Model\",
         \"enabled\": true,
         \"internal\": true,
-        \"credential_id\": \"mock-ultimate-cred\",
+        \"credentials\": [{\"credential_id\": \"mock-ultimate-cred\", \"weight\": 1, \"position\": 0}],
         \"internal_model\": \"mock-model\",
         \"internal_base_url\": \"http://localhost:$MOCK_PORT/v1\"
     }")
@@ -206,6 +223,26 @@ else
     echo -e "${RED}Failed to create ultimate model: $ULTIMATE_MODEL_RESPONSE${NC}"
     exit 1
 fi
+
+# Create a DEDICATED test token: ultimate permission but NO per-token
+# ultimate-model override, so the env-configured mock ultimate model is the
+# one executed. (A personal dev token with a per-token override pointing at
+# a real provider would otherwise send ultimate executions to a REAL
+# upstream — violating the mock-only constraint of this script.)
+TEST_TOKEN_ID=""
+TOKEN_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/tokens" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"name\": \"mock-ultimate-test\",
+        \"ultimate_model_enabled\": true
+    }")
+API_KEY=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
+TEST_TOKEN_ID=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)
+if [ -z "$API_KEY" ] || [ -z "$TEST_TOKEN_ID" ]; then
+    echo -e "${RED}Failed to create dedicated test token: $TOKEN_RESPONSE${NC}"
+    exit 1
+fi
+echo -e "${GREEN}Dedicated mock test token created (no per-token ultimate override)${NC}"
 
 # Test functions
 assert_contains() {
@@ -336,18 +373,34 @@ OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completi
         \"stream\": true
     }" 2>&1)
 
-assert_not_contains "$OUTPUT6" "X-LLMProxy-Ultimate-Model" "No ultimate model header"
+assert_not_contains "$OUTPUT6" "X-Llmproxy-Ultimate-Model" "No ultimate model header"
 assert_contains "$OUTPUT6" '"reasoning_content"' "Reasoning content field present"
 assert_contains "$OUTPUT6" "data: \[DONE\]" "DONE marker present"
 
-# Test 7: Ultimate model triggered after FAILURE
-# First request with error-500 content will FAIL, creating the hash
-# Second request will trigger ultimate model
-echo -e "\n${YELLOW}[10/17] Test 7: Ultimate Model Triggered After Failure${NC}"
-echo -e "Expected: First request fails (500), creating hash. Second request triggers ultimate model."
+# Test 7: Ultimate model triggered at schedule milestone 5 after failures
+# With the fixed schedule (5/10/20/30/40), the 5th total request with the
+# same hash triggers the ultimate model (requests 1-4 flow normally and
+# fail against the mock's error-500 trigger).
+echo -e "\n${YELLOW}[10/17] Test 7: Ultimate Model Triggered at Milestone 5${NC}"
+echo -e "Expected: Requests 1-4 fail normally (500). 5th request triggers ultimate model (which also fails)."
 
-# First: Request that will FAIL (mock-error-500 trigger)
-OUTPUT7A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+# Requests 1-4: identical bodies, all FAIL in the normal flow (no ultimate)
+for i in 1 2 3 4; do
+    OUTPUT7_PRE=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -d "{
+            \"model\": \"mock-internal-model\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"ultimate-trigger-test-mock-error-500\"}],
+            \"stream\": true
+        }" 2>&1)
+    assert_contains "$OUTPUT7_PRE" "error" "Request $i: Error returned (normal flow, no ultimate yet)"
+done
+
+# Request 5: first schedule milestone — ultimate model triggered.
+# Use -i to capture response headers: X-LLMProxy-Ultimate-Model must be set.
+# Ultimate model will also fail because content still has mock-error-500.
+OUTPUT7B=$(curl -N -s -i --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
     -d "{
@@ -355,63 +408,56 @@ OUTPUT7A=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/complet
         \"messages\": [{\"role\": \"user\", \"content\": \"ultimate-trigger-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT7A" "error" "First request: Error returned (hash created)"
+assert_contains "$OUTPUT7B" "X-Llmproxy-Ultimate-Model" "5th request: Ultimate model triggered"
+assert_contains "$OUTPUT7B" "error" "5th request: Ultimate model also fails"
 
-# Second: Same request should trigger ultimate model
-OUTPUT7B=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"ultimate-trigger-test-mock-error-500\"}],
-        \"stream\": true
-    }" 2>&1)
-# Ultimate model will also fail because content still has mock-error-500
-assert_contains "$OUTPUT7B" "error" "Second request: Ultimate model triggered (also fails)"
-
-# Test 8: Retry Limit Exhausted (with consecutive failures)
-# With MAX_RETRIES=2, after 2 consecutive failures, the 3rd attempt should return exhausted error.
-echo -e "\n${YELLOW}[11/17] Test 8: Retry Limit Exhausted (Consecutive Failures)${NC}"
-echo -e "Expected: After 2 consecutive failures, 3rd attempt returns retry_exhausted error"
+# Test 8: Attempt Limit Exhausted (fixed 5/10/20/30/40 schedule, 40-cap)
+# With the fixed schedule, the 41st total request with the same hash is
+# past the 40-attempt cap and returns the exhausted error.
+echo -e "\n${YELLOW}[11/17] Test 8: Attempt Limit Exhausted (41st request)${NC}"
+echo -e "Expected: Milestones 5/10/20/30/40 trigger ultimate (header set); 41st request returns retry_exhausted error"
 
 # curl --max-time 25 > MAX_GENERATION_TIME=20s (set at line 123) keeps curl alive long enough
 # to receive the proxy's error body rather than hanging up at the 5s default.
-# Test 8A: First request that will FAIL, creating the hash (mock returns 500 immediately)
-OUTPUT8A=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
-        \"stream\": true
-    }" 2>&1)
-assert_contains "$OUTPUT8A" "error" "First request: Error (hash created, retry 0)"
+# Test 8A: 40 identical requests. Each records one attempt for the hash.
+# Milestone requests (5/10/20/30/40) trigger the ultimate model (which also
+# fails — the mock always 500s this content) and MUST carry the
+# X-LLMProxy-Ultimate-Model response header; all other requests flow
+# normally and MUST NOT carry it.
+TMP_HDR=$(mktemp)
+T8_PRE_FAILED=$TESTS_FAILED
+for i in $(seq 1 40); do
+    curl -N -s --max-time 25 -D "$TMP_HDR" -o /dev/null \
+        "http://localhost:$PROXY_PORT/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -d "{
+            \"model\": \"mock-internal-model\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
+            \"stream\": true
+        }" 2>/dev/null
+    case $i in
+        5|10|20|30|40)
+            if ! grep -qi "X-LLMProxy-Ultimate-Model" "$TMP_HDR"; then
+                echo -e "${RED}✗${NC} Request $i (milestone): X-LLMProxy-Ultimate-Model header NOT found"
+                ((TESTS_FAILED++))
+            fi
+            ;;
+        *)
+            if grep -qi "X-LLMProxy-Ultimate-Model" "$TMP_HDR"; then
+                echo -e "${RED}✗${NC} Request $i (non-milestone): X-LLMProxy-Ultimate-Model header unexpectedly found"
+                ((TESTS_FAILED++))
+            fi
+            ;;
+    esac
+done
+rm -f "$TMP_HDR"
+if [ $TESTS_FAILED -eq $T8_PRE_FAILED ]; then
+    echo -e "  ${GREEN}✓${NC} Requests 1-40: ultimate header present exactly on milestones 5/10/20/30/40"
+fi
 
-# Test 8B: Trigger ultimate model (retry 1/2) - will FAIL
-OUTPUT8B=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
-        \"stream\": true
-    }" 2>&1)
-assert_contains "$OUTPUT8B" "error" "Second request (retry 1/2): Error from ultimate model"
-
-# Test 8C: Trigger ultimate model (retry 2/2) - will FAIL again
-# The proxy's MAX_GENERATION_TIME=20s allows the error body to be written well after curl's default;
-# --max-time 25 > MAX_GENERATION_TIME keeps curl alive long enough to receive the error body.
-OUTPUT8C=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "{
-        \"model\": \"mock-internal-model\",
-        \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
-        \"stream\": true
-    }" 2>&1)
-assert_contains "$OUTPUT8C" "error" "Third request (retry 2/2): Error from ultimate model"
-
-# Test 8D: Trigger ultimate model (retry 3 > 2) - should FAIL with RETRY EXHAUSTED error
+# Test 8D: the 41st request MUST return the un-retryable exhaustion error
+# carrying the new wire wording (total attempts against the fixed 40 cap).
 OUTPUT8D=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
@@ -420,8 +466,8 @@ OUTPUT8D=$(curl -N -s --max-time 25 "http://localhost:$PROXY_PORT/v1/chat/comple
         \"messages\": [{\"role\": \"user\", \"content\": \"retry-exhaust-test-mock-error-500\"}],
         \"stream\": true
     }" 2>&1)
-assert_contains "$OUTPUT8D" 'ultimate_model_retry_exhausted' "Fourth request (retry 3/2): retry_exhausted error"
-assert_contains "$OUTPUT8D" 'attempt 3 of 2 max' "Fourth request: shows attempt count"
+assert_contains "$OUTPUT8D" 'ultimate_model_retry_exhausted' "41st request: retry_exhausted error"
+assert_contains "$OUTPUT8D" 'attempt 41 of 40 max' "41st request: shows attempt count"
 
 # ============================================================================
 # Tool Call Buffer Tests (Internal Path)
@@ -544,9 +590,9 @@ if [ $TESTS_FAILED -eq 0 ]; then
     echo -e "  ${YELLOW}✓${NC} finish_reason: tool_calls"
     echo -e "  ${YELLOW}✓${NC} Streaming tool calls with index field"
     echo -e "  ${YELLOW}✓${NC} Reasoning content (DeepSeek-style)"
-    echo -e "  ${YELLOW}✓${NC} Hash only created on FAILURE (not success)"
-    echo -e "  ${YELLOW}✓${NC} Ultimate model triggered only after failed requests"
-    echo -e "  ${YELLOW}✓${NC} Retry limit enforced after consecutive failures (MAX_RETRIES=2)"
+    echo -e "  ${YELLOW}✓${NC} Attempts counted per request at entry (1-4 normal, milestone escalation)"
+    echo -e "  ${YELLOW}✓${NC} Ultimate model triggered on schedule milestones (5/10/20/30/40)"
+    echo -e "  ${YELLOW}✓${NC} Attempt limit enforced after 40 requests (41st exhausts, milestones 5/10/20/30/40)"
     echo -e "  ${YELLOW}✓${NC} Tool call buffering: malformed JSON repair"
     echo -e "  ${YELLOW}✓${NC} Tool call buffering: missing index field (Gemini-style)"
     echo -e "  ${YELLOW}✓${NC} Tool call buffering: interleaved tool calls"

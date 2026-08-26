@@ -156,7 +156,6 @@ func bootstrapToolCallUltimateTest(t *testing.T, upstreamURL, wantBody string, s
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")
 
 	mgr, err := config.NewManager()
 	if err != nil {
