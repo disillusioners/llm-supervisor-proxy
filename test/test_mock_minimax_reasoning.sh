@@ -82,10 +82,7 @@ trap hard_timeout_handler SIGALRM
 ( sleep "$HARD_TIMEOUT" && kill -ALRM $$ 2>/dev/null ) &
 TIMER_PID=$!
 
-if [ -f "$ROOT_DIR/.env-test" ]; then
-    export $(grep -v '^#' "$ROOT_DIR/.env-test" | xargs)
-fi
-API_KEY="${TEST_API_KEY:-test-key}"
+API_KEY=""
 
 echo -e "${BLUE}============================================${NC}"
 echo -e "${BLUE}  MiniMax reasoning_details Mock Harness    ${NC}"
@@ -203,12 +200,12 @@ echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model U (ultimate, minimax) cr
 
 # ----------------------------------------------------------------------------
 # Token isolation (review blocker B1):
-# This script shares the developer's persistent SQLite DB, so the inherited
-# TEST_API_KEY resolves to whatever personal token is on file there. If that
-# token carries a per-token ultimate_model_id override pointing at a real
-# provider, the ultimate-path branches (e.g. T15) would dial a REAL upstream
-# — violating the mock-only constraint that already caused one real
-# api.minimax.io call during development.
+# This script shares the developer's persistent SQLite DB, so any pre-existing
+# token on file there could carry a per-token ultimate_model_id override
+# pointing at a real provider. If that token is inherited into the script
+# environment, the ultimate-path branches (e.g. T15) would dial a REAL
+# upstream — violating the mock-only constraint that already caused one
+# real api.minimax.io call during development.
 #
 # Fix: mint a dedicated test token for this script. The mint payload below
 # carries `ultimate_model_enabled: true` but NO `ultimate_model_id` field, so
