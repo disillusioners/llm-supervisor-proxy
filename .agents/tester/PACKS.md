@@ -15,16 +15,16 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-25 | PASS (376 top + 370 sub, 7 intentional skips; @ 564b64e Phase-1 gate) |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-25 | PASS (~90+ funcs; @ 564b64e Phase-1 gate) |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-25 | PASS (87 + 4 PG-gated skips — was 77; +10 = new Phase-1 028/credentials tests; @ 564b64e) |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-25 | PASS (87 top-level funcs; @ 564b64e Phase-1 gate) |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-25 | PASS (17 funcs / 105 subtests; @ 564b64e Phase-1 gate) |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-25 | PASS (33/33 — count corrected from stale 31; @ 564b64e Phase-1 gate) |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-25 | PASS (48 top-level; @ 564b64e Phase-1 gate) |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-25 | PASS (23 funcs / ~118 subtests — count corrected from stale 14; @ 564b64e Phase-1 gate) |
-| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-25 | PASS (~60 funcs / 245 subtests; @ 564b64e Phase-1 gate) |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-25 | PASS (9 pkgs ~280 funcs incl. pkg/ui DTO shim P1-6 guard; @ 564b64e Phase-1 gate) |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-26 | PASS (376+370, 7 skips — byte-identical to baseline; @ 315f4e8 Phase-2 gate) |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-26 | PASS (142/142 identical; @ 315f4e8 Phase-2 gate) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-26 | PASS (99 + 4 PG-skips, +12 vs prior: 9 Phase-2 TestStoreEngine_* + Affinity_BranchTable + 3 late-P1; @ 315f4e8) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-26 | PASS (87 + 267 sub, identical; PEAK-DBG noise gone; @ 315f4e8 Phase-2 gate) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-26 | PASS (17/105 identical; @ 315f4e8 Phase-2 gate) |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-26 | PASS (33/33 identical; @ 315f4e8 Phase-2 gate) |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-26 | PASS (48/48 identical; @ 315f4e8 Phase-2 gate) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-26 | PASS (23 + 118 sub identical; @ 315f4e8 Phase-2 gate) |
+| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-26 | PASS (245/474 identical; @ 315f4e8 Phase-2 gate) |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-26 | PASS (258+90, 9 pkgs; @ 315f4e8 Phase-2 gate) |
 
 ## Mock Test Packs
 

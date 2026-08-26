@@ -1077,12 +1077,34 @@ const (
     // proceed with credential failover. Sub-cases (Round 3c — C2):
     //   (a) Weighted-random among non-cooling (renormalized) picked a
     //       fresh healthy credential (the typical happy path).
-    //   (b) B2 no-op (current binding already points at a credential
-    //       OTHER than `excludedCredID`, because a concurrent same-
-    //       conversation request already rebinded away from it) →
-    //       return `(currentBinding.credentialID, ReselectHealthy)`.
-    //       The unchanged binding is the rebind the concurrent
-    //       request already committed; the caller continues with it.
+    //   (b) B2 no-op — Round 3b + Round 3c — C2, AMENDED Round 3g — Phase-2 Review Rulings
+    //       (cooling-guard): current binding already points at a credential
+    //       OTHER than `excludedCredID` (because a concurrent same-
+    //       conversation request already rebinded away from it). Two
+    //       Round 3g sub-cases:
+    //         (b.1) PURE no-op — current binding's credential is HEALTHY
+    //               (not cooling). Return `(currentBinding.credentialID,
+    //               ReselectHealthy)` unchanged. (Round 3b + Round 3c —
+    //               C2; existing behavior, preserved verbatim.)
+    //         (b.2) COOLING-GUARD — current binding's credential is
+    //               INDEPENDENTLY COOLING (marked by ANOTHER
+    //               conversation's 429 — a different code path set the
+    //               cooldown). FALL THROUGH to a healthy reselect +
+    //               rebind, returning `ReselectHealthy` (NOT
+    //               `ReselectSoonestExpiry` — by construction at least
+    //               one non-cooling credential exists, because the
+    //               excluded credential was the one that 429'd on THIS
+    //               conversation; if EVERY credential were cooling the
+    //               path would already be the all-cooling
+    //               `ReselectSoonestExpiry` branch above). Returning a
+    //               KNOWN-rate-limited credential when healthy
+    //               alternatives exist contradicts the HA intent (the
+    //               same reasoning that justified the affinity break
+    //               itself in Round 3b). The current binding is
+    //               REPLACED with the freshly-picked healthy credential;
+    //               `boundAt` refreshes per #10 sliding-TTL semantics.
+    //       In both sub-cases the caller MUST proceed with credential
+    //       failover (NOT fall through to model-fallback).
     //       NOT an error, NOT ReselectNone.
     //   (c) Empty conversationKey (Round 1 W-2 semantics — no binding
     //       stored) → fresh NON-COOLING weighted-random (renormalized)
@@ -1135,22 +1157,55 @@ const (
 // terminal error incorrectly.
 //
 // **Round 3b — B2 PRECONDITION (concurrent double-429 idempotency;
-// Round 3c — C2 returns ReselectHealthy, NOT ReselectNone)**: the
+// Round 3c — C2 returns ReselectHealthy, NOT ReselectNone; AMENDED
+// Round 3g — Phase-2 Review Rulings — cooling-guard sub-case)**: the
 // rebind happens ONLY if
 // `bindings[convKey].credentialID == excludedCredID`. If the current
 // binding already points at a different credential (because a
 // concurrent request on the same conversation already rebinded away
-// from `excludedCredID`), this call is a NO-OP and returns
-// `(currentCredentialID, ReselectHealthy)` — the unchanged binding is
-// returned as `credentialID` with mode `ReselectHealthy` (Round 3c —
-// C2: was `ReselectNone` in Round 3b; superseded in-place; the prior
-// reading is preserved as audit trail in the changelog). This
-// prevents the binding-flap that two concurrent double-429 requests
-// would otherwise cause (request 1 rebinds A→B mid-attempt on B while
-// request 2 re-marks A cooling and re-selects C). The unchanged
-// binding is healthy — the caller proceeds with credential failover
-// on the unchanged binding (R5 reviewer-5 invariant: do not
-// model-switch while a healthy credential exists).
+// from `excludedCredID`), the B2 no-op path branches into TWO
+// Round-3g sub-cases:
+//
+//   (b.1) PURE no-op (Round 3b + Round 3c — C2; existing behavior,
+//         preserved verbatim): the current binding's credential is
+//         HEALTHY (not cooling). Return
+//         `(currentCredentialID, ReselectHealthy)` unchanged. The
+//         unchanged binding is the rebind the concurrent request
+//         already committed; the caller proceeds with credential
+//         failover on it. NOT an error, NOT ReselectNone.
+//
+//   (b.2) COOLING-GUARD (NEW Round 3g): the current binding's
+//         credential is INDEPENDENTLY COOLING — marked by ANOTHER
+//         conversation's 429 (a different code path set the cooldown;
+//         this ExcludeAndReselect call is for a separate conversation
+//         that just got a 429 on a third credential). FALL THROUGH to
+//         a healthy reselect + rebind. The engine picks a non-cooling
+//         credential via weighted random (renormalized) and REBINDS
+//         the binding; returns `(freshHealthyCredID, ReselectHealthy)`
+//         (NOT `ReselectSoonestExpiry` — by construction at least one
+//         non-cooling credential exists: the excluded credential was
+//         the one that 429'd on THIS conversation; if EVERY credential
+//         were cooling the path would be the all-cooling
+//         `ReselectSoonestExpiry` branch at the top of the function).
+//         Rationale: returning a credential KNOWN to be rate-limited
+//         (cooling) when healthy alternatives exist contradicts the
+//         HA intent (R3's core requirement) — the same reasoning
+//         that justified the affinity break itself. `boundAt` is
+//         refreshed for the new credential per #10 sliding-TTL
+//         semantics; `Failovers` ticks once per this fall-through
+//         (it is a non-no-op successful rebind that returned
+//         `ReselectHealthy`, per the Round 3f pinned definition).
+//
+// Both sub-cases prevent the binding-flap that two concurrent
+// double-429 requests would otherwise cause (request 1 rebinds A→B
+// mid-attempt on B while request 2 re-marks A cooling and re-selects
+// C). In (b.1) the current binding is healthy — the caller proceeds
+// with credential failover on the unchanged binding (R5 reviewer-5
+// invariant: do not model-switch while a healthy credential exists).
+// In (b.2) the current binding is cooling but the caller also
+// proceeds with credential failover — on the freshly-picked healthy
+// credential (do not model-switch while ANY healthy credential
+// exists).
 //
 // Locking: outer Engine.mu Lock → per-model write Lock (one at a
 // time). Reuses the E-1 discipline from Round 1. Single map write
@@ -1185,10 +1240,25 @@ const (
 //   - Single-credential model: returns `("", ReselectNone)` (no
 //     other credential to fail over to). Caller falls through to
 //     model-fallback unchanged.
-//   - B2 precondition: only rebind if current binding matches
-//     `excludedCredID`; otherwise no-op returning
-//     `(currentCredentialID, ReselectHealthy)` — the current
-//     unchanged binding.
+//   - B2 precondition (Round 3b + Round 3c — C2, AMENDED Round 3g
+//     — Phase-2 Review Rulings — cooling-guard): only rebind if
+//     current binding matches `excludedCredID`. Otherwise branch on
+//     `currentBinding.credentialID`'s cooling state:
+//       (b.1) PURE no-op — current binding's credential HEALTHY →
+//             return `(currentCredentialID, ReselectHealthy)`
+//             unchanged (Round 3b + Round 3c — C2; existing
+//             behavior, preserved verbatim).
+//       (b.2) COOLING-GUARD — current binding's credential
+//             INDEPENDENTLY COOLING (marked by ANOTHER
+//             conversation's 429) → FALL THROUGH to a healthy
+//             reselect + rebind, returning `(freshHealthyCredID,
+//             ReselectHealthy)` (NOT `ReselectSoonestExpiry` — by
+//             construction at least one non-cooling credential
+//             exists). Rationale: returning a known-rate-limited
+//             credential when healthy alternatives exist
+//             contradicts the HA intent (R3's core requirement) —
+//             the same reasoning that justified the affinity break
+//             itself.
 //   - Genuinely no candidate (0 valid credentials — e.g., model
 //     was reconfigured to zero credentials between lookup and
 //     reselect, or all credentials are excluded via out-of-band):
@@ -1200,6 +1270,18 @@ const (
 //     stale `EngineStats.Cooldowns` gauge counts). See
 //     technical-analysis.md §Invalidation Semantics for the table
 //     update.
+//   - Round 3f note (2026-08-25 — Phase-2 implementation
+//     feedback): the implementation's outer-lock phase runs under
+//     `Engine.mu` **RLock** (the "Locking:" paragraph above specced
+//     an outer `Lock`) — benign: the binding lookup (the B2
+//     current-credential precondition read) and every binding
+//     mutation live INSIDE the per-model write-lock critical
+//     section (engine.go: "(2) B2 precondition — re-read the
+//     binding under the write lock"), so the RLock-phase reads
+//     (modelState lookup + credential count) only gate the
+//     no-write fast paths (nil-state / single-credential early
+//     returns); correctness is established under the write lock
+//     (documented in code).
 func (e *Engine) ExcludeAndReselect(
     modelID, conversationKey, excludedCredID string,
     retryAfter time.Duration,
@@ -1239,6 +1321,15 @@ type engineState struct {
 
 ```go
 // pkg/credentiallb/engine.go (EngineStats extension — Round 3b — gauge semantics for Cooldowns)
+//
+// **Round 3h (2026-08-25) — RESOLVED:** `Misses` ticks on every path
+// that performs a selection — healthy pick, empty-key fresh pick, and
+// SoonestExpiry pick; NO tick on the `ErrNoCredentials` terminal (no
+// pick occurred). Developer-landed at `315f4e8` (engine.go:322
+// SoonestExpiry tick, :331 healthy/empty-key tick, :221/:230
+// ErrNoCredentials before any pick); reviewer-walked all 10 return
+// paths. Justification: 'lookups that selected a fresh credential' —
+// a Miss is a selection event, not merely a binding miss.
 
 // Existing EngineStats (Round 1 — pinned in #5):
 //   type EngineStats struct {
@@ -1254,12 +1345,26 @@ type engineState struct {
 // (current map size), NOT a monotonic counter.
 type EngineStats struct {
     Hits      uint64  // existing — in-TTL lookup hits
-    Misses    uint64  // existing — lookups that selected a fresh credential
+    Misses    uint64  // existing — RESOLVED Round 3h: ticks on every selection path (healthy, empty-key, SoonestExpiry); not on ErrNoCredentials
     Bindings  uint64  // existing — current binding-map size
     Failovers uint64  // NEW (R3-8) — monotonic counter; total credential failovers (ExcludeAndReselect calls that returned mode=ReselectHealthy)
     Cooldowns uint64  // NEW (R3-8, Round 3b — GAUGE) — current cooldown-map size across all models; recomputed at each janitor sweep or read live on Stats(). NOT a monotonic counter.
 }
 ```
+
+- **Round 3f (2026-08-25) — Phase-2 implementation feedback:** `Failovers` ticks once per healed
+  conversation for STORE-INITIATED heals as well — when the store layer calls
+  `ExcludeAndReselect` on credential deletion (dangling-ref heal, fired by the
+  `ResolveInternalConfigWithAffinity` seam when `GetCredential` returns nil mid-flight), each
+  conversation re-bound by that heal increments `Failovers` exactly once. Combined with the
+  counter definition: `Failovers` counts every NON-NO-OP `ExcludeAndReselect` call that returned
+  `mode=ReselectHealthy` — whether invoked by the proxy failover path (429 rebind) or the store
+  heal path (credential deletion); B2 no-op returns carry `ReselectHealthy` but never tick, and
+  `ReselectSoonestExpiry` picks never tick. Empty-key calls: `GetOrSelect` empty-key picks never
+  touch `Failovers` (no `ExcludeAndReselect` involved), while an empty-key `ExcludeAndReselect`
+  healthy pick DOES tick — the tick precedes the empty-key no-binding-write branch (engine.go
+  pins "actual rebind or empty-key healthy pick"); no binding is involved, but the pick is still
+  a non-no-op failover.
 
 ```go
 // pkg/credentiallb/engine.go (weightedSelector modification —
@@ -1321,6 +1426,13 @@ const (
 //   4. (eventually) caller spawn completes; if 429 again, repeat
 //      from step 1 with the new "from" credential
 ```
+
+**Event contract pin (AMENDED Round 3g — Phase-2 Review Rulings — reviewer requested planner confirmation before Phase 3 consumes the constant).** The canonical Phase-3 contract is the additive constant at `pkg/credentiallb/events.go:18-23`:
+
+- **Name:** `EventCredentialFailover = "model_credential_failover"`
+- **Publisher:** the CALLER (proxy handlers — race coordinator, ultimate-internal hook, `/v1/messages` internal hook, anthropic-passthrough internal hook) — NOT the engine; the engine stays decoupled from `events.Bus`.
+- **Trigger:** AFTER a non-no-op `ExcludeAndReselect` rebind succeeds (i.e., the engine returned `(newCredID, ReselectHealthy)` with `newCredID != excludedCredID`). Pure B2 no-ops (current binding's credential healthy AND ≠ excluded) DO NOT publish — the binding did not move and the failover did not happen. B2 cooling-guard fall-throughs DO publish (a fresh healthy credential was rebound — `Failovers` ticks — so a `model_credential_failover` event is the correct telemetry). SoonestExpiry picks DO publish (a credential was selected for the single-attempt-then-fall-through — the caller is still in the failover path and operators need the visibility). Empty-key `ReselectNone` fall-throughs DO NOT publish (no credential returned; the caller routes to model-fallback).
+- **Payload keys (frozen):** exactly `{model_id, from_credential_id, to_credential_id, reason, retry_after_ms, cooldown_ms, attempt_index}` — verbatim keys, no renames, no additions. Phase 3 MUST consume the constant (NOT a string literal) and MUST NOT alter the payload key set without a future amendment round.
 
 **Janitor interaction (R3-4, Round 3b — gauge semantics).** The
 existing janitor (5-minute sweep, outer RLock + per-model write Lock
@@ -2949,3 +3061,33 @@ separate accounting + OR-clause, which keeps the existing `:338`
 | Round | Source | Title | Sections amended in this file |
 |-------|--------|-------|--------------------------------|
 | **Round 3e** | Phase-1 Review W3 | SQLite 028 up-path backfill switched from raw string-concat to escape-safe JSON1 form (json_array(json_object(...))); PG unchanged; rationale: escape-safety + dialect parity | Migration SQL 028 (SQLite block) |
+
+---
+
+## Round 3f — Phase-2 implementation feedback (2026-08-25)
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3f** | Phase-2 implementation feedback | Failovers pinned to tick once per healed conversation for store-initiated heals (both failover-path and heal-path readings explicit; empty-key reading pinned to the code — GetOrSelect empty-key picks never touch Failovers, empty-key ExcludeAndReselect healthy picks DO tick, per the engine.go "actual rebind or empty-key healthy pick" comment; B2 no-ops and SoonestExpiry picks never tick); ExcludeAndReselect outer-lock phase pinned to RLock — benign: the B2 precondition read and every binding mutation live inside the per-model write-lock critical section, so correctness is established under the write lock | EngineStats Failovers comment (~:1259) + engine-additions invariants block |
+
+---
+
+## Round 3g — Phase-2 Review Rulings (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3g):** leader-ruled micro plan-sync from the
+> Phase-2 external review. Three items, surgical append-only. No
+> restructuring; no new task numbering; existing R3/Round-3b/Round-3c
+> semantics UNCHANGED where not explicitly superseded. Per-item diff is
+> in the row below; existing audit-trail blocks preserved verbatim.
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3g** | Phase-2 Review Rulings | B2 no-op cooling-guard amendment (cooling current binding → healthy reselect+rebind, ReselectHealthy; pure no-op unchanged); EventCredentialFailover pinned as canonical Phase-3 contract (events.go:18-23, payload frozen); Misses TODO marker left for next sync | B2/C2 invariants; events contract; EngineStats area |
+
+## Round 3h — Misses resolution (2026-08-25)
+
+> **AMENDED 2026-08-25 (Round 3h):** leader-ruled micro-amendment closing the Round-3g Misses TODO. The two Round-3g TODO markers (block comment + inline field marker) are replaced with the pinned `Misses` semantics below. Trail preserved (Round 3g row above kept verbatim).
+
+| Round | Source | Title | Sections amended in this file |
+|-------|--------|-------|--------------------------------|
+| **Round 3h** | Misses resolution | Round-3g TODO markers replaced with pinned semantics: Misses ticks on every selection path (healthy, empty-key, SoonestExpiry); no tick on ErrNoCredentials (no pick); developer-landed @ 315f4e8 (engine.go:322/:331 tick, :221/:230 no-tick), 10 return paths reviewer-walked | EngineStats Misses definition + TODO sites |
