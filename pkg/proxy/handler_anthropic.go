@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -193,6 +195,42 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		isAnthropicUpstream: isAnthropicUpstream,
 	}
 
+	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
+	//
+	// Cache firstUserMessage here (cheap canonical walk over the
+	// Anthropic-shape messages: role=="user" → first content-bearing
+	// message). The Anthropic wire-shape content is string OR
+	// []ContentPart (multimodal); ExtractFirstUserMessage expects the
+	// OpenAI-shape messages (role/user/content map) — for Anthropic, the
+	// helper still works because the role + content fields line up after
+	// our pre-processing. For multimodals we canonicalize the JSON
+	// like the OpenAI path does.
+	if resolvedModel != nil && resolvedModel.Internal {
+		arc.firstUserMessage = credentiallb.ExtractFirstUserMessage(arcMessagesAsInterfaces(anthropicReq.Messages))
+		// POST-AUTH wiring (Task 16 / A-1): the Anthropic path has no
+		// per-token auth today (handler does not call
+		// h.authenticate on the Anthropic route), so tokenID stays "".
+		// That matches the A-1 graceful degradation spec — unsalted key.
+		//
+		// W-2 + C2 (mirrors the chat-completions post-auth site): when no
+		// first user message was extracted the key stays "" — the engine
+		// picks FRESH per request and stores NO binding; the
+		// ""-as-own-bucket reading is REMOVED per W-2. The caller owns
+		// this gate (ComputeConversationKey never returns "" by itself).
+		if arc.firstUserMessage == "" {
+			arc.conversationKey = ""
+			log.Printf("[LB] (anthropic) empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
+				resolvedModel.ID)
+		} else {
+			arc.conversationKey = credentiallb.ComputeConversationKey(resolvedModel.ID, "", arc.firstUserMessage)
+			log.Printf("[LB] (anthropic) computed conversationKey hash=%s modelID=%s tokenID=<empty> len(firstUserMessage)=%d",
+				arc.conversationKey[:8],
+				resolvedModel.ID,
+				len(arc.firstUserMessage),
+			)
+		}
+	}
+
 	// Outer loop: iterate through models (original + fallbacks)
 	for modelIndex, currentModel := range arc.modelList {
 		if modelIndex > 0 {
@@ -295,16 +333,28 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 
 	var success bool
 	if isInternal {
-		// Check if the internal model's credential is an Anthropic provider
-		// If so, use passthrough mode instead of the internal OpenAI handler
-		var credProvider string
+		// Phase 3 / Task 22 (Round 3b leader ruling (i)) — the
+		// anthropic-passthrough internal branch now selects its
+		// credential through the AFFINITY SEAM (the pre-Phase-3 read
+		// was the single-credential PrimaryCredentialID()). This is the
+		// second ResolveInternalConfigWithAffinity call site in this
+		// file (the first is the InternalHandler construction inside
+		// doAnthropicInternalRequest) — the branch participates in
+		// conversation-sticky LB like the other three LB'd paths.
+		//
+		// The resolved credential's PROVIDER decides passthrough vs the
+		// internal OpenAI handler (anthropic-provider credential ⇒ raw
+		// passthrough via doAnthropicRequest; transport UNCHANGED per
+		// the dispatch ruling — only the credential read + the
+		// rate-limit hook are new).
+		resolved, resolvedOK := arc.conf.ModelsConfig.ResolveInternalConfigWithAffinity(modelConfig.ID, arc.conversationKey)
 		var cred *models.CredentialConfig
-		primaryCredentialID := modelConfig.PrimaryCredentialID()
-		if primaryCredentialID != "" {
-			cred = arc.conf.ModelsConfig.GetCredential(primaryCredentialID)
-			if cred != nil {
-				credProvider = strings.ToLower(cred.Provider)
-			}
+		if resolvedOK {
+			cred = arc.conf.ModelsConfig.GetCredential(resolved.CredentialID)
+		}
+		credProvider := ""
+		if cred != nil {
+			credProvider = strings.ToLower(cred.Provider)
 		}
 		if credProvider == "anthropic" {
 			// Anthropic provider — use passthrough mode
@@ -345,6 +395,76 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				arc.credentialAPIKey = credAPIKey
 			}
 			success = h.doAnthropicRequest(w, arc)
+
+			// Phase 3 / Task 22 (Round 3b review #4 + Round 3c — W1):
+			// rate-limit failover hook on the anthropic-passthrough branch.
+			// The branch produces NO *ProviderError; classify via
+			// arc.lastStatusCode == 429 OR body `type` substring
+			// `rate_limit` (isAnthropicRateLimit). Pre-write guard:
+			// !arc.headersSent (no Anthropic bytes written — the
+			// first-byte marker is handler_anthropic.go:648-654, NOT
+			// adapter_anthropic.go SetStreamHeaders). Multi-cred +
+			// engine present; single retry per mode (R3-5 budget is
+			// structurally bounded — one retry ≤ len(credentials)−1).
+			if !success &&
+				!arc.headersSent &&
+				isAnthropicRateLimit(arc) &&
+				h.credEngine != nil &&
+				resolvedOK &&
+				len(modelConfig.Credentials) > 1 {
+				reselected, mode := h.credEngine.ExcludeAndReselect(
+					modelConfig.ID,
+					arc.conversationKey,
+					resolved.CredentialID,
+					arc.retryAfter,
+				)
+				switch mode {
+				case credentiallb.ReselectNone:
+					// C2 narrowing: no credential available — fall
+					// through to the model loop's failure handling.
+					log.Printf("[LB-FAILOVER] anthropic-passthrough: model=%s no reselectable credential (mode=%v); falling through", modelConfig.ID, mode)
+				default:
+					// ReselectHealthy (incl. B2 no-op + empty-key fresh
+					// pick per C2) OR ReselectSoonestExpiry (single
+					// attempt — this hook fires once per attempt, so
+					// the single-shot property is structural).
+					if mode == credentiallb.ReselectSoonestExpiry {
+						log.Printf("[WARN] [LB-FAILOVER] anthropic-passthrough: model=%s all credentials cooling; single attempt with soonest-expiring cred=%s", modelConfig.ID, reselected)
+					}
+					if reselected == "" || reselected == resolved.CredentialID {
+						break // nothing new to try — propagate
+					}
+					newCred := arc.conf.ModelsConfig.GetCredential(reselected)
+					if newCred == nil {
+						break // deleted mid-flight — propagate
+					}
+					newKey := newCred.ResolveAPIKey()
+					if newKey == "" {
+						break
+					}
+					log.Printf("[LB-FAILOVER] anthropic-passthrough: model=%s rate-limited on cred=%s; failing over to cred=%s", modelConfig.ID, resolved.CredentialID, reselected)
+					// Task 20 — model_credential_failover event.
+					h.publishAnthropicCredentialFailover(modelConfig.ID, resolved.CredentialID, reselected, arc.retryAfter)
+					// Re-apply with the reselected credential: API key
+					// AND the new credential's base URL (a failover
+					// credential may live on a different deployment).
+					retryURL := modelConfig.InternalBaseURL
+					if retryURL == "" {
+						retryURL = newCred.BaseURL
+					}
+					if retryURL != "" {
+						rc := strings.TrimSuffix(retryURL, "/v1")
+						rc = strings.TrimSuffix(rc, "/")
+						arc.targetURL = rc + "/v1/messages"
+					}
+					arc.credentialAPIKey = newKey
+					// Reset pre-write state for the retry.
+					arc.lastError = nil
+					arc.lastStatusCode = 0
+					arc.retryAfter = 0
+					success = h.doAnthropicRequest(w, arc)
+				}
+			}
 		} else {
 			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
 		}
@@ -422,6 +542,12 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 		debugLog("Body: %s", string(bodyBytes))
 		arc.lastError = bodyBytes
 		arc.lastStatusCode = resp.StatusCode
+		// Phase 3 / Task 22 (Round 3c — W1): the anthropic-passthrough
+		// branch produces no *ProviderError, so Retry-After cannot be
+		// recovered from the provider-error struct. Capture it here at
+		// the existing lastStatusCode set-site so the rate-limit hook
+		// can use it as the cooldown seed without re-parsing the body.
+		captureRetryAfterHeader(arc, resp)
 		return false
 	}
 
@@ -477,6 +603,12 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
+	// Phase 3 / Task 22 — install the engine + bus so the
+	// InternalHandler seam owns the /v1/messages rate-limit failover
+	// hook (ExcludeAndReselect + single retry) for this request. The
+	// handler is constructed fresh above, so per-request state (sink,
+	// failover hooks) cannot leak across requests.
+	internalHandler.SetCredentialFailover(h.credEngine, h.bus)
 	// The handler is created fresh above, so it has no prior sink and this
 	// call can never double-set; treat an error as a programming bug and
 	// abort the internal attempt rather than persisting missing thinking.
@@ -486,7 +618,7 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		arc.lastStatusCode = http.StatusBadGateway
 		return false
 	}
-	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream)
+	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream, arc.conversationKey)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
 		arc.lastError = []byte(err.Error())
@@ -758,6 +890,24 @@ type anthropicRequestContext struct {
 	lastStatusCode      int
 	isAnthropicUpstream bool   // true when upstream speaks Anthropic protocol
 	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
+
+	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
+	//
+	// firstUserMessage is cached at attempt-anthropic-model time (cheap
+	// walk over Anthropic-shape messages). conversationKey is computed
+	// POST-AUTH on the Anthropic path equivalent of handler.go:401+
+	// (HandleAnthropicMessages after auth populates authToken / tokenID),
+	// then threaded through NewInternalHandler.HandleRequest so
+	// /v1/messages internal resolution uses ResolveInternalConfigWithAffinity.
+	//
+	// Retry-After (Round 3c — W1): the anthropic-passthrough branch
+	// produces NO *ProviderError; doAnthropicRequest discards
+	// resp.Header. captured at the existing arc.lastStatusCode set-site
+	// (handler_anthropic.go:423-424) so the Task 22 W1 classifier +
+	// ExcludeAndReselect retry can read it.
+	firstUserMessage string
+	conversationKey  string
+	retryAfter       time.Duration
 
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
@@ -1170,6 +1320,133 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 		})
 	}
 	return result
+}
+
+// publishAnthropicCredentialFailover (Phase 3 / Task 20 / R3-8) emits
+// the model_credential_failover event from the anthropic-passthrough
+// branch with the canonical payload shape. cooldown_ms mirrors the
+// engine's effective seed (retryAfter when present, else the 60s
+// default); attempt_index is 1 (single retry per hook fire).
+func (h *Handler) publishAnthropicCredentialFailover(modelID, fromID, toID string, retryAfter time.Duration) {
+	cooldown := credentiallb.DefaultCooldown
+	if retryAfter > 0 {
+		cooldown = retryAfter
+	}
+	h.publishEvent(credentiallb.EventCredentialFailover, map[string]interface{}{
+		"model_id":           modelID,
+		"from_credential_id": fromID,
+		"to_credential_id":   toID,
+		"reason":             "rate_limit",
+		"retry_after_ms":     retryAfter.Milliseconds(),
+		"cooldown_ms":        cooldown.Milliseconds(),
+		"attempt_index":      1,
+	})
+}
+
+// arcMessagesAsInterfaces (Phase 3 / Task 16) converts Anthropic-shape
+// messages to the OpenAI-shape []interface{} that
+// credentiallb.ExtractFirstUserMessage walks. The conversion is
+// minimal: each Anthropic message becomes a {"role": "...", "content": ...}
+// map. String content is preserved; []ContentBlock / multimodal
+// content is wrapped as []interface{} for the canonical-JSON path.
+func arcMessagesAsInterfaces(messages []translator.AnthropicMessage) []interface{} {
+	out := make([]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		m := map[string]interface{}{
+			"role": msg.Role,
+		}
+		switch c := msg.Content.(type) {
+		case string:
+			m["content"] = c
+		case []interface{}:
+			// Already []interface{} — pass through.
+			m["content"] = c
+		case []translator.ContentBlock:
+			blocks := make([]interface{}, 0, len(c))
+			for _, b := range c {
+				blocks = append(blocks, map[string]interface{}{
+					"type": b.Type,
+					"text": b.Text,
+				})
+			}
+			m["content"] = blocks
+		default:
+			m["content"] = ""
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// captureRetryAfterHeader (Phase 3 / Task 22 — Round 3c — W1): the
+// anthropic-passthrough branch produces no *ProviderError; doAnthropicRequest
+// discards resp.Header. captureRetryAfterHeader is called at the
+// existing arc.lastStatusCode set-site (handler_anthropic.go:423-424)
+// to recover the Retry-After duration into arc.retryAfter so the
+// downstream rate-limit classifier (lastStatusCode==429) can pair
+// the retry budget + cooldown seeding without re-parsing the response.
+func captureRetryAfterHeader(arc *anthropicRequestContext, resp *http.Response) {
+	h := resp.Header.Get("Retry-After")
+	if h == "" {
+		arc.retryAfter = 0
+		return
+	}
+	if secs, err := strconv.Atoi(h); err == nil {
+		arc.retryAfter = time.Duration(secs) * time.Second
+		return
+	}
+	if t, err := time.Parse(time.RFC1123, h); err == nil {
+		arc.retryAfter = time.Until(t)
+		if arc.retryAfter < 0 {
+			arc.retryAfter = 0
+		}
+		return
+	}
+	arc.retryAfter = 0
+}
+
+// isAnthropicRateLimit (Phase 3 / Task 22 — Round 3c — W1) classifies
+// the anthropic-passthrough branch's stored error as a rate-limit
+// condition: arc.lastStatusCode == 429 OR the body `type` field
+// (extracted from arc.lastError when set) contains the substring
+// "rate_limit". HTTP-200-with-embedded-rate-limit is OUT OF SCOPE
+// per R3-1 vocabulary pinning.
+func isAnthropicRateLimit(arc *anthropicRequestContext) bool {
+	if arc == nil {
+		return false
+	}
+	if arc.lastStatusCode == 429 {
+		return true
+	}
+	if len(arc.lastError) == 0 {
+		return false
+	}
+	var body struct {
+		Type string `json:"type"`
+		Code string `json:"code"`
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(arc.lastError, &body); err != nil {
+		return false
+	}
+	if strings.Contains(strings.ToLower(body.Type), "rate_limit") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(body.Error.Type), "rate_limit") {
+		return true
+	}
+	switch body.Code {
+	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
+		return true
+	}
+	switch body.Error.Code {
+	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
+		return true
+	}
+	return false
 }
 
 

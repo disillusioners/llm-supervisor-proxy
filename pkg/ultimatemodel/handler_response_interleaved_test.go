@@ -46,7 +46,7 @@ func TestExecuteExternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 		Enabled:  true,
 		Internal: false,
 	})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -122,7 +122,7 @@ func TestStreamResponse_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -186,7 +186,7 @@ func TestExecuteInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("openai-model", "openai", "test-key", "", "gpt-4o-mini")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -200,7 +200,7 @@ func TestExecuteInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testi
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestExecuteInternal_StreamResponse_NegativeCase_NoThinkingEvents_NonMiniMax
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("openai-model", "openai", "test-key", "", "gpt-4o-mini")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -265,7 +265,7 @@ func TestExecuteInternal_StreamResponse_NegativeCase_NoThinkingEvents_NonMiniMax
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), true, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), true, true, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestExecuteExternal_Response_PositiveCase_MiniMaxAppliesTranslator(t *testi
 		Enabled:  true,
 		Internal: false,
 	})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -350,7 +350,7 @@ func TestStreamResponse_PositiveCase_MiniMaxEmitsReasoning(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -399,7 +399,7 @@ func TestStreamResponse_PositiveCase_FramingPreserved(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -476,7 +476,7 @@ func TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *tes
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -536,7 +536,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *tes
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	_ = httptest.NewRequest("POST", "/v1/chat/completions", nil) // flag absent
@@ -551,7 +551,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *tes
 	requestBodyBytes, _ := json.Marshal(body)
 
 	// interleaved=false — flag absent.
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}

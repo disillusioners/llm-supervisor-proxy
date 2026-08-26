@@ -47,6 +47,27 @@ type requestContext struct {
 	// Original messages (immutable snapshot for retry reconstruction)
 	originalMessages []interface{}
 
+	// Phase 3 — R1 / A-1 conversation affinity plumbing:
+	//
+	//   firstUserMessage is cached in initRequestContext (cheap canonical-JSON
+	//   walk over the first user-role message content). POST-AUTH (at the
+	//   handler.go:401+ wiring site AFTER auth populates tokenID), the
+	//   conversationKey is computed as
+	//   sha256(modelID + "|" + tokenID + "|" + firstUserMessage).
+	//
+	// For external / non-internal models both fields stay "" and the engine
+	// path is skipped at every call site.
+	firstUserMessage string
+	conversationKey  string
+
+	// Phase 3 — R3-5 retry-budget plumbing. Lives on the REQUEST context
+	// (not the engine — R3-5 keeps the engine stateless about retries).
+	// The coordinator increments failoverAttempts and appends to
+	// triedCredentialIDs under c.mu (manage() is the sole mutation site).
+	// reset() clears both fields per pool-reuse.
+	triedCredentialIDs map[string]bool // mutated only from manage() under c.mu — race-free by construction
+	failoverAttempts   int            // mutated only from manage() under c.mu — race-free by construction
+
 	// Accumulated response buffers
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder
@@ -129,6 +150,23 @@ func (rc *requestContext) reset() {
 	// reset so a recycled requestContext cannot leak the flag
 	// from a prior request lifecycle.
 	rc.interleavedThinking = false
+	// Phase 3 (Tasks 1 + 19): clear the per-request affinity + failover
+	// bookkeeping fields. Both are part of the request-scoped state, not
+	// cross-request — pool reuse must NOT carry previous-request values.
+	rc.firstUserMessage = ""
+	rc.conversationKey = ""
+	rc.triedCredentialIDs = nil
+	rc.failoverAttempts = 0
+}
+
+// tokenIDDisplay renders the token ID for log output. Empty tokenID
+// (anonymous requests, per A-1 graceful degradation) renders as
+// "<empty>" so the post-auth wiring site log is unambiguous.
+func (rc *requestContext) tokenIDDisplay() string {
+	if rc.tokenID == "" {
+		return "<empty>"
+	}
+	return rc.tokenID
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

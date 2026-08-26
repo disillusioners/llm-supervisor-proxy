@@ -233,7 +233,7 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 
 	t.Cleanup(func() { upstream.Close() })
 	return h, upstream
@@ -907,7 +907,7 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	return NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	return NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 }
 
 // anthropicTestRequestStore retrieves the request store behind the handler

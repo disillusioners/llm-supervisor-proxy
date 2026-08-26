@@ -187,6 +187,29 @@ func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (provider, apiK
 	return provider, cred.APIKey, baseURL, modelConfig.InternalModel, true
 }
 
+// ResolveInternalConfigWithAffinity (Phase 3 / Task 16 seam) — the
+// mock degrades to the single-credential path (no engine wired in
+// unit tests). Returns models.ResolvedCredential with .NewlyBound=false.
+func (m *mockModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (models.ResolvedCredential, bool) {
+	provider, apiKey, baseURL, internalModel, ok := m.ResolveInternalConfig(modelID)
+	if !ok {
+		return models.ResolvedCredential{}, false
+	}
+	mc := m.GetModel(modelID)
+	primaryID := ""
+	if mc != nil {
+		primaryID = mc.PrimaryCredentialID()
+	}
+	return models.ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		CredentialID:  primaryID,
+		NewlyBound:    false,
+	}, true
+}
+
 func TestCanHandleInternal(t *testing.T) {
 	tests := []struct {
 		name     string

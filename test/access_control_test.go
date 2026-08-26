@@ -149,7 +149,7 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 		ConfigMgr:    cfgMgr,
 		ModelsConfig: modelsConfig,
 	}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	return &accessControlTestEnv{
 		testEnv: &testEnv{

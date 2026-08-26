@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
@@ -74,8 +75,45 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 // race coordinator. Drives the MiniMax reasoning_details split-mode gate
 // inside the executed sub-paths; flag-absent calls short-circuit the gate
 // (H5) so non-MiniMax / non-flagged requests stay byte-identical.
-func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
+//
+// conversationKey (Phase 3 / Task 4) is the per-request affinity key
+// from the post-auth wiring site (handler.go:401+). Threaded through to
+// the resolver seam (ResolveInternalConfigWithAffinity).
+//
+// engine (Phase 3 / Task 6) is the optional Load-Balancing engine
+// (nil-safe per W-3 / E-3). Used by the post-resolution publish site
+// (W-1) to choose between "publish model_credential_selected" (the
+// engine stored a binding) and "do nothing" (the engine returned a
+// pinned-existing binding, or no engine at all).
+//
+// onCredentialSelected (Phase 3 / Task 6) is the callback that emits
+// model_credential_selected with the result struct. Calling it here
+// keeps the publish at "single source of truth" — only this path
+// publishes, never the ultimate-internal or /v1/messages paths.
+func executeRequest(
+	ctx context.Context,
+	cfg *ConfigSnapshot,
+	originalReq *http.Request,
+	rawBody []byte,
+	req *upstreamRequest,
+	interleaved bool,
+	conversationKey string,
+	engine *credentiallb.Engine,
+	onCredentialSelected func(modelID string, cred models.ResolvedCredential),
+) error {
 	req.MarkStarted()
+
+	// Stash the inputs the resolvers and the publish site need on the
+	// per-attempt struct (upstreamRequest has no extra fields; threading
+	// through the function signature is the simplest). The publish site
+	// consults req.resolved.NewlyBound after the internal execution
+	// returns; the conversationKey + engine are reused by both resolution
+	// sites (secondary + primary fallback).
+	if req != nil {
+		req.conversationKey = conversationKey
+		req.engine = engine
+		req.onCredentialSelected = onCredentialSelected
+	}
 
 	// Check if this model uses internal upstream
 	// Note: ModelsConfig may be nil in tests, so check first
@@ -83,12 +121,85 @@ func executeRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.
 		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
 
 		if modelConfig != nil && modelConfig.Internal {
-			return executeInternalRequest(ctx, cfg, rawBody, req, interleaved)
+			err := executeInternalRequest(ctx, cfg, rawBody, req, interleaved)
+
+			// Phase 3 / Task 6 — single-source-of-truth publish site for
+			// model_credential_selected. Fires ONLY when:
+			//   1. the resolver returned ok (req.resolvedOK), AND
+			//   2. the engine returned newlyBound=true (W-1: a binding
+			//      was stored on this call).
+			// Per C2: empty-key fresh picks return NewlyBound=false ⇒
+			// no event (no binding stored). Per W-1: pinned-existing
+			// reuses return NewlyBound=false ⇒ no event.
+			publishCredentialSelected(req)
+			return err
 		}
 	}
 
 	// External upstream: use the configured upstream URL
 	return executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
+}
+
+// publishCredentialSelected (Phase 3 / Task 6) fires the
+// model_credential_selected event when the engine's NewlyBound flag is
+// true for an internal execution. The single-source-of-truth here
+// means the race-internal path owns event publication; the ultimate
+// paths do NOT publish — and an empty conversationKey (W-2 + C2) is
+// naturally absorbed because empty-key picks return NewlyBound=false.
+func publishCredentialSelected(req *upstreamRequest) {
+	if req == nil || !req.resolvedOK {
+		return
+	}
+	if !req.resolved.NewlyBound {
+		return
+	}
+	if req.onCredentialSelected == nil {
+		return
+	}
+	req.onCredentialSelected(req.modelID, req.resolved)
+}
+
+// resolveSpecificInternalCredential (Phase 3 / Task 18 — Round 3b B3)
+// resolves the EXACT credentialID handed back by
+// engine.ExcludeAndReselect for a modelTypeCredFailover row. It skips
+// the affinity seam entirely (a fresh GetOrSelect could re-roll the
+// pick — especially on empty-key requests where every engine call
+// picks fresh) and mirrors the field derivation of
+// store.resolveWithCredential: provider from the credential, baseURL =
+// model override > credential default, internal model with peak-hour
+// substitution. NewlyBound is false: the rebind/fresh-pick side effect
+// already happened inside ExcludeAndReselect; a reselection is not a
+// first binding (W-1), so no model_credential_selected fires for it.
+func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialID string) (models.ResolvedCredential, bool) {
+	if cfg == nil || cfg.ModelsConfig == nil {
+		return models.ResolvedCredential{}, false
+	}
+	modelConfig := cfg.ModelsConfig.GetModel(modelID)
+	if modelConfig == nil || !modelConfig.Internal {
+		return models.ResolvedCredential{}, false
+	}
+	cred := cfg.ModelsConfig.GetCredential(credentialID)
+	if cred == nil {
+		return models.ResolvedCredential{}, false
+	}
+	baseURL := modelConfig.InternalBaseURL
+	if baseURL == "" {
+		baseURL = cred.BaseURL
+	}
+	internalModel := modelConfig.InternalModel
+	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
+		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
+			modelConfig.ID, peakModel, modelConfig.InternalModel)
+		internalModel = peakModel
+	}
+	return models.ResolvedCredential{
+		Provider:      cred.Provider,
+		APIKey:        cred.APIKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		CredentialID:  credentialID,
+		NewlyBound:    false, // reselection ≠ first binding (W-1)
+	}, true
 }
 
 // executeInternalRequest handles requests to internal providers (bypassing external upstream).
@@ -103,15 +214,33 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	useSecondary := req.UseSecondaryUpstream()
 
 	var internalModel string
-	var provider, apiKey, baseURL string
-	var ok bool
+	var resolved models.ResolvedCredential
+	var resolvedOK bool
 
-	if useSecondary && cfg.ModelsConfig != nil {
+	// Phase 3 / Task 18 (Round 3b B3 + Round 3c C3(1)) — a
+	// modelTypeCredFailover row resolves the SPECIFIC reselected
+	// credential surfaced by engine.ExcludeAndReselect (pre-resolved at
+	// classification time in the coordinator; rides
+	// spawnTriggerInfo.credentialID). NOT a fresh GetOrSelect: for
+	// empty-key requests a fresh engine call would re-roll the weighted
+	// pick and could re-select the just-excluded (cooling) credential.
+	if req.reselectedCredentialID != "" && cfg.ModelsConfig != nil {
+		resolved, resolvedOK = resolveSpecificInternalCredential(cfg, req.modelID, req.reselectedCredentialID)
+		if resolvedOK {
+			log.Printf("[LB-FAILOVER] attempt %d using reselected credential %s for model %s",
+				req.id, req.reselectedCredentialID, req.modelID)
+		}
+	}
+
+	// Phase 3 / Task 4 — primary + secondary paths both go through the
+	// affinity seam. The secondary path inherits the primary credential
+	// (do NOT call the engine a second time per the contract).
+	if !resolvedOK && useSecondary && cfg.ModelsConfig != nil {
 		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
 		if modelConfig != nil && modelConfig.SecondaryUpstreamModel != "" && modelConfig.InternalModel != "" {
 			// Resolve credential/provider from primary config, but use secondary model name
-			provider, apiKey, baseURL, _, ok = cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
-			if ok {
+			resolved, resolvedOK = cfg.ModelsConfig.ResolveInternalConfigWithAffinity(req.modelID, req.conversationKey)
+			if resolvedOK {
 				internalModel = modelConfig.SecondaryUpstreamModel
 				log.Printf("[SECONDARY] Using secondary upstream model %s instead of %s for model %s",
 					internalModel, modelConfig.InternalModel, req.modelID)
@@ -134,12 +263,50 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	}
 
 	// Fallback to normal resolution if secondary not used or not configured
-	if !ok {
-		provider, apiKey, baseURL, internalModel, ok = cfg.ModelsConfig.ResolveInternalConfig(req.modelID)
+	if !resolvedOK {
+		resolved, resolvedOK = cfg.ModelsConfig.ResolveInternalConfigWithAffinity(req.modelID, req.conversationKey)
 	}
 
-	if !ok {
+	// Capture the resolution result for the post-completion publish site
+	// (Phase 3 / Task 6). The executeRequest caller reads these fields
+	// after this function returns and fires the model_credential_selected
+	// event when newlyBound=true (the engine's W-1 signal).
+	req.resolved = resolved
+	req.resolvedOK = resolvedOK
+
+	if !resolvedOK {
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
+	}
+
+	// If this attempt is a modelTypeCredFailover row (Round-3), the
+	// caller has already populated req.reselectedCredentialID via
+	// ExcludeAndReselect. We use it to short-circuit the engine
+	// call path — for a single-attempt retry, the per-attempt
+	// resolution is REPLACED with the reselected credential.
+	//
+	// Note: the credFailover path is currently only feasible on
+	// the Race Coordinator's Case-1 path, which spawns a new
+	// attempt — for the existing request logic, the engine
+	// already returned the reselected credential via ResolveInternalConfigWithAffinity
+	// in the coordinator's pre-spawn branch. The field is here
+	// for completeness and for the handleNonStreamResult /
+	// streamResult layers that may consult it.
+	if req.reselectedCredentialID != "" {
+		// Override resolved.CredentialID with the explicit reselected
+		// pick. Other resolved fields (Provider/APIKey/BaseURL) are
+		// re-looked up at the resolver layer; in Phase 3 the
+		// ResolvedCredential carries the resolved values already.
+		// (Read-through to GetCredential lives inside
+		// ResolveInternalConfigWithAffinity.)
+		// No-op here — downstream already sees the right
+		// credential through resolved.CredentialID.
+	}
+
+	provider := resolved.Provider
+	apiKey := resolved.APIKey
+	baseURL := resolved.BaseURL
+	if internalModel == "" {
+		internalModel = resolved.InternalModel
 	}
 
 	// Create provider client
@@ -148,7 +315,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
 
-	log.Printf("[DEBUG] Race attempt %d calling internal provider: %s (model=%s, baseURL=%s)", req.id, provider, internalModel, baseURL)
+	log.Printf("[DEBUG] Race attempt %d calling internal provider: %s (model=%s, baseURL=%s, credential_id=%s)", req.id, provider, internalModel, baseURL, resolved.CredentialID)
 
 	// Parse request body
 	var bodyMap map[string]interface{}
@@ -208,6 +375,15 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 }
 
 // executeExternalRequest handles requests to external upstream (LiteLLM, etc.).
+//
+// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): this env-only path is
+// UNCHANGED by credential load-balancing and rate-limit credential
+// failover. The cfg.UpstreamCredentialID resolution below uses the
+// deployment's single env credential — it is NOT model-owned, so a 429
+// here follows the existing model-racing behavior (no
+// ExcludeAndReselect, no cooldown, no modelTypeCredFailover spawn).
+// grep-guard: zero hits of ExcludeAndReselect / IsRateLimitError /
+// modelTypeCredFailover within this function.
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
 // entry, threaded via executeRequest). Drives the MiniMax

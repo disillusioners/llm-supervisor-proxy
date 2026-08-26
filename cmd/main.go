@@ -38,6 +38,12 @@ func main() {
 	reqStore := store.NewRequestStore(100) // Keep last 100 requests
 
 	var configMgr config.ManagerInterface
+	// Phase 3 — main.go now binds modelsMgr at the concrete
+	// *database.ModelsManager type so credLB := modelsMgr.Engine() can
+	// run (Dispatcher Ruling #2: ModelsManager owns the engine). The
+	// proxyConfig still consumes the interface (proxy.Config
+	// ModelsConfig field is unchanged).
+	var modelsMgr *database.ModelsManager
 	var modelsConfig models.ModelsConfigInterface
 	var dbStore *database.Store
 
@@ -45,11 +51,50 @@ func main() {
 	// - If DATABASE_URL is set with postgres://, uses PostgreSQL
 	// - Otherwise uses SQLite at ~/.config/llm-supervisor-proxy/config.db
 	var err error
-	dbStore, configMgr, modelsConfig, err = database.InitializeAll(ctx, bus)
+	dbStore, configMgr, modelsMgr, err = database.InitializeAll(ctx, bus)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
+	// Phase 3 / Round 3g — graceful shutdown teardown ordering:
+	//   srv.Shutdown (drains HTTP)
+	//   → credLB.Stop (engine janitor stop)
+	//   → modelsMgr.Close (event-bus unsubscribe + per-instance cleanup)
+	//   → dbStore.Close (closes DB)
+	// Implementation: register defers in this order so LIFO fires the
+	// reverse. Existing `defer dbStore.Close()` at the original site stays;
+	// we ADD modelsMgr.Close() RIGHT BELOW it (so it runs before dbStore.Close
+	// at LIFO) and credLB.Stop() RIGHT BELOW that.
 	defer dbStore.Close()
+	if modelsMgr != nil {
+		defer modelsMgr.Close()
+	}
+
+	// Phase 3 / Task 10 + 12 — obtain the engine (Dispatcher Ruling #2
+	// — ModelsManager owns the engine; main.go only OBTAINS it). The
+	// local variable name `credLB` per the plan cross-reference.
+	//
+	// Phase 3 / Task 11 — EventCredentialsChanged subscription: the
+	// plan's original text placed the bus subscription here, but the
+	// Phase-2 ModelsManager ALREADY owns it (store.go wires a bus
+	// subscription that forwards EventCredentialsChanged →
+	// Engine.OnModelChanged with E-2 filter-survivors semantics, and
+	// ModelsManager.Close() unsubscribes it). A second subscription in
+	// main.go would double-deliver every event — the single
+	// ModelsManager loop IS the production-path handler the task's
+	// acceptance describes. main.go deliberately does NOT subscribe.
+	credLB := modelsMgr.Engine()
+
+	// Phase 3 — the interface-typed modelsConfig used by proxyConfig +
+	// uiServer points at the same concrete *ModelsManager.
+	modelsConfig = modelsMgr
+
+	// Phase 3 / Round 3g — engine stop is the LAST defer registered
+	// before srv.Shutdown, so LIFO fires it first after srv.Shutdown
+	// returns (and the srv.Shutdown itself happens implicitly when
+	// the signal handler triggers — see below).
+	if credLB != nil {
+		defer credLB.Stop()
+	}
 
 	// Initialize encryption (required for internal upstream API key storage)
 	if err := crypto.InitEncryption(); err != nil {
@@ -82,7 +127,7 @@ func main() {
 	}
 	log.Printf("Buffer storage initialized at: %s (max %d MB)", bufferStorageDir, cfg.BufferMaxStorageMB)
 
-	// Initialize Proxy Config
+	// Initialize Proxy Config (interface consumers see modelsConfig).
 	proxyConfig := &proxy.Config{
 		ConfigMgr:    configMgr,
 		ModelsConfig: modelsConfig,
@@ -103,8 +148,11 @@ func main() {
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore, dbStore)
 	ui.SetVersion(Version)
 
-	// Initialize Proxy Handler
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter)
+	// Initialize Proxy Handler (Phase 3 / Task 12) — the engine is the 7th
+	// positional arg. Pass nil for legacy / test paths; the seam is
+	// nil-safe and degrades to single-credential resolution via
+	// ResolveInternalConfigWithAffinity's nil-engine branch.
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter, credLB)
 
 	// Setup Server
 	mux := http.NewServeMux()

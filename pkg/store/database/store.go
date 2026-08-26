@@ -1783,14 +1783,13 @@ func resolveWithCredential(modelConfig *models.ModelConfig, cred *models.Credent
 // (W-1 signal: true ⇔ this call stored a new engine binding — the
 // only way newlyBound flows from the engine's binding-store side
 // effect through to the proxy/ultimatemodel call sites).
-type ResolvedCredential struct {
-	Provider      string
-	APIKey        string
-	BaseURL       string
-	InternalModel string
-	CredentialID  string
-	NewlyBound    bool
-}
+//
+// Phase 3: this is now an alias of models.ResolvedCredential. The
+// canonical declaration lives in pkg/models so the ModelsConfigInterface
+// method signature can refer to it without an import cycle. The alias
+// here is the SOLE assignment / read target — the dbStore
+// implementation populates models.ResolvedCredential fields directly.
+type ResolvedCredential = models.ResolvedCredential
 
 // ResolveInternalConfigWithAffinity resolves a credential for modelID,
 // applying the LB engine when the model has 2+ credentials.

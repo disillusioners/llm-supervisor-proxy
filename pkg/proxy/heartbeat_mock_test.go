@@ -113,7 +113,7 @@ func newTestHandlerWithURL(t *testing.T, upstreamURL string) *Handler {
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	return NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	return NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

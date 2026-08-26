@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
@@ -108,6 +109,16 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		conf.ModelID = originalModel
 	}
 
+	// Phase 3 / Task 2 — cache the first-user-message extraction here so
+	// the post-auth wiring site at handler.go:401+ can hash it with
+	// tokenID. The token-salted conversationKey is NOT computed here —
+	// tokenID is unset at this line; see A-1 + A-1-wiring in the plan.
+	// Multimodal content ([]interface{}) is canonical-JSON hashed per A-2.
+	var firstUserMessage string
+	if resolvedModel != nil && resolvedModel.Internal {
+		firstUserMessage = credentiallb.ExtractFirstUserMessage(originalMessages)
+	}
+
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
 	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
 
@@ -127,5 +138,6 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		baseCtx:          r.Context(),
 		originalMessages: originalMessages,
 		bypassInternal:   bypassInternal,
+		firstUserMessage: firstUserMessage,
 	}, nil
 }

@@ -151,7 +151,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_External(t *testing.T
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Trigger ultimate via the force header so we don't depend on
 	// the duplicate-request path or hash-cache timing.
@@ -303,7 +303,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_ExternalStream(t *tes
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",
@@ -504,7 +504,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",
@@ -654,7 +654,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",

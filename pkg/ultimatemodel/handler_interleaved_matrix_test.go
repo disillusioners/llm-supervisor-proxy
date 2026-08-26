@@ -63,7 +63,7 @@ func TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 			Enabled:  true,
 			Internal: false,
 		})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -105,7 +105,7 @@ func TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		resp, err := http.Get(server.URL)
 		if err != nil {
@@ -165,7 +165,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Internal:     false,
 			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -219,7 +219,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Internal:     false,
 			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -259,7 +259,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 			Internal:     false,
 			Credentials: models.TestRefs("missing-minimax-cred"),
 		})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		resp, err := http.Get(server.URL)
 		if err != nil {
@@ -320,7 +320,7 @@ func TestExecuteExternal_HeaderStrip_NoCredential_CaseVaried(t *testing.T) {
 				Internal:     false,
 				Credentials: models.TestRefs("missing-minimax-cred"),
 			})
-			h := NewHandler(cfg, modelsCfg, nil)
+			h := NewHandler(cfg, modelsCfg, nil, nil)
 
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -368,7 +368,7 @@ func TestExecuteExternal_UsagePreserved_GateOff(t *testing.T) {
 		cfg.cfg.UpstreamURL = upstream.URL
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -404,7 +404,7 @@ func TestExecuteExternal_UsagePreserved_GateOff(t *testing.T) {
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		resp, err := http.Get(server.URL)
 		if err != nil {
@@ -457,7 +457,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		_ = httptest.NewRequest("POST", "/v1/chat/completions", nil) // flag absent
@@ -469,7 +469,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 
 		// Flag absent; provider IS minimax (gate would fire IF
 		// flag was true) — gate stays off because flag is false.
-		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false)
+		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false, "")
 		if err != nil {
 			t.Fatalf("executeInternal: %v", err)
 		}
@@ -515,7 +515,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		_ = httptest.NewRequest("POST", "/v1/chat/completions", nil) // flag absent
@@ -526,7 +526,7 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 		}
 		requestBodyBytes, _ := json.Marshal(body)
 
-		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), true, false)
+		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), true, false, "")
 		if err != nil {
 			t.Fatalf("executeInternal: %v", err)
 		}
@@ -567,7 +567,7 @@ func TestExecuteInternal_NegativeCase_NoCredential_ResolutionFails(t *testing.T)
 		Enabled:  true,
 		Internal: true,
 	})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -578,7 +578,7 @@ func TestExecuteInternal_NegativeCase_NoCredential_ResolutionFails(t *testing.T)
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("ghost-internal"), false, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("ghost-internal"), false, true, "")
 	if err == nil {
 		t.Fatal("expected error from executeInternal when internal config is unresolvable")
 	}
@@ -621,7 +621,7 @@ func TestExecuteInternal_UsagePreserved_GateOff(t *testing.T) {
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddInternalModel("openai-model", "openai", "test-key", "", "gpt-4o-mini")
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -632,7 +632,7 @@ func TestExecuteInternal_UsagePreserved_GateOff(t *testing.T) {
 		}
 		requestBodyBytes, _ := json.Marshal(body)
 
-		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true)
+		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true, "")
 		if err != nil {
 			t.Fatalf("executeInternal: %v", err)
 		}
@@ -675,7 +675,7 @@ func TestExecuteInternal_UsagePreserved_GateOff(t *testing.T) {
 		cfg := newMockConfigManager()
 		modelsCfg := newMockModelsConfig()
 		modelsCfg.AddInternalModel("openai-model", "openai", "test-key", "", "gpt-4o-mini")
-		h := NewHandler(cfg, modelsCfg, nil)
+		h := NewHandler(cfg, modelsCfg, nil, nil)
 
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -687,7 +687,7 @@ func TestExecuteInternal_UsagePreserved_GateOff(t *testing.T) {
 		}
 		requestBodyBytes, _ := json.Marshal(body)
 
-		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), true, true)
+		_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), true, true, "")
 		if err != nil {
 			t.Fatalf("executeInternal: %v", err)
 		}

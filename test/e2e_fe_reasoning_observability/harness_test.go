@@ -297,7 +297,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 	proxyCfg := &proxy.Config{ConfigMgr: cfgMgr, ModelsConfig: modelsConfig}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// ── FE API over real HTTP, sharing reqStore ─────────────────────────
 	uiSrv := ui.NewServer(bus, cfgMgr, proxyCfg, modelsConfig, reqStore, nil, tokenStore, dbStore)

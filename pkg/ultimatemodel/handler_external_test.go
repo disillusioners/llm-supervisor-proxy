@@ -23,7 +23,7 @@ func TestExecuteExternal_UpstreamURLNotConfigured(t *testing.T) {
 	cfg.cfg.UpstreamURL = "" // Empty URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -83,7 +83,7 @@ func TestExecuteExternal_SuccessfulNonStreaming(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -146,7 +146,7 @@ func TestExecuteExternal_SuccessfulStreaming(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -182,7 +182,7 @@ func TestExecuteExternal_UpstreamError(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -213,7 +213,7 @@ func TestExecuteExternal_UpstreamReturns400(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -244,7 +244,7 @@ func TestExecuteExternal_ContextCancellation(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -281,7 +281,7 @@ func TestExecuteExternal_ResponseHeadersForwarded(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -325,7 +325,7 @@ func TestExecuteExternal_ModelIDOverride(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -366,7 +366,7 @@ func TestExecuteExternal_HeadersHopByHopSkipped(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -403,7 +403,7 @@ func TestStreamResponse_SSEHeadersSet(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Get the server's response
 	resp, err := http.Get(server.URL)
@@ -448,7 +448,7 @@ func TestStreamResponse_DataForwarding(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -484,7 +484,7 @@ func TestStreamResponse_DONEMarker(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -517,7 +517,7 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -553,7 +553,7 @@ func TestStreamResponse_EmptyStream(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -589,7 +589,7 @@ func TestStreamResponse_MultipleChunks(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	resp, err := http.Get(server.URL)
 	if err != nil {
@@ -627,7 +627,7 @@ func TestStreamResponse_WithToolCallBuffer(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Enable tool call buffer
 	repairCfg := toolrepair.DisabledConfig()
@@ -780,7 +780,7 @@ func TestExecuteExternal_Integration(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -816,7 +816,7 @@ func TestExecuteExternal_RequestBodyMarshalingError(t *testing.T) {
 	cfg.cfg.UpstreamURL = "http://localhost:9999" // Won't be reached
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)

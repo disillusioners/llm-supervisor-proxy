@@ -147,7 +147,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		ConfigMgr:    cfgMgr,
 		ModelsConfig: modelsConfig,
 	}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	return &testEnv{
 		db:         db,

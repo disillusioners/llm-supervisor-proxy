@@ -230,7 +230,14 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 }
 
 // handleError converts HTTP error response to ProviderError
-// If bufferStore is configured, saves the request to a file for debugging
+// If bufferStore is configured, saves the request to a file for debugging.
+//
+// Round 3 (R3-1) — wires parseRetryAfter on the 429 path into the
+// returned ProviderError.RetryAfter so ExcludeAndReselect can seed the
+// per-credential cooldown; also captures the already-decoded
+// {Error:{Message,Type,Code}} body Type/Code (Round 3c — W2) into
+// ProviderError.ErrorType/ErrorCode so the downstream IsRateLimitError
+// classifier can read them without re-parsing the raw response body.
 func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionRequest) *ProviderError {
 	// Limit body size to 10MB to prevent unbounded memory consumption
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
@@ -263,6 +270,18 @@ func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionReq
 		StatusCode: resp.StatusCode,
 		Message:    msg,
 		Retryable:  retryable,
+		// Round 3 (R3-1) additive wiring — see struct doc-comment.
+		ErrorType: apiErr.Error.Type,
+		ErrorCode: apiErr.Error.Code,
+	}
+
+	// R3-1 wiring — parseRetryAfter was DEAD code (openai.go:592-609,
+	// zero callers). On the 429 path parse the Retry-After response
+	// header into ProviderError.RetryAfter so the per-credential cooldown
+	// can be seeded with the upstream's own hint instead of the
+	// engine's default (60s).
+	if resp.StatusCode == 429 {
+		providerErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 	}
 
 	// Save request to file for debugging

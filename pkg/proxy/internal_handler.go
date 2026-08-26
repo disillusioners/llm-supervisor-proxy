@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/logger"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
@@ -41,6 +44,24 @@ type InternalHandler struct {
 	toolCallBufferMaxSize  int64              // Max size for tool call buffer
 	toolCallBufferDisabled bool               // Disable tool call buffering
 	toolRepairConfig       *toolrepair.Config // Tool repair config for buffer
+
+	// credEngine + eventBus (Phase 3 / Task 22 — Round 3 rate-limit
+	// credential failover at the InternalHandler seam). Both optional
+	// (nil-safe): unset on legacy/test constructions — the hook is
+	// skipped entirely. Installed via SetCredentialFailover by the
+	// /v1/messages caller that owns the engine (constructor-only
+	// injection per W-3 holds — NewInternalHandler's signature is
+	// unchanged per the Files table row).
+	credEngine *credentiallb.Engine
+	eventBus   *events.Bus
+}
+
+// SetCredentialFailover (Phase 3 / Task 22) installs the engine + bus
+// used by HandleRequest's rate-limit failover hook. Optional; when not
+// called, HandleRequest behaves exactly as before (single attempt).
+func (h *InternalHandler) SetCredentialFailover(engine *credentiallb.Engine, bus *events.Bus) {
+	h.credEngine = engine
+	h.eventBus = bus
 }
 
 // NewInternalHandler creates a new internal handler for a model
@@ -106,12 +127,145 @@ func CanHandleInternal(modelConfig *models.ModelConfig) bool {
 }
 
 // HandleRequest handles a request using internal provider
-func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool) error {
-	// Resolve internal config (including credential lookup)
-	provider, apiKey, baseURL, internalModel, ok := h.resolver.ResolveInternalConfig(h.config.ID)
+//
+// conversationKey (Phase 3 / Task 16) is the per-request affinity key
+// threaded from the Anthropic-path post-auth wiring site
+// (handler_anthropic.go HandleAnthropicMessages, after the resolved
+// model + auth-equivalent site). Empty key is graceful (W-2 + C2 — no
+// binding stored, fresh pick per request).
+//
+// Phase 3 / Task 22 (Round 3 rate-limit credential failover at the
+// InternalHandler seam): when the engine + bus are installed
+// (SetCredentialFailover) and the initial provider call fails with a
+// rate-limited *ProviderError, the hook calls engine.ExcludeAndReselect
+// and retries ONCE with the reselected credential. Pre-first-byte
+// guard: the initial-call *ProviderError assertion (initial-call
+// errors return before any write to `w`; the /v1/messages client-side
+// first-byte marker is arc.headersSent at handler_anthropic.go:648-654,
+// which cannot have fired while the recorder is still empty).
+func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool, conversationKey string) error {
+	// Resolve internal config via the affinity seam (Phase 3 / Task 16,
+	// #3 struct form). The Anthropic path does NOT publish
+	// model_credential_selected itself (single source of truth in
+	// pkg/proxy/race_executor.go:executeRequest); discarding NewlyBound
+	// here is intentional.
+	resolved, ok := h.resolver.ResolveInternalConfigWithAffinity(h.config.ID, conversationKey)
 	if !ok {
 		return fmt.Errorf("failed to resolve internal config for model %s", h.config.ID)
 	}
+
+	err := h.executeWithResolved(ctx, requestBody, w, isStream, resolved)
+	if err == nil || h.credEngine == nil {
+		return err
+	}
+
+	// ── Task 22 hook guards ──
+	// (1) initial-call *ProviderError (pre-first-byte guard: ChatCompletion/
+	//     StreamChatCompletion errors return before any write to `w`);
+	// (2) rate-limit classification (Task 17 vocabulary);
+	// (3) multi-credential model (single-cred ⇒ ReselectNone anyway);
+	// (4) budget: this hook retries at most ONCE — structurally within
+	//     the R3-5 budget (≤ len(credentials)−1) given (3).
+	var providerErr *providers.ProviderError
+	if !errors.As(err, &providerErr) {
+		return err
+	}
+	if !providers.IsRateLimitError(providerErr) {
+		return err
+	}
+	if len(h.config.Credentials) <= 1 {
+		return err
+	}
+
+	reselected, mode := h.credEngine.ExcludeAndReselect(
+		h.config.ID,
+		conversationKey,
+		resolved.CredentialID,
+		providerErr.RetryAfter,
+	)
+
+	switch mode {
+	case credentiallb.ReselectNone:
+		// C2 narrowing: no credential available. Propagate.
+		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s no reselectable credential (mode=%v); propagating failure", h.config.ID, mode)
+		return err
+	case credentiallb.ReselectSoonestExpiry:
+		// 0-of-N healthy: single attempt with the soonest-expiring
+		// credential, then propagate (F.4 single-attempt-then-fall-through).
+		log.Printf("[WARN] [LB-FAILOVER] /v1/messages internal: model=%s all credentials cooling; single attempt with soonest-expiring cred=%s", h.config.ID, reselected)
+	default:
+		// ReselectHealthy (incl. B2 no-op + empty-key fresh pick per C2).
+		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s rate-limited on cred=%s; failing over to cred=%s", h.config.ID, resolved.CredentialID, reselected)
+	}
+
+	if reselected == "" || reselected == resolved.CredentialID {
+		// Nothing new to try — propagate (idempotent no-op guard).
+		return err
+	}
+
+	// Resolve the SPECIFIC reselected credential — NOT a fresh
+	// GetOrSelect (an empty-key fresh pick would re-roll and could
+	// re-select the just-cooled credential). Same field derivation as
+	// store.resolveWithCredential.
+	newCred := h.resolver.GetCredential(reselected)
+	if newCred == nil {
+		return err
+	}
+	newBaseURL := h.config.InternalBaseURL
+	if newBaseURL == "" {
+		newBaseURL = newCred.BaseURL
+	}
+	newInternalModel := h.config.InternalModel
+	if peakModel := h.config.ResolvePeakHourModel(time.Now()); peakModel != "" {
+		newInternalModel = peakModel
+	}
+	retryResolved := models.ResolvedCredential{
+		Provider:      newCred.Provider,
+		APIKey:        newCred.APIKey,
+		BaseURL:       newBaseURL,
+		InternalModel: newInternalModel,
+		CredentialID:  reselected,
+		NewlyBound:    false, // reselection ≠ first binding (W-1) — never publishes model_credential_selected
+	}
+
+	// Task 20 observability: model_credential_failover event
+	// ({model_id, from_credential_id, to_credential_id, reason,
+	// retry_after_ms, cooldown_ms, attempt_index}).
+	if h.eventBus != nil {
+		cooldown := credentiallb.DefaultCooldown
+		if providerErr.RetryAfter > 0 {
+			cooldown = providerErr.RetryAfter
+		}
+		data := map[string]interface{}{
+			"model_id":           h.config.ID,
+			"from_credential_id": resolved.CredentialID,
+			"to_credential_id":   reselected,
+			"reason":             "rate_limit",
+			"retry_after_ms":     providerErr.RetryAfter.Milliseconds(),
+			"cooldown_ms":        cooldown.Milliseconds(),
+			"attempt_index":      1,
+		}
+		h.eventBus.Publish(events.Event{
+			Type:      credentiallb.EventCredentialFailover,
+			Timestamp: time.Now().Unix(),
+			Data:      data,
+		})
+	}
+
+	// Single retry through the SAME execution path.
+	return h.executeWithResolved(ctx, requestBody, w, isStream, retryResolved)
+}
+
+// executeWithResolved (Phase 3 / Task 22 refactor) runs the internal
+// request against an ALREADY-RESOLVED credential. Split out of
+// HandleRequest so the failover hook can retry with the reselected
+// credential through the identical provider-construction + dispatch
+// path (no duplicated logic).
+func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool, resolved models.ResolvedCredential) error {
+	provider := resolved.Provider
+	apiKey := resolved.APIKey
+	baseURL := resolved.BaseURL
+	internalModel := resolved.InternalModel
 
 	// Create provider
 	providerClient, err := providers.NewProvider(provider, apiKey, baseURL)

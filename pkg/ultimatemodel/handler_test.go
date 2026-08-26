@@ -212,6 +212,23 @@ func (m *mockModelsConfig) UpdateCredential(id string, cred models.CredentialCon
 }
 func (m *mockModelsConfig) RemoveCredential(id string) error { return nil }
 
+// ResolveInternalConfigWithAffinity (Phase 3 / Task 16 seam mock) —
+// delegates to ResolveInternalConfig; the test mock has no engine so
+// NewlyBound stays false.
+func (m *mockModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (models.ResolvedCredential, bool) {
+	provider, apiKey, baseURL, internalModel, ok := m.ResolveInternalConfig(modelID)
+	if !ok {
+		return models.ResolvedCredential{}, false
+	}
+	return models.ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		NewlyBound:    false,
+	}, true
+}
+
 // mockProvider implements providers.Provider for testing
 type mockProvider struct {
 	name         string
@@ -261,7 +278,7 @@ func TestNewHandler(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	if h == nil {
 		t.Fatal("NewHandler returned nil")
@@ -282,7 +299,7 @@ func TestNewHandler_DefaultMaxHash(t *testing.T) {
 	cfg.cfg.UltimateModel.MaxHash = 0 // Test default value
 	modelsCfg := newMockModelsConfig()
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Should use default of 100
 	count, _ := h.hashCache.GetStats()
@@ -297,7 +314,7 @@ func TestShouldTrigger_NoModelConfigured(t *testing.T) {
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "" // No model configured
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -312,7 +329,7 @@ func TestShouldTrigger_NoModelConfigured(t *testing.T) {
 func TestShouldTrigger_EmptyMessages(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	result := h.ShouldTrigger([]map[string]interface{}{})
 	if result.Triggered {
@@ -323,7 +340,7 @@ func TestShouldTrigger_EmptyMessages(t *testing.T) {
 func TestShouldTrigger_NewMessage(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -341,7 +358,7 @@ func TestShouldTrigger_NewMessage(t *testing.T) {
 func TestShouldTrigger_AfterMarkFailed(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -373,7 +390,7 @@ func TestShouldTrigger_MaxRetriesZero(t *testing.T) {
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.MaxRetries = 0 // Unlimited retries
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -394,7 +411,7 @@ func TestShouldTrigger_RetryExhausted(t *testing.T) {
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.MaxRetries = 2
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -427,7 +444,7 @@ func TestShouldTrigger_RetryExhausted(t *testing.T) {
 func TestMarkFailed_EmptyMessages(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	hash := h.MarkFailed([]map[string]interface{}{})
 	if hash != "" {
@@ -438,7 +455,7 @@ func TestMarkFailed_EmptyMessages(t *testing.T) {
 func TestMarkFailed_ReturnsHash(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -461,7 +478,7 @@ func TestGetModelID(t *testing.T) {
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "test-model-id"
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	if h.GetModelID() != "test-model-id" {
 		t.Error("GetModelID should return configured model ID")
@@ -472,7 +489,7 @@ func TestGetModelID_Empty(t *testing.T) {
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = ""
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	if h.GetModelID() != "" {
 		t.Error("GetModelID should return empty string when not configured")
@@ -484,7 +501,7 @@ func TestGetModelID_Empty(t *testing.T) {
 func TestSetToolCallBufferConfig(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	repairCfg := toolrepair.DisabledConfig()
 	h.SetToolCallBufferConfig(1024*1024, false, repairCfg)
@@ -505,7 +522,7 @@ func TestSetToolCallBufferConfig(t *testing.T) {
 func TestOnConfigChange_ModelIDChanged(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Store a hash
 	h.MarkFailed([]map[string]interface{}{
@@ -531,7 +548,7 @@ func TestOnConfigChange_ModelIDChanged(t *testing.T) {
 func TestOnConfigChange_OtherField(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Store a hash
 	h.MarkFailed([]map[string]interface{}{
@@ -557,7 +574,7 @@ func TestOnConfigChange_OtherField(t *testing.T) {
 func TestOnConfigChange_NoData(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Store a hash
 	h.MarkFailed([]map[string]interface{}{
@@ -582,7 +599,7 @@ func TestOnConfigChange_NoData(t *testing.T) {
 func TestSendRetryExhaustedError_Streaming(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	err := h.SendRetryExhaustedError(w, "abc12345", 3, 2, true)
@@ -615,7 +632,7 @@ func TestSendRetryExhaustedError_Streaming(t *testing.T) {
 func TestSendRetryExhaustedError_NonStreaming(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	err := h.SendRetryExhaustedError(w, "abc12345", 3, 2, false)
@@ -639,7 +656,7 @@ func TestSendRetryExhaustedError_NonStreaming(t *testing.T) {
 func TestSendRetryExhaustedError_ShortHash(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	// Pass short hash - should not panic
@@ -653,7 +670,7 @@ func TestSendRetryExhaustedError_ShortHash(t *testing.T) {
 func TestSendRetryExhaustedError_EmptyHash(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	// Pass empty hash - should not panic
@@ -671,7 +688,7 @@ func TestExecute_ModelNotFound(t *testing.T) {
 	cfg.cfg.UpstreamURL = "http://localhost:9999" // Won't be used
 	modelsCfg := newMockModelsConfig()
 	// Don't add the model
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -684,7 +701,7 @@ func TestExecute_ModelNotFound(t *testing.T) {
 
 	hash := "somehash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "nonexistent-model", hash, &headersSent, nil)
+	_, err := h.Execute(context.Background(), w, r, body, "nonexistent-model", hash, &headersSent, nil, "")
 
 	if err == nil {
 		t.Error("Execute should return error for unknown model")
@@ -730,7 +747,7 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL // Use mock server
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -744,7 +761,7 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 
 	hash := "testhash123"
 	headersSent := false
-	execResult, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	execResult, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -804,7 +821,7 @@ func TestExecute_ExternalStreaming(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -816,7 +833,7 @@ func TestExecute_ExternalStreaming(t *testing.T) {
 
 	hash := "streamhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -839,7 +856,7 @@ func TestExecute_UpstreamError(t *testing.T) {
 	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -850,7 +867,7 @@ func TestExecute_UpstreamError(t *testing.T) {
 
 	hash := "errorhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
 
 	if err == nil {
 		t.Error("Execute should return error for upstream failure")
@@ -875,7 +892,7 @@ func TestExecute_ContextCancellation(t *testing.T) {
 	cfg.cfg.MaxGenerationTime = config.Duration(50 * time.Millisecond) // Short timeout
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -886,7 +903,7 @@ func TestExecute_ContextCancellation(t *testing.T) {
 
 	hash := "cancelhash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
 
 	// Should get an error due to context timeout
 	if err == nil {
@@ -899,7 +916,7 @@ func TestExecute_ContextCancellation(t *testing.T) {
 func TestConvertRequest(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -939,7 +956,7 @@ func TestConvertRequest(t *testing.T) {
 func TestConvertRequest_ToolCalls(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -978,7 +995,7 @@ func TestConvertRequest_ToolCalls(t *testing.T) {
 func TestConvertRequest_MultimodalContent(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -1026,7 +1043,7 @@ func TestExecuteInternal_NonStreaming(t *testing.T) {
 	modelsCfg.AddInternalModel("internal-model", "openai", "test-key", "http://localhost:8080", "gpt-4")
 
 	cfg := newMockConfigManager()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// This test requires a real provider, so we'll just verify the setup
 	// For full testing, we'd need to mock the providers.NewProvider call
@@ -1049,7 +1066,7 @@ func TestExecuteInternal_NonStreaming(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := h.executeInternal(ctx, w, body, nil, modelCfg, false, false)
+	_, err := h.executeInternal(ctx, w, body, nil, modelCfg, false, false, "")
 	if err == nil {
 		t.Log("executeInternal succeeded (unexpected in test without real provider)")
 	}
@@ -1073,7 +1090,7 @@ func TestUltimateModelError(t *testing.T) {
 func TestHandler_ConcurrentShouldTrigger(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Hello concurrent"},
@@ -1122,7 +1139,7 @@ func TestHandler_FullFlow(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Test message"},
@@ -1225,7 +1242,7 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 	modelsCfg.AddModel(models.ModelConfig{ID: "token-override-model", Name: "token-override", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1238,7 +1255,7 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 	hash := "per-token-hash"
 	headersSent := false
 	tokenModelID := "token-override-model" // Per-token override uses model ID (as frontend stores model.id)
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -1288,7 +1305,7 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 	modelsCfg.AddModel(models.ModelConfig{ID: "token-stream-override", Name: "token-stream", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1301,7 +1318,7 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 	hash := "stream-override-hash"
 	headersSent := false
 	tokenModelID := "token-stream-override" // Per-token override uses model ID (as frontend stores model.id)
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &tokenModelID, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -1354,7 +1371,7 @@ func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1367,7 +1384,7 @@ func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
 	hash := "empty-override-hash"
 	headersSent := false
 	emptyModelID := "" // Empty string - should use global
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &emptyModelID)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &emptyModelID, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -1421,7 +1438,7 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1433,7 +1450,7 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 
 	hash := "nil-override-hash"
 	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil) // nil - should use global
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "") // nil - should use global
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -1457,7 +1474,7 @@ func TestExecute_PerTokenOverride_NonexistentModel(t *testing.T) {
 	// Only add the global model, NOT the per-token override model
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1470,7 +1487,7 @@ func TestExecute_PerTokenOverride_NonexistentModel(t *testing.T) {
 	hash := "nonexistent-override-hash"
 	headersSent := false
 	nonexistentModel := "nonexistent-model"
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel, "")
 
 	// Should return error, NOT panic
 	if err == nil {
@@ -1494,7 +1511,7 @@ func TestExecute_PerTokenOverride_NonexistentModel_Streaming(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1507,7 +1524,7 @@ func TestExecute_PerTokenOverride_NonexistentModel_Streaming(t *testing.T) {
 	hash := "nonexistent-stream-override-hash"
 	headersSent := false
 	nonexistentModel := "totally-fake-model-12345"
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &nonexistentModel, "")
 
 	// Should return error, NOT panic
 	if err == nil {
@@ -1565,7 +1582,7 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 		Internal: false,
 	})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1578,7 +1595,7 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 	hash := "global-id-hash"
 	headersSent := false
 	// No per-token override - should use global config
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error: %v", err)
@@ -1640,7 +1657,7 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 		Internal: false,
 	})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1654,7 +1671,7 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 	headersSent := false
 	// Per-token override with UUID-like ID
 	perTokenModelID := "550e8400-e29b-41d4-a716-446655440000"
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &perTokenModelID)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &perTokenModelID, "")
 
 	if err != nil {
 		t.Errorf("Execute returned error for UUID-like ID: %v", err)
@@ -1675,7 +1692,7 @@ func TestExecute_PerTokenOverride_WithID_Nonexistent(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -1689,7 +1706,7 @@ func TestExecute_PerTokenOverride_WithID_Nonexistent(t *testing.T) {
 	headersSent := false
 	// UUID-like ID that doesn't exist
 	fakeUUID := "123e4567-e89b-12d3-a456-426614174000"
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &fakeUUID)
+	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, &fakeUUID, "")
 
 	// Should return error, NOT panic
 	if err == nil {
@@ -1750,7 +1767,7 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 		Internal: false,
 	})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	tests := []struct {
 		name           string
@@ -1793,7 +1810,7 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 
 			hash := tt.name + "-hash"
 			headersSent := false
-			_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, tt.perTokenModel)
+			_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, tt.perTokenModel, "")
 
 			if err != nil {
 				t.Errorf("Execute returned error: %v", err)

@@ -2,6 +2,9 @@ package providers
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"time"
 )
 
 // Provider defines the interface for AI providers
@@ -61,12 +64,12 @@ type ReasoningDetailEntry struct {
 
 // ChatMessage represents a single message in a chat
 type ChatMessage struct {
-	Role             string               `json:"role"`
-	Content          interface{}          `json:"content"` // string or []ContentPart for multimodal
-	Name             string               `json:"name,omitempty"`
-	ToolCalls        []ToolCall           `json:"tool_calls,omitempty"`
-	ToolCallID       string               `json:"tool_call_id,omitempty"` // Required for tool role messages
-	ReasoningContent string               `json:"reasoning_content,omitempty"` // For DeepSeek R1-style thinking models
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content"` // string or []ContentPart for multimodal
+	Name             string      `json:"name,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`      // Required for tool role messages
+	ReasoningContent string      `json:"reasoning_content,omitempty"` // For DeepSeek R1-style thinking models
 
 	// ReasoningDetails carries MiniMax-format per-message reasoning_details
 	// on request-side map→struct hydration (D1). It is intentionally NOT
@@ -152,13 +155,36 @@ type StreamEvent struct {
 	Response         *ChatCompletionResponse // Full response for "done" event
 }
 
-// ProviderError wraps provider-specific errors with retry information
+// ProviderError wraps provider-specific errors with retry information.
+//
+// Round 3 (R3-1) ADDITIVE extension — RetryAfter + ErrorType + ErrorCode
+// (Round 3c — W2). No existing field is renamed, removed, or reordered;
+// the new fields are appended at the tail so existing error-comparison
+// code paths and tests keep compiling.
+//
+// RetryAfter is captured from the Retry-After response header on the
+// 429 path (openai.go:handleError wire-up) so ExcludeAndReselect can
+// seed the per-credential cooldown. Zero when the header is absent
+// or unparseable; the F.2 caller treats RetryAfter=0 as the "caller
+// applies default cooldown (60s)" signal — NEVER "no cooldown".
+//
+// ErrorType + ErrorCode mirror the unmarshaled anonymous-local
+// {Error:{Message,Type,Code}} body shape (openai.go:handleError wire-up).
+// They make the Round-3b classifier matrix row 11 (503 + rate-limit
+// body) implementable and the W1 /v1/messages anthropic-passthrough
+// classifier readable without re-parsing raw response bodies on the
+// hook site.
 type ProviderError struct {
 	Provider   string
 	StatusCode int
 	Message    string
 	Retryable  bool
 	BufferID   string // Optional: ID of saved request buffer for debugging
+
+	// Round 3 — R3-1 (additive). See struct doc-comment above.
+	RetryAfter time.Duration
+	ErrorType  string
+	ErrorCode  string
 }
 
 func (e *ProviderError) Error() string {
@@ -168,4 +194,56 @@ func (e *ProviderError) Error() string {
 // IsRetryable implements Provider interface check
 func (e *ProviderError) IsRetryable() bool {
 	return e.Retryable
+}
+
+// IsRateLimitError (Round 3 — R3-1) classifies an error as a 429-style
+// rate-limit condition.
+//
+// True when the error wraps a *ProviderError whose:
+//   - HTTP status is 429, OR
+//   - error-body code matches the rate-limit vocabulary
+//     (equality on {rate_limit, rate_limit_error, rate_limit_exceeded}),
+//     OR whose:
+//   - error-body type contains the substring "rate_limit"
+//     (case-insensitive; covers `rate_limit`, `rate_limit_error`,
+//     `rate_limit_exceeded` and any `-`/no-underscore variant the
+//     upstream brand emits).
+//
+// Vocabulary (Round 3b pinned; Round 3c — S1 adds rate_limit_exceeded):
+//   - type-substring match on "rate_limit" (the ONLY vocabulary
+//     check on the type field)
+//   - code-equality set = {rate_limit, rate_limit_error, rate_limit_exceeded}
+//   - status == 429
+//
+// Classifier returns true when ANY of the three match. The error
+// body's `code` and `type` fields are read from the extended
+// ProviderError.ErrorCode / ErrorType (Round 3c — W2), not from a raw
+// body re-parse — the API path already decoded them in handleError.
+//
+// Returns false for nil errors and for non-*ProviderError errors.
+// Safe to call from any goroutine.
+func IsRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// errors.As (not a direct type assertion): callers up the stack may
+	// wrap the *ProviderError with fmt.Errorf("%w", ...) — the Task 18
+	// coordinator reads latestReq.GetError() which can be wrapped; the
+	// classifier must see through the wrapping (Task 21 uses the same
+	// errors.As form for the ultimate guard).
+	var pe *ProviderError
+	if !errors.As(err, &pe) || pe == nil {
+		return false
+	}
+	if pe.StatusCode == 429 {
+		return true
+	}
+	if strings.Contains(strings.ToLower(pe.ErrorType), "rate_limit") {
+		return true
+	}
+	switch pe.ErrorCode {
+	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
+		return true
+	}
+	return false
 }

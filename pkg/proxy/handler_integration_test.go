@@ -176,7 +176,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Execute: Make a request through the handler with the valid API key
 	reqBody := map[string]interface{}{
@@ -335,7 +335,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Make 3 requests
 	for i := 0; i < 3; i++ {
@@ -564,7 +564,7 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Mark the request hash as failed so ultimate model will be triggered
 	// (simulating a duplicate request scenario)
@@ -744,7 +744,7 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Make a regular request (not triggering ultimate model because it's disabled)
 	reqBody := map[string]interface{}{
@@ -867,7 +867,7 @@ func TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow(t *testing.T) 
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Prepare messages for duplicate detection
 	messages := []map[string]interface{}{
@@ -1067,7 +1067,7 @@ func TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion(t *testing.T)
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// Subscribe to events to verify exclusion event is NOT published
 	eventCh, _ := bus.Subscribe()
@@ -1199,7 +1199,7 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Multiple retries test"},
@@ -1361,7 +1361,7 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
 	// The key test messages
 	testMessages := []map[string]interface{}{

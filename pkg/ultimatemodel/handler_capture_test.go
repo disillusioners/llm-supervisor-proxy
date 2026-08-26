@@ -58,7 +58,7 @@ func TestCapture_ExternalNonStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -115,7 +115,7 @@ func TestCapture_ExternalStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	resp, err := http.Get(upstream.URL)
@@ -153,7 +153,7 @@ func TestCapture_ExternalStream_ReturnsContentAndThinking(t *testing.T) {
 func TestCapture_InternalNonStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	mockResp := &providers.ChatCompletionResponse{
 		ID:      "chatcmpl-test",
@@ -232,7 +232,7 @@ func TestCapture_InternalNonStream_ReturnsContentAndThinking(t *testing.T) {
 func TestCapture_InternalStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	p := &mockProvider{
 		name: "mock",
@@ -499,7 +499,7 @@ func TestCapture_ExternalStream_ByteIdentity_PreservesUpstreamOrder(t *testing.T
 	cfg.cfg.UpstreamURL = upstream.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)

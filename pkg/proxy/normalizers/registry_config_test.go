@@ -41,6 +41,22 @@ func (m *mockModelsConfig) ResolveInternalConfig(modelID string) (string, string
 	return "", "", "", "", false
 }
 
+// ResolveInternalConfigWithAffinity (Phase 3 / Task 16 seam mock).
+func (m *mockModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (models.ResolvedCredential, bool) {
+	provider, apiKey, baseURL, internalModel, ok := m.ResolveInternalConfig(modelID)
+	if !ok {
+		return models.ResolvedCredential{}, false
+	}
+	return models.ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		CredentialID:  "",
+		NewlyBound:    false,
+	}, true
+}
+
 func (m *mockModelsConfig) AddModelForTest(id string, internal bool) {
 	m.models[id] = &models.ModelConfig{
 		ID:           id,

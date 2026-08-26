@@ -192,6 +192,33 @@ type ModelsConfigInterface interface {
 
 	// Internal config resolution
 	ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool)
+
+	// Phase 3 / Task 16 + Tasks 4/8/9 — affinity resolution seam.
+	// The struct form (ResolvedCredential + trailing ok) carries the
+	// engine's W-1 NewlyBound signal in addition to the credentials
+	// resolved fields. The legacy 5-tuple ResolveInternalConfig remains
+	// as the inner fallback for the Credentials == nil || len == 0
+	// fast path inside ResolveInternalConfigWithAffinity (and for the
+	// single-credential fast path that produces NO engine call).
+	ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool)
+}
+
+// ResolvedCredential is the struct form returned by
+// ResolveInternalConfigWithAffinity (Phase 3 / #3 — leader-ruled
+// struct over 6-tuple). Fields map to legacy 5-tuple except for
+// CredentialID (engine-selector output for observability + the
+// model_credential_selected event payload) and NewlyBound (W-1
+// only-on-first-binding event signal). The canonical concrete
+// implementation lives in pkg/store/database.ResolvedCredential;
+// pkg/models declares it here so pkg/proxy / pkg/ultimatemodel
+// can talk about the shape without an import cycle.
+type ResolvedCredential struct {
+	Provider      string
+	APIKey        string
+	BaseURL       string
+	InternalModel string
+	CredentialID  string
+	NewlyBound    bool
 }
 
 // ModelsConfig manages the collection of model configurations.
@@ -754,6 +781,43 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 	}
 
 	return provider, cred.APIKey, baseURL, actualModel, true
+}
+
+// ResolveInternalConfigWithAffinity (Phase 3 / Task 16 + Tasks 4/8/9 /
+// ModelsConfigInterface seam). The JSON-file-backed ModelsConfig has no
+// engine wired — the phase-2 ModelsManager owns the engine — so this
+// struct degrades to the legacy single-credential resolution (the
+// phase2 E-3 fast path): ResolveInternalConfig returns a struct with
+// .CredentialID == primaryID + .NewlyBound=false + .ok=resolves the
+// same shape as the single-cred path inside ModelsManager.
+//
+// Single-credential behavior is byte-identical — no engine call, no
+// binding write, no engine overhead.
+func (mc *ModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool) {
+	provider, apiKey, baseURL, internalModel, ok := mc.ResolveInternalConfig(modelID)
+	if !ok {
+		return ResolvedCredential{}, false
+	}
+	// Derive CredentialID for the legacy single-credential path.
+	mc.mu.RLock()
+	var primaryID string
+	for _, m := range mc.Models {
+		if m.ID == modelID {
+			primaryID = m.PrimaryCredentialID()
+			break
+		}
+	}
+	mc.mu.RUnlock()
+	return ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		CredentialID:  primaryID,
+		// NewlyBound is always false for the JSON-file backend (no
+		// engine wired; this is the E-3 single-credential fast path).
+		NewlyBound: false,
+	}, true
 }
 
 // GetEnabledModels returns only the enabled model configurations.

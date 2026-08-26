@@ -286,7 +286,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 	proxyCfg := &proxy.Config{ConfigMgr: cfgMgr, ModelsConfig: modelsConfig}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// Real tokenStore parity with the T1 harness (the anthropic endpoint
 	// itself does not gate on it, but the store wiring must be realistic).
