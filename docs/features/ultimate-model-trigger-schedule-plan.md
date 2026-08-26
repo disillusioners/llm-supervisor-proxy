@@ -1,29 +1,83 @@
 # Plan: Ultimate Model Trigger Schedule (5/10/20/30/40)
 
-Status: PLANNED (not implemented) — rev. 3, post-approver-revision
+Status: PLANNED (not implemented) — rev. 4, final approver cycle
 Date: 2026-08-26
 Depends on: `docs/ultimate-model-design.md` (current design)
 Rev. 2: folded in the two post-review CRITICAL fixes (MarkFailed double-count,
 force-trigger storage contradiction), four confirmed leader decisions, and
 review warnings/suggestions. All open questions were DECIDED — none remained.
-Rev. 3 (this revision): completes the MarkFailed deletion sweep across the
-test suite (rev. 2 missed 10 sites in `pkg/ultimatemodel/handler_test.go` plus
-3 dedicated MarkFailed test functions, causing `go build` / `go test` to
-fail after implementation), tightens §4.3/§4.6 enumerations to be exhaustive,
-corrects the §4.5 frontend enumeration: BOTH `components/SettingsPage.tsx`
-(5 sites — state hook, config-sync setter, payload write, prop pass,
-handler binding) AND `components/config/ProxySettings.tsx` (7 sites) must
-be edited together; the leader's original `:387` / `:405` citations were
-exact (rev. 2's `SettingsPage.tsx:128, :171` were correct anchors in the
-real file at `pkg/ui/frontend/src/components/SettingsPage.tsx` — rev. 3
-must not regress them), rewords the §3 MaxHash decision (config-read with
-default 100, not hardcoded),
-fixes the §3 → §5 cross-reference (→ §4.1), pins the SendRetryExhaustedError
-lockstep call site (`pkg/proxy/handler.go:662`), adds first-boot
-`MaxRetries=0` observability verification, and mandates a
+Rev. 3: completes the MarkFailed deletion sweep across the test suite (rev. 2
+missed 10 sites in `pkg/ultimatemodel/handler_test.go` plus 3 dedicated
+MarkFailed test functions, causing `go build` / `go test` to fail after
+implementation), tightens §4.3/§4.6 enumerations to be exhaustive, corrects
+the §4.5 frontend enumeration: BOTH `components/SettingsPage.tsx` (5 sites —
+state hook, config-sync setter, payload write, prop pass, handler binding)
+AND `components/config/ProxySettings.tsx` (7 sites) must be edited together;
+the leader's original `:387` / `:405` citations were exact (rev. 2's
+`SettingsPage.tsx:128, :171` were correct anchors in the real file at
+`pkg/ui/frontend/src/components/SettingsPage.tsx` — rev. 3 must not regress
+them), rewords the §3 MaxHash decision (config-read with default 100, not
+hardcoded), fixes the §3 → §5 cross-reference (→ §4.1), pins the
+SendRetryExhaustedError lockstep call site (`pkg/proxy/handler.go:662`),
+adds first-boot `MaxRetries=0` observability verification, and mandates a
 `grep -rn 'MarkFailed'` post-edit sweep as a HARD implementation procedure.
 No architectural changes vs. rev. 2 — approver explicitly called this
 "a completeness fix, not a redesign."
+Rev. 4 (this revision, final approver cycle): addresses the iteration-002
+approver's 2 blocking findings + 5 non-blocking fold-ins — **no architectural
+or 23-site MarkFailed-sweep changes** (those are approver-verified exact and
+must not regress). **(1) BLOCKING** — re-scopes the §4.6/§7.10 `MarkFailed`
+grep gate from `grep -rn 'MarkFailed' pkg/ test/` (provably unsatisfiable:
+collides with the UNRELATED `upstreamRequest.MarkFailed(err)` per-attempt
+failure marker at `pkg/proxy/race_request.go:149`, called from
+`pkg/proxy/race_coordinator.go:807`, with 30 test refs across the race trio
+`race_request_test.go` / `race_coordinator_test.go` /
+`race_coordinator_credfailover_test.go` plus 7 docs/ refs in
+`docs/fix-ultimate-model-cloudflare-drop.md` — none of which this feature
+deletes) to **two** scoped greps: `grep -rn 'MarkFailed' pkg/ultimatemodel/`
+→ zero and `grep -n 'MarkFailed' pkg/proxy/handler.go
+pkg/proxy/handler_integration_test.go pkg/proxy/handler_test.go` → zero. The
+race-package method is explicitly enumerated as out-of-scope with the
+collision inventory above so the implementor understands what they will still
+see in a repo-wide grep and why that is correct. **(2) BLOCKING** — completes
+the §4.6 mock-script enumeration: `test/test_mock_ultimate_model.sh:115`
+(echo banner, cosmetic), `:373`/`:375` (Test 8 header comment + echo,
+cosmetic), and **the entire Test 8 block (`test/test_mock_ultimate_model.sh`
+lines 370–432, incl. 8A/8B/8C/8D at `:379`/`:390`/`:401`/`:414` and the
+`attempt 3 of 2 max` assertion at `:424`)** — Test 8 is a **FULL REWRITE**
+(not a line-edit): drive 41 identical requests through the mock; the 41st
+must carry the un-retryable exhaustion error; assert the new wire wording
+`attempt 41 of 40 max` (SendRetryExhaustedError now reports total attempts
+against the fixed 40 cap, not the deleted `MaxRetries=2` knob); keep the
+17-step script structure and mock-remote-only constraint. Also adds
+`test/test_mock_minimax_reasoning.sh:768` (Test 5 comment, cosmetic). The
+already-listed `:127` (both scripts, export) and `:549` items stay as-is.
+**NON-BLOCKING (5 fold-ins)** — (i) §4.6 e2e_minimax_reasoning wording fix:
+clarifies the `harness_test.go:287–292` treatment is **drop only** the
+`t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")` line at `:292` (with its
+comment at `:287–288`); **keep** the `APPLY_ENV_OVERRIDES` line at `:289`
+and its companion `MAX_GENERATION_TIME`/`ULTIMATE_MODEL_MAX_HASH` siblings at
+`:290–291` (previously the wording read as "remove the entire block"). (ii)
+§4.6 note that `pkg/ultimatemodel/handler_test.go:792` (`GetRetryCount`
+usage — note: the rev. 4 typo "pkg/proxy/handler_test.go:792" is corrected to
+the real file) is covered by the §4.1 grep gate (field/method removal gate)
+and is **not** duplicated into the §4.6 MarkFailed sweep. (iii) Adds a
+parallel `ULTIMATE_MODEL_MAX_RETRIES` env-var grep gate — two greps,
+`grep -rn 'ULTIMATE_MODEL_MAX_RETRIES' pkg/ test/ README.md AGENTS.md` → zero
+PLUS `grep -rn 'ULTIMATE_MODEL_MAX_RETRIES' docs/ --exclude-dir=features` →
+zero (the leader's suggested single-grep form
+`grep -rn 'ULTIMATE_MODEL_MAX_RETRIES' docs/` is unsatisfiable: hits
+`docs/features/ultimate-model-trigger-schedule-plan.md` legitimately; today's
+ONLY docs/ hit is the plan doc itself, hence the `--exclude-dir=features`
+qualifier). (iv) §4.1 semantics pin: explicit line that
+`RecordAttempt(hash)` called after `StoreIfAbsent(hash)` for the same hash
+returns **2** (the force-seen insertion counts as attempt 1; the next
+`RecordAttempt` is attempt 2), plus a unit test bullet asserting this. (v)
+§4.6 fixtures clarification: the 5 `MaxRetries=3` fixtures at
+`pkg/proxy/handler_test.go:2084, :2099, :2160, :2221, :2285` become
+**deletions** (the config field is removed entirely per §4.4 — there is no
+value to rewrite the fixture to), not value rewrites. Implementation
+procedure updated accordingly. No open questions remain.
 
 ## 1. Motivation
 
@@ -161,13 +215,36 @@ credential-failover (credFailover) attempts never add to the counter.
 
   - Insert only, no increment — with the same first-sight eviction semantics
     as `RecordAttempt` (evicting the oldest hash + counter entry when full).
+  - **Semantics pin (rev. 4)**: `RecordAttempt(hash)` called **after**
+    `StoreIfAbsent(hash)` for the same hash returns **2**. The
+    `StoreIfAbsent` insertion is a counter-only insertion (counter → 1,
+    hash present, no increment), so the next `RecordAttempt` increments
+    counter from 1 → 2. This is the canonical force-then-normal flow
+    asserted by the new "Force → RecordAttempt" unit test (below). The
+    pair is the implementation of the leader-confirmed "force-seen hash
+    counts as attempt 1 on the next normal `RecordAttempt` call" decision
+    (§3).
 
 - Rename `retryCounter` map → attempt counter (`attemptCounter`). Keep
   `Remove`/`Reset` (also clear the counter entry — already the case), keep
   `Contains`, `GetStats`.
 - Delete `IncrementAndCheckRetry`, `GetRetryCount`, `ClearRetryCount` unless
   still referenced after refactor (expected: unused → delete; `GetRetryCount`
-  delete only if no external callers — verify with grep during implementation).
+  delete only if no external callers — verify with grep during
+  implementation). **External caller inventory verified (rev. 4)**:
+  `GetRetryCount` has exactly one external caller in the test suite at
+  `pkg/ultimatemodel/handler_test.go:792` (post-success-retry-counter-clear
+  assertion in `TestExecute_*`); the `MarkFailed`-deletion sweep (§4.6)
+  removes its only other use sites. The deletion of `GetRetryCount` is
+  covered by the **§4.1 grep gate** (field/method removal gate —
+  `grep -n 'GetRetryCount\|IncrementAndCheckRetry\|ClearRetryCount'
+  pkg/ultimatemodel/` → zero): line :792 is rewritten to assert against
+  the new attempt-counter API (or removed if the test's premise is
+  obsoleted by the schedule change), and is NOT enumerated as a separate
+  site in the §4.6 MarkFailed sweep — its treatment belongs to §4.1.
+  > **Note**: the iteration-002 brief referenced this site as
+  > `pkg/proxy/handler_test.go:792`; the real file is
+  > `pkg/ultimatemodel/handler_test.go:792`. Corrected in rev. 4.
 
 ### 4.2 `pkg/ultimatemodel/handler.go`
 
@@ -220,8 +297,10 @@ credential-failover (credFailover) attempts never add to the counter.
   (§4.6: 6 in `pkg/proxy/` + 10 in `pkg/ultimatemodel/handler_test.go`),
   plus the **3 dedicated MarkFailed test functions** in
   `pkg/ultimatemodel/handler_test.go` (`:358, :444, :455`).
-  `grep -rn 'MarkFailed' pkg/ test/` MUST return zero matches after the
-  sweep (§4.6 HARD procedure).
+  `grep -rn 'MarkFailed' pkg/ultimatemodel/` and
+  `grep -n 'MarkFailed' pkg/proxy/handler.go
+   pkg/proxy/handler_integration_test.go pkg/proxy/handler_test.go` MUST
+  return zero matches after the sweep (§4.6 HARD procedure, gates 1 + 2).
 - `SendRetryExhaustedError`: rename params to `currentAttempt`/`maxAttempts`;
   new message wording: `"Request attempt limit exceeded (attempt %d of %d
   max). Hash: %s..."`. **Keep** the wire error type string
@@ -380,6 +459,13 @@ New unit tests:
   normal call counts as attempt 1).
 - `StoreIfAbsent` unit: inserts without incrementing; force-seen hash → next
   `RecordAttempt` returns 1.
+- **RecordAttempt-after-StoreIfAbsent unit (rev. 4)** — for the same hash:
+  `RecordAttempt` returns **2** when preceded by `StoreIfAbsent` (the
+  force-seen insertion is counter-only, so the next `RecordAttempt`
+  increments counter from 1 → 2). Asserts the canonical force-then-normal
+  flow at the API level: pin `StoreIfAbsent(h)` → assert
+  `RecordAttempt(h) == 2`. This is the unit-level proof of the §4.1
+  semantics pin above.
 - Eviction: climb a hash to 3 → insert 100 other hashes (evicting it from
   the circular buffer) → the same hash restarts at 1.
 - Excluded model at attempt 41+: no exhausted error, normal flow (ordering).
@@ -455,8 +541,29 @@ Updates to existing tests:
   currently expect trigger on 2nd call; change to 5th. Line 1184
   `ULTIMATE_MODEL_MAX_RETRIES=2` env → remove.
 - `pkg/proxy/handler_test.go` — the five `MaxRetries = 3` fixtures at
-  `:2084`, `:2099`, `:2160`, `:2221`, `:2285` → schedule-based (loop to 5
-  or use ForceTrigger).
+  `:2084`, `:2099`, `:2160`, `:2221`, `:2285` → **DELETE the entire
+  `MaxRetries = 3` assignment line and any surrounding test-only setup
+  that referenced it as a config knob** (rev. 4 clarification). The
+  config field is removed entirely per §4.4 — there is no value to
+  rewrite the fixture to, so these fixtures existed solely to exercise
+  the now-removed `MaxRetries` knob and become pure deletions. Where the
+  surrounding test body depended on `MaxRetries = 3` semantics (e.g.
+  expected retry counts, exhaustion timing), rewrite those assertions
+  against the fixed 5/10/20/30/40 schedule per §3 (loop to 5 milestones,
+  use `ForceTrigger`, or assert the new attempt-based event payload).
+  Today the five assignments are:
+  - `:2084` — `cfg.UltimateModel.MaxRetries = 3` (followed by
+    `mgr.Save(cfg)`) — DELETE.
+  - `:2099` — `c.UltimateModel.MaxRetries = 3` (inside the
+    `newTestHandlerWithTokenStore` modifier closure, test 1) — DELETE.
+  - `:2160` — `c.UltimateModel.MaxRetries = 3` (test 2 — permission
+    denied) — DELETE.
+  - `:2221` — `c.UltimateModel.MaxRetries = 3` (test 3 — anonymous,
+    pre-populate hash cache) — DELETE.
+  - `:2285` — `c.UltimateModel.MaxRetries = 3` (test 4 — anonymous,
+    pre-populate hash cache) — DELETE.
+  The `MaxHash = 100` lines at the same five sites **stay** (the field
+  is unchanged per §3).
 - Capture-persistence env cleanups (corrects rev. 1's "4 files" wording):
   `handler_capture_persistence_test.go` — 4× inert
   `t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")` at `:138`, `:290`, `:491`,
@@ -470,10 +577,17 @@ Updates to existing tests:
   (rev. 1 phantom entry): the file contains only
   `ExcludeFromUltimateSwitching` tests and zero `MaxRetries` references —
   no update needed.
-- `test/e2e_minimax_reasoning/harness_test.go:287-292` — remove the
-  `t.Setenv` env-workaround block (`APPLY_ENV_OVERRIDES` +
-  `ULTIMATE_MODEL_MAX_RETRIES=0`) once the force-on-first-call regression
-  lands (the explanatory comment at `:287-288` goes with it).
+- `test/e2e_minimax_reasoning/harness_test.go:287-292` — **keep** the
+  `t.Setenv("APPLY_ENV_OVERRIDES", "1")` line at **:289** (and its
+  companion `MAX_GENERATION_TIME` and `ULTIMATE_MODEL_MAX_HASH` lines at
+  `:290–291`); **drop only** the `t.Setenv("ULTIMATE_MODEL_MAX_RETRIES",
+  "0")` line at **:292** together with its explanatory comment at
+  `:287–288` (`// Env: ultimate model + fast deadlines.
+  ULTIMATE_MODEL_MAX_RETRIES=0 // makes X-Force-Ultimate-Model trigger on
+  the first call.`). Once the force-on-first-call regression lands
+  (§4.6 new unit tests), the env workaround is no longer needed but the
+  surrounding `APPLY_ENV_OVERRIDES` setup remains required for the
+  harness.
 - `test/e2e_ultimate_internal_reasoning/e2e_ultimate_internal_reasoning_test.go:193-200`
   — remove the `t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "0")` line at
   **:200** (the surrounding `APPLY_ENV_OVERRIDES` / `MAX_GENERATION_TIME` /
@@ -486,30 +600,104 @@ Updates to existing tests:
   `APPLY_ENV_OVERRIDES` / `MAX_GENERATION_TIME` / `ULTIMATE_MODEL_MAX_HASH`
   lines at :275–277 stay (only the max-retries line goes).
 - Mock e2e scripts (export/assert `ULTIMATE_MODEL_MAX_RETRIES` — remove or
-  update to the new schedule):
+  update to the new schedule; rev. 4 enumeration is now **exhaustive**):
+  - `test/test_mock_ultimate_model.sh:115` — echo banner
+    `echo -e "  ULTIMATE_MODEL_MAX_RETRIES=2"` → **update** to the new
+    schedule semantics (e.g. `echo -e "  ULTIMATE_MODEL_MAX_RETRIES=N/A
+    (schedule is fixed at 5/10/20/30/40, 40-attempt cap)"`). Cosmetic only.
   - `test/test_mock_ultimate_model.sh:127` — `export
     ULTIMATE_MODEL_MAX_RETRIES="2"` → remove.
+  - `test/test_mock_ultimate_model.sh:373` — Test 8 header comment
+    `# With MAX_RETRIES=2, after 2 consecutive failures, the 3rd attempt
+    should return exhausted error.` → **update** wording to the new
+    schedule semantics (e.g. `# With the fixed schedule, after 40 total
+    attempts, the 41st attempt returns the exhausted error.`).
+    Cosmetic only.
+  - `test/test_mock_ultimate_model.sh:375` — Test 8 header echo `Expected:
+    After 2 consecutive failures, 3rd attempt returns retry_exhausted
+    error` → **update** wording to the new schedule semantics (e.g.
+    `Expected: After 40 attempts, the 41st returns retry_exhausted error`).
+    Cosmetic only.
+  - `test/test_mock_ultimate_model.sh` **Test 8 block (lines 370–432) —
+    FULL REWRITE** (not a line-edit). Today Test 8 (8A/8B/8C/8D at lines
+    :379, :390, :401, :414) drives a 4-request flow and asserts at
+    `:424` the wire text `attempt 3 of 2 max`. Under the new schedule
+    that wire text is impossible — `SendRetryExhaustedError` now reports
+    **total attempts against the fixed 40 cap** (`maxAttempts = 40`),
+    so the text becomes `attempt 41 of 40 max` on the 41st request.
+    Rewrite the block to drive **41** identical requests through the
+    mock (mock is local and free, so 41 requests are acceptable):
+    - Keep the same payload (`retry-exhaust-test-mock-error-500`,
+      `mock-internal-model`, streaming).
+    - The first 40 requests flow normally (each lands on a milestone
+      only if the hash is being seen for the 1st, 5th, 10th, 20th, 30th,
+      40th time; with 41 identical requests the milestones are at
+      request #5, #10, #20, #30, #40 — for an exhaustive test, assert
+      `X-LLMProxy-Ultimate-Model` header presence on those 5 calls,
+      absence on the other 35).
+    - The 41st request MUST return the un-retryable exhaustion error
+      carrying the new wire text `attempt 41 of 40 max` and the wire
+      error type `ultimate_model_retry_exhausted` (unchanged per §6).
+    - Keep the 17-step script structure (Test 8 = step 11/17) and the
+      mock-remote-only constraint (no real upstream).
   - `test/test_mock_ultimate_model.sh:549` — assertion "Retry limit enforced
     after consecutive failures (MAX_RETRIES=2)" → update to attempts
-    wording (41st request exhausts).
+    wording (e.g. "Attempt limit enforced after 40 requests (41st exhausts)").
   - `test/test_mock_minimax_reasoning.sh:127` — same export → remove.
+  - `test/test_mock_minimax_reasoning.sh:768` — Test 5 comment
+    `# We use the template's ULTIMATE_MODEL_MAX_RETRIES=2, so after 1
+    failure we retry (via duplicate hash) — second call should reach the
+    ultimate model.` → **update** wording to the new schedule semantics
+    (e.g. `# With the fixed schedule, after 1 failure the duplicate-hash
+    flow retries — the 5th call lands on the first milestone and reaches
+    the ultimate model.`). Cosmetic only.
 - `test/packs/ultimatemodel_unit_test.sh` — **no change needed** (rev. 1's
   conditional resolved): verified to be a generic wrapper (runs
   `go test ./pkg/ultimatemodel/` with no schedule assertions).
 
-  **HARD implementation procedure — MarkFailed grep sweep.** Before
-  declaring §4.6 (and §4.3) complete, the implementor MUST run:
+  **HARD implementation procedure — MarkFailed grep sweep (rev. 4).**
+  Before declaring §4.6 (and §4.3) complete, the implementor MUST run **both**
+  of the following greps and confirm **zero** matches:
 
   ```bash
-  grep -rn 'MarkFailed' pkg/ test/
+  # Gate 1: the ultimatemodel HashCache API deletion — covers handler.go:140
+  # comment + :144 func def + 22 sites in pkg/ultimatemodel/handler_test.go
+  # (3 dedicated test functions + 10 sites inside other tests + the comment
+  # and assertion lines around them) = 24 in-scope refs today.
+  grep -rn 'MarkFailed' pkg/ultimatemodel/
+
+  # Gate 2: the proxy trio — covers the 4 production MarkFailed call sites
+  # in pkg/proxy/handler.go (:952, :997, :1178, :1389) + the 4 sites in
+  # pkg/proxy/handler_integration_test.go (:575, :898, :1211, :1399) + the
+  # 2 sites in pkg/proxy/handler_test.go (:2232, :2293) = 10 in-scope refs
+  # today.
+  grep -n 'MarkFailed' pkg/proxy/handler.go pkg/proxy/handler_integration_test.go pkg/proxy/handler_test.go
   ```
 
-  and confirm **zero** matches across the entire repository. This is a
-  build-gate: with the API deleted (`handler.go:144-152` removed in §4.2),
-  any residual reference — production, test, comment, or doc — will fail
-  `go build ./...` or `go test ./pkg/ultimatemodel/...`. The grep is
-  expected to return no lines. If any line surfaces, the deletion sweep is
-  incomplete and §4.6 is not done.
+  Both gates MUST return zero lines. This is a build-gate: with the API
+  deleted (`handler.go:144-152` removed in §4.2), any residual reference —
+  production, test, comment, or doc — will fail `go build ./...` or
+  `go test ./pkg/ultimatemodel/...`.
+
+  **Out of scope (intentionally NOT covered by either gate).** The repo
+  contains ~30 references to a **different** `MarkFailed` method — the
+  per-attempt race failure marker `func (r *upstreamRequest) MarkFailed(err
+  error)` on the race package (`pkg/proxy/race_request.go:149`, called from
+  `pkg/proxy/race_coordinator.go:807`). That method is a per-upstream-attempt
+  status setter that pre-dates this feature, has nothing to do with the
+  ultimate-model hash cache, and is NOT part of this feature's deletion.
+  Today the collisions are: `pkg/proxy/race_request_test.go` (14 refs),
+  `pkg/proxy/race_coordinator_test.go` (15 refs),
+  `pkg/proxy/race_coordinator_credfailover_test.go:452` (1 ref). They will
+  remain after the implementation and the implementor will still see them in
+  any repo-wide `grep -rn 'MarkFailed' .` sweep — this is correct and is
+  why a repo-wide grep would never pass as a build gate. The two greps
+  above are scoped to the in-scope API surface only. The 7 legacy docs/
+  references in `docs/fix-ultimate-model-cloudflare-drop.md` (lines 23, 29,
+  38, 77, 89, 114, 115) are also out of scope: that file documents an
+  older fix and is NOT updated by this plan. If any line surfaces under
+  gate 1 or gate 2 above, the deletion sweep is incomplete and §4.6 is not
+  done.
 
 ### 4.7 Docs
 
@@ -582,8 +770,9 @@ Updates to existing tests:
 5. `pkg/proxy/handler_integration_test.go` + `pkg/proxy/handler_test.go`
    MarkFailed sweep: remove the **6 `MarkFailed` call sites**
    (`:575, :898, :1211, :1399, :2232, :2293`) and rewrite the fixtures that
-   asserted 2nd-call trigger (now 5th) and the `MaxRetries = 3` fixtures
-   (`:2084, :2099, :2160, :2221, :2285`) to be schedule-based.
+   asserted 2nd-call trigger (now 5th). The five `MaxRetries = 3` fixtures
+   (`:2084, :2099, :2160, :2221, :2285`) become **pure deletions** per
+   rev. 4 (no value rewrite — config field is gone; §4.6).
 6. `pkg/config/config.go`: remove `MaxRetries` everywhere; verify zero
    residual references via the §4.4 first-boot grep gate; fix
    `config`/`store` tests (`:1410, :1522`, `mock_store_test.go:176`).
@@ -602,10 +791,28 @@ Updates to existing tests:
    must be edited together**; the SettingsPage sites are real, not phantom,
    and the leader's `:387` / `:405` citations were exact.
 9. Docs: `ultimate-model-design.md`, `AGENTS.md`, `README.md`.
-10. **Final build-gate**: `grep -rn 'MarkFailed' pkg/ test/` must return
-    zero matches (§4.6 HARD procedure); `go test ./pkg/ultimatemodel/...
-    ./pkg/proxy/... ./pkg/config/...` must pass; `npm run build` in
-    `pkg/ui/frontend` must succeed with zero TS errors.
+10. **Final build-gate** (rev. 4): four grep gates must all return zero,
+    plus the test/build gates from §4.6/§4.4/§4.5:
+    - `grep -rn 'MarkFailed' pkg/ultimatemodel/` → zero (§4.6 HARD
+      procedure, gate 1)
+    - `grep -n 'MarkFailed' pkg/proxy/handler.go
+      pkg/proxy/handler_integration_test.go pkg/proxy/handler_test.go` →
+      zero (§4.6 HARD procedure, gate 2)
+    - `grep -rn 'ULTIMATE_MODEL_MAX_RETRIES' pkg/ test/ README.md
+      AGENTS.md` → zero (rev. 4 new env-var gate)
+    - `grep -rn 'ULTIMATE_MODEL_MAX_RETRIES' docs/ --exclude-dir=features`
+      → zero (rev. 4 new env-var gate; the plan doc itself legitimately
+      mentions the env var, hence `--exclude-dir=features`)
+    - `go test ./pkg/ultimatemodel/... ./pkg/proxy/... ./pkg/config/...`
+      must pass; `npm run build` in `pkg/ui/frontend` must succeed with
+      zero TS errors.
+    - **Note on the race-package `MarkFailed`**: the repo-wide
+      `grep -rn 'MarkFailed' pkg/ test/` from rev. 3 is INTENTIONALLY
+      removed — it collides with `upstreamRequest.MarkFailed(err)` in
+      `pkg/proxy/race_request.go:149` (called from
+      `race_coordinator.go:807`, plus 30 test refs across the race
+      trio), which this feature does not delete. The two scoped greps
+      above replace it.
 
 ## 8. Verification
 
