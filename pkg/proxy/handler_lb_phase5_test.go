@@ -1503,3 +1503,419 @@ func TestHandler_RateLimitFailover_ThreeCred_NoFallbackChain(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Test 8 — Phase 5 priority gap-fill — Case 1 modelID population guard
+// for the post-fallback credFailover path.
+//
+// CONTEXT (race_coordinator.go:494 area — Round 3j C1 critical):
+//   The Case-1 (main-error) branch builds the credFailover spawnTriggerInfo
+//   with `modelID: latestReq.modelID` so a credFailover spawn fired AFTER a
+//   FALLBACK row's 429 targets the FALLBACK row's OWN model + credential
+//   pool — not c.models[0]. Direct-spawn unit tests hand-set modelID, so
+//   deleting that line compiles green but regresses the wrong-model
+//   fallback path at runtime.
+//
+// COVERAGE GAP this test fills:
+//   TestHandler_TwoModelFallback429_WrongModelRegression uses m1=3-cred +
+//   m2=2-cred. m1's two credFailover spawns exhaust the WIP's global
+//   failoverAttempts counter (2 ≮ len(m2.Creds)-1 = 1), so Case 1 never
+//   fires for m2 and the guarded line is never exercised. This test uses
+//   m1=SINGLE-cred (no credFailover chain fires on m1 — the
+//   single-credential fast-path bypasses Case 1 entirely, so the global
+//   budget stays at 0) and m2=TWO-cred (the plan returns cleanly the
+//   first time it is consulted: 0 < 1).
+//
+// EXPECTED FLOW (exercises the guarded line end-to-end):
+//   1. modelTypeMain       on m1, m1-cred          → always 429
+//   2. Case 1 plan on m1's 429: SINGLE-cred → returns nil plan →
+//      log-skip straight to fallback spawn.
+//   3. modelTypeFallback   on m2, m2-cred-1        → 429 (once)
+//   4. Case 1 plan on m2's 429: returns reselect=m2-cred-2
+//      (the GUARDED LINE fires here):
+//        c.spawn(modelTypeCredFailover, spawnTriggerInfo{
+//            ...
+//            modelID: latestReq.modelID,   // <-- the guarded line
+//        })
+//   5. modelTypeCredFailover on m2, m2-cred-2      → 200
+//
+// ASSERTIONS (the re-review's MUST-HAVE behavioral guard):
+//   a) HTTP 200 — the whole chain completes cleanly.
+//   b) Exactly ONE credFailover row exists, with modelID == "m2" and
+//      credentialID == "m2-cred-2" (the engine's reselect). If the
+//      guarded line were deleted, c.models[0] = "m1" would surface here
+//      and resolveSpecificInternalCredential's belt-and-braces would
+//      refuse the cross-model resolve, terminating the request as 5xx —
+//      assertion (a) would fail before (b) could even be evaluated.
+//   c) The final 200 used InternalModel "internal-m2" as the request
+//      body model field AND an apiKey in m2's pool
+//      {key-m2-cred-1, key-m2-cred-2}, NEVER key-m1-cred (billing-grade
+//      guard).
+//   d) No cross-model (modelID, credentialID) pair appears across all
+//      spawn rows.
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestHandler_Case1ModelIDPopulation_ManageLoopGuard(t *testing.T) {
+	mock := &mockModelsConfig{}
+
+	// Two upstreams — per-credential BaseURL wiring lets us give each
+	// model its own rate-limit shape:
+	//   m1Upstream: ALWAYS 429 (m1's only credential is rate-limited
+	//               for every call).
+	//   m2Upstream: failFirstN=1 (the first distinct apiKey it sees
+	//               429s once, subsequent apiKeys succeed). With both
+	//               m2 credentials pointed here, m2-cred-1 fails its
+	//               first call and m2-cred-2 always succeeds.
+	m1Upstream := newRecordingUpstream()
+	m1Srv := httptest.NewServer(m1Upstream)
+	defer m1Srv.Close()
+	m1Upstream.mu.Lock()
+	m1Upstream.failAll = true
+	m1Upstream.failAllRetryAfter = 1 * time.Second
+	m1Upstream.mu.Unlock()
+
+	m2Upstream := newRecordingUpstream()
+	m2Srv := httptest.NewServer(m2Upstream)
+	defer m2Srv.Close()
+	m2Upstream.mu.Lock()
+	m2Upstream.failFirstN = 1
+	m2Upstream.failAllRetryAfter = 1 * time.Second
+	m2Upstream.mu.Unlock()
+
+	// Three credentials across the two upstreams.
+	mock.AddCredential(models.CredentialConfig{
+		ID: "m1-cred", Provider: "openai",
+		APIKey: "key-m1-cred", BaseURL: m1Srv.URL,
+	})
+	mock.AddCredential(models.CredentialConfig{
+		ID: "m2-cred-1", Provider: "openai",
+		APIKey: "key-m2-cred-1", BaseURL: m2Srv.URL,
+	})
+	mock.AddCredential(models.CredentialConfig{
+		ID: "m2-cred-2", Provider: "openai",
+		APIKey: "key-m2-cred-2", BaseURL: m2Srv.URL,
+	})
+
+	// m1: SINGLE credential (no credFailover plan can fire — Case 1
+	// returns nil and falls straight to model fallback).
+	// m2: TWO credentials (the ONLY model where Case 1 fires here).
+	mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true,
+		InternalModel: "internal-m1",
+		Credentials:   models.TestRefs("m1-cred"),
+		FallbackChain: []string{"m2"},
+	})
+	mock.AddModel(models.ModelConfig{
+		ID: "m2", Name: "m2", Enabled: true, Internal: true,
+		InternalModel: "internal-m2",
+		Credentials:   models.TestRefs("m2-cred-1", "m2-cred-2"),
+	})
+
+	env := buildHandlerStack(t, mock, []string{"m1", "m2"})
+	// NOTE: we deliberately do NOT bias m2's first pick via
+	// InjectPreconditionStateForTest here. The conversation key is
+	// computed from (modelID, tokenID, firstUserMessage) — the actual
+	// value is request-scoped and unknown at test setup time. We want
+	// the test to remain robust to EITHER ordering of m2-cred-1 ↔
+	// m2-cred-2 first picks (both exercise the guarded line
+	// identically — Case 1 always fires once on m2's fallback-row
+	// 429). The credFailover row's credentialID is asserted against
+	// the DYNAMICALLY-OBSERVED winning success below.
+
+	// Subscribe BEFORE send so the captured spawn events include the
+	// credFailover row carrying the guarded line's modelID value.
+	spawns := make(chan spawnRecord, 64)
+	ch, err := env.bus.Subscribe()
+	if err != nil {
+		t.Fatalf("bus.Subscribe: %v", err)
+	}
+	defer env.bus.Unsubscribe(ch)
+	go func() {
+		for evt := range ch {
+			if evt.Type != "race_spawn" {
+				continue
+			}
+			data, ok := evt.Data.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			rec := spawnRecord{
+				modelID:      asString(data["model"]),
+				modelType:    asString(data["type"]),
+				trigger:      asString(data["trigger"]),
+				credentialID: asString(data["credential_id"]),
+			}
+			if v, ok := data["request_index"].(int); ok {
+				rec.requestIndex = v
+			} else if v, ok := data["request_index"].(float64); ok {
+				rec.requestIndex = int(v)
+			}
+			spawns <- rec
+		}
+	}()
+
+	rec := sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test case1-modelid-guard")
+
+	// (a) HTTP 200 — the whole chain m1-429 → m2-fallback →
+	// m2-cred-failover → m2-cred-2 OK completes successfully.
+	if rec.Code != http.StatusOK {
+		// Drain whatever spawns the goroutine already produced so the
+		// failure message shows the captured race_spawn history.
+		snapshot := drainSpawns(spawns)
+		t.Fatalf("response status = %d, want 200 (body: %s); spawns so far: %v",
+			rec.Code, rec.Body.String(), snapshot)
+	}
+
+	// Wait for the event bus to drain (the goroutine processes events
+	// asynchronously — sendChatRequest returns before all events are
+	// flushed into the buffered channel).
+	deadline := time.Now().Add(3 * time.Second)
+	var recs []spawnRecord
+loop:
+	for time.Now().Before(deadline) {
+		select {
+		case r := <-spawns:
+			recs = append(recs, r)
+		case <-time.After(200 * time.Millisecond):
+			break loop
+		}
+	}
+	// Drain any remaining buffered events (non-blocking) before
+	// assertions run.
+	for {
+		select {
+		case r := <-spawns:
+			recs = append(recs, r)
+		default:
+			goto ready
+		}
+	}
+ready:
+
+	if len(recs) == 0 {
+		t.Fatalf("no race_spawn events captured (m1Upstream calls=%d, m2Upstream calls=%d)",
+			m1Upstream.callCount(), m2Upstream.callCount())
+	}
+
+	// Identify the SUCCESS credential dynamically — whichever m2
+	// credential DID NOT 429 on its first call is the reselect winner
+	// (its apiKey appears on the success path, its model field
+	// appears in m2Upstream.lastModels with success=false). The
+	// credFailover row's credentialID must equal this one.
+	m2Upstream.mu.Lock()
+	failedKeys := make(map[string]bool, len(m2Upstream.failedKeys))
+	for k := range m2Upstream.failedKeys {
+		failedKeys[k] = true
+	}
+	m2Upstream.mu.Unlock()
+
+	m2Keys := m2Upstream.perKeyCallsSnapshot()
+	if len(m2Keys) != 2 {
+		t.Errorf("m2Upstream perKeyCalls has %d distinct keys, want 2 (m2-cred-{1,2}); perKeyCalls=%v",
+			len(m2Keys), m2Keys)
+	}
+	if len(failedKeys) != 1 {
+		t.Errorf("m2Upstream failedKeys = %v (size %d), want exactly 1 entry (one credential 429'd; the other reselected and succeeded)",
+			failedKeys, len(failedKeys))
+	}
+	apiKeyToCred := map[string]string{
+		"Bearer key-m2-cred-1": "m2-cred-1",
+		"Bearer key-m2-cred-2": "m2-cred-2",
+	}
+	var successCredID string
+	for k := range m2Keys {
+		if failedKeys[k] {
+			continue
+		}
+		if c, ok := apiKeyToCred[k]; ok {
+			successCredID = c
+			break
+		}
+	}
+	if successCredID == "" {
+		t.Fatalf("could not derive successCredID from m2Upstream state (keys=%v, failedKeys=%v)",
+			m2Keys, failedKeys)
+	}
+	if successCredID != "m2-cred-1" && successCredID != "m2-cred-2" {
+		t.Fatalf("successCredID=%q, want m2-cred-1 or m2-cred-2", successCredID)
+	}
+
+	// (b) — THE GUARDED LINE'S BEHAVIORAL TEST.
+	// Exactly ONE credFailover row exists, with modelID == "m2"
+	// (the source model of the post-fallback 429, NOT c.models[0]
+	// which is "m1"). credentialID must be the winning success
+	// credential derived above (the engine's reselect).
+	m2CredFailoverCount := 0
+	for i, r := range recs {
+		if r.modelType != "cred_failover" {
+			continue
+		}
+		switch r.modelID {
+		case "m2":
+			m2CredFailoverCount++
+			if r.credentialID != successCredID {
+				t.Errorf("credFailover[%d] modelID=m2 but credentialID=%q, want %q (the reselect winner from m2's pool)",
+					i, r.credentialID, successCredID)
+			}
+		case "m1":
+			// GUARDED LINE REGRESSION: deleting `modelID:
+			// latestReq.modelID` in race_coordinator.go would cause
+			// spawn() to default to c.models[0] = "m1" here. The
+			// resolveSpecificInternalCredential belt-and-braces would
+			// then refuse the cross-model resolve and the request
+			// would terminate as 5xx (so rec.Code would not be 200).
+			// Reaching this branch with rec.Code == 200 is a hard
+			// failure — the regression has happened but somehow
+			// didn't trip the belt-and-braces. Treat it as the guard
+			// invariant break it is.
+			t.Errorf("credfailover[%d] modelID=m1 — GUARDED LINE REGRESSION: "+
+				"race_coordinator.go:494 modelID: latestReq.modelID was deleted; "+
+				"spawn defaulted to c.models[0] (m1) instead of the post-fallback source model (m2)", i)
+		default:
+			t.Errorf("credFailover[%d] modelID = %q, want m2 (the source of the post-fallback 429)", i, r.modelID)
+		}
+	}
+	if m2CredFailoverCount != 1 {
+		t.Errorf("modelTypeCredFailover rows on m2 = %d, want exactly 1 "+
+			"(Case 1 fires once after m2 fallback row 429s; the guarded line at race_coordinator.go:494 "+
+			"must populate modelID=m2 on this row); full: %v", m2CredFailoverCount, recs)
+	}
+
+	// (b-aux) — Structural cross-check on the OTHER rows so the
+	// (b) assertion's "exactly 1" claim is grounded in the observed
+	// event topology: one main row on m1, one fallback row on m2,
+	// one credFailover row on m2. No second rows, no extra
+	// fallbacks.
+	if mainRows := countByType(recs, "main"); mainRows != 1 {
+		t.Errorf("modelTypeMain rows = %d, want 1; full: %v", mainRows, recs)
+	}
+	if fbRows := countByType(recs, "fallback"); fbRows != 1 {
+		t.Errorf("modelTypeFallback rows = %d, want 1 (m2 spawned as fallback after m1 burned); full: %v", fbRows, recs)
+	}
+	for i, r := range recs {
+		if r.modelType == "main" && r.modelID != "m1" {
+			t.Errorf("modelTypeMain[%d] modelID = %q, want m1", i, r.modelID)
+		}
+		if r.modelType == "fallback" && r.modelID != "m2" {
+			t.Errorf("modelTypeFallback[%d] modelID = %q, want m2", i, r.modelID)
+		}
+	}
+
+	// (c) — Billing-grade guard: the final 200's apiKey is in m2's
+	// pool and never m1's, AND the request body model field is
+	// "internal-m2".
+	m2Keys = m2Upstream.perKeyCallsSnapshot()
+	for k, n := range m2Keys {
+		if strings.Contains(k, "key-m1-cred") && n > 0 {
+			t.Errorf("m2Upstream hit m1's apiKey %q = %d (billing-grade cross-credential leak: m1's key must never appear on m2Upstream)", k, n)
+		}
+	}
+	// m2-cred-1 / m2-cred-2: each called exactly once (one for the
+	// initial 429, one for the reselect success — engine does not
+	// retry the same key). Stronger: the SUCCESS credential is the
+	// one we computed above.
+	if n := m2Keys["Bearer key-m2-cred-1"]; n != 1 {
+		t.Errorf("m2-cred-1 upstream calls = %d, want 1 (one attempt total); perKeyCalls=%v", n, m2Keys)
+	}
+	if n := m2Keys["Bearer key-m2-cred-2"]; n != 1 {
+		t.Errorf("m2-cred-2 upstream calls = %d, want 1 (one attempt total); perKeyCalls=%v", n, m2Keys)
+	}
+	// Belt-and-braces — the success credential we derived matches
+	// the one that showed up as the credFailover row's credentialID
+	// (already asserted in (b)).
+	m1Keys := m1Upstream.perKeyCallsSnapshot()
+	if n := m1Keys["Bearer key-m1-cred"]; n != 1 {
+		t.Errorf("m1-cred upstream calls = %d, want 1 (always-429 single attempt); perKeyCalls=%v", n, m1Keys)
+	}
+	// Belt-and-braces: m2 credentials must NEVER appear on
+	// m1Upstream.
+	for k, n := range m1Keys {
+		if (strings.Contains(k, "key-m2-cred-1") || strings.Contains(k, "key-m2-cred-2")) && n > 0 {
+			t.Errorf("m1Upstream hit m2's apiKey %q = %d (cross-credential leak)", k, n)
+		}
+	}
+
+	// Final call on m2Upstream had body model == "internal-m2"
+	// (the success's resolver used the m2 model config's
+	// InternalModel field — NOT "internal-m1", which would be a
+	// wrong-model regression at the resolver layer too).
+	m2Upstream.mu.Lock()
+	lastModels := append([]string(nil), m2Upstream.lastModels...)
+	m2Upstream.mu.Unlock()
+	if len(lastModels) == 0 {
+		t.Fatalf("m2Upstream recorded no calls (lastModels empty)")
+	}
+	if got := lastModels[len(lastModels)-1]; got != "internal-m2" {
+		t.Errorf("m2Upstream last call's body model field = %q, want %q (the winning 200 was dispatched as the m2 internal model)",
+			got, "internal-m2")
+	}
+	// All m2Upstream request bodies must have used "internal-m2"
+	// (m2's InternalModel); none should have been "internal-m1"
+	// (m1's InternalModel — would imply a wrong-model dispatch from
+	// either the fallback or the credFailover row).
+	for i, m := range lastModels {
+		if m == "internal-m1" {
+			t.Errorf("m2Upstream call[%d] used body model %q (m1's InternalModel) — wrong-model dispatch", i, m)
+		}
+		if m != "internal-m2" {
+			t.Errorf("m2Upstream call[%d] used body model %q, want %q", i, m, "internal-m2")
+		}
+	}
+
+	// (d) — No cross-model (modelID, credentialID) pair anywhere
+	// (re-uses test 6's check shape).
+	m1Pool := map[string]bool{"m1-cred": true}
+	m2Pool := map[string]bool{"m2-cred-1": true, "m2-cred-2": true}
+	for i, r := range recs {
+		switch r.modelType {
+		case "main":
+			// Main row carries no credentialID on the spawn event;
+			// the resolver picked m1-cred via the single-cred fast
+			// path, which is correct by construction.
+			continue
+		case "fallback":
+			// Same: modelTypeFallback rows don't surface a
+			// credentialID on the spawn event (race_coordinator.go
+			// :344); the resolver picked m2-cred-1 via the engine's
+			// biased precondition, which is correct by construction.
+			continue
+		case "cred_failover":
+			switch r.modelID {
+			case "m2":
+				if !m2Pool[r.credentialID] {
+					t.Errorf("WRONG-MODEL REGRESSION: credFailover[%d] modelID=m2 credentialID=%q (not in m2's pool); full: %v",
+						i, r.credentialID, recs)
+				}
+			case "m1":
+				if !m1Pool[r.credentialID] {
+					t.Errorf("WRONG-MODEL REGRESSION: credFailover[%d] modelID=m1 credentialID=%q (not in m1's pool); full: %v",
+						i, r.credentialID, recs)
+				}
+			}
+		}
+	}
+
+	// Informational — engine stats reflect the real rebind Case 1
+	// performed for m2.
+	stats := env.credLB.Stats()
+	if st, ok := stats["m2"]; !ok || st.Failovers == 0 {
+		t.Errorf("engine stats[m2].Failovers = %d (or m2 absent), want >=1 (Case 1 fired a real rebind); full stats: %+v",
+			stats["m2"], stats)
+	}
+}
+
+// drainSpawns reads any events currently buffered on the channel
+// (non-blocking). Used by t.Fatalf paths in the Case-1 modelID guard
+// test to surface the partial race_spawn history when the response
+// status already indicates a failure.
+func drainSpawns(ch <-chan spawnRecord) []spawnRecord {
+	var out []spawnRecord
+	for {
+		select {
+		case r := <-ch:
+			out = append(out, r)
+		default:
+			return out
+		}
+	}
+}
