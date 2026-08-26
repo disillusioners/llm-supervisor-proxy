@@ -35,10 +35,10 @@ UltimateModel automates this by detecting repeated requests and automatically es
 │            │ YES                                                     │
 │            ▼                                                         │
 │  ┌─────────────────────┐     NO      ┌──────────────────────────┐   │
-│  │ StoreAndCheck hash  │────────────►│ Continue normal flow     │   │
-│  │ (ATOMIC, store 1st) │             │ (hash now stored)        │   │
+│  │ RecordAttempt hash  │─not on     ►│ Continue normal flow     │   │
+│  │ (ATOMIC, counts all)│  milestone  │ (attempt recorded)       │   │
 │  └─────────┬───────────┘             └──────────────────────────┘   │
-│            │ YES (was duplicate)                                   │
+│            │ YES (milestone 5/10/20/30/40 or beyond 40)          │
 │            ▼                                                         │
 │  ┌─────────────────────┐     FAIL    ┌──────────────────────────┐   │
 │  │ Get model from DB   ├────────────►│ Remove hash from cache   │   │
@@ -137,10 +137,15 @@ func NewHashCache(maxSize int) *HashCache
 // HashMessages generates a consistent hash from messages (role + content only)
 func HashMessages(messages []openai.ChatCompletionMessage) string
 
-// StoreAndCheck stores the hash and returns whether it was ALREADY present.
-// ATOMIC: Stores first, then checks - prevents race condition with concurrent requests.
-// Returns true if hash was already in cache (duplicate detected).
-func (c *HashCache) StoreAndCheck(hash string) bool
+// RecordAttempt records the hash (inserting on first sight) and increments
+// the attempt counter on EVERY call. ATOMIC single-mutex critical section.
+// Returns the total attempt count for this hash.
+func (c *HashCache) RecordAttempt(hash string) int
+
+// StoreIfAbsent inserts the hash if not already present WITHOUT incrementing
+// the attempt counter. Used only by the force-trigger branch: the insertion
+// counts as attempt 1, so the next normal RecordAttempt returns 2.
+func (c *HashCache) StoreIfAbsent(hash string)
 
 // Remove removes a hash from the cache (used when ultimate model fails).
 // This prevents infinite retry loop on broken config.
@@ -175,14 +180,14 @@ func HashMessages(messages []openai.ChatCompletionMessage) string {
 - Different context/windowing → different hash
 - Simple and deterministic
 
-### 2.4 StoreAndCheck vs CheckAndStore
+### 2.4 Atomic counting (why RecordAttempt is a single mutex op)
 
 **Problem with CheckAndStore (check first, then store):**
 - Two identical concurrent requests both check → both see "not in cache"
 - Both proceed to normal flow
 - Neither triggers ultimate mode
 
-**Solution with StoreAndCheck (store first, return if duplicate):**
+**Solution with atomic insert-on-first-sight counting (RecordAttempt):**
 - First request stores hash → returns false (not duplicate) → normal flow
 - Second request stores hash → returns true (was duplicate) → ultimate mode
 - Thread-safe with mutex lock around entire operation
@@ -216,15 +221,24 @@ func NewHandler(cfg *config.Manager, modelsMgr models.ModelsConfigInterface, eve
 ### 3.2 Core Methods
 
 ```go
-// ShouldTrigger stores hash and returns true if:
-// 1. Ultimate model is configured (non-empty ModelID)
-// 2. This request hash was already in cache (duplicate)
-// Uses atomic StoreAndCheck to prevent race conditions.
-func (h *Handler) ShouldTrigger(messages []openai.ChatCompletionMessage) (bool, string)
+// ShouldTrigger records an attempt for the hash and returns Triggered=true if:
+// 1. Ultimate model is configured (non-empty ModelID), AND
+// 2. The TOTAL attempt count for this hash lands on a schedule milestone
+//    (5/10/20/30/40) — or exceeds the 40 cap (AttemptsExhausted=true)
+// Uses the atomic RecordAttempt to prevent race conditions.
+//
+// Trigger schedule (total requests with the same hash):
+//   1-4           → normal flow
+//   5,10,20,30,40 → ultimate model (milestone injection)
+//   41+           → un-retryable error (ultimate_model_retry_exhausted)
+// Ultimate success → Remove(hash): schedule re-arms.
+// Ultimate failure → counter kept; next milestone applies.
+func (h *Handler) ShouldTrigger(messages []openai.ChatCompletionMessage) ShouldTriggerResult
 
 // Execute handles request with ultimate model - RAW PROXY
 // No retry, no fallback, no loop detection, no buffering.
-// On failure, removes hash from cache to prevent infinite retry loop.
+// On failure: keeps the attempt counter (next milestone applies).
+// On success: removes the hash (schedule re-arms).
 func (h *Handler) Execute(
     ctx context.Context,
     w http.ResponseWriter,
@@ -306,15 +320,20 @@ if shouldTrigger:
     else → return true (ultimate mode)
 ```
 
-### 3.4.3 Interaction with Retry Counter
+### 3.4.3 Interaction with Attempt Counter
 
-The retry counter is hash-based (message content), not per-model:
+The attempt counter is hash-based (message content), not per-model, and
+counts TOTAL requests (not duplicates only):
 
-- When an excluded model sends a duplicate request, `ShouldTrigger()` still increments the retry counter
-- Same messages sent first to an excluded model, then to a non-excluded model:
-  - The non-excluded model may see higher retry count
-  - May even see `RetryExhausted`
-- **This is accepted behavior** — the counter tracks how many times *these messages* have been seen globally
+- Every request records an attempt at the early-exit gate — including
+  requests to excluded models (`ShouldTrigger()` runs before the
+  exclusion gate, which only suppresses the switch and the exhausted
+  error)
+- Same messages sent first to an excluded model, then to a non-excluded
+  model: the non-excluded model sees the accumulated attempt count and
+  may land on a milestone — or beyond the 40 cap (`AttemptsExhausted`)
+- **This is accepted behavior** — the counter tracks how many times
+  *these messages* have been seen globally
 
 ### 3.4.4 ForceTrigger Behavior
 
@@ -569,7 +588,7 @@ Add indicator column in request list:
 
 | File | Description |
 |------|-------------|
-| `pkg/ultimatemodel/hash_cache.go` | Circular buffer hash storage with StoreAndCheck, Remove, Reset |
+| `pkg/ultimatemodel/hash_cache.go` | Circular buffer hash storage with RecordAttempt, StoreIfAbsent, Remove, Reset |
 | `pkg/ultimatemodel/hash_cache_test.go` | Unit tests for hash cache |
 | `pkg/ultimatemodel/handler.go` | Main orchestration with config change handling |
 | `pkg/ultimatemodel/handler_internal.go` | Direct provider calls |
@@ -601,7 +620,9 @@ Add indicator column in request list:
 | Multi-turn conversation | Each message array = new hash check |
 | Empty messages array | Skip hash check (not a valid request) |
 | Ultimate model ID changed | Reset hash cache via config change event |
-| Concurrent identical requests | First → normal flow, second → ultimate mode (atomic StoreAndCheck) |
+| Concurrent identical requests | Atomic RecordAttempt assigns distinct attempt numbers; only the request landing exactly on a milestone triggers |
+| Attempt 41+ with the same hash | Un-retryable error (ultimate_model_retry_exhausted, "attempt N of 40 max") — unless the model is excluded (exclusion gate precedes the exhausted check) |
+| Hash evicted from the circular buffer | Counter entry deleted with the hash → counting restarts at 1 |
 | Server restart | Hash cache cleared (ephemeral by design) |
 
 ## 8.1 Feature Interaction (What Ultimate Mode Bypasses)
@@ -624,12 +645,13 @@ Add indicator column in request list:
 ### Unit Tests
 
 1. **HashCache**
-   - Test `StoreAndCheck` returns false for first insert
-   - Test `StoreAndCheck` returns true for duplicate
-   - Test circular buffer wraps around
-   - Test `Reset` clears all hashes
-   - Test `Remove` removes specific hash
-   - Test concurrent `StoreAndCheck` calls (race condition test)
+   - Test `RecordAttempt` returns 1 on first insert and increments
+   - Test `StoreIfAbsent` inserts without incrementing (next RecordAttempt returns 2)
+   - Test the trigger schedule: 1-4 no trigger, 5/10/20/30/40 trigger, 41/42 exhausted
+   - Test circular buffer wraps around (counter cleaned on eviction)
+   - Test `Reset` clears all hashes and counters
+   - Test `Remove` removes specific hash (counter resets)
+   - Test concurrent `RecordAttempt` calls (multiset {1..N} race test)
 
 2. **HashMessages**
    - Test same messages produce same hash
@@ -674,9 +696,9 @@ Add indicator column in request list:
 
 | Decision | Rationale |
 |----------|-----------|
-| `StoreAndCheck` instead of `CheckAndStore` | Prevents race condition with concurrent identical requests |
+| `RecordAttempt` atomic counting instead of check-then-store | Prevents race condition with concurrent identical requests; total-request basis matches the 5/10/20/30/40 schedule |
 | Pass `requestContext` to `Execute()` | Ensures logging continuity and request ID tracking |
-| Remove hash on ultimate model failure | Prevents infinite retry loop on broken config |
+| Keep counter on ultimate failure, remove hash on success | Failure flows normally to the next milestone; success re-arms the schedule |
 | Reset cache on `model_id` config change | Different model = different behavior expectations |
 | Full SHA256 (64 chars) | Prevents collision risk from truncation |
 | In-memory hash cache | Ephemeral by design, no persistence overhead |

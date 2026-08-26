@@ -149,7 +149,7 @@ credential-failover (credFailover) attempts never add to the counter.
 | Old `max_retries` config/env | **Drop** — remove field, default, validation, env override, UI input |
 | Reset after ultimate success (success → `Remove(hash)` → schedule re-arms) | **CONFIRMED intended** (preserved semantic). Worst case up to ~**8** ultimate invocations per 40 identical requests (see §5) |
 | Hash-cache eviction size | **CONFIRMED leave MaxHash config unchanged** — MaxHash is config-read (`pkg/ultimatemodel/handler.go:60-63`, default 100 when `≤ 0`); the schedule change leaves the field, its default, and its env override (`ULTIMATE_MODEL_MAX_HASH`) untouched. Eviction semantics tightened in §4.1 (counter entry deleted alongside evicted hash) |
-| Force-trigger counting | **CONFIRMED** — force uses `StoreIfAbsent` (store-if-new, NO counter effect); a force-seen hash counts as attempt 1 on the next normal `RecordAttempt` (see §4.1/§4.2) |
+| Force-trigger counting | **CONFIRMED** — force uses `StoreIfAbsent` (insert-only): the insertion itself sets counter=1, i.e. the force-seen insertion IS attempt 1; the next normal `RecordAttempt` increments to **2** (§4.1 pin is authoritative) |
 | `MarkFailed` fate | **CONFIRMED deleted entirely** — counting-neutral (attempts are counted at entry by `RecordAttempt`); also removes an unintended cross-token side effect (see §4.2) |
 
 ### Semantics preserved from current design
@@ -163,8 +163,9 @@ credential-failover (credFailover) attempts never add to the counter.
   normally until the next milestone.
 - `X-Force-Ultimate-Model` (ForceTrigger) → triggers immediately, **never
   increments the counter**, still stores hash if new — now via
-  `StoreIfAbsent` (insert-only, no increment; §4.1). A force-seen hash counts
-  as attempt 1 on the next normal `RecordAttempt` call. No exhaustion applies.
+  `StoreIfAbsent` (insert-only, no increment; §4.1). The force-seen
+  insertion counts as attempt 1 (counter=1), so the next normal
+  `RecordAttempt` call returns 2 and IS attempt 2. No exhaustion applies.
   **Explicit behavior change** (leader-confirmed): today, force on a
   first-sight hash under the default `max_retries=2` returns
   `Triggered=false` (and even increments the duplicate counter to 1); the e2e
@@ -795,6 +796,8 @@ Updates to existing tests:
     plus the test/build gates from §4.6/§4.4/§4.5:
     - `grep -rn 'MarkFailed' pkg/ultimatemodel/` → zero (§4.6 HARD
       procedure, gate 1)
+    - `grep -n 'GetRetryCount\|IncrementAndCheckRetry\|ClearRetryCount'
+      pkg/ultimatemodel/` → zero (§4.1 field/method removal gate)
     - `grep -n 'MarkFailed' pkg/proxy/handler.go
       pkg/proxy/handler_integration_test.go pkg/proxy/handler_test.go` →
       zero (§4.6 HARD procedure, gate 2)

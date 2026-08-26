@@ -141,7 +141,10 @@ For handling duplicate requests with a designated high-priority model:
 |----------|---------|-------------|
 | `ULTIMATE_MODEL_ID` | *(empty)* | Model ID for duplicate request handling. |
 | `ULTIMATE_MODEL_MAX_HASH` | `100` | Max hashes in circular buffer. |
-| `ULTIMATE_MODEL_MAX_RETRIES` | `2` | Max ultimate model retries per hash. |
+
+Ultimate-model trigger schedule is fixed (not configurable): escalation on
+the **5th/10th/20th/30th/40th** request with the same content hash; requests
+beyond the 40th receive an un-retryable `ultimate_model_retry_exhausted` error.
 
 ### Loop Detection Configuration
 
