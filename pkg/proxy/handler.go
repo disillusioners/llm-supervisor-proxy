@@ -624,16 +624,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					})
 					// Fall through to normal flow (no ultimate model switch)
 				} else {
-					// Check if retry limit exhausted
-					if result.RetryExhausted {
+					// Check if the per-hash attempt limit is exhausted
+					// (strictly beyond the hardcoded 40-attempt cap)
+					if result.AttemptsExhausted {
 						// Resolve ultimate model ID with per-token override
 						ultimateModelID := h.ultimateHandler.GetModelID()
 						if rc.ultimateModelID != "" {
 							ultimateModelID = rc.ultimateModelID
 						}
 
-						log.Printf("[UltimateModel] Retry limit exhausted for hash=%s (attempt %d/%d)",
-							result.Hash[:8], result.CurrentRetry, result.MaxRetries)
+						log.Printf("[UltimateModel] Attempt limit exhausted for hash=%s (attempt %d/%d)",
+							result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
 
 						// Determine if streaming
 						isStream := false
@@ -643,23 +644,30 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 						// Update request log
 						rc.reqLog.Status = "failed"
-						rc.reqLog.Error = fmt.Sprintf("Ultimate model retry limit exceeded (attempt %d/%d)", result.CurrentRetry, result.MaxRetries)
+						rc.reqLog.Error = fmt.Sprintf("Request attempt limit exceeded (attempt %d/%d)", result.CurrentAttempt, result.MaxAttempts)
 						rc.reqLog.EndTime = time.Now()
 						rc.reqLog.Duration = time.Since(rc.startTime).String()
 						rc.reqLog.UltimateModelUsed = true
 						rc.reqLog.UltimateModelID = ultimateModelID
 						h.store.Add(rc.reqLog)
 
-						// Publish event
+						// Publish event.
+						//
+						// COMPATIBILITY NOTE: the payload keys "current_retry" /
+						// "max_retries" are KEPT for frontend compatibility
+						// (EventLog.tsx and any external consumers read them);
+						// their values now mean TOTAL attempts against the
+						// hardcoded 40 cap (e.g. 41/40), not the removed
+						// max-retries config knob.
 						h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
 							"id":            rc.reqID,
 							"hash":          result.Hash[:8],
-							"current_retry": result.CurrentRetry,
-							"max_retries":   result.MaxRetries,
+							"current_retry": result.CurrentAttempt,
+							"max_retries":   result.MaxAttempts,
 						})
 
 						// Send error response (HTTP 200 with JSON stream error)
-						h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentRetry, result.MaxRetries, isStream)
+						h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentAttempt, result.MaxAttempts, isStream)
 						return
 					}
 
@@ -669,8 +677,8 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						ultimateModelID = rc.ultimateModelID
 						log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
 					}
-					log.Printf("[UltimateModel] Triggered for duplicate request, using %s, hash=%s, retry=%d/%d",
-						ultimateModelID, result.Hash[:8], result.CurrentRetry, result.MaxRetries)
+					log.Printf("[UltimateModel] Triggered for duplicate request (schedule milestone), using %s, hash=%s, attempt=%d/%d",
+						ultimateModelID, result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
 
 					// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
 
@@ -680,14 +688,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					rc.reqLog.Status = "running"
 					h.store.Add(rc.reqLog)
 
-					// Publish event
+					// Publish event.
+					//
+					// COMPATIBILITY NOTE: the payload keys "current_retry" /
+					// "max_retries" are KEPT for frontend compatibility; their
+					// values now mean TOTAL attempts against the hardcoded 40
+					// cap (milestone values are 5/10/20/30/40 of 40).
 					h.publishEvent("ultimate_model_triggered", map[string]interface{}{
 						"id":             rc.reqID,
 						"ultimate_model": ultimateModelID,
 						"original_model": rc.reqLog.Model,
 						"hash":           result.Hash[:8],
-						"current_retry":  result.CurrentRetry,
-						"max_retries":    result.MaxRetries,
+						"current_retry":  result.CurrentAttempt,
+						"max_retries":    result.MaxAttempts,
 					})
 
 					// Execute with ultimate model (raw proxy, no retry/fallback)
@@ -932,26 +945,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// Stream the final result from the winner's buffer
 			if err := h.streamResult(w, rc, winner); err != nil {
 				// Client write failed (e.g., Cloudflare/proxy dropped connection).
-				// This is not a race failure, but we still need to mark the hash
-				// so ultimate model can be triggered on retry.
-				log.Printf("[STREAM] Client write failed for request %s: %v (will enable ultimate model on retry)", rc.reqID, err)
+				// Not a race failure: the attempt counter for the hash was
+				// already recorded at the early-exit gate, so a client retry
+				// still progresses through the trigger schedule.
+				log.Printf("[STREAM] Client write failed for request %s: %v", rc.reqID, err)
 
 				// Cancel all other parallel requests to stop wasted upstream work.
 				// The winner's cancel is handled by the defer below.
 				coordinator.cancelAllExcept(winner)
 
-				// Mark for ultimate model retry
-				if h.ultimateHandler != nil {
-					if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-						msgMaps := make([]map[string]interface{}, len(messages))
-						for i, msg := range messages {
-							if m, ok := msg.(map[string]interface{}); ok {
-								msgMaps[i] = m
-							}
-						}
-						h.ultimateHandler.MarkFailed(msgMaps)
-					}
-				}
 				// Don't send error response - connection is already broken
 				return
 			}
@@ -970,7 +972,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "context_cancelled")
 		return
 	default:
-		// All attempts failed with errors - mark for ultimate model retry
+		// All attempts failed with errors
 		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
 		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")
 		return
@@ -978,6 +980,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleRaceFailure handles the common failure case for race retry.
+// It finalizes the failed request (log, event, error response).
 // This is called when either all models failed with errors OR the context was cancelled.
 func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, coordinator *raceCoordinator, heartbeatCancel context.CancelFunc, reason string) {
 	// Cancel heartbeat first to prevent concurrent writes with sendSSEError
@@ -985,18 +988,9 @@ func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, c
 	if heartbeatCancel != nil {
 		heartbeatCancel()
 	}
-	// Mark this request as failed so ultimate model can be triggered on retry
-	if h.ultimateHandler != nil {
-		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-			msgMaps := make([]map[string]interface{}, len(messages))
-			for i, msg := range messages {
-				if m, ok := msg.(map[string]interface{}); ok {
-					msgMaps[i] = m
-				}
-			}
-			h.ultimateHandler.MarkFailed(msgMaps)
-		}
-	}
+	// Note: no hash marking is needed here — the attempt counter is
+	// recorded at request entry (early-exit gate), so a client retry
+	// still progresses through the trigger schedule.
 
 	// Get final error info from coordinator (OpenCode-compatible format)
 	var errInfo FinalErrorInfo
@@ -1041,7 +1035,6 @@ func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, c
 // streamResult flushes the winner's buffer to the client.
 // Note: Headers and heartbeat are already set up in HandleChatCompletions.
 // Returns an error if client write failed (e.g., connection dropped by Cloudflare/proxy).
-// The caller should check for this error and call handleRaceFailure to enable ultimate model retry.
 func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) error {
 	buffer := winner.GetBuffer()
 	readIndex := 0
@@ -1165,19 +1158,6 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 
 				// Now safe to prune (after capturing raw response)
 				buffer.Prune(readIndex)
-
-				// Mark this request as failed so ultimate model can be triggered on retry
-				if h.ultimateHandler != nil {
-					if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-						msgMaps := make([]map[string]interface{}, len(messages))
-						for i, msg := range messages {
-							if m, ok := msg.(map[string]interface{}); ok {
-								msgMaps[i] = m
-							}
-						}
-						h.ultimateHandler.MarkFailed(msgMaps)
-					}
-				}
 
 				// Send OpenAI-compatible error response
 				errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
@@ -1376,19 +1356,6 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				if winner.IsIdle(rc.conf.IdleTerminationTimeout) {
 					log.Printf("[STREAM] Idle termination: upstream idle for %v, terminating stream",
 						time.Since(winner.GetLastActivity()))
-
-					// Mark this request as failed so ultimate model can be triggered on retry
-					if h.ultimateHandler != nil {
-						if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-							msgMaps := make([]map[string]interface{}, len(messages))
-							for i, msg := range messages {
-								if m, ok := msg.(map[string]interface{}); ok {
-									msgMaps[i] = m
-								}
-							}
-							h.ultimateHandler.MarkFailed(msgMaps)
-						}
-					}
 
 					// Mark as terminated to avoid duplicate error in buffer.Done()
 					idleTerminated = true

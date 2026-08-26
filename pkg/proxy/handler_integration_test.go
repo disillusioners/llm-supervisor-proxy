@@ -566,24 +566,17 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 
 	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter, nil)
 
-	// Mark the request hash as failed so ultimate model will be triggered
-	// (simulating a duplicate request scenario)
+	// Drive the hash attempt counter to just below the first milestone:
+	// under the fixed 5/10/20/30/40 schedule the 5th total request with
+	// the same hash triggers ultimate (attempts 1-4 stay normal).
+	// The HTTP request below is therefore the 5th attempt.
 	messages := []map[string]interface{}{
 		{"role": "user", "content": "Trigger ultimate model"},
 	}
-	// Access ultimateHandler (private field) from the handler in the same package
-	h.ultimateHandler.MarkFailed(messages)
-
-	// First ShouldTrigger call: counter=1, not triggered
-	result := h.ultimateHandler.ShouldTrigger(messages)
-	if result.Triggered {
-		t.Error("First ShouldTrigger should not trigger (counter=1)")
-	}
-
-	// Second ShouldTrigger call: counter=2, triggered
-	result = h.ultimateHandler.ShouldTrigger(messages)
-	if !result.Triggered {
-		t.Fatal("Second ShouldTrigger should trigger (counter=2)")
+	for i := 0; i < 4; i++ {
+		if result := h.ultimateHandler.ShouldTrigger(messages); result.Triggered {
+			t.Fatalf("Pre-seed call %d should not trigger (below milestone 5)", i+1)
+		}
 	}
 
 	// Execute the request
@@ -894,11 +887,16 @@ func TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow(t *testing.T) 
 		t.Fatalf("First request failed: %d - %s", rec1.Code, rec1.Body.String())
 	}
 
-	// Mark the hash as failed to simulate duplicate request scenario
-	h.ultimateHandler.MarkFailed(messages)
+	// Advance the hash counter to just below milestone 5 (the first HTTP
+	// request above was attempt 1; these three calls are attempts 2-4)
+	for i := 0; i < 3; i++ {
+		if result := h.ultimateHandler.ShouldTrigger(messages); result.Triggered {
+			t.Fatalf("Pre-seed call %d should not trigger (below milestone 5)", i+1)
+		}
+	}
 
-	// Second request with same messages - should NOT trigger ultimate model
-	// because the model is excluded
+	// Second request with same messages - lands on milestone 5 (trigger),
+	// but should NOT use ultimate model because the model is excluded
 	body2 := map[string]interface{}{
 		"model":  "excluded-model",
 		"stream": false,
@@ -1181,7 +1179,6 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 	t.Setenv("RACE_RETRY_ENABLED", "false")
 	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
-	t.Setenv("ULTIMATE_MODEL_MAX_RETRIES", "2")
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -1201,15 +1198,10 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 
 	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
 
-	messages := []map[string]interface{}{
-		{"role": "user", "content": "Multiple retries test"},
-	}
-
-	// Send same request 5 times (exceeds max_retries=2)
-	for i := 0; i < 5; i++ {
-		// Mark as failed to simulate duplicates
-		h.ultimateHandler.MarkFailed(messages)
-
+	// Send the same request 42 times: under the fixed schedule attempts
+	// 41 and 42 are past the 40 cap (exhausted) — exclusion must still
+	// prevent any retry-exhausted error and keep the normal flow.
+	for i := 0; i < 42; i++ {
 		body := map[string]interface{}{
 			"model":  "excluded-model",
 			"stream": false,
@@ -1238,8 +1230,8 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 	}
 
 	// All requests should have gone through normal upstream
-	if upstreamCallCount != 5 {
-		t.Errorf("Expected 5 upstream calls (normal flow), got %d", upstreamCallCount)
+	if upstreamCallCount != 42 {
+		t.Errorf("Expected 42 upstream calls (normal flow), got %d", upstreamCallCount)
 	}
 
 	_ = tokenID // Use the variable
@@ -1394,17 +1386,13 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		t.Errorf("Expected excluded-model to be called, got: %s", modelUsed)
 	}
 
-	// Step 2: Manually simulate the duplicate detection
-	// Store hash and call ShouldTrigger twice to get counter=2
-	h.ultimateHandler.MarkFailed(testMessages)
-	result1 := h.ultimateHandler.ShouldTrigger(testMessages)
-	if result1.Triggered {
-		t.Error("First ShouldTrigger should not trigger (counter=1)")
-	}
-
-	result2 := h.ultimateHandler.ShouldTrigger(testMessages)
-	if !result2.Triggered {
-		t.Fatal("Second ShouldTrigger should trigger (counter=2)")
+	// Step 2: Advance the hash counter so the upcoming second HTTP request
+	// lands on milestone 5 (step 1's request was attempt 1; these three
+	// calls are attempts 2-4, all below the first milestone)
+	for i := 0; i < 3; i++ {
+		if r := h.ultimateHandler.ShouldTrigger(testMessages); r.Triggered {
+			t.Fatalf("Pre-seed call %d should not trigger (below milestone 5)", i+1)
+		}
 	}
 
 	// Step 3: Subscribe to events to verify ultimate model was triggered

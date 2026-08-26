@@ -2081,7 +2081,6 @@ func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
 	cfg := mgr.Get()
 	cfg.UltimateModel.ModelID = "ultimate-model"
 	cfg.UltimateModel.MaxHash = 100
-	cfg.UltimateModel.MaxRetries = 3
 	mgr.Save(cfg)
 
 	// Create mock token store with permission granted
@@ -2096,7 +2095,6 @@ func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
 		c.UltimateModel.ModelID = "ultimate-model"
 		c.UltimateModel.MaxHash = 100
-		c.UltimateModel.MaxRetries = 3
 	})
 	defer upstream.Close()
 
@@ -2157,7 +2155,6 @@ func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
 		c.UltimateModel.ModelID = "ultimate-model"
 		c.UltimateModel.MaxHash = 100
-		c.UltimateModel.MaxRetries = 3
 	})
 	defer upstream.Close()
 
@@ -2218,7 +2215,6 @@ func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, tokenStore, func(c *config.Config) {
 		c.UltimateModel.ModelID = "ultimate-model"
 		c.UltimateModel.MaxHash = 100
-		c.UltimateModel.MaxRetries = 3
 	})
 	defer upstream.Close()
 
@@ -2227,9 +2223,7 @@ func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
 	testMessages := []map[string]interface{}{
 		{"role": "user", "content": "test prompt for hash"},
 	}
-	h.ultimateHandler.ShouldTrigger(testMessages) // This computes and checks the hash
-	// Mark it as failed to store in cache
-	h.ultimateHandler.MarkFailed(testMessages)
+	h.ultimateHandler.ShouldTrigger(testMessages) // Records the hash (attempt 1) into the cache
 
 	// Send the SAME request that would trigger ultimate model (hash in cache)
 	// but with permission DENIED
@@ -2282,7 +2276,6 @@ func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, nil, func(c *config.Config) {
 		c.UltimateModel.ModelID = "ultimate-model"
 		c.UltimateModel.MaxHash = 100
-		c.UltimateModel.MaxRetries = 3
 	})
 	defer upstream.Close()
 
@@ -2290,7 +2283,7 @@ func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 	testMessages := []map[string]interface{}{
 		{"role": "user", "content": "test prompt no auth"},
 	}
-	h.ultimateHandler.MarkFailed(testMessages)
+	h.ultimateHandler.ShouldTrigger(testMessages) // Records the hash (attempt 1) into the cache
 
 	// Send request without authentication
 	body := bodyWithPrompt("external-model", true, "test prompt no auth")
