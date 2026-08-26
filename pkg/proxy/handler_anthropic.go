@@ -205,12 +205,28 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// helper still works because the role + content fields line up after
 	// our pre-processing. For multimodals we canonicalize the JSON
 	// like the OpenAI path does.
+	//
+	// Resolve auth (mirrors handler.go:411-437 — the OpenAI path's
+	// POST-AUTH wiring site). h.authenticate returns (nil, true) when
+	// tokenStore is nil (auth disabled), so the call is a no-op when
+	// auth is off; when the client sends no/invalid Bearer we also get
+	// nil and degrade to the unsalted key (A-1 graceful degradation).
+	// Only when a valid sk- token is presented does arc.tokenID take
+	// the token's ID, salting the conversationKey per-principal.
+	var arcTokenID string
+	if h.tokenStore != nil {
+		if authToken, _ := h.authenticate(r); authToken != nil {
+			arcTokenID = authToken.ID
+		}
+	}
 	if resolvedModel != nil && resolvedModel.Internal {
 		arc.firstUserMessage = credentiallb.ExtractFirstUserMessage(arcMessagesAsInterfaces(anthropicReq.Messages))
-		// POST-AUTH wiring (Task 16 / A-1): the Anthropic path has no
-		// per-token auth today (handler does not call
-		// h.authenticate on the Anthropic route), so tokenID stays "".
-		// That matches the A-1 graceful degradation spec — unsalted key.
+		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
+		// authenticated token's ID for salted conversation keys (the
+		// OPENAI-path parity fix landed in W3 at handler.go:431-474).
+		// Anonymous requests (no token / invalid token / auth disabled)
+		// keep arcTokenID == "" → unsalted key — accepted residual
+		// risk per A-1.
 		//
 		// W-2 + C2 (mirrors the chat-completions post-auth site): when no
 		// first user message was extracted the key stays "" — the engine
@@ -222,10 +238,15 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			log.Printf("[LB] (anthropic) empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
 				resolvedModel.ID)
 		} else {
-			arc.conversationKey = credentiallb.ComputeConversationKey(resolvedModel.ID, "", arc.firstUserMessage)
-			log.Printf("[LB] (anthropic) computed conversationKey hash=%s modelID=%s tokenID=<empty> len(firstUserMessage)=%d",
+			arc.conversationKey = credentiallb.ComputeConversationKey(resolvedModel.ID, arcTokenID, arc.firstUserMessage)
+			tokDisp := arcTokenID
+			if tokDisp == "" {
+				tokDisp = "<empty>"
+			}
+			log.Printf("[LB] (anthropic) computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
 				arc.conversationKey[:8],
 				resolvedModel.ID,
+				tokDisp,
 				len(arc.firstUserMessage),
 			)
 		}

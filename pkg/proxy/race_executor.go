@@ -180,11 +180,28 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	}
 	// Phase 3 / Round 3j C1 belt-and-braces — the reselected credential
 	// MUST belong to this model's Credentials list. If it doesn't, the
-	// engine handed back a credential for a DIFFERENT model (e.g. spawn
-	// got the wrong modelID — see C1 critical fix in spawn()). Fall
-	// through to the existing failure handling in executeInternalRequest
-	// instead of running the wrong model's InternalModel against the
-	// wrong credential pool.
+	// engine handed back a credential for a DIFFERENT model — refusing
+	// it here prevents wrong-ACCOUNT billing (running models[1]'s
+	// upstream call on models[0]'s account).
+	//
+	// This refusal is ONE of two layers that together prevent wrong-
+	// model serving on credFailover:
+	//   - Spawn layer (spawn()'s modelTypeCredFailover case reads
+	//     triggerInfo.modelID — Round 3j C1 critical fix) — this is
+	//     what makes wrong-model serving IMPOSSIBLE for the rate-limit
+	//     trigger path.
+	//   - Executor refusal (this block) — defense-in-depth: even if a
+	//     wrong-modelID reaches us through a future regression, the
+	//     wrong ACCOUNT is still blocked here. Note: the refusal does
+	//     NOT itself make wrong-model serving impossible — the
+	//     credential-id-mismatch log only proves the spawn fix was
+	//     bypassed; the fall-through re-resolve inside executeInternal
+	//     could in principle still serve the wrong model on the
+	//     correct account if the spawn fix regressed. The spawn fix
+	//     is the load-bearing layer.
+	//
+	// Fall-through on refusal: return (zero, false) and let the
+	// existing failure handling in executeInternalRequest surface it.
 	credBelongs := false
 	for _, ref := range modelConfig.Credentials {
 		if ref.CredentialID == credentialID {

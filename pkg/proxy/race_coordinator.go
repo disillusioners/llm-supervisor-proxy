@@ -99,14 +99,20 @@ type spawnTriggerInfo struct {
 	// Empty for every other trigger type.
 	credentialID string
 
-	// modelID (Phase 3 / Round 3j C1 critical fix) is the modelID the
-	// credFailover spawn MUST target. Populated at the Case-1 classification
-	// site from latestReq.modelID so the modelTypeCredFailover row stays
-	// on the SAME model that just 429'd (NOT c.models[0] — which is wrong
+	// modelID (Phase 3 / Round 3j C1 critical fix) is consumed ONLY
+	// by modelTypeCredFailover spawns: the credFailover row MUST target
+	// the SAME model that just 429'd (NOT c.models[0] — which is wrong
 	// in a 2-model chain where the fallback row carries models[1]'s
-	// modelID). The fallback-model-failover case (triggerMainError)
-	// populates this from latestReq.modelID too so the existing
-	// modelTypeFallback path is unchanged.
+	// modelID). It is populated at the Case-1 classification site from
+	// latestReq.modelID for the rate-limit path.
+	//
+	// The modelTypeFallback / modelTypeMain / modelTypeSecond spawn
+	// paths do NOT consume this field — they read c.models[0] /
+	// c.models[1] directly in spawn(). triggerMainError-driven
+	// modelTypeFallback rows therefore leave modelID empty (no need to
+	// populate); spawn()'s case modelTypeCredFailover is the sole
+	// reader, and if the field is empty for that path it defensively
+	// falls back to c.models[0] (single-model chain safety).
 	modelID string
 }
 
@@ -1450,7 +1456,7 @@ func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string
 // under c.mu before `go execute(req)` — race-free by construction).
 // Reading `req.resolved.CredentialID` here without locking would race
 // against `executeInternalRequest`'s lock-free write at
-// race_executor.go:274. The belt-and-braces check in
+// race_executor.go:293. The belt-and-braces check in
 // resolveSpecificInternalCredential (Round 3j C1 step 4) already
 // guarantees that a row whose reselected credential was rejected never
 // gets past the executor — so the resolved-fallback was both racy AND
