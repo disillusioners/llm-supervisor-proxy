@@ -375,6 +375,32 @@ Store encrypted API keys and call providers directly (bypassing LiteLLM):
 
 Supports environment variable expansion: `${VAR}` or `${VAR:-default}`.
 
+### Model credentials (multi-credential load balancing)
+
+Attach up to **16** same-provider credentials to one model with per-credential
+weights for weighted distribution (and failover rotation). The first entry
+(`credentials[0]`) is the primary. `position` is server-managed (slice
+index, 0-based) and is set on save. Weight must be `> 0`; all entries
+must share the same provider.
+
+```json
+{
+  "id": "gpt-4-balanced",
+  "name": "gpt-4",
+  "enabled": true,
+  "internal": true,
+  "credentials": [
+    {"credential_id": "openai-key-a", "weight": 3, "position": 0},
+    {"credential_id": "openai-key-b", "weight": 1, "position": 1}
+  ],
+  "internal_model": "gpt-4"
+}
+```
+
+The **test-connection** endpoint still accepts a single `credential_id`
+(it tests against the primary). To add a second credential, save the
+model and re-open it in the Web UI.
+
 ## ☸️ Kubernetes Deployment
 
 Deploy to Kubernetes using the included Helm chart:

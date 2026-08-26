@@ -15,6 +15,15 @@ export interface Credential {
   base_url?: string;
 }
 
+// Reference to a credential attached to a model (Phase 4 multi-credential load balancing).
+// position is server-managed (slice index); weight is integer >= 1; all entries on a
+// single model must share the same provider.
+export interface CredentialRef {
+  credential_id: string;
+  weight: number;
+  position: number;
+}
+
 export interface LoopDetectionConfig {
   enabled: boolean;
   shadow_mode: boolean;
@@ -108,7 +117,10 @@ export interface Model {
   truncate_params?: string[];
   // Internal upstream fields
   internal?: boolean;
-  credential_id?: string; // Reference to credential
+  // Multi-credential load balancing (Phase 4). The first entry is the primary
+  // credential; all entries must share a provider. Server stamps `position`
+  // from the slice index, so the client may include it or omit it.
+  credentials?: CredentialRef[];
   internal_api_key?: string;   // Display only, write-only
   internal_base_url?: string; // Base URL override (optional)
   internal_model?: string;     // Actual model name at provider

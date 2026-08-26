@@ -23,18 +23,22 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
-// Model represents a model with its fallback chain.
+// Model is the wire DTO exposed by the model CRUD handlers
+// (`handleModels`, `handleModelDetail`, `handleValidateModel`).
 //
-// Phase 1 wire DTO (back-compat shim — Phase 4 swaps the DTO to the
-// multi-credential shape). For now the DTO keeps accepting and
-// returning a single `credential_id` string at the JSON boundary, and
-// the server-side translate layer converts it to/from
-// `models.ModelConfig.Credentials` (a single-ref slice with weight=1,
-// position=0 when a credential is present; nil when absent). The
-// conversion lives in `singleRefFromCredentialID` /
-// `ModelConfigToDTO` (see below); do NOT call m.CredentialID on a
-// `models.ModelConfig` — the field is removed (use
-// `PrimaryCredentialID()`).
+// Phase 4 wire shape: the multi-credential `credentials[]` slice is
+// the SINGLE application source of truth on the API surface. The DB
+// column `models.credential_id` is retained only as a derived shadow
+// (= `credentials[0].credential_id`) for legacy/external readers
+// until migration 029 lands; the API contract never re-exposes it as
+// a top-level field. A legacy top-level `credential_id` key in a
+// POST/PUT payload is silently DROPPED by the decoder as an unknown
+// field during the deprecation window — when `credentials[]` is
+// present, the array wins; when `credentials[]` is absent on an
+// internal model, the server returns 400 telling the operator to
+// reload the Web UI and re-save. The single-credential test endpoint
+// (`TestModelRequest`) is the only legitimate carrier of a top-level
+// credential identifier; it remains exempt from this gate by design.
 type Model struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
@@ -42,18 +46,18 @@ type Model struct {
 	FallbackChain  []string `json:"fallback_chain"`
 	TruncateParams []string `json:"truncate_params,omitempty"`
 	// Internal upstream fields
-	Internal        bool   `json:"internal"`
-	CredentialID    string `json:"credential_id,omitempty"`     // Wire-shape single credential reference (Phase 4 replaces this DTO)
-	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional)
-	InternalModel   string `json:"internal_model,omitempty"`
+	Internal        bool                   `json:"internal"`
+	Credentials     []models.CredentialRef `json:"credentials,omitempty"`       // Ordered, weighted credential refs (Phase 4 wire shape)
+	InternalBaseURL string                 `json:"internal_base_url,omitempty"` // Base URL override (optional)
+	InternalModel   string                 `json:"internal_model,omitempty"`
 	// Stream buffering deadline
 	ReleaseStreamChunkDeadline models.Duration `json:"release_stream_chunk_deadline,omitempty"`
 	// Peak hour auto-switch fields
 	PeakHourEnabled  bool   `json:"peak_hour_enabled"`
-	PeakHourStart   string `json:"peak_hour_start"`
-	PeakHourEnd     string `json:"peak_hour_end"`
+	PeakHourStart    string `json:"peak_hour_start"`
+	PeakHourEnd      string `json:"peak_hour_end"`
 	PeakHourTimezone string `json:"peak_hour_timezone"`
-	PeakHourModel   string `json:"peak_hour_model"`
+	PeakHourModel    string `json:"peak_hour_model"`
 	// Secondary upstream model for retry logic
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
 	// Ultimate model exclusion
@@ -66,26 +70,6 @@ type Credential struct {
 	Provider string `json:"provider"`
 	APIKey   string `json:"api_key"` // Masked API key (e.g., "sk-abcde***")
 	BaseURL  string `json:"base_url,omitempty"`
-}
-
-// singleRefFromCredentialID translates the legacy wire-shape
-// `credential_id` string into a single-ref []models.CredentialRef
-// slice (weight=1, position=0 — the legacy single-credential "primary"
-// semantics). When the wire field is empty, returns nil so the
-// resulting ModelConfig stays consistent with an external / non-internal
-// model. Phase 4 replaces the DTO and removes this helper.
-//
-// This is the Phase 1 back-compat shim that keeps the old UI working
-// while the backend stores the new Credentials shape; it lives in
-// pkg/ui because the wire DTO is the only place the legacy
-// `credential_id` string is still observable.
-func singleRefFromCredentialID(id string) []models.CredentialRef {
-	if id == "" {
-		return nil
-	}
-	return []models.CredentialRef{
-		{CredentialID: id, Weight: 1, Position: 0},
-	}
 }
 
 //go:embed static/*
@@ -404,6 +388,119 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// validateCredentials enforces the Phase-1 multi-credential validation
+// matrix on a wire-shape []models.CredentialRef slice before it is
+// persisted as a `models.ModelConfig.Credentials` field. It mirrors
+// the rules in `pkg/models/config.go` ModelsConfig.Validate
+// (lines ~584-636) so that UI and persisted-DB validation agree on
+// every error path.
+//
+// Rules enforced (in order):
+//
+//   (a) internal=true && len(creds)==0 → at least one credential
+//
+//	is required.
+//
+//   (b) each entry's credential identifier is non-empty AND exists in
+//
+//	`existingCreds` (looked up by id).
+//
+//   (c) each entry's weight is strictly positive (> 0).
+//   (d) all entries' providers match the first entry's provider
+//
+//	(case-insensitive, same as pkg/models).
+//
+//   (e) no duplicate credential identifiers within the slice.
+//   (f) len(creds) <= models.MaxCredentialRefs (16).
+//
+// On acceptance, the function walks the slice and STAMPS each
+// entry's Position to the slice index (0-based) so callers persist
+// deterministic ordering regardless of the operator's payload order
+// (the frontend sends positions only as a server-managed hint —
+// see Phase 1 plan-overview).
+//
+// Returns a slice of human-readable error messages (empty on success).
+// The caller decides the HTTP response shape (POST/PUT return
+// 400 {error}; the validate endpoint returns {valid:false,
+// errors:[...]}).
+func validateCredentials(creds []models.CredentialRef, internal bool, existingCreds []models.CredentialConfig) []string {
+	var errs []string
+
+	// Build a lookup index by id for rule (b) and rule (d).
+	byID := make(map[string]models.CredentialConfig, len(existingCreds))
+	for _, c := range existingCreds {
+		byID[c.ID] = c
+	}
+
+	// Rule (a) — internal models must carry at least one credential.
+	if internal && len(creds) == 0 {
+		errs = append(errs, "credentials: at least one credential is required when internal is true (the legacy single-credential field was removed — reload the Web UI and re-save)")
+	}
+
+	// Rule (f) — size cap. Checked before per-entry loops so a 17-entry
+	// payload reports the cap, not 17 weight errors.
+	if len(creds) > models.MaxCredentialRefs {
+		errs = append(errs, fmt.Sprintf("credentials: list exceeds max of %d refs (got %d)", models.MaxCredentialRefs, len(creds)))
+	}
+
+	// Pre-resolve primary provider (rule (d) anchor) for the
+	// case-insensitive same-provider comparison.
+	var primaryProvider string
+	if len(creds) > 0 {
+		if primary, ok := byID[creds[0].CredentialID]; ok {
+			primaryProvider = strings.ToLower(primary.Provider)
+		}
+	}
+
+	seen := make(map[string]bool, len(creds))
+	for idx, ref := range creds {
+		// Rule (b) — non-empty id that exists.
+		if ref.CredentialID == "" {
+			errs = append(errs, fmt.Sprintf("credentials[%d]: identifier is empty", idx))
+		} else if existing, ok := byID[ref.CredentialID]; !ok {
+			errs = append(errs, fmt.Sprintf("credentials[%d]: identifier %q references an unknown credential", idx, ref.CredentialID))
+		} else if idx == 0 {
+			// First entry exists — fine, just used below for the
+			// provider-match comparison.
+			_ = existing
+		}
+
+		// Rule (c) — strictly positive weight.
+		if ref.Weight <= 0 {
+			errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): weight must be > 0, got %d", idx, ref.CredentialID, ref.Weight))
+		}
+
+		// Rule (e) — no duplicates within the slice.
+		if ref.CredentialID != "" {
+			if seen[ref.CredentialID] {
+				errs = append(errs, fmt.Sprintf("credentials[%d]: duplicate identifier %q in credentials list", idx, ref.CredentialID))
+			}
+			seen[ref.CredentialID] = true
+		}
+
+		// Rule (d) — all entries share the primary provider
+		// (case-insensitive). Only enforced once both the primary
+		// and the current entry resolve to existing credentials;
+		// otherwise the (b) error above already covers it.
+		if idx > 0 && primaryProvider != "" {
+			if cur, ok := byID[ref.CredentialID]; ok {
+				if strings.ToLower(cur.Provider) != primaryProvider {
+					errs = append(errs, fmt.Sprintf("credentials[%d] (identifier=%q): provider %q does not match primary provider %q", idx, ref.CredentialID, cur.Provider, creds[0].CredentialID))
+				}
+			}
+		}
+	}
+
+	if len(errs) == 0 {
+		// Rule (g) — stamp positions to the slice index on acceptance.
+		for i := range creds {
+			creds[i].Position = i
+		}
+	}
+
+	return errs
+}
+
 // handleModels handles GET and POST /fe/api/models
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -412,28 +509,28 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		models := make([]Model, len(modelConfigs))
 		for i, mc := range modelConfigs {
 			models[i] = Model{
-				ID:                         mc.ID,
-				Name:                       mc.Name,
-				Enabled:                    mc.Enabled,
-				FallbackChain:              mc.FallbackChain,
-				TruncateParams:             mc.TruncateParams,
-				Internal:                   mc.Internal,
-				CredentialID:               mc.PrimaryCredentialID(),
-				InternalBaseURL:            mc.InternalBaseURL,
-				InternalModel:              mc.InternalModel,
-				ReleaseStreamChunkDeadline: mc.ReleaseStreamChunkDeadline,
-				PeakHourEnabled:            mc.PeakHourEnabled,
-				PeakHourStart:              mc.PeakHourStart,
-				PeakHourEnd:                mc.PeakHourEnd,
-				PeakHourTimezone:           mc.PeakHourTimezone,
-				PeakHourModel:              mc.PeakHourModel,
-				SecondaryUpstreamModel:     mc.SecondaryUpstreamModel,
+				ID:                           mc.ID,
+				Name:                         mc.Name,
+				Enabled:                      mc.Enabled,
+				FallbackChain:                mc.FallbackChain,
+				TruncateParams:               mc.TruncateParams,
+				Internal:                     mc.Internal,
+				Credentials:                  mc.Credentials,
+				InternalBaseURL:              mc.InternalBaseURL,
+				InternalModel:                mc.InternalModel,
+				ReleaseStreamChunkDeadline:   mc.ReleaseStreamChunkDeadline,
+				PeakHourEnabled:              mc.PeakHourEnabled,
+				PeakHourStart:                mc.PeakHourStart,
+				PeakHourEnd:                  mc.PeakHourEnd,
+				PeakHourTimezone:             mc.PeakHourTimezone,
+				PeakHourModel:                mc.PeakHourModel,
+				SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
 				ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
 			}
-	}
+		}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(models)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models)
 
 	case http.MethodPost:
 		// Limit request body to 64KB to prevent memory exhaustion attacks
@@ -475,33 +572,53 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Phase 4 multi-credential validation. validateCredentials
+		// stamps positions into the slice on acceptance — so the
+		// persisted ModelConfig carries deterministic ordering even
+		// when the operator's payload didn't include (or had
+		// inconsistent) position values. The validator emits ALL
+		// applicable errors in one pass (not just the first); we
+		// collapse them to a single 400 by joining with "; " so the
+		// API contract keeps the {error: "..."} shape (no array
+		// support in POST/PUT response per house style).
+		if credErrs := validateCredentials(newModel.Credentials, newModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid credentials: " + strings.Join(credErrs, "; "),
+			})
+			return
+		}
+
 		// Generate ID if not provided
 		if newModel.ID == "" {
 			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
 		}
 
-		// Convert to models.ModelConfig
+		// Convert to models.ModelConfig. Positions have already been
+		// stamped by validateCredentials (or the slice is empty for
+		// an external model — both are legal).
 		modelConfig := models.ModelConfig{
-			ID:                         newModel.ID,
-			Name:                       newModel.Name,
-			Enabled:                    newModel.Enabled,
-			FallbackChain:              newModel.FallbackChain,
-			TruncateParams:             newModel.TruncateParams,
-			Internal:                   newModel.Internal,
-			Credentials:                singleRefFromCredentialID(newModel.CredentialID),
-			InternalBaseURL:            newModel.InternalBaseURL,
-			InternalModel:              newModel.InternalModel,
-			ReleaseStreamChunkDeadline: newModel.ReleaseStreamChunkDeadline,
-			PeakHourEnabled:            newModel.PeakHourEnabled,
-			PeakHourStart:              newModel.PeakHourStart,
-			PeakHourEnd:                newModel.PeakHourEnd,
-			PeakHourTimezone:           newModel.PeakHourTimezone,
-			PeakHourModel:              newModel.PeakHourModel,
-		SecondaryUpstreamModel:       newModel.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: newModel.ExcludeFromUltimateSwitching,
-	}
+			ID:                           newModel.ID,
+			Name:                         newModel.Name,
+			Enabled:                      newModel.Enabled,
+			FallbackChain:                newModel.FallbackChain,
+			TruncateParams:               newModel.TruncateParams,
+			Internal:                     newModel.Internal,
+			Credentials:                  newModel.Credentials,
+			InternalBaseURL:              newModel.InternalBaseURL,
+			InternalModel:                newModel.InternalModel,
+			ReleaseStreamChunkDeadline:   newModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:              newModel.PeakHourEnabled,
+			PeakHourStart:                newModel.PeakHourStart,
+			PeakHourEnd:                  newModel.PeakHourEnd,
+			PeakHourTimezone:             newModel.PeakHourTimezone,
+			PeakHourModel:                newModel.PeakHourModel,
+			SecondaryUpstreamModel:       newModel.SecondaryUpstreamModel,
+			ExcludeFromUltimateSwitching: newModel.ExcludeFromUltimateSwitching,
+		}
 
-	if err := s.modelsConfig.AddModel(modelConfig); err != nil {
+		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -527,19 +644,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 // handleModelDetail handles PUT and DELETE /fe/api/models/{id}
 //
-// W6 (Phase-1 hardening): PUT through the legacy UI DTO COLLAPSES a
-// multi-credential model to a single credential ref. The Model DTO
-// (declared above) still carries a single `credential_id` string at
-// the wire boundary; the PUT decode populates it via
-// `singleRefFromCredentialID(updatedModel.CredentialID)` further down,
-// which always returns a 1-element []models.CredentialRef slice when
-// non-empty. So a user editing a 3-credential model via the old UI
-// silently loses 2 refs on save. This is the Phase-1 wire-DTO
-// constraint the contract (technical-analysis.md) acknowledges and
-// Phase 4 replaces with a multi-ref DTO. Do NOT remove this comment
-// when Phase 4 lands — it documents the migration hazard for any
-// in-flight operator upgrades that touch the legacy UI during the
-// deprecation window.
+// Phase 4 replaced the single-ref DTO; the legacy top-level
+// `credential_id` field is dropped as an unknown JSON field during the
+// deprecation window. TestModelRequest (the operator-driven test
+// endpoint) remains the only legitimate carrier of a top-level
+// credential identifier — exempt from this gate by design.
 func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	// /fe/api/models/{id}
 	id := r.URL.Path[len("/fe/api/models/"):]
@@ -589,10 +698,24 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Phase 4 multi-credential validation. Same rules as POST
+		// (see validateCredentials above). Positions are stamped
+		// into the slice on acceptance so persistence is
+		// deterministic.
+		if credErrs := validateCredentials(updatedModel.Credentials, updatedModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid credentials: " + strings.Join(credErrs, "; "),
+			})
+			return
+		}
+
 		// Keep the same ID
 		updatedModel.ID = id
 
-		// Convert to models.ModelConfig and update
+		// Convert to models.ModelConfig and update. Positions are
+		// already stamped by validateCredentials above.
 		modelConfig := models.ModelConfig{
 			ID:                           updatedModel.ID,
 			Name:                         updatedModel.Name,
@@ -600,7 +723,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			FallbackChain:                updatedModel.FallbackChain,
 			TruncateParams:               updatedModel.TruncateParams,
 			Internal:                     updatedModel.Internal,
-			Credentials:                  singleRefFromCredentialID(updatedModel.CredentialID),
+			Credentials:                  updatedModel.Credentials,
 			InternalBaseURL:              updatedModel.InternalBaseURL,
 			InternalModel:                updatedModel.InternalModel,
 			ReleaseStreamChunkDeadline:   updatedModel.ReleaseStreamChunkDeadline,
@@ -696,6 +819,14 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 		if !existingModels[fallback] {
 			validationErrors = append(validationErrors, fmt.Sprintf("fallback model '%s' not found", fallback))
 		}
+	}
+
+	// Phase 4 multi-credential validation. Same rules as POST/PUT
+	// (see validateCredentials above). The validator does NOT stamp
+	// positions on this path — the validate endpoint is dry-run and
+	// the caller's payload is read-only.
+	if credErrs := validateCredentials(model.Credentials, model.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+		validationErrors = append(validationErrors, credErrs...)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -889,7 +1020,7 @@ type TokenResponse struct {
 	CreatedAt            string    `json:"created_at"`
 	CreatedBy            string    `json:"created_by"`
 	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
-	UltimateModel        string    `json:"ultimate_model"` // Empty = use global config
+	UltimateModel        string    `json:"ultimate_model"`           // Empty = use global config
 	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
 }
 
@@ -959,9 +1090,9 @@ func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
 
 // UpdateTokenPermissionRequest represents the request body for updating token permission
 type UpdateTokenPermissionRequest struct {
-	UltimateModelEnabled *bool    `json:"ultimate_model_enabled"` // pointer for distinguishing unset vs false
-	UltimateModel       *string  `json:"ultimate_model,omitempty"` // nil = keep existing; "" = use global; "value" = override
-	AllowedModels       *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
+	UltimateModelEnabled *bool     `json:"ultimate_model_enabled"`   // pointer for distinguishing unset vs false
+	UltimateModel        *string   `json:"ultimate_model,omitempty"` // nil = keep existing; "" = use global; "value" = override
+	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
 }
 
 // updateTokenPermission handles PATCH /fe/api/tokens/{id}
