@@ -45,9 +45,21 @@ type Engine struct {
 	sweepDone chan struct{} // janitor exit ack
 	stopOnce  sync.Once
 
-	// sweepHook is a nil-by-default janitor extension point exercised
-	// ONLY from the testhooks.go seam (W8): production engine code
-	// never references any named test hook — see testhooks.go.
+	// sweepHook is a nil-by-default janitor extension point. This is
+	// a SANCTIONED test-seam exception (Item 6b) per the W8
+	// testhooks boundary rule: production engine code (this file,
+	// binding.go, selector.go) carries the hook VARIABLE so the
+	// dedicated testhooks.go file can install a panic-recovery
+	// fn, but no symbol named with the test-helper suffix appears
+	// in production code and no public method exposes the hook.
+	// The script that pins this gate is the one documented at
+	// pkg/credentiallb/doc.go: zero hits for the test-helper name
+	// in engine.go / binding.go / selector.go. The variable name
+	// `sweepHook` plus the `getSweepHook()` accessor are private
+	// (lowercase) and only used to plumb the E-4 panic-recovery
+	// seam; the nil-by-default contract makes the hook itself
+	// free of any production behavior. See testhooks.go for the
+	// consumer-side install function.
 	sweepHookMu sync.Mutex
 	sweepHook   func()
 }
@@ -247,19 +259,25 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 		if hit {
 			// Upgrade to the write lock for the #10 boundAt refresh
 			// (a value write cannot race under RLock), re-verifying
-			// the binding survived the lock transition.
+			// the binding survived the lock transition AND has not
+			// been marked cooling in the gap (Item 1 TOCTOU: a
+			// concurrent ExcludeAndReselect could have just
+			// started a cooldown on b.credentialID between the
+			// RLock release and this Lock acquire).
 			st.mu.Lock()
 			if b, ok := st.bindings[conversationKey]; ok &&
 				b.credentialID == hitCred &&
-				!b.expired(e.ttl, now) {
+				!b.expired(e.ttl, now) &&
+				!st.isCoolingLocked(b.credentialID, now) {
 				b.boundAt = now
 				st.hitsTotal++
 				st.mu.Unlock()
 				return hitCred, false, nil
 			}
 			st.mu.Unlock()
-			// Raced out between the locks (binding rebound/evicted by
-			// a concurrent writer) — fall through to the full path.
+			// Raced out between the locks (binding rebound/evicted
+			// by a concurrent writer, OR the credential went
+			// cooling) — fall through to the full path.
 		}
 	}
 
@@ -286,19 +304,31 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 		}
 	}
 
-	st.missesTotal++ // a fresh pick happens from here on (C2: ticks for empty-key picks too)
-
 	pick := st.pickHealthyLocked(now)
 	if pick == "" {
 		// All-cooling (F.4): soonest-expiring pick, selection-only.
 		soonest, allCooling := st.soonestCooldownLocked(now)
 		if !allCooling || soonest == "" {
 			// Refs went invalid under us (race with OnModelChanged).
+			// NO Misses tick — no pick was performed (contract: Misses
+			// counts "lookups that selected a fresh credential"; a
+			// no-pick terminal path explicitly does not satisfy
+			// that definition).
 			return "", false, ErrNoCredentials
 		}
+		// All-cooling path DID select a credential (soonest-expiring)
+		// — tick Misses per the contract's "binding lookup missed
+		// AND a pick was performed" semantics (Leader Item 4 ruling).
+		st.missesTotal++
 		log.Printf("[LB-FAILOVER] model=%s all credentials cooling; picking soonest-expiring cred=%s", modelID, soonest)
 		return soonest, false, nil
 	}
+
+	// Healthy fresh pick — tick Misses. C2: empty-key picks below
+	// also tick here (they performed a fresh weighted pick, just
+	// chose not to store a binding — the pick still happened, so
+	// Misses counts it).
+	st.missesTotal++
 
 	if conversationKey == "" {
 		// W-2: no binding stored for the empty key.
@@ -438,7 +468,7 @@ func (e *Engine) Stop() {
 // Cooldowns — no aliases.
 type EngineStats struct {
 	Hits      uint64 // in-TTL lookup hits (sliding-TTL refreshes)
-	Misses    uint64 // lookups that selected a fresh credential (incl. empty-key picks; excludes the E-3 fast path)
+	Misses    uint64 // lookups that performed a credential selection (healthy fresh pick, empty-key fresh pick, OR the all-cooling soonest-expiry path); excludes the E-3 single-credential fast path and the ErrNoCredentials no-pick terminal
 	Bindings  uint64 // current binding-map size for this model (O(1) via the bindingsCount mirror)
 	Failovers uint64 // R3-8 monotonic counter — ticks once per NON-no-op failover (actual rebind or empty-key healthy pick; B2 no-ops and SoonestExpiry picks do NOT tick)
 	Cooldowns uint64 // R3-8 GAUGE (Round 3b amendment 7) — current cooldown-map size for this model, read live on Stats(); NOT a counter
@@ -625,9 +655,31 @@ func (e *Engine) ExcludeAndReselect(
 	if conversationKey != "" {
 		if b, ok := st.bindings[conversationKey]; ok && b.credentialID != excludedCredID {
 			// NO-OP: a concurrent same-conversation request already
-			// rebinded away from excludedCredID. Return the unchanged
-			// binding; Failovers does NOT tick.
-			return b.credentialID, ReselectHealthy
+			// rebinded away from excludedCredID. The unchanged
+			// binding IS the rebind the concurrent request committed.
+			// Failovers does NOT tick.
+			//
+			// Leader Item 2 amendment (semantics change):
+			// the no-op only holds when the current binding's
+			// credential is HEALTHY. If it is INDEPENDENTLY
+			// cooling (a separate ExcludeAndReselect marked it
+			// cooling on a different conversation), do NOT return
+			// it — availability beats pure no-op, and the caller
+			// would otherwise be told to retry a credential that
+			// 429'd. Fall through to the healthy reselect path
+			// below (which, by construction here, finds healthy
+			// alternatives — the bound credential's independent
+			// cooling and the just-marked excludedCredID leave at
+			// least one healthy credential when the model has 3+
+			// refs; the 2-cred case degrades to SoonestExpiry via
+			// the all-cooling path, which is the correct F.4
+			// behavior).
+			if !st.isCoolingLocked(b.credentialID, now) {
+				return b.credentialID, ReselectHealthy
+			}
+			// Bound credential is independently cooling — fall
+			// through to the healthy reselect; the excluded
+			// credential is already cooled above.
 		}
 	}
 

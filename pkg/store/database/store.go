@@ -1882,6 +1882,22 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 		// deterministically re-selects a live credential instead of
 		// re-picking the dead one until the dangling ref is cleaned
 		// up. Per the contract THIS call still fails with ok=false.
+		//
+		// DELIBERATE RE-SEED ASYMMETRY (Item 6a): OnCredentialDeleted
+		// above clears st.cooldowns[credID] to zero; the very next
+		// ExcludeAndReselect call re-seeds a fresh defaultCooldown
+		// row on the SAME credential. The asymmetry is intentional:
+		// if we left the cooldown slot empty after the S6 hygiene
+		// clear, a subsequent GetOrSelect could pick the dead
+		// credential before the dangling credentials_json ref is
+		// cleaned up by an external writer — re-seeding the
+		// cooldown deterministically blocks every future selection
+		// of credID until the row expires (or OnCredentialDeleted
+		// re-fires after another failed resolution). The Cooldowns
+		// GAUGE is therefore >= 1 for the lifetime of the dangling
+		// ref + the cooldown TTL — that is the heal's visible
+		// side-effect, pinned by the Failovers==1 && Cooldowns==1
+		// assertions in TestResolveInternalConfigWithAffinity_BranchTable.
 		log.Printf("[WARN] [credentiallb] credential %s vanished mid-flight for model %s — clearing engine state, resolution fails this call", credID, modelID)
 		m.engine.OnCredentialDeleted(credID)
 		m.engine.ExcludeAndReselect(modelID, conversationKey, credID, 0)

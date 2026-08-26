@@ -48,6 +48,48 @@ func TestSelector_IntervalBoundaries(t *testing.T) {
 	}
 }
 
+// TestSelector_FourCredentialBoundary — Item 5b: the boundary
+// correctness must hold at n>=4 too. Weights [1,1,2,1] → prefix
+// [1,2,4,5], totalWeight=5. The r=totalWeight-1=4 probe MUST land
+// in the LAST bucket (index 3 = D), proving the binary-search
+// upper-bound semantics work at the very end of the prefix array
+// (a class of off-by-one that the n=3 fixture cannot catch). The
+// neighbouring r=3 probe lands in the SECOND-TO-LAST bucket (index
+// 2 = C, the weight-2 entry), pinning the last-vs-second-to-last
+// boundary transition.
+func TestSelector_FourCredentialBoundary(t *testing.T) {
+	w := newWeightedSelector(models.TestRefsWeighted(
+		models.CredentialRef{CredentialID: "A", Weight: 1},
+		models.CredentialRef{CredentialID: "B", Weight: 1},
+		models.CredentialRef{CredentialID: "C", Weight: 2},
+		models.CredentialRef{CredentialID: "D", Weight: 1},
+	))
+	if w == nil {
+		t.Fatal("nil selector for valid 4-ref fixture")
+	}
+	if w.totalWeight != 5 {
+		t.Fatalf("totalWeight: got %d want 5", w.totalWeight)
+	}
+	// r=0..4 → A, B, C, C, D.
+	cases := map[int]string{0: "A", 1: "B", 2: "C", 3: "C", 4: "D"}
+	for r, want := range cases {
+		if got := w.pick(r); got != want {
+			t.Fatalf("pick(%d): got %s want %s", r, got, want)
+		}
+	}
+	// The pinned r=totalWeight-1=4 probe lands in the LAST bucket
+	// (D, index 3) — off-by-one in the binary search would land
+	// it in C (index 2).
+	if got := w.pick(w.totalWeight - 1); got != "D" {
+		t.Fatalf("last-bucket boundary: pick(totalWeight-1=%d): got %s want D", w.totalWeight-1, got)
+	}
+	// And the neighbouring r=3 (second-to-last interval boundary)
+	// lands in C (index 2), NOT D.
+	if got := w.pick(3); got != "C" {
+		t.Fatalf("second-to-last boundary: pick(3): got %s want C", got)
+	}
+}
+
 // TestSelector_SingleCredential — k=1 always returns the same
 // credential for every r.
 func TestSelector_SingleCredential(t *testing.T) {

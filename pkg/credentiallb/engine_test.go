@@ -176,6 +176,20 @@ func TestEngine_Janitor_SweepsExpiredBindings(t *testing.T) {
 // goroutines hammer GetOrSelect; under -race any lock-discipline slip
 // trips, and a stalled-read design (outer write lock) would show up as
 // starvation (reads still complete here) or deadlock (test timeout).
+//
+// Item 5c (leader-ruled): the starvation sampling must happen BEFORE
+// wg.Wait() — otherwise the post-wg.Wait() assertion only sees the
+// quiescent final state and cannot distinguish "reads kept up during
+// the sweep" from "all readers blocked and then finished in a single
+// burst after the sweep ended". The mid-flight read samples taken at
+// the ~100ms and ~200ms marks prove progress is happening WHILE the
+// sweep is running (lateReads > midReads; both > 0).
+//
+// Goroutines loop until the stop channel closes so the test wall-time
+// (200ms) — not an iteration count — controls how long reads run;
+// this keeps the mid-flight sample meaningful on fast machines where
+// the original fixed-iteration design completed all 20k reads in
+// <100ms.
 func TestEngine_E1_SweepConcurrency(t *testing.T) {
 	e := newTestEngine(t, 30*time.Millisecond, 5*time.Millisecond, 7, time.Minute)
 	// 20 models × 100 bindings = sweeping work, constantly expiring +
@@ -197,7 +211,8 @@ func TestEngine_E1_SweepConcurrency(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			mid := "m" + itoa(g%20)
-			for i := 0; i < 1000; i++ {
+			i := 0
+			for {
 				select {
 				case <-stop:
 					return
@@ -208,19 +223,42 @@ func TestEngine_E1_SweepConcurrency(t *testing.T) {
 					atomic.AddInt64(&bad, 1)
 				}
 				atomic.AddInt64(&reads, 1)
+				i++
 			}
 		}(g)
 	}
-	// Let sweeps interleave with reads for ~200ms while readers run.
-	time.Sleep(200 * time.Millisecond)
+
+	// Mid-flight samples (Item 5c): two snapshots at ~100ms and
+	// ~200ms, BEFORE wg.Wait(), prove reads are progressing WHILE
+	// the sweep is running. With proper outer-RLock + per-model
+	// write-lock discipline, the second sample is comfortably
+	// larger than the first (a stalled-read bug would show
+	// lateReads ≈ midReads).
+	time.Sleep(100 * time.Millisecond)
+	midReads := atomic.LoadInt64(&reads)
+	time.Sleep(100 * time.Millisecond)
+	lateReads := atomic.LoadInt64(&reads)
+
+	// Signal goroutines to exit, then collect.
+	close(stop)
 	wg.Wait()
+
 	if bad != 0 {
 		t.Fatalf("%d reads failed during concurrent sweeps", bad)
 	}
 	if reads < 10000 {
 		t.Fatalf("reads starved during sweep: only %d completed (expected >=10000)", reads)
 	}
-	_ = stop
+	// Starvation check (Item 5c): mid-flight sample must be non-
+	// zero (reads were running WHILE the sweep was running), AND
+	// the late sample must show meaningful progress past the mid
+	// sample (proving no stall between the two sample points).
+	if midReads == 0 {
+		t.Fatalf("mid-flight starvation: zero reads at 100ms")
+	}
+	if lateReads <= midReads {
+		t.Fatalf("starvation: midReads=%d lateReads=%d (no progress between 100ms and 200ms)", midReads, lateReads)
+	}
 }
 
 // TestEngine_E2_FilterSurvivors — E-2: OnModelChanged PRESERVES

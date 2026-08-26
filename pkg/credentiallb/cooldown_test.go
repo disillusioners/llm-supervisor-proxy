@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -389,4 +390,307 @@ func TestEngine_Cooldown_ConcurrentWritesAndSelections(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// TestEngine_GetOrSelect_TOCTOU_CoolingReverify — Item 1 (pre-merge
+// gate): the post-lock-upgrade re-verify predicate (engine.go
+// happy-path lock-upgrade branch) must include a just-started cooldown
+// check. A concurrent ExcludeAndReselect that marks the bound
+// credential cooling in the RLock→Lock gap must cause the optimistic
+// read to fall through to the full path; GetOrSelect never returns a
+// cooling credential once the cooldown is observable. Stays -race
+// clean.
+//
+// Interleaved shape: 100 readers hammer GetOrSelect(convKey) in a
+// loop, all bound to A; ONE writer (running on a separate goroutine,
+// on a DIFFERENT conversation key "other-conv") calls
+// ExcludeAndReselect to mark A cooling mid-stream. Because
+// "other-conv" does not overlap any reader key, the writer's
+// exclusion marks A cooling WITHOUT rebinding the readers' keys —
+// the same shape the production race takes when "a sibling
+// conversation 429s A while ours is bound to A". The leader-ruled
+// race window (RLock observes binding=A → cooldown seeded in the
+// gap → Lock-upgrade re-verify must observe the cooldown) is
+// exercised dynamically because the writer lands while readers are
+// actively mid-flight.
+//
+// Per-iteration flag check: every reader loop checks writerDoneFlag
+// atomically — returns BEFORE flag-set may be A (legitimate, no
+// cooldown yet); returns AFTER flag-set must NOT be A. The aggregate
+// post-flag read count also must be > 0, otherwise the writer
+// finished before any reader observed the cooldown and the interleave
+// was never exercised (a -race-only timing failure on a too-fast
+// runner).
+//
+// Bounded runtime: ~100ms total window, then close(stop). No runaway
+// loops.
+func TestEngine_GetOrSelect_TOCTOU_CoolingReverify(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour, 11, 10*time.Second)
+	seed3(e, "m") // A=1 B=1 C=2
+
+	// Pre-bind 100 conversations to a deterministic credential (A) so
+	// every reader has the same cached hit-credential under the RLock.
+	const N = 100
+	keys := make([]string, N)
+	for i := 0; i < N; i++ {
+		keys[i] = "conv-" + itoa(i)
+		e.InjectPreconditionStateForTest("m", keys[i], "A")
+	}
+	// Sanity: the optimistic RLock reads see A as the bound cred.
+	if id, _, err := e.GetOrSelect("m", "conv-0"); err != nil || id != "A" {
+		t.Fatalf("baseline: id=%s err=%v want A", id, err)
+	}
+
+	stop := make(chan struct{})
+	var writerDoneFlag int64 // atomic: 0 = not yet, 1 = writer finished seeding the cooldown
+	var postFlagReads int64  // aggregate count of reader returns AFTER writerDoneFlag=1
+	var postFlagSawA int64   // aggregate count of post-flag returns that violated the contract
+
+	var wg sync.WaitGroup
+	wg.Add(N + 1)
+
+	for _, k := range keys {
+		go func(k string) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				id, _, err := e.GetOrSelect("m", k)
+				if err != nil {
+					t.Errorf("GetOrSelect err for %s: %v", k, err)
+					return
+				}
+				if id == "" {
+					t.Errorf("empty credential returned for %s", k)
+					return
+				}
+				if atomic.LoadInt64(&writerDoneFlag) == 0 {
+					// Pre-flag — A is legitimate here (no cooldown
+					// has been seeded yet by the writer).
+					continue
+				}
+				// Post-flag: A is FORBIDDEN. The predicate fix must
+				// have caused the optimistic read to fall through to
+				// the full path and pick a healthy reselect (B or C).
+				atomic.AddInt64(&postFlagReads, 1)
+				if id == "A" {
+					atomic.AddInt64(&postFlagSawA, 1)
+					t.Errorf("TOCTOU cooling leak: post-flag served A for %s", k)
+				}
+			}
+		}(k)
+	}
+
+	// Tiny head start so readers are actively mid-flight when the
+	// writer lands — this is what creates the genuine
+	//   RLock observes binding=A → cooldown seeded in the gap →
+	//   Lock-upgrade re-verify must observe the cooldown
+	// window the leader ruling pins. Without the head start the
+	// writer could land during the readers' scheduling gap and the
+	// race would never be exercised.
+	time.Sleep(2 * time.Millisecond)
+
+	// WRITER: ExcludeAndReselect on a DIFFERENT conversation key.
+	// "other-conv" does not overlap any reader key, so this marks A
+	// cooling WITHOUT touching the readers' bindings. Once the call
+	// returns, the cooldown is observable to any subsequent reader
+	// iteration — flip writerDoneFlag so readers switch from
+	// pre-flag to post-flag accounting.
+	go func() {
+		defer wg.Done()
+		e.ExcludeAndReselect("m", "other-conv", "A", 30*time.Second)
+		atomic.StoreInt64(&writerDoneFlag, 1)
+	}()
+
+	// Bounded runtime: 100ms is enough on any runner to span many
+	// reader iterations before the writer's flag flips and many more
+	// post-flag reads.
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// (a) Every post-flag return was non-empty and never A.
+	if postFlagSawA != 0 {
+		t.Fatalf("TOCTOU cooling leak: %d post-flag reads served A", postFlagSawA)
+	}
+	// (a.2) The interleave was actually exercised — the writer landed
+	// while at least one reader iteration observed the cooldown.
+	// Without this guard the test would pass on a too-fast runner
+	// even with the predicate bug present (no reader iteration ever
+	// hit the post-flag path).
+	if postFlagReads == 0 {
+		t.Fatalf("no post-flag reads — writer finished before any reader observed the cooldown; interleave not exercised")
+	}
+
+	// (c) Every binding is now healthy (B or C); A is gone from every
+	// conversation (the final sequential GetOrSelect runs after
+	// writerDoneFlag=1 so the same predicate applies).
+	for _, k := range keys {
+		id, _, err := e.GetOrSelect("m", k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id == "A" {
+			t.Fatalf("binding %s still on cooling A: %s", k, id)
+		}
+	}
+	// Gauge: A is the only cooling credential; once janitor sweeps
+	// the test-cooldown the gauge goes to 0 (we don't sleep here —
+	// the contract is just "exactly one cooling row").
+	if got := e.Stats()["m"].Cooldowns; got != 1 {
+		t.Fatalf("cooldown gauge after race: %d want 1", got)
+	}
+}
+
+// TestEngine_ExcludeAndReselect_B2_IndependentCoolingGuard — Item 2
+// (leader-ruled SEMANTICS CHANGE): the B2 precondition no-op only
+// holds when the current binding's credential is HEALTHY. When the
+// bound credential is INDEPENDENTLY cooling (a separate
+// ExcludeAndReselect marked it cooling on a different conversation),
+// the no-op does NOT apply — we fall through to the healthy reselect
+// path, returning a healthy credential with mode=ReselectHealthy AND
+// rebinding the conversation to it (subsequent GetOrSelect on the
+// same key returns the new credential as an in-TTL hit).
+//
+// Constraint: the EXISTING B2 test
+// (TestEngine_ExcludeAndReselect_PreconditionNoOp_B2) still passes
+// unchanged — the new guard is a STRICTLY TIGHTER no-op (it only
+// refuses to no-op when the bound cred is independently cooling).
+func TestEngine_ExcludeAndReselect_B2_IndependentCoolingGuard(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour, 17, 10*time.Second)
+	seed3(e, "m") // A=1 B=1 C=2
+
+	// Setup: conversation "conv" is bound to B (concurrent request
+	// rebinded away from A). B is INDEPENDENTLY cooling (a separate
+	// ExcludeAndReselect on "other" marked B cooling).
+	e.InjectPreconditionStateForTest("m", "conv", "B")
+	e.InjectPreconditionStateForTest("m", "other", "B")
+	e.ExcludeAndReselect("m", "other", "B", 0) // B is now cooling
+	if got := e.Stats()["m"].Cooldowns; got != 1 {
+		t.Fatalf("preconditions: cooldown gauge %d want 1", got)
+	}
+
+	// Excluded = A (not equal to bound B). Pre-Item-2: returns B
+	// (the no-op). Post-Item-2: B is independently cooling, so we
+	// fall through to the healthy reselect — A is cooling (we just
+	// marked it), C is healthy. The result MUST be C with
+	// mode=ReselectHealthy, AND the conversation must be REBOUND to
+	// C (subsequent GetOrSelect on "conv" returns C as an in-TTL
+	// hit, not B).
+	preFailovers := e.Stats()["m"].Failovers
+	id, mode := e.ExcludeAndReselect("m", "conv", "A", 0)
+	if mode != ReselectHealthy {
+		t.Fatalf("mode: got %v want ReselectHealthy", mode)
+	}
+	if id != "C" {
+		t.Fatalf("reselect: got %s want C (A is excluded, B is independently cooling)", id)
+	}
+	// Failovers ticked — the new guard forces a REAL rebind, not a
+	// no-op.
+	if got := e.Stats()["m"].Failovers; got != preFailovers+1 {
+		t.Fatalf("Failovers: got %d want %d (real rebind should tick)", got, preFailovers+1)
+	}
+	// Conversation rebound to C: subsequent GetOrSelect returns C
+	// as an in-TTL hit (newlyBound=false).
+	if id2, newly, err := e.GetOrSelect("m", "conv"); err != nil || id2 != "C" || newly {
+		t.Fatalf("post-guard rebind: id=%s newly=%v err=%v want C/false", id2, newly, err)
+	}
+	// Cooldown gauge: A (just excluded) + B (still cooling) = 2.
+	if got := e.Stats()["m"].Cooldowns; got != 2 {
+		t.Fatalf("cooldown gauge post-guard: %d want 2", got)
+	}
+	// The pre-existing B2 path (B2 no-op, bound NOT cooling) must
+	// STILL pass unchanged. Cross-check by binding to A on a
+	// different conv that is NOT excluded and NOT cooling — A's
+	// bound conv is A, we exclude a different cred, the no-op
+	// applies.
+	e2 := newTestEngine(t, time.Hour, time.Hour, 17, time.Minute)
+	e2.RebindFromStore("m2", models.TestRefs("X", "Y", "Z"))
+	e2.InjectPreconditionStateForTest("m2", "k", "Y")
+	preFailovers2 := e2.Stats()["m2"].Failovers
+	id2, mode2 := e2.ExcludeAndReselect("m2", "k", "X", 0)
+	if mode2 != ReselectHealthy || id2 != "Y" {
+		t.Fatalf("legacy B2 no-op shape: got (%s,%v) want (Y,ReselectHealthy)", id2, mode2)
+	}
+	if got := e2.Stats()["m2"].Failovers; got != preFailovers2 {
+		t.Fatalf("legacy B2 no-op ticked Failovers: %d want %d", got, preFailovers2)
+	}
+
+	// 2-cred degradation sub-case — the doc comment of this test
+	// predicts that when the B2 guard falls through AND no healthy
+	// alternative exists, the call MUST degrade to
+	// ReselectSoonestExpiry (NOT ReselectHealthy). Fixture: 2 creds
+	// (X, Y); X is bound + independently cooling with a LONGER
+	// retryAfter; Y is excluded-and-cooling via THIS call with the
+	// engine's shorter defaultCooldown. Soonest-expiry = Y (its
+	// shorter remaining cooldown beats X's).
+	e3 := newTestEngine(t, time.Hour, time.Hour, 19, 200*time.Millisecond)
+	e3.RebindFromStore("m3", models.TestRefs("X", "Y"))
+	e3.InjectPreconditionStateForTest("m3", "conv", "X")
+	e3.InjectPreconditionStateForTest("m3", "other", "X")
+	e3.ExcludeAndReselect("m3", "other", "X", 30*time.Second) // X cooling for 30s
+	preFailovers3 := e3.Stats()["m3"].Failovers
+	id3, mode3 := e3.ExcludeAndReselect("m3", "conv", "Y", 0)
+	if mode3 != ReselectSoonestExpiry {
+		t.Fatalf("2-cred degradation: got mode=%v want ReselectSoonestExpiry", mode3)
+	}
+	if id3 != "Y" {
+		t.Fatalf("soonest-expiry pick: got %s want Y (200ms default < X's 30s remaining)", id3)
+	}
+	// SoonestExpiry is selection-only — Failovers does NOT tick.
+	if got := e3.Stats()["m3"].Failovers; got != preFailovers3 {
+		t.Fatalf("SoonestExpiry ticked Failovers: got %d want %d", got, preFailovers3)
+	}
+}
+
+// TestEngine_SkipCooling_RenormalizedDistribution — Item 5a: the
+// skip-cooling renormalized pick follows weights AMONG SURVIVORS.
+// Fixture: A=1, B=1, C=2 with A cooling → survivors B:C with weights
+// 1:2. Over N samples with a fixed seed, the empirical B/(B+C) ratio
+// must land in the principled band.
+//
+// N=10000 with fixed seed=23. Expected: B ≈ 3333, C ≈ 6666. ±5% bands
+// = [3167, 3500] for B and [6333, 7000] for C. The 5% band is the
+// same generous band used by TestEngine_WeightedDistribution (the
+// contract's canonical distribution fixture), keeping the test
+// sensitivity aligned across the suite — anything tighter would
+// start to flake on slower runners, anything looser would let real
+// selector bugs slip through.
+func TestEngine_SkipCooling_RenormalizedDistribution(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour, 23, time.Minute)
+	seed3(e, "m") // A=1 B=1 C=2
+
+	// Mark A cooling via a throwaway conversation's failover (the
+	// realistic shape — A genuinely 429'd).
+	e.InjectPreconditionStateForTest("m", "warmup", "A")
+	e.ExcludeAndReselect("m", "warmup", "A", 0)
+	if got := e.Stats()["m"].Cooldowns; got != 1 {
+		t.Fatalf("A not cooling: gauge=%d", got)
+	}
+
+	const N = 10000
+	counts := map[string]int{"B": 0, "C": 0}
+	for i := 0; i < N; i++ {
+		id, _, err := e.GetOrSelect("m", "f"+itoa(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A must NEVER be picked while cooling — that's the
+		// hard correctness assertion; the distribution check is
+		// secondary.
+		if id == "A" {
+			t.Fatalf("cooling A selected at iter %d", i)
+		}
+		counts[id]++
+	}
+	bands := map[string][2]int{"B": {3167, 3500}, "C": {6333, 7000}}
+	for id, c := range counts {
+		b := bands[id]
+		if c < b[0] || c > b[1] {
+			t.Fatalf("renormalized distribution drift for %s: got %d, want [%d,%d]", id, c, b[0], b[1])
+		}
+	}
 }

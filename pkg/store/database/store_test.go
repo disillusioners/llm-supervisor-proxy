@@ -18,11 +18,13 @@ package database
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
@@ -182,7 +184,11 @@ func TestResolveInternalConfigWithAffinity_BranchTable(t *testing.T) {
 	}
 
 	// Case 8: credential deleted mid-flight — this call fails, the
-	// next call re-selects a LIVE credential.
+	// next call re-selects a LIVE credential. Item 5d (leader-ruled):
+	// the heal must produce the side-effect stats the contract pins
+	// for the per-call observability — Cooldowns==1 (the just-
+	// re-seeded dead credential) and Failovers==1 (the heal rebind
+	// to a healthy credential via ExcludeAndReselect).
 	if _, err := store.DB.ExecContext(context.Background(),
 		`DELETE FROM credentials WHERE id = ?`, "cred-A"); err != nil {
 		t.Fatal(err)
@@ -190,6 +196,18 @@ func TestResolveInternalConfigWithAffinity_BranchTable(t *testing.T) {
 	mgr.Engine().InjectPreconditionStateForTest("multi", "conv-mid", "cred-A")
 	if rc, ok := mgr.ResolveInternalConfigWithAffinity("multi", "conv-mid"); ok || rc != (ResolvedCredential{}) {
 		t.Fatalf("mid-flight: this call must fail, got (%+v,%v)", rc, ok)
+	}
+	// Heal side-effects (Item 5d): the failed call invoked
+	// OnCredentialDeleted (cleared cred-A cooldown) and then
+	// ExcludeAndReselect (re-seeded cred-A's cooldown + rebound
+	// conv-mid to a healthy credential — cred-B). The GAUGE
+	// reflects 1 cooling row (cred-A), and Failovers ticked once
+	// (the heal rebind was a real non-no-op reselect).
+	if st := mgr.Engine().Stats()["multi"]; st.Cooldowns != 1 {
+		t.Fatalf("heal side-effect: Cooldowns=%d want 1 (cred-A re-seeded)", st.Cooldowns)
+	}
+	if st := mgr.Engine().Stats()["multi"]; st.Failovers != 1 {
+		t.Fatalf("heal side-effect: Failovers=%d want 1 (heal rebind ticked)", st.Failovers)
 	}
 	rc, ok = mgr.ResolveInternalConfigWithAffinity("multi", "conv-mid")
 	if !ok || rc.CredentialID != "cred-B" {
@@ -532,4 +550,102 @@ func TestStoreEngine_ConcurrentResolutionAndWrites(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+// TestStoreEngine_BusDrainForwardsCredentialsChanged — Item 3: the
+// drain loop in store.go:690-716 is currently deletable with the suite
+// staying green (no test exercises it). This pins the forwarding
+// behavior end-to-end: stale engine state injected via the testhooks
+// seam, then a SINGLE credentials-changed publish on a REAL
+// events.Bus, then assert the engine state converges to the DB truth
+// from the EVENT ALONE (no direct OnModelChanged call in the test).
+//
+// Mechanism: prime the engine with a single-credential ref list
+// (only cA) so a fresh-key pick can only return cA. Then add cC
+// to the DB via direct SQL (bypassing AddModel/UpdateModel so the
+// direct write-path OnModelChanged call does NOT fire), publish the
+// event, and wait for the drain to converge. Once the drain runs
+// OnModelChanged with the DB-truth refs, the engine knows about cC
+// and a fresh-key pick on a new conversation must surface it. Each
+// conversation is uniquely-keyed per call so each pick is a fresh
+// bind; cC appears with probability 1/3 over 3 creds.
+func TestStoreEngine_BusDrainForwardsCredentialsChanged(t *testing.T) {
+	store, cleanup := newStoreWithMigrations(t)
+	defer cleanup()
+
+	bus := events.NewBus()
+	mgr, err := NewModelsManager(store, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	seedModelCreds(t, mgr, "bd", models.TestRefs("cA", "cB"))
+
+	// Inject STALE engine state — single credential cA only
+	// (overriding the direct OnModelChanged call that seedModelCreds
+	// fired via RebindFromStore).
+	mgr.Engine().RebindFromStore("bd", models.TestRefs("cA"))
+	// Sanity: the stale state must manifest as "only cA is picked"
+	// for a fresh conversation key — the engine doesn't know cB.
+	if rc, ok := mgr.ResolveInternalConfigWithAffinity("bd", "stale-pre"); !ok || rc.CredentialID != "cA" {
+		t.Fatalf("stale engine pre-publish: got (%+v,%v) want (cA,true)", rc, ok)
+	}
+
+	// Add a new credential cC to the DB via direct SQL. We bypass
+	// mgr.AddModel / mgr.UpdateModel so the direct write-path
+	// OnModelChanged call does NOT fire — the bus event alone must
+	// drive the convergence.
+	seedCredential(t, store, "cC", "openai")
+	if _, err := store.DB.ExecContext(context.Background(),
+		`UPDATE models SET credentials_json = ? WHERE id = ?`,
+		`[{"credential_id":"cA","weight":1,"position":0},{"credential_id":"cB","weight":1,"position":1},{"credential_id":"cC","weight":1,"position":2}]`,
+		"bd"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain any residual subscription-side events from the
+	// seedModelCreds publish (mgr.AddModel publishes via the bus).
+	time.Sleep(20 * time.Millisecond)
+
+	// Publish the SINGLE credentials-changed event on the REAL bus.
+	bus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialsChanged,
+		Timestamp: time.Now().Unix(),
+		Data:      map[string]interface{}{"model_id": "bd"},
+	})
+
+	// Wait for the drain to converge. Poll a fresh-key pick on a
+	// unique conversation key: once the engine knows cC (post-
+	// drain), cC must appear at least once over a sample of 50
+	// unique keys (P(no cC in 50 picks with 3 creds) = (2/3)^50 ≈
+	// 10^-9 — a comfortable floor).
+	const sampleSize = 50
+	foundCC := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := 0; i < sampleSize; i++ {
+			rc, ok := mgr.ResolveInternalConfigWithAffinity("bd", "poll-"+strconv.Itoa(i)+"-"+time.Now().Format("150405.000000"))
+			if ok && rc.CredentialID == "cC" {
+				foundCC = true
+				break
+			}
+		}
+		if foundCC {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !foundCC {
+		t.Fatal("bus drain did not converge: engine never picked cC after credentials-changed publish")
+	}
+	// Cross-check via Stats(): the engine tracks more bindings now
+	// (50 unique poll-* keys were sampled during the poll loop) and
+	// the prefix-sum selector spans cA+cB+cC (verified indirectly
+	// via cC resolution above). The drain-goroutine convergence is
+	// the contract this test pins.
+	st := mgr.Engine().Stats()["bd"]
+	if st.Bindings == 0 {
+		t.Fatalf("post-drain stats: %+v (no bindings recorded)", st)
+	}
 }
