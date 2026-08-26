@@ -800,3 +800,77 @@ func TestUpstreamRequestUseSecondaryUpstreamWithModelTypeFallback(t *testing.T) 
 		t.Error("SetUseSecondaryUpstream(true) should work for fallback requests too")
 	}
 }
+
+// =============================================================================
+// Tests for SetResp (regression: pre-existing data race introduced in
+// 5326148 @ 2026-04-08 — race_executor.go's bare `req.resp = resp` write
+// vs cleanup()'s locked `r.resp != nil` read via Cancel())
+// =============================================================================
+
+func TestUpstreamRequestSetResp(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("set-resp body")),
+	}
+	req.SetResp(resp)
+
+	// Read back under the file's lock discipline
+	req.mu.RLock()
+	got := req.resp
+	req.mu.RUnlock()
+
+	if got != resp {
+		t.Error("req.resp was not set to the response passed to SetResp")
+	}
+}
+
+// TestUpstreamRequestSetRespVsCancelStress is the regression test for the
+// pre-existing data race (5326148, Apr-2026): the executor's post-Do write
+// `req.resp = resp` (now req.SetResp) raced cleanup()'s locked read of
+// r.resp inside Cancel(). A deterministic repro is not achievable given the
+// instruction-wide race window, so the stress loop is the practical form:
+// per round, goroutines invoke Cancel() on a fresh upstreamRequest
+// concurrently with post-Do-style SetResp assignments. Run under -race.
+func TestUpstreamRequestSetRespVsCancelStress(t *testing.T) {
+	const (
+		goroutines = 32 // per round: half Cancel(), half SetResp()
+		rounds     = 200
+	)
+
+	var wg sync.WaitGroup
+	for round := 0; round < rounds; round++ {
+		req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+		ctx, cancel := context.WithCancel(context.Background())
+		req.SetContext(ctx, cancel)
+
+		for g := 0; g < goroutines; g++ {
+			wg.Add(1)
+			if g%2 == 0 {
+				go func() {
+					defer wg.Done()
+					req.Cancel() // cleanup() reads r.resp under r.mu
+				}()
+			} else {
+				go func() {
+					defer wg.Done()
+					req.SetResp(&http.Response{ // pre-fix: bare `req.resp = resp`
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("stress body")),
+					})
+				}()
+			}
+		}
+		wg.Wait()
+
+		// Hygiene: close any body that landed after cleanup() nil'd resp
+		// (mirrors the executor's guarded nil-check defer).
+		req.mu.Lock()
+		if req.resp != nil && req.resp.Body != nil {
+			req.resp.Body.Close()
+			req.resp = nil
+		}
+		req.mu.Unlock()
+	}
+}

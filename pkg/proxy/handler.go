@@ -14,6 +14,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
@@ -103,13 +104,41 @@ type Handler struct {
 	tokenStore      auth.TokenStoreInterface
 	ultimateHandler *ultimatemodel.Handler
 	counter         *usage.Counter
+
+	// credEngine is the load-balancing engine injected at construction
+	// (Phase 3 / Tasks 3 + W-3). The Config struct has NO CredEngine
+	// field — constructor-only injection is the law (single source of
+	// injection; no second Config.CredEngine path).
+	//
+	// MAY BE NIL: legacy single-credential paths and unit tests that
+	// don't wire the engine pass nil. The race coordinator's
+	// ResolveInternalConfigWithAffinity seam handles nil-engine by
+	// returning the legacy single-credential resolution (Phase 2).
+	credEngine *credentiallb.Engine
 }
 
-func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, bufferStore *bufferstore.BufferStore, tokenStore auth.TokenStoreInterface, counter *usage.Counter) *Handler {
+// NewHandler (Phase 3 / Task 3 + W-3): 7th constructor parameter is the
+// load-balancing engine. NO Config.CredEngine field — the 7th positional
+// arg is the SOLE injection path.
+//
+// If credEngine is nil, the race coordinator's nil-engine branch serves
+// the legacy single-credential fast path (Phase 2 / E-3); behavior is
+// byte-identical to pre-Phase-3.
+//   credEngine may be nil.
+func NewHandler(
+	config *Config,
+	bus *events.Bus,
+	store *store.RequestStore,
+	bufferStore *bufferstore.BufferStore,
+	tokenStore auth.TokenStoreInterface,
+	counter *usage.Counter,
+	credEngine *credentiallb.Engine,
+) *Handler {
 	h := &Handler{
-		config: config,
-		bus:    bus,
-		store:  store,
+		config:     config,
+		bus:        bus,
+		store:      store,
+		credEngine: credEngine,
 		client: &http.Client{
 			// IMPORTANT: Timeout is set to 0 for streaming support.
 			// We use context deadlines (attemptCtx) instead of http.Client.Timeout because:
@@ -128,8 +157,11 @@ func NewHandler(config *Config, bus *events.Bus, store *store.RequestStore, buff
 		counter:     counter,
 	}
 
-	// Initialize ultimate model handler
-	h.ultimateHandler = ultimatemodel.NewHandler(config.ConfigMgr, config.ModelsConfig, bus)
+	// Initialize ultimate model handler (Phase 3 / Task 3): the engine
+	// is forwarded to ultimatemodel.NewHandler so its internal executeInternal
+	// path can call ExcludeAndReselect for the rate-limit failover hook
+	// (Task 21). The package owns the ult-internal hook end-to-end.
+	h.ultimateHandler = ultimatemodel.NewHandler(config.ConfigMgr, config.ModelsConfig, bus, credEngine)
 
 	// Wire up tool call buffer configuration for ultimate model handler
 	cfg := config.ConfigMgr.Get()
@@ -404,6 +436,43 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		rc.ultimateModelID = authToken.UltimateModelID
 	}
 
+	// Phase 3 / Task 2a — POST-AUTH wiring site (A-1, A-1-wiring).
+	// HOISTED OUT of the `if authToken != nil` branch (Round 3j W3):
+	// anonymous / unauthenticated requests must STILL get a conversation
+	// key — they receive the unsalted key because rc.tokenID is the
+	// zero value "" (the requestContext defaults it to empty). The
+	// key is NEVER computed in initRequestContext (tokenID is unset
+	// there at handler.go:352). The key is only meaningful for
+	// INTERNAL models — external / unknown models leave
+	// rc.conversationKey == "" and the engine path is skipped at every
+	// call site.
+	//
+	// W-2 + C2: when no first user message was extracted, the key
+	// stays "" — the engine then picks FRESH per request and stores
+	// NO binding (the ""-as-own-bucket reading is REMOVED per W-2;
+	// ComputeConversationKey never returns "" by itself, so the
+	// caller owns this gate). The DEBUG log below is the canonical
+	// C2 observability mechanism.
+	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+		if rc.firstUserMessage == "" {
+			rc.conversationKey = ""
+			log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
+				rc.resolvedModel.ID)
+		} else {
+			rc.conversationKey = credentiallb.ComputeConversationKey(
+				rc.resolvedModel.ID,
+				rc.tokenID, // "" for anonymous — unsalted key
+				rc.firstUserMessage,
+			)
+			log.Printf("[LB] computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
+				rc.conversationKey[:8],
+				rc.resolvedModel.ID,
+				rc.tokenIDDisplay(),
+				len(rc.firstUserMessage),
+			)
+		}
+	}
+
 	// === MODEL ACCESS CHECK ===
 	// Check if the requested model is allowed for this token
 	// This check happens AFTER authentication for internal models
@@ -632,7 +701,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					// client and never mutates the wire path — see
 					// pkg/ultimatemodel/handler_capture_test.go for the
 					// byte-identity proofs.
-					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID)
+					//
+					// Phase 3 / Task 8: conversationKey (post-auth wired at
+					// handler.go:401+) is threaded down so ultimate-internal's
+					// resolution can use the LB engine (Tasks 8/9); the
+					// intermediate Execute gains the 9th positional arg with
+					// no semantic change to trigger / capture behavior.
+					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID, rc.conversationKey)
 					if err != nil {
 						log.Printf("[UltimateModel] Error: %v", err)
 						rc.reqLog.Status = "failed"
@@ -780,8 +855,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// This ensures client receives heartbeats during race retry wait time
 	var heartbeatCancel context.CancelFunc
 	if rc.isStream {
+		// SSE headers — Cache-Control: no-cache alone is insufficient
+		// for Cloudflare (and similar CDNs). `no-transform` is required
+		// to disable CF's response buffering and asset optimization, otherwise
+		// even frequent SSE heartbeats sit in CF's buffer until CF's
+		// 100/180s read timeout triggers (524 — proxy disconnects the
+		// client even though the upstream response is still streaming).
+		// See: CF docs §"no-transform" + §"Streaming responses".
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
@@ -820,7 +902,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// threaded here so race-internal sites can read it via executeRequest
 	// without taking a *requestContext dependency (B3 — executeInternalRequest
 	// has neither rc nor *http.Request).
-	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking)
+	//
+	// Phase 3 / Round 3c C3 — the engine + conversationKey reach the
+	// coordinator through this construction site:
+	//   cmd/main.go → NewHandler(…, credLB) → Handler.credEngine → here
+	// Constructor-only injection per W-3 holds end-to-end (no
+	// Config.CredEngine second injection path).
+	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()

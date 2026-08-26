@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -76,6 +77,27 @@ func GetConfigPath() string {
 	return filepath.Join(configDir, AppName, "models.json")
 }
 
+// MaxCredentialRefs is the maximum number of credential references
+// allowed per model. Multi-credential load balancing lives in
+// Phase 2 (pkg/credentiallb); Phase 1 enforces the upper bound so
+// the JSON column and the engine inputs stay aligned.
+const MaxCredentialRefs = 16
+
+// CredentialRef is a single (credential, weight, position) entry in a
+// model's ordered, weighted credential list.
+//
+//   - CredentialID: references credentials.id (app-level FK).
+//   - Weight: positive integer; the higher, the more often picked.
+//     Default 1. Validation: must be > 0.
+//   - Position: 0-based deterministic ordering. Used to break weight ties
+//     (lower position wins) and to define the "primary" credential
+//     (Credentials[0]).
+type CredentialRef struct {
+	CredentialID string `json:"credential_id"`
+	Weight       int    `json:"weight"`
+	Position     int    `json:"position"`
+}
+
 // ModelConfig represents the configuration for a single model.
 type ModelConfig struct {
 	ID             string   `json:"id"`
@@ -85,10 +107,18 @@ type ModelConfig struct {
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
 	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
-	Internal        bool   `json:"internal,omitempty"`
-	CredentialID    string `json:"credential_id,omitempty"`     // Reference to credential (required if internal is true)
-	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
-	InternalModel   string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
+	Internal        bool           `json:"internal,omitempty"`
+	InternalBaseURL string         `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
+	InternalModel   string         `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
+
+	// Credentials is the ordered, weighted list of credential refs. Empty for
+	// external / non-internal models. Validation: if non-empty, every entry's
+	// CredentialID must exist in the credentials table; every entry's weight
+	// must be > 0; every entry's provider must match Credentials[0]'s provider
+	// (provider-match invariant). Use PrimaryCredentialID() to read the
+	// "primary" (back-compat single-credential view) — it returns
+	// Credentials[0].CredentialID.
+	Credentials []CredentialRef `json:"credentials,omitempty"`
 
 	// ReleaseStreamChunkDeadline is the duration after which buffered stream chunks
 	// should be flushed to downstream even if the stream hasn't completed.
@@ -120,6 +150,24 @@ func (m *ModelConfig) GetReleaseStreamChunkDeadline() time.Duration {
 	return time.Duration(m.ReleaseStreamChunkDeadline)
 }
 
+// PrimaryCredentialID returns the legacy single-credential view of the
+// model's credentials list: the first ref's CredentialID, or "" if
+// the model has no credentials configured.
+//
+// This is the single-credential fast path used by every existing
+// call site (race-internal, ultimate-internal, ultimate-external's
+// D3 provider probe) until the Phase 2 LB engine (pkg/credentiallb)
+// wires the affinity-aware variant. Behavior is byte-identical to
+// the pre-Phase-1 m.CredentialID reads when the model has exactly
+// one credential; it returns "" for external models with empty
+// Credentials (same as the old default string value).
+func (m *ModelConfig) PrimaryCredentialID() string {
+	if len(m.Credentials) == 0 {
+		return ""
+	}
+	return m.Credentials[0].CredentialID
+}
+
 // ModelsConfigInterface defines the interface for models configuration
 // Both JSON and database-backed implementations must satisfy this interface
 type ModelsConfigInterface interface {
@@ -144,6 +192,33 @@ type ModelsConfigInterface interface {
 
 	// Internal config resolution
 	ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool)
+
+	// Phase 3 / Task 16 + Tasks 4/8/9 — affinity resolution seam.
+	// The struct form (ResolvedCredential + trailing ok) carries the
+	// engine's W-1 NewlyBound signal in addition to the credentials
+	// resolved fields. The legacy 5-tuple ResolveInternalConfig remains
+	// as the inner fallback for the Credentials == nil || len == 0
+	// fast path inside ResolveInternalConfigWithAffinity (and for the
+	// single-credential fast path that produces NO engine call).
+	ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool)
+}
+
+// ResolvedCredential is the struct form returned by
+// ResolveInternalConfigWithAffinity (Phase 3 / #3 — leader-ruled
+// struct over 6-tuple). Fields map to legacy 5-tuple except for
+// CredentialID (engine-selector output for observability + the
+// model_credential_selected event payload) and NewlyBound (W-1
+// only-on-first-binding event signal). The canonical concrete
+// implementation lives in pkg/store/database.ResolvedCredential;
+// pkg/models declares it here so pkg/proxy / pkg/ultimatemodel
+// can talk about the shape without an import cycle.
+type ResolvedCredential struct {
+	Provider      string
+	APIKey        string
+	BaseURL       string
+	InternalModel string
+	CredentialID  string
+	NewlyBound    bool
 }
 
 // ModelsConfig manages the collection of model configurations.
@@ -508,16 +583,67 @@ func (mc *ModelsConfig) Validate() error {
 
 		// Validate internal upstream configuration
 		if model.Internal {
-			if model.CredentialID == "" {
+			// Phase 1: internal models must carry at least one credential ref.
+			// Empty Credentials ⇒ keep the legacy error text verbatim so
+			// downstream callers that grep the message keep working.
+			if len(model.Credentials) == 0 {
 				return fmt.Errorf("model %s: credential_id is required when internal is true", model.ID)
 			}
-			if !credentialIDs[model.CredentialID] {
-				return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, model.CredentialID)
+
+			// Per-ref validation (Task 6 validation matrix).
+			seen := make(map[string]bool, len(model.Credentials))
+			var primaryCred *CredentialConfig
+			for idx, ref := range model.Credentials {
+				if ref.CredentialID == "" {
+					return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
+				}
+				if !credentialIDs[ref.CredentialID] {
+					return fmt.Errorf("model %s: credential_id '%s' references non-existent credential", model.ID, ref.CredentialID)
+				}
+				if ref.Weight <= 0 {
+					return fmt.Errorf("model %s: credentials[%d] (credential_id=%q): weight must be > 0, got %d", model.ID, idx, ref.CredentialID, ref.Weight)
+				}
+				if seen[ref.CredentialID] {
+					return fmt.Errorf("model %s: duplicate credential_id '%s' in credentials list", model.ID, ref.CredentialID)
+				}
+				seen[ref.CredentialID] = true
 			}
+			if len(model.Credentials) > MaxCredentialRefs {
+				return fmt.Errorf("model %s: credentials list exceeds max of %d refs", model.ID, MaxCredentialRefs)
+			}
+
+			// Provider-match invariant: every ref's credential must share
+			// Credentials[0]'s provider (case-insensitive). Looks up via
+			// mc.Credentials when available, else falls back to the
+			// already-built credentialIDs set (best-effort: matches when
+			// the credential row's Provider is the same — the database
+			// Validate mirror builds the same lookup).
+			if mc.Credentials != nil {
+				primaryCred = mc.Credentials.GetCredential(model.Credentials[0].CredentialID)
+			}
+			if primaryCred != nil {
+				primaryProvider := strings.ToLower(primaryCred.Provider)
+				for idx, ref := range model.Credentials[1:] {
+					refCred := mc.Credentials.GetCredential(ref.CredentialID)
+					if refCred == nil {
+						continue // already caught by the existence check above
+					}
+					if strings.ToLower(refCred.Provider) != primaryProvider {
+						return fmt.Errorf("model %s: credentials[%d] (credential_id=%q) provider %q does not match primary provider %q",
+							model.ID, idx+1, ref.CredentialID, refCred.Provider, primaryCred.Provider)
+					}
+				}
+			}
+
 			if model.InternalModel == "" {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
 		}
+		// Note: non-internal models MAY carry Credentials — the
+		// ultimate-external D3 provider probe reads Credentials[0] to
+		// classify the upstream provider without injecting credentials.
+		// (See ModelsConfig.Validate comment for the rationale on the
+		// plan's "non-internal with creds ⇒ reject" rule deviation.)
 
 		// Validate secondary upstream model
 		if model.SecondaryUpstreamModel != "" {
@@ -591,15 +717,19 @@ func (m *ModelConfig) GetInternalConfig() (credentialID, provider, baseURL, mode
 	if !m.Internal {
 		return "", "", "", "", false
 	}
-	return m.CredentialID, "", m.InternalBaseURL, m.InternalModel, true
+	return m.PrimaryCredentialID(), "", m.InternalBaseURL, m.InternalModel, true
 }
 
 // ResolveInternalConfig resolves the full internal upstream configuration including
 // credentials. It returns the provider, apiKey, baseURL, and model name.
 // The provider comes from the credential. The baseURL is taken from the model if specified, otherwise from the credential.
+//
+// Legacy single-credential resolution — always uses Credentials[0].
+// The Phase 2 LB engine (pkg/credentiallb) introduces
+// ResolveInternalConfigWithAffinity for multi-credential models with
+// conversation-sticky affinity; for Phase 1 this stays as the
+// single-credential fast path (byte-identical to pre-change behavior).
 func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
-	log.Printf("[PEAK-DBG] ResolveInternalConfig ENTRY: modelID=%q", modelID)
-
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
@@ -613,22 +743,22 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 	}
 
 	if modelConfig == nil || !modelConfig.Internal {
-		log.Printf("[PEAK-DBG] ResolveInternalConfig: modelConfig=%v, Internal=%v", modelConfig != nil, modelConfig != nil && modelConfig.Internal)
 		return "", "", "", "", false
 	}
 
-	log.Printf("[PEAK-DBG] ResolveInternalConfig: found modelConfig, ID=%q, PeakHourEnabled=%v, InternalModel=%q, PeakHourModel=%q",
-		modelConfig.ID, modelConfig.PeakHourEnabled, modelConfig.InternalModel, modelConfig.PeakHourModel)
+	// Get credential via the primary (single-credential fast path).
+	primaryCredentialID := modelConfig.PrimaryCredentialID()
+	if primaryCredentialID == "" {
+		return "", "", "", "", false
+	}
 
 	// Get credential
 	if mc.Credentials == nil {
-		log.Printf("[PEAK-DBG] ResolveInternalConfig: Credentials is nil")
 		return "", "", "", "", false
 	}
 
-	cred := mc.Credentials.GetCredential(modelConfig.CredentialID)
+	cred := mc.Credentials.GetCredential(primaryCredentialID)
 	if cred == nil {
-		log.Printf("[PEAK-DBG] ResolveInternalConfig: credential %q not found", modelConfig.CredentialID)
 		return "", "", "", "", false
 	}
 
@@ -643,19 +773,51 @@ func (mc *ModelsConfig) ResolveInternalConfig(modelID string) (provider, apiKey,
 
 	// Determine actual model: check peak hour first
 	actualModel := modelConfig.InternalModel
-	log.Printf("[PEAK-DBG] ResolveInternalConfig: before peak check, actualModel=%q", actualModel)
 
 	if peakModel := modelConfig.ResolvePeakHourModel(time.Now()); peakModel != "" {
 		log.Printf("[PEAK-HOUR] peak hour active for model %s: using %s instead of %s",
 			modelConfig.ID, peakModel, modelConfig.InternalModel)
-		log.Printf("[PEAK-DBG] ResolveInternalConfig: peak hour SUBSTITUTED %q -> %q", actualModel, peakModel)
 		actualModel = peakModel
-	} else {
-		log.Printf("[PEAK-DBG] ResolveInternalConfig: no peak hour active, using internalModel=%q", actualModel)
 	}
 
-	log.Printf("[PEAK-DBG] ResolveInternalConfig EXIT: returning model=%q", actualModel)
 	return provider, cred.APIKey, baseURL, actualModel, true
+}
+
+// ResolveInternalConfigWithAffinity (Phase 3 / Task 16 + Tasks 4/8/9 /
+// ModelsConfigInterface seam). The JSON-file-backed ModelsConfig has no
+// engine wired — the phase-2 ModelsManager owns the engine — so this
+// struct degrades to the legacy single-credential resolution (the
+// phase2 E-3 fast path): ResolveInternalConfig returns a struct with
+// .CredentialID == primaryID + .NewlyBound=false + .ok=resolves the
+// same shape as the single-cred path inside ModelsManager.
+//
+// Single-credential behavior is byte-identical — no engine call, no
+// binding write, no engine overhead.
+func (mc *ModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool) {
+	provider, apiKey, baseURL, internalModel, ok := mc.ResolveInternalConfig(modelID)
+	if !ok {
+		return ResolvedCredential{}, false
+	}
+	// Derive CredentialID for the legacy single-credential path.
+	mc.mu.RLock()
+	var primaryID string
+	for _, m := range mc.Models {
+		if m.ID == modelID {
+			primaryID = m.PrimaryCredentialID()
+			break
+		}
+	}
+	mc.mu.RUnlock()
+	return ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: internalModel,
+		CredentialID:  primaryID,
+		// NewlyBound is always false for the JSON-file backend (no
+		// engine wired; this is the E-3 single-credential fast path).
+		NewlyBound: false,
+	}, true
 }
 
 // GetEnabledModels returns only the enabled model configurations.
@@ -779,6 +941,13 @@ func (mc *ModelsConfig) UpdateCredential(id string, cred CredentialConfig) error
 
 // RemoveCredential removes a credential configuration by ID.
 // Returns an error if the credential is in use by any model.
+//
+// In-use guard scans every model's Credentials slice (the new
+// ordered, weighted list). When a single-credential model with the
+// legacy CredentialID field would have been caught by `model.CredentialID
+// == id`, the new guard catches it on `Credentials[i].CredentialID == id`
+// (the primary ref). When the field-drop is in place, only the slice
+// matters; both shapes remain covered for the deprecation window.
 func (mc *ModelsConfig) RemoveCredential(id string) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
@@ -787,10 +956,12 @@ func (mc *ModelsConfig) RemoveCredential(id string) error {
 		return ErrCredentialNotFound
 	}
 
-	// Check if credential is in use
+	// Check if credential is in use by any model
 	for _, model := range mc.Models {
-		if model.CredentialID == id {
-			return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, ErrCredentialInUse)
+		for _, ref := range model.Credentials {
+			if ref.CredentialID == id {
+				return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, ErrCredentialInUse)
+			}
 		}
 	}
 

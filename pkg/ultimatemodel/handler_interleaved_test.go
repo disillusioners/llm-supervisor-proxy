@@ -47,7 +47,7 @@ func TestExecuteExternal_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 		Enabled:  true,
 		Internal: false,
 	})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -125,7 +125,7 @@ func TestExecuteExternal_PositiveCase_MiniMaxAppliesTranslator(t *testing.T) {
 		Enabled:  true,
 		Internal: false,
 	})
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -188,7 +188,7 @@ func TestExecuteInternal_NegativeCase_TypedFieldsNotSet_NonMiniMax(t *testing.T)
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("openai-model", "openai", "test-key", "", "gpt-4o-mini")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -204,7 +204,7 @@ func TestExecuteInternal_NegativeCase_TypedFieldsNotSet_NonMiniMax(t *testing.T)
 
 	// interleaved=true; provider from ResolveInternalConfig is "openai"
 	// (not MiniMax) so the gate stays off.
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("openai-model"), false, true, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestExecuteInternal_PositiveCase_TypedFieldsSet_MiniMax(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -270,7 +270,7 @@ func TestExecuteInternal_PositiveCase_TypedFieldsSet_MiniMax(t *testing.T) {
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, true, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestExecuteInternal_PositiveCase_TranslatesRequestBody_MiniMax(t *testing.T
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddInternalModel("minimax-model", "minimax", "test-key", "", "MiniMax-M1")
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -330,7 +330,7 @@ func TestExecuteInternal_PositiveCase_TranslatesRequestBody_MiniMax(t *testing.T
 	}
 	requestBodyBytes, _ := json.Marshal(body)
 
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, true)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, true, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}

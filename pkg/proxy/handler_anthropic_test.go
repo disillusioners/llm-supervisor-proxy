@@ -146,7 +146,7 @@ func mockOpenAIHandler(t *testing.T) http.HandlerFunc {
 
 		// Streaming response
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -233,7 +233,7 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 
 	t.Cleanup(func() { upstream.Close() })
 	return h, upstream
@@ -894,7 +894,7 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 		Name:          "Internal Primary",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-openai-cred",
+		Credentials: models.TestRefs("test-openai-cred"),
 		InternalModel: "gpt-4o-internal",
 		FallbackChain: []string{"external-fallback"},
 	}); err != nil {
@@ -907,7 +907,7 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	return NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	return NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 }
 
 // anthropicTestRequestStore retrieves the request store behind the handler

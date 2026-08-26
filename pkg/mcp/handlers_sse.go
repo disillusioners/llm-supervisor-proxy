@@ -180,7 +180,7 @@ func (s *Server) handleSSEConnection(w http.ResponseWriter, r *http.Request) {
 
 	// Set SSE response headers
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 
 	// Get flusher for streaming responses

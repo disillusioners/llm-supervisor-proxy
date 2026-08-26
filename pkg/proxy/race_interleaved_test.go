@@ -175,7 +175,7 @@ func TestRaceInternal_NegativeCase_TypedFieldsNotSet_NonMiniMax(t *testing.T) {
 				Name:          "openai-model-internal",
 				Enabled:       true,
 				Internal:      true,
-				CredentialID:  "openai-cred",
+				Credentials: models.TestRefs("openai-cred"),
 				InternalModel: "gpt-4o-mini",
 			},
 		},

@@ -15,16 +15,16 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-21 | PASS (376 top-level, 7 intentional skips; @ ec1efb6 reasoning-observability regression gate) |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-21 | PASS (142 top-level incl. rewritten-capture gate tests) |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-21 | PASS (77 + 4 PG-gated skips) |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-21 | PASS (87 top-level funcs) |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-21 | PASS (17 funcs / 105 subtests) |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-21 | PASS (31/31) |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-21 | PASS (48 top-level) |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-21 | PASS (14 funcs / 100% subtests) |
-| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-21 | PASS |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-21 | PASS (348 incl. pkg/ui FE API surface) |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-26 | PASS (376+370, 7 skips — byte-identical to baseline; @ 315f4e8 Phase-2 gate) |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-26 | PASS (145/145, +3 TestUltimateInternal_* failover; @ d6368bd FINAL gate) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-26 | PASS (99 + 4 PG-skips, flat vs 315f4e8; @ d6368bd FINAL gate) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-26 | PASS (87 + 267 sub, flat; PEAK-DBG gone; @ d6368bd FINAL gate) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-26 | PASS (17/105, 3-gate identical; @ d6368bd FINAL gate) |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-26 | PASS (33/33, 3-gate identical; @ d6368bd FINAL gate) |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-26 | PASS (48/48, 3-gate identical; @ d6368bd FINAL gate) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-26 | PASS (23 + 118 sub, 3-gate stable; @ d6368bd FINAL gate) |
+| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-26 | PASS (245/474 identical; @ 315f4e8 Phase-2 gate) |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-26 | PASS (258+90, 9 pkgs; @ 315f4e8 Phase-2 gate) |
 
 ## Mock Test Packs
 
@@ -175,3 +175,7 @@ Update after each test run:
 - Test A: Add Server mode — button calls `/fe/api/mcp-servers/test-connection` ✅
 - Test B: Edit Server mode — button calls API ✅
 - Test C: SSRF protection — localhost URLs blocked ✅
+ blocked ✅
+ction — localhost URLs blocked ✅
+ blocked ✅
+✅

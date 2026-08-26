@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
@@ -33,6 +36,13 @@ var newProviderClient = providers.NewProvider
 // populates ChatMessage.ReasoningDetails from the input map. The gate
 // (provider + flag) belongs to the caller, not here — this function
 // remains pure (W6).
+//
+// conversationKey (Phase 3 / Task 8): the per-request affinity key wired
+// at handler.go:401+ (post-auth). Threaded to the resolution seam via
+// ResolveInternalConfigWithAffinity. MAY be empty (no first-user-message)
+// — see W-2 + C-2 in the plan for empty-key semantics. Used by the
+// rate-limit failover hook below (Task 21) to compute the per-request
+// cooldown-injection exclusion set when a 429 hits.
 func (h *Handler) executeInternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -41,12 +51,43 @@ func (h *Handler) executeInternal(
 	modelCfg *models.ModelConfig,
 	isStream bool,
 	interleaved bool,
+	conversationKey string,
 ) (*ExecuteResult, error) {
-	// Resolve internal config (including credential lookup)
-	provider, apiKey, baseURL, internalModel, ok := h.modelsMgr.ResolveInternalConfig(modelCfg.ID)
+	// Resolve internal config via the affinity seam (Phase 3 / Tasks 8 +
+	// 9 — #3 struct form: ResolvedCredential + trailing ok). Discard
+	// NewlyBound — the ultimate path does NOT publish model_credential_selected
+	// itself (single source of truth in pkg/proxy/race_executor.go:executeRequest,
+	// reachable only from the race coordinator).
+	resolved, ok := h.modelsMgr.ResolveInternalConfigWithAffinity(modelCfg.ID, conversationKey)
 	if !ok {
 		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
+
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved)
+}
+
+// executeInternalWithResolved (Phase 3 / Task 21 refactor) runs the
+// internal execution against an ALREADY-RESOLVED credential. Split out
+// of executeInternal so the rate-limit-failover wrapper can (a) know
+// exactly which credential attempt #1 used, and (b) retry with the
+// reselected credential through the SAME provider-construction +
+// translation + dispatch path — no duplicated translation logic (the
+// prior partial implementation re-implemented the MiniMax twin-B
+// translation inline and drifted from it).
+func (h *Handler) executeInternalWithResolved(
+	ctx context.Context,
+	w http.ResponseWriter,
+	requestBody map[string]interface{},
+	requestBodyBytes []byte,
+	modelCfg *models.ModelConfig,
+	isStream bool,
+	interleaved bool,
+	resolved models.ResolvedCredential,
+) (*ExecuteResult, error) {
+	provider := resolved.Provider
+	apiKey := resolved.APIKey
+	baseURL := resolved.BaseURL
+	internalModel := resolved.InternalModel
 
 	// Create provider
 	providerClient, err := newProviderClient(provider, apiKey, baseURL)
@@ -141,6 +182,131 @@ func (h *Handler) executeInternal(
 		return h.handleInternalStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
 	}
 	return h.handleInternalNonStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
+}
+
+// executeInternalWithRateLimitFailover (Phase 3 / Task 21 — Round 3b
+// review #4 guard fix) wraps the internal execution so an initial-call
+// *ProviderError classified as rate-limit retries ONCE with the
+// reselected credential (ExcludeAndReselect mode-aware per B3/C2). The
+// guard is the *ProviderError type assertion — NOT headersSent, which
+// Execute() pre-sets before executeInternal runs and is therefore
+// unusable as a first-byte marker here (initial-call errors return
+// before any content write — handler_internal.go non-stream ~155 /
+// stream ~253; mid-stream failures surface as SSE error events).
+//
+// Resolution happens ONCE here (attempt #1's credential is exactly what
+// executeInternalWithResolved consumes); the retry resolves the
+// SPECIFIC reselected credential (not a fresh GetOrSelect — an
+// empty-key fresh pick would re-roll and could re-select the cooling
+// credential).
+//
+// conversationKey is the per-request affinity key wired at handler.go:401+
+// (chat path). MAY be empty (no first-user-message extracted) — W-2
+// semantics: ExcludeAndReselect performs a fresh non-cooling weighted
+// pick with no binding write for empty keys (ReselectHealthy per C2).
+//
+// Budget (R3-5): this hook retries at most ONCE; combined with the
+// len(Credentials) > 1 precondition the per-request failover count is
+// structurally bounded by 1 ≤ len(credentials)−1 — no loops possible.
+func (h *Handler) executeInternalWithRateLimitFailover(
+	ctx context.Context,
+	w http.ResponseWriter,
+	requestBody map[string]interface{},
+	requestBodyBytes []byte,
+	modelCfg *models.ModelConfig,
+	isStream bool,
+	interleaved bool,
+	conversationKey string,
+) (*ExecuteResult, error) {
+	// Attempt #1 — resolve via the affinity seam, then execute.
+	resolved, ok := h.modelsMgr.ResolveInternalConfigWithAffinity(modelCfg.ID, conversationKey)
+	if !ok {
+		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
+	}
+	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved)
+	if err == nil || h.credEngine == nil {
+		return result, err
+	}
+
+	// ── Task 21 hook guards ──
+	// (1) initial-call *ProviderError (the pre-first-byte guard — errors
+	//     from the initial provider call return before any content write);
+	// (2) rate-limit classification (Task 17 vocabulary);
+	// (3) multi-credential model (single-cred ⇒ ReselectNone anyway).
+	var providerErr *providers.ProviderError
+	if !errors.As(err, &providerErr) {
+		return result, err
+	}
+	if !providers.IsRateLimitError(providerErr) {
+		return result, err
+	}
+	if len(modelCfg.Credentials) <= 1 {
+		return result, err
+	}
+
+	reselected, mode := h.credEngine.ExcludeAndReselect(
+		modelCfg.ID,
+		conversationKey,
+		resolved.CredentialID,
+		providerErr.RetryAfter,
+	)
+
+	switch mode {
+	case credentiallb.ReselectNone:
+		// C2 narrowing: no credential available (single-cred model or 0
+		// valid credentials). Propagate the existing failure shape.
+		log.Printf("[LB-FAILOVER] ultimate-internal: model=%s no reselectable credential (mode=%v); propagating failure", modelCfg.ID, mode)
+		return result, err
+	case credentiallb.ReselectSoonestExpiry:
+		// 0-of-N healthy: single attempt with the soonest-expiring
+		// credential, then propagate (F.4 — no second ExcludeAndReselect).
+		log.Printf("[WARN] [LB-FAILOVER] ultimate-internal: model=%s all credentials cooling; single attempt with soonest-expiring cred=%s", modelCfg.ID, reselected)
+	default:
+		// ReselectHealthy (incl. B2 no-op + empty-key fresh pick per C2).
+		log.Printf("[LB-FAILOVER] ultimate-internal: model=%s rate-limited on cred=%s; failing over to cred=%s", modelCfg.ID, resolved.CredentialID, reselected)
+	}
+
+	if reselected == "" || reselected == resolved.CredentialID {
+		// Nothing new to try — propagate (idempotent no-op guard).
+		return result, err
+	}
+
+	// Resolve the SPECIFIC reselected credential (Task 21 retry): same
+	// field derivation as store.resolveWithCredential (provider from the
+	// credential; baseURL = model override > credential default;
+	// internal model with peak-hour substitution). NewlyBound=false: the
+	// rebind side effect already happened inside ExcludeAndReselect and
+	// this path never publishes model_credential_selected.
+	newCred := h.modelsMgr.GetCredential(reselected)
+	if newCred == nil {
+		// Deleted mid-flight — propagate (the engine's S6 hygiene will
+		// have cleared its state via the store's defensive heal).
+		return result, err
+	}
+	newBaseURL := modelCfg.InternalBaseURL
+	if newBaseURL == "" {
+		newBaseURL = newCred.BaseURL
+	}
+	newInternalModel := modelCfg.InternalModel
+	if peakModel := modelCfg.ResolvePeakHourModel(time.Now()); peakModel != "" {
+		newInternalModel = peakModel
+	}
+	retryResolved := models.ResolvedCredential{
+		Provider:      newCred.Provider,
+		APIKey:        newCred.APIKey,
+		BaseURL:       newBaseURL,
+		InternalModel: newInternalModel,
+		CredentialID:  reselected,
+		NewlyBound:    false, // reselection ≠ first binding (W-1)
+	}
+
+	// Task 20 observability: event + logs on the successful failover.
+	h.publishCredentialFailoverEvent(modelCfg.ID, resolved.CredentialID, reselected, providerErr.RetryAfter)
+
+	// Single retry through the SAME execution path (provider
+	// construction + MiniMax twin-B translation + dispatch) — no
+	// duplicated translation logic.
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -257,7 +423,7 @@ func (h *Handler) handleInternalStream(
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
@@ -731,4 +897,38 @@ func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCo
 	}
 
 	return req, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 / Task 21 — ultimate-internal rate-limit failover helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// publishCredentialFailoverEvent (Phase 3 / Task 20 / R3-8) emits the
+// model_credential_failover event with the canonical payload shape
+// {model_id, from_credential_id, to_credential_id, reason,
+// retry_after_ms, cooldown_ms, attempt_index}. cooldown_ms mirrors the
+// engine's effective seed (retryAfter when the upstream supplied it,
+// else credentiallb.DefaultCooldown). attempt_index is 1 on this hook
+// (the ultimate-internal hook retries exactly once per request).
+func (h *Handler) publishCredentialFailoverEvent(modelID, fromID, toID string, retryAfter time.Duration) {
+	if h.eventBus == nil {
+		return
+	}
+	cooldown := credentiallb.DefaultCooldown
+	if retryAfter > 0 {
+		cooldown = retryAfter
+	}
+	h.eventBus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialFailover,
+		Timestamp: time.Now().Unix(),
+		Data: map[string]interface{}{
+			"model_id":           modelID,
+			"from_credential_id": fromID,
+			"to_credential_id":   toID,
+			"reason":             "rate_limit",
+			"retry_after_ms":     retryAfter.Milliseconds(),
+			"cooldown_ms":        cooldown.Milliseconds(),
+			"attempt_index":      1,
+		},
+	})
 }

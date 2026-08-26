@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import type { Model, InternalProvider } from '../../types';
+import type { Model, InternalProvider, CredentialRef } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { ModelForm } from './ModelForm';
 
@@ -50,7 +50,7 @@ export function ModelsTab({
     fallback_chain: string[];
     truncate_params: string[];
     internal?: boolean;
-    credential_id?: string;
+    credentials?: CredentialRef[];
     internal_provider?: InternalProvider;
     internal_api_key?: string;
     internal_base_url?: string;
@@ -74,7 +74,7 @@ export function ModelsTab({
           internal_model: data.internal_model,
           secondary_upstream_model: data.internal ? (data.secondary_upstream_model || '') : undefined,
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
-          credential_id: data.internal ? data.credential_id : undefined,
+          credentials: data.internal ? data.credentials : undefined,
           exclude_from_ultimate_switching: data.exclude_from_ultimate_switching,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
@@ -84,7 +84,7 @@ export function ModelsTab({
           fallback_chain: data.fallback_chain,
           truncate_params: data.truncate_params,
           internal: data.internal,
-          credential_id: data.internal ? data.credential_id : undefined,
+          credentials: data.internal ? data.credentials : undefined,
           internal_provider: data.internal_provider,
           internal_api_key: data.internal_api_key,
           internal_base_url: data.internal_base_url,

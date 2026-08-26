@@ -14,9 +14,9 @@ import (
 
 // mockTokenStore implements auth.TokenStoreInterface for testing
 type mockTokenStore struct {
-	tokens         map[string]*auth.AuthToken
-	updateErr      error
-	createTokenFn  func(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error)
+	tokens        map[string]*auth.AuthToken
+	updateErr     error
+	createTokenFn func(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error)
 }
 
 func newMockTokenStore() *mockTokenStore {

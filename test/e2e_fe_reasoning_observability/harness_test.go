@@ -226,7 +226,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Race Internal",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  externalCredID,
+		Credentials: models.TestRefs(externalCredID),
 		InternalModel: "matrix-race-internal-upstream",
 	})
 
@@ -236,7 +236,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:         "Matrix Ultimate External",
 		Enabled:      true,
 		Internal:     false,
-		CredentialID: externalCredID,
+		Credentials: models.TestRefs(externalCredID),
 	})
 
 	// Ultimate-internal model (Internal:true ⇒ executeInternal).
@@ -245,7 +245,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Ultimate Internal",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  externalCredID,
+		Credentials: models.TestRefs(externalCredID),
 		InternalModel: "matrix-ult-internal-upstream",
 	})
 
@@ -257,7 +257,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:         "Matrix Ultimate External MiniMax",
 		Enabled:      true,
 		Internal:     false,
-		CredentialID: minimaxCredID,
+		Credentials: models.TestRefs(minimaxCredID),
 	})
 
 	// Anthropic-client internal model (openai provider ⇒ translation mode,
@@ -267,7 +267,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Anthropic Internal",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  externalCredID,
+		Credentials: models.TestRefs(externalCredID),
 		InternalModel: "matrix-anthropic-internal-upstream",
 	})
 
@@ -297,7 +297,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 	proxyCfg := &proxy.Config{ConfigMgr: cfgMgr, ModelsConfig: modelsConfig}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// ── FE API over real HTTP, sharing reqStore ─────────────────────────
 	uiSrv := ui.NewServer(bus, cfgMgr, proxyCfg, modelsConfig, reqStore, nil, tokenStore, dbStore)

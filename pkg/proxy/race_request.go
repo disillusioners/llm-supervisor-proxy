@@ -6,14 +6,18 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
 type upstreamModelType string
 
 const (
-	modelTypeMain     upstreamModelType = "main"
-	modelTypeSecond   upstreamModelType = "second"
-	modelTypeFallback upstreamModelType = "fallback"
+	modelTypeMain         upstreamModelType = "main"
+	modelTypeSecond       upstreamModelType = "second"
+	modelTypeFallback     upstreamModelType = "fallback"
+	modelTypeCredFailover upstreamModelType = "cred_failover" // Phase 3 / Task 18 (Round 3c canonical)
 )
 
 type upstreamStatus string
@@ -48,6 +52,37 @@ type upstreamRequest struct {
 	status   upstreamStatus     // Current status
 	err      error              // Final error (if any)
 	attempts int                // Number of HTTP retries (for connectivity)
+
+	// Phase 3 / Tasks 4 + 6 — race-executor plumbing.
+	// conversationKey is threaded from handler.go:401+ through the
+	// race coordinator + executeRequest down to the resolver seam
+	// (ResolveInternalConfigWithAffinity). required for
+	// ResolvedCredential.CredentialID / .NewlyBound propagation.
+	conversationKey string
+
+	// resolved is the struct form (Phase 3 / #3) populated by
+	// executeInternalRequest after the resolver call. .NewlyBound is
+	// the W-1 sole signal for the model_credential_selected event.
+	resolved   models.ResolvedCredential
+	resolvedOK bool
+
+	// engine + onCredentialSelected (Phase 3 / Task 6) are
+	// captured by executeRequest and forwarded via this attempt
+	// struct so the publish site (executeRequest after
+	// executeInternalRequest returns) can fire the event.
+	//
+	// engine is the optional Load-Balancing engine (nil-safe per
+	// W-3 / E-3); onCredentialSelected is the caller-supplied callback
+	// that publishes model_credential_selected with the result struct.
+	engine               *credentiallb.Engine
+	onCredentialSelected func(modelID string, cred models.ResolvedCredential)
+
+	// reselectedCredentialID (Phase 3 / R3-2/R3-3) — populated only
+	// for modelTypeCredFailover rows from Round-3b ExcludeAndReselect:
+	// the SPECIFIC reselected credential (not a fresh engine call).
+	// Used by handleNonStreamResult / streamResult to skip the
+	// secondary upstream-set call and use this credential directly.
+	reselectedCredentialID string
 
 	// Cancellation state
 	cancelled  bool      // Set when Cancel() has been called
@@ -274,6 +309,13 @@ func (r *upstreamRequest) GetUsage() *TokenUsage {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.usage
+}
+
+// SetResp sets the HTTP response received from upstream
+func (r *upstreamRequest) SetResp(resp *http.Response) {
+	r.mu.Lock()
+	r.resp = resp
+	r.mu.Unlock()
 }
 
 // SetHTTPStatus sets the HTTP status code from upstream

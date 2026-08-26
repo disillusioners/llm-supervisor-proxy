@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'preact/hooks';
-import type { Model, Credential } from '../../types';
+import type { Model, Credential, CredentialRef } from '../../types';
 import { getCredentials, useProviders } from '../../hooks/useApi';
+import { MultiCredentialEditor } from './MultiCredentialEditor';
+
+const MAX_CREDENTIALS = 16;
 
 // Peak hour time validation (uses UTC)
 function isPeakHourActive(start: string, end: string, offset: string): boolean {
@@ -81,7 +84,7 @@ interface ModelFormProps {
     fallback_chain: string[];
     truncate_params: string[];
     internal?: boolean;
-    credential_id?: string;
+    credentials?: CredentialRef[];
     internal_api_key?: string;
     internal_base_url?: string;
     internal_model?: string;
@@ -109,13 +112,31 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     return provider?.name || providerType;
   };
 
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<{
+    id: string;
+    name: string;
+    fallback_chain: string;
+    truncate_params: string;
+    internal: boolean;
+    credentials: CredentialRef[];
+    internal_api_key: string;
+    internal_base_url: string;
+    internal_model: string;
+    secondary_upstream_model: string;
+    release_stream_chunk_deadline: string;
+    peak_hour_enabled: boolean;
+    peak_hour_start: string;
+    peak_hour_end: string;
+    peak_hour_timezone: string;
+    peak_hour_model: string;
+    exclude_from_ultimate_switching: boolean;
+  }>({
     id: '',
     name: '',
     fallback_chain: '',
     truncate_params: '',
     internal: false,
-    credential_id: '',
+    credentials: [],
     internal_api_key: '',
     internal_base_url: '',
     internal_model: '',
@@ -134,6 +155,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
   const [testing, setTesting] = useState(false);
   const [peakHourErrors, setPeakHourErrors] = useState<string[]>([]);
   const [currentTimeTick, setCurrentTimeTick] = useState(Date.now());
+  const [legacyCredentialNotice, setLegacyCredentialNotice] = useState<string | null>(null);
 
   // Fetch credentials on mount
   useEffect(() => {
@@ -166,13 +188,31 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         truncateParams = 'max_completion_tokens, store';
       }
 
+      // Phase 4 multi-credential load balancing: hydrate from the new
+      // `credentials` array. Backward-compat shim: if a server still emits
+      // the legacy single `credential_id` field and `credentials` is empty,
+      // seed one row and surface a one-time warning banner so the user knows
+      // saving will migrate the value to the new shape.
+      const legacyCredId = (initialData as { credential_id?: string }).credential_id;
+      let hydCreds: CredentialRef[] = (initialData.credentials ?? []).map((c) => ({
+        credential_id: c.credential_id,
+        weight: c.weight,
+        position: c.position,
+      }));
+      let legacyNotice: string | null = null;
+      if (hydCreds.length === 0 && legacyCredId) {
+        hydCreds = [{ credential_id: legacyCredId, weight: 1, position: 0 }];
+        legacyNotice =
+          'Legacy single-credential field detected — saving will migrate it to the new credentials list.';
+      }
+
       setFormData({
         id: initialData.id,
         name: initialData.name,
         fallback_chain: (initialData.fallback_chain ?? []).join(', '),
         truncate_params: truncateParams,
         internal: initialData.internal ?? false,
-        credential_id: initialData.credential_id ?? '',
+        credentials: hydCreds,
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
         internal_model: initialData.internal_model ?? '',
@@ -185,6 +225,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         peak_hour_model: initialData.peak_hour_model ?? '',
         exclude_from_ultimate_switching: initialData.exclude_from_ultimate_switching ?? false,
       });
+      setLegacyCredentialNotice(legacyNotice);
     } else if (mode === 'add') {
       setFormData({
         id: '',
@@ -192,7 +233,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         fallback_chain: '',
         truncate_params: '',
         internal: false,
-        credential_id: '',
+        credentials: [],
         internal_api_key: '',
         internal_base_url: '',
         internal_model: '',
@@ -205,6 +246,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         peak_hour_model: '',
         exclude_from_ultimate_switching: false,
       });
+      setLegacyCredentialNotice(null);
     }
   }, [mode, initialData]);
 
@@ -226,15 +268,12 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
           updated.truncate_params = 'max_completion_tokens, store';
         }
       }
-      
-      // Clear base URL override when credential changes
-      if (field === 'credential_id') {
-        updated.internal_base_url = '';
-      }
 
-      // Clear credential when toggling internal off
+      // Clear credentials, base URL override, secondary model, and peak-hour
+      // fields when internal upstream is turned off (mirrors prior behavior
+      // for the old single `credential_id` field).
       if (field === 'internal' && value === false) {
-        updated.credential_id = '';
+        updated.credentials = [];
         updated.internal_api_key = '';
         updated.secondary_upstream_model = '';
         // Clear all peak hour fields when internal upstream is turned off
@@ -254,6 +293,20 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       }
       
       return updated;
+    });
+  };
+
+  // Phase 4 multi-credential editor row handlers. Immutable updates. When
+  // the primary row (index 0) changes credential, clear the base-URL
+  // override (mirrors the legacy single-credential behavior at line ~231).
+  const handleCredentialRowsChange = (next: CredentialRef[]) => {
+    setFormData(prev => {
+      const prevPrimary = prev.credentials[0]?.credential_id;
+      const nextPrimary = next[0]?.credential_id;
+      if (prevPrimary === nextPrimary) {
+        return { ...prev, credentials: next };
+      }
+      return { ...prev, credentials: next, internal_base_url: '' };
     });
   };
 
@@ -279,6 +332,39 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         }
       }
 
+      // Phase 4 multi-credential validation. Mirrors the server-side 400
+      // rules so users get immediate feedback instead of a round-trip.
+      let validatedCredentials: CredentialRef[] | undefined;
+      if (formData.internal) {
+        if (formData.credentials.length === 0) {
+          throw new Error('Internal upstream requires at least one credential');
+        }
+        if (formData.credentials.length > MAX_CREDENTIALS) {
+          throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed`);
+        }
+        const seen = new Set<string>();
+        for (let i = 0; i < formData.credentials.length; i++) {
+          const row = formData.credentials[i];
+          if (!row.credential_id) {
+            throw new Error(`Credential row ${i + 1}: please select a credential`);
+          }
+          if (!Number.isFinite(row.weight) || row.weight < 1) {
+            throw new Error(`Credential row ${i + 1}: weight must be at least 1`);
+          }
+          if (seen.has(row.credential_id)) {
+            throw new Error(
+              `Credential row ${i + 1}: duplicate credential "${row.credential_id}"`,
+            );
+          }
+          seen.add(row.credential_id);
+        }
+        validatedCredentials = formData.credentials.map((c, i) => ({
+          credential_id: c.credential_id,
+          weight: c.weight,
+          position: i,
+        }));
+      }
+
       if (mode === 'add') {
         if (!formData.id || !formData.name) {
           throw new Error('ID and Name are required');
@@ -295,7 +381,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         fallback_chain: fallback,
         truncate_params: truncate,
         internal: formData.internal || undefined,
-        credential_id: formData.internal && formData.credential_id ? formData.credential_id : undefined,
+        credentials: validatedCredentials,
         internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
         internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
         internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
@@ -321,12 +407,14 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       setTesting(true);
       onStatus(null);
 
-      // Get provider from selected credential
-      const selectedCred = credentials.find(c => c.id === formData.credential_id);
+      // Test Connection targets the primary credential only (the /fe/api/models/test
+      // endpoint is single-credential by design).
+      const primaryCredId = formData.credentials[0]?.credential_id ?? '';
+      const selectedCred = credentials.find(c => c.id === primaryCredId);
       const baseUrl = formData.internal_base_url || selectedCred?.base_url;
 
       const payload: Record<string, string | undefined> = {
-        credential_id: formData.credential_id || undefined,
+        credential_id: primaryCredId || undefined,
         api_key: formData.internal_api_key || undefined,
         internal_base_url: baseUrl,
         internal_model: formData.internal_model,
@@ -357,21 +445,23 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     }
   };
 
-  // Can test if: need credential (or API key) and model name
-  const canTestConnection = formData.internal_model && 
-    (mode === 'edit' || formData.credential_id || formData.internal_api_key);
+  // Can test if: need primary credential (or API key) and model name
+  const canTestConnection = formData.internal_model &&
+    (mode === 'edit' || formData.credentials[0]?.credential_id || formData.internal_api_key);
 
-  const isValid = mode === 'add' 
+  const isValid = mode === 'add'
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
     : formData.name.trim() !== '';
 
-  // Get the currently selected credential
-  const selectedCredential = credentials.find(cred => cred.id === formData.credential_id);
+  // The "primary" credential drives provider badge, default base URL, and
+  // placeholder for the upstream model name.
+  const primaryCredentialId = formData.credentials[0]?.credential_id ?? '';
+  const selectedCredential = credentials.find(cred => cred.id === primaryCredentialId);
 
-  // Compute the default base URL (from credential)
+  // Compute the default base URL (from primary credential)
   const defaultBaseUrl = selectedCredential?.base_url || 'Provider default';
 
-  // Get provider display name from selected credential
+  // Get provider display name from primary credential
   const selectedProvider = selectedCredential?.provider;
 
   // Compute live status (depends on currentTimeTick to update every minute)
@@ -472,79 +562,45 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
 
         {formData.internal && (
           <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
-            <div>
-              <div class="flex items-center justify-between mb-1">
-                <label class="block text-sm font-medium text-gray-300">Credential</label>
-                {onNavigateToCredentials && (
-                  <button
-                    type="button"
-                    onClick={onNavigateToCredentials}
-                    class="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-                  >
-                    Manage Credentials
-                  </button>
-                )}
+            {legacyCredentialNotice && (
+              <div class="bg-amber-900/30 border border-amber-700/50 rounded-md p-2">
+                <p class="text-xs text-amber-200">{legacyCredentialNotice}</p>
               </div>
-              {loadingCredentials ? (
-                <div class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-gray-400 text-sm">
-                  Loading credentials...
-                </div>
-              ) : (
-                <select
-                  value={formData.credential_id}
-                  onChange={(e) => handleInputChange('credential_id', (e.target as HTMLSelectElement).value)}
-                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                >
-                  <option value="">Select a credential</option>
-                  {credentials.map((cred) => (
-                    <option key={cred.id} value={cred.id}>
-                      {cred.id} ({cred.provider || 'unknown'})
-                    </option>
-                  ))}
-                </select>
-              )}
-              {credentials.length === 0 && !loadingCredentials && (
-                <p class="text-xs text-gray-400 mt-1">
-                  No credentials found. 
-                  {onNavigateToCredentials && (
-                    <button
-                      type="button"
-                      onClick={onNavigateToCredentials}
-                      class="text-blue-400 hover:text-blue-300 ml-1"
-                    >
-                      Add a credential
-                    </button>
-                  )}
-                </p>
-              )}
-              {selectedProvider && (
-                <div class="mt-2 flex items-center gap-2">
-                  <span class="text-xs text-gray-400">Provider:</span>
-                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
-                    {getProviderName(selectedProvider)}
-                  </span>
-                </div>
-              )}
-              {selectedCredential?.base_url && (
-                <p class="text-xs text-gray-500 mt-1">
-                  Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
-                </p>
-              )}
-            </div>
+            )}
+            <MultiCredentialEditor
+              credentials={formData.credentials}
+              availableCredentials={credentials}
+              loading={loadingCredentials}
+              onChange={handleCredentialRowsChange}
+              onNavigateToCredentials={onNavigateToCredentials}
+            />
+            {selectedProvider && (
+              <div class="mt-2 flex items-center gap-2">
+                <span class="text-xs text-gray-400">Provider:</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
+                  {getProviderName(selectedProvider)}
+                </span>
+              </div>
+            )}
+            {selectedCredential?.base_url && (
+              <p class="text-xs text-gray-500 mt-1">
+                Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
+              </p>
+            )}
 
-            {formData.credential_id && (
+            {formData.credentials[0]?.credential_id && (
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-1">
-                  API Key Override <span class="text-gray-500">(optional)</span>
+                  API Key Override <span class="text-gray-500">(optional, overrides the primary credential's API key)</span>
                 </label>
                 <input
                   type="password"
                   value={formData.internal_api_key}
                   onInput={(e) => handleInputChange('internal_api_key', (e.target as HTMLInputElement).value)}
                   class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                  placeholder="Overrides the credential's API key if set"
+                  placeholder="Overrides the primary credential's API key if set"
                 />
-                <p class="text-xs text-gray-400 mt-1">Overrides the credential's API key if set</p>
+                <p class="text-xs text-gray-400 mt-1">Overrides the primary credential's API key if set</p>
               </div>
             )}
 
@@ -724,14 +780,16 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
               </label>
             </div>
 
-            <div class="pt-2">
+            <div class="pt-2 flex items-center gap-2">
               <button
                 onClick={handleTestConnection}
                 class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-md transition-colors text-sm font-medium"
                 disabled={!canTestConnection || testing}
+                title="Tests against the primary credential only"
               >
                 {testing ? 'Testing...' : 'Test Connection'}
               </button>
+              <span class="text-xs text-gray-500">Tests against the primary credential only.</span>
             </div>
           </div>
         )}

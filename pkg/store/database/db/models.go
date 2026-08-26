@@ -57,6 +57,6 @@ type Model struct {
 	InternalBaseUrl            sql.NullString `json:"internal_base_url"`
 	InternalModel              sql.NullString `json:"internal_model"`
 	InternalKeyVersion         int64          `json:"internal_key_version"`
-	CredentialID               sql.NullString `json:"credential_id"`
+	CredentialsJson            string         `json:"credentials_json"`
 	ReleaseStreamChunkDeadline int64          `json:"release_stream_chunk_deadline"`
 }

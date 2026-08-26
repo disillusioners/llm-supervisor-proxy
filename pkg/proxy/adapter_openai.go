@@ -109,9 +109,13 @@ func (a *OpenAIAdapter) WriteStreamDone(w http.ResponseWriter) error {
 	return nil
 }
 
+// SSE headers — `Cache-Control: no-cache, no-transform` is required
+// to defeat Cloudflare's response buffering on long-lived streaming
+// responses (otherwise CF sits on chunks until its 100/180s read
+// timeout and disconnects the client mid-stream with a 524).
 func (a *OpenAIAdapter) SetStreamHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 }
 

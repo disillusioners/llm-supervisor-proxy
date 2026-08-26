@@ -112,7 +112,7 @@ func TestReasoningContentChain_NonStream(t *testing.T) {
 					Name:          "Test Internal",
 					Enabled:       true,
 					Internal:      true,
-					CredentialID:  "test-cred",
+					Credentials: models.TestRefs("test-cred"),
 					InternalModel: "test-model",
 				},
 			}
@@ -291,7 +291,7 @@ func TestReasoningContentSerializationChain(t *testing.T) {
 					ID:            "test-internal",
 					Enabled:       true,
 					Internal:      true,
-					CredentialID:  "test-cred",
+					Credentials: models.TestRefs("test-cred"),
 					InternalModel: "test-model",
 				},
 			}

@@ -86,7 +86,7 @@ func TestHeartbeat_DuringLongStream(t *testing.T) {
 	slowUpstream := func(t *testing.T) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Cache-Control", "no-cache, no-transform")
 			w.WriteHeader(http.StatusOK)
 			flusher := w.(http.Flusher)
 

@@ -244,7 +244,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Name:          "Race Internal MiniMax",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  minimaxCredID,
+		Credentials: models.TestRefs(minimaxCredID),
 		InternalModel: "minimax-internal-name",
 	})
 
@@ -254,7 +254,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Name:          "Race Internal OpenAI",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  openaiCredID,
+		Credentials: models.TestRefs(openaiCredID),
 		InternalModel: "gpt-4o-mini",
 	})
 
@@ -265,14 +265,14 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Name:         "Ultimate External MiniMax",
 		Enabled:      true,
 		Internal:     false,
-		CredentialID: minimaxCredID,
+		Credentials: models.TestRefs(minimaxCredID),
 	})
 	addModel(models.ModelConfig{
 		ID:            ultIntModel,
 		Name:          "Ultimate Internal MiniMax",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  minimaxCredID,
+		Credentials: models.TestRefs(minimaxCredID),
 		InternalModel: "minimax-ultimate-internal-name",
 	})
 	// Ultimate-external target bound to the non-MiniMax credential (S9).
@@ -281,7 +281,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Name:         "Ultimate External OpenAI",
 		Enabled:      true,
 		Internal:     false,
-		CredentialID: openaiCredID,
+		Credentials: models.TestRefs(openaiCredID),
 	})
 
 	// Env: ultimate model + fast deadlines. ULTIMATE_MODEL_MAX_RETRIES=0
@@ -319,7 +319,7 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 	proxyCfg := &proxy.Config{ConfigMgr: cfgMgr, ModelsConfig: modelsConfig}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	env := &testEnv{
 		t:            t,

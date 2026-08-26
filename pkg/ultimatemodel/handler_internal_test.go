@@ -19,7 +19,7 @@ import (
 func TestHandleInternalNonStream_Success(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with successful response
 	usage := providers.Usage{
@@ -94,7 +94,7 @@ func TestHandleInternalNonStream_Success(t *testing.T) {
 func TestHandleInternalNonStream_ProviderError(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider that returns error
 	expectedErr := errors.New("provider error: connection refused")
@@ -125,7 +125,7 @@ func TestHandleInternalNonStream_ProviderError(t *testing.T) {
 func TestHandleInternalNonStream_EmptyUsage(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Response with zero usage
 	mockResp := &providers.ChatCompletionResponse{
@@ -172,7 +172,7 @@ func TestHandleInternalNonStream_EmptyUsage(t *testing.T) {
 func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with streaming events
 	p := &mockProvider{
@@ -212,8 +212,8 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
-	if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache")
+	if cc := w.Header().Get("Cache-Control"); cc != "no-cache, no-transform" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-cache, no-transform")
 	}
 
 	// Check SSE body contains expected events
@@ -241,7 +241,7 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with tool call events
 	p := &mockProvider{
@@ -304,7 +304,7 @@ func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 func TestHandleInternalStream_Thinking(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with thinking events
 	p := &mockProvider{
@@ -342,7 +342,7 @@ func TestHandleInternalStream_Thinking(t *testing.T) {
 func TestHandleInternalStream_Error(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with error event
 	p := &mockProvider{
@@ -380,7 +380,7 @@ func TestHandleInternalStream_Error(t *testing.T) {
 func TestConvertRequest_NilBody(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	req, err := h.convertRequest(nil)
 	if err != nil {
@@ -396,7 +396,7 @@ func TestConvertRequest_NilBody(t *testing.T) {
 func TestConvertRequest_EmptyBody(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	req, err := h.convertRequest(map[string]interface{}{})
 	if err != nil {
@@ -414,7 +414,7 @@ func TestConvertRequest_EmptyBody(t *testing.T) {
 func TestConvertRequest_MissingModelField(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"messages": []interface{}{
@@ -442,7 +442,7 @@ func TestConvertRequest_MissingModelField(t *testing.T) {
 func TestConvertRequest_EmptyMessagesArray(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model":    "test-model",
@@ -462,7 +462,7 @@ func TestConvertRequest_EmptyMessagesArray(t *testing.T) {
 func TestConvertRequest_InvalidMessagesType(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// messages is a string instead of array - should fail gracefully
 	body := map[string]interface{}{
@@ -484,7 +484,7 @@ func TestConvertRequest_InvalidMessagesType(t *testing.T) {
 func TestConvertRequest_ExtraFieldsPreserved(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -521,7 +521,7 @@ func TestConvertRequest_ExtraFieldsPreserved(t *testing.T) {
 func TestConvertRequest_ToolCallsInMessages(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -592,7 +592,7 @@ func TestConvertRequest_ToolCallsInMessages(t *testing.T) {
 func TestConvertRequest_ReasoningContent(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Case 1: single assistant message with reasoning_content — must survive conversion.
 	body := map[string]interface{}{
@@ -701,7 +701,7 @@ func TestConvertRequest_ReasoningContent(t *testing.T) {
 func TestConvertRequest_ToolChoice(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model": "test-model",
@@ -727,7 +727,7 @@ func TestConvertRequest_ToolChoice(t *testing.T) {
 func TestConvertRequest_Stream(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model":    "test-model",
@@ -758,7 +758,7 @@ func TestExecuteInternal_ResolveFailure(t *testing.T) {
 		Internal: true,
 	})
 
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model":    "unresolved-model",
@@ -772,7 +772,7 @@ func TestExecuteInternal_ResolveFailure(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	requestBodyBytes, _ := json.Marshal(body)
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelCfg, false, false)
+	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelCfg, false, false, "")
 
 	if err == nil {
 		t.Fatal("Expected error for unresolved internal config")
@@ -788,7 +788,7 @@ func TestExecuteInternal_ResolveFailure(t *testing.T) {
 func TestConvertRequest_TemperatureAndMaxTokens(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	body := map[string]interface{}{
 		"model":       "test-model",
@@ -816,7 +816,7 @@ func TestConvertRequest_TemperatureAndMaxTokens(t *testing.T) {
 func TestHandleInternalStream_EmptyContent(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Stream with empty content followed by done
 	p := &mockProvider{
@@ -848,7 +848,7 @@ func TestHandleInternalStream_EmptyContent(t *testing.T) {
 func TestHandleInternalStream_MultipleToolCalls(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Stream with multiple tool calls at once
 	p := &mockProvider{
@@ -888,7 +888,7 @@ func TestHandleInternalStream_MultipleToolCalls(t *testing.T) {
 func TestConvertRequest_MissingRole(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Message without role field
 	body := map[string]interface{}{
@@ -917,7 +917,7 @@ func TestConvertRequest_MissingRole(t *testing.T) {
 func TestConvertRequest_MissingContent(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Message with role but no content
 	body := map[string]interface{}{
@@ -947,7 +947,7 @@ func TestConvertRequest_MissingContent(t *testing.T) {
 func TestHandleInternalStream_UsageFromDoneEvent(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with usage only in done event
 	p := &mockProvider{
@@ -994,7 +994,7 @@ func TestHandleInternalStream_UsageFromDoneEvent(t *testing.T) {
 func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()
-	h := NewHandler(cfg, modelsCfg, nil)
+	h := NewHandler(cfg, modelsCfg, nil, nil)
 
 	// Create mock provider with no usage in done event and empty stream
 	// This tests that fallback counting returns zero usage when no content is streamed

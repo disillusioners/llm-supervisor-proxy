@@ -666,7 +666,7 @@ func TestOpenAIAdapter_SetStreamHeaders(t *testing.T) {
 	if rec.Header().Get("Content-Type") != "text/event-stream" {
 		t.Error("expected Content-Type: text/event-stream")
 	}
-	if rec.Header().Get("Cache-Control") != "no-cache" {
+	if rec.Header().Get("Cache-Control") != "no-cache, no-transform" {
 		t.Error("expected Cache-Control: no-cache")
 	}
 }

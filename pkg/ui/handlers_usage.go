@@ -98,11 +98,11 @@ type ModelSummary struct {
 
 // UsageModelsResponse represents the response for GET /fe/api/usage/models
 type UsageModelsResponse struct {
-	From   string                `json:"from"`
-	To     string                `json:"to"`
-	View   string                `json:"view"`
-	Data   []ModelUsageDataRow   `json:"data"`
-	Models []ModelSummary        `json:"models"`
+	From   string              `json:"from"`
+	To     string              `json:"to"`
+	View   string              `json:"view"`
+	Data   []ModelUsageDataRow `json:"data"`
+	Models []ModelSummary      `json:"models"`
 }
 
 // validateDateRange validates the from/to date range and returns an error message if invalid.

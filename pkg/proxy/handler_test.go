@@ -136,7 +136,7 @@ func mockLLMHandler(t *testing.T) http.HandlerFunc {
 
 		// Set headers for SSE
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 
@@ -246,7 +246,7 @@ func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(cfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
 
 	t.Cleanup(func() {
 		upstream.Close()
@@ -1004,7 +1004,7 @@ func mockLoopExactHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -1036,7 +1036,7 @@ func mockLoopSimilarHandler() http.HandlerFunc {
 		msg := variations[(callCount-1)%len(variations)]
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -1125,7 +1125,7 @@ func TestLoopDetection_ToolCallExtraction(t *testing.T) {
 		r.Body.Close()
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
 
@@ -1492,7 +1492,7 @@ func TestSaveRawResponse_SavesToFile(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil, nil)
 
 	// Create a buffer with some data
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1545,7 +1545,7 @@ func TestSaveRawResponse_SkipsWhenTooLarge(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil, nil)
 
 	// Create a buffer with data larger than limit
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1579,7 +1579,7 @@ func TestSaveRawResponse_SkipsWhenBufferEmpty(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil, nil)
 
 	// Create an empty buffer
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1604,7 +1604,7 @@ func TestSaveRawResponse_NilBufferStore(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, nil, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, nil, nil, nil, nil)
 
 	// Create a buffer with data
 	buffer := newStreamBuffer(1024 * 1024)
@@ -1631,7 +1631,7 @@ func TestSaveRawResponse_NilBuffer(t *testing.T) {
 		EventBus:     events.NewBus(),
 	}
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), reqStore, bufStore, nil, nil, nil)
 
 	// Should not panic with nil buffer
 	h.saveRawResponse("test-req", nil, []byte("request"), 1024)
@@ -1803,7 +1803,7 @@ func TestIdleTermination_Triggered(t *testing.T) {
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil, nil)
 
 	// Create mock upstream that hangs after a few chunks
 	upstream := httptest.NewServer(mockIdleHangHandler(t))
@@ -1867,7 +1867,7 @@ func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil, nil)
 
 	// Use normal mock handler (completes successfully)
 	upstream := httptest.NewServer(mockLLMHandler(t))
@@ -1930,7 +1930,7 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil)
+	h := NewHandler(proxyCfg, bus, reqStore, nil, nil, nil, nil)
 
 	// Use mock that sends continuously (50ms between chunks)
 	upstream := httptest.NewServer(mockContinuousStreamHandler(t))
@@ -2048,7 +2048,7 @@ func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
 
-	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	t.Cleanup(func() {
 		upstream.Close()
@@ -2402,7 +2402,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "claude-3",
 	})
 	if err != nil {
@@ -2415,7 +2415,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2442,7 +2442,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// Send request with model "claude-3" (not in allowed list)
 	body := simpleBody("claude-3", false)
@@ -2511,7 +2511,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2538,7 +2538,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// Send request with model "gpt-4" (in allowed list)
 	body := simpleBody("gpt-4", false)
@@ -2598,7 +2598,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-credential",
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "any-model",
 	})
 	if err != nil {
@@ -2625,7 +2625,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	// Send request with any model
 	body := simpleBody("any-model", false)

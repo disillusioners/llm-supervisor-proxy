@@ -31,7 +31,11 @@ func InitializeManagers(store *Store, eventBus *events.Bus) (*ConfigManager, *Mo
 		return nil, nil, err
 	}
 
-	modelsMgr, err := NewModelsManager(store)
+	// Phase 2: the event bus flows into ModelsManager so it can
+	// subscribe to model.credentials.changed on the engine's behalf
+	// (nil-bus safe — the engine then runs on direct-call
+	// invalidation only).
+	modelsMgr, err := NewModelsManager(store, eventBus)
 	if err != nil {
 		return nil, nil, err
 	}

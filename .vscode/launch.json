@@ -7,7 +7,6 @@
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/cmd/main.go",
-            "envFile": "${workspaceFolder}/.vscode/.env.dev",
             "env": {
                 "APPLY_ENV_OVERRIDES": "true",
                 "LOG_LEVEL": "debug",
@@ -20,8 +19,11 @@
                 // "MAX_UPSTREAM_ERROR_RETRIES": "1",
                 // "MAX_IDLE_RETRIES": "2",
                 // "MAX_GENERATION_RETRIES": "1"
-                "MCP_ENABLED": "true",
-            }
+                "MCP_ENABLED": "true"
+            },
+            // DB connection for local dev lives in .env.dev (git-ignored).
+            // Uses native localhost Postgres (llm_proxy db, prod-data copy).
+            "envFile": "${workspaceFolder}/.vscode/.env.dev"
         }
     ]
 }

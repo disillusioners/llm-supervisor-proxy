@@ -193,7 +193,7 @@ func TestModelConfig_GetInternalConfig(t *testing.T) {
 	}{
 		{
 			name:       "internal model",
-			config:     ModelConfig{Internal: true, CredentialID: "cred1", InternalBaseURL: "https://api.example.com", InternalModel: "model-1"},
+			config:     ModelConfig{Internal: true, Credentials: TestRefs("cred1"), InternalBaseURL: "https://api.example.com", InternalModel: "model-1"},
 			wantCredID: "cred1",
 			wantBase:   "https://api.example.com",
 			wantModel:  "model-1",
@@ -643,7 +643,7 @@ func TestModelsConfig_RemoveCredential(t *testing.T) {
 	initialCred := CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "key"}
 	cfg := &ModelsConfig{
 		Models: []ModelConfig{
-			{ID: "model-1", Name: "Model 1", Internal: true, CredentialID: "cred-1", InternalModel: "model"},
+			{ID: "model-1", Name: "Model 1", Internal: true, Credentials: TestRefs("cred-1"), InternalModel: "model"},
 		},
 		Credentials: &CredentialsConfig{credentials: map[string]CredentialConfig{"cred-1": initialCred}},
 	}
@@ -793,7 +793,7 @@ func TestModelsConfig_ResolveInternalConfig(t *testing.T) {
 	cred := CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "test-key"}
 	cfg := &ModelsConfig{
 		Models: []ModelConfig{
-			{ID: "model-1", Name: "Model 1", Internal: true, CredentialID: "cred-1", InternalModel: "gpt-4"},
+			{ID: "model-1", Name: "Model 1", Internal: true, Credentials: TestRefs("cred-1"), InternalModel: "gpt-4"},
 		},
 		Credentials: &CredentialsConfig{credentials: map[string]CredentialConfig{"cred-1": cred}},
 	}

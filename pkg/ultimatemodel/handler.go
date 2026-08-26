@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
@@ -35,6 +36,12 @@ type Handler struct {
 	hashCache *HashCache
 	eventBus  *events.Bus
 
+	// credEngine (Phase 3 / Task 3 + W-3): injected at construction;
+	// consumed by executeInternal's rate-limit failover hook (Task 21).
+	// MAY BE NIL: legacy / test paths that don't wire the engine pass
+	// nil; executeInternal's hook is gated on h.credEngine != nil.
+	credEngine *credentiallb.Engine
+
 	// Tool call buffer configuration
 	toolCallBufferMaxSize  int64              // Max size for tool call buffer
 	toolCallBufferDisabled bool               // Disable tool call buffering
@@ -42,17 +49,25 @@ type Handler struct {
 }
 
 // NewHandler creates a new ultimate model handler
-func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterface, eventBus *events.Bus) *Handler {
+//
+// credEngine is the load-balancing engine injected at construction
+// (Phase 3 / Task 3 + W-3 — no second Config injection path; MAY BE NIL).
+// The engine is consumed by executeInternal's rate-limit failover hook
+// (Task 21) — exclusively; it never participates in policy decisions
+// about whether to trigger ultimate (ShouldTrigger/ForceTrigger are
+// rate-limit-blind).
+func NewHandler(cfg config.ManagerInterface, modelsMgr models.ModelsConfigInterface, eventBus *events.Bus, credEngine *credentiallb.Engine) *Handler {
 	maxHash := cfg.Get().UltimateModel.MaxHash
 	if maxHash <= 0 {
 		maxHash = 100
 	}
 
 	return &Handler{
-		config:    cfg,
-		modelsMgr: modelsMgr,
-		hashCache: NewHashCache(maxHash),
-		eventBus:  eventBus,
+		config:     cfg,
+		modelsMgr:  modelsMgr,
+		hashCache:  NewHashCache(maxHash),
+		eventBus:   eventBus,
+		credEngine: credEngine,
 	}
 }
 
@@ -146,6 +161,34 @@ func (h *Handler) SetToolCallBufferConfig(maxSize int64, disabled bool, repairCo
 	h.toolCallBufferMaxSize = maxSize
 	h.toolCallBufferDisabled = disabled
 	h.toolRepairConfig = repairConfig
+}
+
+// getEffectivePrimaryCredentialID (Phase 3 / Task 7) returns the legacy
+// single-credential view of the model's credential list: the first ref's
+// CredentialID, or "" if the model has no credentials configured. This
+// is the single-credential fast path used by the ultimate-external D3
+// provider probe (Execute) — the post-Phase-1 modelCfg.CredentialID
+// shadow is GONE; Credentials[0].CredentialID is the primary.
+//
+// Behavior:
+//   - nil modelCfg ⇒ "" (defensive; the probe is gated on modelCfg
+//     being non-nil in the caller, but the shim keeps the contract
+//     safe).
+//   - len(modelCfg.Credentials) == 0 ⇒ "".
+//   - len(modelCfg.Credentials) >= 1 ⇒ Credentials[0].CredentialID.
+//
+// modelCfg.PrimaryCredentialID() (defined on models.ModelConfig) is the
+// equivalent inline helper — this shim is the standalone replacement
+// for the post-Phase-1 ultimatemodel/handler.go:625-635 site that
+// previously read modelCfg.CredentialID directly.
+func getEffectivePrimaryCredentialID(modelCfg *models.ModelConfig) string {
+	if modelCfg == nil {
+		return ""
+	}
+	if len(modelCfg.Credentials) == 0 {
+		return ""
+	}
+	return modelCfg.Credentials[0].CredentialID
 }
 
 // OnConfigChange handles config change events.
@@ -541,7 +584,7 @@ func (h *Handler) SendRetryExhaustedError(
 	if isStream {
 		// SSE format for streaming requests
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
 		fmt.Fprintf(w, "data: %s\n\n", string(errorJSON))
@@ -569,6 +612,11 @@ func (h *Handler) SendRetryExhaustedError(
 // response AND the passively-captured assistant content and
 // thinking (see ExecuteResult for the capture contract).
 // tokenModelID is an optional per-token override for the ultimate model ID (nil = use global config).
+//
+// conversationKey (Phase 3 / Task 8) threads the per-request affinity key
+// down to executeInternal so the resolution can use the LB engine's
+// conversation-sticky weighted-random selection (single source of truth
+// for the credential selection on the ultimate-internal path).
 func (h *Handler) Execute(
 	parentCtx context.Context,
 	w http.ResponseWriter,
@@ -578,6 +626,7 @@ func (h *Handler) Execute(
 	hash string,
 	headersSent *bool,
 	tokenModelID *string,
+	conversationKey string,
 ) (*ExecuteResult, error) {
 	cfg := h.config.Get()
 	modelID := cfg.UltimateModel.ModelID
@@ -624,12 +673,17 @@ func (h *Handler) Execute(
 
 	// D3: derive upstream provider from credential when available so the
 	// executeExternal gate can short-circuit non-MiniMax paths without
-	// touching the request body (H5 invariant). CredentialID empty ⇒
-	// upstreamProvider="" ⇒ gate=false (caller of executeExternal treats
-	// empty as not-MiniMax).
+	// touching the request body (H5 invariant). Primary credential ID
+	// empty ⇒ upstreamProvider="" ⇒ gate=false (caller of executeExternal
+	// treats empty as not-MiniMax).
 	var upstreamProvider string
-	if modelCfg.CredentialID != "" {
-		cred := h.modelsMgr.GetCredential(modelCfg.CredentialID)
+	// Phase 3 / Task 7 — single source of truth for the legacy
+	// single-credential view. Post-Phase-1 modelCfg.CredentialID is
+	// GONE; Credentials[0].CredentialID is the primary. The shim
+	// preserves the len(Credentials) == 0 ⇒ "" semantics.
+	primaryCredentialID := getEffectivePrimaryCredentialID(modelCfg)
+	if primaryCredentialID != "" {
+		cred := h.modelsMgr.GetCredential(primaryCredentialID)
 		if cred != nil {
 			upstreamProvider = strings.ToLower(cred.Provider)
 		}
@@ -657,11 +711,28 @@ func (h *Handler) Execute(
 	// Route to internal or external handler
 	var result *ExecuteResult
 	if modelCfg.Internal {
-		result, err = h.executeInternal(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved)
+		// Phase 3 / Task 21 — route through the rate-limit-failover
+		// wrapper (Round 3b review #4 guard fix: initial-call
+		// *ProviderError assertion, NOT headersSent). The wrapper owns
+		// the SINGLE affinity resolution (Tasks 8+9): attempt #1's
+		// credential is exactly what executeInternalWithResolved
+		// consumes, and the retry resolves the SPECIFIC reselected
+		// credential — no double resolution, no fresh re-roll.
+		result, err = h.executeInternalWithRateLimitFailover(
+			ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved,
+			conversationKey,
+		)
+	// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): ultimate-EXTERNAL
+	// passthrough is UNCHANGED by credential load-balancing — provider
+	// detection only (getEffectivePrimaryCredentialID shim, Task 7);
+	// client auth passes through; no credential switching, no
+	// ExcludeAndReselect, no rate-limit failover hook on this branch.
+	// The failover family is the four LB'd INTERNAL paths only
+	// (race-internal, ultimate-internal, /v1/messages internal,
+	// anthropic-passthrough internal branch).
 	} else {
 		result, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider)
 	}
-
 	// Stop heartbeat
 	heartbeatCancel()
 

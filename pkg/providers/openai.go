@@ -230,7 +230,14 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 }
 
 // handleError converts HTTP error response to ProviderError
-// If bufferStore is configured, saves the request to a file for debugging
+// If bufferStore is configured, saves the request to a file for debugging.
+//
+// Round 3 (R3-1) — wires parseRetryAfter on the 429 path into the
+// returned ProviderError.RetryAfter so ExcludeAndReselect can seed the
+// per-credential cooldown; also captures the already-decoded
+// {Error:{Message,Type,Code}} body Type/Code (Round 3c — W2) into
+// ProviderError.ErrorType/ErrorCode so the downstream IsRateLimitError
+// classifier can read them without re-parsing the raw response body.
 func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionRequest) *ProviderError {
 	// Limit body size to 10MB to prevent unbounded memory consumption
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
@@ -263,6 +270,18 @@ func (p *OpenAIProvider) handleError(resp *http.Response, req *ChatCompletionReq
 		StatusCode: resp.StatusCode,
 		Message:    msg,
 		Retryable:  retryable,
+		// Round 3 (R3-1) additive wiring — see struct doc-comment.
+		ErrorType: apiErr.Error.Type,
+		ErrorCode: apiErr.Error.Code,
+	}
+
+	// R3-1 wiring — parseRetryAfter was DEAD code (openai.go:592-609,
+	// zero callers). On the 429 path parse the Retry-After response
+	// header into ProviderError.RetryAfter so the per-credential cooldown
+	// can be seeded with the upstream's own hint instead of the
+	// engine's default (60s).
+	if resp.StatusCode == 429 {
+		providerErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 	}
 
 	// Save request to file for debugging
@@ -589,7 +608,13 @@ func isNetworkError(err error) bool {
 	return true
 }
 
-// parseRetryAfter parses the Retry-After header
+// parseRetryAfter parses the Retry-After header. Negative durations
+// (e.g. a seconds value < 0, or an HTTP-date already in the past) are
+// clamped to 0 — the contract treats RetryAfter=0 as "no upstream
+// hint, use the engine default cooldown" (see
+// credentiallb.DefaultCooldown). A negative cooldown would otherwise
+// expire a credential's cooling instantly and re-select the same
+// credential on the next failover, defeating the rate-limit exclusion.
 func parseRetryAfter(header string) time.Duration {
 	if header == "" {
 		return 0
@@ -597,12 +622,19 @@ func parseRetryAfter(header string) time.Duration {
 
 	// Try parsing as seconds
 	if secs, err := strconv.Atoi(header); err == nil {
-		return time.Duration(secs) * time.Second
+		d := time.Duration(secs) * time.Second
+		if d < 0 {
+			return 0
+		}
+		return d
 	}
 
 	// Try parsing as date
 	if t, err := time.Parse(time.RFC1123, header); err == nil {
-		return time.Until(t)
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+		return 0
 	}
 
 	return 0

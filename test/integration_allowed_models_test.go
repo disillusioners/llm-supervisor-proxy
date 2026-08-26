@@ -129,7 +129,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 			Name:          model.name,
 			Enabled:       true,
 			Internal:      true,
-			CredentialID:  "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel: model.internalModel,
 		}); err != nil {
 			t.Fatalf("Failed to add model %s: %v", model.id, err)
@@ -147,7 +147,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		ConfigMgr:    cfgMgr,
 		ModelsConfig: modelsConfig,
 	}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	return &testEnv{
 		db:         db,

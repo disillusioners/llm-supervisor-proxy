@@ -1825,7 +1825,7 @@ func TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream(t *testing.T) {
 			Name:                   "Test Internal Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
 		},
@@ -1921,7 +1921,7 @@ func TestExecuteInternalRequest_SecondaryModelSwap_E2E_Stream(t *testing.T) {
 			Name:                   "Test Internal Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
 		},
@@ -2023,7 +2023,7 @@ func TestExecuteInternalRequest_NoSecondary_UsesPrimary_E2E(t *testing.T) {
 			Name:          "Test Internal No Secondary",
 			Enabled:       true,
 			Internal:      true,
-			CredentialID:  "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel: "glm-5.0", // Primary only, no secondary
 		},
 	}
@@ -2120,7 +2120,7 @@ func TestExecuteInternalRequest_SecondaryFalse_UsesPrimary_E2E(t *testing.T) {
 			Name:                   "Test Internal Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
 		},
@@ -2197,7 +2197,7 @@ func TestResolveInternalConfig_SecondaryModelConfigured(t *testing.T) {
 			Name:                   "Test Internal Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
 		},
@@ -2245,7 +2245,7 @@ func TestResolveInternalConfig_SecondaryModelEmptyFallsBack(t *testing.T) {
 			Name:          "Test Internal No Secondary",
 			Enabled:       true,
 			Internal:      true,
-			CredentialID:  "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel: "glm-5.0", // Primary only, no secondary
 		},
 	}
@@ -2319,7 +2319,7 @@ func TestResolveInternalConfig_UseSecondaryUpstreamFalse_UsesPrimary(t *testing.
 			Name:                   "Test Both Models",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model
 		},
@@ -2354,7 +2354,7 @@ func TestResolveInternalConfig_ModelNotFound(t *testing.T) {
 			Name:                   "Some Other Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -2422,7 +2422,7 @@ func TestConfigSnapshot_WithModelsConfig(t *testing.T) {
 			Name:                   "Snapshot Test Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -2547,7 +2547,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_NonStream(t *testing.
 			Name:                   "Peak and Secondary Model",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",        // Base model
 			PeakHourEnabled:        true,             // Peak hours ACTIVE
 			PeakHourStart:          peakStartStr,     // Start time (local)
@@ -2726,7 +2726,7 @@ func TestExecuteInternalRequest_PeakHourAndSecondary_Combo_Stream(t *testing.T) 
 			Name:                   "Peak and Secondary Stream",
 			Enabled:                true,
 			Internal:               true,
-			CredentialID:           "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			PeakHourEnabled:        true,
 			PeakHourStart:          peakStartStr,

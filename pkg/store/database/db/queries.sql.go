@@ -42,7 +42,7 @@ func (q *Queries) DeleteModel(ctx context.Context, id string) error {
 }
 
 const getAllModels = `-- name: GetAllModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credentials_json, release_stream_chunk_deadline FROM models ORDER BY name
 `
 
 func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
@@ -68,7 +68,7 @@ func (q *Queries) GetAllModels(ctx context.Context) ([]Model, error) {
 			&i.InternalBaseUrl,
 			&i.InternalModel,
 			&i.InternalKeyVersion,
-			&i.CredentialID,
+			&i.CredentialsJson,
 			&i.ReleaseStreamChunkDeadline,
 		); err != nil {
 			return nil, err
@@ -111,7 +111,7 @@ func (q *Queries) GetConfig(ctx context.Context) (Config, error) {
 }
 
 const getEnabledModels = `-- name: GetEnabledModels :many
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models WHERE enabled = 1 ORDER BY name
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credentials_json, release_stream_chunk_deadline FROM models WHERE enabled = 1 ORDER BY name
 `
 
 func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
@@ -137,7 +137,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 			&i.InternalBaseUrl,
 			&i.InternalModel,
 			&i.InternalKeyVersion,
-			&i.CredentialID,
+			&i.CredentialsJson,
 			&i.ReleaseStreamChunkDeadline,
 		); err != nil {
 			return nil, err
@@ -154,7 +154,7 @@ func (q *Queries) GetEnabledModels(ctx context.Context) ([]Model, error) {
 }
 
 const getModelByID = `-- name: GetModelByID :one
-SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credential_id, release_stream_chunk_deadline FROM models WHERE id = ?
+SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at, internal, internal_provider, internal_api_key, internal_base_url, internal_model, internal_key_version, credentials_json, release_stream_chunk_deadline FROM models WHERE id = ?
 `
 
 func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
@@ -174,7 +174,7 @@ func (q *Queries) GetModelByID(ctx context.Context, id string) (Model, error) {
 		&i.InternalBaseUrl,
 		&i.InternalModel,
 		&i.InternalKeyVersion,
-		&i.CredentialID,
+		&i.CredentialsJson,
 		&i.ReleaseStreamChunkDeadline,
 	)
 	return i, err

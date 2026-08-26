@@ -222,16 +222,20 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		qb := NewQueryBuilder(PostgreSQL)
 		got := qb.InsertModel()
 		// Verify it uses $N placeholders
-		if !contains(got, "$1") || !contains(got, "$17") {
+		if !contains(got, "$1") || !contains(got, "$18") {
 			t.Errorf("PostgreSQL InsertModel() should use $N placeholders, got: %v", got)
 		}
 		// Verify it has ON CONFLICT
 		if !contains(got, "ON CONFLICT") {
 			t.Errorf("PostgreSQL InsertModel() should use ON CONFLICT")
 		}
-		// Verify it has 17 columns (for 17 placeholders)
-		if countOccurrences(got, "$") != 17 {
-			t.Errorf("PostgreSQL InsertModel() should have 17 placeholders, got: %d", countOccurrences(got, "$"))
+		// Verify it has 18 placeholders (17 fields + credentials_json + credential_id shadow + WHERE excluded — INSERT only).
+		// Phase 1 M-1 contract: the INSERT writes BOTH credentials_json AND
+		// credential_id (Go-computed shadow) so the column count grew from 17
+		// to 18 in this statement. See technical-analysis.md §API Contract
+		// store-layer write-path and Round-2 reviewer punch-list #12.
+		if countOccurrences(got, "$") != 18 {
+			t.Errorf("PostgreSQL InsertModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
@@ -248,9 +252,11 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "UPDATE models SET") {
 			t.Errorf("SQLite UpdateModel() should use UPDATE models SET")
 		}
-		// Verify it has 17 ? placeholders (16 fields + WHERE id = ?)
-		if countOccurrences(got, "?") != 17 {
-			t.Errorf("SQLite UpdateModel() should have 17 placeholders, got: %d", countOccurrences(got, "?"))
+		// Verify it has 18 ? placeholders (17 fields + WHERE id = ?). M-1
+		// shadow adds credential_id alongside credentials_json in the same
+		// UPDATE statement.
+		if countOccurrences(got, "?") != 18 {
+			t.Errorf("SQLite UpdateModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "?"))
 		}
 	})
 
@@ -258,12 +264,12 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		qb := NewQueryBuilder(PostgreSQL)
 		got := qb.UpdateModel()
 		// Verify it uses $N placeholders
-		if !contains(got, "$1") || !contains(got, "$17") {
+		if !contains(got, "$1") || !contains(got, "$18") {
 			t.Errorf("PostgreSQL UpdateModel() should use $N placeholders, got: %v", got)
 		}
-		// Verify it has 17 placeholders (16 fields + WHERE id = $17)
-		if countOccurrences(got, "$") != 17 {
-			t.Errorf("PostgreSQL UpdateModel() should have 17 placeholders, got: %d", countOccurrences(got, "$"))
+		// Verify it has 18 placeholders (17 fields + WHERE id = $18)
+		if countOccurrences(got, "$") != 18 {
+			t.Errorf("PostgreSQL UpdateModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }

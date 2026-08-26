@@ -131,7 +131,7 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 			Name:          m.name,
 			Enabled:       true,
 			Internal:      true,
-			CredentialID:  "test-cred",
+			Credentials: models.TestRefs("test-cred"),
 			InternalModel: m.internalModel,
 		}); err != nil {
 			t.Fatalf("Failed to add model %s: %v", m.id, err)
@@ -149,7 +149,7 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 		ConfigMgr:    cfgMgr,
 		ModelsConfig: modelsConfig,
 	}
-	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil)
+	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil)
 
 	return &accessControlTestEnv{
 		testEnv: &testEnv{
@@ -508,7 +508,7 @@ func TestEdge_IDMatchesName(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		CredentialID:  "test-cred",
+		Credentials: models.TestRefs("test-cred"),
 		InternalModel: "gpt-4",
 	}); err != nil {
 		t.Fatalf("Failed to add model: %v", err)

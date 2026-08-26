@@ -56,6 +56,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -63,8 +64,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
 // spawnTrigger indicates why parallel requests are being spawned
@@ -73,6 +76,12 @@ type spawnTrigger string
 const (
 	triggerIdleTimeout spawnTrigger = "idle_timeout"
 	triggerMainError   spawnTrigger = "main_error"
+	// triggerRateLimit (Phase 3 / Round 3b canonical naming) identifies
+	// the Case-1 rate-limit trigger that spawns a modelTypeCredFailover
+	// row (same model, re-selected credential) instead of a model
+	// fallback. triggerMainError continues to identify the plain
+	// Case-1 model-fallback trigger.
+	triggerRateLimit spawnTrigger = "rate_limit"
 )
 
 // spawnTriggerInfo contains detailed information about why a spawn was triggered
@@ -80,6 +89,31 @@ type spawnTriggerInfo struct {
 	trigger       spawnTrigger
 	errorMessage  string // Only populated when trigger is main_error
 	failedRequest int    // Index of the failed request, -1 if not applicable
+
+	// credentialID (Phase 3 / Round 3c C3(1)) is populated ONLY for
+	// triggerRateLimit spawns: the reselected credential handed back by
+	// engine.ExcludeAndReselect. It rides the trigger info from the
+	// Case-1 classification site to spawn()/the executor, which applies
+	// it to the new upstreamRequest BEFORE the attempt goroutine starts
+	// (race-free by construction — the write happens-before `go execute`).
+	// Empty for every other trigger type.
+	credentialID string
+
+	// modelID (Phase 3 / Round 3j C1 critical fix) is consumed ONLY
+	// by modelTypeCredFailover spawns: the credFailover row MUST target
+	// the SAME model that just 429'd (NOT c.models[0] — which is wrong
+	// in a 2-model chain where the fallback row carries models[1]'s
+	// modelID). It is populated at the Case-1 classification site from
+	// latestReq.modelID for the rate-limit path.
+	//
+	// The modelTypeFallback / modelTypeMain / modelTypeSecond spawn
+	// paths do NOT consume this field — they read c.models[0] /
+	// c.models[1] directly in spawn(). triggerMainError-driven
+	// modelTypeFallback rows therefore leave modelID empty (no need to
+	// populate); spawn()'s case modelTypeCredFailover is the sole
+	// reader, and if the field is empty for that path it defensively
+	// falls back to c.models[0] (single-model chain safety).
+	modelID string
 }
 
 // raceCoordinator manages multiple parallel upstream requests
@@ -98,6 +132,12 @@ type raceCoordinator struct {
 	// (which never crosses into race_executor). See B3 (architecture §4.1).
 	interleaved bool
 
+	// Phase 3 / Round 3c C3 — engine + conversationKey reach the
+	// race coordinator through the constructor; both are optional
+	// (nil-safe) and consumed by execute() + manage().
+	engine          *credentiallb.Engine
+	conversationKey string
+
 	requests    []*upstreamRequest
 	models      []string
 	winner      *upstreamRequest
@@ -114,6 +154,15 @@ type raceCoordinator struct {
 	startTime     time.Time
 	spawnTriggers []spawnTriggerInfo // Track detailed info about why requests were spawned
 
+	// Phase 3 / Task 18 + R3-5 — credential failover bookkeeping. Lives
+	// on the coordinator (NOT requestContext — R3-5 keeps the engine
+	// stateless about retries; the coordinator is the single owner of
+	// the per-race budget and is constructed fresh per race). Mutated
+	// only from manage() under c.mu.
+	triedCredIDs                      map[string]bool // mutated only from manage() under c.mu — race-free by construction
+	failoverAttempts                  int            // mutated only from manage() under c.mu — race-free by construction
+	credFailoverSoonestExpiryAttempted bool           // mutated only from manage() under c.mu — race-free by construction
+
 	// Event publishing
 	eventBus  *events.Bus
 	requestID string
@@ -123,28 +172,50 @@ type raceCoordinator struct {
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
-	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved)
+	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "")
 }
 
-func newRaceCoordinatorWithEvents(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, eventBus *events.Bus, requestID string, interleaved bool) *raceCoordinator {
+// newRaceCoordinatorWithEvents (Phase 3 / Round 3c C3) gains two more
+// parameters: engine (the Load-Balancing engine; nil-safe) and
+// conversationKey (the per-request affinity key). Constructor-only
+// injection per W-3 holds end-to-end (cmd/main.go → NewHandler →
+// coordinator). The 7th positional arg in NewHandler is the source.
+func newRaceCoordinatorWithEvents(
+	ctx context.Context,
+	cfg *ConfigSnapshot,
+	req *http.Request,
+	rawBody []byte,
+	models []string,
+	eventBus *events.Bus,
+	requestID string,
+	interleaved bool,
+	engine *credentiallb.Engine,
+	conversationKey string,
+) *raceCoordinator {
 	if len(models) == 0 {
 		models = []string{cfg.ModelID}
 	}
 	return &raceCoordinator{
-		baseCtx:       ctx,
-		cfg:           cfg,
-		req:           req,
-		rawBody:       rawBody,
-		interleaved:   interleaved,
-		models:        models,
-		requests:      make([]*upstreamRequest, 0, len(models)),
-		winnerIdx:     -1,
-		done:          make(chan struct{}),
-		streamCh:      make(chan struct{}),
-		startTime:     time.Now(),
-		spawnTriggers: make([]spawnTriggerInfo, 0),
-		eventBus:      eventBus,
-		requestID:     requestID,
+		baseCtx:         ctx,
+		cfg:             cfg,
+		req:             req,
+		rawBody:         rawBody,
+		interleaved:     interleaved,
+		engine:          engine,
+		conversationKey: conversationKey,
+		models:          models,
+		requests:        make([]*upstreamRequest, 0, len(models)),
+		winnerIdx:       -1,
+		done:            make(chan struct{}),
+		streamCh:        make(chan struct{}),
+		startTime:       time.Now(),
+		spawnTriggers:   make([]spawnTriggerInfo, 0),
+		// Phase 3 / Task 19 — per-request tried-set (R3-5: request
+		// context, NOT engine state). Initialized here so manage()'s
+		// first mutation never sees a nil map.
+		triedCredIDs: make(map[string]bool),
+		eventBus:     eventBus,
+		requestID:    requestID,
 	}
 }
 
@@ -167,8 +238,6 @@ func (c *raceCoordinator) publishEvent(eventType string, data map[string]interfa
 // Start initiates the race
 func (c *raceCoordinator) Start() {
 	log.Printf("[RACE] Starting race coordinator with %d models: %v", len(c.models), c.models)
-
-	log.Printf("[PEAK-DBG] race_coordinator.Start: models=%v, len=%d", c.models, len(c.models))
 
 	// Publish race_started event
 	c.publishEvent("race_started", map[string]interface{}{
@@ -213,6 +282,33 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 			return
 		}
 		modelID = c.models[1]
+	case modelTypeCredFailover:
+		// Phase 3 / Round 3j C1 critical fix — the credFailover row MUST
+		// target the SAME model that just 429'd, NOT c.models[0]. The
+		// prior code's hard-coded c.models[0] was wrong in a 2-model
+		// chain: a fallback-row 429 would have spawned a credFailover
+		// attempt running models[1]'s InternalModel on models[0]'s
+		// credential pool (wrong model served + wrong-account billing).
+		//
+		// The trigger info carries the source modelID (C3(2) wiring,
+		// populated at the Case-1 classification site from
+		// latestReq.modelID). If unset (defensive — should never happen
+		// for a real triggerRateLimit spawn), fall back to c.models[0]
+		// to preserve the legacy single-model chain.
+		//
+		// NOTE (B1 separate accounting): this row does NOT consume a
+		// spawn-window slot — the idx guard below main/second/fallback
+		// does NOT apply here (a 3-cred single-model chain spawns idx
+		// 1 and 2 past len(c.models), by design).
+		if len(c.models) == 0 {
+			log.Printf("[RACE] Cannot spawn cred-failover: no model available")
+			return
+		}
+		if triggerInfo.modelID != "" {
+			modelID = triggerInfo.modelID
+		} else {
+			modelID = c.models[0]
+		}
 	}
 
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
@@ -222,11 +318,19 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		req.SetUseSecondaryUpstream(true)
 	}
 
+	// Phase 3 / Round 3c C3(1) — a credFailover row carries the
+	// pre-resolved credential (engine.ExcludeAndReselect output) on the
+	// trigger info. Applied BEFORE `go c.execute(req)` below, so the
+	// executor's resolveSpecificInternalCredential read is race-free
+	// (goroutine start is the happens-before edge).
+	if mType == modelTypeCredFailover && triggerInfo.credentialID != "" {
+		req.reselectedCredentialID = triggerInfo.credentialID
+	}
+
 	c.requests = append(c.requests, req)
 	c.spawnTriggers = append(c.spawnTriggers, triggerInfo)
 
 	log.Printf("[RACE] Spawning %s request (id=%d, model=%s, trigger=%s)", mType, idx, modelID, triggerInfo.trigger)
-	log.Printf("[PEAK-DBG] race_coordinator.spawn: mType=%v, idx=%d, modelID=%q", mType, idx, modelID)
 
 	// Build event data with detailed error info if available
 	eventData := map[string]interface{}{
@@ -239,6 +343,12 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	// Add detailed error information if this spawn was triggered by an error
 	if triggerInfo.trigger == triggerMainError {
 		eventData["trigger_reason"] = triggerInfo.errorMessage
+		eventData["failed_request_index"] = triggerInfo.failedRequest
+	}
+	// Phase 3 / Task 18 — surface the reselected credential on
+	// credFailover spawns (operator observability via the SSE feed).
+	if triggerInfo.trigger == triggerRateLimit && triggerInfo.credentialID != "" {
+		eventData["credential_id"] = triggerInfo.credentialID
 		eventData["failed_request_index"] = triggerInfo.failedRequest
 	}
 
@@ -335,7 +445,21 @@ func (c *raceCoordinator) manage() {
 				return
 			}
 			// Spawning logic (on failure or idle)
-			if c.winner == nil && len(c.requests) < len(c.models) {
+			//
+			// Phase 3 / Round 3c — C1 HOISTED ADMISSION GATE (replaces the
+			// pre-Phase-3 window check `len(c.requests) < len(c.models)`):
+			//    gate := modelAttempts < len(models) || credFailoverEligibleWithBudget()
+			// modelAttempts counts ONLY modelType ∈ {main, second, fallback}
+			// (B1 separate accounting — modelTypeCredFailover rows are EXEMPT
+			// from the window count and from the all-failed accounting below).
+			// The hoisted form is what lets the core scenario (3 creds /
+			// 1 model / no fallback chain: `1 < 1` false from the first
+			// failure) get its FULL failover chain before terminal.
+			modelAttempts := c.modelAttemptCountLocked()
+			credEligible := c.credFailoverEligibleLocked()
+			gate := modelAttempts < len(c.models) || credEligible
+			spawnedCredFailover := false
+			if c.winner == nil && gate {
 				running := 0
 				for _, r := range c.requests {
 					if !r.IsDone() {
@@ -352,19 +476,67 @@ func (c *raceCoordinator) manage() {
 					if latestReq.IsDone() && latestReq.GetError() != nil {
 
 						errMsg := latestReq.GetError().Error()
-						log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, errMsg)
-						shouldSpawn = true
-						triggerInfo = spawnTriggerInfo{
-							trigger:       triggerMainError,
-							errorMessage:  errMsg,
-							failedRequest: latestReq.id,
+
+						// ── HOISTED CRED-FAILOVER BRANCH (Round 3c C1;
+						// Tasks 18-20) ── rate-limit classified AND internal
+						// multi-credential model AND pre-first-byte (race guard:
+						// c.winner == nil per Task 23 — framing headers +
+						// ": connected" carry no model content) AND retry budget
+						// remaining ⇒ ExcludeAndReselect + same-model
+						// modelTypeCredFailover spawn INSTEAD of model fallback.
+						// Precedence: credential failover BEFORE model switching.
+						plan := c.credFailoverPlanLocked(latestReq)
+						if plan != nil {
+							c.mu.Unlock()
+							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan.retryAfter)
+							c.spawn(modelTypeCredFailover, spawnTriggerInfo{
+								trigger:       triggerRateLimit,
+								errorMessage:  errMsg,
+								failedRequest: latestReq.id,
+								credentialID:  plan.credentialID,
+								// Phase 3 / Round 3j C1 critical fix —
+								// ride the source modelID on the trigger
+								// info so spawn() targets the SAME model
+								// that just 429'd (not c.models[0]).
+								modelID: latestReq.modelID,
+							})
+							c.mu.Lock()
+							// Budget bookkeeping (Task 19 / R3-5 — mutated only
+							// from manage() under c.mu — race-free by construction).
+							c.failoverAttempts++
+							c.triedCredIDs[plan.credentialID] = true
+							if plan.soonestExpiry {
+								// W3 single-shot: the SoonestExpiry attempt is
+								// spent; the NEXT 429 routes straight to model
+								// fallback (no double spawn, no loop).
+								c.credFailoverSoonestExpiryAttempted = true
+							}
+							spawnedCredFailover = true
+							// Skip the model-fallback spawn this tick — the
+							// credFailover row IS this tick's spawn.
+						} else {
+							log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, errMsg)
+							shouldSpawn = true
+							triggerInfo = spawnTriggerInfo{
+								trigger:       triggerMainError,
+								errorMessage:  errMsg,
+								failedRequest: latestReq.id,
+							}
 						}
 					}
 
 					// Case 2: Main request is idle (Parallel race retry)
+					// Phase 3 / Round 3c W4 (RE-SCOPE of Round-3b ruling iii):
+					// this path spawns second/fallback UNCHANGED — at
+					// idle-spawn time NO error exists to classify
+					// (latestReq.GetError() is nil for a stalled-but-
+					// unfinished request). The stalled attempt's eventual
+					// 429 is adjudicated by Case 1 above, which the C1
+					// hoisted gate makes reachable in the multi-attempt
+					// environment this spawn creates.
 					// FIXED: Now uses IsIdle() which tracks last activity time during streaming
 					// This correctly detects idle even after the request has started streaming
-					if !shouldSpawn && c.cfg.RaceParallelOnIdle && len(c.requests) == 1 {
+					if !shouldSpawn && !spawnedCredFailover && c.cfg.RaceParallelOnIdle && len(c.requests) == 1 {
 						mainReq := c.requests[0]
 						// Check for idle in two ways:
 						// 1. statusRunning: hasn't received first byte yet (use start time)
@@ -393,7 +565,10 @@ func (c *raceCoordinator) manage() {
 					}
 				}
 
-				if shouldSpawn {
+				if spawnedCredFailover {
+					// credFailover row already spawned this tick — skip the
+					// model-fallback spawn path below.
+				} else if shouldSpawn {
 
 					c.mu.Unlock()
 
@@ -417,7 +592,13 @@ func (c *raceCoordinator) manage() {
 			}
 
 			// If no winner and reached max parallel attempts, check if all failed
-			if c.winner == nil && len(c.requests) >= len(c.models) {
+			//
+			// Phase 3 / B1 amendment: the accounting counts MODEL attempts only
+			// (modelTypeCredFailover rows are exempt). Terminal fires when every
+			// request has failed AND no credFailover row was just spawned (that
+			// row is still running); after credential exhaustion the flow falls
+			// through to the model-fallback spawn above when c.models[1] exists.
+			if c.winner == nil && !spawnedCredFailover && modelAttempts >= len(c.models) {
 				allFailed := true
 				for _, r := range c.requests {
 					if !r.IsDone() || r.GetError() == nil {
@@ -585,13 +766,42 @@ func (c *raceCoordinator) cancelAllExcept(winner *upstreamRequest) {
 	}
 }
 
-// execute is a wrapper for executeRequest
+// execute is a wrapper for executeRequest.
+//
+// Phase 3 / Tasks 4 + 6 + race-coordinator-level wiring (Round 3c C3):
+// receive the per-coordinator engine + conversationKey from the
+// constructor; forward them down to executeRequest on every call so
+// the publish site has them.
 func (c *raceCoordinator) execute(req *upstreamRequest) {
 	// Create context for this specific attempt
 	ctx, cancel := context.WithCancel(c.baseCtx)
 	req.SetContext(ctx, cancel)
 
-	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req, c.interleaved)
+	// Build the per-request "publish model_credential_selected" callback
+	// bound to this coordinator's eventBus. The callback reads
+	// NewlyBound off the resolved struct (already populated by
+	// executeInternalRequest) and fires the event on the bus.
+	var publish func(modelID string, cred models.ResolvedCredential)
+	if c.eventBus != nil && c.engine != nil {
+		publish = func(modelID string, cred models.ResolvedCredential) {
+			keyPrefix := c.conversationKey
+			if len(keyPrefix) > 8 {
+				keyPrefix = keyPrefix[:8]
+			}
+			c.eventBus.Publish(events.Event{
+				Type:      "model_credential_selected",
+				Timestamp: time.Now().Unix(),
+				Data: map[string]interface{}{
+					"model_id":                 modelID,
+					"credential_id":            cred.CredentialID,
+					"conversation_key_prefix": keyPrefix,
+					"id":                       c.requestID,
+				},
+			})
+		}
+	}
+
+	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req, c.interleaved, c.conversationKey, c.engine, publish)
 
 	if err != nil {
 		req.MarkFailed(err)
@@ -723,42 +933,10 @@ func (c *raceCoordinator) GetStats() RaceStats {
 	return stats
 }
 
-// GetRequestStatuses returns the status of each upstream request type (main, second, fallback)
-// Status values: "success" (completed), "failed" (error), "not_started" (never spawned or cancelled)
-func (c *raceCoordinator) GetRequestStatuses() map[string]string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	statuses := make(map[string]string)
-	// Initialize all as not_started
-	statuses["main"] = "not_started"
-	statuses["second"] = "not_started"
-	statuses["fallback"] = "not_started"
-
-	for _, req := range c.requests {
-		var status string
-		switch req.GetStatus() {
-		case statusCompleted:
-			status = "success"
-		case statusFailed:
-			status = "failed"
-		default:
-			// pending, running, streaming - treat as not_started (cancelled or in-progress)
-			status = "not_started"
-		}
-
-		switch req.modelType {
-		case modelTypeMain:
-			statuses["main"] = status
-		case modelTypeSecond:
-			statuses["second"] = status
-		case modelTypeFallback:
-			statuses["fallback"] = status
-		}
-	}
-
-	return statuses
-}
+// GetRequestStatuses now lives with the Phase 3 Task 18 helpers at the
+// bottom of this file (S4 — credFailover rows surfacing). The original
+// three-key shape (main/second/fallback) is preserved; the additive
+// cred_failover_<n> keys extend it without breaking legacy readers.
 
 // GetStreamDeadlineError returns the error info if stream deadline fired with no content
 func (c *raceCoordinator) GetStreamDeadlineError() *FinalErrorInfo {
@@ -1057,4 +1235,276 @@ func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 	}
 
 	return commonStatus
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 / Task 18 (Round 3b B1/B3 + Round 3c C1/C3/W3) — coordinator
+// credential-failover helpers. All *Locked functions run under c.mu from
+// the manage() loop (single-goroutine mutation invariant, R3-5).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// credFailoverPlan is the decision output of credFailoverPlanLocked: the
+// spawn the Case-1 branch should perform INSTEAD of a model fallback.
+type credFailoverPlan struct {
+	credentialID     string        // reselected credential (engine output) — rides spawnTriggerInfo.credentialID
+	fromCredentialID string        // the credential that 429'd
+	retryAfter       time.Duration // from the upstream Retry-After header (0 ⇒ engine default cooldown)
+	soonestExpiry    bool          // W3: single-shot SoonestExpiry attempt
+}
+
+// modelAttemptCountLocked returns the B1 separate-accounting count of
+// MODEL attempts: rows with modelType ∈ {main, second, fallback} only.
+// modelTypeCredFailover rows are EXEMPT from the spawn-window gate and
+// from the all-failed accounting (Round 3b B1 / Round 3c C1).
+func (c *raceCoordinator) modelAttemptCountLocked() int {
+	n := 0
+	for _, r := range c.requests {
+		switch r.modelType {
+		case modelTypeMain, modelTypeSecond, modelTypeFallback:
+			n++
+		}
+	}
+	return n
+}
+
+// credFailoverEligibleLocked is the cheap (side-effect-free) form of
+// credFailoverEligibleWithBudget() used by the C1-hoisted admission
+// gate. It performs NO engine calls (ExcludeAndReselect has cooldown
+// side effects and must run at most once per Case-1 decision).
+func (c *raceCoordinator) credFailoverEligibleLocked() bool {
+	if c.engine == nil || c.cfg == nil || c.cfg.ModelsConfig == nil || len(c.requests) == 0 {
+		return false
+	}
+	latest := c.requests[len(c.requests)-1]
+	if !latest.IsDone() || latest.GetError() == nil {
+		return false
+	}
+	if !providers.IsRateLimitError(latest.GetError()) {
+		return false
+	}
+	// Task 23 pre-first-byte guard (race path): c.winner == nil. Framing
+	// headers + ": connected\n\n" precede coordinator.Start() but carry
+	// NO model content (handler.go:783-797); the guard is the winner,
+	// not headersSent.
+	if c.winner != nil {
+		return false
+	}
+	modelCfg := c.cfg.ModelsConfig.GetModel(latest.modelID)
+	if modelCfg == nil || !modelCfg.Internal || len(modelCfg.Credentials) <= 1 {
+		return false
+	}
+	// W3: once the single SoonestExpiry attempt is spent, the next 429
+	// routes straight to model fallback.
+	if c.credFailoverSoonestExpiryAttempted {
+		return false
+	}
+	// R3-5 budget: each remaining credential at most once per request;
+	// total failover attempts ≤ len(credentials)−1.
+	return c.failoverAttempts < len(modelCfg.Credentials)-1
+}
+
+// credFailoverPlanLocked runs the full Round-3b/3c decision chain for
+// the failed latestReq: extract Retry-After (errors.As — the executor
+// propagates the raw *ProviderError up to the coordinator), call
+// engine.ExcludeAndReselect (mode-aware per B3/C2), and map the mode:
+//
+//   - ReselectHealthy (incl. B2 no-op + empty-key fresh pick) → proceed
+//     with the returned credential (spawn below).
+//   - ReselectSoonestExpiry → single attempt (soonestExpiry=true; the
+//     caller sets the W3 single-shot flag after spawning).
+//   - ReselectNone → fall through to model fallback (plan == nil).
+//
+// The tried-set intersection (R3-5) makes re-selection of a
+// tried-this-request credential impossible — no loops by construction.
+func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *credFailoverPlan {
+	if !c.credFailoverEligibleLocked() {
+		return nil
+	}
+
+	err := latestReq.GetError()
+
+	// Retry-After from the extended ProviderError (Task 17 — survives
+	// wrapping; errors.As sees through fmt.Errorf("%w", ...) up the
+	// executor's return path). Zero ⇒ the engine seeds its
+	// DefaultCooldown (60s) — the classifier itself does NOT default.
+	var retryAfter time.Duration
+	var providerErr *providers.ProviderError
+	if errors.As(err, &providerErr) {
+		retryAfter = providerErr.RetryAfter
+	}
+
+	// The credential that 429'd: the attempt's resolved credential.
+	// modelTypeSecond rows resolve the PRIMARY credential at the
+	// executor layer (race_executor.go secondary branch) — a 429 there
+	// re-keys failover to the primary credential of c.models[0]
+	// (specified behavior per Round 3b, not an accident).
+	fromCred := latestReq.resolved.CredentialID
+	if fromCred == "" {
+		// Resolution itself failed (no credential was used) — not a
+		// credential failover candidate.
+		return nil
+	}
+
+	reselected, mode := c.engine.ExcludeAndReselect(
+		latestReq.modelID,
+		c.conversationKey, // Round 3c C3(3): injected via constructor
+		fromCred,
+		retryAfter,
+	)
+
+	switch mode {
+	case credentiallb.ReselectHealthy:
+		if reselected == "" || reselected == fromCred || c.triedCredIDs[reselected] {
+			// Engine returned nothing new (or a credential this request
+			// already tried — belt-and-braces on top of the engine's
+			// cooldown skip): fall through to model fallback.
+			log.Printf("[LB-FAILOVER] model=%s no healthy untried credential (reselected=%q); falling through to model fallback",
+				latestReq.modelID, reselected)
+			return nil
+		}
+		log.Printf("[LB-FAILOVER] model=%s rate-limited on cred=%s; failing over to cred=%s (attempt %d/%d)",
+			latestReq.modelID, fromCred, reselected, c.failoverAttempts+1, modelBudget(c, latestReq.modelID))
+		return &credFailoverPlan{
+			credentialID:     reselected,
+			fromCredentialID: fromCred,
+			retryAfter:       retryAfter,
+		}
+
+	case credentiallb.ReselectSoonestExpiry:
+		// 0-of-N healthy (Round 3b 0-of-N pin): the engine already
+		// emitted its WARN; caller performs a SINGLE attempt then falls
+		// through (W3 flag + F.4 contract).
+		if reselected == "" || reselected == fromCred || c.triedCredIDs[reselected] {
+			return nil
+		}
+		log.Printf("[WARN] [LB-FAILOVER] model=%s all credentials cooling; single attempt with soonest-expiring cred=%s then model fallback",
+			latestReq.modelID, reselected)
+		return &credFailoverPlan{
+			credentialID:     reselected,
+			fromCredentialID: fromCred,
+			retryAfter:       retryAfter,
+			soonestExpiry:    true,
+		}
+
+	default: // credentiallb.ReselectNone — no credential available
+		// (single-credential model or 0 valid credentials; B2 no-op and
+		// empty-key are ReselectHealthy per the C2 unified enum).
+		log.Printf("[LB-FAILOVER] model=%s no reselectable credential (mode=%v); falling through to model fallback",
+			latestReq.modelID, mode)
+		return nil
+	}
+}
+
+// modelBudget returns len(credentials)−1 (R3-5 budget cap) for the
+// INFO log line; 0 when the model config is unavailable.
+func modelBudget(c *raceCoordinator, modelID string) int {
+	if c.cfg == nil || c.cfg.ModelsConfig == nil {
+		return 0
+	}
+	mc := c.cfg.ModelsConfig.GetModel(modelID)
+	if mc == nil {
+		return 0
+	}
+	return len(mc.Credentials) - 1
+}
+
+// publishCredentialFailover (Task 20 / R3-8) emits the canonical
+// model_credential_failover event with the payload
+// {model_id, from_credential_id, to_credential_id, reason,
+// retry_after_ms, cooldown_ms, attempt_index}. cooldown_ms mirrors the
+// engine's effective seed (retryAfter when the upstream supplied it,
+// else credentiallb.DefaultCooldown) — the engine itself never
+// publishes (it must not import pkg/events).
+func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string, retryAfter time.Duration) {
+	if c.eventBus == nil {
+		return
+	}
+	cooldown := credentiallb.DefaultCooldown
+	if retryAfter > 0 {
+		cooldown = retryAfter
+	}
+	data := map[string]interface{}{
+		"model_id":           modelID,
+		"from_credential_id": fromID,
+		"to_credential_id":   toID,
+		"reason":             "rate_limit",
+		"retry_after_ms":     retryAfter.Milliseconds(),
+		"cooldown_ms":        cooldown.Milliseconds(),
+		"attempt_index":      c.failoverAttempts + 1,
+	}
+	if c.requestID != "" {
+		data["id"] = c.requestID
+	}
+	c.eventBus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialFailover,
+		Timestamp: time.Now().Unix(),
+		Data:      data,
+	})
+}
+
+// GetRequestStatuses (Phase 3 / Round 3c — S4): credFailover rows are
+// surfaced as additive "cred_failover_<n>" keys alongside the legacy
+// main/second/fallback slots (B1 separate accounting keeps the legacy
+// three keys model-attempt-only). Each row's reselected credential is
+// exposed as "cred_failover_<n>_credential" for operator visibility.
+//
+// Round 3j W4 — the fallback to `req.resolved.CredentialID` was DROPPED
+// rather than reading it under `req.mu`: the only meaningful credential
+// identity for a credFailover row is the one the coordinator pre-resolved
+// at the Case-1 classification site (`req.reselectedCredentialID`, set
+// under c.mu before `go execute(req)` — race-free by construction).
+// Reading `req.resolved.CredentialID` here without locking would race
+// against `executeInternalRequest`'s lock-free write at
+// race_executor.go:293. The belt-and-braces check in
+// resolveSpecificInternalCredential (Round 3j C1 step 4) already
+// guarantees that a row whose reselected credential was rejected never
+// gets past the executor — so the resolved-fallback was both racy AND
+// redundant.
+func (c *raceCoordinator) GetRequestStatuses() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	statuses := make(map[string]string)
+	// Initialize all as not_started
+	statuses["main"] = "not_started"
+	statuses["second"] = "not_started"
+	statuses["fallback"] = "not_started"
+
+	credIdx := 0
+	for _, req := range c.requests {
+		var status string
+		switch req.GetStatus() {
+		case statusCompleted:
+			status = "success"
+		case statusFailed:
+			status = "failed"
+		default:
+			// pending, running, streaming - treat as not_started (cancelled or in-progress)
+			status = "not_started"
+		}
+
+		switch req.modelType {
+		case modelTypeMain:
+			statuses["main"] = status
+		case modelTypeSecond:
+			statuses["second"] = status
+		case modelTypeFallback:
+			statuses["fallback"] = status
+		case modelTypeCredFailover:
+			key := fmt.Sprintf("cred_failover_%d", credIdx)
+			statuses[key] = status
+			// Round 3j W4 — use ONLY reselectedCredentialID.
+			// Reading req.resolved.CredentialID here would race the
+			// executor's lock-free write (race_executor.go:293); the
+			// reselected credential IS the row's identity for operator
+			// observability.
+			if req.reselectedCredentialID != "" {
+				statuses[key+"_credential"] = req.reselectedCredentialID
+			}
+			credIdx++
+		}
+	}
+
+	return statuses
 }
