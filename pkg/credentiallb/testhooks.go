@@ -77,6 +77,32 @@ func (e *Engine) cooldownUntil(modelID, credID string) time.Time {
 	return st.cooldowns[credID] // zero value when absent
 }
 
+// bindingBoundAtForTest is the binding-state reader hook — the #10
+// sliding-idle-TTL counterpart of cooldownUntil above. It returns
+// the binding's boundAt anchor for (modelID, convKey) and whether a
+// binding row exists (absent, or lazily expired / janitor-swept).
+// Phase 5 Task 44 (W7-3) uses it to pin that an in-TTL GetOrSelect
+// hit REFRESHES boundAt (strict increase); it is read-only, like
+// cooldownUntil, and referenced only from tests.
+func (e *Engine) bindingBoundAtForTest(modelID, convKey string) (time.Time, bool) {
+	if e == nil {
+		return time.Time{}, false
+	}
+	e.mu.RLock()
+	st := e.models[modelID]
+	e.mu.RUnlock()
+	if st == nil {
+		return time.Time{}, false
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	b, ok := st.bindings[convKey]
+	if !ok {
+		return time.Time{}, false
+	}
+	return b.boundAt, true
+}
+
 // forceCooldownExpiryForTest fast-forwards the cooldown row for
 // (modelID, credID) to the past so the read-time check treats it as
 // expired immediately and the next janitor sweep removes the row
