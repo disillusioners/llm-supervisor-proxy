@@ -98,6 +98,16 @@ type spawnTriggerInfo struct {
 	// (race-free by construction — the write happens-before `go execute`).
 	// Empty for every other trigger type.
 	credentialID string
+
+	// modelID (Phase 3 / Round 3j C1 critical fix) is the modelID the
+	// credFailover spawn MUST target. Populated at the Case-1 classification
+	// site from latestReq.modelID so the modelTypeCredFailover row stays
+	// on the SAME model that just 429'd (NOT c.models[0] — which is wrong
+	// in a 2-model chain where the fallback row carries models[1]'s
+	// modelID). The fallback-model-failover case (triggerMainError)
+	// populates this from latestReq.modelID too so the existing
+	// modelTypeFallback path is unchanged.
+	modelID string
 }
 
 // raceCoordinator manages multiple parallel upstream requests
@@ -138,11 +148,11 @@ type raceCoordinator struct {
 	startTime     time.Time
 	spawnTriggers []spawnTriggerInfo // Track detailed info about why requests were spawned
 
-	// Phase 3 / Task 18 + R3-5 — credential failover bookkeeping. Mirrors
-	// the per-request tried-set/budget fields on requestContext; the
-	// engine itself stays stateless about retries per R3-5, so the
-	// coordinator owns the budget here. Mutated only from manage()
-	// under c.mu.
+	// Phase 3 / Task 18 + R3-5 — credential failover bookkeeping. Lives
+	// on the coordinator (NOT requestContext — R3-5 keeps the engine
+	// stateless about retries; the coordinator is the single owner of
+	// the per-race budget and is constructed fresh per race). Mutated
+	// only from manage() under c.mu.
 	triedCredIDs                      map[string]bool // mutated only from manage() under c.mu — race-free by construction
 	failoverAttempts                  int            // mutated only from manage() under c.mu — race-free by construction
 	credFailoverSoonestExpiryAttempted bool           // mutated only from manage() under c.mu — race-free by construction
@@ -267,10 +277,19 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		}
 		modelID = c.models[1]
 	case modelTypeCredFailover:
-		// Phase 3 / Round 3c C3(2) — same MODEL, re-selected CREDENTIAL.
-		// The absent case would leave modelID="" and the attempt would
-		// silently misfire; c.models[0] keeps the row on the SAME model
-		// that just 429'd (credential failover BEFORE model switching).
+		// Phase 3 / Round 3j C1 critical fix — the credFailover row MUST
+		// target the SAME model that just 429'd, NOT c.models[0]. The
+		// prior code's hard-coded c.models[0] was wrong in a 2-model
+		// chain: a fallback-row 429 would have spawned a credFailover
+		// attempt running models[1]'s InternalModel on models[0]'s
+		// credential pool (wrong model served + wrong-account billing).
+		//
+		// The trigger info carries the source modelID (C3(2) wiring,
+		// populated at the Case-1 classification site from
+		// latestReq.modelID). If unset (defensive — should never happen
+		// for a real triggerRateLimit spawn), fall back to c.models[0]
+		// to preserve the legacy single-model chain.
+		//
 		// NOTE (B1 separate accounting): this row does NOT consume a
 		// spawn-window slot — the idx guard below main/second/fallback
 		// does NOT apply here (a 3-cred single-model chain spawns idx
@@ -279,7 +298,11 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 			log.Printf("[RACE] Cannot spawn cred-failover: no model available")
 			return
 		}
-		modelID = c.models[0]
+		if triggerInfo.modelID != "" {
+			modelID = triggerInfo.modelID
+		} else {
+			modelID = c.models[0]
+		}
 	}
 
 	req := newUpstreamRequest(idx, mType, modelID, c.cfg.RaceMaxBufferBytes)
@@ -465,6 +488,11 @@ func (c *raceCoordinator) manage() {
 								errorMessage:  errMsg,
 								failedRequest: latestReq.id,
 								credentialID:  plan.credentialID,
+								// Phase 3 / Round 3j C1 critical fix —
+								// ride the source modelID on the trigger
+								// info so spawn() targets the SAME model
+								// that just 429'd (not c.models[0]).
+								modelID: latestReq.modelID,
 							})
 							c.mu.Lock()
 							// Budget bookkeeping (Task 19 / R3-5 — mutated only
@@ -1412,8 +1440,21 @@ func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string
 // GetRequestStatuses (Phase 3 / Round 3c — S4): credFailover rows are
 // surfaced as additive "cred_failover_<n>" keys alongside the legacy
 // main/second/fallback slots (B1 separate accounting keeps the legacy
-// three keys model-attempt-only). Each row's resolved credential is
+// three keys model-attempt-only). Each row's reselected credential is
 // exposed as "cred_failover_<n>_credential" for operator visibility.
+//
+// Round 3j W4 — the fallback to `req.resolved.CredentialID` was DROPPED
+// rather than reading it under `req.mu`: the only meaningful credential
+// identity for a credFailover row is the one the coordinator pre-resolved
+// at the Case-1 classification site (`req.reselectedCredentialID`, set
+// under c.mu before `go execute(req)` — race-free by construction).
+// Reading `req.resolved.CredentialID` here without locking would race
+// against `executeInternalRequest`'s lock-free write at
+// race_executor.go:274. The belt-and-braces check in
+// resolveSpecificInternalCredential (Round 3j C1 step 4) already
+// guarantees that a row whose reselected credential was rejected never
+// gets past the executor — so the resolved-fallback was both racy AND
+// redundant.
 func (c *raceCoordinator) GetRequestStatuses() map[string]string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -1447,10 +1488,13 @@ func (c *raceCoordinator) GetRequestStatuses() map[string]string {
 		case modelTypeCredFailover:
 			key := fmt.Sprintf("cred_failover_%d", credIdx)
 			statuses[key] = status
+			// Round 3j W4 — use ONLY reselectedCredentialID.
+			// Reading req.resolved.CredentialID here would race the
+			// executor's lock-free write (race_executor.go:274); the
+			// reselected credential IS the row's identity for operator
+			// observability.
 			if req.reselectedCredentialID != "" {
 				statuses[key+"_credential"] = req.reselectedCredentialID
-			} else if req.resolved.CredentialID != "" {
-				statuses[key+"_credential"] = req.resolved.CredentialID
 			}
 			credIdx++
 		}

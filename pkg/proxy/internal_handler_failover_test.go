@@ -165,8 +165,12 @@ func TestInternalHandler_NoEngine_Propagates(t *testing.T) {
 	if got := upstream.callCount(); got != 1 {
 		t.Errorf("upstream calls = %d, want 1", got)
 	}
+	// Round 3j S2 — was a t.Logf pseudo-assertion (logged only when
+	// the contract held, did nothing when it broke). Converted to a
+	// real assertion: the propagated error MUST carry the rate-limit
+	// marker that the next layer (IsRateLimitError) keys on.
 	if !strings.Contains(err.Error(), "429") && !strings.Contains(err.Error(), "rate") {
-		t.Logf("propagated error: %v", err)
+		t.Errorf("propagated error missing rate-limit marker (IsRateLimitError contract broken): %v", err)
 	}
 }
 

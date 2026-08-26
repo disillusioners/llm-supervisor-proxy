@@ -60,14 +60,6 @@ type requestContext struct {
 	firstUserMessage string
 	conversationKey  string
 
-	// Phase 3 — R3-5 retry-budget plumbing. Lives on the REQUEST context
-	// (not the engine — R3-5 keeps the engine stateless about retries).
-	// The coordinator increments failoverAttempts and appends to
-	// triedCredentialIDs under c.mu (manage() is the sole mutation site).
-	// reset() clears both fields per pool-reuse.
-	triedCredentialIDs map[string]bool // mutated only from manage() under c.mu — race-free by construction
-	failoverAttempts   int            // mutated only from manage() under c.mu — race-free by construction
-
 	// Accumulated response buffers
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder
@@ -150,13 +142,14 @@ func (rc *requestContext) reset() {
 	// reset so a recycled requestContext cannot leak the flag
 	// from a prior request lifecycle.
 	rc.interleavedThinking = false
-	// Phase 3 (Tasks 1 + 19): clear the per-request affinity + failover
-	// bookkeeping fields. Both are part of the request-scoped state, not
-	// cross-request — pool reuse must NOT carry previous-request values.
+	// Phase 3 (Task 1): clear the per-request affinity fields so pool
+	// reuse cannot leak firstUserMessage / conversationKey from a
+	// previous request lifecycle. The credFailover budget lives on the
+	// coordinator (`raceCoordinator.triedCredIDs` / `.failoverAttempts`),
+	// NOT here — it is constructed fresh per race and dies with the
+	// coordinator.
 	rc.firstUserMessage = ""
 	rc.conversationKey = ""
-	rc.triedCredentialIDs = nil
-	rc.failoverAttempts = 0
 }
 
 // tokenIDDisplay renders the token ID for log output. Empty tokenID

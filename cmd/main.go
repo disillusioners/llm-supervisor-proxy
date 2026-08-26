@@ -257,7 +257,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
+		// Round 3j S3 — was `log.Fatal`, which SKIPPED the deferred
+		// teardown (engine stop → modelsMgr close → dbStore close) and
+		// terminated the process. We log and fall through; the LIFO
+		// defers below still fire so the engine janitor stops cleanly
+		// and the DB connection is released. A force-shutdown is a
+		// warning, not a reason to leak goroutines or DB handles.
+		log.Printf("Server forced to shutdown (continuing with deferred teardown): %v", err)
 	}
 
 	log.Println("Server exiting")

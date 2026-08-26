@@ -120,7 +120,7 @@ func (p *scriptedProvider) callCount() int {
 // newCredFailoverTestEnv builds a coordinator wired for credential
 // failover: engine-backed resolver over a 3-credential internal model,
 // scripted provider override, event bus, conversation key.
-func newCredFailoverTestEnv(t *testing.T, credCount int, failN int, conversationKey string) (*raceCoordinator, *engineBackedResolver, *scriptedProvider, *events.Bus, *credentiallb.Engine) { //nolint:unparam // engine return kept for future hook tests
+func newCredFailoverTestEnv(t *testing.T, credCount int, failN int, conversationKey string) (*raceCoordinator, *engineBackedResolver, *scriptedProvider, *events.Bus) {
 	t.Helper()
 
 	mock := &mockModelsConfig{}
@@ -171,7 +171,7 @@ func newCredFailoverTestEnv(t *testing.T, credCount int, failN int, conversation
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, conversationKey)
-	return coord, resolver, provider, bus, engine
+	return coord, resolver, provider, bus
 }
 
 // TestCoordinator_CredFailover_ThreeCredChain (Phase 3 / Task 18
@@ -184,7 +184,7 @@ func newCredFailoverTestEnv(t *testing.T, credCount int, failN int, conversation
 //   - modelAttempts stays 1 (B1 separate accounting);
 //   - the failover visited DISTINCT credentials (tried-set).
 func TestCoordinator_CredFailover_ThreeCredChain(t *testing.T) {
-	coord, _, provider, bus, _ := newCredFailoverTestEnv(t, 3, 2, "conv-key-1")
+	coord, _, provider, bus := newCredFailoverTestEnv(t, 3, 2, "conv-key-1")
 
 	coord.Start()
 	winner := coord.WaitForWinner()
@@ -256,7 +256,7 @@ func TestCoordinator_CredFailover_ThreeCredChain(t *testing.T) {
 // acceptance): all 3 credentials 429 → exactly 2 failover attempts,
 // then TERMINAL (no infinite loop, no third failover spawn).
 func TestCoordinator_CredFailover_BudgetExhaustionTerminates(t *testing.T) {
-	coord, _, provider, _, _ := newCredFailoverTestEnv(t, 3, 99, "conv-key-2") // always 429
+	coord, _, provider, _ := newCredFailoverTestEnv(t, 3, 99, "conv-key-2") // always 429
 
 	coord.Start()
 	winner := coord.WaitForWinner()
@@ -281,34 +281,12 @@ func TestCoordinator_CredFailover_BudgetExhaustionTerminates(t *testing.T) {
 	}
 }
 
-// TestCoordinator_CredFailover_ResetClearsBudget (Task 19): the
-// requestContext budget fields are cleared in reset() — pool reuse must
-// not carry a previous request's failover accounting.
-func TestCoordinator_CredFailover_ResetClearsBudget(t *testing.T) {
-	rc := &requestContext{
-		triedCredentialIDs: map[string]bool{"cred-A": true, "cred-B": true},
-		failoverAttempts:   2,
-		firstUserMessage:   "hello",
-		conversationKey:    "some-key",
-	}
-	rc.reset()
-	if rc.failoverAttempts != 0 {
-		t.Errorf("reset() did not clear failoverAttempts: %d", rc.failoverAttempts)
-	}
-	if len(rc.triedCredentialIDs) != 0 {
-		t.Errorf("reset() did not clear triedCredentialIDs: %v", rc.triedCredentialIDs)
-	}
-	if rc.firstUserMessage != "" || rc.conversationKey != "" {
-		t.Errorf("reset() did not clear affinity fields: %q / %q", rc.firstUserMessage, rc.conversationKey)
-	}
-}
-
 // TestCoordinator_CredFailover_NonRateLimitSkipsToModelFallback
 // (control test, Phase 5 Task 46 shape): a non-rate-limit error must
 // NOT spawn any credFailover row — it follows the existing
 // model-fallback/terminal path directly.
 func TestCoordinator_CredFailover_NonRateLimitSkipsToModelFallback(t *testing.T) {
-	coord, _, _, bus, _ := newCredFailoverTestEnv(t, 3, 0, "conv-key-3")
+	coord, _, _, bus := newCredFailoverTestEnv(t, 3, 0, "conv-key-3")
 
 	// Override the provider to fail with a NON-rate-limit error.
 	failErr := &providers.ProviderError{Provider: "scripted", StatusCode: 500, Message: "boom"}
@@ -461,7 +439,7 @@ func TestCoordinator_ModelCredentialSelected_EmptyKey_NeverFires(t *testing.T) {
 // tried-set intersection makes a plan for an already-tried credential
 // impossible — the coordinator falls to model fallback instead.
 func TestCoordinator_CredFailoverPlan_TriedSetBlocksRepeat(t *testing.T) {
-	coord, _, _, _, _ := newCredFailoverTestEnv(t, 2, 0, "conv-key-ts")
+	coord, _, _, _ := newCredFailoverTestEnv(t, 2, 0, "conv-key-ts")
 
 	// Mark BOTH credentials as already tried.
 	coord.triedCredIDs["cred-A"] = true
@@ -524,3 +502,162 @@ func drainEvents(bus *events.Bus, eventType string) []events.Event {
 		}
 	}
 }
+
+// TestCoordinator_CredFailover_TwoModelChain_WrongModelFix (Round 3j
+// C1 critical — the guardrail). The legacy 675556f code hard-coded
+// c.models[0] in the modelTypeCredFailover spawn case; in a 2-model
+// chain, a fallback-row 429 would have spawned a credFailover attempt
+// targeting m1's modelID with m2's picked credential pool — running
+// m2's credential against m1's InternalModel and bumping m1's billing
+// for a request meant for m2. The fix rides the source modelID on the
+// trigger info (C3(2)) so the spawned row stays on the SAME model that
+// 429'd.
+//
+// All existing tests use single-model chains — that blind spot hid the
+// bug. This test is the only regression guard; it MUST cover the
+// 2-model case. Two layers of assertion:
+//
+//   1. spawn() targets triggerInfo.modelID, NOT c.models[0]
+//      (the C1 fix at race_coordinator.go:spawn).
+//   2. resolveSpecificInternalCredential refuses a credential NOT in
+//      the model's Credentials list (the C1 belt-and-braces at
+//      race_executor.go:resolveSpecificInternalCredential).
+//
+// NOTE on integration: a full integration test that fires Case 1 on
+// the fallback row in a 2-model chain is blocked by the B1 separate-
+// accounting "all-failed" check (modelAttempts >= len(models) fires
+// before the fallback row gets a credFailover chance). That gate is
+// a separate architectural decision from C1; the spawn-layer and
+// resolver-layer guardrails here are the actual code paths the C1
+// fix changed, and they fail loudly if reverted.
+func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
+	mock := &mockModelsConfig{}
+	// m1 credentials (the LEGACY pool that the bug would have used)
+	m1IDs := []string{"cred-A", "cred-B", "cred-C"}
+	for _, id := range m1IDs {
+		mock.AddCredential(models.CredentialConfig{ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id})
+	}
+	// m2 credentials (the CORRECT pool for the fallback row's 429)
+	m2IDs := []string{"cred-X", "cred-Y"}
+	for _, id := range m2IDs {
+		mock.AddCredential(models.CredentialConfig{ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id})
+	}
+	// Both models are internal + multi-credential. Distinct internal
+	// model names so the test can assert the credFailover row ran
+	// the RIGHT model (m2's, not m1's).
+	mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true,
+		InternalModel: "internal-m1",
+		Credentials:   models.TestRefs(m1IDs...),
+	})
+	mock.AddModel(models.ModelConfig{
+		ID: "m2", Name: "m2", Enabled: true, Internal: true,
+		InternalModel: "internal-m2",
+		Credentials:   models.TestRefs(m2IDs...),
+	})
+
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 103, 60*time.Second)
+	t.Cleanup(engine.Stop)
+	engine.RebindFromStore("m1", models.TestRefs(m1IDs...))
+	engine.RebindFromStore("m2", models.TestRefs(m2IDs...))
+
+	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
+
+	bus := events.NewBus()
+	cfg := newTestConfigSnapshot("m1")
+	cfg.ModelsConfig = resolver
+	cfg.StreamDeadline = 5 * time.Second
+	cfg.MaxGenerationTime = 10 * time.Second
+
+	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
+		[]string{"m1", "m2"}, bus, "test-req", false, engine, "conv-key-2model")
+
+	// ── Layer 1 — spawn() targets triggerInfo.modelID (the C1 fix) ──
+	// Simulate the Case-1 classification site: the fallback row just
+	// 429'd and the coordinator pre-resolved a credential from m2's
+	// pool. The trigger info MUST carry m2 as the source modelID so
+	// spawn() targets m2 (NOT c.models[0] = m1).
+	coord.spawn(modelTypeCredFailover, spawnTriggerInfo{
+		trigger:      triggerRateLimit,
+		credentialID: "cred-X",
+		modelID:      "m2", // C1 fix: ride the source modelID
+		failedRequest: -1,
+	})
+
+	// Find the spawned row (must be the only credFailover row so far).
+	var cf *upstreamRequest
+	for _, r := range coord.requests {
+		if r.modelType == modelTypeCredFailover {
+			cf = r
+			break
+		}
+	}
+	if cf == nil {
+		t.Fatalf("spawn did not create a credFailover row")
+	}
+	if cf.modelID != "m2" {
+		t.Errorf("C1 REGRESSION: spawned credFailover row modelID = %q, want %q (the fix routes via triggerInfo.modelID; legacy hard-coded c.models[0])",
+			cf.modelID, "m2")
+	}
+	if cf.reselectedCredentialID != "cred-X" {
+		t.Errorf("reselectedCredentialID = %q, want cred-X", cf.reselectedCredentialID)
+	}
+
+	// ── Layer 2 — verify the belt-and-braces in resolveSpecificInternalCredential ──
+	// The bug fundamentally was a CROSS-MODEL resolve: m2's cred being
+	// handed to m1's model. The belt-and-braces refuses any credential
+	// NOT in the model's own Credentials list.
+	if _, ok := resolveSpecificInternalCredential(cfg, "m1", "cred-X"); ok {
+		t.Errorf("belt-and-braces BROKEN: resolveSpecificInternalCredential accepted m2's credential cred-X for m1 — cross-model resolve would bill m1 for an m2 request")
+	}
+	if _, ok := resolveSpecificInternalCredential(cfg, "m2", "cred-A"); ok {
+		t.Errorf("belt-and-braces BROKEN: resolveSpecificInternalCredential accepted m1's credential cred-A for m2 — cross-model resolve")
+	}
+	// Sanity — credentials of the SAME model still resolve.
+	if _, ok := resolveSpecificInternalCredential(cfg, "m2", "cred-X"); !ok {
+		t.Errorf("belt-and-braces TOO STRICT: same-model resolve for m2/cred-X refused")
+	}
+	if _, ok := resolveSpecificInternalCredential(cfg, "m1", "cred-A"); !ok {
+		t.Errorf("belt-and-braces TOO STRICT: same-model resolve for m1/cred-A refused")
+	}
+
+	// ── Layer 3 — negative test for the legacy fallback path ──
+	// Without triggerInfo.modelID, spawn() falls back to c.models[0]
+	// (the legacy single-model chain — preserves the W2 reasoning
+	// that defensive fallback is needed for tests / corrupt triggers).
+	// This is DOCUMENTED behavior, not a bug, but it MUST select m1
+	// (the existing single-model chain) so unit tests that omit
+	// modelID don't silently misfire.
+	coord2 := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
+		[]string{"m1", "m2"}, bus, "test-req-2", false, engine, "conv-key-2model-neg")
+	coord2.spawn(modelTypeCredFailover, spawnTriggerInfo{
+		trigger:       triggerRateLimit,
+		credentialID:  "cred-Y",
+		modelID:       "", // legacy: omit the source modelID
+		failedRequest: -1,
+	})
+	var cf2 *upstreamRequest
+	for _, r := range coord2.requests {
+		if r.modelType == modelTypeCredFailover {
+			cf2 = r
+			break
+		}
+	}
+	if cf2 == nil {
+		t.Fatalf("negative-test spawn did not create a credFailover row")
+	}
+	if cf2.modelID != "m1" {
+		t.Errorf("legacy fallback modelID = %q, want %q (c.models[0] — preserves single-model chain defensively)",
+			cf2.modelID, "m1")
+	}
+
+	_ = resolver // anchored for future test expansion
+}
+
+// TestCoordinator_CredFailover_LegacySpawnUsesCModelsZero is the
+// regression guard for the defensive fallback in spawn(): when
+// triggerInfo.modelID is empty (legacy single-model chains / corrupted
+// triggers), the row's modelID MUST be c.models[0]. This branch is
+// DOCUMENTED (race_coordinator.go:291-294) but exercised here so a
+// future "always require modelID" refactor surfaces immediately.

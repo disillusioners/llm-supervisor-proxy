@@ -178,6 +178,25 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	if modelConfig == nil || !modelConfig.Internal {
 		return models.ResolvedCredential{}, false
 	}
+	// Phase 3 / Round 3j C1 belt-and-braces — the reselected credential
+	// MUST belong to this model's Credentials list. If it doesn't, the
+	// engine handed back a credential for a DIFFERENT model (e.g. spawn
+	// got the wrong modelID — see C1 critical fix in spawn()). Fall
+	// through to the existing failure handling in executeInternalRequest
+	// instead of running the wrong model's InternalModel against the
+	// wrong credential pool.
+	credBelongs := false
+	for _, ref := range modelConfig.Credentials {
+		if ref.CredentialID == credentialID {
+			credBelongs = true
+			break
+		}
+	}
+	if !credBelongs {
+		log.Printf("[LB-FAILOVER] refusing credential %q — not in model %s's Credentials list (possible wrong-model spawn)",
+			credentialID, modelID)
+		return models.ResolvedCredential{}, false
+	}
 	cred := cfg.ModelsConfig.GetCredential(credentialID)
 	if cred == nil {
 		return models.ResolvedCredential{}, false
@@ -278,29 +297,17 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to resolve internal config for model %s", req.modelID)
 	}
 
-	// If this attempt is a modelTypeCredFailover row (Round-3), the
-	// caller has already populated req.reselectedCredentialID via
-	// ExcludeAndReselect. We use it to short-circuit the engine
-	// call path — for a single-attempt retry, the per-attempt
-	// resolution is REPLACED with the reselected credential.
-	//
-	// Note: the credFailover path is currently only feasible on
-	// the Race Coordinator's Case-1 path, which spawns a new
-	// attempt — for the existing request logic, the engine
-	// already returned the reselected credential via ResolveInternalConfigWithAffinity
-	// in the coordinator's pre-spawn branch. The field is here
-	// for completeness and for the handleNonStreamResult /
-	// streamResult layers that may consult it.
-	if req.reselectedCredentialID != "" {
-		// Override resolved.CredentialID with the explicit reselected
-		// pick. Other resolved fields (Provider/APIKey/BaseURL) are
-		// re-looked up at the resolver layer; in Phase 3 the
-		// ResolvedCredential carries the resolved values already.
-		// (Read-through to GetCredential lives inside
-		// ResolveInternalConfigWithAffinity.)
-		// No-op here — downstream already sees the right
-		// credential through resolved.CredentialID.
-	}
+	// Phase 3 / Task 18 (Round 3b B3) — a modelTypeCredFailover row
+	// resolves the SPECIFIC reselected credential surfaced by
+	// engine.ExcludeAndReselect at the coordinator layer (above). The
+	// `req.reselectedCredentialID` field is consumed by the executor's
+	// primary resolution path (race_executor.go just above) via
+	// resolveSpecificInternalCredential — there is NO secondary
+	// override to apply here. The downstream provider call below reads
+	// `resolved.CredentialID` / `resolved.APIKey` directly, so the
+	// reselect already propagates end-to-end. (The original Round-3
+	// `if` block was a no-op placeholder from the case-1 prototype
+	// and is removed — Round 3j W2.)
 
 	provider := resolved.Provider
 	apiKey := resolved.APIKey

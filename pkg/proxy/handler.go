@@ -434,37 +434,42 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		rc.tokenName = authToken.Name
 		rc.ultimateModelEnabled = authToken.UltimateModelEnabled
 		rc.ultimateModelID = authToken.UltimateModelID
+	}
 
-		// Phase 3 / Task 2a — POST-AUTH wiring site (A-1, A-1-wiring).
-		// AFTER rc.tokenID is populated, compute the conversationKey with
-		// the tokenID salt. Anonymous/unauthenticated requests pass
-		// tokenID="" → unsalted key (graceful, per A-1). The key is
-		// NEVER computed in initRequestContext (tokenID is unset there).
-		//
-		// W-2 + C2: when no first user message was extracted, the key
-		// stays "" — the engine then picks FRESH per request and stores
-		// NO binding (the ""-as-own-bucket reading is REMOVED per W-2;
-		// ComputeConversationKey never returns "" by itself, so the
-		// caller owns this gate). The DEBUG log below is the canonical
-		// C2 observability mechanism.
-		if rc.resolvedModel != nil && rc.resolvedModel.Internal {
-			if rc.firstUserMessage == "" {
-				rc.conversationKey = ""
-				log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
-					rc.resolvedModel.ID)
-			} else {
-				rc.conversationKey = credentiallb.ComputeConversationKey(
-					rc.resolvedModel.ID,
-					rc.tokenID,
-					rc.firstUserMessage,
-				)
-				log.Printf("[LB] computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
-					rc.conversationKey[:8],
-					rc.resolvedModel.ID,
-					rc.tokenIDDisplay(),
-					len(rc.firstUserMessage),
-				)
-			}
+	// Phase 3 / Task 2a — POST-AUTH wiring site (A-1, A-1-wiring).
+	// HOISTED OUT of the `if authToken != nil` branch (Round 3j W3):
+	// anonymous / unauthenticated requests must STILL get a conversation
+	// key — they receive the unsalted key because rc.tokenID is the
+	// zero value "" (the requestContext defaults it to empty). The
+	// key is NEVER computed in initRequestContext (tokenID is unset
+	// there at handler.go:352). The key is only meaningful for
+	// INTERNAL models — external / unknown models leave
+	// rc.conversationKey == "" and the engine path is skipped at every
+	// call site.
+	//
+	// W-2 + C2: when no first user message was extracted, the key
+	// stays "" — the engine then picks FRESH per request and stores
+	// NO binding (the ""-as-own-bucket reading is REMOVED per W-2;
+	// ComputeConversationKey never returns "" by itself, so the
+	// caller owns this gate). The DEBUG log below is the canonical
+	// C2 observability mechanism.
+	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+		if rc.firstUserMessage == "" {
+			rc.conversationKey = ""
+			log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
+				rc.resolvedModel.ID)
+		} else {
+			rc.conversationKey = credentiallb.ComputeConversationKey(
+				rc.resolvedModel.ID,
+				rc.tokenID, // "" for anonymous — unsalted key
+				rc.firstUserMessage,
+			)
+			log.Printf("[LB] computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
+				rc.conversationKey[:8],
+				rc.resolvedModel.ID,
+				rc.tokenIDDisplay(),
+				len(rc.firstUserMessage),
+			)
 		}
 	}
 

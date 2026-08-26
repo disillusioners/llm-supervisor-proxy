@@ -608,7 +608,13 @@ func isNetworkError(err error) bool {
 	return true
 }
 
-// parseRetryAfter parses the Retry-After header
+// parseRetryAfter parses the Retry-After header. Negative durations
+// (e.g. a seconds value < 0, or an HTTP-date already in the past) are
+// clamped to 0 — the contract treats RetryAfter=0 as "no upstream
+// hint, use the engine default cooldown" (see
+// credentiallb.DefaultCooldown). A negative cooldown would otherwise
+// expire a credential's cooling instantly and re-select the same
+// credential on the next failover, defeating the rate-limit exclusion.
 func parseRetryAfter(header string) time.Duration {
 	if header == "" {
 		return 0
@@ -616,12 +622,19 @@ func parseRetryAfter(header string) time.Duration {
 
 	// Try parsing as seconds
 	if secs, err := strconv.Atoi(header); err == nil {
-		return time.Duration(secs) * time.Second
+		d := time.Duration(secs) * time.Second
+		if d < 0 {
+			return 0
+		}
+		return d
 	}
 
 	// Try parsing as date
 	if t, err := time.Parse(time.RFC1123, header); err == nil {
-		return time.Until(t)
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+		return 0
 	}
 
 	return 0
