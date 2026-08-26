@@ -401,6 +401,61 @@ The **test-connection** endpoint still accepts a single `credential_id`
 (it tests against the primary). To add a second credential, save the
 model and re-open it in the Web UI.
 
+**Operator behavior summary.** The first request of a conversation
+picks one credential by weighted random selection across the model's
+configured `credentials[]` (the same weights that govern failover
+rotation). Every subsequent request of that same conversation —
+identified by a **token-salted**, conversation-stable key — is pinned
+to that credential until the conversation goes **24 hours idle**
+(sliding TTL: refreshed on each use). Keeping the same credential on
+every turn keeps the upstream provider's prompt cache hot, which is
+the entire reason this feature exists.
+
+**Single-proxy affinity limitation.** Conversation-to-credential
+bindings live in process memory; they are **not** shared across proxy
+instances and **not** persisted across restarts. Restarting the proxy
+within a 24h TTL window clears every binding — the next request of
+every conversation re-rolls a credential (weighted random, same as a
+new conversation). A horizontally-scaled deployment will see each pod
+pick its own affinity; there is no cross-pod stickiness. Redis-backed
+or sticky-load-balancer affinity is **future work (v2)** — for now,
+plan capacity per replica, not per cluster.
+
+**Env path bypasses load balancing.** Requests served through the
+external race path using the `UPSTREAM_CREDENTIAL_ID` env credential
+bypass credential load balancing entirely — there is no `credentials[]`
+on that path. To load-balance, configure `credentials[]` on an
+**internal** model.
+
+**`modelTypeSecond` re-key on 429 (counterintuitive but correct).**
+When a secondary-model attempt is rate-limited (HTTP 429), credential
+failover re-keys to the **PRIMARY** model's credential — secondary
+attempts resolve to the primary credential at the executor layer.
+Operators watching `model_credential_failover` events on secondary
+attempts should expect `from_credential_id` to equal the **primary**'s
+credential, not the secondary's. This is specified behavior; it
+preserves provider-pool consistency within the same model.
+
+**Worst-case latency under full rate-limit pressure.** When every
+credential on a multi-credential model is rate-limited simultaneously
+and the model has a fallback chain, the proxy may burn up to
+**Σ(len(credentials) − 1)** extra 429 round-trips before falling
+through to the fallback model — each credential failover costs one
+upstream RTT. With N credentials on the primary model, that's up to
+N − 1 extra RTTs plus the fallback attempt. Tune `STREAM_DEADLINE` and
+`MAX_GENERATION_TIME` accordingly when configuring large N.
+
+**Stale-binding self-healing.** If the credential a conversation is
+bound to has been deleted, weight-changed out, or aged out by another
+mechanism, the first 429 on that stale binding triggers **exactly one**
+`model_credential_failover` event — the conversation rebinds to a
+healthy credential and stays there for a fresh 24h TTL window. Expect
+a single event per stale binding, not a burst: the rebind is
+idempotent under concurrent double-429s (no flapping to a third
+credential), and the new binding's sliding TTL prevents the same
+conversation from oscillating back to a cooling credential within the
+window.
+
 ## ☸️ Kubernetes Deployment
 
 Deploy to Kubernetes using the included Helm chart:
