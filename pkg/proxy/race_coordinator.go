@@ -1490,7 +1490,7 @@ func (c *raceCoordinator) GetRequestStatuses() map[string]string {
 			statuses[key] = status
 			// Round 3j W4 — use ONLY reselectedCredentialID.
 			// Reading req.resolved.CredentialID here would race the
-			// executor's lock-free write (race_executor.go:274); the
+			// executor's lock-free write (race_executor.go:293); the
 			// reselected credential IS the row's identity for operator
 			// observability.
 			if req.reselectedCredentialID != "" {

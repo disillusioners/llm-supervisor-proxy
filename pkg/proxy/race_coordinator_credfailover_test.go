@@ -523,13 +523,12 @@ func drainEvents(bus *events.Bus, eventType string) []events.Event {
 //      the model's Credentials list (the C1 belt-and-braces at
 //      race_executor.go:resolveSpecificInternalCredential).
 //
-// NOTE on integration: a full integration test that fires Case 1 on
-// the fallback row in a 2-model chain is blocked by the B1 separate-
-// accounting "all-failed" check (modelAttempts >= len(models) fires
-// before the fallback row gets a credFailover chance). That gate is
-// a separate architectural decision from C1; the spawn-layer and
-// resolver-layer guardrails here are the actual code paths the C1
-// fix changed, and they fail loudly if reverted.
+// NOTE on integration: the direct-spawn() design was chosen because
+// a full integration test that fires Case 1 on the fallback row in a
+// 2-model chain requires running concurrent scripted providers with
+// timing coordination. The spawn-layer and resolver-layer guardrails
+// in this test exercise the exact code paths the C1 fix changed, and
+// they fail loudly if reverted.
 func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 	mock := &mockModelsConfig{}
 	// m1 credentials (the LEGACY pool that the bug would have used)
@@ -654,10 +653,3 @@ func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 
 	_ = resolver // anchored for future test expansion
 }
-
-// TestCoordinator_CredFailover_LegacySpawnUsesCModelsZero is the
-// regression guard for the defensive fallback in spawn(): when
-// triggerInfo.modelID is empty (legacy single-model chains / corrupted
-// triggers), the row's modelID MUST be c.models[0]. This branch is
-// DOCUMENTED (race_coordinator.go:291-294) but exercised here so a
-// future "always require modelID" refactor surfaces immediately.
