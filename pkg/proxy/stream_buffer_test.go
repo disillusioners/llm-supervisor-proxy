@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -954,5 +955,61 @@ func TestStreamBufferShouldPruneBoundaryAtEnd(t *testing.T) {
 	// (past halfway point: 3 > 4/2 = 2)
 	if !sb.ShouldPrune(3) {
 		t.Error("ShouldPrune(3) should be true (past halfway, one chunk remaining)")
+	}
+}
+
+// TestStreamBufferNilReceiverSafety is a regression test for the production
+// SIGSEGV: upstreamRequest.Cancel() releases the buffer (sets the field to
+// nil) while executor/handler goroutines may still hold or fetch the buffer
+// pointer. All streamBuffer methods must be nil-receiver safe.
+func TestStreamBufferNilReceiverSafety(t *testing.T) {
+	var sb *streamBuffer
+
+	if sb.Add([]byte("data")) {
+		t.Error("Add on nil receiver should return false")
+	}
+
+	sb.Close(nil) // must not panic
+
+	if got := sb.GetAllRawBytesOnce(); got != nil {
+		t.Errorf("GetAllRawBytesOnce on nil receiver = %v, want nil", got)
+	}
+	if got := sb.GetAllRawBytes(); got != nil {
+		t.Errorf("GetAllRawBytes on nil receiver = %v, want nil", got)
+	}
+
+	chunks, idx := sb.GetChunksFrom(0)
+	if chunks != nil || idx != 0 {
+		t.Errorf("GetChunksFrom on nil receiver = (%v, %d), want (nil, 0)", chunks, idx)
+	}
+
+	if got := sb.TotalLen(); got != 0 {
+		t.Errorf("TotalLen on nil receiver = %d, want 0", got)
+	}
+	if !sb.IsComplete() {
+		t.Error("IsComplete on nil receiver should be true (no more data can arrive)")
+	}
+	if sb.ShouldPrune(1) {
+		t.Error("ShouldPrune on nil receiver should be false")
+	}
+	sb.Prune(1) // must not panic
+
+	if sb.Err() == nil {
+		t.Error("Err on nil receiver should return context.Canceled")
+	} else if sb.Err() != context.Canceled {
+		t.Errorf("Err on nil receiver = %v, want context.Canceled", sb.Err())
+	}
+
+	// NotifyCh/Done must return a closed channel so relay loops wake up
+	// instead of blocking forever on a nil channel
+	select {
+	case <-sb.NotifyCh():
+	default:
+		t.Error("NotifyCh on nil receiver should return a closed channel")
+	}
+	select {
+	case <-sb.Done():
+	default:
+		t.Error("Done on nil receiver should return a closed channel")
 	}
 }

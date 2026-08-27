@@ -1037,6 +1037,13 @@ func (h *Handler) handleRaceFailure(w http.ResponseWriter, rc *requestContext, c
 // Returns an error if client write failed (e.g., connection dropped by Cloudflare/proxy).
 func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner *upstreamRequest) error {
 	buffer := winner.GetBuffer()
+	if buffer == nil {
+		// Buffer released by Cancel() before relay started — the request
+		// was cancelled (client disconnect / coordinator shutdown) and no
+		// data can ever arrive. Streaming an empty 200 would hang the
+		// relay loop on a permanently-closed notify channel.
+		return fmt.Errorf("winner buffer released before streaming (request cancelled)")
+	}
 	readIndex := 0
 
 	// Track if we've already sent an error (to avoid duplicates)

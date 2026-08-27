@@ -587,7 +587,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 	}
 
 	// If provider didn't return usage, use fallback token counting
-	if upstreamReq.usage == nil || (upstreamReq.usage.PromptTokens == 0 && upstreamReq.usage.CompletionTokens == 0 && upstreamReq.usage.TotalTokens == 0) {
+	if usage := upstreamReq.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 		if token.FallbackEnabled() {
 			tokenizer := token.GetTokenizer()
 			// Convert bodyMap back to rawBody for fallback counting
@@ -624,7 +624,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 	}
 
 	// Add as single chunk
-	if !upstreamReq.buffer.Add(data) {
+	if buf := upstreamReq.GetBuffer(); !buf.Add(data) {
 		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
 	}
 
@@ -633,6 +633,14 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 
 // handleInternalStream handles streaming requests for internal providers
 func handleInternalStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, upstreamReq *upstreamRequest, internalModel string, normCtx *normalizers.NormalizeContext, toolRepairConfig toolrepair.Config, streamDeadline time.Duration, rawBody []byte) error {
+	// Snapshot the buffer once: Cancel() (client disconnect) releases the
+	// buffer field concurrently (cleanup sets it to nil), so this handler
+	// must never re-read upstreamReq.buffer after this point. The snapshot
+	// stays valid after Close() — Add returns false, GetAllRawBytesOnce
+	// still returns the buffered chunks (regression: nil-deref SIGSEGV in
+	// the fallback token-count path).
+	buf := upstreamReq.GetBuffer()
+
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		// Extract HTTP status from ProviderError if available
@@ -733,7 +741,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if modified {
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
-			if !upstreamReq.buffer.Add(normalizedLine) {
+			if !buf.Add(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded: content chunk for model %s", internalModel)
 			}
 			firstChunk = false
@@ -809,7 +817,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 
 				// Add all chunks to buffer
 				for _, chunk := range chunksToEmit {
-					if !upstreamReq.buffer.Add(chunk) {
+					if !buf.Add(chunk) {
 						return fmt.Errorf("buffer limit exceeded: tool_call chunk for model %s", internalModel)
 					}
 				}
@@ -839,7 +847,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if modified {
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
-			if !upstreamReq.buffer.Add(normalizedLine) {
+			if !buf.Add(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded: thinking chunk for model %s", internalModel)
 			}
 
@@ -848,7 +856,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if toolCallBuffer != nil {
 				flushChunks := toolCallBuffer.Flush()
 				for _, chunk := range flushChunks {
-					if !upstreamReq.buffer.Add(chunk) {
+					if !buf.Add(chunk) {
 						log.Printf("[WARN] Race attempt %d (internal): failed to flush tool call chunk", upstreamReq.id)
 					}
 				}
@@ -910,24 +918,24 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 
 			finalData, _ := json.Marshal(finalChunk)
 			finalLine := fmt.Sprintf("data: %s\n", finalData)
-			if !upstreamReq.buffer.Add([]byte(finalLine)) {
+			if !buf.Add([]byte(finalLine)) {
 				return fmt.Errorf("buffer limit exceeded: final chunk for model %s", internalModel)
 			}
 
 			// Write [DONE] marker
-			if !upstreamReq.buffer.Add([]byte("data: [DONE]\n")) {
+			if !buf.Add([]byte("data: [DONE]\n")) {
 				return fmt.Errorf("buffer limit exceeded: done marker for model %s", internalModel)
 			}
 
 			// If provider didn't return usage in the done event, use fallback
-			if upstreamReq.usage == nil || (upstreamReq.usage.PromptTokens == 0 && upstreamReq.usage.CompletionTokens == 0 && upstreamReq.usage.TotalTokens == 0) {
+			if usage := upstreamReq.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 				if token.FallbackEnabled() {
 					tokenizer := token.GetTokenizer()
 					promptTokens, err := tokenizer.CountPromptTokens(rawBody, internalModel)
 					if err != nil {
 						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
 					}
-					rawBytes := upstreamReq.buffer.GetAllRawBytesOnce()
+					rawBytes := buf.GetAllRawBytesOnce()
 					completionText := token.ExtractCompletionTextFromChunks(rawBytes)
 					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
 					if err != nil {
@@ -1167,7 +1175,7 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 	}
 
 	// If provider didn't return usage, use fallback token counting
-	if req.usage == nil || (req.usage.PromptTokens == 0 && req.usage.CompletionTokens == 0 && req.usage.TotalTokens == 0) {
+	if usage := req.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 		if token.FallbackEnabled() {
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
@@ -1190,7 +1198,7 @@ func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *
 	}
 
 	// Add as single chunk (the non-streaming JSON response)
-	if !req.buffer.Add(body) {
+	if buf := req.GetBuffer(); !buf.Add(body) {
 		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", req.modelID)
 	}
 
@@ -1381,6 +1389,13 @@ func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepai
 // (H5). Gated-off is a pure no-op: the StreamTranslator instance
 // is only constructed when the gate fires.
 func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string, rawBody []byte, interleaved bool) error {
+	// Snapshot the buffer once: Cancel() (client disconnect) releases the
+	// buffer field concurrently (cleanup sets it to nil), so this handler
+	// must never re-read req.buffer after this point. The snapshot stays
+	// valid after Close() — Add returns false, GetAllRawBytesOnce still
+	// returns the buffered chunks.
+	buf := req.GetBuffer()
+
 	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
 	// to avoid issues with long SSE lines and memory retention.
 	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
@@ -1556,7 +1571,7 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 
 			// Add all chunks to buffer
 			for _, chunk := range chunksToEmit {
-				if !req.buffer.Add(chunk) {
+				if !buf.Add(chunk) {
 					return fmt.Errorf("buffer limit exceeded: streaming tool_call chunk for model %s", req.modelID)
 				}
 			}
@@ -1593,7 +1608,7 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 	if toolCallBuffer != nil {
 		flushChunks := toolCallBuffer.Flush()
 		for _, chunk := range flushChunks {
-			if !req.buffer.Add(chunk) {
+			if !buf.Add(chunk) {
 				log.Printf("[WARN] Race attempt %d: failed to add flushed tool call chunk (buffer limit exceeded)", req.id)
 				break
 			}
@@ -1624,14 +1639,14 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 	}
 
 	// If no usage was found during streaming, use fallback
-	if req.usage == nil || (req.usage.PromptTokens == 0 && req.usage.CompletionTokens == 0 && req.usage.TotalTokens == 0) {
+	if usage := req.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 		if token.FallbackEnabled() {
 			tokenizer := token.GetTokenizer()
 			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
 			if err != nil {
 				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
 			}
-			rawBytes := req.buffer.GetAllRawBytesOnce()
+			rawBytes := buf.GetAllRawBytesOnce()
 			completionText := token.ExtractCompletionTextFromChunks(rawBytes)
 			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
 			if err != nil {

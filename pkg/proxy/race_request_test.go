@@ -201,6 +201,72 @@ func TestUpstreamRequestGetBuffer(t *testing.T) {
 	}
 }
 
+// TestUpstreamRequestCancelDuringStreamNoPanic is a regression test for the
+// production SIGSEGV (exit 2): a client disconnect calls Cancel() which
+// releases the buffer (cleanup sets r.buffer = nil) while the executor
+// goroutine is still streaming and later dereferences the buffer in the
+// fallback token-count path (GetAllRawBytesOnce). Executors now snapshot the
+// buffer once via GetBuffer(); this test hammers Cancel() against
+// GetBuffer()/snapshot reads under the race detector.
+func TestUpstreamRequestCancelDuringStreamNoPanic(t *testing.T) {
+	req := newUpstreamRequest(0, modelTypeMain, "gpt-4", 1024)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Writer goroutine: mimics handleInternalStream/handleStreamingResponse
+	// using a buffer snapshot taken once at entry
+	snapshot := req.GetBuffer()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			snapshot.Add([]byte("data: {\"choices\":[]}\n"))
+			raw := snapshot.GetAllRawBytesOnce()
+			_ = raw
+		}
+	}()
+
+	// Reader goroutine: mimics coordinator/handler fetching the live buffer
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if buf := req.GetBuffer(); buf != nil {
+				_ = buf.TotalLen()
+			}
+		}
+	}()
+
+	// Canceller goroutine: mimics client disconnect → coordinator Cancel()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if i == 50 {
+				close(stop)
+			}
+			req.Cancel()
+		}
+	}()
+
+	wg.Wait()
+
+	if buf := req.GetBuffer(); buf != nil {
+		t.Error("GetBuffer() after Cancel() = non-nil, want released (nil) buffer")
+	}
+}
+
 func TestUpstreamRequestGetError(t *testing.T) {
 	tests := []struct {
 		name      string

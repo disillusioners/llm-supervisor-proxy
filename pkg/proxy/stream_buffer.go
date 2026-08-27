@@ -1,9 +1,21 @@
 package proxy
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
+
+// nilStreamSignal is a pre-closed channel returned by NotifyCh/Done when the
+// receiver is nil (buffer released by Cancel). Consumers wake immediately
+// instead of blocking forever on a nil channel. A nil receiver means the
+// owning request was cancelled, so "no more data will ever arrive" is the
+// correct signal.
+var nilStreamSignal = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
 
 // chunkPool provides pooling for byte slices to reduce allocations and GC pressure.
 // Using a pool of pre-sized slices avoids repeated allocations for common chunk sizes.
@@ -96,7 +108,12 @@ func newStreamBuffer(maxBytes int64) *streamBuffer {
 // Add appends a chunk to the buffer. Thread-safe. Never blocks.
 // Uses sync.Pool for byte slice allocation to reduce GC pressure.
 // Returns false if buffer overflow (caller should stop).
+// Nil-receiver safe: a nil buffer (released by Cancel) accepts no data.
 func (sb *streamBuffer) Add(line []byte) bool {
+	if sb == nil {
+		return false
+	}
+
 	// Check if already completed
 	if atomic.LoadInt32(&sb.completed) == 1 {
 		return false
@@ -135,7 +152,12 @@ func (sb *streamBuffer) Add(line []byte) bool {
 }
 
 // Close marks the buffer as complete. Thread-safe.
+// Nil-receiver safe: no-op on a released buffer.
 func (sb *streamBuffer) Close(err error) {
+	if sb == nil {
+		return
+	}
+
 	if !atomic.CompareAndSwapInt32(&sb.completed, 0, 1) {
 		return // Already closed
 	}
@@ -162,7 +184,12 @@ func (sb *streamBuffer) InvalidateCache() {
 // GetAllRawBytesOnce returns cached raw bytes if valid, builds cache if not.
 // Thread-safe using double-checked locking.
 // The returned []byte is shared - callers must NOT modify it.
+// Nil-receiver safe: returns nil on a released buffer.
 func (sb *streamBuffer) GetAllRawBytesOnce() []byte {
+	if sb == nil {
+		return nil
+	}
+
 	sb.mu.RLock()
 	if sb.cacheValid && sb.cachedRawBytes != nil {
 		result := sb.cachedRawBytes
@@ -192,7 +219,12 @@ func (sb *streamBuffer) GetAllRawBytesOnce() []byte {
 
 // GetChunksFrom returns chunks starting from index. Thread-safe.
 // Returns the chunks and the new index to use for next call.
+// Nil-receiver safe: no new data on a released buffer.
 func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
+	if sb == nil {
+		return nil, fromIndex
+	}
+
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 
@@ -239,6 +271,10 @@ func (sb *streamBuffer) GetChunksFrom(fromIndex int) ([][]byte, int) {
 // Uses sync.Pool to return chunks for reuse instead of deallocation.
 // This is critical for memory efficiency during long streams.
 func (sb *streamBuffer) Prune(readIndex int) {
+	if sb == nil {
+		return
+	}
+
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
@@ -256,6 +292,10 @@ func (sb *streamBuffer) Prune(readIndex int) {
 // ShouldPrune returns true if pruning would be beneficial.
 // Pruning is beneficial when readIndex is past the halfway point of chunks.
 func (sb *streamBuffer) ShouldPrune(readIndex int) bool {
+	if sb == nil {
+		return false
+	}
+
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 	// W3: Fix boundary - only prune if readIndex is within bounds (not at end)
@@ -263,27 +303,52 @@ func (sb *streamBuffer) ShouldPrune(readIndex int) bool {
 }
 
 // TotalLen returns total buffered bytes. Thread-safe.
+// Nil-receiver safe: a released buffer holds no data.
 func (sb *streamBuffer) TotalLen() int64 {
+	if sb == nil {
+		return 0
+	}
+
 	return atomic.LoadInt64(&sb.totalLen)
 }
 
 // IsComplete returns true if stream has completed.
+// Nil-receiver safe: a released buffer will never receive more data.
 func (sb *streamBuffer) IsComplete() bool {
+	if sb == nil {
+		return true
+	}
+
 	return atomic.LoadInt32(&sb.completed) == 1
 }
 
 // NotifyCh returns the notification channel (signals when new data available).
+// Nil-receiver safe: returns a pre-closed channel so consumers wake immediately.
 func (sb *streamBuffer) NotifyCh() <-chan struct{} {
+	if sb == nil {
+		return nilStreamSignal
+	}
+
 	return sb.notifyCh
 }
 
 // Done returns a channel that's closed when the stream completes.
+// Nil-receiver safe: returns a pre-closed channel so consumers wake immediately.
 func (sb *streamBuffer) Done() <-chan struct{} {
+	if sb == nil {
+		return nilStreamSignal
+	}
+
 	return sb.done
 }
 
 // Err returns the final error (if any). Thread-safe.
+// Nil-receiver safe: a released buffer belongs to a cancelled request.
 func (sb *streamBuffer) Err() error {
+	if sb == nil {
+		return context.Canceled
+	}
+
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 	return sb.err
@@ -291,7 +356,12 @@ func (sb *streamBuffer) Err() error {
 
 // GetAllRawBytes returns all buffered chunks as a single byte slice.
 // Thread-safe for concurrent access. Used for raw response logging.
+// Nil-receiver safe: returns nil on a released buffer.
 func (sb *streamBuffer) GetAllRawBytes() []byte {
+	if sb == nil {
+		return nil
+	}
+
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 

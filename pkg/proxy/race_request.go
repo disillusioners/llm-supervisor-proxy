@@ -183,7 +183,13 @@ func (r *upstreamRequest) GetModelID() string {
 	return r.modelID
 }
 
+// GetBuffer returns the current stream buffer, or nil after Cancel()
+// released it. Callers must either nil-check the result or rely on the
+// nil-safe streamBuffer methods. Lock-protected: buffer release (Cancel →
+// cleanup) writes this field concurrently.
 func (r *upstreamRequest) GetBuffer() *streamBuffer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.buffer
 }
 

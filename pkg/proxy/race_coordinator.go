@@ -415,7 +415,7 @@ func (c *raceCoordinator) manage() {
 
 							// Enhanced logging with timing and buffer stats
 							elapsed := time.Since(c.startTime)
-							bufferLen := req.buffer.TotalLen()
+							bufferLen := req.GetBuffer().TotalLen()
 							log.Printf("[RACE] Winner selected: request %d (%s, %s) after %v, buffer=%d bytes",
 								i, req.modelType, req.modelID, elapsed.Round(time.Millisecond), bufferLen)
 
@@ -663,7 +663,7 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 
 	for _, req := range c.requests {
 		if req != nil && !req.IsDone() {
-			bufferLen := req.buffer.TotalLen()
+			bufferLen := req.GetBuffer().TotalLen()
 			if bufferLen > bestLen {
 				best = req
 				bestLen = bufferLen
@@ -927,7 +927,7 @@ func (c *raceCoordinator) GetStats() RaceStats {
 	if c.winner != nil {
 		stats.WinnerType = string(c.winner.modelType)
 		stats.WinnerModel = c.winner.modelID
-		stats.WinnerBufferLen = c.winner.buffer.TotalLen()
+		stats.WinnerBufferLen = c.winner.GetBuffer().TotalLen()
 	}
 
 	return stats
