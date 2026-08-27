@@ -20,6 +20,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
 type liveFlushingRecorder struct {
@@ -748,5 +749,299 @@ func TestReviewFix8_NilArcEmitLivePreamble(t *testing.T) {
 	// Should not have written anything.
 	if rw.Body.Len() != 0 {
 		t.Errorf("emitLivePreamble(nil) wrote %d bytes; want 0 (no panic, no write)", rw.Body.Len())
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_ToolCallRepair_Active is the regression test for the
+// Phase 3 follow-up ruling (plan decision #5 — preserve tool-call
+// buffering + repair in live mode on the Anthropic path). Before the
+// follow-up, the live tool_call arm bypassed toolCallBuffer entirely
+// (review-fix #4 had documented this as deliberate), so malformed tool
+// args reached the Anthropic wire raw. The follow-up wires the buffer
+// into the live arm — per-call hold, repair chain active, emission on
+// JSON completion.
+//
+// This test sends ONE tool_call event with MALFORMED JSON args
+// (missing closing brace — invalid JSON). The buffer holds the call
+// (isCompleteLocked returns false), then Flush() at end-of-stream
+// triggers the repairer (toolrepair's library_repair strategy uses
+// jsonrepair to add the missing brace). The REPAIRED args must reach
+// the wire.
+//
+// A failure of this test means the live arm bypasses repair again —
+// raw malformed args leaking to streaming clients.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_ToolCallRepair_Active(t *testing.T) {
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	// Configure the buffer with the default repair config (Enabled,
+	// strategies: trim_trailing_garbage, extract_json, library_repair,
+	// remove_reasoning).
+	handler.SetToolCallBufferConfig(1024*1024, false, toolrepair.DefaultConfig())
+
+	tr := translator.NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	if err := handler.SetLiveTranslator(tr); err != nil {
+		t.Fatalf("SetLiveTranslator: %v", err)
+	}
+	handler.SetLiveArc(&anthropicRequestContext{})
+
+	// ONE tool_call event with INVALID JSON args (missing closing
+	// brace). The buffer holds the call (isCompleteLocked fails on
+	// truncated JSON), then Flush() at end-of-stream runs the repairer.
+	provider := &liveStreamEventProvider{events: []providers.StreamEvent{
+		{
+			Type: "tool_call",
+			ToolCalls: []providers.ToolCall{
+				{
+					ID:   "toolu_repair_test",
+					Type: "function",
+					Function: providers.ToolCallFunction{
+						Name:      "lookup",
+						Arguments: `{"q":"hi"`, // INVALID — missing closing brace
+					},
+				},
+			},
+		},
+		{Type: "done", FinishReason: "stop"},
+	}}
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{
+		Model:    "test-model",
+		Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+		Stream:   true,
+	}
+
+	if err := handler.handleStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
+		t.Fatalf("handleStream: %v", err)
+	}
+
+	body := rw.Body.String()
+
+	// The repaired JSON (with closing brace added by jsonrepair) must
+	// be on the Anthropic wire. The translator wraps input_json_delta
+	// in `"partial_json":"..."` with the inner JSON's quotes escaped.
+	// Parse the input_json_delta event's data payload and check the
+	// partial_json field is the repaired value (valid JSON object).
+	var foundRepaired bool
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		if ev["type"] != "content_block_delta" {
+			continue
+		}
+		delta, ok := ev["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if delta["type"] != "input_json_delta" {
+			continue
+		}
+		pj, ok := delta["partial_json"].(string)
+		if !ok {
+			continue
+		}
+		// Verify the partial_json is valid JSON ending with the
+		// repaired closing brace — confirms repair added it.
+		var js interface{}
+		if err := json.Unmarshal([]byte(pj), &js); err == nil {
+			// Also assert the repaired shape: {"q":"hi"}.
+			if m, ok := js.(map[string]interface{}); ok {
+				if q, ok := m["q"].(string); ok && q == "hi" {
+					foundRepaired = true
+				}
+			}
+		}
+	}
+	if !foundRepaired {
+		t.Errorf("LiveMode repair NOT active: expected repaired JSON `{\"q\":\"hi\"}` (with closing brace) on wire; body=%q", body)
+	}
+	// Tool name should appear (content_block_start with name=lookup).
+	if !strings.Contains(body, `"name":"lookup"`) {
+		t.Errorf("LiveMode repair: tool name missing from wire; body=%q", body)
+	}
+	// Preamble + close events must appear.
+	if !strings.Contains(body, "event: message_start") {
+		t.Errorf("LiveMode repair: missing message_start; body=%q", body)
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Errorf("LiveMode repair: missing message_stop; body=%q", body)
+	}
+	// The translator's StreamState.ToolCalls must also reflect the
+	// repaired args (per-review-fix-#1 ProcessEvent accumulation mirror).
+	st := tr.State()
+	if len(st.ToolCalls) != 1 {
+		t.Fatalf("LiveMode repair: State().ToolCalls len = %d, want 1", len(st.ToolCalls))
+	}
+	if got, want := st.ToolCalls[0].Arguments.String(), `{"q":"hi"}`; got != want {
+		t.Errorf("LiveMode repair: State().ToolCalls[0].Arguments = %q, want %q (REPAIRED)", got, want)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_NonToolChunkLatency is the second regression test for
+// the Phase 3 follow-up ruling. The follow-up explicitly accepts
+// "arrival-order divergence" — a held tool call may complete AFTER
+// later text/thinking chunks have already streamed to the wire (the
+// per-call hold is BOUNDED to ONE tool call's JSON completion, not a
+// full-response hold). The translator assigns block indices at
+// emission time, so the held call lands later on the wire but with a
+// valid Anthropic structure.
+//
+// This test drives:
+//   1. tool_call (incomplete JSON — held)
+//   2. content "HELLO"  ← must reach wire BEFORE the tool completes
+//   3. tool_call (completes JSON — buffer emits)
+//   4. done
+//
+// Assertions:
+//   - "HELLO" appears on the wire BEFORE the tool_use content_block_start
+//     (content pass-through latency — no cross-kind hold).
+//   - The completed tool IS on the wire (held calls do reach the
+//     client eventually).
+//   - message_start / message_stop / structure still well-formed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_NonToolChunkLatency(t *testing.T) {
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	handler.SetToolCallBufferConfig(1024*1024, false, toolrepair.DefaultConfig())
+
+	tr := translator.NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	if err := handler.SetLiveTranslator(tr); err != nil {
+		t.Fatalf("SetLiveTranslator: %v", err)
+	}
+	handler.SetLiveArc(&anthropicRequestContext{})
+
+	// Sequence: held tool_call start → text → completing tool_call → done.
+	// Combined args across events 1+3 = `{"k":"v"}` (valid JSON).
+	provider := &liveStreamEventProvider{events: []providers.StreamEvent{
+		{
+			Type: "tool_call",
+			ToolCalls: []providers.ToolCall{
+				{ID: "toolu_lat", Type: "function", Function: providers.ToolCallFunction{Name: "lookup", Arguments: `{"k":`}},
+			},
+		},
+		{Type: "content", Content: "HELLO"},
+		{
+			Type: "tool_call",
+			ToolCalls: []providers.ToolCall{
+				{ID: "toolu_lat", Type: "function", Function: providers.ToolCallFunction{Name: "lookup", Arguments: `"v"}`}},
+			},
+		},
+		{Type: "done", FinishReason: "stop"},
+	}}
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{
+		Model:    "test-model",
+		Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+		Stream:   true,
+	}
+
+	if err := handler.handleStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
+		t.Fatalf("handleStream: %v", err)
+	}
+
+	body := rw.Body.String()
+
+	// Preamble + close events still well-formed.
+	if !strings.Contains(body, "event: message_start") {
+		t.Errorf("latency: missing message_start; body=%q", body)
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Errorf("latency: missing message_stop; body=%q", body)
+	}
+
+	// HELLO and the completed tool's content_block_start must both
+	// appear. Find their byte positions on the wire.
+	idxContent := strings.Index(body, "HELLO")
+	idxToolStart := strings.Index(body, `"type":"tool_use"`)
+	if idxContent < 0 {
+		t.Fatalf("latency: missing content 'HELLO' on wire; body=%q", body)
+	}
+	if idxToolStart < 0 {
+		t.Fatalf("latency: missing tool_use block on wire (held tool did not land); body=%q", body)
+	}
+
+	// Non-tool pass-through latency — the content chunk must appear
+	// BEFORE the held tool's completion event (no cross-kind hold).
+	if idxContent >= idxToolStart {
+		t.Errorf("latency violated: content 'HELLO' at byte %d must appear BEFORE tool_use block at byte %d; body=%q",
+			idxContent, idxToolStart, body)
+	}
+
+	// The completed tool's combined args (the buffer concatenated the
+	// two held fragments and emitted) must appear on the wire. The
+	// translator wraps input_json_delta in `"partial_json":"..."` with
+	// the inner JSON's quotes escaped — parse the payload and assert
+	// the partial_json parses to {"k":"v"}.
+	var foundCombined bool
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		if ev["type"] != "content_block_delta" {
+			continue
+		}
+		delta, ok := ev["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if delta["type"] != "input_json_delta" {
+			continue
+		}
+		pj, ok := delta["partial_json"].(string)
+		if !ok {
+			continue
+		}
+		var js interface{}
+		if err := json.Unmarshal([]byte(pj), &js); err == nil {
+			if m, ok := js.(map[string]interface{}); ok {
+				if k, ok := m["k"].(string); ok && k == "v" {
+					foundCombined = true
+				}
+			}
+		}
+	}
+	if !foundCombined {
+		t.Errorf("latency: completed tool's combined args missing from wire; body=%q", body)
+	}
+
+	// The translator's StreamState must reflect the completed tool
+	// (per-review-fix-#1 ProcessEvent accumulation mirror — proves
+	// the arc mirror in doAnthropicInternalRequest will see it).
+	st := tr.State()
+	if len(st.ToolCalls) != 1 {
+		t.Fatalf("latency: State().ToolCalls len = %d, want 1", len(st.ToolCalls))
+	}
+	if got, want := st.ToolCalls[0].Arguments.String(), `{"k":"v"}`; got != want {
+		t.Errorf("latency: State().ToolCalls[0].Arguments = %q, want %q", got, want)
+	}
+	if got, want := st.AccumulatedContent.String(), "HELLO"; got != want {
+		t.Errorf("latency: State().AccumulatedContent = %q, want %q", got, want)
 	}
 }

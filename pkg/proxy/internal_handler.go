@@ -507,43 +507,95 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 
 		case "tool_call":
 			if h.liveTranslator != nil {
-				// Live mode: drive the translator via ProcessEvent with
-				// the OpenAI-shape tool_calls list. Emitted Anthropic
-				// events REPLACE the raw OpenAI-chunk write to w.
-				//
-				// REVIEW-FIX #4 (Phase 3 review, DOCUMENT-ONLY):
-				// The live tool_call arm does NOT feed toolCallBuffer —
-				// the buffered arm below (lines ~552-560) is the only
-				// path that runs tool-call repair. This is a DELIBERATE
-				// semantic divergence, not a bug:
-				//   - live mode = raw tool arguments reach the wire
-				//     IMMEDIATELY (no repair window between receipt of
-				//     fragments and emission to the client).
-				//   - buffered mode = full tool-call repair chain runs
-				//     on the recorder's collected fragments before the
-				//     client sees anything.
-				// The semantics decision (whether live mode should also
-				// buffer for repair) is being escalated separately.
-				// Adding the buffer here would change wire-visible
-				// behavior (introduce latency between fragment receipt
-				// and emission) and is OUT OF SCOPE for the review
-				// pass. See pkg/proxy/adapter_anthropic.go for the
-				// parallel buffered/non-buffered seam.
-				toolCallsForEv := convertProvidersToolCallsToMapList(event.ToolCalls)
-				events, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
-				if terr != nil {
-					logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (tool_call): %v", terr)
-					break
+				// LIVE MODE with per-call hold + repair active (Phase 3
+				// follow-up ruling on plan decision #5 — tool-call
+				// buffering must be preserved for streaming clients,
+				// mirroring the Phase 2 OpenAI race path). The
+				// pipeline SHAPE here mirrors the buffered arm below
+				// (~:552-585):
+				//   1. Build a raw OpenAI SSE "data: ..." line from
+				//      the typed event's ToolCalls (same construction
+				//      as the buffered arm — see ~:551-569).
+				//   2. Feed it through toolCallBuffer.ProcessChunk —
+				//      per-call hold: the buffer accumulates fragments
+				//      per index and emits an OpenAI-shape chunk ONLY
+				//      when that tool call's arguments form valid JSON
+				//      (buffer.go:220-223). If JSON is malformed, the
+				//      toolrepair chain (pkg/toolrepair) repairs it
+				//      before emission (buffer.go:268-286).
+				//   3. For each complete emission, parse back to a
+				//      providers.ToolCall list and drive the
+				//      liveTranslator via ProcessEvent. The
+				//      translator's emitToolDelta opens the
+				//      content_block_start on first id+name arrival
+				//      and emits input_json_delta(complete args) — no
+				//      unbounded hold, only per-call latency.
+				//   4. Write the emitted Anthropic events to w.
+				// Non-tool arms (case "content" / "thinking") stay
+				// UNTOUCHED — immediate pass-through, zero added
+				// latency for text/thinking deltas. Only tool-call
+				// fragments are subject to the per-call hold.
+				chunk := providers.ChatCompletionResponse{
+					ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   internalModel,
+					Choices: []providers.Choice{
+						{
+							Index: 0,
+							Delta: &providers.ChatMessage{
+								Role:      "assistant",
+								ToolCalls: event.ToolCalls,
+							},
+						},
+					},
 				}
-				if len(events) > 0 {
-					h.emitLivePreamble(w, h.liveArc)
+				data, _ := json.Marshal(chunk)
+				line := fmt.Sprintf("data: %s\n\n", data)
+				logger.Debugf("[DEBUG INTERNAL] Live tool_call chunk: %s", string(data))
+
+				// Per-call hold + repair (same shape as the buffered
+				// arm's toolCallBuffer call below). The buffer may
+				// return zero chunks when no tool call is yet complete
+				// (in-flight fragments held until JSON parses) — that
+				// IS the per-call hold guarantee.
+				var chunksToEmit [][]byte
+				if toolCallBuffer != nil {
+					chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+				} else {
+					// No buffer configured (disabled): preserve the
+					// raw-passthrough behavior so a misconfigured test
+					// path doesn't drop tool calls silently. This
+					// matches the buffered arm's else-branch behavior.
+					chunksToEmit = [][]byte{[]byte(line)}
 				}
-				for _, ev := range events {
-					if _, werr := w.Write([]byte(ev)); werr != nil {
-						return werr
+
+				// Drive the liveTranslator with each complete emission.
+				// Each emission has COMPLETE args (the buffer's per-
+				// call hold guarantee) so the translator's
+				// content_block_start + input_json_delta(complete)
+				// emission shape is correct.
+				for _, emitted := range chunksToEmit {
+					tcs := parseBufferEmittedToolCalls(emitted)
+					if len(tcs) == 0 {
+						continue
 					}
-					if f, ok := w.(http.Flusher); ok {
-						f.Flush()
+					toolCallsForEv := convertProvidersToolCallsToMapList(tcs)
+					events, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
+					if terr != nil {
+						logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (tool_call): %v", terr)
+						break
+					}
+					if len(events) > 0 {
+						h.emitLivePreamble(w, h.liveArc)
+					}
+					for _, ev := range events {
+						if _, werr := w.Write([]byte(ev)); werr != nil {
+							return werr
+						}
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
 					}
 				}
 				break
@@ -589,22 +641,41 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				// Live mode: the plan pins the ordering constraint
 				// that translator.Finalize() MUST run AFTER
 				// toolCallBuffer.Flush() completes (internal_handler
-				// toolcall-buffer ordering constraint). The buffer
-				// flush is for the recorder-based buffered path; in
-				// live mode the buffer is unused (we drive the
-				// translator directly with typed events, no recorder),
-				// but we still maintain the structural order for
-				// consistency: flush buffer (no-op if nil) → run
-				// translator.Finalize() → write the close events to
-				// the wire.
+				// toolcall-buffer ordering constraint). With per-call
+				// hold active (Phase 3 follow-up), Flush() may now
+				// emit any HELD tool calls (those that never reached
+				// valid JSON during streaming — truncated stream,
+				// upstream error, etc.). Those emissions MUST be fed
+				// through the liveTranslator BEFORE Finalize() runs;
+				// otherwise the held calls would vanish from the wire
+				// AND from the arc mirror, breaking the persistence
+				// contract. Ordering is load-bearing — see also the
+				// phase-3 follow-up commit's regression test pair.
 				if toolCallBuffer != nil {
 					flushChunks := toolCallBuffer.Flush()
-					// Live mode: toolCallBuffer.Flush output is
-					// already translated into Anthropic events via
-					// ProcessEvent above; the recorder-flush chunks
-					// are NOT emitted to the wire in live mode (they
-					// would be raw OpenAI-shape bytes).
-					_ = flushChunks
+					for _, emitted := range flushChunks {
+						tcs := parseBufferEmittedToolCalls(emitted)
+						if len(tcs) == 0 {
+							continue
+						}
+						toolCallsForEv := convertProvidersToolCallsToMapList(tcs)
+						fEvents, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
+						if terr != nil {
+							logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (flush tool_call): %v", terr)
+							continue
+						}
+						if len(fEvents) > 0 {
+							h.emitLivePreamble(w, h.liveArc)
+						}
+						for _, ev := range fEvents {
+							if _, werr := w.Write([]byte(ev)); werr != nil {
+								return werr
+							}
+							if f, ok := w.(http.Flusher); ok {
+								f.Flush()
+							}
+						}
+					}
 					stats := toolCallBuffer.GetRepairStats()
 					if stats.Attempted > 0 {
 						log.Printf("[TOOL-BUFFER] InternalHandler (live): Repair stats: attempted=%d, success=%d, failed=%d",
@@ -769,6 +840,68 @@ func (h *InternalHandler) emitLivePreamble(w http.ResponseWriter, arc *anthropic
 		f.Flush()
 	}
 	return true
+}
+
+// parseBufferEmittedToolCalls parses one `data: {...}\n\n` byte slice
+// emitted by toolcall.ToolCallBuffer (ProcessChunk or Flush) and
+// returns the providers.ToolCall list it carries. Returns nil for
+// non-tool chunks, malformed JSON, or empty tool_calls. The buffer
+// emits at most one tool call per chunk in its current shape
+// (buffer.go:267-316), but this parses any count for forward-
+// compatibility.
+//
+// Used by the live tool_call arm and the Flush-before-Finalize done
+// site to feed the liveTranslator with complete tool-call emissions.
+func parseBufferEmittedToolCalls(line []byte) []providers.ToolCall {
+	s := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(s, "data: ") {
+		return nil
+	}
+	data := strings.TrimPrefix(s, "data: ")
+	var chunk map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		return nil
+	}
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	delta, ok := choice["delta"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	toolCallsRaw, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(toolCallsRaw) == 0 {
+		return nil
+	}
+	var out []providers.ToolCall
+	for _, tc := range toolCallsRaw {
+		tcMap, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ptc := providers.ToolCall{}
+		if id, ok := tcMap["id"].(string); ok {
+			ptc.ID = id
+		}
+		if typ, ok := tcMap["type"].(string); ok {
+			ptc.Type = typ
+		}
+		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+			if name, ok := fn["name"].(string); ok {
+				ptc.Function.Name = name
+			}
+			if args, ok := fn["arguments"].(string); ok {
+				ptc.Function.Arguments = args
+			}
+		}
+		out = append(out, ptc)
+	}
+	return out
 }
 
 // convertProvidersToolCallsToMapList converts providers.ToolCall into
