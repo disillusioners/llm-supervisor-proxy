@@ -106,7 +106,7 @@ func TestNewRaceCoordinatorWithEvents(t *testing.T) {
 	cfg := newTestConfigSnapshot("gpt-4")
 	models := []string{"gpt-4"}
 
-	coord := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), models, nil, "test-request-id", false, nil, "")
+	coord := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), []byte("{}"), models, nil, "test-request-id", false, nil, "", false)
 
 	if coord.eventBus != nil {
 		t.Error("eventBus should be nil")

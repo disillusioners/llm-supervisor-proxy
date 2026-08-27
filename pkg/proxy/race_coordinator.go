@@ -169,10 +169,22 @@ type raceCoordinator struct {
 
 	// Stream deadline error info (set when stream deadline fires with no content)
 	streamDeadlineError *FinalErrorInfo
+
+	// liveFirstByteGate (Phase 2 / real-streaming-default) redefines the
+	// winner-eligibility predicate from `IsCompleted()` to "first forwardable
+	// data chunk" (`GetError()==nil && GetBuffer().TotalLen()>0`). Set by
+	// handler.go BEFORE coordinator construction: liveFirstByteGate =
+	// !rc.bufferMode && rc.isStream — isStream-scoped (NOT `!bufferMode`
+	// alone, which would change non-stream deadline behavior, M3 amendment).
+	// The constructor does NOT compute the gate — isStream is a
+	// *requestContext field, not a *ConfigSnapshot, and the constructor
+	// signature is ConfigSnapshot-based. Buffered mode (header present or
+	// isStream=false) is byte-identical to today.
+	liveFirstByteGate bool
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
-	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "")
+	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "", false)
 }
 
 // newRaceCoordinatorWithEvents (Phase 3 / Round 3c C3) gains two more
@@ -180,6 +192,15 @@ func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Requ
 // conversationKey (the per-request affinity key). Constructor-only
 // injection per W-3 holds end-to-end (cmd/main.go → NewHandler →
 // coordinator). The 7th positional arg in NewHandler is the source.
+//
+// Phase 2 / real-streaming-default adds an 11th positional parameter:
+// liveFirstByteGate. When true, the manage-loop winner-eligibility
+// predicate swaps from `IsCompleted()` to the first-byte gate
+// (GetError()==nil && GetBuffer().TotalLen()>0). The 6-arg wrapper
+// (`newRaceCoordinator`) passes false, so direct-constructor test
+// callers stay byte-identical to buffered/legacy semantics. The
+// production call site is handler.go:924, which computes the flag
+// as `!rc.bufferMode && rc.isStream`.
 func newRaceCoordinatorWithEvents(
 	ctx context.Context,
 	cfg *ConfigSnapshot,
@@ -191,25 +212,27 @@ func newRaceCoordinatorWithEvents(
 	interleaved bool,
 	engine *credentiallb.Engine,
 	conversationKey string,
+	liveFirstByteGate bool,
 ) *raceCoordinator {
 	if len(models) == 0 {
 		models = []string{cfg.ModelID}
 	}
 	return &raceCoordinator{
-		baseCtx:         ctx,
-		cfg:             cfg,
-		req:             req,
-		rawBody:         rawBody,
-		interleaved:     interleaved,
-		engine:          engine,
-		conversationKey: conversationKey,
-		models:          models,
-		requests:        make([]*upstreamRequest, 0, len(models)),
-		winnerIdx:       -1,
-		done:            make(chan struct{}),
-		streamCh:        make(chan struct{}),
-		startTime:       time.Now(),
-		spawnTriggers:   make([]spawnTriggerInfo, 0),
+		baseCtx:           ctx,
+		cfg:               cfg,
+		req:               req,
+		rawBody:           rawBody,
+		interleaved:       interleaved,
+		engine:            engine,
+		conversationKey:   conversationKey,
+		models:            models,
+		requests:          make([]*upstreamRequest, 0, len(models)),
+		winnerIdx:         -1,
+		done:              make(chan struct{}),
+		streamCh:          make(chan struct{}),
+		startTime:         time.Now(),
+		spawnTriggers:     make([]spawnTriggerInfo, 0),
+		liveFirstByteGate: liveFirstByteGate,
 		// Phase 3 / Task 19 — per-request tried-set (R3-5: request
 		// context, NOT engine state). Initialized here so manage()'s
 		// first mutation never sees a nil map.
@@ -367,6 +390,16 @@ func (c *raceCoordinator) manage() {
 	// STREAMING DEADLINE TIMER
 	// When StreamDeadline is reached, pick the best buffer and continue streaming.
 	// This allows us to start streaming to the client even if the upstream hasn't finished.
+	//
+	// PRECEDENCE (Phase 1 + Phase 2 / real-streaming-default):
+	//   - Buffered mode (X-LLMProxy-Buffer-Response header present OR isStream=false):
+	//     coordinator runs with the IsCompleted winner gate; StreamDeadline behaves as
+	//     today — promotes a 0-byte best winner and keeps streaming until the hard
+	//     deadline or upstream completion.
+	//   - Live mode (header absent AND isStream=true): coordinator runs with the
+	//     first-byte winner gate (liveFirstByteGate = true). StreamDeadline here
+	//     MEANS "no forwardable byte within StreamDeadline ⇒ terminal in-band SSE
+	//     error envelope + cancelAll()" (see handleStreamingDeadline 0-byte guard).
 	streamDeadlineTimer := time.NewTimer(c.cfg.StreamDeadline)
 	defer streamDeadlineTimer.Stop()
 
@@ -403,10 +436,40 @@ func (c *raceCoordinator) manage() {
 			// BUG FIX: Previously selected winner when IsStreaming() was true, which caused
 			// premature winner selection when request finishes within idle timeout.
 			// The correct behavior: buffer > wait till DONE > select winner
+			//
+			// Phase 2 / real-streaming-default — live-mode winner eligibility
+			// is REDEFINED to "first forwardable data chunk" (the attempt's
+			// streamBuffer transitions from 0 to >=1 chunk):
+			// `req.GetError()==nil && req.GetBuffer().TotalLen()>0`.
+			// Buffered mode (and isStream=false requests, M3) keep the
+			// original IsCompleted gate verbatim — byte-identical to today.
+			//
+			// CONSTRAINT (pinned gate form, amendment #8): the swap lands
+			// in the EXISTING manage-loop ticker arm with `onceStream`
+			// single-close semantics (:431), the deadline guard's reuse of
+			// the winner-nil check (:653-655), and the cancel-and-exit
+			// (:440-446) untouched. NO per-attempt atomic first-byte flag.
 			if c.winner == nil {
 				for i, req := range c.requests {
-					// Only select winner when request is fully completed with [DONE] signal
-					if req.IsCompleted() && req.GetError() == nil {
+					// Phase 2 / real-streaming-default — STRICT mode switch
+					// (review fix; plan :572-574, :640, CONSTRAINTS :609):
+					// the live-mode gate REPLACES the IsCompleted gate, it
+					// is not an OR-superset over it. The OR form had a
+					// corner defect: a live-mode attempt that completed
+					// with err==nil but TotalLen()==0 (upstream emitted
+					// only [DONE]/comments) satisfied the IsCompleted arm
+					// and WON — a phantom 0-byte 200 stream that preempts
+					// fallback and sidesteps the task-2.2 0-byte guard.
+					// In live mode ONLY `TotalLen()>0 && err==nil` is
+					// eligible; buffered mode (and isStream=false, M3)
+					// keeps the IsCompleted gate verbatim.
+					var eligible bool
+					if c.liveFirstByteGate {
+						eligible = req.GetError() == nil && req.GetBuffer().TotalLen() > 0
+					} else {
+						eligible = req.IsCompleted() && req.GetError() == nil
+					}
+					if eligible {
 						// We found a potential winner!
 						// Preference: earlier requests (lower index)
 						if c.winner == nil || i < c.winnerIdx {
@@ -646,11 +709,18 @@ func (c *raceCoordinator) manage() {
 // - Pick the request with the most content (best candidate to continue)
 // - DON'T cancel the winner - let it continue streaming until complete or hard deadline
 // - Cancel only the other requests
+//
+// Phase 2 / real-streaming-default — live-mode 0-byte guard (M3 + amendment #8).
+// When liveFirstByteGate is true, the predicate inside the manage-loop ticker
+// arm is the first-byte gate, so a deadline fire with all buffers empty MUST
+// surface as an in-band SSE error envelope + all attempts cancelled (today's
+// behavior promotes a 0-byte winner and keeps streaming — wrong for live mode).
+// Buffered mode keeps today's behavior byte-identical.
 func (c *raceCoordinator) handleStreamingDeadline() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if c.winner != nil {
+		c.mu.Unlock()
 		return // Already have a winner
 	}
 
@@ -674,6 +744,43 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 	// If we have a winner (even with 0 bytes), stream it
 	// Only error if no requests exist at all
 	if best != nil {
+		// Phase 2 / real-streaming-default — LIVE-MODE 0-BYTE GUARD.
+		// In buffered mode, today promotes a 0-byte winner and keeps
+		// streaming (unaffected). In live mode, a 0-byte deadline fire
+		// means "no forwardable byte within StreamDeadline" — surface as
+		// an in-band SSE error envelope + cancelAll (the no-content
+		// branch below), instead of forwarding a phantom 0-byte winner.
+		if c.liveFirstByteGate && bestLen == 0 {
+			log.Printf("[RACE] Live-mode deadline 0-byte guard firing: no forwardable byte within StreamDeadline")
+
+			// Build error info for the handler to use
+			errInfo := c.getFinalErrorInfoLocked()
+			errInfo.Message = "Request timeout - no response received"
+			c.streamDeadlineError = &errInfo
+
+			c.publishEvent("race_all_failed", map[string]interface{}{
+				"total_attempts": len(c.requests),
+				"duration_ms":    time.Since(c.startTime).Milliseconds(),
+				"reason":         "streaming_deadline_no_content_live",
+			})
+
+			c.onceDone.Do(func() { close(c.done) })
+			c.onceStream.Do(func() { close(c.streamCh) })
+
+			// PINNED cancellation form (C2 / W1): capture the request
+			// set under the held c.mu, RELEASE the lock, THEN cancel.
+			// cancelAll → cancelAllExcept → c.mu re-acquires at :760;
+			// `req.Cancel()` itself only acquires `r.mu` and is not the
+			// deadlock source, but the pinned form keeps one shape.
+			// Releasing first also matches the codebase pattern at
+			// :441-446 (cancel-and-exit). The deferred unlock is
+			// REMOVED in this live-guard branch (W1) — the explicit
+			// Unlock() below replaces it; double-unlock would fail-fast.
+			c.mu.Unlock()
+			c.cancelAll()
+			return
+		}
+
 		c.winner = best
 		c.winnerIdx = best.id
 
@@ -702,6 +809,7 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 				req.Cancel()
 			}
 		}
+		c.mu.Unlock()
 	} else {
 		// No content at all - all failed or no requests started
 		log.Printf("[RACE] Streaming deadline reached, no content available")
@@ -719,6 +827,14 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 
 		c.onceDone.Do(func() { close(c.done) })
 		c.onceStream.Do(func() { close(c.streamCh) })
+
+		// Match the live-guard sequencing: release c.mu before cancelAll
+		// to avoid the c.mu re-entrance chain (cancelAllExcept :760).
+		// Buffered mode callers benefit from the same safe ordering
+		// (today's defer-form Unlock would also be safe, but this
+		// single form keeps both branches consistent).
+		c.mu.Unlock()
+		c.cancelAll()
 	}
 }
 

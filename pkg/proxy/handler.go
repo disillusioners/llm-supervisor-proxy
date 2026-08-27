@@ -921,7 +921,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	//   cmd/main.go → NewHandler(…, credLB) → Handler.credEngine → here
 	// Constructor-only injection per W-3 holds end-to-end (no
 	// Config.CredEngine second injection path).
-	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey)
+	//
+	// Phase 2 / real-streaming-default — compute liveFirstByteGate
+	// HERE (NOT inside the constructor): isStream is a *requestContext
+	// field, not a *ConfigSnapshot, and the constructor signature is
+	// ConfigSnapshot-based. liveFirstByteGate is true only in real-
+	// streaming mode (header absent AND isStream=true); the gate
+	// redefines the winner-eligibility predicate from `IsCompleted()`
+	// to "first forwardable data chunk". Buffered mode (header present)
+	// and isStream=false requests keep the original IsCompleted gate
+	// verbatim (M3 amendment, regression-pinned by
+	// TestLiveRelay_NonStreamUnaffected).
+	liveFirstByteGate := !rc.bufferMode && rc.isStream
+	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate)
 	coordinator.Start()
 
 	winner := coordinator.WaitForWinner()
@@ -1050,7 +1062,15 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 	idleTerminated := false
 
 	// Capture raw bytes BEFORE any pruning happens - this is the complete response
-	if rc.conf.LogRawUpstreamResponse {
+	//
+	// Phase 2 / real-streaming-default (task 2.4 / R2 fix) — gate the
+	// entry raw-capture to BUFFERED mode. In live mode the relay runs
+	// concurrently with Adds, so the entry capture would save a partial
+	// prefix and double-save with the Done capture (:1194-1200 below).
+	// The Done capture is authoritative in live mode (full stream,
+	// single-save); entry capture is byte-identical to today's buffered
+	// double-save.
+	if rc.bufferMode && rc.conf.LogRawUpstreamResponse {
 		if buf := winner.GetBuffer(); buf != nil {
 			capturedBytes := buf.GetAllRawBytesOnce()
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
@@ -1073,12 +1093,30 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
 		}
 		readIndex++
+		// Phase 2 / real-streaming-default (task 2.5) — set
+		// `streamingNonRetryable` on the FIRST successful client
+		// write, inside the existing rc.writeMu critical section.
+		// The atomic Store(true) is inherently idempotent — no
+		// Load-before-Store guard exists — and the writeMu critical
+		// section provides the ordering/visibility boundary between
+		// the relay write and any concurrent reader (reset() clears
+		// it per request lifecycle — see handler_helpers.go:156).
+		// After this point: no racing / fallback / mid-stream
+		// credential failover — the stream is live.
+		rc.streamingNonRetryable.Store(true)
 	}
 	if flusher != nil {
 		flusher.Flush()
 	}
 	rc.writeMu.Unlock()
-	if buffer.ShouldPrune(readIndex) {
+	// Phase 2 / real-streaming-default (task 2.4 / R2 fix) — gate
+	// Prune to BUFFERED mode. In live mode the relay runs concurrently
+	// with Adds, so Prune would non-deterministically truncate the
+	// raw bytes consumed by the usage estimator (line ~1244) and
+	// the bufferstore Done capture (~:1194-1200). Buffered mode
+	// keeps today's behavior byte-identical (Prune never fires
+	// there today anyway — ShouldPrune is false when readIndex==len).
+	if rc.bufferMode && buffer.ShouldPrune(readIndex) {
 		buffer.Prune(readIndex)
 	}
 
@@ -1113,12 +1151,19 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
 				}
 				readIndex++
+				// Phase 2 / task 2.5 — set streamingNonRetryable on
+				// the first successful write (idempotent — atomic
+				// Store is a no-op if already true; reset() in
+				// handler_helpers.go clears it per request).
+				rc.streamingNonRetryable.Store(true)
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 			rc.writeMu.Unlock()
-			if buffer.ShouldPrune(readIndex) {
+			// Phase 2 / R2 fix — Prune gated to buffered mode (see
+			// the entry-site comment at ~:1103 for rationale).
+			if rc.bufferMode && buffer.ShouldPrune(readIndex) {
 				buffer.Prune(readIndex)
 			}
 		case <-buffer.Done():
@@ -1139,6 +1184,8 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 					extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
 				}
 				readIndex++
+				// Phase 2 / task 2.5 — see entry-site comment.
+				rc.streamingNonRetryable.Store(true)
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -1164,7 +1211,14 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}
 
 				// Now safe to prune (after capturing raw response)
-				buffer.Prune(readIndex)
+				// Phase 2 / R2 fix — Prune gated to buffered mode (see
+				// the entry-site comment at ~:1103 for rationale). In
+				// live mode the buffer is captured at ~:1206-1213 below
+				// (Done case) and at the bufferstore Done site; this
+				// error-path Prune is no longer needed in live mode.
+				if rc.bufferMode {
+					buffer.Prune(readIndex)
+				}
 
 				// Send OpenAI-compatible error response
 				errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", fmt.Sprintf("Streaming error: %v", err))
@@ -1235,7 +1289,15 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			}
 
 			// Now safe to prune (after extracting usage)
-			buffer.Prune(readIndex)
+			// Phase 2 / R2 fix — Prune gated to buffered mode (see the
+			// entry-site comment at ~:1103 for rationale). In live
+			// mode, GetAllRawBytesOnce at line ~1252 was called BEFORE
+			// this site, so the estimator has already seen the full
+			// stream; further Prune would be a no-op for live mode but
+			// keeps a single consistent shape across both modes.
+			if rc.bufferMode {
+				buffer.Prune(readIndex)
+			}
 
 			// Finalize tool call arguments from builders
 			for i := range rc.accumulatedToolCalls {
@@ -1348,12 +1410,16 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 						extractStreamChunkContent(data, &rc.accumulatedResponse, &rc.accumulatedThinking, &rc.accumulatedToolCalls, &rc.toolCallArgBuilders)
 					}
 					readIndex++
+					// Phase 2 / task 2.5 — see entry-site comment.
+					rc.streamingNonRetryable.Store(true)
 				}
 				if flusher != nil {
 					flusher.Flush()
 				}
 				rc.writeMu.Unlock()
-				if buffer.ShouldPrune(readIndex) {
+				// Phase 2 / R2 fix — Prune gated to buffered mode (see
+				// the entry-site comment at ~:1103 for rationale).
+				if rc.bufferMode && buffer.ShouldPrune(readIndex) {
 					buffer.Prune(readIndex)
 				}
 			}

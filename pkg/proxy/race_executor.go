@@ -1570,6 +1570,20 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 			}
 
 			// Add all chunks to buffer
+			// Phase 2 / real-streaming-default — PREDICATE HAZARD FIX
+			// (task 2.3): the isStreamErrorChunk check must run BEFORE
+			// the Add loop. A stream whose ONLY chunk is an error chunk
+			// must not transiently win the first-byte winner gate
+			// (`req.GetError()==nil && req.GetBuffer().TotalLen()>0`) —
+			// if the error chunk is Added before the error is returned,
+			// the predicate fires on it and preempts fallback. Behavior-
+			// neutral in buffered mode (failed buffers are never read
+			// there); only the on-error raw-dump content at
+			// handler.go:1159-1164 changes.
+			if isStreamErrorChunk(line) != "" {
+				return fmt.Errorf("upstream streamed error chunk: %s", isStreamErrorChunk(line))
+			}
+
 			for _, chunk := range chunksToEmit {
 				if !buf.Add(chunk) {
 					return fmt.Errorf("buffer limit exceeded: streaming tool_call chunk for model %s", req.modelID)
@@ -1578,11 +1592,6 @@ func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *htt
 
 			// Extract usage from SSE chunk if present
 			extractUsageFromSSEChunk(req, normalizedLine)
-
-			// Check for stream error chunk (e.g., from LiteLLM)
-			if isStreamErrorChunk(line) != "" {
-				return fmt.Errorf("upstream streamed error chunk: %s", isStreamErrorChunk(line))
-			}
 
 			// Check for [DONE]
 			if string(line) == "data: [DONE]" {
