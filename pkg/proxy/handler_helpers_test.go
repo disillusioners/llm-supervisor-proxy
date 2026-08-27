@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -225,5 +227,55 @@ func TestExtractNonStreamContent(t *testing.T) {
 				t.Errorf("thinking: got %q, want %q", got, tt.wantThinking)
 			}
 		})
+	}
+}
+
+// TestRequestContext_BufferModeReset verifies the per-request lifecycle of
+// rc.bufferMode (real-streaming-default plan, Phase 1): initRequestContext
+// populates it from the X-LLMProxy-Buffer-Response header, and reset()
+// returns it to false so a recycled requestContext cannot leak buffered
+// mode from a prior request. Also pins the Q4 companion reset: the
+// streamingNonRetryable flag is now a sync/atomic.Bool whose reset goes
+// through Store(false).
+func TestRequestContext_BufferModeReset(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := newTestHandlerWithURL(t, upstream.URL)
+
+	body := map[string]interface{}{
+		"model": "test-model",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "Hello"},
+		},
+	}
+	req := buildRequestBodyForInitContext(t, body)
+	// PRESENT + truthy ⇒ buffered. Direct map access under the canonical
+	// key (mirrors the server-side header parser; see
+	// TestBufferModeHeaderParsing for the canonicalization rationale).
+	req.Header[http.CanonicalHeaderKey("X-LLMProxy-Buffer-Response")] = []string{"true"}
+
+	rc, err := h.initRequestContext(req)
+	if err != nil {
+		t.Fatalf("initRequestContext() error = %v", err)
+	}
+	if !rc.bufferMode {
+		t.Fatal("initRequestContext() bufferMode = false, want true (header PRESENT + \"true\" must opt into buffered mode)")
+	}
+
+	rc.reset()
+	if rc.bufferMode {
+		t.Error("after reset(): bufferMode = true, want false (delivery mode must not leak across request lifecycles)")
+	}
+
+	// Q4 companion: streamingNonRetryable shares the reset path and is now
+	// an atomic.Bool — its reset must go through Store(false).
+	rc.streamingNonRetryable.Store(true)
+	rc.reset()
+	if rc.streamingNonRetryable.Load() {
+		t.Error("after reset(): streamingNonRetryable = true, want false (atomic Bool reset must Store(false))")
 	}
 }

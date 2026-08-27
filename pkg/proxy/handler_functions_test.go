@@ -322,3 +322,89 @@ func TestInitRequestContext_NoRegressionOnMissingReasoningContent(t *testing.T) 
 		t.Error("reqLog.Messages is nil; expected populated slice")
 	}
 }
+
+// TestBufferModeHeaderParsing pins the LOCKED L1 truth table for the
+// X-LLMProxy-Buffer-Response opt-in header (real-streaming-default plan,
+// Phase 1; approver iteration 001):
+//
+//	ABSENT header             ⇒ live streaming (false — the new default)
+//	PRESENT + true/1/yes/on   ⇒ buffered (true), case-insensitive value
+//	PRESENT + empty value     ⇒ buffered (true — bare-header opt-in)
+//	PRESENT + false/0/no/off  ⇒ live streaming (false), case-insensitive
+//	PRESENT + unknown value   ⇒ live streaming (false — opt-in must be
+//	                             explicit and correctly spelled; unknown
+//	                             values must NOT fall back to buffered)
+//
+// Fixture mechanics: PRESENT rows use DIRECT map access so PRESENT+empty
+// ([]string{""}) stays distinct from ABSENT (no entry at all) —
+// http.Header.Set cannot express that distinction reliably. The map key
+// is canonicalized with http.CanonicalHeaderKey, mirroring the net/http
+// server-side header parser (which canonicalizes every incoming wire key,
+// whatever casing the client used): r.Header.Values canonicalizes only
+// its LOOKUP key, so a raw non-canonical map entry would be invisible to
+// it — such an entry cannot occur for a server-parsed request. The
+// mixed-case-key rows prove any client spelling of the header name
+// resolves to the same canonical entry.
+func TestBufferModeHeaderParsing(t *testing.T) {
+	const headerName = "X-LLMProxy-Buffer-Response"
+
+	tests := []struct {
+		name string
+		// setHeader false ⇒ ABSENT (no header entry at all).
+		setHeader bool
+		// headerKey is the (possibly mixed-case) header name to register;
+		// only meaningful when setHeader is true.
+		headerKey string
+		value     string
+		want      bool
+	}{
+		// PRESENT + truthy ⇒ buffered.
+		{name: "present true", setHeader: true, headerKey: headerName, value: "true", want: true},
+		{name: "present 1", setHeader: true, headerKey: headerName, value: "1", want: true},
+		{name: "present yes", setHeader: true, headerKey: headerName, value: "yes", want: true},
+		{name: "present on", setHeader: true, headerKey: headerName, value: "on", want: true},
+		{name: "present True (case variant)", setHeader: true, headerKey: headerName, value: "True", want: true},
+		{name: "present TRUE (case variant)", setHeader: true, headerKey: headerName, value: "TRUE", want: true},
+		{name: "present YES (case variant)", setHeader: true, headerKey: headerName, value: "YES", want: true},
+
+		// PRESENT + empty ⇒ buffered (the deliberate bare-header opt-in).
+		{name: "present empty value", setHeader: true, headerKey: headerName, value: "", want: true},
+
+		// PRESENT + falsy ⇒ live streaming.
+		{name: "present false", setHeader: true, headerKey: headerName, value: "false", want: false},
+		{name: "present 0", setHeader: true, headerKey: headerName, value: "0", want: false},
+		{name: "present no", setHeader: true, headerKey: headerName, value: "no", want: false},
+		{name: "present off", setHeader: true, headerKey: headerName, value: "off", want: false},
+		{name: "present FALSE (case variant)", setHeader: true, headerKey: headerName, value: "FALSE", want: false},
+		{name: "present No (case variant)", setHeader: true, headerKey: headerName, value: "No", want: false},
+
+		// PRESENT + unknown ⇒ live streaming (misspelled/garbage must NOT
+		// fall back to legacy buffered; whitespace-only is unknown after
+		// TrimSpace, not empty).
+		{name: "present unknown maybe", setHeader: true, headerKey: headerName, value: "maybe", want: false},
+		{name: "present unknown trueish", setHeader: true, headerKey: headerName, value: "trueish", want: false},
+		{name: "present whitespace-only", setHeader: true, headerKey: headerName, value: " ", want: false},
+
+		// ABSENT ⇒ live streaming (the new default).
+		{name: "absent header", setHeader: false, want: false},
+
+		// Mixed-case header KEYS: each spelling with a truthy value must
+		// yield buffered (canonicalization handled by r.Header.Values).
+		{name: "mixed-case key X-LLMProxy-Buffer-Response", setHeader: true, headerKey: "X-LLMProxy-Buffer-Response", value: "true", want: true},
+		{name: "mixed-case key x-llmproxy-buffer-response", setHeader: true, headerKey: "x-llmproxy-buffer-response", value: "1", want: true},
+		{name: "mixed-case key X-LLMPROXY-BUFFER-RESPONSE", setHeader: true, headerKey: "X-LLMPROXY-BUFFER-RESPONSE", value: "on", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tt.setHeader {
+				req.Header[http.CanonicalHeaderKey(tt.headerKey)] = []string{tt.value}
+			}
+			got := bufferModeFor(req)
+			if got != tt.want {
+				t.Errorf("bufferModeFor() = %v, want %v (key=%q value=%q)", got, tt.want, tt.headerKey, tt.value)
+			}
+		})
+	}
+}

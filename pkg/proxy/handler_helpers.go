@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
@@ -96,10 +97,26 @@ type requestContext struct {
 	// Proxy-only flags (stripped before forwarding upstream)
 	bypassInternal bool // Force external upstream, skip internal provider routing
 
-	// Streaming non-retryable state
-	// When true, this request will not retry upstream on errors
-	// This is set after ReleaseStreamChunkDeadline is reached and buffer is flushed
-	streamingNonRetryable bool
+	// Streaming non-retryable state (Q4 resolved 2026-08-27: sync/atomic.Bool
+	// so any future reader gets a race-free Load without holding writeMu).
+	// When true: stream is live — no racing / fallback / mid-stream
+	// credential failover after the first forwarded byte. Set on the first
+	// successful client write inside the relay loop (set-site lands in
+	// Phase 2); zero readers exist today.
+	streamingNonRetryable atomic.Bool
+
+	// bufferMode is the per-request delivery mode parsed from the
+	// X-LLMProxy-Buffer-Response header by initRequestContext
+	// (real-streaming-default plan, Phase 1): true = buffered (legacy
+	// full-buffer delivery, explicit header opt-in), false = live
+	// streaming (the default when the header is absent).
+	//
+	// DISTINCT from streamingNonRetryable (Q4 resolution): bufferMode is
+	// the per-request header-derived mode, set once by
+	// initRequestContext; streamingNonRetryable is the post-first-byte
+	// "stream is live" flag set inside the relay loop. Different
+	// lifecycles; both are cleared in reset().
+	bufferMode bool
 
 	// Token identity for usage tracking
 	tokenID   string
@@ -136,7 +153,11 @@ func (rc *requestContext) reset() {
 	rc.headersSent = false
 	rc.streamID = ""
 	rc.streamIDSet = false
-	rc.streamingNonRetryable = false
+	rc.streamingNonRetryable.Store(false)
+	// Phase 1 (real-streaming-default): clear the per-request delivery
+	// mode so pool reuse cannot leak buffered mode from a prior request
+	// lifecycle.
+	rc.bufferMode = false
 	rc.currentModelIndex = 0
 	// W5-cheap: clear the P1-6 interleavedThinking field on
 	// reset so a recycled requestContext cannot leak the flag

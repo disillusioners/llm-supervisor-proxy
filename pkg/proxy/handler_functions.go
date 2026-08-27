@@ -122,6 +122,15 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
 	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
 
+	// Per-request delivery mode from the X-LLMProxy-Buffer-Response opt-in
+	// header (real-streaming-default plan, Phase 1). Locked L1 semantics are
+	// presence-aware — see bufferModeFor below. Precedence (Q3, as amended):
+	// header PRESENT ⇒ buffered mode ⇒ today's StreamDeadline machinery runs
+	// unchanged; header ABSENT ⇒ live mode ⇒ (Phase 2+) the coordinator's
+	// first-byte winner gate applies and StreamDeadline becomes a
+	// no-forwardable-byte timeout.
+	bufferMode := bufferModeFor(r)
+
 	return &requestContext{
 		conf:             conf,
 		targetURL:        targetURL,
@@ -138,6 +147,59 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		baseCtx:          r.Context(),
 		originalMessages: originalMessages,
 		bypassInternal:   bypassInternal,
+		bufferMode:       bufferMode,
 		firstUserMessage: firstUserMessage,
 	}, nil
+}
+
+// bufferModeFor reports whether the client opted into buffered (legacy)
+// streaming delivery via the X-LLMProxy-Buffer-Response header.
+//
+// Semantics (LOCKED, plan decision L1 — presence-aware):
+//
+//	ABSENT header             ⇒ live streaming (false — the new default)
+//	PRESENT + true/1/yes/on   ⇒ buffered (true), case-insensitive value
+//	PRESENT + empty value     ⇒ buffered (true — bare-header opt-in)
+//	PRESENT + anything else   ⇒ live streaming (false): the falsy
+//	                            spellings (false/0/no/off) AND any unknown
+//	                            non-empty value — opt-in must be explicit
+//	                            and correctly spelled
+//
+// The presence check MUST use r.Header.Values, never r.Header.Get: Get
+// conflates an absent header with a PRESENT empty value and would invert
+// the default. Values canonicalizes the header key, matching the net/http
+// server-side parser which stores every incoming wire key in canonical
+// form regardless of client casing.
+func bufferModeFor(r *http.Request) bool {
+	vals := r.Header.Values("X-LLMProxy-Buffer-Response")
+	if len(vals) == 0 {
+		return false
+	}
+	return parseBufferResponseValue(vals[0])
+}
+
+// parseBufferResponseValue interprets a PRESENT X-LLMProxy-Buffer-Response
+// value. Truthy spellings (true/1/yes/on, case-insensitive) and a genuinely
+// empty value opt into buffered delivery; every other value — the falsy
+// spellings (false/0/no/off) and any unknown non-empty string — falls to
+// live streaming.
+//
+// Empty-vs-whitespace distinction (locked fixture table, plan Test
+// Strategy): only a raw-empty value is the bare-header opt-in. A
+// whitespace-only value trims to "" but counts as UNKNOWN — it must NOT
+// be conflated with the deliberate empty opt-in, so the emptiness check
+// happens BEFORE trimming. (A plain trim-then-switch with "" in the
+// truthy case list would wrongly buffer whitespace-only values.)
+// Surrounding whitespace around a real token is still trimmed
+// ("  true  " ⇒ buffered).
+func parseBufferResponseValue(v string) bool {
+	if v == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
