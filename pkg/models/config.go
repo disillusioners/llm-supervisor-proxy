@@ -124,6 +124,10 @@ type ModelConfig struct {
 	// should be flushed to downstream even if the stream hasn't completed.
 	// This prevents clients with idle chunk detection from dropping the connection.
 	// Example: "1m50s" (110 seconds). Set to 0 or omit to disable this feature.
+	// DORMANT: no call sites in pkg/proxy consume this per-model deadline; the
+	// ACTIVE stream deadline is the global StreamDeadline enforced inside the
+	// race coordinator (pkg/proxy/race_coordinator.go). The field is persisted
+	// and surfaced by the UI but currently has no runtime effect.
 	ReleaseStreamChunkDeadline Duration `json:"release_stream_chunk_deadline,omitempty"`
 
 	// PeakHourConfig controls automatic model switching during peak hours.

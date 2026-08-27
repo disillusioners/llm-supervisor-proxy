@@ -132,7 +132,7 @@ func TestStreamResponse_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Flag=true, providerIsMiniMax=false ⇒ gate OFF.
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestStreamResponse_PositiveCase_MiniMaxEmitsReasoning(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Flag=true, providerIsMiniMax=true ⇒ gate fires.
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestStreamResponse_PositiveCase_FramingPreserved(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true)
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}

@@ -43,6 +43,10 @@ var newProviderClient = providers.NewProvider
 // — see W-2 + C-2 in the plan for empty-key semantics. Used by the
 // rate-limit failover hook below (Task 21) to compute the per-request
 // cooldown-injection exclusion set when a 429 hits.
+//
+// opts (Phase 4 / task 4.3) selects the stream wire mode: absent/zero =
+// live streaming (per-event write+flush); ExecuteOptions{BufferMode:
+// true} = buffered. No-op for non-stream requests.
 func (h *Handler) executeInternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -52,7 +56,9 @@ func (h *Handler) executeInternal(
 	isStream bool,
 	interleaved bool,
 	conversationKey string,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
 	// Resolve internal config via the affinity seam (Phase 3 / Tasks 8 +
 	// 9 — #3 struct form: ResolvedCredential + trailing ok). Discard
 	// NewlyBound — the ultimate path does NOT publish model_credential_selected
@@ -63,7 +69,7 @@ func (h *Handler) executeInternal(
 		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
 
-	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved)
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, opt)
 }
 
 // executeInternalWithResolved (Phase 3 / Task 21 refactor) runs the
@@ -83,7 +89,9 @@ func (h *Handler) executeInternalWithResolved(
 	isStream bool,
 	interleaved bool,
 	resolved models.ResolvedCredential,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
 	provider := resolved.Provider
 	apiKey := resolved.APIKey
 	baseURL := resolved.BaseURL
@@ -179,7 +187,7 @@ func (h *Handler) executeInternalWithResolved(
 	req.Model = internalModel
 
 	if isStream {
-		return h.handleInternalStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
+		return h.handleInternalStream(ctx, providerClient, req, w, internalModel, requestBodyBytes, opt)
 	}
 	return h.handleInternalNonStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
 }
@@ -217,13 +225,15 @@ func (h *Handler) executeInternalWithRateLimitFailover(
 	isStream bool,
 	interleaved bool,
 	conversationKey string,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
 	// Attempt #1 — resolve via the affinity seam, then execute.
 	resolved, ok := h.modelsMgr.ResolveInternalConfigWithAffinity(modelCfg.ID, conversationKey)
 	if !ok {
 		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
-	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved)
+	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, opt)
 	if err == nil || h.credEngine == nil {
 		return result, err
 	}
@@ -306,7 +316,7 @@ func (h *Handler) executeInternalWithRateLimitFailover(
 	// Single retry through the SAME execution path (provider
 	// construction + MiniMax twin-B translation + dispatch) — no
 	// duplicated translation logic.
-	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved)
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved, opt)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -407,7 +417,36 @@ func (h *Handler) handleInternalNonStream(
 	}, nil
 }
 
-// handleInternalStream handles streaming requests for internal providers
+// sseDataFrame frames a JSON payload as one SSE data event: the
+// `data: ` prefix, the payload bytes, and a trailing blank line.
+// Used by handleInternalStream (Phase 4) to build the same wire shape
+// in both wire modes — the buffered path accumulates the same bytes
+// via buf.WriteString("data: ");buf.Write(data);buf.WriteString("\n\n").
+func sseDataFrame(data []byte) []byte {
+	frame := make([]byte, 0, len(data)+8)
+	frame = append(frame, "data: "...)
+	frame = append(frame, data...)
+	frame = append(frame, '\n', '\n')
+	return frame
+}
+
+// sseDoneFrame returns the `data: [DONE]\n\n` SSE terminator.
+func sseDoneFrame() []byte {
+	return []byte("data: [DONE]\n\n")
+}
+
+// handleInternalStream handles streaming requests for internal providers.
+//
+// opts (Phase 4 / task 4.3) selects the wire mode. LIVE (default,
+// BufferMode=false): every `case "content"` event and every emitted
+// tool-call chunk goes through ExecuteOptions.writeChunk (per-event
+// writeMu-guarded write+flush); every `case "thinking"` likewise;
+// `case "done"` and `case "error"` still emit their terminator lines
+// with a writeMu-guarded write+flush (no drain of buf). The capture-
+// side accumulator (buf) receives the SAME bytes as the wire writes
+// in the SAME loop iteration (C1 estimator parity, by construction).
+// BUFFERED (BufferMode=true): today's behavior byte-for-byte — buf
+// accumulates everything, single end-of-stream write+flush.
 func (h *Handler) handleInternalStream(
 	ctx context.Context,
 	provider providers.Provider,
@@ -415,7 +454,9 @@ func (h *Handler) handleInternalStream(
 	w http.ResponseWriter,
 	internalModel string,
 	requestBodyBytes []byte,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
 	eventCh, err := provider.StreamChatCompletion(ctx, req)
 	if err != nil {
 		return nil, err
@@ -477,10 +518,14 @@ func (h *Handler) handleInternalStream(
 	var capturedToolCalls []store.ToolCall
 	var capturedToolCallArgBuilders []*strings.Builder
 
-	// Accumulate raw SSE chunks for fallback token counting
-	var rawChunks bytes.Buffer
-
-	// Create a simple buffer to batch writes like the race executor does
+	// Phase 4 dual role (C1): in BUFFERED mode this buf is the wire
+	// accumulation written in one end-of-stream flush; in LIVE mode it
+	// is the capture-side accumulator ONLY — each per-event wire write
+	// appends the same bytes here so the fallback estimator sees the
+	// full completion text (byte-parity of Usage between modes).
+	// (Phase 4 / task 4.3 — NB7 dead-accumulator disposition: the
+	// pre-Phase-4 `var rawChunks bytes.Buffer` + its writes at the done
+	// + error arms had zero readers outside this file; removed.)
 	var buf bytes.Buffer
 
 	for event := range eventCh {
@@ -522,10 +567,17 @@ func (h *Handler) handleInternalStream(
 				}
 				data, _ = json.Marshal(chunk)
 			}
-			buf.WriteString("data: ")
-			buf.Write(data)
-			buf.WriteString("\n\n")
 			firstChunk = false
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+			} else {
+				// LIVE (Phase 4 / task 4.3): per-event writeMu-guarded
+				// write+flush; same bytes appended to the capture-side
+				// accumulator for C1 estimator parity.
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
 			// Capture-side only: accumulate content delta. The
 			// typed event.Content field is the same string the
 			// proxy just wrote into the chunk above, so
@@ -620,7 +672,17 @@ func (h *Handler) handleInternalStream(
 				}
 
 				for _, chunk := range chunksToEmit {
-					buf.Write(chunk)
+					if opt.BufferMode {
+						buf.Write(chunk)
+					} else {
+						// LIVE (Phase 4 / task 4.3): per-tool
+						// writeMu-guarded write+flush; the toolcall
+						// buffer's per-call hold (emit only when the
+						// arguments JSON is complete) is unchanged —
+						// multiple chunks per event stays the current
+						// behavior.
+						opt.writeChunk(w, flusher, chunk, &buf)
+					}
 				}
 			}
 
@@ -640,9 +702,17 @@ func (h *Handler) handleInternalStream(
 				},
 			}
 			data, _ := json.Marshal(chunk)
-			buf.WriteString("data: ")
-			buf.Write(data)
-			buf.WriteString("\n\n")
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+			} else {
+				// LIVE (Phase 4 / task 4.3): thinking deltas go to the
+				// wire per-event too — with done/error no longer
+				// draining buf, a buffered-only accumulation would
+				// silently DROP thinking from the live wire.
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
 			// Capture-side only: accumulate thinking delta. The
 			// typed event.ReasoningContent field is the same
 			// string the proxy just wrote into the chunk above
@@ -657,7 +727,11 @@ func (h *Handler) handleInternalStream(
 			if toolCallBuffer != nil {
 				flushChunks := toolCallBuffer.Flush()
 				for _, chunk := range flushChunks {
-					buf.Write(chunk)
+					if opt.BufferMode {
+						buf.Write(chunk)
+					} else {
+						opt.writeChunk(w, flusher, chunk, &buf)
+					}
 				}
 				stats := toolCallBuffer.GetRepairStats()
 				if stats.Attempted > 0 {
@@ -694,12 +768,25 @@ func (h *Handler) handleInternalStream(
 				},
 			}
 			finalData, _ := json.Marshal(finalChunk)
-			buf.WriteString("data: ")
-			buf.Write(finalData)
-			buf.WriteString("\n\n")
-			buf.WriteString("data: [DONE]\n\n")
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(finalData)
+				buf.WriteString("\n\n")
+				buf.WriteString("data: [DONE]\n\n")
+			} else {
+				// LIVE (Phase 4): terminator lines still emitted with a
+				// writeMu-guarded write+flush — but buf is NOT drained
+				// (the content already went out per-event).
+				opt.writeChunk(w, flusher, sseDataFrame(finalData), &buf)
+				opt.writeChunk(w, flusher, sseDoneFrame(), &buf)
+			}
 
 			// Fallback token counting
+			// C1 (Phase 4): buf.Bytes() is the estimator input in BOTH
+			// modes — buffered accumulated the wire bytes here; live
+			// appended them in lockstep with each per-event wire write.
+			// Parity of Usage.CompletionTokens between modes is
+			// required, not best-effort.
 			if extractedUsage == nil || (extractedUsage.PromptTokens == 0 && extractedUsage.CompletionTokens == 0 && extractedUsage.TotalTokens == 0) {
 				if token.FallbackEnabled() {
 					tokenizer := token.GetTokenizer()
@@ -722,10 +809,13 @@ func (h *Handler) handleInternalStream(
 				}
 			}
 
-			// Flush everything to client
-			rawChunks.Write(buf.Bytes())
-			w.Write(buf.Bytes())
-			flusher.Flush()
+			// Buffered mode only: flush everything to the client in one
+			// write (writeMu-guarded — serialized against the heartbeat
+			// goroutine). In live mode the bytes already went out
+			// per-event and this is a no-op.
+			if opt.BufferMode {
+				opt.writeAll(w, flusher, buf.Bytes())
+			}
 
 			return &ExecuteResult{
 				Usage:     extractedUsage,
@@ -741,12 +831,18 @@ func (h *Handler) handleInternalStream(
 			}
 			errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", errMsg)
 			data, _ := json.Marshal(errResp)
-			buf.WriteString("data: ")
-			buf.Write(data)
-			buf.WriteString("\n\n")
-			rawChunks.Write(buf.Bytes())
-			w.Write(buf.Bytes())
-			flusher.Flush()
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+				// Flush everything to client in one write
+				opt.writeAll(w, flusher, buf.Bytes())
+			} else {
+				// LIVE (Phase 4): error envelope emitted immediately with
+				// a writeMu-guarded write+flush; no drain of buf (the
+				// partial content already went out per-event).
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
 			return nil, fmt.Errorf("provider error: %s", errMsg)
 		}
 	}

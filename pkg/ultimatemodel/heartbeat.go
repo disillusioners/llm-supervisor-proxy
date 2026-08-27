@@ -8,17 +8,27 @@ import (
 	"time"
 )
 
-const (
-	// HeartbeatInterval is the interval between SSE heartbeat comments
+var (
+	// HeartbeatInterval is the interval between SSE heartbeat comments.
+	// Var (not const) so TestUltimate_HeartbeatRaceVsLiveRelay can shorten
+	// it to ~50ms (with t.Cleanup restore) to make the heartbeat-vs-relay
+	// concurrency window observable under `go test -race`; the production
+	// value is 15 seconds.
 	HeartbeatInterval = 15 * time.Second
 	// HeartbeatWriteTimeout is the timeout for writing heartbeat data
 	HeartbeatWriteTimeout = 3 * time.Second
 )
 
-// startSSEHeartbeat starts a goroutine that sends SSE comments every 15 seconds
-// to keep the client connection alive while streaming.
+// startSSEHeartbeat starts a goroutine that sends SSE comments every
+// HeartbeatInterval to keep the client connection alive while streaming.
 // Uses parentCtx so it exits when request completes.
-func startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) {
+//
+// writeMu (Phase 4 / approver iteration 001, Blocking 2) is the
+// request-scoped mutex owned by Execute; sendHeartbeat takes it around
+// its write+flush so heartbeat comments cannot interleave mid-write
+// with the live relay loops' per-chunk write+flush (mirrors the
+// proxy-side pattern at pkg/proxy/heartbeat.go).
+func startSSEHeartbeat(w http.ResponseWriter, writeMu *sync.Mutex, ctx context.Context) {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -34,7 +44,7 @@ func startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) {
 		case <-heartbeatCtx.Done():
 			return
 		case <-ticker.C:
-			if !sendHeartbeat(w, heartbeatCtx, writeTimeout) {
+			if !sendHeartbeat(w, writeMu, heartbeatCtx, writeTimeout) {
 				log.Printf("[HEARTBEAT][Ultimate] Client disconnected, stopping heartbeat goroutine")
 				return
 			}
@@ -44,7 +54,12 @@ func startSSEHeartbeat(w http.ResponseWriter, ctx context.Context) {
 
 // sendHeartbeat sends a single SSE heartbeat comment to the client.
 // Returns true if heartbeat was sent successfully, false if client disconnected.
-func sendHeartbeat(w http.ResponseWriter, heartbeatCtx context.Context, writeTimeout *time.Timer) bool {
+//
+// writeMu serializes the heartbeat write AND flush against the live-mode
+// per-chunk relay writes (approver iteration 001, Blocking 2). The lock
+// covers only the write+flush pair — it is never held across a blocking
+// operation other than the client write itself.
+func sendHeartbeat(w http.ResponseWriter, writeMu *sync.Mutex, heartbeatCtx context.Context, writeTimeout *time.Timer) bool {
 	heartbeatData := []byte(": heartbeat\n\n")
 	written := make(chan bool, 1)
 	clientDisconnected := make(chan bool, 1)
@@ -54,12 +69,22 @@ func sendHeartbeat(w http.ResponseWriter, heartbeatCtx context.Context, writeTim
 
 	go func() {
 		defer wg.Done()
+		// Acquire the per-request write mutex: the write AND the flush
+		// both touch the ResponseWriter, so both go under the lock.
+		writeMu.Lock()
+		defer writeMu.Unlock()
+
 		_, err := w.Write(heartbeatData)
 		if err != nil {
 			log.Printf("[HEARTBEAT][Ultimate] Write error: %v", err)
 			select {
 			case clientDisconnected <- true:
 			default:
+			}
+		}
+		if err == nil {
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
 		}
 		select {
@@ -88,9 +113,6 @@ func sendHeartbeat(w http.ResponseWriter, heartbeatCtx context.Context, writeTim
 	case ok := <-written:
 		if ok {
 			log.Printf("[HEARTBEAT][Ultimate] Sent heartbeat at %s", time.Now().Format(time.RFC3339))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
 		}
 		wg.Wait()
 		return ok

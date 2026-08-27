@@ -49,6 +49,11 @@ var sharedHTTPClient = &http.Client{
 // The gate fires iff interleaved && upstreamProvider == providers.ProviderMiniMax
 // (case-insensitive). Gate lives in this function so H5 (short-circuit
 // BEFORE parse/marshal) is guaranteed at the strongest no-op site.
+//
+// opts (Phase 4 / task 4.1) selects the stream wire mode: absent/zero =
+// live streaming (per-chunk write-through); ExecuteOptions{BufferMode:
+// true} = buffered (single end-of-stream write, H8). No-op for
+// non-stream requests (both modes write the entire body anyway).
 func (h *Handler) executeExternal(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -59,7 +64,9 @@ func (h *Handler) executeExternal(
 	isStream bool,
 	interleaved bool,
 	upstreamProvider string,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
 	cfg := h.config.Get()
 	var _ config.Config = cfg // Ensure config package is used
 
@@ -159,7 +166,7 @@ func (h *Handler) executeExternal(
 
 	if isStream {
 		// Stream response directly
-		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes, interleaved, providerIsMiniMax)
+		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes, interleaved, providerIsMiniMax, opt)
 	}
 
 	// Non-streaming: read body, extract usage, then translate + copy to response
@@ -268,7 +275,7 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 	}
 }
 
-// streamResponse streams the upstream response directly to client
+// streamResponse streams the upstream response to the client.
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag (re-parsed
 // from r.Header in Execute, threaded through executeExternal).
@@ -276,7 +283,25 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 // must be true to construct a StreamTranslator instance; gated-off
 // is a pure no-op (H5 — strictest invariant on this verbatim-byte
 // path; gate short-circuits BEFORE any parse).
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool) (*ExecuteResult, error) {
+//
+// opts (Phase 4 / task 4.2) selects the wire mode. LIVE (default,
+// BufferMode=false): every chunk the existing translator + toolcall
+// buffer + normalizer chain emits goes to the client immediately via
+// a writeMu-guarded write+flush (per-chunk real streaming; the chain
+// itself is unchanged — multiple chunks per upstream line stays the
+// current behavior). BUFFERED (BufferMode=true): today's behavior
+// byte-for-byte — accumulate in buf, single end-of-stream write+flush
+// (H8 holds in this mode only).
+//
+// In BOTH modes buf doubles as the capture-side accumulator feeding
+// the tokenizer-fallback estimator (C1 usage parity): in buffered
+// mode buf.Bytes() is both the wire input and the estimator input; in
+// live mode each wire write appends the SAME bytes to buf in the SAME
+// iteration (ExecuteOptions.writeChunk), so the estimator input is
+// byte-identical between modes by construction.
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool, opts ...ExecuteOptions) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
@@ -337,7 +362,12 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	var capturedToolCalls []store.ToolCall
 	var capturedToolCallArgBuilders []*strings.Builder
 
-	// Create buffer to batch all writes like race executor does
+	// Create buffer to batch all writes like race executor does.
+	// Phase 4 dual role (C1): in BUFFERED mode this is the wire
+	// accumulation written in one end-of-stream flush; in LIVE mode it
+	// is the capture-side accumulator ONLY — each per-chunk wire write
+	// appends the same bytes here so the fallback estimator sees the
+	// full completion text (byte-parity of Usage between modes).
 	var buf bytes.Buffer
 
 	reader := bufio.NewReader(resp.Body)
@@ -378,9 +408,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		// (stripped, emitted) — the caller writes stripped first,
 		// then each emitted[i] in order, before the next flush
 		// boundary. The translator is error-free by construction
-		// (§6.1); err is always nil. ultim-ext has no mid-stream
-		// flush (H8) — all bytes accumulate in buf and are written
-		// in a single flush at end-of-stream.
+		// (§6.1); err is always nil. H8 (no mid-stream flush) holds
+		// in BUFFERED mode only — all bytes accumulate in buf and are
+		// written in a single flush at end-of-stream; in LIVE mode
+		// each emitted chunk is written+flushed immediately (Phase 4).
 		translatorLine := lineBytes
 		var translatorEmitted [][]byte
 		if streamTranslator != nil {
@@ -412,9 +443,8 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		// and returns the ORIGINAL line VERBATIM (already framed)
 		// on the unchanged path. The call site is therefore
 		// responsible for ZERO framing here — just concatenate in
-		// order. ultim-ext has no mid-stream flush (H8) — all
-		// bytes accumulate in buf and are written in a single
-		// flush at end-of-stream.
+		// order. H8 holds in BUFFERED mode only; LIVE mode writes
+		// each chunk through immediately (Phase 4).
 		if len(translatorEmitted) > 0 {
 			full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
 			full = append(full, translatorEmitted...)
@@ -423,11 +453,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 
 		// Capture-side only: observe the chunks that are about to
-		// be buffered to the client and accumulate any content /
+		// be written to the client and accumulate any content /
 		// reasoning_content / tool_calls deltas.
 		// captureFromSSEChunkBytes is best-effort and never
-		// mutates the chunk bytes — it just parses them. Wire
-		// bytes to buf are unchanged.
+		// mutates the chunk bytes — it just parses them.
 		for _, chunk := range chunksToEmit {
 			captureFromSSEChunkBytes(chunk, &capturedContent, &capturedThinking)
 			// W7: same shape of observation for tool calls —
@@ -435,7 +464,15 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			// bytes we are parsing here. captureFromSSEChunk*
 			// helpers below are read-only and best-effort.
 			captureToolCallsFromSSEChunk(chunk, &capturedToolCalls, &capturedToolCallArgBuilders)
-			buf.Write(chunk)
+			if opt.BufferMode {
+				buf.Write(chunk)
+			} else {
+				// LIVE (Phase 4 / task 4.2): write-through per
+				// chunk — writeMu-guarded write+flush, plus the
+				// same bytes into the capture-side accumulator
+				// (C1 estimator parity, by construction).
+				opt.writeChunk(w, flusher, chunk, &buf)
+			}
 		}
 	}
 
@@ -456,7 +493,11 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 			// cannot diverge from what capture-from-raw
 			// would see.
 			captureToolCallsFromSSEChunk(chunk, &capturedToolCalls, &capturedToolCallArgBuilders)
-			buf.Write(chunk)
+			if opt.BufferMode {
+				buf.Write(chunk)
+			} else {
+				opt.writeChunk(w, flusher, chunk, &buf)
+			}
 		}
 
 		stats := toolCallBuffer.GetRepairStats()
@@ -473,6 +514,10 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	}
 
 	// Fallback token counting
+	// C1 (Phase 4): buf.Bytes() is the estimator input in BOTH modes —
+	// buffered mode accumulated the wire bytes here, live mode appended
+	// them in lockstep with each per-chunk wire write. Parity of
+	// Usage.CompletionTokens between modes is required, not best-effort.
 	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
 		if token.FallbackEnabled() {
 			tokenizer := token.GetTokenizer()
@@ -495,9 +540,13 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 		}
 	}
 
-	// Write all buffered data to client in one flush
-	w.Write(buf.Bytes())
-	flusher.Flush()
+	// Buffered mode only: write all accumulated data to the client in
+	// one flush (writeMu-guarded — serialized against the heartbeat
+	// goroutine). In live mode the bytes already went out per chunk and
+	// this is a no-op.
+	if opt.BufferMode {
+		opt.writeAll(w, flusher, buf.Bytes())
+	}
 
 	return &ExecuteResult{
 		Usage:     usage,

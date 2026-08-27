@@ -124,7 +124,7 @@ func TestCapture_ExternalStream_ReturnsContentAndThinking(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	result, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false)
+	result, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCapture_InternalStream_ReturnsContentAndThinking(t *testing.T) {
 	req := &providers.ChatCompletionRequest{Model: "test-model"}
 
 	w := httptest.NewRecorder()
-	result, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	result, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("handleInternalStream: %v", err)
 	}

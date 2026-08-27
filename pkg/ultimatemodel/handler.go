@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
@@ -630,6 +631,81 @@ func (h *Handler) SendRetryExhaustedError(
 	return nil
 }
 
+// ExecuteOptions carries per-request wire-mode flags into Execute (and,
+// internally, down the execute chain to the stream relay loops).
+//
+// The zero value — and calling Execute with no options at all — selects
+// LIVE streaming, the post-real-streaming-default wire mode: every chunk
+// the translator + toolcall-buffer + normalizer chain emits is written to
+// the client immediately with a per-chunk flush. BufferMode=true opts
+// back into the legacy buffered mode: the full response is accumulated
+// and written in a single end-of-stream flush (H8 holds in that mode).
+//
+// Callers (e.g. pkg/proxy via the X-LLMProxy-Buffer-Response header
+// parsed in Phase 1) pass ExecuteOptions{BufferMode: rc.bufferMode};
+// absent options mean live, exactly matching the header-absent default.
+type ExecuteOptions struct {
+	// BufferMode selects the buffered wire mode (single end-of-stream
+	// write+flush). false = live per-chunk write-through.
+	BufferMode bool
+
+	// writeMu is the per-request write mutex serializing client writes
+	// (live per-chunk relay, buffered end-of-stream write, and the SSE
+	// heartbeat goroutine) — approver iteration 001, Blocking 2,
+	// mirroring the proxy-side rc.writeMu pattern (pkg/proxy/heartbeat.go).
+	// It is created INSIDE Execute (resolveExecuteOptions) and threaded
+	// down; external callers never set it. Deliberately NOT a Handler
+	// field: concurrent Execute invocations must not serialize each
+	// other, so the mutex is request-scoped.
+	writeMu *sync.Mutex
+}
+
+// resolveExecuteOptions derives the effective per-request options.
+// Zero options ⇒ live mode with a fresh request-scoped mutex. A
+// pre-resolved option (writeMu set by Execute) is propagated verbatim
+// so the heartbeat goroutine and the relay loops share ONE mutex.
+// Direct calls into the internal chain (tests) resolve their own fresh
+// mutex; the mode defaults to live in all cases.
+func resolveExecuteOptions(opts []ExecuteOptions) ExecuteOptions {
+	if len(opts) > 0 && opts[0].writeMu != nil {
+		return opts[0]
+	}
+	resolved := ExecuteOptions{BufferMode: false, writeMu: &sync.Mutex{}}
+	if len(opts) > 0 {
+		resolved.BufferMode = opts[0].BufferMode
+	}
+	return resolved
+}
+
+// writeChunk performs ONE live-mode wire write: a writeMu-guarded
+// write+flush pair (serialized against the SSE heartbeat goroutine —
+// approver iteration 001, Blocking 2). DEADLOCK RULE: never hold
+// writeMu across a blocking upstream read or channel receive — the
+// lock covers ONLY the write+flush pair, and this helper guarantees
+// that shape.
+//
+// The estimator accumulator (est) receives the SAME bytes in the SAME
+// loop iteration as the wire write, so the capture-side accumulator
+// cannot drift from the wire by construction (C1 estimator parity —
+// NOT an accepted degradation; see plan task 4.2/4.3).
+func (opt ExecuteOptions) writeChunk(w http.ResponseWriter, flusher http.Flusher, chunk []byte, est *bytes.Buffer) {
+	opt.writeMu.Lock()
+	w.Write(chunk)
+	flusher.Flush()
+	opt.writeMu.Unlock()
+	est.Write(chunk)
+}
+
+// writeAll performs the buffered-mode end-of-stream single write
+// (writeMu-guarded — free correctness against the heartbeat goroutine;
+// today's concurrency window is microscopic but the lock costs nothing).
+func (opt ExecuteOptions) writeAll(w http.ResponseWriter, flusher http.Flusher, b []byte) {
+	opt.writeMu.Lock()
+	w.Write(b)
+	flusher.Flush()
+	opt.writeMu.Unlock()
+}
+
 // Execute handles request with ultimate model - RAW PROXY
 // No retry, no fallback, no loop detection, no buffering.
 // On failure: KEEPS the attempt counter — subsequent requests flow normally
@@ -645,6 +721,13 @@ func (h *Handler) SendRetryExhaustedError(
 // down to executeInternal so the resolution can use the LB engine's
 // conversation-sticky weighted-random selection (single source of truth
 // for the credential selection on the ultimate-internal path).
+//
+// opts (Phase 4 / task 4.1) selects the wire mode: absent/zero value =
+// live streaming (per-chunk write-through, the post-Phase-4 default);
+// ExecuteOptions{BufferMode: true} opts into the legacy buffered mode
+// (single end-of-stream write). Execute creates the request-scoped
+// writeMu here and shares it with the SSE heartbeat goroutine and both
+// live relay loops (approver iteration 001, Blocking 2).
 func (h *Handler) Execute(
 	parentCtx context.Context,
 	w http.ResponseWriter,
@@ -655,7 +738,10 @@ func (h *Handler) Execute(
 	headersSent *bool,
 	tokenModelID *string,
 	conversationKey string,
+	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+
 	cfg := h.config.Get()
 	modelID := cfg.UltimateModel.ModelID
 
@@ -718,11 +804,15 @@ func (h *Handler) Execute(
 	}
 
 	// Start heartbeat for streaming requests - runs until request ends
-	// Heartbeat is started here (after headers are set) to keep connection alive
+	// Heartbeat is started here (after headers are set) to keep connection alive.
+	// Phase 4 (approver iteration 001, Blocking 2): opt.writeMu serializes
+	// the heartbeat's write+flush against the live relay loops' per-chunk
+	// write+flush — both ultimate live paths share this ONE request-scoped
+	// mutex with sendHeartbeat (mirrors pkg/proxy/heartbeat.go's rc.writeMu).
 	var heartbeatCancel context.CancelFunc
 	heartbeatCtx, heartbeatCancel := context.WithCancel(parentCtx)
 	if isStream {
-		go startSSEHeartbeat(w, heartbeatCtx)
+		go startSSEHeartbeat(w, opt.writeMu, heartbeatCtx)
 	}
 
 	// Apply MaxGenerationTime as the absolute hard timeout
@@ -748,7 +838,7 @@ func (h *Handler) Execute(
 		// credential — no double resolution, no fresh re-roll.
 		result, err = h.executeInternalWithRateLimitFailover(
 			ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved,
-			conversationKey,
+			conversationKey, opt,
 		)
 		// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): ultimate-EXTERNAL
 		// passthrough is UNCHANGED by credential load-balancing — provider
@@ -759,7 +849,7 @@ func (h *Handler) Execute(
 		// (race-internal, ultimate-internal, /v1/messages internal,
 		// anthropic-passthrough internal branch).
 	} else {
-		result, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider)
+		result, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider, opt)
 	}
 	// Stop heartbeat
 	heartbeatCancel()

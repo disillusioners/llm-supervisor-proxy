@@ -116,7 +116,7 @@ func TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentic
 		w := httptest.NewRecorder()
 		// Flag=false, providerIsMiniMax=true (gate would fire IF
 		// flag was true) — gate stays off because flag is false.
-		_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, true)
+		_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 		if err != nil {
 			t.Fatalf("streamResponse: %v", err)
 		}
@@ -269,7 +269,7 @@ func TestExecuteExternal_NegativeCase_NoCredential_ByteIdentical(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		// Flag=true, providerIsMiniMax=false (gate stays off).
-		_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false)
+		_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 		if err != nil {
 			t.Fatalf("streamResponse: %v", err)
 		}
@@ -413,7 +413,7 @@ func TestExecuteExternal_UsagePreserved_GateOff(t *testing.T) {
 		defer resp.Body.Close()
 
 		w := httptest.NewRecorder()
-		_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false)
+		_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 		if err != nil {
 			t.Fatalf("streamResponse: %v", err)
 		}

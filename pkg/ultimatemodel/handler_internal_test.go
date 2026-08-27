@@ -1,9 +1,14 @@
 package ultimatemodel
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -191,7 +196,7 @@ func TestHandleInternalStream_ContentAndDone(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -269,7 +274,7 @@ func TestHandleInternalStream_WithToolCalls(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -323,7 +328,7 @@ func TestHandleInternalStream_Thinking(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -358,7 +363,7 @@ func TestHandleInternalStream_Error(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err == nil {
 		t.Fatal("Expected error from stream")
@@ -834,7 +839,7 @@ func TestHandleInternalStream_EmptyContent(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -869,7 +874,7 @@ func TestHandleInternalStream_MultipleToolCalls(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	_, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -965,7 +970,7 @@ func TestHandleInternalStream_UsageFromDoneEvent(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -1010,7 +1015,7 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil)
+	usage, err := h.handleInternalStream(context.Background(), p, req, w, "test-model", nil, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 16): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Fatalf("handleInternalStream returned error: %v", err)
@@ -1027,5 +1032,300 @@ func TestHandleInternalStream_NoUsageInDone(t *testing.T) {
 		t.Errorf("PromptTokens = %d, want 0 (no requestBodyBytes for fallback)", usage.Usage.PromptTokens)
 	} else if usage.Usage.CompletionTokens != 0 {
 		t.Errorf("CompletionTokens = %d, want 0 (empty stream for fallback)", usage.Usage.CompletionTokens)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4 (real-streaming default) — live-mode tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// gatedStreamProvider is a provider whose event channel the test feeds
+// manually, so the stream can be held open mid-flight (the internal-path
+// analogue of a blocking upstream).
+type gatedStreamProvider struct {
+	events chan providers.StreamEvent
+}
+
+func (p *gatedStreamProvider) Name() string { return "gated" }
+
+func (p *gatedStreamProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	return nil, errors.New("gated provider: ChatCompletion not implemented")
+}
+
+func (p *gatedStreamProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	return p.events, nil
+}
+
+func (p *gatedStreamProvider) IsRetryable(err error) bool { return false }
+
+// TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion asserts
+// the internal eventCh path forwards `data: ...` events as they arrive,
+// BEFORE the `case "done"` terminator closes the channel (Phase 4 /
+// task 4.3). Events are fed from a goroutine that runs concurrently
+// with client.Get — the handler's first receive unblocks the feeder
+// as soon as it is scheduled, then a live write flushes the SSE
+// headers and client.Get returns; the first `data: ...` line is then
+// observable on the client side while the channel is still open.
+func TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion(t *testing.T) {
+	events := make(chan providers.StreamEvent)
+	p := &gatedStreamProvider{events: events}
+	h := NewHandler(newMockConfigManager(), newMockModelsConfig(), nil, nil)
+
+	handlerErr := make(chan error, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No options = live mode (the new default).
+		_, err := h.handleInternalStream(r.Context(), p, &providers.ChatCompletionRequest{Model: "test-model"}, w, "test-model", nil)
+		handlerErr <- err
+	}))
+	defer proxy.Close()
+
+	// Feeder goroutine — the feeder's ONLY responsibility is to send the
+	// events and close. The feeder does NOT need to be coordinated with
+	// client.Get beyond starting concurrently: the handler can't receive
+	// until it is scheduled, so the first send blocks; once it does,
+	// the handler writes+flushes, client.Get returns.
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		events <- providers.StreamEvent{Type: "content", Content: "early"}
+		events <- providers.StreamEvent{Type: "done", FinishReason: "stop", Response: &providers.ChatCompletionResponse{
+			Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		}}
+		close(events)
+	}()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	cr, err := client.Get(proxy.URL)
+	if err != nil {
+		t.Fatalf("client Get: %v (if this is a timeout, the path buffered instead of live-forwarding)", err)
+	}
+	defer cr.Body.Close()
+
+	reader := bufio.NewReader(cr.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading first data event: %v", err)
+	}
+	if !strings.HasPrefix(line, "data: ") || !strings.Contains(line, "early") {
+		t.Fatalf("first event = %q, want a data: line carrying %q", line, "early")
+	}
+
+	sawDone := false
+	for !sawDone {
+		l, rerr := reader.ReadString('\n')
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("draining stream: %v", rerr)
+		}
+		if strings.Contains(l, "[DONE]") {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Error("stream finished without [DONE]")
+	}
+	<-feedDone
+	if err := <-handlerErr; err != nil {
+		t.Errorf("handleInternalStream: %v", err)
+	}
+}
+
+// TestUltimateCapture_LiveMode_IdenticalToBuffered_Internal is the
+// internal-path half of the C1 regression pin (plan task 4.4): the
+// done event carries NO usage, so Usage comes exclusively from the
+// tokenizer-fallback estimator fed by buf.Bytes(). Live and buffered
+// runs of the SAME event sequence must return identical
+// ExecuteResults; a regressed capture-side accumulator reports
+// live CompletionTokens=0 while buffered keeps the correct count.
+func TestUltimateCapture_LiveMode_IdenticalToBuffered_Internal(t *testing.T) {
+	newEvents := func() []providers.StreamEvent {
+		return []providers.StreamEvent{
+			{Type: "thinking", ReasoningContent: "think "},
+			{Type: "content", Content: "hello "},
+			{Type: "content", Content: "there"},
+			{Type: "tool_call", ToolCalls: []providers.ToolCall{
+				{ID: "call_1", Type: "function", Function: providers.ToolCallFunction{Name: "get_weather", Arguments: "{\"city\":"}},
+			}},
+			{Type: "tool_call", ToolCalls: []providers.ToolCall{
+				{ID: "call_1", Function: providers.ToolCallFunction{Name: "", Arguments: "\"NYC\"}"}},
+			}},
+			// done WITHOUT Response ⇒ no usage ⇒ fallback estimator.
+			{Type: "done", FinishReason: "tool_calls"},
+		}
+	}
+
+	run := func(opts ...ExecuteOptions) (*ExecuteResult, string) {
+		h := NewHandler(newMockConfigManager(), newMockModelsConfig(), nil, nil)
+		p := &mockProvider{name: "mock", streamEvents: newEvents()}
+		w := httptest.NewRecorder()
+		result, err := h.handleInternalStream(context.Background(), p, &providers.ChatCompletionRequest{Model: "test-model"}, w, "test-model", nil, opts...)
+		if err != nil {
+			t.Fatalf("handleInternalStream: %v", err)
+		}
+		return result, w.Body.String()
+	}
+
+	buffered, bufferedBody := run(ExecuteOptions{BufferMode: true})
+	live, liveBody := run() // default = live
+
+	if buffered.Content != live.Content {
+		t.Errorf("Content: buffered=%q live=%q", buffered.Content, live.Content)
+	}
+	if buffered.Thinking != live.Thinking {
+		t.Errorf("Thinking: buffered=%q live=%q", buffered.Thinking, live.Thinking)
+	}
+	if len(buffered.ToolCalls) != len(live.ToolCalls) {
+		t.Fatalf("ToolCalls: buffered=%d live=%d", len(buffered.ToolCalls), len(live.ToolCalls))
+	}
+	for i := range buffered.ToolCalls {
+		if buffered.ToolCalls[i] != live.ToolCalls[i] {
+			t.Errorf("ToolCalls[%d]: buffered=%+v live=%+v", i, buffered.ToolCalls[i], live.ToolCalls[i])
+		}
+	}
+	if buffered.Usage == nil || live.Usage == nil {
+		t.Fatalf("Usage nil: buffered=%v live=%v", buffered.Usage, live.Usage)
+	}
+	// C1 pin: fallback estimator (no usage in done) — buffered sanity
+	// non-zero, live EXACT match; regression mode: live=0.
+	if buffered.Usage.CompletionTokens == 0 {
+		t.Fatalf("buffered CompletionTokens=0 — fixture lost its completion text")
+	}
+	if live.Usage.CompletionTokens != buffered.Usage.CompletionTokens {
+		t.Errorf("C1 REGRESSION: CompletionTokens live=%d buffered=%d", live.Usage.CompletionTokens, buffered.Usage.CompletionTokens)
+	}
+	if live.Usage.PromptTokens != buffered.Usage.PromptTokens ||
+		live.Usage.TotalTokens != buffered.Usage.TotalTokens {
+		t.Errorf("Usage mismatch: live=%+v buffered=%+v", live.Usage, buffered.Usage)
+	}
+	if normalizeSSEIDs(bufferedBody) != normalizeSSEIDs(liveBody) {
+		t.Errorf("wire bytes diverged between modes (IDs normalized):\n buffered=%q\n live=%q",
+			normalizeSSEIDs(bufferedBody), normalizeSSEIDs(liveBody))
+	}
+}
+
+// TestUltimate_HeartbeatRaceVsLiveRelay (approver iteration 001,
+// Blocking 2) runs a chunked live stream against a SHORTENED heartbeat
+// interval under `go test -race`: Execute spawns the SSE heartbeat
+// goroutine while the live relay writes per-event — any unsynchronized
+// w.Write pair is a data race the detector fails the test on. Chunks
+// arrive at intervals ≫ the tick so several heartbeats fire between
+// chunks, maximizing the interleaving window. Also asserts final body
+// integrity: heartbeat lines are SSE-legal comments and every data
+// line survives uncorrupted.
+//
+// During development the un-mutexed form was verified to be caught by
+// -race (see the Phase 4 report); the test is committed in the FIXED
+// form.
+func TestUltimate_HeartbeatRaceVsLiveRelay(t *testing.T) {
+	// Shorten the heartbeat interval (production 15s → 50ms), restored
+	// on cleanup. HeartbeatInterval is a package var for exactly this.
+	origInterval := HeartbeatInterval
+	HeartbeatInterval = 50 * time.Millisecond
+	t.Cleanup(func() { HeartbeatInterval = origInterval })
+
+	events := make(chan providers.StreamEvent)
+	p := &gatedStreamProvider{events: events}
+
+	origNewProvider := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return p, nil
+	}
+	t.Cleanup(func() { newProviderClient = origNewProvider })
+
+	cfg := newMockConfigManager()
+	modelsCfg := newMockModelsConfig()
+	modelsCfg.AddInternalModel("ultimate-model", "openai", "test-key", "", "gpt-4")
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	handlerErr := make(chan error, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headersSent := true
+		_, err := h.Execute(r.Context(), w, r, map[string]interface{}{
+			"model":    "ultimate-model",
+			"stream":   true,
+			"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+		}, "original-model", "race-test-hash", &headersSent, nil, "")
+		handlerErr <- err
+	}))
+	defer proxy.Close()
+
+	const chunks = 10
+	// Feeder runs concurrently with client.Get: the handler cannot
+	// receive until it is scheduled, so the first send blocks; once it
+	// does, the handler writes+flushes headers and client.Get returns.
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		for i := 0; i < chunks; i++ {
+			events <- providers.StreamEvent{Type: "content", Content: fmt.Sprintf("chunk-%d ", i)}
+			// Interval ≫ tick (150ms ≫ 50ms): ~3 heartbeats between chunks.
+			time.Sleep(150 * time.Millisecond)
+		}
+		events <- providers.StreamEvent{Type: "done", FinishReason: "stop", Response: &providers.ChatCompletionResponse{
+			Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+		}}
+		close(events)
+	}()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	cr, err := client.Get(proxy.URL)
+	if err != nil {
+		t.Fatalf("client Get: %v", err)
+	}
+
+	var body bytes.Buffer
+	if _, err := io.Copy(&body, cr.Body); err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	cr.Body.Close()
+	<-feedDone
+	if err := <-handlerErr; err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// Body integrity: heartbeat comments are SSE-legal; every data line
+	// must parse — a torn write (heartbeat spliced into a data line)
+	// fails the JSON unmarshal below.
+	heartbeats := 0
+	dataLines := 0
+	sawDone := false
+	for _, line := range strings.Split(body.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			heartbeats++
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			t.Fatalf("corrupt SSE line (torn write?): %q", line)
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("torn data line %q: %v", line, err)
+		}
+		dataLines++
+	}
+	if heartbeats == 0 {
+		t.Error("no heartbeat interleaved — the race window was not exercised")
+	}
+	if !sawDone {
+		t.Error("missing [DONE]")
+	}
+	if dataLines < chunks+1 {
+		t.Errorf("data lines = %d, want >= %d", dataLines, chunks+1)
+	}
+	for i := 0; i < chunks; i++ {
+		if !strings.Contains(body.String(), fmt.Sprintf("chunk-%d ", i)) {
+			t.Errorf("content chunk %d lost or corrupted", i)
+		}
 	}
 }
