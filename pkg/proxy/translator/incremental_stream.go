@@ -272,6 +272,16 @@ func (t *IncrementalStreamTranslator) ProcessChunk(rawOpenAIChunk []byte) ([]str
 // ProcessChunk emit path so wire behavior is identical between the
 // two entry points.
 //
+// CRITICAL: ProcessEvent ALSO accumulates into t.state using the SAME
+// shapes accumulateChunk applies to ProcessChunk — content →
+// AccumulatedContent, reasoning/thinking → ThinkingContent, tool
+// deltas → ToolCalls. Without this mirror the internal live-mode
+// success path (handler_anthropic.go:795-816 arc mirror) reads an
+// empty StreamState and persists a store.Message with empty
+// Content + ToolCalls for every internal live-mode streaming
+// response. ProcessChunk has always done both (emit + accumulate);
+// this entry point was emitting without accumulating.
+//
 // content populates text; reasoning/thinking populate the thinking block;
 // toolCalls is the OpenAI-shape []interface{} of {index,id,function{...}}
 // maps to populate tool_use blocks.
@@ -283,6 +293,56 @@ func (t *IncrementalStreamTranslator) ProcessEvent(content, reasoning, thinking 
 	var emitted []string
 
 	t.emitPreamble(&emitted)
+
+	// Accumulate into t.state with the same shapes accumulateChunk uses.
+	// Content / thinking / tool calls only — ProcessChunk's per-chunk
+	// usage + stop_reason are not exposed on the typed-event entry
+	// (the internal handler does not see those fields per-event).
+	if content != "" {
+		t.state.AccumulatedContent.WriteString(content)
+	}
+	if reasoning != "" {
+		t.state.ThinkingContent.WriteString(reasoning)
+	}
+	if thinking != "" {
+		t.state.ThinkingContent.WriteString(thinking)
+	}
+	if len(toolCalls) > 0 {
+		for _, tc := range toolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			index := 0
+			// Internal handler (convertProvidersToolCallsToMapList)
+			// passes int; JSON-parsed chunks (ProcessChunk path) pass
+			// float64. Accept both — the accumulate + emit paths must
+			// produce identical slot expansion regardless of source.
+			switch idx := tcMap["index"].(type) {
+			case float64:
+				index = int(idx)
+			case int:
+				index = idx
+			case int64:
+				index = int(idx)
+			}
+			// Ensure we have enough slots (same guard as accumulateChunk).
+			for len(t.state.ToolCalls) <= index {
+				t.state.ToolCalls = append(t.state.ToolCalls, ToolCallState{Index: index})
+			}
+			if id, ok := tcMap["id"].(string); ok && id != "" {
+				t.state.ToolCalls[index].ID = id
+			}
+			if function, ok := tcMap["function"].(map[string]interface{}); ok {
+				if name, ok := function["name"].(string); ok {
+					t.state.ToolCalls[index].Name = name
+				}
+				if args, ok := function["arguments"].(string); ok {
+					t.state.ToolCalls[index].Arguments.WriteString(args)
+				}
+			}
+		}
+	}
 
 	if content != "" {
 		t.emitTextDelta(content, &emitted)
@@ -300,7 +360,14 @@ func (t *IncrementalStreamTranslator) ProcessEvent(content, reasoning, thinking 
 			continue
 		}
 		index := 0
-		if idx, ok := tcMap["index"].(float64); ok {
+		// Accept both int (internal handler path) and float64
+		// (JSON-parsed path) — see comment above.
+		switch idx := tcMap["index"].(type) {
+		case float64:
+			index = int(idx)
+		case int:
+			index = idx
+		case int64:
 			index = int(idx)
 		}
 
@@ -346,8 +413,12 @@ func (t *IncrementalStreamTranslator) Finalize() ([]string, error) {
 		emitted = append(emitted, formatContentBlockStop(t.thinkingBlockIdx))
 		t.thinkingBlockOpen = false
 	}
-	// Close any still-open tool blocks (in block-index order so the
-	// wire stops match the opens).
+	// Close any still-open tool blocks. The overall Finalize order is
+	// FIXED: text-block-stop → thinking-block-stop → tool-block-stops
+	// in block-index order. The text + thinking stops above run
+	// unconditionally (when their blocks are open); this loop handles
+	// the tools in their block-index order so the wire stops match the
+	// opens.
 	for idx := 0; idx < t.nextBlockIndex; idx++ {
 		for toolIdx, blockIdx := range t.toolBlockIndex {
 			if blockIdx == idx && t.toolBlocksOpen[toolIdx] {

@@ -673,7 +673,6 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// "content"/"thinking"/"tool_call" arms will drive ProcessEvent
 	// instead of writing raw OpenAI SSE chunks to the recorder.
 	var arcTranslator *translator.IncrementalStreamTranslator
-	var sinkPtr *strings.Builder
 	if sinkForLive {
 		arcTranslator = translator.NewIncrementalStreamTranslator(arc.originalModel)
 		arc.liveTranslator = arcTranslator
@@ -748,7 +747,6 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// TRUE w (not a recorder) so the translator's per-event Anthropic
 	// emissions reach the client wire directly. The handler emits
 	// SSE headers itself via SetStreamHeaders inside handleStream.
-	_ = sinkPtr // sinkForLive unused past the SetThinkingSink call above
 
 	// IMPORTANT: the live preamble is NOT emitted up-front here. The
 	// fallback loop guard at the loop-top (handler_anthropic.go
@@ -783,11 +781,19 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		return true // Don't retry after headers sent
 	}
 
-	// Persist captured thinking (sink capture runs in BOTH modes — see
-	// internal_handler.go task-3.9 comment for dual-mode wording).
-	if capturedThinking.Len() > 0 {
-		arc.accumulatedThinking.WriteString(capturedThinking.String())
-	}
+	// Review-fix #1 (Phase 3 review): ProcessEvent is now the SINGLE
+	// source of truth for the arc mirror in live mode. The translator
+	// accumulates into StreamState directly (mirroring accumulateChunk
+	// in ProcessChunk) and the arc mirror reads from State() below.
+	// The legacy capturedThinking→arc write is REMOVED here because:
+	//   1. State().ThinkingContent already carries the full thinking
+	//      text accumulated during typed events.
+	//   2. Writing capturedThinking too produced a duplicate append on
+	//      every internal live-mode streaming response, leaking one
+	//      full copy of the thinking text into store.Message.Thinking.
+	// Buffered mode (else branch above) still uses the capturedThinking
+	// side channel because the legacy recorder-based path doesn't drive
+	// the translator — that path is unchanged.
 
 	// Mirror the translator's accumulated text + tool-calls into the
 	// arc builders (the StreamState is the source of truth; the arc
@@ -965,7 +971,6 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB cap, mirrors :821
-	chunkCount := 0
 	var doneSeen bool
 
 	for scanner.Scan() {
@@ -975,7 +980,6 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 		}
 
 		line := scanner.Bytes()
-		chunkCount++
 
 		// Skip empty lines and SSE comments.
 		if len(line) == 0 {
@@ -988,25 +992,50 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 			break
 		}
 
-		// Only "data: ..." lines reach the translator; everything
-		// else (event: ..., comments) is forwarded verbatim so we
-		// don't strip anything the upstream might include.
+		// Review-fix #5 (Phase 3 review): the legacy `forward non-data
+		// lines verbatim` rule leaked OpenAI-shape bytes (e.g. `event:`
+		// lines, blank framing) onto the Anthropic wire when the upstream
+		// emitted non-Anthropic framing. Buffered mode (`stream.go`
+		// scanner) only passes `data:` lines into the translator, so
+		// live mode now matches that hygiene: forward ONLY SSE comments
+		// (`: ...` lines — heartbeat keep-alives the Anthropic client
+		// tolerates) and DROP every other non-`data:` line.
 		if !bytes.HasPrefix(line, []byte("data: ")) {
-			if !arc.headersSent {
-				writeLiveStreamPreamble(w, arc)
+			if bytes.HasPrefix(line, []byte(":")) {
+				if !arc.headersSent {
+					writeLiveStreamPreamble(w, arc)
+				}
+				w.Write(line)
+				w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
 			}
-			w.Write(line)
-			w.Write([]byte("\n"))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
+			// non-comment, non-data line (e.g. `event: ...`, blank
+			// framing) — drop it. The buffered path also drops these
+			// because it only feeds `data:` lines into the translator.
 			continue
 		}
 
 		events, err := tr.ProcessChunk(line)
 		if err != nil {
-			log.Printf("Live stream translator chunk failed: %v", err)
-			continue
+			// Review-fix #3 (Phase 3 review): ProcessChunk emits the
+			// preamble BEFORE attempting to parse the JSON body, and
+			// returns the preamble events alongside the parse error.
+			// The legacy `continue` here DROPPED those events: by the
+			// time we hit this line messageStartSent / pingSent are
+			// already true, but the wire has never seen message_start
+			// or ping — the client gets a stream that starts at the
+			// first parseable chunk instead of the well-formed
+			// message_start preamble the Anthropic wire protocol
+			// expects.
+			//
+			// Fix: still emit whatever events ProcessChunk returned.
+			// The parse error only means THIS chunk's body was bad;
+			// the preamble and any preceding successful chunks are
+			// still valid wire bytes. Dropping them violates the
+			// well-formed-stream contract.
+			log.Printf("Live stream translator chunk failed: %v (continuing with %d preamble events)", err, len(events))
 		}
 
 		if len(events) > 0 && !arc.headersSent {
@@ -1155,21 +1184,39 @@ func applyTranslatorEventPayloadToArc(eventType, payload string, arc *anthropicR
 			if cb["type"] == "tool_use" {
 				id, _ := cb["id"].(string)
 				name, _ := cb["name"].(string)
-				// If the last arc-accumulated tool call already has
-				// the SAME id, just update its name (the streaming
-				// OpenAI upstream sometimes carries id in one delta
-				// and name in a later one, but the translator
-				// buffers until id+name arrive, so by the time the
-				// wire sees content_block_start both are set).
+				// Review-fix #2 (Phase 3 review): the legacy code
+				// only filled the last entry's empty id/name — when a
+				// second tool_use block started (tool B arrives after
+				// tool A already has id+name), the new id/name was
+				// SILENTLY DROPPED and B's input_json_deltas later
+				// appended into A's Arguments, producing one persisted
+				// tool call with concatenated JSON from both tools.
+				//
+				// The fix:
+				//   - if the last entry has a DIFFERENT id (or is empty),
+				//     APPEND a fresh entry — that's a new tool call.
+				//   - else (same id, or first entry) fill the empty
+				//     id/name on the last entry — that mirrors the
+				//     OpenAI upstream's split-arrival quirk (id in one
+				//     delta, name in a later one) and the translator's
+				//     own id+name buffering.
 				if len(arc.accumulatedToolCalls) > 0 {
 					last := &arc.accumulatedToolCalls[len(arc.accumulatedToolCalls)-1]
-					if last.ID == "" {
-						last.ID = id
+					if last.ID != "" && last.ID != id {
+						arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
+							ID:       id,
+							Type:     "tool_use",
+							Function: store.Function{Name: name},
+						})
+					} else {
+						if last.ID == "" {
+							last.ID = id
+						}
+						if last.Function.Name == "" {
+							last.Function.Name = name
+						}
+						last.Type = "tool_use"
 					}
-					if last.Function.Name == "" {
-						last.Function.Name = name
-					}
-					last.Type = "tool_use"
 				} else {
 					arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
 						ID:       id,

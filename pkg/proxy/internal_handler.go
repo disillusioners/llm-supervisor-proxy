@@ -510,6 +510,25 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				// Live mode: drive the translator via ProcessEvent with
 				// the OpenAI-shape tool_calls list. Emitted Anthropic
 				// events REPLACE the raw OpenAI-chunk write to w.
+				//
+				// REVIEW-FIX #4 (Phase 3 review, DOCUMENT-ONLY):
+				// The live tool_call arm does NOT feed toolCallBuffer —
+				// the buffered arm below (lines ~552-560) is the only
+				// path that runs tool-call repair. This is a DELIBERATE
+				// semantic divergence, not a bug:
+				//   - live mode = raw tool arguments reach the wire
+				//     IMMEDIATELY (no repair window between receipt of
+				//     fragments and emission to the client).
+				//   - buffered mode = full tool-call repair chain runs
+				//     on the recorder's collected fragments before the
+				//     client sees anything.
+				// The semantics decision (whether live mode should also
+				// buffer for repair) is being escalated separately.
+				// Adding the buffer here would change wire-visible
+				// behavior (introduce latency between fragment receipt
+				// and emission) and is OUT OF SCOPE for the review
+				// pass. See pkg/proxy/adapter_anthropic.go for the
+				// parallel buffered/non-buffered seam.
 				toolCallsForEv := convertProvidersToolCallsToMapList(event.ToolCalls)
 				events, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
 				if terr != nil {
@@ -729,8 +748,14 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 // set headersSent exactly once. w is the live ResponseWriter.
 // Returns true when the preamble was emitted (caller should NOT
 // emit it again), false when it was already emitted.
+//
+// Review-fix #8 (Phase 3 review): nil-guard the arc pointer. Live
+// tests that construct an InternalHandler with SetLiveArc(nil) (e.g.
+// when asserting wire output without persistence) previously
+// panicked on the headersSent write. Treat nil arc as "preamble
+// already sent / not relevant" — never panic, never set headersSent.
 func (h *InternalHandler) emitLivePreamble(w http.ResponseWriter, arc *anthropicRequestContext) bool {
-	if arc.headersSent {
+	if arc == nil || arc.headersSent {
 		return false
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

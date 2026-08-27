@@ -42,10 +42,16 @@ import (
 //   - ping (if present) follows message_start;
 //   - blocks follow: content_block_start → content_block_delta*N → content_block_stop;
 //   - one text block AND one thinking block max open concurrently
-//     (single-open-block-of-each-kind ruling);
+//     (single-open-block-of-each-kind ruling for text + thinking);
+//   - tool_use blocks: per-INDEX uniqueness only — multiple tool_use
+//     blocks at different indices can be open concurrently
+//     (Phase 3 review-fix #9 — was previously per-kind which would
+//     false-reject future multi-tool fixtures);
 //   - block indices are assigned monotonically starting at 0;
 //   - message_delta follows ALL content_block_stop;
-//   - message_stop is the last event.
+//   - message_stop is the last event AND arrives only when zero
+//     blocks remain open (Phase 3 review-fix #9 — was previously
+//     only enforced for message_delta).
 //
 // A violation is a real finding — the Phase 3 plan assumes SDK
 // tolerance for the interleaved wire shape; this test is the gate.
@@ -56,7 +62,6 @@ type anthropicSDKStreamParser struct {
 	currentBlockIdx    int            // last index seen in a content_block_start
 	textBlocksOpen     int
 	thinkingBlocksOpen int
-	toolBlocksOpen     int
 	err                error
 }
 
@@ -119,6 +124,13 @@ func (p *anthropicSDKStreamParser) consume(eventType string, data string) bool {
 			return false
 		}
 		// Single-open-block-of-each-kind ruling.
+		// Review-fix #9 (Phase 3 review): text and thinking are still
+		// single-open-per-kind (the translator's interleave ruling);
+		// tool_use is now per-INDEX — multiple tool_use blocks at
+		// different indices can be open concurrently. The per-index
+		// uniqueness is already enforced above by `_, ok := p.blockOpen[d.Index]`,
+		// so the legacy "no second tool_use ever" rule was a false
+		// rejection waiting for the next multi-tool fixture.
 		switch kind {
 		case "text":
 			if p.textBlocksOpen >= 1 {
@@ -133,11 +145,10 @@ func (p *anthropicSDKStreamParser) consume(eventType string, data string) bool {
 			}
 			p.thinkingBlocksOpen++
 		case "tool_use":
-			if p.toolBlocksOpen >= 1 {
-				p.err = &parseErr{msg: "opening second tool_use block violates single-open ruling"}
-				return false
-			}
-			p.toolBlocksOpen++
+			// No per-kind count check — the Anthropic SDK accepts
+			// multiple tool_use blocks open concurrently as long as
+			// each index is unique (already guaranteed by the
+			// blockOpen lookup above).
 		}
 		p.blockOpen[d.Index] = kind
 		p.currentBlockKind = kind
@@ -180,8 +191,6 @@ func (p *anthropicSDKStreamParser) consume(eventType string, data string) bool {
 			p.textBlocksOpen--
 		case "thinking":
 			p.thinkingBlocksOpen--
-		case "tool_use":
-			p.toolBlocksOpen--
 		}
 		delete(p.blockOpen, d.Index)
 	case string(EventMessageDelta):
@@ -194,6 +203,15 @@ func (p *anthropicSDKStreamParser) consume(eventType string, data string) bool {
 	case string(EventMessageStop):
 		if p.state == stateInit || p.state == stateMessageStartSeen {
 			p.err = &parseErr{msg: "message_stop before message_start seen fully"}
+			return false
+		}
+		// Review-fix #9 (Phase 3 review): all content_block_stop
+		// events MUST precede message_stop. The legacy rule only
+		// enforced this for message_delta, so a stream that closed
+		// some (but not all) blocks before message_stop would pass.
+		// The SDK rejects such streams.
+		if len(p.blockOpen) > 0 {
+			p.err = &parseErr{msg: "message_stop with " + itoa(len(p.blockOpen)) + " still-open block(s)"}
 			return false
 		}
 		p.state = stateMessageStopSeen

@@ -1030,3 +1030,197 @@ func TestIncrementalStreamTranslator_ProcessEventToolCall(t *testing.T) {
 		t.Error("ProcessEvent with tool_call: missing input_json_delta for arguments")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestIncrementalStreamTranslator_ProcessEvent_AccumulatesState is the
+// regression test for Phase 3 review-fix #1. Before the fix, ProcessEvent
+// emitted wire events but never accumulated into t.state, so the internal
+// live-mode success path (handler_anthropic.go:795-816 arc mirror) read
+// an empty StreamState and persisted store.Message with empty
+// Content + ToolCalls + Thinking for every internal live-mode streaming
+// response.
+//
+// The test drives ProcessEvent with content + reasoning + tool_calls and
+// asserts the State() accumulators are populated with the SAME shapes
+// accumulateChunk uses in ProcessChunk. A failure of this test means
+// the internal live-mode persistence path is broken again.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestIncrementalStreamTranslator_ProcessEvent_AccumulatesState(t *testing.T) {
+	tr := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+
+	// 1. Content accumulation.
+	if _, err := tr.ProcessEvent("hello world", "", "", nil); err != nil {
+		t.Fatalf("ProcessEvent(content): %v", err)
+	}
+	if got, want := tr.State().AccumulatedContent.String(), "hello world"; got != want {
+		t.Errorf("ProcessEvent: AccumulatedContent = %q, want %q", got, want)
+	}
+
+	// 2. Reasoning/thinking accumulation (both keys — same as accumulateChunk).
+	tr2 := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	if _, err := tr2.ProcessEvent("", "step1", "", nil); err != nil {
+		t.Fatalf("ProcessEvent(reasoning): %v", err)
+	}
+	if _, err := tr2.ProcessEvent("", "", "step2", nil); err != nil {
+		t.Fatalf("ProcessEvent(thinking): %v", err)
+	}
+	if got, want := tr2.State().ThinkingContent.String(), "step1step2"; got != want {
+		t.Errorf("ProcessEvent: ThinkingContent = %q, want %q (reasoning_content + thinking keys concatenated)", got, want)
+	}
+
+	// 3. Tool call accumulation — single tool, id+name+args.
+	tr3 := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	tc := []interface{}{
+		map[string]interface{}{
+			"index": 0,
+			"id":    "call_abc",
+			"type":  "function",
+			"function": map[string]interface{}{
+				"name":      "lookup",
+				"arguments": `{"q":"hi"}`,
+			},
+		},
+	}
+	if _, err := tr3.ProcessEvent("", "", "", tc); err != nil {
+		t.Fatalf("ProcessEvent(tool_call): %v", err)
+	}
+	tools := tr3.State().ToolCalls
+	if len(tools) != 1 {
+		t.Fatalf("ProcessEvent: ToolCalls len = %d, want 1", len(tools))
+	}
+	if tools[0].ID != "call_abc" {
+		t.Errorf("ProcessEvent: ToolCalls[0].ID = %q, want %q", tools[0].ID, "call_abc")
+	}
+	if tools[0].Name != "lookup" {
+		t.Errorf("ProcessEvent: ToolCalls[0].Name = %q, want %q", tools[0].Name, "lookup")
+	}
+	if got, want := tools[0].Arguments.String(), `{"q":"hi"}`; got != want {
+		t.Errorf("ProcessEvent: ToolCalls[0].Arguments = %q, want %q", got, want)
+	}
+
+	// 4. Tool call accumulation — TWO tool calls at different indices
+	//    (regression for review-fix #2 — multi-tool mirror requires
+	//    distinct slots per index; the State mirror must also keep
+	//    them separate, NOT concatenate).
+	tr4 := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	tc2 := []interface{}{
+		map[string]interface{}{
+			"index": 0,
+			"id":    "call_a",
+			"function": map[string]interface{}{
+				"name":      "tool_a",
+				"arguments": `{"a":1}`,
+			},
+		},
+		map[string]interface{}{
+			"index": 1,
+			"id":    "call_b",
+			"function": map[string]interface{}{
+				"name":      "tool_b",
+				"arguments": `{"b":2}`,
+			},
+		},
+	}
+	if _, err := tr4.ProcessEvent("", "", "", tc2); err != nil {
+		t.Fatalf("ProcessEvent(two tool_calls): %v", err)
+	}
+	tools = tr4.State().ToolCalls
+	if len(tools) != 2 {
+		t.Fatalf("ProcessEvent: 2-tool ToolCalls len = %d, want 2", len(tools))
+	}
+	if tools[0].ID != "call_a" || tools[0].Name != "tool_a" || tools[0].Arguments.String() != `{"a":1}` {
+		t.Errorf("ProcessEvent: ToolCalls[0] corrupted: %+v", tools[0])
+	}
+	if tools[1].ID != "call_b" || tools[1].Name != "tool_b" || tools[1].Arguments.String() != `{"b":2}` {
+		t.Errorf("ProcessEvent: ToolCalls[1] corrupted: %+v", tools[1])
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestIncrementalStreamTranslator_ProcessEvent_MatchesProcessChunkState
+// is a stronger cross-entry-point regression for review-fix #1. It
+// drives the SAME logical OpenAI stream through ProcessChunk and
+// ProcessEvent (the two entry points) and asserts the resulting
+// StreamState is byte-identical — except that ProcessEvent has no
+// access to usage + finish_reason per-chunk (those are not exposed on
+// the typed-event entry), so the comparison excludes those fields.
+//
+// A failure of this test means the two entry points have DRIFTED —
+// exactly the bug class that drove the review-fix. Future changes
+// to either entry point must keep this invariant.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestIncrementalStreamTranslator_ProcessEvent_MatchesProcessChunkState(t *testing.T) {
+	// Logical OpenAI stream: role + content "ab" + reasoning "r1r2"
+	// + tool_call id+name+args "x", finished.
+	chunks := []string{
+		`data: {"choices":[{"delta":{"role":"assistant"},"index":0}]}`,
+		`data: {"choices":[{"delta":{"content":"a"},"index":0}]}`,
+		`data: {"choices":[{"delta":{"content":"b"},"index":0}]}`,
+		`data: {"choices":[{"delta":{"reasoning_content":"r1"},"index":0}]}`,
+		`data: {"choices":[{"delta":{"reasoning_content":"r2"},"index":0}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"fn","arguments":"{}"}}]},"index":0}]}`,
+	}
+
+	trChunk := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	for _, c := range chunks {
+		if _, err := trChunk.ProcessChunk([]byte(c)); err != nil {
+			t.Fatalf("ProcessChunk(%s): %v", c, err)
+		}
+	}
+
+	trEvent := NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	// Drive the same logical events through ProcessEvent. Note the
+	// reasoning_content + content are merged by event type, so we
+	// replay them in the same order ProcessChunk would have seen them.
+	type ev struct {
+		content, reasoning, thinking string
+		toolCalls                   []interface{}
+	}
+	events := []ev{
+		{content: "", reasoning: "", thinking: ""}, // role-only preamble equivalent
+		{content: "a"},
+		{content: "b"},
+		{reasoning: "r1"},
+		{reasoning: "r2"},
+		{toolCalls: []interface{}{map[string]interface{}{
+			"index": 0,
+			"id":    "call_x",
+			"function": map[string]interface{}{
+				"name":      "fn",
+				"arguments": "{}",
+			},
+		}}},
+	}
+	for _, e := range events {
+		if _, err := trEvent.ProcessEvent(e.content, e.reasoning, e.thinking, e.toolCalls); err != nil {
+			t.Fatalf("ProcessEvent: %v", err)
+		}
+	}
+
+	cs := trChunk.State()
+	es := trEvent.State()
+
+	if got, want := cs.AccumulatedContent.String(), es.AccumulatedContent.String(); got != want {
+		t.Errorf("AccumulatedContent drift: chunk=%q event=%q", got, want)
+	}
+	if got, want := cs.ThinkingContent.String(), es.ThinkingContent.String(); got != want {
+		t.Errorf("ThinkingContent drift: chunk=%q event=%q", got, want)
+	}
+	if len(cs.ToolCalls) != len(es.ToolCalls) {
+		t.Fatalf("ToolCalls len drift: chunk=%d event=%d", len(cs.ToolCalls), len(es.ToolCalls))
+	}
+	for i := range cs.ToolCalls {
+		if cs.ToolCalls[i].ID != es.ToolCalls[i].ID {
+			t.Errorf("ToolCalls[%d].ID drift: chunk=%q event=%q", i, cs.ToolCalls[i].ID, es.ToolCalls[i].ID)
+		}
+		if cs.ToolCalls[i].Name != es.ToolCalls[i].Name {
+			t.Errorf("ToolCalls[%d].Name drift: chunk=%q event=%q", i, cs.ToolCalls[i].Name, es.ToolCalls[i].Name)
+		}
+		if cs.ToolCalls[i].Arguments.String() != es.ToolCalls[i].Arguments.String() {
+			t.Errorf("ToolCalls[%d].Arguments drift: chunk=%q event=%q",
+				i, cs.ToolCalls[i].Arguments.String(), es.ToolCalls[i].Arguments.String())
+		}
+	}
+}
