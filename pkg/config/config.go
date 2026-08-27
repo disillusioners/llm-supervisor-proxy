@@ -147,10 +147,11 @@ type LoopDetectionConfig struct {
 }
 
 // UltimateModelConfig holds configuration for the ultimate model feature.
-// When a duplicate request is detected, the proxy bypasses all normal logic
-// (fallback, retry, buffering) and acts as a raw proxy to this model.
+// Ultimate mode is injected at requests 5, 10, 20, 30, and 40 per hash.
+// The schedule has a 40-attempt cap; requests 41+ are exhausted and
+// no longer retryable.
 type UltimateModelConfig struct {
-	ModelID string `json:"model_id"` // Model ID to use for duplicate requests (e.g., "claude-3-opus")
+	ModelID string `json:"model_id"` // Model ID to use for ultimate mode (e.g., "claude-3-opus")
 	MaxHash int    `json:"max_hash"` // Max hashes in circular buffer (default: 100)
 }
 

@@ -15,7 +15,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   request_started: () => 'Processing new request...',
   timeout_idle: (e) => `Idle timeout detected (${e.data?.timeout || 'unknown'})`,
   retry_attempt: (e) => `Retrying request (Attempt ${e.data?.attempt || '?'})`,
-  error_max_upstream_error_retries: (e) => `Max retries exceeded${e.data?.error ? ` - ${e.data.error}` : ''}`,
+  error_max_upstream_error_retries: (e) => `Upstream retries exceeded${e.data?.error ? ` - ${e.data.error}` : ''}`,
   upstream_error: (e) => `Upstream request failed: ${e.data?.error || 'Unknown error'}`,
   upstream_error_status: (e) => `Upstream returned HTTP ${e.data?.status || '?'}`,
   upstream_error_status_retry: (e) => `Retry failed with HTTP ${e.data?.status || '?'} (headers already sent)`,
@@ -264,7 +264,10 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
                 <span class={`shrink-0 font-semibold ${getEventColor(event.type)}`}>
                   [{getEventTypeLabel(event.type)}]
                 </span>
-                <span class="text-gray-300">
+                <span
+                  class="text-gray-300"
+                  aria-label={event.type === 'ultimate_model_retry_exhausted' ? 'Ultimate model attempt limit reached' : undefined}
+                >
                   {getEventMessage(event)}
                   {(event.type === 'stream_error_after_headers' || event.type === 'upstream_error_status' || event.type === 'internal_error') && event.data?.buffer_id && (
                     <a

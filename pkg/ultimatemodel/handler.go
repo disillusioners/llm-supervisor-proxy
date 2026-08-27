@@ -124,15 +124,13 @@ func (h *Handler) shouldTriggerInternal(messages []map[string]interface{}, force
 	// Generate hash from messages (role + content only)
 	hash := HashMessages(messages)
 
-	// Force: trigger immediately, never increment the attempt counter, no
-	// exhaustion. Still store the hash if new (insert-only) — a force-seen
-	// hash counts as attempt 1 on the next normal RecordAttempt call.
+	// Force: trigger immediately without consuming an attempt slot. StoreIfAbsent
+	// may initialize a missing hash and its counter to 1 (insert-only), but we
+	// deliberately return CurrentAttempt=0 so force never claims a schedule slot.
 	if force {
 		h.hashCache.StoreIfAbsent(hash)
-		// No CurrentAttempt field set: StoreIfAbsent is insert-only, so the
-		// counter was never touched and there is no attempt count to report.
-		// The default zero serializes to "current_retry": 0 on the wire
-		// (intentional — a force trigger must not consume an attempt slot).
+		// CurrentAttempt is deliberately zero: StoreIfAbsent may have
+		// initialized the counter to 1, but force must not claim an attempt slot.
 		return ShouldTriggerResult{
 			Triggered:   true,
 			Hash:        hash,
@@ -612,12 +610,14 @@ func (h *Handler) SendRetryExhaustedError(
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
+		// WIRE COMP: retain the legacy "retry-exhausted" header value for external consumers.
 		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
 		fmt.Fprintf(w, "data: %s\n\n", string(errorJSON))
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 	} else {
 		// Regular JSON response for non-streaming
 		w.Header().Set("Content-Type", "application/json")
+		// WIRE COMP: retain the legacy "retry-exhausted" header value for external consumers.
 		w.Header().Set("X-LLMProxy-Ultimate-Model", "retry-exhausted")
 		w.Write(errorJSON)
 	}

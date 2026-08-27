@@ -147,8 +147,11 @@ func (c *HashCache) RecordAttempt(hash string) int
 // counts as attempt 1, so the next normal RecordAttempt returns 2.
 func (c *HashCache) StoreIfAbsent(hash string)
 
-// Remove removes a hash from the cache (used when ultimate model fails).
-// This prevents infinite retry loop on broken config.
+// Remove removes a hash from the cache and clears its attempt counter.
+// Ultimate execution calls Remove only after a successful run, which
+// re-arms the milestone schedule, or when the configured model is missing
+// (a configuration-error cleanup). Failed executions keep the counter so
+// subsequent requests flow normally until the next schedule milestone.
 func (c *HashCache) Remove(hash string)
 
 // Reset clears all hashes (called when ultimate_model_id config changes)
