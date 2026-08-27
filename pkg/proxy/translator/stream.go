@@ -63,8 +63,22 @@ func TranslateBufferedStream(openaiBuffer []byte, originalModel string) ([]byte,
 	return append([]byte(nil), buf.Bytes()...), nil
 }
 
-// extractChunkContent extracts content from an OpenAI stream chunk into state
+// extractChunkContent is the public entry point retained for backwards
+// compatibility (used by TranslateBufferedStream). The body has been
+// factored into accumulateChunk so the incremental translator can reuse
+// the same per-chunk accumulation primitive.
 func extractChunkContent(chunk map[string]interface{}, state *StreamState) {
+	accumulateChunk(chunk, state)
+}
+
+// accumulateChunk is the shared per-chunk accumulator used by BOTH
+// TranslateBufferedStream (via extractChunkContent) and
+// IncrementalStreamTranslator. The shape is the same as the pre-refactor
+// extractChunkContent body — zero behavior change. Splitting the helper
+// out keeps the per-chunk state mutation in one place so the new
+// incremental translator cannot drift from the batch translator on
+// how it folds an OpenAI delta into StreamState.
+func accumulateChunk(chunk map[string]interface{}, state *StreamState) {
 	choices, ok := chunk["choices"].([]interface{})
 	if !ok || len(choices) == 0 {
 		return

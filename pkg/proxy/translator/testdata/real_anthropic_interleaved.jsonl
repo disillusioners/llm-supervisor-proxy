@@ -1,0 +1,13 @@
+{"choices":[{"delta":{"role":"assistant"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":"Let me think about this problem"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":" carefully. The user is asking"},"index":0}]}
+{"choices":[{"delta":{"content":"Hi"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":" a question about interleaved"},"index":0}]}
+{"choices":[{"delta":{"content":" there"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":" thinking patterns."},"index":0}]}
+{"choices":[{"delta":{"content":" How can I help"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":" Let me consider"},"index":0}]}
+{"choices":[{"delta":{"content":" you today?"},"index":0}]}
+{"choices":[{"delta":{"reasoning_content":" the context."},"index":0}]}
+{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":12,"completion_tokens":24,"total_tokens":36}}
+[DONE]

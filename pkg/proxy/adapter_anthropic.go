@@ -152,10 +152,38 @@ func (a *AnthropicAdapter) WriteNonStreamResponse(w http.ResponseWriter, openaiR
 }
 
 func (a *AnthropicAdapter) WriteStreamEvent(w http.ResponseWriter, openaiChunk []byte) error {
-	// For streaming, we need to translate each OpenAI chunk to Anthropic format
-	// This is more complex and handled by the stream translator
-	// For now, we'll use the buffered approach
+	// Buffered mode: legacy path. The recorder-based handler at
+	// handleAnthropicInternalStreamResponse feeds the body into
+	// translator.TranslateBufferedStream, so per-chunk translation
+	// is unnecessary here. The error message is preserved verbatim
+	// from the legacy behavior (any caller that hits this path is
+	// relying on buffered translation).
 	return fmt.Errorf("streaming requires buffered translation - use BufferedStreamTranslator")
+}
+
+// WriteStreamEventLive is the live-mode counterpart to
+// WriteStreamEvent. Called by the live Anthropic-streaming
+// handler (handleAnthropicLiveStreamResponse at
+// handler_anthropic.go) which owns the IncrementalStreamTranslator
+// directly — the adapter only needs to forward each emitted
+// Anthropic event to w and flush.
+//
+// The actual translation from OpenAI SSE → Anthropic SSE happens
+// upstream (the handler drives translator.IncrementalStreamTranslator
+// .ProcessChunk per line). This method is the seam where the
+// adapter's WriteStreamEvent contract would otherwise return the
+// "buffered translation required" error — for the live path the
+// caller is the handler, not the adapter, so this method is
+// unused at runtime today, but the seam is documented here for
+// symmetry and future refactors.
+func (a *AnthropicAdapter) WriteStreamEventLive(w http.ResponseWriter, anthropicEvent string) error {
+	if _, err := fmt.Fprint(w, anthropicEvent); err != nil {
+		return err
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
 }
 
 func (a *AnthropicAdapter) WriteStreamDone(w http.ResponseWriter) error {

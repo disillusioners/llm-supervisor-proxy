@@ -30,15 +30,43 @@ type InternalHandler struct {
 	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
 	// thinkingSink is an OPTIONAL, capture-only side channel for case
-	// "thinking" reasoning text. INVARIANT: thinking bytes must NEVER be
-	// written to the ResponseWriter `w` — the recorder body is consumed
-	// downstream by translator.TranslateBufferedStream, which would convert
-	// any reasoning_content delta written here into Anthropic thinking
-	// blocks leaked onto the client wire. Base fea5874 DROPPED thinking
-	// events entirely; the sink exists only so persistence
-	// (store.Message.Thinking) can still observe them. When nil, thinking
-	// events are silently not captured (the documented base behaviour).
+	// "thinking" reasoning text. INVARIANT (Phase 3 / task 3.9 dual-
+	// mode wording): thinking bytes must NEVER be written to the
+	// ResponseWriter `w` as raw OpenAI chunks. Buffered mode: the
+	// recorder body is consumed downstream by
+	// translator.TranslateBufferedStream, which would convert any
+	// reasoning_content delta written there into Anthropic thinking
+	// blocks leaked onto the client wire — so the recorder path
+	// keeps the sink capture-only contract. Live mode: the recorder
+	// is gone (handleStream drives the typed-event translator
+	// instead); thinking events are captured into the sink AND
+	// ADDITIONALLY emitted as Anthropic thinking_delta blocks via
+	// the translator on the wire — that is the deliberate,
+	// documented wire-shape change for the internal non-Anthropic
+	// variant in live mode (real-streaming-default plan, Phase 3 /
+	// Q2 mechanics). When nil, thinking events are silently not
+	// captured (the documented base behaviour).
 	thinkingSink *strings.Builder
+
+	// liveTranslator is the OPTIONAL per-request
+	// translator.IncrementalStreamTranslator installed ONLY in live
+	// mode (bufferMode==false at the call site). When set, the case
+	// "content"/"thinking"/"tool_call" arms in handleStream drive
+	// ProcessEvent from the typed event instead of writing raw
+	// OpenAI SSE chunks to w — the translator's emitted Anthropic
+	// events REPLACE the raw-OpenAI write (M5: REPLACE, never
+	// "also"). The recorder-based buffered mode never installs
+	// this. Installed via SetLiveTranslator mirroring SetThinkingSink
+	// (nil-safe; nil means legacy buffered behavior).
+	liveTranslator *translator.IncrementalStreamTranslator
+
+	// liveArc is the per-request anthropicRequestContext installed
+	// by SetLiveArc. Used by emitLivePreamble to set headersSent
+	// lazily (preserving pre-first-byte fallback semantics — see
+	// the emitLivePreamble comment for the full rationale). nil in
+	// buffered mode (the buffered path owns its own headersSent
+	// gate at handleAnthropicInternalStreamResponse :735-749).
+	liveArc *anthropicRequestContext
 
 	// Tool call buffer configuration
 	toolCallBufferMaxSize  int64              // Max size for tool call buffer
@@ -119,6 +147,41 @@ func (h *InternalHandler) SetThinkingSink(sink *strings.Builder) error {
 // sanctioned way to make a subsequent SetThinkingSink succeed.
 func (h *InternalHandler) ResetThinkingSink() {
 	h.thinkingSink = nil
+}
+
+// SetLiveTranslator (Phase 3 / task 3.4) installs the per-request
+// IncrementalStreamTranslator used by the live-mode Anthropic path
+// (doAnthropicInternalRequest). When set, handleStream's content /
+// thinking / tool_call arms drive ProcessEvent instead of writing raw
+// OpenAI chunks to w. nil-safe: a nil install returns nil and leaves
+// the previous state alone (the documented buffered-mode behavior
+// when no translator was ever installed).
+//
+// Double-set is a programming error: a second call without an
+// intervening ResetLiveTranslator returns an error and leaves the
+// existing translator installed.
+func (h *InternalHandler) SetLiveTranslator(t *translator.IncrementalStreamTranslator) error {
+	if h.liveTranslator != nil && t != nil {
+		return fmt.Errorf("SetLiveTranslator: translator already set; call ResetLiveTranslator before installing a new one")
+	}
+	h.liveTranslator = t
+	return nil
+}
+
+// ResetLiveTranslator removes the installed translator. After
+// ResetLiveTranslator, the internal handler returns to the buffered-
+// mode default (raw OpenAI chunks written to w).
+func (h *InternalHandler) ResetLiveTranslator() {
+	h.liveTranslator = nil
+	h.liveArc = nil
+}
+
+// SetLiveArc installs the per-request anthropicRequestContext used
+// by emitLivePreamble to set headersSent lazily. Required in live
+// mode; the InternalHandler cannot read arc directly because it
+// lives in the proxy package.
+func (h *InternalHandler) SetLiveArc(arc *anthropicRequestContext) {
+	h.liveArc = arc
 }
 
 // CanHandleInternal checks if a model should use internal upstream
@@ -355,7 +418,36 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 		logger.Debugf("[DEBUG INTERNAL] Received event: type=%s, content=%.100s", event.Type, event.Content)
 		switch event.Type {
 		case "content":
-			// Write SSE data event
+			if h.liveTranslator != nil {
+				// Live mode: drive the translator via the typed-event
+				// entry. The emitted Anthropic events REPLACE the raw
+				// OpenAI-chunk write to w (M5: REPLACE, never "also")
+				// — no double-write, no OpenAI-wire bytes on the
+				// Anthropic wire. Per-event accumulation into the
+				// arc's accumulatedResponse is the caller's job (the
+				// translator's StreamState is the source of truth,
+				// mirrored in doAnthropicInternalRequest's success
+				// path).
+				toolCallsForEv := convertProvidersToolCallsToMapList(event.ToolCalls)
+				events, terr := h.liveTranslator.ProcessEvent(event.Content, "", "", toolCallsForEv)
+				if terr != nil {
+					logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (content): %v", terr)
+					break
+				}
+				if len(events) > 0 {
+					h.emitLivePreamble(w, h.liveArc)
+				}
+				for _, ev := range events {
+					if _, werr := w.Write([]byte(ev)); werr != nil {
+						return werr
+					}
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+				break
+			}
+			// Buffered mode (legacy): write raw OpenAI SSE chunk to w.
 			chunk := providers.ChatCompletionResponse{
 				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				Object:  "chat.completion.chunk",
@@ -377,26 +469,67 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			flusher.Flush()
 
 		case "thinking":
-			// Capture reasoning/thinking text via side channel ONLY.
-			// The recorder (`w`) is consumed downstream by
-			// translator.TranslateBufferedStream, which would convert any
-			// reasoning_content delta we wrote here into Anthropic thinking
-			// blocks the client would receive. That violates the byte-identity
-			// contract with the pre-fix behaviour, so we deliberately stay
-			// silent on the wire and accumulate event.ReasoningContent into
-			// the optional thinkingSink for persistence instead.
-			//
-			// NIL-SINK INVARIANT (W1): with no sink installed this arm is a
-			// no-op — thinking is silently not captured, exactly the
-			// documented base behaviour of fea5874 (which dropped thinking
-			// events entirely). No panic, no wire write, ever.
+			// Capture reasoning/thinking text via side channel ONLY
+			// in buffered mode. In live mode the side channel ALSO
+			// captures (invariant dual-mode wording — see the
+			// thinkingSink field comment), and the translator
+			// ADDITIONALLY emits an Anthropic thinking_delta event on
+			// the wire. The recorder-based buffered path suppresses
+			// the wire write to keep the recorder clean (which is
+			// what TranslateBufferedStream downstream expects).
 			if h.thinkingSink != nil {
 				h.thinkingSink.WriteString(event.ReasoningContent)
 			}
 			logger.Debugf("[DEBUG INTERNAL] Captured thinking (side channel): %s", event.ReasoningContent)
 
+			if h.liveTranslator != nil {
+				// Live mode wire emission: drive ProcessEvent to get
+				// the Anthropic thinking_delta event(s), then write
+				// to w (replaces the legacy "do not write" rule —
+				// that rule was recorder-specific).
+				events, terr := h.liveTranslator.ProcessEvent("", event.ReasoningContent, "", nil)
+				if terr != nil {
+					logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (thinking): %v", terr)
+					break
+				}
+				if len(events) > 0 {
+					h.emitLivePreamble(w, h.liveArc)
+				}
+				for _, ev := range events {
+					if _, werr := w.Write([]byte(ev)); werr != nil {
+						return werr
+					}
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+			}
+
 		case "tool_call":
-			// Write tool_call delta
+			if h.liveTranslator != nil {
+				// Live mode: drive the translator via ProcessEvent with
+				// the OpenAI-shape tool_calls list. Emitted Anthropic
+				// events REPLACE the raw OpenAI-chunk write to w.
+				toolCallsForEv := convertProvidersToolCallsToMapList(event.ToolCalls)
+				events, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
+				if terr != nil {
+					logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (tool_call): %v", terr)
+					break
+				}
+				if len(events) > 0 {
+					h.emitLivePreamble(w, h.liveArc)
+				}
+				for _, ev := range events {
+					if _, werr := w.Write([]byte(ev)); werr != nil {
+						return werr
+					}
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+				break
+			}
+			// Buffered mode (legacy): write tool_call delta as raw OpenAI SSE.
 			chunk := providers.ChatCompletionResponse{
 				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				Object:  "chat.completion.chunk",
@@ -433,7 +566,55 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			flusher.Flush()
 
 		case "done":
-			// Flush any remaining buffered tool calls with repair
+			if h.liveTranslator != nil {
+				// Live mode: the plan pins the ordering constraint
+				// that translator.Finalize() MUST run AFTER
+				// toolCallBuffer.Flush() completes (internal_handler
+				// toolcall-buffer ordering constraint). The buffer
+				// flush is for the recorder-based buffered path; in
+				// live mode the buffer is unused (we drive the
+				// translator directly with typed events, no recorder),
+				// but we still maintain the structural order for
+				// consistency: flush buffer (no-op if nil) → run
+				// translator.Finalize() → write the close events to
+				// the wire.
+				if toolCallBuffer != nil {
+					flushChunks := toolCallBuffer.Flush()
+					// Live mode: toolCallBuffer.Flush output is
+					// already translated into Anthropic events via
+					// ProcessEvent above; the recorder-flush chunks
+					// are NOT emitted to the wire in live mode (they
+					// would be raw OpenAI-shape bytes).
+					_ = flushChunks
+					stats := toolCallBuffer.GetRepairStats()
+					if stats.Attempted > 0 {
+						log.Printf("[TOOL-BUFFER] InternalHandler (live): Repair stats: attempted=%d, success=%d, failed=%d",
+							stats.Attempted, stats.Successful, stats.Failed)
+					}
+				}
+
+				// Now Finalize — emits content_block_stops +
+				// message_delta + message_stop on the wire.
+				finalEvents, ferr := h.liveTranslator.Finalize()
+				if ferr != nil {
+					logger.Debugf("[DEBUG INTERNAL] live translator Finalize: %v", ferr)
+				} else {
+					if len(finalEvents) > 0 {
+						h.emitLivePreamble(w, h.liveArc)
+					}
+					for _, ev := range finalEvents {
+						if _, werr := w.Write([]byte(ev)); werr != nil {
+							return werr
+						}
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+					}
+				}
+				return nil
+			}
+			// Buffered mode (legacy): flush the tool-call buffer's
+			// remaining chunks, write the finish chunk + [DONE].
 			if toolCallBuffer != nil {
 				flushChunks := toolCallBuffer.Flush()
 				for _, chunk := range flushChunks {
@@ -475,12 +656,113 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			return nil
 
 		case "error":
+			// Mid-stream error (NB2): the live translator's Finalize
+			// MUST run at this call site BEFORE we propagate the
+			// error to the client wire — sequence pinned by the
+			// plan. After Finalize, we write a well-formed Anthropic
+			// error event and return.
 			log.Printf("Stream error: %v", event.Error)
+			if h.liveTranslator != nil {
+				if fEvents, ferr := h.liveTranslator.Finalize(); ferr == nil {
+					if len(fEvents) > 0 {
+						h.emitLivePreamble(w, h.liveArc)
+					}
+					for _, ev := range fEvents {
+						w.Write([]byte(ev))
+					}
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+				}
+			}
+			// Emit a well-formed Anthropic error event on the wire
+			// (mirrors sendAnthropicSSEError shape at
+			// handler_anthropic.go:1129).
+			errorEvent := map[string]interface{}{
+				"type": "error",
+				"error": map[string]interface{}{
+					"type":    "api_error",
+					"message": event.Error.Error(),
+				},
+			}
+			errBytes, _ := json.Marshal(errorEvent)
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(errBytes))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
 			return event.Error
 		}
 	}
 
+	// Channel closed without an explicit "done" event — Finalize the
+	// translator if live mode is active.
+	if h.liveTranslator != nil {
+		if fEvents, ferr := h.liveTranslator.Finalize(); ferr == nil {
+			if len(fEvents) > 0 {
+				h.emitLivePreamble(w, h.liveArc)
+			}
+			for _, ev := range fEvents {
+				w.Write([]byte(ev))
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+
 	return nil
+}
+
+// emitLivePreamble (Phase 3 / task 3.3 / NB8) is the lazy SSE
+// preamble emitter. Called once on the FIRST wire-writing arm
+// (case "content"/"thinking"/"tool_call") of handleStream in live
+// mode. The lazy-emit property is critical: setting headersSent
+// before any provider event would trip the fallback-loop guard at
+// handler_anthropic.go:256-264 (which breaks on
+// `arc.headersSent && !arc.bufferMode`) and block pre-first-byte
+// fallback for a provider that fails before sending any event.
+// Mirrors the buffered path's recorder-based semantics where
+// headersSent is set only AFTER the recorder has captured all
+// chunks (handleAnthropicInternalStreamResponse :735-749).
+//
+// arcPtr is the calling request's anthropicRequestContext so we can
+// set headersSent exactly once. w is the live ResponseWriter.
+// Returns true when the preamble was emitted (caller should NOT
+// emit it again), false when it was already emitted.
+func (h *InternalHandler) emitLivePreamble(w http.ResponseWriter, arc *anthropicRequestContext) bool {
+	if arc.headersSent {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	arc.headersSent = true
+	fmt.Fprint(w, ": connected\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return true
+}
+
+// convertProvidersToolCallsToMapList converts providers.ToolCall into
+// the []interface{} of OpenAI-shape {index,id,type,function{...}} maps
+// that translator.IncrementalStreamTranslator.ProcessEvent expects.
+func convertProvidersToolCallsToMapList(tcs []providers.ToolCall) []interface{} {
+	out := make([]interface{}, 0, len(tcs))
+	for i, tc := range tcs {
+		out = append(out, map[string]interface{}{
+			"index": i,
+			"id":    tc.ID,
+			"type":  tc.Type,
+			"function": map[string]interface{}{
+				"name":      tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			},
+		})
+	}
+	return out
 }
 
 // convertRequest converts map[string]interface{} to ChatCompletionRequest

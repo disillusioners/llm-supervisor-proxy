@@ -927,6 +927,19 @@ func anthropicTestRequestStore(h *Handler) *store.RequestStore {
 // thinking — the internal partial thinking must not appear (neither
 // concatenated, nor duplicated, nor polluting).
 func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
+	// NOTE: this test exercises the W4 thinking-isolation property on
+	// the BUFFERED-mode path (real-streaming-default plan, Phase 3,
+	// task 3.8 — buffered mode is byte-for-byte legacy). The plan
+	// explicitly notes that live mode's preamble emission commits the
+	// stream once a byte hits the wire (handler_anthropic.go
+	// :256-264 fallback guard fires on arc.headersSent), so a
+	// mid-stream failure after the first byte CANNOT fall back —
+	// which is the correct live-mode behavior (per plan: "Pre-first-
+	// byte fallback unchanged"). The internal upstream below emits
+	// ONE thinking chunk before dying, which IS a byte — so in live
+	// mode the fallback wouldn't fire. Opting into buffered mode
+	// (X-LLMProxy-Buffer-Response: true) keeps the legacy recorder-
+	// based semantics that this test was originally written for.
 	const internalPartialThinking = "INTERNAL PARTIAL THINKING TOKEN"
 	const fallbackThinking = "fallback reasoning"
 	const fallbackContent = "fallback answer"
@@ -976,6 +989,10 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 		{"role": "user", "content": "Hello"},
 	})
 	req := makeAnthropicRequest(t, body)
+	// Opt into buffered mode — see test comment above for why live
+	// mode cannot exercise this fallback path (commit-on-first-byte
+	// semantics block model switches after any byte hits the wire).
+	req.Header.Set("X-LLMProxy-Buffer-Response", "true")
 	rr := httptest.NewRecorder()
 
 	h.HandleAnthropicMessages(rr, req)

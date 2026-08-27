@@ -193,6 +193,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		method:              r.Method,
 		originalHeaders:     r.Header,
 		isAnthropicUpstream: isAnthropicUpstream,
+		// Phase 3 / task 3.7: thread the per-request delivery mode from
+		// the X-LLMProxy-Buffer-Response header (presence-aware
+		// parser at handler_functions.go:bufferModeFor). Live mode
+		// is the default when the header is absent; buffered mode is
+		// an explicit opt-in for the legacy full-buffer delivery.
+		bufferMode: bufferModeFor(r),
 	}
 
 	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
@@ -260,6 +266,21 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 		if arc.baseCtx.Err() != nil {
 			log.Printf("Client disconnected, failing request")
+			break
+		}
+
+		// Phase 3 / task 3.4 (Anthropic-path sequential fallback loop
+		// guard in live mode — architect resolution per the plan):
+		// once the live translator has emitted ANY byte (arc.headersSent
+		// set at handleAnthropicLiveStreamResponse or the new live
+		// internal-variant entry), no model fallback can happen mid-
+		// stream — the Anthropic client is already committed to this
+		// stream's wire shape. The guard is loop-top (NOT inside
+		// attemptAnthropicModel) so we skip the wasted per-model
+		// setup at :275-299 on iterations that can never switch.
+		// Pre-first-byte (iteration 0, headers not sent) fallback is
+		// unchanged — the guard fires only AFTER the first byte.
+		if arc.headersSent && !arc.bufferMode {
 			break
 		}
 
@@ -583,6 +604,13 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 
 	// Translation mode: translate OpenAI response to Anthropic format
 	if arc.isStream {
+		// Phase 3 / task 3.3: live mode dispatches to the new
+		// incremental-translator-driven handler; buffered mode
+		// stays on the existing handleAnthropicStreamResponse path
+		// (byte-for-byte legacy per task 3.8).
+		if !arc.bufferMode {
+			return h.handleAnthropicLiveStreamResponse(w, resp, arc)
+		}
 		return h.handleAnthropicStreamResponse(w, resp, arc)
 	}
 	return h.handleAnthropicNonStreamResponse(w, resp, arc)
@@ -608,19 +636,27 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		return false
 	}
 
-	// Create a response recorder that supports flushing (for streaming)
-	recorder := &flushingResponseRecorder{httptest.NewRecorder()}
-
 	log.Printf("[DEBUG ANTHROPIC] Creating InternalHandler for model: %s", modelConfig.ID)
 
-	// Side-channel sink for thinking/reasoning text. The InternalHandler's
-	// case "thinking" arm deliberately does NOT write reasoning_content SSE
-	// chunks to `w`, because the recorder body is fed to
-	// translator.TranslateBufferedStream which would emit Anthropic thinking
-	// blocks to the client (violating byte-identity with the pre-fix
-	// behaviour). Instead we accumulate the thinking text in this builder and
-	// copy it into arc.accumulatedThinking below for persistence.
+	// Side-channel sink for thinking/reasoning text. Buffered mode
+	// (legacy) keeps the recorder + TranslateBufferedStream path;
+	// live mode threads the true `w` through InternalHandler so the
+	// per-event Anthropic-shape emissions reach the client wire
+	// directly (recorder is replaced — see Phase 3 / task 3.4).
 	var capturedThinking strings.Builder
+
+	// The sink capture is preserved in BOTH modes — see
+	// internal_handler.go invariant comment (updated in Phase 3
+	// / task 3.9 for dual-mode wording).
+	sinkForLive := false
+	if !arc.bufferMode {
+		// Live mode: we still capture into a sink so the persistence
+		// path (finalizeAnthropicSuccess → store.Message.Thinking)
+		// gets populated. The wire emission is ADDITIONAL via the
+		// translator — that's the deliberate, documented wire-shape
+		// change for the internal non-Anthropic variant in live mode.
+		sinkForLive = true
+	}
 
 	// Use InternalHandler to make the request
 	internalHandler := NewInternalHandler(modelConfig, arc.conf.ModelsConfig)
@@ -630,58 +666,159 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// handler is constructed fresh above, so per-request state (sink,
 	// failover hooks) cannot leak across requests.
 	internalHandler.SetCredentialFailover(h.credEngine, h.bus)
-	// The handler is created fresh above, so it has no prior sink and this
-	// call can never double-set; treat an error as a programming bug and
-	// abort the internal attempt rather than persisting missing thinking.
-	if err := internalHandler.SetThinkingSink(&capturedThinking); err != nil {
-		log.Printf("[DEBUG ANTHROPIC] Failed to install thinking sink (programming error): %v", err)
-		arc.lastError = []byte(err.Error())
-		arc.lastStatusCode = http.StatusBadGateway
-		return false
+
+	// Live-mode wiring: construct the translator and install it via
+	// the new SetLiveTranslator setter (mirrors SetThinkingSink at
+	// internal_handler.go:109-115). The internal handler's case
+	// "content"/"thinking"/"tool_call" arms will drive ProcessEvent
+	// instead of writing raw OpenAI SSE chunks to the recorder.
+	var arcTranslator *translator.IncrementalStreamTranslator
+	var sinkPtr *strings.Builder
+	if sinkForLive {
+		arcTranslator = translator.NewIncrementalStreamTranslator(arc.originalModel)
+		arc.liveTranslator = arcTranslator
+		if err := internalHandler.SetThinkingSink(&capturedThinking); err != nil {
+			log.Printf("[DEBUG ANTHROPIC] Failed to install thinking sink (programming error): %v", err)
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
+		if err := internalHandler.SetLiveTranslator(arcTranslator); err != nil {
+			log.Printf("[DEBUG ANTHROPIC] Failed to install live translator (programming error): %v", err)
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
+		// Install the arc reference so emitLivePreamble can set
+		// headersSent lazily on the first wire-writing arm. Without
+		// this the lazy preamble cannot fire (the internal handler
+		// lives in this package but arc is constructed in
+		// HandleAnthropicMessages and threaded in).
+		internalHandler.SetLiveArc(arc)
+	} else {
+		// Buffered mode (legacy): keep the recorder + sink + batch
+		// translation path.
+		recorder := &flushingResponseRecorder{httptest.NewRecorder()}
+		if err := internalHandler.SetThinkingSink(&capturedThinking); err != nil {
+			log.Printf("[DEBUG ANTHROPIC] Failed to install thinking sink (programming error): %v", err)
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
+
+		err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream, arc.conversationKey)
+		if err != nil {
+			log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
+
+		// Check response status
+		if recorder.Code != http.StatusOK {
+			arc.lastError = recorder.Body.Bytes()
+			arc.lastStatusCode = recorder.Code
+			log.Printf("[DEBUG ANTHROPIC] Internal request returned %d: %s", recorder.Code, string(arc.lastError))
+			return false
+		}
+
+		// Persist any captured thinking text (side channel) so the
+		// final store.Message.Thinking field still gets populated.
+		// This runs BEFORE the response handler because
+		// handleAnthropicInternalStreamResponse calls
+		// extractOpenAIResponseContentFromSSE, which will now return
+		// an empty thinking string (the recorder no longer carries
+		// thinking SSE).
+		if capturedThinking.Len() > 0 {
+			arc.accumulatedThinking.WriteString(capturedThinking.String())
+		}
+
+		log.Printf("[DEBUG ANTHROPIC] Recorder body length: %d bytes", recorder.Body.Len())
+
+		// Translate response from OpenAI to Anthropic format
+		if arc.isStream {
+			log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalStreamResponse")
+			return h.handleAnthropicInternalStreamResponse(w, recorder.Body.Bytes(), arc)
+		}
+		log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalNonStreamResponse")
+		return h.handleAnthropicInternalNonStreamResponse(w, recorder.Body.Bytes(), arc)
 	}
-	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream, arc.conversationKey)
+
+	// Live branch (only reached if sinkForLive == true). We use the
+	// TRUE w (not a recorder) so the translator's per-event Anthropic
+	// emissions reach the client wire directly. The handler emits
+	// SSE headers itself via SetStreamHeaders inside handleStream.
+	_ = sinkPtr // sinkForLive unused past the SetThinkingSink call above
+
+	// IMPORTANT: the live preamble is NOT emitted up-front here. The
+	// fallback loop guard at the loop-top (handler_anthropic.go
+	// :256-264) breaks on `arc.headersSent && !arc.bufferMode`. If
+	// we set headersSent now and the internal attempt fails before
+	// any provider event lands, the fallback would be blocked even
+	// though no byte reached the client. The preamble is instead
+	// lazy-emitted from handleStream's first wire-writing arm
+	// (case "content"/"thinking"/"tool_call"), which preserves the
+	// pre-first-byte fallback semantics. This mirrors the recorder-
+	// based buffered path where headersSent is set only AFTER the
+	// recorder has captured all chunks (handleAnthropicInternalStreamResponse
+	// :735-749), so a failed internal attempt never trips the
+	// fallback guard.
+
+	// Drive the InternalHandler with the TRUE w — translator events
+	// reach the wire directly. Per-event writeMu-equivalent
+	// discipline is the translator's single-wire-writer contract
+	// (no concurrent writers in the internal handler event loop).
+	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, w, arc.isStream, arc.conversationKey)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
-		arc.lastError = []byte(err.Error())
-		arc.lastStatusCode = http.StatusBadGateway
-		return false
+		// Mid-stream error path (NB2): the InternalHandler's
+		// case "error" arm has already run translator.Finalize()
+		// + emitted a well-formed Anthropic error event on the wire
+		// (see internal_handler.go case "error"). Headers are
+		// already sent and we cannot change the wire shape
+		// retroactively. Returning true aborts the fallback loop
+		// (arc.headersSent is now true) — the client receives the
+		// error envelope and can reconnect. arc.lastError is NOT
+		// set here so a future retry sees a clean state.
+		return true // Don't retry after headers sent
 	}
 
-	// Check response status
-	if recorder.Code != http.StatusOK {
-		arc.lastError = recorder.Body.Bytes()
-		arc.lastStatusCode = recorder.Code
-		log.Printf("[DEBUG ANTHROPIC] Internal request returned %d: %s", recorder.Code, string(arc.lastError))
-		return false
-	}
-
-	// Persist any captured thinking text (side channel) so the final
-	// store.Message.Thinking field still gets populated. This runs BEFORE
-	// the response handler because handleAnthropicInternalStreamResponse
-	// calls extractOpenAIResponseContentFromSSE, which will now return an
-	// empty thinking string (the recorder no longer carries thinking SSE).
-	//
-	// W4: this copy is deliberately gated under the SUCCESS path
-	// (HandleRequest returned nil AND recorder is 200). A failed internal
-	// attempt may have partially captured thinking before the failure;
-	// copying it here would leave the partial text in
-	// arc.accumulatedThinking and pollute the fallback's persisted
-	// thinking. Partial captures from failed attempts are discarded along
-	// with the local builder.
+	// Persist captured thinking (sink capture runs in BOTH modes — see
+	// internal_handler.go task-3.9 comment for dual-mode wording).
 	if capturedThinking.Len() > 0 {
 		arc.accumulatedThinking.WriteString(capturedThinking.String())
 	}
 
-	log.Printf("[DEBUG ANTHROPIC] Recorder body length: %d bytes", recorder.Body.Len())
-	log.Printf("[DEBUG ANTHROPIC] Recorder body preview: %.200s", recorder.Body.String()[:200])
-
-	// Translate response from OpenAI to Anthropic format
-	if arc.isStream {
-		log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalStreamResponse")
-		return h.handleAnthropicInternalStreamResponse(w, recorder.Body.Bytes(), arc)
+	// Mirror the translator's accumulated text + tool-calls into the
+	// arc builders (the StreamState is the source of truth; the arc
+	// builders feed finalizeAnthropicSuccess).
+	if arcTranslator != nil {
+		st := arcTranslator.State()
+		if st != nil {
+			arc.accumulatedResponse.WriteString(st.AccumulatedContent.String())
+			arc.accumulatedThinking.WriteString(st.ThinkingContent.String())
+			// Mirror tool calls from the StreamState into the
+			// store-format list.
+			for _, tc := range st.ToolCalls {
+				if tc.ID == "" || tc.Name == "" {
+					continue
+				}
+				arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
+					ID:   tc.ID,
+					Type: "tool_use",
+					Function: store.Function{
+						Name:      tc.Name,
+						Arguments: tc.Arguments.String(),
+					},
+				})
+			}
+		}
 	}
-	log.Printf("[DEBUG ANTHROPIC] Calling handleAnthropicInternalNonStreamResponse")
-	return h.handleAnthropicInternalNonStreamResponse(w, recorder.Body.Bytes(), arc)
+
+	// Finalize with assistant message
+	h.finalizeAnthropicSuccess(arc)
+
+	return true
 }
 
 // handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
@@ -790,6 +927,259 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	h.finalizeAnthropicSuccess(arc)
 
 	return true
+}
+
+// handleAnthropicLiveStreamResponse (Phase 3 / task 3.3) drives the new
+// IncrementalStreamTranslator off the upstream scanner loop, flushing
+// per-emitted event. Live mode (X-LLMProxy-Buffer-Response absent)
+// replaces the buffered handleAnthropicStreamResponse path so the
+// first Anthropic content byte lands BEFORE upstream completion.
+//
+// Mirrors the passthrough scanner shape at :1245-1290 (bufio.Scanner
+// with the 1MB buffer cap from :821); the only material difference
+// is that we feed each line through translator.IncrementalStreamTranslator
+// instead of forwarding bytes verbatim, and we flush after each
+// translated event instead of after each line.
+//
+// Preamble emit (NB8): the SSE preamble `: connected\n\n` + initial
+// flush is emitted ONCE on the FIRST wire-writing event — lazy-emit
+// rather than up-front so the fallback-loop guard at :256-264
+// (`arc.headersSent && !arc.bufferMode`) does NOT trip until the
+// first byte has actually been written. This preserves pre-first-
+// byte fallback semantics: if the upstream returns no chunks (or
+// errors before sending data), the fallback chain still runs.
+func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp *http.Response, arc *anthropicRequestContext) bool {
+	debugLog("=== LIVE STREAM START ===")
+	debugLog("Request ID: %s", arc.reqID)
+	debugLog("Model: %s", arc.originalModel)
+
+	// Construct the per-request translator. The arc.liveTranslator
+	// field is unused here (the external variant drives via raw SSE
+	// lines from the scanner) but we still install it for symmetry
+	// with the internal variant's wiring and for tests that inspect
+	// it.
+	if arc.liveTranslator == nil {
+		arc.liveTranslator = translator.NewIncrementalStreamTranslator(arc.originalModel)
+	}
+	tr := arc.liveTranslator
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB cap, mirrors :821
+	chunkCount := 0
+	var doneSeen bool
+
+	for scanner.Scan() {
+		if arc.baseCtx.Err() != nil {
+			log.Printf("Client disconnected during live stream")
+			break
+		}
+
+		line := scanner.Bytes()
+		chunkCount++
+
+		// Skip empty lines and SSE comments.
+		if len(line) == 0 {
+			continue
+		}
+
+		// Check for [DONE] — finalize on the way out.
+		if bytes.HasPrefix(line, []byte("data: [DONE]")) {
+			doneSeen = true
+			break
+		}
+
+		// Only "data: ..." lines reach the translator; everything
+		// else (event: ..., comments) is forwarded verbatim so we
+		// don't strip anything the upstream might include.
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			if !arc.headersSent {
+				writeLiveStreamPreamble(w, arc)
+			}
+			w.Write(line)
+			w.Write([]byte("\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			continue
+		}
+
+		events, err := tr.ProcessChunk(line)
+		if err != nil {
+			log.Printf("Live stream translator chunk failed: %v", err)
+			continue
+		}
+
+		if len(events) > 0 && !arc.headersSent {
+			writeLiveStreamPreamble(w, arc)
+		}
+
+		// Mirror per-event payload into arc.accumulated* and write
+		// each emitted event to the wire, flushing after each.
+		for _, ev := range events {
+			mirrorTranslatorEventIntoArc(ev, arc)
+			if _, err := w.Write([]byte(ev)); err != nil {
+				log.Printf("Live stream wire write failed: %v", err)
+				return true
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Live stream scanner error: %v", err)
+	}
+
+	// Finalize — emit block-stops + message_delta + message_stop on
+	// the wire. Whether [DONE] was seen or not, Finalize always emits
+	// message_stop (mirrors stream.go:238-241 batch parity).
+	finalEvents, err := tr.Finalize()
+	if err != nil {
+		log.Printf("Live stream finalize failed: %v", err)
+	} else {
+		if len(finalEvents) > 0 && !arc.headersSent {
+			writeLiveStreamPreamble(w, arc)
+		}
+		for _, ev := range finalEvents {
+			mirrorTranslatorEventIntoArc(ev, arc)
+			if _, err := w.Write([]byte(ev)); err != nil {
+				log.Printf("Live stream final wire write failed: %v", err)
+				break
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+
+	// If the stream ended without [DONE], the documented contract is
+	// a well-formed Anthropic error event AFTER message_stop
+	// (handler_anthropic.go:880-886 baseline). This matches the
+	// buffered path's error envelope shape.
+	if !doneSeen {
+		h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
+	}
+
+	// Persist the assistant message and publish completion.
+	h.finalizeAnthropicSuccess(arc)
+	return true
+}
+
+// writeLiveStreamPreamble emits the SSE preamble (: connected\n\n)
+// and sets arc.headersSent. Called lazily on the first wire-writing
+// event so the fallback-loop guard at :256-264 does not trip until
+// at least one byte has been written to the client.
+func writeLiveStreamPreamble(w http.ResponseWriter, arc *anthropicRequestContext) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	arc.headersSent = true
+	fmt.Fprint(w, ": connected\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// mirrorTranslatorEventIntoArc scans a single Anthropic SSE event
+// string and appends any text/thinking/tool_use delta payload to the
+// arc.accumulated* builders — same shape as the buffered path's
+// extractOpenAIResponseContentFromSSE on the recorder body. The
+// single source of truth is the translator's StreamState, but the
+// arc builders are the persistence path's contract (see
+// finalizeAnthropicSuccess at handler_anthropic.go:961-983).
+func mirrorTranslatorEventIntoArc(eventStr string, arc *anthropicRequestContext) {
+	// Cheap line-prefix scan — full event-by-event parse is overkill
+	// here because the payload is already typed for us. We just need
+	// to fold each text/thinking/input_json_delta into the right
+	// arc builder so finalizeAnthropicSuccess has the full text +
+	// thinking + tool-calls at hand.
+	lines := strings.Split(eventStr, "\n")
+	var currentEvent string
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "event: "):
+			currentEvent = strings.TrimPrefix(ln, "event: ")
+		case strings.HasPrefix(ln, "data: "):
+			payload := strings.TrimPrefix(ln, "data: ")
+			applyTranslatorEventPayloadToArc(currentEvent, payload, arc)
+			currentEvent = ""
+		}
+	}
+}
+
+// applyTranslatorEventPayloadToArc folds one data line's parsed JSON
+// payload into the arc.accumulated* builders.
+func applyTranslatorEventPayloadToArc(eventType, payload string, arc *anthropicRequestContext) {
+	var p map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return
+	}
+	switch eventType {
+	case string(translator.EventContentBlockDelta):
+		delta, ok := p["delta"].(map[string]interface{})
+		if !ok {
+			return
+		}
+		switch delta["type"] {
+		case "text_delta":
+			if t, ok := delta["text"].(string); ok {
+				arc.accumulatedResponse.WriteString(t)
+			}
+		case "thinking_delta":
+			if t, ok := delta["thinking"].(string); ok {
+				arc.accumulatedThinking.WriteString(t)
+			}
+		case "input_json_delta":
+			// Tool call args accumulate on the liveTranslator's
+			// StreamState.ToolCalls; we mirror a synthetic tool-call
+			// entry here so the persisted ToolCalls list is populated.
+			if pj, ok := delta["partial_json"].(string); ok {
+				// Append into the LAST tool call's Arguments (or
+				// append a new tool call entry if none yet).
+				if len(arc.accumulatedToolCalls) == 0 {
+					arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
+						Function: store.Function{Arguments: pj},
+					})
+				} else {
+					last := &arc.accumulatedToolCalls[len(arc.accumulatedToolCalls)-1]
+					last.Function.Arguments += pj
+				}
+			}
+		}
+	case string(translator.EventContentBlockStart):
+		// Track tool_use id/name so persisted ToolCalls are populated.
+		if cb, ok := p["content_block"].(map[string]interface{}); ok {
+			if cb["type"] == "tool_use" {
+				id, _ := cb["id"].(string)
+				name, _ := cb["name"].(string)
+				// If the last arc-accumulated tool call already has
+				// the SAME id, just update its name (the streaming
+				// OpenAI upstream sometimes carries id in one delta
+				// and name in a later one, but the translator
+				// buffers until id+name arrive, so by the time the
+				// wire sees content_block_start both are set).
+				if len(arc.accumulatedToolCalls) > 0 {
+					last := &arc.accumulatedToolCalls[len(arc.accumulatedToolCalls)-1]
+					if last.ID == "" {
+						last.ID = id
+					}
+					if last.Function.Name == "" {
+						last.Function.Name = name
+					}
+					last.Type = "tool_use"
+				} else {
+					arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
+						ID:       id,
+						Type:     "tool_use",
+						Function: store.Function{Name: name},
+					})
+				}
+			}
+		}
+	}
 }
 
 // handleAnthropicStreamResponse handles a streaming response
@@ -912,6 +1302,16 @@ type anthropicRequestContext struct {
 	isAnthropicUpstream bool   // true when upstream speaks Anthropic protocol
 	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
 
+	// bufferMode is the per-request delivery mode (real-streaming-default
+	// plan, Phase 3 / task 3.7): true = buffered (legacy, header opt-in
+	// via X-LLMProxy-Buffer-Response), false = live streaming (the
+	// default when the header is absent). Threaded at
+	// HandleAnthropicMessages via bufferModeFor(r). Buffered mode keeps
+	// today's handleAnthropicStreamResponse + TranslateBufferedStream
+	// code paths; live mode dispatches to handleAnthropicLiveStreamResponse
+	// + the new IncrementalStreamTranslator.
+	bufferMode bool
+
 	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
 	//
 	// firstUserMessage is cached at attempt-anthropic-model time (cheap
@@ -934,6 +1334,13 @@ type anthropicRequestContext struct {
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder
 	accumulatedToolCalls []store.ToolCall
+
+	// liveTranslator is set ONLY in live mode (bufferMode==false) by
+	// doAnthropicInternalRequest. The internal-variant handler drives
+	// it from the typed-event entry (ProcessEvent); the external
+	// variant drives it from the upstream scanner via
+	// handleAnthropicLiveStreamResponse. nil in buffered mode.
+	liveTranslator *translator.IncrementalStreamTranslator
 }
 
 // sendAnthropicError sends an error response in Anthropic format
