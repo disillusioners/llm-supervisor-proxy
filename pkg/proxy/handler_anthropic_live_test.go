@@ -31,16 +31,27 @@ import (
 // follow-up) — the test pushes events into the channel, then closes
 // it WITHOUT sending a "done" event, exercising the path at
 // internal_handler.go:716-727.
+//
+// Race-free close contract (Phase 3 final follow-up -race fix):
+// StreamChatCompletion closes the `pushed` channel AFTER all events
+// are sent into `p.ch`. The test goroutine MUST receive on `pushed`
+// BEFORE calling CloseNow — this provides the happens-before edge
+// (send → close(pushed) → <-pushed → close(p.ch)) that eliminates
+// the unsynchronized close-vs-send race under `-race`. The
+// `time.Sleep` approach used previously was a timing trick, not
+// synchronization; the race detector correctly flagged it.
 type liveStreamEventChannelCloserProvider struct {
-	events []providers.StreamEvent
-	ch     chan providers.StreamEvent
-	once   sync.Once
+	events    []providers.StreamEvent
+	ch        chan providers.StreamEvent
+	pushed    chan struct{} // closed when all events have been pushed into `ch`
+	closeOnce sync.Once
 }
 
 func newLiveStreamEventChannelCloserProvider(events []providers.StreamEvent) *liveStreamEventChannelCloserProvider {
 	return &liveStreamEventChannelCloserProvider{
 		events: events,
 		ch:     make(chan providers.StreamEvent, len(events)+1),
+		pushed: make(chan struct{}),
 	}
 }
 
@@ -52,16 +63,32 @@ func (p *liveStreamEventChannelCloserProvider) StreamChatCompletion(ctx context.
 	for _, e := range p.events {
 		p.ch <- e
 	}
+	// Signal that all events have been pushed. The test MUST wait
+	// on this channel before calling CloseNow — see struct doc for
+	// the happens-before contract.
+	close(p.pushed)
 	return p.ch, nil
 }
 func (p *liveStreamEventChannelCloserProvider) IsRetryable(err error) bool { return false }
 
 // CloseNow closes the event channel WITHOUT sending a "done" event.
 // Safe to call multiple times.
+//
+// Race contract: callers MUST have already received from `Pushed`
+// before calling CloseNow, otherwise the close races with the
+// in-progress send in StreamChatCompletion under `-race`.
 func (p *liveStreamEventChannelCloserProvider) CloseNow() {
-	p.once.Do(func() {
+	p.closeOnce.Do(func() {
 		close(p.ch)
 	})
+}
+
+// Pushed returns the channel that is closed once StreamChatCompletion
+// has pushed all events into the underlying event channel. Tests
+// using CloseNow MUST `<-provider.Pushed()` first to ensure the
+// close happens-after all sends (race-free).
+func (p *liveStreamEventChannelCloserProvider) Pushed() <-chan struct{} {
+	return p.pushed
 }
 
 type liveFlushingRecorder struct {
@@ -1329,10 +1356,14 @@ func TestLiveMode_ChannelClosedFlushesHeldToolCall(t *testing.T) {
 		done <- handler.handleStream(context.Background(), provider, req, rw, "gpt-4")
 	}()
 
-	// Give handleStream a moment to receive the tool_call event and
-	// block on the channel, then close the channel WITHOUT sending a
-	// done event — exercises the channel-closed path.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for StreamChatCompletion to finish pushing events BEFORE
+	// closing the channel. The `pushed` channel is closed after all
+	// sends complete (provider fixture's race-free contract) — this
+	// provides a happens-before edge (send → close(pushed) →
+	// <-pushed → close(p.ch)) that the previous `time.Sleep` could
+	// not guarantee under `-race`. See liveStreamEventChannelCloserProvider
+	// struct doc for the full race-free contract.
+	<-provider.Pushed()
 	provider.CloseNow()
 
 	// Wait for handleStream to return.
