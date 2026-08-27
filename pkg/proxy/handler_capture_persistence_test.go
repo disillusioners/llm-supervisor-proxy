@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -114,10 +115,10 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_External(t *testing.T
 		t.Fatalf("AddCredential: %v", err)
 	}
 	err = modelsConfig.AddModel(models.ModelConfig{
-		ID:           "ultimate-model",
-		Name:         "Ultimate Model",
-		Enabled:      true,
-		Internal:     false, // EXTERNAL — executes through executeExternal
+		ID:          "ultimate-model",
+		Name:        "Ultimate Model",
+		Enabled:     true,
+		Internal:    false, // EXTERNAL — executes through executeExternal
 		Credentials: models.TestRefs("test-credential"),
 	})
 	if err != nil {
@@ -265,10 +266,10 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_ExternalStream(t *tes
 		t.Fatalf("AddCredential: %v", err)
 	}
 	err = modelsConfig.AddModel(models.ModelConfig{
-		ID:           "ultimate-model",
-		Name:         "Ultimate Model",
-		Enabled:      true,
-		Internal:     false,
+		ID:          "ultimate-model",
+		Name:        "Ultimate Model",
+		Enabled:     true,
+		Internal:    false,
 		Credentials: models.TestRefs("test-credential"),
 	})
 	if err != nil {
@@ -465,7 +466,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 		Name:            "Ultimate Model",
 		Enabled:         true,
 		Internal:        true, // INTERNAL — routes through executeInternal
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:     models.TestRefs("test-credential"),
 		InternalModel:   "internal-model",
 		InternalBaseURL: upstream.URL,
 	})
@@ -614,7 +615,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 		Name:            "Ultimate Model",
 		Enabled:         true,
 		Internal:        true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:     models.TestRefs("test-credential"),
 		InternalModel:   "internal-model",
 		InternalBaseURL: upstream.URL,
 	})
@@ -691,4 +692,257 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 	if assistantMsg.Thinking != wantThinking {
 		t.Errorf("persisted Thinking = %q, want %q", assistantMsg.Thinking, wantThinking)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dispatcher addendum (post-FIX-4) / plan Phase 4 Files row 7 — live-mode
+// capture-persistence variants: the persisted request record (assistant
+// Content/Thinking + Usage via the capture taps) must be IDENTICAL between
+// wire modes. Runs each ultimate-stream fixture twice against the same
+// handler/env — header ABSENT (live per-chunk relay) vs header PRESENT
+// (buffered single end-of-stream write) — and asserts record equality,
+// wire-byte equality, AND that the header actually flipped the mode
+// (first-data timing vs the upstream's mid-stream hold).
+//
+// Non-stream fixtures have no wire-mode distinction (BufferMode only
+// selects the STREAM delivery shape), so the parity pair is necessarily
+// the two stream fixtures below.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ultimateParityFixture is the shared SSE upstream: reasoning chunk, a
+// 300ms hold, then content + final-usage chunk + [DONE]. The hold makes
+// the two wire modes distinguishable on the client timeline (live relays
+// the reasoning chunk during the hold; buffered emits nothing until the
+// end-of-stream write).
+func ultimateParityFixture(wantContent, wantThinking string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"%s\"}}]}\n\n", wantThinking)
+		flusher.Flush()
+		time.Sleep(400 * time.Millisecond) // mid-stream hold: separates live vs buffered timing
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n\n", wantContent)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+}
+
+// newUltimateCaptureParityEnv bootstraps the DB + token + ultimate model
+// + handler exactly like the buffered-mode tests above; `internal` picks
+// the executeInternal vs executeExternal routing.
+func newUltimateCaptureParityEnv(t *testing.T, internal bool, upstreamURL string) (*Handler, *store.RequestStore, string) {
+	t.Helper()
+
+	db := setupIntegrationDB(t)
+	counter := usage.NewCounter(db, database.SQLite)
+	tokenStore := auth.NewTokenStore(db, database.SQLite)
+	plaintextToken, _, err := tokenStore.CreateToken(
+		context.Background(),
+		"token-with-ultimate",
+		nil,
+		"test-user",
+		true, // ultimateModelEnabled
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	modelsConfig := models.NewModelsConfig()
+	if err := modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstreamURL,
+	}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	modelCfg := models.ModelConfig{
+		ID:            "ultimate-model",
+		Name:          "Ultimate Model",
+		Enabled:       true,
+		Internal:      internal,
+		Credentials:   models.TestRefs("test-credential"),
+		InternalModel: "internal-model",
+	}
+	if internal {
+		modelCfg.InternalBaseURL = upstreamURL
+	}
+	if err := modelsConfig.AddModel(modelCfg); err != nil {
+		t.Fatalf("AddModel (ultimate): %v", err)
+	}
+
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("UPSTREAM_URL", upstreamURL)
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	t.Setenv("ULTIMATE_MODEL_ID", "ultimate-model")
+
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsConfig}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	return h, reqStore, plaintextToken
+}
+
+// ultimateParityRun drives one streaming ultimate request (force header)
+// in the requested delivery mode and returns the wire bytes, the
+// first-data-frame latency, and the persisted ultimate RequestLog.
+func ultimateParityRun(t *testing.T, h *Handler, reqStore *store.RequestStore, token string, buffered bool) (wire []byte, firstDataLatency time.Duration, log *store.RequestLog) {
+	t.Helper()
+
+	body := map[string]interface{}{
+		"model":  "any-model",
+		"stream": true,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hello"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("X-Force-Ultimate-Model", "true")
+	if buffered {
+		httpReq.Header.Set("X-LLMProxy-Buffer-Response", "true")
+	}
+
+	rec := newFirstDataRecorder()
+	start := time.Now()
+	h.HandleChatCompletions(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request failed: %d - %s", rec.Code, rec.Body.String())
+	}
+	if rec.firstDataAt.IsZero() {
+		t.Fatal("no data frame reached the client")
+	}
+
+	all := reqStore.List()
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].UltimateModelUsed {
+			return rec.Body.Bytes(), rec.firstDataAt.Sub(start), all[i]
+		}
+	}
+	t.Fatal("no ultimate request log found for this run")
+	return nil, 0, nil
+}
+
+// ultimateParityAssistantMsg extracts the persisted assistant message.
+func ultimateParityAssistantMsg(t *testing.T, log *store.RequestLog) *store.Message {
+	t.Helper()
+	for i := len(log.Messages) - 1; i >= 0; i-- {
+		if log.Messages[i].Role == "assistant" {
+			return &log.Messages[i]
+		}
+	}
+	t.Fatalf("no assistant message persisted; log messages: %+v", log.Messages)
+	return nil
+}
+
+// assertUltimateCaptureParity runs the live/buffered pair against one env
+// and asserts record parity + wire parity + the mode flip.
+func assertUltimateCaptureParity(t *testing.T, h *Handler, reqStore *store.RequestStore, token, wantContent, wantThinking string) {
+	t.Helper()
+
+	liveWire, liveFirstData, liveLog := ultimateParityRun(t, h, reqStore, token, false /* header absent ⇒ live */)
+	bufWire, bufFirstData, bufLog := ultimateParityRun(t, h, reqStore, token, true /* header present ⇒ buffered */)
+
+	// MODE FLIP proof (dispatcher addendum Item 1 wiring): the upstream
+	// holds 400ms between its first chunk and completion. Live mode
+	// relays the first chunk DURING the hold; buffered mode emits its
+	// single write only after the stream completes.
+	if liveFirstData >= 350*time.Millisecond {
+		t.Errorf("live mode: first data frame at %v — expected DURING the upstream hold (<350ms); header-absent did not select live?", liveFirstData)
+	}
+	if bufFirstData < 350*time.Millisecond {
+		t.Errorf("buffered mode: first data frame at %v — expected AFTER the upstream hold (≥400ms); header-present did not select buffered (Item 1 wiring)?", bufFirstData)
+	}
+
+	// WIRE parity: both modes deliver the identical byte stream. The
+	// INTERNAL path synthesizes two wall-clock nonces per chunk — the
+	// id ("chatcmpl-<UnixNano>") and "created" (<Unix seconds>; the
+	// mid-stream hold can straddle a second boundary) — which differ
+	// on every run (live-vs-live too). Both are normalized before
+	// comparing; framing, field order, content and structure must be
+	// byte-identical.
+	normalizeWire := func(b []byte) []byte {
+		b = regexp.MustCompile(`chatcmpl-\d+`).ReplaceAll(b, []byte("chatcmpl-X"))
+		return regexp.MustCompile(`"created":\d+`).ReplaceAll(b, []byte(`"created":0`))
+	}
+	liveNorm := normalizeWire(liveWire)
+	bufNorm := normalizeWire(bufWire)
+	if !bytes.Equal(liveNorm, bufNorm) {
+		t.Errorf("wire bytes differ between modes (synthesized ids normalized):\nlive: %q\nbuf:  %q", liveNorm, bufNorm)
+	}
+
+	// RECORD parity: persisted assistant Content/Thinking + ToolCalls +
+	// Usage must be identical regardless of wire mode.
+	liveMsg := ultimateParityAssistantMsg(t, liveLog)
+	bufMsg := ultimateParityAssistantMsg(t, bufLog)
+	if liveMsg.Content != bufMsg.Content || liveMsg.Thinking != bufMsg.Thinking {
+		t.Errorf("assistant record diverged between modes: live={Content:%q Thinking:%q} buffered={Content:%q Thinking:%q}",
+			liveMsg.Content, liveMsg.Thinking, bufMsg.Content, bufMsg.Thinking)
+	}
+	if len(liveMsg.ToolCalls) != len(bufMsg.ToolCalls) {
+		t.Errorf("ToolCalls count diverged: live=%d buffered=%d", len(liveMsg.ToolCalls), len(bufMsg.ToolCalls))
+	}
+	if liveMsg.Content != wantContent {
+		t.Errorf("persisted Content = %q, want %q (live mode)", liveMsg.Content, wantContent)
+	}
+	if liveMsg.Thinking != wantThinking {
+		t.Errorf("persisted Thinking = %q, want %q (live mode)", liveMsg.Thinking, wantThinking)
+	}
+	if liveLog.Usage == nil || bufLog.Usage == nil {
+		t.Fatalf("Usage not persisted: live=%v buffered=%v", liveLog.Usage, bufLog.Usage)
+	}
+	if *liveLog.Usage != *bufLog.Usage {
+		t.Errorf("Usage record diverged: live=%+v buffered=%+v", *liveLog.Usage, *bufLog.Usage)
+	}
+	if liveLog.Usage.TotalTokens != 5 || liveLog.Usage.CompletionTokens != 2 {
+		t.Errorf("Usage = %+v, want {Prompt:3 Completion:2 Total:5} (usage-chunk capture parity)", *liveLog.Usage)
+	}
+}
+
+// TestUltimateCapturePersistence_LiveVsBuffered_Parity_ExternalStream
+// (plan Phase 4 Files row 7): the EXTERNAL ultimate stream fixture runs
+// in both wire modes; the persisted record (assistant Content/Thinking,
+// Usage) must match buffered mode exactly.
+func TestUltimateCapturePersistence_LiveVsBuffered_Parity_ExternalStream(t *testing.T) {
+	const wantContent = "parity external streamed answer"
+	const wantThinking = "parity external streamed reasoning"
+
+	upstream := httptest.NewServer(ultimateParityFixture(wantContent, wantThinking))
+	defer upstream.Close()
+
+	h, reqStore, token := newUltimateCaptureParityEnv(t, false /* external */, upstream.URL)
+	assertUltimateCaptureParity(t, h, reqStore, token, wantContent, wantThinking)
+}
+
+// TestUltimateCapturePersistence_LiveVsBuffered_Parity_InternalStream
+// (plan Phase 4 Files row 7): the INTERNAL ultimate stream fixture runs
+// in both wire modes; the persisted record must match buffered mode
+// exactly (executeInternalStream's capture taps are wire-mode agnostic).
+func TestUltimateCapturePersistence_LiveVsBuffered_Parity_InternalStream(t *testing.T) {
+	const wantContent = "parity internal streamed answer"
+	const wantThinking = "parity internal streamed reasoning"
+
+	upstream := httptest.NewServer(ultimateParityFixture(wantContent, wantThinking))
+	defer upstream.Close()
+
+	h, reqStore, token := newUltimateCaptureParityEnv(t, true /* internal */, upstream.URL)
+	assertUltimateCaptureParity(t, h, reqStore, token, wantContent, wantThinking)
 }

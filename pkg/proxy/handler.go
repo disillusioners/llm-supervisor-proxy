@@ -720,7 +720,18 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					// resolution can use the LB engine (Tasks 8/9); the
 					// intermediate Execute gains the 9th positional arg with
 					// no semantic change to trigger / capture behavior.
-					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID, rc.conversationKey)
+					//
+					// Phase 4 / dispatcher addendum Item 1: thread the
+					// per-request delivery mode into the variadic opts.
+					// Execute's zero value = live (the header-absent
+					// default), so omitting this arg forced ultimate
+					// paths live even when the client opted into
+					// buffering via X-LLMProxy-Buffer-Response —
+					// violating the "header = current behavior"
+					// guarantee. Purely additive: BufferMode=false keeps
+					// Phase 4's live default verbatim.
+					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID, rc.conversationKey,
+						ultimatemodel.ExecuteOptions{BufferMode: rc.bufferMode})
 					if err != nil {
 						log.Printf("[UltimateModel] Error: %v", err)
 						rc.reqLog.Status = "failed"

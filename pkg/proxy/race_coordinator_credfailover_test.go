@@ -517,11 +517,11 @@ func drainEvents(bus *events.Bus, eventType string) []events.Event {
 // bug. This test is the only regression guard; it MUST cover the
 // 2-model case. Two layers of assertion:
 //
-//   1. spawn() targets triggerInfo.modelID, NOT c.models[0]
-//      (the C1 fix at race_coordinator.go:spawn).
-//   2. resolveSpecificInternalCredential refuses a credential NOT in
-//      the model's Credentials list (the C1 belt-and-braces at
-//      race_executor.go:resolveSpecificInternalCredential).
+//  1. spawn() targets triggerInfo.modelID, NOT c.models[0]
+//     (the C1 fix at race_coordinator.go:spawn).
+//  2. resolveSpecificInternalCredential refuses a credential NOT in
+//     the model's Credentials list (the C1 belt-and-braces at
+//     race_executor.go:resolveSpecificInternalCredential).
 //
 // NOTE on integration: the direct-spawn() design was chosen because
 // a full integration test that fires Case 1 on the fallback row in a
@@ -578,9 +578,9 @@ func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 	// pool. The trigger info MUST carry m2 as the source modelID so
 	// spawn() targets m2 (NOT c.models[0] = m1).
 	coord.spawn(modelTypeCredFailover, spawnTriggerInfo{
-		trigger:      triggerRateLimit,
-		credentialID: "cred-X",
-		modelID:      "m2", // C1 fix: ride the source modelID
+		trigger:       triggerRateLimit,
+		credentialID:  "cred-X",
+		modelID:       "m2", // C1 fix: ride the source modelID
 		failedRequest: -1,
 	})
 
@@ -652,4 +652,246 @@ func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 	}
 
 	_ = resolver // anchored for future test expansion
+
+	// JOIN the fire-and-forget executors launched by spawn() above:
+	// they call the newProviderClient seam (a package var) while the
+	// NEXT test's env builder writes its own override there — an
+	// unjoined executor is a race-detector exposure across tests.
+	joinExecutors := func(c *raceCoordinator) {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			allDone := true
+			for _, r := range c.requests {
+				if !r.IsDone() {
+					allDone = false
+					break
+				}
+			}
+			if allDone {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	joinExecutors(coord)
+	joinExecutors(coord2)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 / real-streaming-default — review row (f): live-mode credential
+// failover window pin. Post-first-byte (post-winner) the credential
+// failover window is CLOSED: a rate-limit error hitting the winner's
+// attempt AFTER the first forwarded byte spawns NOTHING and the stream
+// terminates with the error envelope. Pre-first-byte 429 failover is
+// UNCHANGED in live mode (companion).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// liveStreamScriptedProvider is a streaming scripted provider for the
+// live-mode failover window tests:
+//   - mode "post-byte": call 1 streams ONE content event (the first
+//     forwardable byte — winner selection), then errors with a 429
+//     ProviderError (HTTP-status rate-limit path);
+//   - mode "pre-byte": call 1 returns a 429 ProviderError immediately
+//     (no byte); call 2 succeeds with content + done.
+type liveStreamScriptedProvider struct {
+	mu      sync.Mutex
+	mode    string // "post-byte" | "pre-byte"
+	calls   int
+	apiKeys []string
+}
+
+func (p *liveStreamScriptedProvider) Name() string { return "live-scripted" }
+
+func (p *liveStreamScriptedProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	return nil, &providers.ProviderError{StatusCode: 500, Message: "unused non-stream path"}
+}
+
+func (p *liveStreamScriptedProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+
+	rateLimitErr := &providers.ProviderError{
+		Provider:   "live-scripted",
+		StatusCode: 429,
+		Message:    "rate limited (live scripted)",
+		ErrorType:  "rate_limit",
+		ErrorCode:  "rate_limit",
+		Retryable:  true,
+	}
+
+	if p.mode == "pre-byte" && n == 1 {
+		// 429 BEFORE any byte — the classic pre-first-byte failover case.
+		return nil, rateLimitErr
+	}
+
+	ch := make(chan providers.StreamEvent, 4)
+	ch <- providers.StreamEvent{Type: "content", Content: "live-first-byte"} // first forwardable byte
+	if p.mode == "post-byte" {
+		// HOLD the error past at least one manage-loop tick (100ms) so
+		// the first-byte winner gate actually observes
+		// `TotalLen>0 && err==nil`; the 429 then hits the WINNER's
+		// attempt mid-stream (post-first-byte window).
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			ch <- providers.StreamEvent{Type: "error", Error: rateLimitErr}
+			close(ch)
+		}()
+		return ch, nil
+	}
+	ch <- providers.StreamEvent{
+		Type:         "done",
+		FinishReason: "stop",
+		Response: &providers.ChatCompletionResponse{
+			ID: "chatcmpl-live", Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model,
+			Usage: providers.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+		},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (p *liveStreamScriptedProvider) IsRetryable(err error) bool { return true }
+
+func (p *liveStreamScriptedProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// newLiveCredFailoverEnv wires the engine-backed 2-credential harness with
+// a STREAMING scripted provider and the LIVE first-byte gate (the existing
+// newCredFailoverTestEnv hardcodes liveFirstByteGate=false and a
+// non-stream body — the live variant needs its own builder).
+func newLiveCredFailoverEnv(t *testing.T, mode string) (*raceCoordinator, *liveStreamScriptedProvider, *events.Bus) {
+	t.Helper()
+
+	mock := &mockModelsConfig{}
+	ids := []string{"cred-A", "cred-B"}
+	for _, id := range ids {
+		if err := mock.AddCredential(models.CredentialConfig{
+			ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true, InternalModel: "upstream-m1",
+		Credentials: models.TestRefs(ids...),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 42, 60*time.Second)
+	t.Cleanup(engine.Stop)
+	engine.RebindFromStore("m1", models.TestRefs(ids...))
+
+	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
+
+	provider := &liveStreamScriptedProvider{mode: mode}
+	origNew := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		provider.mu.Lock()
+		provider.apiKeys = append(provider.apiKeys, apiKey)
+		provider.mu.Unlock()
+		return provider, nil
+	}
+	t.Cleanup(func() { newProviderClient = origNew })
+
+	bus := events.NewBus()
+
+	cfg := newTestConfigSnapshot("m1")
+	cfg.ModelsConfig = resolver
+	cfg.StreamDeadline = 5 * time.Second
+	cfg.MaxGenerationTime = 10 * time.Second
+
+	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
+		[]string{"m1"}, bus, "live-failover-req", false, engine, "conv-live-failover", true /* liveFirstByteGate */)
+	return coord, provider, bus
+}
+
+// TestLiveRelay_NoCredFailoverAfterFirstByte (review row f): the winner's
+// attempt 429s AFTER the first forwarded byte. The post-first-byte window
+// is CLOSED — no credFailover spawn, no model_credential_failover event;
+// the stream terminates with the buffer error (terminal envelope upstream
+// of the client).
+func TestLiveRelay_NoCredFailoverAfterFirstByte(t *testing.T) {
+	coord, provider, bus := newLiveCredFailoverEnv(t, "post-byte")
+
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatal("expected a first-byte winner (provider streams a content event before erroring)")
+	}
+
+	// The winner's stream must terminate with the rate-limit error.
+	select {
+	case <-winner.GetBuffer().Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("winner stream never terminated after the post-first-byte 429")
+	}
+	if err := winner.GetBuffer().Err(); err == nil {
+		t.Fatal("expected the winner buffer to close with the rate-limit error")
+	}
+
+	// NO credential failover fired: single provider call (the original
+	// attempt), zero failover bookkeeping, zero failover rows/events.
+	if got := provider.callCount(); got != 1 {
+		t.Errorf("provider calls = %d, want 1 (any second call would be a post-first-byte failover spawn)", got)
+	}
+	if got := coord.failoverAttempts; got != 0 {
+		t.Errorf("failoverAttempts = %d, want 0 (post-first-byte window closed)", got)
+	}
+	for _, r := range coord.requests {
+		if r.modelType == modelTypeCredFailover {
+			t.Errorf("credFailover row spawned post-first-byte: %+v", r)
+		}
+	}
+	if failovers := drainEvents(bus, credentiallb.EventCredentialFailover); len(failovers) != 0 {
+		t.Errorf("model_credential_failover events = %d, want 0 post-first-byte", len(failovers))
+	}
+}
+
+// TestLiveRelay_PreFirstByte429_FailoverUnchangedInLiveMode (review row f
+// companion): a 429 BEFORE any forwardable byte still fails over to the
+// second credential in LIVE mode — pre-winner semantics are untouched by
+// the gate swap.
+func TestLiveRelay_PreFirstByte429_FailoverUnchangedInLiveMode(t *testing.T) {
+	coord, provider, bus := newLiveCredFailoverEnv(t, "pre-byte")
+
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatal("expected failover to rescue the request (2nd credential succeeds)")
+	}
+
+	// Exactly one failover: main (429) → cred_failover row (success).
+	if got := coord.failoverAttempts; got != 1 {
+		t.Errorf("failoverAttempts = %d, want 1 (pre-first-byte failover UNCHANGED in live mode)", got)
+	}
+	if got := provider.callCount(); got != 2 {
+		t.Errorf("provider calls = %d, want 2 (main 429 + failover success)", got)
+	}
+	seen := map[string]bool{}
+	for _, r := range coord.requests {
+		seen[r.resolved.CredentialID] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("distinct credentials used = %d (%v), want 2", len(seen), seen)
+	}
+	if failovers := drainEvents(bus, credentiallb.EventCredentialFailover); len(failovers) != 1 {
+		t.Errorf("model_credential_failover events = %d, want 1", len(failovers))
+	}
+
+	// The winner carries the rescued content and completes cleanly.
+	select {
+	case <-winner.GetBuffer().Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("failover winner never completed")
+	}
+	if err := winner.GetBuffer().Err(); err != nil {
+		t.Errorf("failover winner buffer error = %v, want clean completion", err)
+	}
 }
