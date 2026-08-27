@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,46 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
+
+// liveStreamEventChannelCloserProvider is a variant of
+// liveStreamEventProvider that allows the test to control WHEN the
+// channel is closed (instead of auto-closing after all events). Used
+// for the channel-closed-without-done regression test (Phase 3 final
+// follow-up) — the test pushes events into the channel, then closes
+// it WITHOUT sending a "done" event, exercising the path at
+// internal_handler.go:716-727.
+type liveStreamEventChannelCloserProvider struct {
+	events []providers.StreamEvent
+	ch     chan providers.StreamEvent
+	once   sync.Once
+}
+
+func newLiveStreamEventChannelCloserProvider(events []providers.StreamEvent) *liveStreamEventChannelCloserProvider {
+	return &liveStreamEventChannelCloserProvider{
+		events: events,
+		ch:     make(chan providers.StreamEvent, len(events)+1),
+	}
+}
+
+func (p *liveStreamEventChannelCloserProvider) Name() string { return "mock" }
+func (p *liveStreamEventChannelCloserProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	return nil, nil
+}
+func (p *liveStreamEventChannelCloserProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	for _, e := range p.events {
+		p.ch <- e
+	}
+	return p.ch, nil
+}
+func (p *liveStreamEventChannelCloserProvider) IsRetryable(err error) bool { return false }
+
+// CloseNow closes the event channel WITHOUT sending a "done" event.
+// Safe to call multiple times.
+func (p *liveStreamEventChannelCloserProvider) CloseNow() {
+	p.once.Do(func() {
+		close(p.ch)
+	})
+}
 
 type liveFlushingRecorder struct {
 	http.ResponseWriter
@@ -1043,5 +1084,344 @@ func TestLiveMode_NonToolChunkLatency(t *testing.T) {
 	}
 	if got, want := st.AccumulatedContent.String(), "HELLO"; got != want {
 		t.Errorf("latency: State().AccumulatedContent = %q, want %q", got, want)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_ErrorPathFlushesHeldToolCall is the regression test for
+// the Phase 3 final follow-up — wire Flush-before-Finalize into the
+// live-mode case "error" path. Before the fix, a held partial tool
+// call vanished when the upstream errored (Finalize() ran without
+// Flush(), the held fragment was dropped). The follow-up mirrors the
+// a8b97f3 done-site pattern in the error path so buffered/live parity
+// holds on error paths too.
+//
+// This test drives:
+//   1. ONE tool_call event with malformed JSON (missing closing brace)
+//   2. ONE error event (simulated upstream failure mid-tool-call)
+//
+// The buffer holds the call (isCompleteLocked fails on truncated JSON).
+// Without the follow-up fix, the error path's Finalize() would run
+// without Flush() and the held fragment would vanish. With the fix:
+//   (a) the held partial tool call IS flushed (Flush() emits with
+//       repair chain active) BEFORE the Finalize events;
+//   (b) tool-use block events precede message_stop AND the error event;
+//   (c) repaired args land on the wire;
+//   (d) translator.State() (arc mirror source) reflects the repaired
+//       tool call — proves the persistence contract is preserved.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_ErrorPathFlushesHeldToolCall(t *testing.T) {
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	handler.SetToolCallBufferConfig(1024*1024, false, toolrepair.DefaultConfig())
+
+	tr := translator.NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	if err := handler.SetLiveTranslator(tr); err != nil {
+		t.Fatalf("SetLiveTranslator: %v", err)
+	}
+	handler.SetLiveArc(&anthropicRequestContext{})
+
+	// ONE tool_call (malformed JSON) + ONE error event. Upstream fails
+	// mid-tool-call — the buffer holds the incomplete fragment, the
+	// error path's Flush-before-Finalize must recover it on the wire.
+	provider := &liveStreamEventProvider{events: []providers.StreamEvent{
+		{
+			Type: "tool_call",
+			ToolCalls: []providers.ToolCall{
+				{
+					ID:   "toolu_err_test",
+					Type: "function",
+					Function: providers.ToolCallFunction{
+						Name:      "lookup",
+						Arguments: `{"q":"hi"`, // INVALID — missing closing brace
+					},
+				},
+			},
+		},
+		{
+			Type:  "error",
+			Error: errors.New("simulated upstream failure mid-tool-call"),
+		},
+	}}
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{
+		Model:    "test-model",
+		Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+		Stream:   true,
+	}
+
+	// handleStream returns the event.Error — that's the existing NB2
+	// contract; the test only inspects the wire body, not the return.
+	if err := handler.handleStream(context.Background(), provider, req, rw, "gpt-4"); err == nil {
+		t.Errorf("expected handleStream to return the upstream error; got nil")
+	}
+
+	body := rw.Body.String()
+
+	// Parse the wire for the three classes of events we need to
+	// assert on. Each event line is `event: TYPE\ndata: JSON\n\n`.
+	var foundToolUseBlock, foundInputJSONDelta, foundMessageStop, foundErrorEvent bool
+	var partialJSON string
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		switch ev["type"] {
+		case "content_block_start":
+			if cb, ok := ev["content_block"].(map[string]interface{}); ok {
+				if cb["type"] == "tool_use" {
+					foundToolUseBlock = true
+				}
+			}
+		case "content_block_delta":
+			if delta, ok := ev["delta"].(map[string]interface{}); ok {
+				if delta["type"] == "input_json_delta" {
+					if pj, ok := delta["partial_json"].(string); ok {
+						foundInputJSONDelta = true
+						partialJSON = pj
+					}
+				}
+			}
+		case "message_stop":
+			foundMessageStop = true
+		case "error":
+			foundErrorEvent = true
+		}
+	}
+
+	if !foundToolUseBlock {
+		t.Errorf("ErrorPathFlush: held tool_use content_block_start MISSING from wire (fragment dropped); body=%q", body)
+	}
+	if !foundInputJSONDelta {
+		t.Errorf("ErrorPathFlush: held input_json_delta MISSING from wire; body=%q", body)
+	}
+	if !foundMessageStop {
+		t.Errorf("ErrorPathFlush: missing message_stop (Finalize did not run?); body=%q", body)
+	}
+	if !foundErrorEvent {
+		t.Errorf("ErrorPathFlush: missing Anthropic error event; body=%q", body)
+	}
+
+	// Ordering: tool block events must precede message_stop AND the
+	// error event. (The translator emits block_stop for the tool after
+	// Finalize — so we check tool START position vs message_stop /
+	// error positions on the wire.)
+	idxToolStart := strings.Index(body, `"id":"toolu_err_test"`)
+	idxMessageStop := strings.Index(body, `"type":"message_stop"`)
+	idxError := strings.Index(body, `"type":"error"`)
+	if idxToolStart < 0 {
+		idxToolStart = strings.Index(body, `"type":"tool_use"`)
+	}
+	if idxToolStart >= 0 && idxMessageStop >= 0 && idxToolStart >= idxMessageStop {
+		t.Errorf("ErrorPathFlush: tool_use block (%d) must precede message_stop (%d); body=%q",
+			idxToolStart, idxMessageStop, body)
+	}
+	if idxToolStart >= 0 && idxError >= 0 && idxToolStart >= idxError {
+		t.Errorf("ErrorPathFlush: tool_use block (%d) must precede error event (%d); body=%q",
+			idxToolStart, idxError, body)
+	}
+
+	// Repaired args must land on the wire — the buffer's repair chain
+	// (library_repair via jsonrepair) added the missing closing brace.
+	var repairedValid bool
+	if partialJSON != "" {
+		var js interface{}
+		if err := json.Unmarshal([]byte(partialJSON), &js); err == nil {
+			if m, ok := js.(map[string]interface{}); ok {
+				if q, ok := m["q"].(string); ok && q == "hi" {
+					repairedValid = true
+				}
+			}
+		}
+	}
+	if !repairedValid {
+		t.Errorf("ErrorPathFlush: repaired JSON `{\"q\":\"hi\"}` missing from input_json_delta; partialJSON=%q body=%q",
+			partialJSON, body)
+	}
+
+	// Arc/State mirror must reflect the held tool — proves the
+	// persistence contract is preserved on the error path.
+	st := tr.State()
+	if len(st.ToolCalls) != 1 {
+		t.Errorf("ErrorPathFlush: State().ToolCalls len = %d, want 1 (held call lost from mirror)", len(st.ToolCalls))
+	} else {
+		if got, want := st.ToolCalls[0].Arguments.String(), `{"q":"hi"}`; got != want {
+			t.Errorf("ErrorPathFlush: State().ToolCalls[0].Arguments = %q, want %q (REPAIRED)", got, want)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_ChannelClosedFlushesHeldToolCall is the second
+// regression test for the Phase 3 final follow-up — wire
+// Flush-before-Finalize into the channel-closed-without-done path
+// (internal_handler.go:716-727). Before the fix, a held partial tool
+// call vanished when the upstream closed the channel without sending
+// a "done" event. The follow-up mirrors the a8b97f3 done-site pattern
+// in this path too.
+//
+// This test uses a custom provider that:
+//   1. Sends one tool_call event (malformed JSON, never completed)
+//   2. Closes the channel WITHOUT a "done" event
+//
+// The buffer holds the call; the channel-closed path's
+// Flush-before-Finalize must recover it on the wire.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_ChannelClosedFlushesHeldToolCall(t *testing.T) {
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	handler.SetToolCallBufferConfig(1024*1024, false, toolrepair.DefaultConfig())
+
+	tr := translator.NewIncrementalStreamTranslator("claude-sonnet-4-5")
+	if err := handler.SetLiveTranslator(tr); err != nil {
+		t.Fatalf("SetLiveTranslator: %v", err)
+	}
+	handler.SetLiveArc(&anthropicRequestContext{})
+
+	// Channel-closer provider: sends ONE tool_call event (malformed
+	// JSON), then closes the channel WITHOUT a "done" event.
+	provider := newLiveStreamEventChannelCloserProvider([]providers.StreamEvent{
+		{
+			Type: "tool_call",
+			ToolCalls: []providers.ToolCall{
+				{
+					ID:   "toolu_chan_test",
+					Type: "function",
+					Function: providers.ToolCallFunction{
+						Name:      "lookup",
+						Arguments: `{"q":"hi"`, // INVALID — missing closing brace
+					},
+				},
+			},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{
+		Model:    "test-model",
+		Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+		Stream:   true,
+	}
+
+	// Drive handleStream in a goroutine — the channel-closed path
+	// returns nil (no upstream error), so we use a separate goroutine
+	// to push events, close the channel, and let handleStream drain.
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.handleStream(context.Background(), provider, req, rw, "gpt-4")
+	}()
+
+	// Give handleStream a moment to receive the tool_call event and
+	// block on the channel, then close the channel WITHOUT sending a
+	// done event — exercises the channel-closed path.
+	time.Sleep(50 * time.Millisecond)
+	provider.CloseNow()
+
+	// Wait for handleStream to return.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("channel-closed handleStream returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("handleStream did not return after channel close")
+	}
+
+	body := rw.Body.String()
+
+	// Parse the wire for the same classes of events as the error path.
+	var foundToolUseBlock, foundInputJSONDelta, foundMessageStop bool
+	var partialJSON string
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		switch ev["type"] {
+		case "content_block_start":
+			if cb, ok := ev["content_block"].(map[string]interface{}); ok {
+				if cb["type"] == "tool_use" {
+					foundToolUseBlock = true
+				}
+			}
+		case "content_block_delta":
+			if delta, ok := ev["delta"].(map[string]interface{}); ok {
+				if delta["type"] == "input_json_delta" {
+					if pj, ok := delta["partial_json"].(string); ok {
+						foundInputJSONDelta = true
+						partialJSON = pj
+					}
+				}
+			}
+		case "message_stop":
+			foundMessageStop = true
+		}
+	}
+
+	if !foundToolUseBlock {
+		t.Errorf("ChannelClosedFlush: held tool_use content_block_start MISSING from wire (fragment dropped); body=%q", body)
+	}
+	if !foundInputJSONDelta {
+		t.Errorf("ChannelClosedFlush: held input_json_delta MISSING from wire; body=%q", body)
+	}
+	if !foundMessageStop {
+		t.Errorf("ChannelClosedFlush: missing message_stop (Finalize did not run?); body=%q", body)
+	}
+
+	// No error event on the channel-closed path (that's the case-error
+	// path's responsibility). Confirm no error event leaked here.
+	if strings.Contains(body, `"type":"error"`) {
+		t.Errorf("ChannelClosedFlush: unexpected 'error' event on channel-closed path; body=%q", body)
+	}
+
+	// Repaired args must land on the wire — same expectation as the
+	// error path. The held fragment was repaired by Flush().
+	var repairedValid bool
+	if partialJSON != "" {
+		var js interface{}
+		if err := json.Unmarshal([]byte(partialJSON), &js); err == nil {
+			if m, ok := js.(map[string]interface{}); ok {
+				if q, ok := m["q"].(string); ok && q == "hi" {
+					repairedValid = true
+				}
+			}
+		}
+	}
+	if !repairedValid {
+		t.Errorf("ChannelClosedFlush: repaired JSON `{\"q\":\"hi\"}` missing from input_json_delta; partialJSON=%q body=%q",
+			partialJSON, body)
+	}
+
+	// Arc/State mirror must reflect the held tool — same expectation
+	// as the error path.
+	st := tr.State()
+	if len(st.ToolCalls) != 1 {
+		t.Errorf("ChannelClosedFlush: State().ToolCalls len = %d, want 1 (held call lost from mirror)", len(st.ToolCalls))
+	} else {
+		if got, want := st.ToolCalls[0].Arguments.String(), `{"q":"hi"}`; got != want {
+			t.Errorf("ChannelClosedFlush: State().ToolCalls[0].Arguments = %q, want %q (REPAIRED)", got, want)
+		}
 	}
 }

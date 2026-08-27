@@ -652,34 +652,11 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 				// contract. Ordering is load-bearing — see also the
 				// phase-3 follow-up commit's regression test pair.
 				if toolCallBuffer != nil {
-					flushChunks := toolCallBuffer.Flush()
-					for _, emitted := range flushChunks {
-						tcs := parseBufferEmittedToolCalls(emitted)
-						if len(tcs) == 0 {
-							continue
-						}
-						toolCallsForEv := convertProvidersToolCallsToMapList(tcs)
-						fEvents, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
-						if terr != nil {
-							logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (flush tool_call): %v", terr)
-							continue
-						}
-						if len(fEvents) > 0 {
-							h.emitLivePreamble(w, h.liveArc)
-						}
-						for _, ev := range fEvents {
-							if _, werr := w.Write([]byte(ev)); werr != nil {
-								return werr
-							}
-							if f, ok := w.(http.Flusher); ok {
-								f.Flush()
-							}
-						}
-					}
-					stats := toolCallBuffer.GetRepairStats()
-					if stats.Attempted > 0 {
-						log.Printf("[TOOL-BUFFER] InternalHandler (live): Repair stats: attempted=%d, success=%d, failed=%d",
-							stats.Attempted, stats.Successful, stats.Failed)
+					// Flush-before-Finalize — see helper doc for the
+					// full rationale (held calls would otherwise
+					// vanish from the wire AND from the arc mirror).
+					if ferr := driveBufferFlushIntoLiveTranslator(w, h, toolCallBuffer); ferr != nil {
+						return ferr
 					}
 				}
 
@@ -751,8 +728,18 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 			// error to the client wire — sequence pinned by the
 			// plan. After Finalize, we write a well-formed Anthropic
 			// error event and return.
+			//
+			// Phase 3 final follow-up: held tool calls must also be
+			// flushed BEFORE Finalize on this path. A truncated
+			// fragment that never reached valid JSON would otherwise
+			// vanish — same root cause as the done site (a8b97f3).
+			// Wire-write errors here are IGNORED (the error event
+			// MUST still be written regardless — the helper returns
+			// the werr which we deliberately discard here).
 			log.Printf("Stream error: %v", event.Error)
 			if h.liveTranslator != nil {
+				_ = driveBufferFlushIntoLiveTranslator(w, h, toolCallBuffer)
+
 				if fEvents, ferr := h.liveTranslator.Finalize(); ferr == nil {
 					if len(fEvents) > 0 {
 						h.emitLivePreamble(w, h.liveArc)
@@ -786,7 +773,14 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 
 	// Channel closed without an explicit "done" event — Finalize the
 	// translator if live mode is active.
+	//
+	// Phase 3 final follow-up: same Flush-before-Finalize as the done
+	// site and case "error" path — held tool calls land on the wire
+	// before the close events. Wire-write errors are ignored (no
+	// further writes follow this path).
 	if h.liveTranslator != nil {
+		_ = driveBufferFlushIntoLiveTranslator(w, h, toolCallBuffer)
+
 		if fEvents, ferr := h.liveTranslator.Finalize(); ferr == nil {
 			if len(fEvents) > 0 {
 				h.emitLivePreamble(w, h.liveArc)
@@ -902,6 +896,67 @@ func parseBufferEmittedToolCalls(line []byte) []providers.ToolCall {
 		out = append(out, ptc)
 	}
 	return out
+}
+
+// driveBufferFlushIntoLiveTranslator (live mode only) drains any HELD
+// tool calls from the toolCallBuffer via Flush(), parses each emitted
+// complete chunk back to providers.ToolCall, drives the liveTranslator
+// so the held calls land on the Anthropic wire, and writes the
+// emitted Anthropic events to w.
+//
+// Used by every end-of-stream path in live mode:
+//   - case "done"            — see a8b97f3 done-site
+//   - case "error"           — Phase 3 final follow-up
+//   - channel-closed-without-done — Phase 3 final follow-up
+//
+// Flush-before-Finalize ordering is LOAD-BEARING for held calls:
+// without it, a tool call whose arguments never reached valid JSON
+// during streaming (truncated stream, upstream error, channel close)
+// would vanish from the wire AND from the arc mirror, breaking the
+// persistence contract. The repair chain (pkg/toolrepair) runs in
+// emitToolCall when JSON is invalid, so a held but repairable
+// fragment lands on the wire as REPAIRED args.
+//
+// Returns the FIRST wire-write error (if any). Callers decide:
+//   - done path propagates (returns the werr from handleStream).
+//   - error / channel-closed paths ignore (continue to write the
+//     well-formed Anthropic error event, or simply end-of-stream).
+//
+// No-op if toolCallBuffer is nil.
+func driveBufferFlushIntoLiveTranslator(w http.ResponseWriter, h *InternalHandler, toolCallBuffer *toolcall.ToolCallBuffer) error {
+	if toolCallBuffer == nil {
+		return nil
+	}
+	flushChunks := toolCallBuffer.Flush()
+	for _, emitted := range flushChunks {
+		tcs := parseBufferEmittedToolCalls(emitted)
+		if len(tcs) == 0 {
+			continue
+		}
+		toolCallsForEv := convertProvidersToolCallsToMapList(tcs)
+		fEvents, terr := h.liveTranslator.ProcessEvent("", "", "", toolCallsForEv)
+		if terr != nil {
+			logger.Debugf("[DEBUG INTERNAL] live translator ProcessEvent (flush tool_call): %v", terr)
+			continue
+		}
+		if len(fEvents) > 0 {
+			h.emitLivePreamble(w, h.liveArc)
+		}
+		for _, ev := range fEvents {
+			if _, werr := w.Write([]byte(ev)); werr != nil {
+				return werr
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+	stats := toolCallBuffer.GetRepairStats()
+	if stats.Attempted > 0 {
+		log.Printf("[TOOL-BUFFER] InternalHandler (live): Repair stats: attempted=%d, success=%d, failed=%d",
+			stats.Attempted, stats.Successful, stats.Failed)
+	}
+	return nil
 }
 
 // convertProvidersToolCallsToMapList converts providers.ToolCall into
