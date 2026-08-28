@@ -150,7 +150,7 @@ MODEL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
         \"name\": \"Mock OpenAI Model (Buffered)\",
         \"enabled\": true,
         \"internal\": true,
-        \"credential_id\": \"mock-openai-cred-buffered\",
+        \"credentials\": [{\"credential_id\": \"mock-openai-cred-buffered\", \"weight\": 1, \"position\": 0}],
         \"internal_model\": \"mock-model\",
         \"internal_base_url\": \"http://localhost:$MOCK_PORT/v1\"
     }")
@@ -200,6 +200,7 @@ echo -e "\n${YELLOW}[4/18] Test 1: Normal Streaming (DONE + finish_reason=stop)$
 OUTPUT1=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}],
@@ -215,6 +216,7 @@ echo -e "\n${YELLOW}[5/18] Test 2: Streaming Tool Call${NC}"
 OUTPUT2=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-stream\"}],
@@ -232,6 +234,7 @@ echo -e "\n${YELLOW}[6/18] Test 3: Multiple Streaming Tool Calls${NC}"
 OUTPUT3=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-multi-stream\"}],
@@ -248,6 +251,7 @@ echo -e "\n${YELLOW}[7/18] Test 4: Reasoning Content${NC}"
 OUTPUT4=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-reasoning\"}],
@@ -264,6 +268,7 @@ echo -e "\n${YELLOW}[8/18] Test 5: Reasoning + Tool Call${NC}"
 OUTPUT5=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-reasoning-tool\"}],
@@ -281,6 +286,7 @@ echo -e "\n${YELLOW}[9/18] Test 6: Streaming Tool Call with Malformed JSON (Buff
 OUTPUT6=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-malformed-stream\"}],
@@ -311,6 +317,7 @@ echo -e "\n${YELLOW}[10/18] Test 7: Tool Call WITHOUT Index Field (Gemini-style)
 OUTPUT7=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-no-index\"}],
@@ -329,6 +336,7 @@ echo -e "\n${YELLOW}[11/18] Test 8: Tool Call WITHOUT ID Field (Ollama-style)${N
 OUTPUT8=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-no-id\"}],
@@ -346,6 +354,7 @@ echo -e "\n${YELLOW}[12/18] Test 9: Interleaved Tool Calls (index 0,1,0,1 patter
 OUTPUT9=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-interleaved\"}],
@@ -363,6 +372,7 @@ echo -e "\n${YELLOW}[13/18] Test 10: Tool Call with Empty Deltas${NC}"
 OUTPUT10=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-empty-delta\"}],
@@ -380,6 +390,7 @@ echo -e "\n${YELLOW}[14/18] Test 11: Minimal Tool Call (index only)${NC}"
 OUTPUT11=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-minimal\"}],
@@ -396,6 +407,7 @@ echo -e "\n${YELLOW}[15/18] Test 12: Partial JSON Arguments${NC}"
 OUTPUT12=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-partial-json\"}],
@@ -413,6 +425,7 @@ echo -e "\n${YELLOW}[16/18] Test 13: Tool Call WITHOUT Type Field${NC}"
 OUTPUT13=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-no-type\"}],
@@ -430,6 +443,7 @@ echo -e "\n${YELLOW}[17/18] Test 14: Tool Call with Large Index (50)${NC}"
 OUTPUT14=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-large-index\"}],
@@ -447,6 +461,7 @@ echo -e "\n${YELLOW}[18/18] Test 15: Sparse Index Tool Calls (0, 5, 10)${NC}"
 OUTPUT15=$(curl -N -s --max-time 5 "http://localhost:$PROXY_PORT/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $API_KEY" \
+    -H "X-LLMProxy-Buffer-Response: true" \
     -d "{
         \"model\": \"mock-openai-model-buffered\",
         \"messages\": [{\"role\": \"user\", \"content\": \"mock-tool-sparse-index\"}],
