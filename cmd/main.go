@@ -19,6 +19,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -213,9 +214,26 @@ func main() {
 	// This prevents connection pool exhaustion
 	idleTimeout := 300 * time.Second
 
+	// Transparent request-body gzip decompression is wired as the
+	// INNER of two middlewares wrapping the mux. Order matters: gzipmw
+	// runs FIRST so every handler — proxy, ultimatemodel (which
+	// ultimately calls Execute → executeExternal with body bytes
+	// produced from r.Body via initRequestContext's parse), UI, MCP
+	// — sees a decompressed body. recoveryMiddleware is the OUTER
+	// wrapper so a panic inside gzipmw (e.g. on a pathological
+	// gzip header) still gets a 500 instead of crashing the process.
+	// Gzip errors are handled explicitly inside gzipmw and emit
+	// OpenAI-shape 4xx envelopes; recoveryMiddleware only catches
+	// the unexpected.
+	//
+	// Compression scope: gzipmw is conditional on Content-Encoding:
+	// gzip and ONLY gzip; requests without that header (or with
+	// "identity") pass through untouched so uncompressed clients
+	// experience zero behavior change. See pkg/middleware/gzipmw for
+	// the contract and cap story.
 	srv := &http.Server{
 		Addr:           ":" + strconv.Itoa(cfg.Port),
-		Handler:        recoveryMiddleware(mux),
+		Handler:        recoveryMiddleware(gzipmw.DecompressRequest(mux)),
 		ReadTimeout:    readTimeout,
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,
