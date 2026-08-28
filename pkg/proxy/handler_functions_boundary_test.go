@@ -1,6 +1,6 @@
 package proxy
 
-// handler_functions_failsafe_test.go — db-cache-layer 1D boundary
+// handler_functions_boundary_test.go — db-cache-layer 1D boundary
 // contract tests (OpenAI path). The gate at the initRequestContext
 // resolution site must:
 //   - nil + healthy            → today's legit external passthrough

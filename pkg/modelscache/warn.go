@@ -21,7 +21,7 @@ const deadDefaultUpstreamURL = "http://localhost:4001"
 // (planner ruling E — boot-only, never per-read: the WARN is for
 // operators deploying, not for runtime consumers at hundreds of
 // requests per second). Idempotent by construction: invoked exactly
-// once, from WrapModels. An empty upstreamURL skips the check (the
+// once, from NewCachedModelsConfig. An empty upstreamURL skips the check (the
 // wiring did not supply one — e.g. tests).
 func warnDeadDefaultUpstream(upstreamURL string, enabled []models.ModelConfig) {
 	if upstreamURL == "" || upstreamURL != deadDefaultUpstreamURL || len(enabled) == 0 {

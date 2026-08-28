@@ -469,9 +469,9 @@ func connRefused(msg string) error {
 
 func mustWrap(t *testing.T, inner *fakeStrictSource, opts Options) *CachedModelsConfig {
 	t.Helper()
-	c, err := WrapModels(inner, opts)
+	c, err := NewCachedModelsConfig(inner, opts)
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	t.Cleanup(c.Stop)
 	return c
@@ -505,7 +505,7 @@ func TestCachedModelsConfig_BootPriming_Happy(t *testing.T) {
 
 func TestCachedModelsConfig_BootPriming_Cold(t *testing.T) {
 	inner := &fakeStrictSource{listErr: errors.New("DB down")}
-	c, err := WrapModels(inner, Options{})
+	c, err := NewCachedModelsConfig(inner, Options{})
 	if err == nil {
 		c.Stop()
 		t.Fatal("expected boot priming error, got nil")
@@ -760,9 +760,9 @@ func TestCachedModelsConfig_Reconciler_AbortOnErrorPerC3(t *testing.T) {
 
 	// Legitimate empty from a previously-empty snapshot → swap allowed.
 	inner2 := &fakeStrictSource{}
-	c2, err := WrapModels(inner2, Options{ReconcileInterval: time.Hour})
+	c2, err := NewCachedModelsConfig(inner2, Options{ReconcileInterval: time.Hour})
 	if err != nil {
-		t.Fatalf("WrapModels empty boot: %v", err)
+		t.Fatalf("NewCachedModelsConfig empty boot: %v", err)
 	}
 	c2.reconcileOnce()
 	if !c2.Healthy() {
@@ -776,9 +776,9 @@ func TestCachedModelsConfig_Reconciler_StopCancelsInflightScan(t *testing.T) {
 
 	// Boot WITHOUT the stall (priming must succeed), then arm the stall
 	// so the next reconciler tick blocks mid-scan.
-	c, err := WrapModels(inner, Options{ReconcileInterval: time.Hour})
+	c, err := NewCachedModelsConfig(inner, Options{ReconcileInterval: time.Hour})
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	inner.mu.Lock()
 	inner.stall = make(chan struct{})
@@ -946,9 +946,9 @@ func TestCachedModelsConfig_Warn_DeadDefault(t *testing.T) {
 	}()
 
 	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
-	c, err := WrapModels(inner, Options{UpstreamURL: "http://localhost:4001"})
+	c, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "http://localhost:4001"})
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	defer c.Stop()
 
@@ -962,9 +962,9 @@ func TestCachedModelsConfig_Warn_DeadDefault(t *testing.T) {
 
 	// Non-default upstream → no WARN.
 	buf.Reset()
-	c2, err := WrapModels(inner, Options{UpstreamURL: "https://litellm.example.com"})
+	c2, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "https://litellm.example.com"})
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	defer c2.Stop()
 	if strings.Contains(buf.String(), "localhost:4001") {

@@ -16,7 +16,7 @@ import (
 //
 // Three tiers (planner ruling I / C2):
 //
-//   - positive      — inner said yes; fresh until min(now+PositiveTTL,
+//   - positive      — inner said yes; fresh until min(now+TokensPositiveTTL,
 //     token.ExpiresAt-clamped view); after that it transitions to
 //     stale-positive, NOT a miss.
 //   - stale-positive — expired positive kept for the StaleCap window;
@@ -31,7 +31,7 @@ type tokenEntry struct {
 	verdict  error           // the negative verdict to replay (nil otherwise)
 	cachedAt time.Time
 	// freshUntil is when the positive stops being "fresh": the
-	// min(now+PositiveTTL, token.ExpiresAt) clamp.
+	// min(now+TokensPositiveTTL, token.ExpiresAt) clamp.
 	freshUntil time.Time
 }
 
@@ -45,8 +45,8 @@ const (
 
 // CachedTokenStore decorates auth.TokenStoreInterface with the
 // three-tier token cache. Tokens drive no fail-fast (only models do
-// — the boundary sites consult ConfigStoreHealth), so Healthy() here
-// is informational; the stale tier IS the outage behavior.
+// — the boundary sites consult ConfigStoreHealth on the models
+// decorator); the stale tier IS the outage behavior here.
 type CachedTokenStore struct {
 	inner auth.TokenStoreInterface
 	opts  Options
@@ -62,12 +62,12 @@ type CachedTokenStore struct {
 	stopOnce sync.Once
 }
 
-// WrapTokens builds the token cache decorator. No boot priming
-// (tokens are strictly lazy), no goroutine — Stop is a no-op kept for
-// the deferred-teardown wiring (W2).
-func WrapTokens(inner auth.TokenStoreInterface, opts Options) *CachedTokenStore {
+// NewCachedTokenStore builds the token cache decorator. No boot
+// priming (tokens are strictly lazy), no goroutine — Stop is a no-op
+// kept for the deferred-teardown wiring (W2).
+func NewCachedTokenStore(inner auth.TokenStoreInterface, opts Options) *CachedTokenStore {
 	if inner == nil {
-		panic("modelscache: WrapTokens requires a non-nil inner token store")
+		panic("modelscache: NewCachedTokenStore requires a non-nil inner token store")
 	}
 	o := opts.withDefaults()
 	return &CachedTokenStore{
@@ -90,13 +90,6 @@ func (c *CachedTokenStore) Stop() {
 	c.stopOnce.Do(func() {})
 }
 
-// Healthy is informational (tokens do not drive fail-fast; exit
-// criterion 1B): true when the last inner contact succeeded or no
-// inner contact has happened yet.
-func (c *CachedTokenStore) Healthy() bool {
-	return true
-}
-
 // rememberID records id→hash for DeleteToken fan-out (W4), evicting
 // the oldest entries beyond defaultIDIndexCap (straight FIFO; losing
 // a stale mapping just falls back to TTL expiry for that token —
@@ -116,6 +109,70 @@ func (c *CachedTokenStore) rememberID(id, hash string) {
 	c.idToHash[id] = hash
 }
 
+// storePositive caches a successful inner verdict as a fresh positive
+// and records id→hash (W4). clampExpiry is the freshness ceiling:
+// ValidateToken passes token.ExpiresAt; CreateToken passes the
+// caller-supplied expiresAt param — a pre-existing drift between the
+// two call sites, deliberately parameterized (not fixed) here.
+func (c *CachedTokenStore) storePositive(hash string, token *auth.AuthToken, clampExpiry *time.Time, now time.Time) {
+	freshUntil := now.Add(c.opts.TokensPositiveTTL)
+	if clampExpiry != nil && clampExpiry.Before(freshUntil) {
+		freshUntil = *clampExpiry
+	}
+	c.mu.Lock()
+	c.entries.Put(hash, &tokenEntry{
+		kind:       tierPositive,
+		token:      token,
+		freshUntil: freshUntil,
+		cachedAt:   now,
+	})
+	if token != nil {
+		c.rememberID(token.ID, hash)
+	}
+	c.mu.Unlock()
+}
+
+// storeNegative caches a verdict-class denial for NegativeTTL.
+// Negative entries carry no token and never record id→hash.
+func (c *CachedTokenStore) storeNegative(hash string, verdict error, now time.Time) {
+	c.mu.Lock()
+	c.entries.Put(hash, &tokenEntry{
+		kind:     tierNegative,
+		verdict:  verdict,
+		cachedAt: now,
+	})
+	c.mu.Unlock()
+}
+
+// cachedVerdict returns the definitive cached answer for hash, if
+// one exists: a fresh positive (token, nil, true) or a fresh negative
+// (nil, verdict, true). A miss, an expired positive (now a
+// stale-positive candidate for the infra branch), or an expired
+// negative reports (nil, nil, false) so the caller revalidates
+// against the inner store.
+func (c *CachedTokenStore) cachedVerdict(hash string, now time.Time) (*auth.AuthToken, error, bool) {
+	c.mu.RLock()
+	raw, hit := c.entries.Peek(hash)
+	c.mu.RUnlock()
+	if !hit {
+		return nil, nil, false
+	}
+	e := raw.(*tokenEntry)
+	switch e.kind {
+	case tierPositive:
+		if now.Before(e.freshUntil) {
+			// Fresh positive — serve from cache, zero DB.
+			return e.token, nil, true
+		}
+	case tierNegative:
+		if now.Sub(e.cachedAt) <= c.opts.NegativeTTL {
+			// Fail-closed verdict replay (never stale-served).
+			return nil, e.verdict, true
+		}
+	}
+	return nil, nil, false
+}
+
 // ValidateToken implements the three-tier state machine (task 1.B.8).
 func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) (*auth.AuthToken, error) {
 	// Pre-DB format check mirrors the inner store — a malformed token
@@ -126,65 +183,32 @@ func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 	hash := auth.HashToken(plaintext)
 	now := c.now()
 
-	c.mu.RLock()
-	raw, hit := c.entries.Peek(hash)
-	c.mu.RUnlock()
-
-	if hit {
-		e := raw.(*tokenEntry)
-		switch e.kind {
-		case tierPositive:
-			if now.Before(e.freshUntil) {
-				// Fresh positive — serve from cache, zero DB.
-				return e.token, nil
-			}
-			// Expired → this entry is now a stale-positive; fall
-			// through to inner revalidation (which may refresh it,
-			// convert it to a negative verdict, or — on an infra
-			// error — serve it degraded-allow below).
-		case tierNegative:
-			if now.Sub(e.cachedAt) <= c.opts.NegativeTTL {
-				// Fail-closed verdict replay (never stale-served).
-				return nil, e.verdict
-			}
-			// Negative TTL expired → fall through to revalidation.
-		}
+	// Fresh positive → serve (zero DB); fresh negative → fail-closed
+	// replay; anything else (miss, expired positive → stale-positive
+	// candidate, expired negative) falls through to revalidation.
+	if token, verdict, ok := c.cachedVerdict(hash, now); ok {
+		return token, verdict
 	}
 
 	token, err := c.inner.ValidateToken(ctx, plaintext)
 
 	switch {
 	case err == nil:
-		// (a) success → positive; clamp freshness to
-		// min(now+PositiveTTL, token expiry). Populate idToHash on the
-		// READ path too (W4) so DeleteToken can fan out.
-		freshUntil := now.Add(c.opts.PositiveTTL)
-		if token != nil && token.ExpiresAt != nil && token.ExpiresAt.Before(freshUntil) {
-			freshUntil = *token.ExpiresAt
-		}
-		c.mu.Lock()
-		c.entries.Put(hash, &tokenEntry{
-			kind:       tierPositive,
-			token:      token,
-			freshUntil: freshUntil,
-			cachedAt:   now,
-		})
+		// (a) success → positive; storePositive clamps freshness to
+		// min(now+TokensPositiveTTL, token expiry) and populates
+		// idToHash on the READ path too (W4) so DeleteToken can fan
+		// out.
+		var clamp *time.Time
 		if token != nil {
-			c.rememberID(token.ID, hash)
+			clamp = token.ExpiresAt
 		}
-		c.mu.Unlock()
+		c.storePositive(hash, token, clamp, now)
 		return token, nil
 
 	case isVerdictClass(err):
 		// (c) verdict-class (not-found / bad format / expired) →
 		// negative cache, fail-closed, never stale fallback.
-		c.mu.Lock()
-		c.entries.Put(hash, &tokenEntry{
-			kind:     tierNegative,
-			verdict:  err,
-			cachedAt: now,
-		})
-		c.mu.Unlock()
+		c.storeNegative(hash, err, now)
 		return nil, err
 
 	case isInfraError(err):
@@ -198,22 +222,21 @@ func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 		// c.mu to read the freshest cache state. Between the pre-call
 		// Peek and this branch, a concurrent DeleteToken or a racing
 		// verdict-class validate may have replaced the positive with a
-		// definitive verdict; without this re-read, the pre-call `raw`
-		// would let one stale token slip past a freshly-recorded
-		// ErrTokenNotFound. The re-Peek closes the race — if the
-		// entry is no longer a usable stale-positive, fall through to
-		// the not-found path instead of serving a now-revoked token.
-		if hit {
-			c.mu.RLock()
-			fresh, ok := c.entries.Peek(hash)
-			c.mu.RUnlock()
-			if ok {
-				e := fresh.(*tokenEntry)
-				if e.kind == tierPositive && e.token != nil &&
-					now.Sub(e.cachedAt) <= c.opts.StaleCap {
-					log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
-					return e.token, nil
-				}
+		// definitive verdict; without this re-read, the pre-call
+		// cached entry would let one stale token slip past a
+		// freshly-recorded ErrTokenNotFound. The re-Peek closes the
+		// race — if the entry is no longer a usable stale-positive,
+		// fall through to the not-found path instead of serving a
+		// now-revoked token.
+		c.mu.RLock()
+		fresh, ok := c.entries.Peek(hash)
+		c.mu.RUnlock()
+		if ok {
+			e := fresh.(*tokenEntry)
+			if e.kind == tierPositive && e.token != nil &&
+				now.Sub(e.cachedAt) <= c.opts.StaleCap {
+				log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
+				return e.token, nil
 			}
 		}
 		return nil, err
@@ -244,21 +267,10 @@ func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expires
 	}
 	hash := auth.HashToken(plaintext)
 	now := c.now()
-	freshUntil := now.Add(c.opts.PositiveTTL)
-	if expiresAt != nil && expiresAt.Before(now.Add(c.opts.PositiveTTL)) {
-		freshUntil = *expiresAt
-	}
-	c.mu.Lock()
-	c.entries.Put(hash, &tokenEntry{
-		kind:       tierPositive,
-		token:      token,
-		freshUntil: freshUntil,
-		cachedAt:   now,
-	})
-	if token != nil {
-		c.rememberID(token.ID, hash)
-	}
-	c.mu.Unlock()
+	// Clamp source is the caller-supplied expiresAt param, NOT
+	// token.ExpiresAt — pre-existing drift vs ValidateToken's clamp,
+	// preserved exactly per call site (tidy finding 11).
+	c.storePositive(hash, token, expiresAt, now)
 	return plaintext, token, nil
 }
 

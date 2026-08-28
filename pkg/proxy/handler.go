@@ -407,11 +407,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			})
 			return
 		}
-		if err.Error() == "invalid_upstream_url" {
+		if errors.Is(err, ErrInvalidUpstreamURL) {
 			http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
-		} else if err.Error() == "read_body_failed" {
+		} else if errors.Is(err, ErrReadBodyFailed) {
 			http.Error(w, "Failed to read body", http.StatusInternalServerError)
-		} else if err.Error() == "invalid_json" {
+		} else if errors.Is(err, ErrInvalidJSON) {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		}
 		return

@@ -104,15 +104,14 @@ func main() {
 	var wrappedTokens *modelscache.CachedTokenStore
 
 	if cacheLayerEnabled {
-		// Options.UpstreamURL feeds only the boot-time dead-default
-		// (localhost:4001) WARN tripwire; read the config snapshot
-		// locally (cfg is materialized further below).
-		wrappedModels, err = modelscache.WrapModels(modelsMgr, modelscache.Options{
-			PositiveTTL:       60 * time.Second,
-			NegativeTTL:       60 * time.Second,
-			StalenessCap:      24 * time.Hour,
-			StrictFillTimeout: 5 * time.Second,
-			UpstreamURL:       configMgr.Get().UpstreamURL,
+		// Options: only genuinely runtime-specific values — every
+		// default (TTLs, caps, fill timeout) is owned by
+		// Options.withDefaults (tidy finding 7), never duplicated at
+		// the call site. Options.UpstreamURL feeds only the boot-time
+		// dead-default (localhost:4001) WARN tripwire; read the config
+		// snapshot locally (cfg is materialized further below).
+		wrappedModels, err = modelscache.NewCachedModelsConfig(modelsMgr, modelscache.Options{
+			UpstreamURL: configMgr.Get().UpstreamURL,
 		})
 		if err != nil {
 			log.Fatalf("Failed to prime models cache: %v", err)
@@ -177,12 +176,9 @@ func main() {
 	// NewHandler, and mcp.NewServer unchanged.
 	var tokenStore auth.TokenStoreInterface
 	if cacheLayerEnabled {
-		wrappedTokens = modelscache.WrapTokens(auth.NewTokenStore(dbStore.DB, dbStore.Dialect), modelscache.Options{
-			PositiveTTL: 60 * time.Second,
-			NegativeTTL: 60 * time.Second,
-			LRUCap:      10000,
-			StaleCap:    24 * time.Hour,
-		})
+		// Bare Options: withDefaults owns every default (tidy finding
+		// 7) — no duplicated literal TTLs/caps at the call site.
+		wrappedTokens = modelscache.NewCachedTokenStore(auth.NewTokenStore(dbStore.DB, dbStore.Dialect), modelscache.Options{})
 		tokenStore = wrappedTokens
 	} else {
 		tokenStore = auth.NewTokenStore(dbStore.DB, dbStore.Dialect)

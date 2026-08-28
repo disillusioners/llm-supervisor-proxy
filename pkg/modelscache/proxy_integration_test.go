@@ -128,9 +128,9 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 
 	// Warm-cache boot (DB up), then cut it.
 	src := &downModelsSource{ModelsManager: mgr}
-	cached, err := modelscache.WrapModels(src, modelscache.Options{})
+	cached, err := modelscache.NewCachedModelsConfig(src, modelscache.Options{})
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	defer cached.Stop()
 	src.down = true

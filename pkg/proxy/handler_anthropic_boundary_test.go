@@ -1,6 +1,6 @@
 package proxy
 
-// handler_anthropic_failsafe_test.go — db-cache-layer 1D boundary
+// handler_anthropic_boundary_test.go — db-cache-layer 1D boundary
 // contract tests (Anthropic path), mirroring the OpenAI trio:
 //   - nil + healthy              → today's legit external passthrough
 //   - nil + !healthy             → 503 config_store_unavailable
@@ -17,8 +17,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
-func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
-
 func anthropicRequest(t *testing.T, model string) *http.Request {
 	t.Helper()
 	body := map[string]interface{}{
@@ -32,7 +30,7 @@ func anthropicRequest(t *testing.T, model string) *http.Request {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytesReader(raw))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }

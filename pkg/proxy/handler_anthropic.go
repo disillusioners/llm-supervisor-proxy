@@ -158,8 +158,8 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
 	}
 
-	// db-cache-layer 1D — boundary fail-fast gate (mirror of
-	// handler_functions.go; N2 confirmed this block as :154-177). nil
+	// db-cache-layer 1D — boundary fail-fast gate (mirror of the
+	// OpenAI site in handler_functions.go). nil
 	// + unhealthy store → 503 config_store_unavailable, never a silent
 	// external passthrough on a DB error.
 	if resolvedModel == nil && conf.ModelsConfig != nil {
@@ -1915,8 +1915,8 @@ func isAnthropicRateLimit(arc *anthropicRequestContext) bool {
 		return false
 	}
 	var body struct {
-		Type string `json:"type"`
-		Code string `json:"code"`
+		Type  string `json:"type"`
+		Code  string `json:"code"`
 		Error struct {
 			Type string `json:"type"`
 			Code string `json:"code"`
@@ -1941,5 +1941,3 @@ func isAnthropicRateLimit(arc *anthropicRequestContext) bool {
 	}
 	return false
 }
-
-

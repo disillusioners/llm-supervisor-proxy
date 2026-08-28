@@ -27,7 +27,7 @@ Survive a ≥1-hour database outage with **zero/near-zero request failures** for
   - `GetModelStrict(ctx, modelID) (*models.ModelConfig, error)` — distinguishes `errors.Is(err, sql.ErrNoRows)` from infra errors.
   - `GetCredentialStrict(ctx, id) (*models.CredentialConfig, error)` — same error discrimination; **never serves ciphertext** (fixes store.go:1530-1538 hazard).
   - `ResolveInternalConfigWithAffinityCached(cachedModel, conversationKey, credLookup)` — resolver variant (council correction §8.3) so the hottest internal path makes **zero DB reads** on a warm cache.
-  - `GetModelsStrict(ctx)`, `GetEnabledModelsStrict(ctx)`, `GetCredentialsStrict(ctx)` — **NEW** error-propagating list scans (additive only; no signature changes to the existing 19-method interface per [PLANNER-C]-amended). Combined with the strict single-row reads, the decorator can boot-prime + reconcile with full error visibility without ever touching the legacy silent-`[]` paths.
+  - `GetModelsStrict(ctx)`, `GetEnabledModelsStrict(ctx)`, `GetCredentialsStrict(ctx)` — **NEW** error-propagating list scans (additive only; no signature changes to the existing 18-method interface per [PLANNER-C]-amended). Combined with the strict single-row reads, the decorator can boot-prime + reconcile with full error visibility without ever touching the legacy silent-`[]` paths.
 - Fail-fast 503 at the **two boundary sites only** (council correction §8.4):
   - `pkg/proxy/handler_functions.go:87-103` (chat-completions / OpenAI)
   - `pkg/proxy/handler_anthropic.go:154-170` (Anthropic messages)
@@ -149,7 +149,7 @@ The release unit is **all five sub-stages together as ONE release** (leader deci
 
 **Council evidence anchors (verified at HEAD `68dbe63`):**
 - `cmd/main.go` — verified seams at `:90` (modelsConfig), `:132-136` (proxyConfig), `:139` (tokenStore), `:149` (ui.NewServer), `:156` (proxy.NewHandler); all interface-typed; no concrete-type assertions downstream.
-- `pkg/models/config.go:177-208` — `ModelsConfigInterface` 19-method surface with **no error returns** (D1 proof).
+- `pkg/models/config.go:177-208` — `ModelsConfigInterface` 18-method surface with **no error returns** (D1 proof).
 - `pkg/store/database/store.go`:
   - `:862-863` GetModel conflated nil (incident crux).
   - `:942-944` GetModelByName same shape (same defect — silent nil on err).
@@ -202,7 +202,7 @@ The release unit is **all five sub-stages together as ONE release** (leader deci
 
 | Component | Effort | Notes |
 |-----------|--------|-------|
-| Phase 1: `pkg/store/database` strict additions (single + list, **+GetModelsStrict +GetEnabledModelsStrict +GetCredentialsStrict** per C1/C3) + resolver variant | 2.0–2.5 dev-days | Additive only across 7 new methods; no signature breakage on the existing 19-method interface; 12+ concrete-call sites in `database_test.go` keep their shape; `cmd/main.go:90` compilation unaffected. |
+| Phase 1: `pkg/store/database` strict additions (single + list, **+GetModelsStrict +GetEnabledModelsStrict +GetCredentialsStrict** per C1/C3) + resolver variant | 2.0–2.5 dev-days | Additive only across 7 new methods; no signature breakage on the existing 18-method interface; 12+ concrete-call sites in `database_test.go` keep their shape; `cmd/main.go:90` compilation unaffected. |
 | Phase 2: `pkg/modelscache` package (models + tokens decorators, **+3-tier token state machine with stale-tier per C2**, **+abort-on-error reconciler swap per C3**, **+legacy `ResolveInternalConfig` cache override per W1**, **+no-op `Stop()` on `CachedTokenStore` per W2**, **+Stop cancels reconciler ctx per W3**, **+`ListTokens`/`GetTokenByID` pass-through per W5**) | 3.0–3.5 dev-days | Includes deep-copy helpers, negative caches, write-through logic, LRU, infra-error classifier helper. |
 | Phase 3: `cmd/main.go` wiring (**+wrapped vars declared + nil-guarded Stops per W2**) | 0.75 dev-day | 2-line wrap at `:90` and `:139`; env-flag parse; teardown LIFO order `srv → StopModelsCache → StopTokensCache → credLB → modelsMgr → dbStore` per W2. |
 | Phase 4: Proxy fail-fast 503 | 0.5 dev-day | 2-site gate. |
@@ -254,4 +254,4 @@ Tasks 2.1+4 and 4 alone are independently parallelizable once the `ConfigStoreHe
 | `pkg/store/database/store_strict_test.go` | **new** | 5 | Strict-method contract — `errors.Is(err, sql.ErrNoRows)` vs infra error returns. |
 
 **Net change count:** ~16 files (5 modified, 11 new).
-**Interface expansion risk:** zero — both `ModelsConfigInterface` (19 methods, no errors) and `TokenStoreInterface` (6 methods) remain untouched. The decorator implements them transparently.
+**Interface expansion risk:** zero — both `ModelsConfigInterface` (18 methods, no errors) and `TokenStoreInterface` (6 methods) remain untouched. The decorator implements them transparently.

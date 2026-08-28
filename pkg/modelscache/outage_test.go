@@ -163,15 +163,15 @@ func newOutageStack(t *testing.T) *outageStack {
 	tokSrc := &outageTokenStore{TokenStoreInterface: tokReal}
 
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
-	modelsCache, err := WrapModels(src, Options{Clock: clk.Now, ReconcileInterval: time.Hour})
+	modelsCache, err := NewCachedModelsConfig(src, Options{Clock: clk.Now, ReconcileInterval: time.Hour})
 	if err != nil {
-		t.Fatalf("WrapModels: %v", err)
+		t.Fatalf("NewCachedModelsConfig: %v", err)
 	}
 	t.Cleanup(modelsCache.Stop)
 
 	return &outageStack{
 		t: t, dbStore: dbStore, mgr: mgr, src: src, tokSrc: tokSrc,
-		models: modelsCache, tokens: WrapTokens(tokSrc, Options{Clock: clk.Now}),
+		models: modelsCache, tokens: NewCachedTokenStore(tokSrc, Options{Clock: clk.Now}),
 		clk: clk,
 	}
 }

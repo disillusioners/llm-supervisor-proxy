@@ -1043,46 +1043,37 @@ var (
 	ErrDecryptionFailureInScan = errors.New("credential scan aborted: decryption failure")
 )
 
-// modelSelectByIDQuery returns the dialect-appropriate single-model
-// SELECT used by the strict reads (same shape GetModel builds inline).
-func (m *ModelsManager) modelSelectByIDQuery() string {
-	if m.store.Dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+// modelSelectColumnsPG and modelSelectColumnsSQLite are the shared
+// column lists of the single-model strict SELECTs, one per dialect
+// (PostgreSQL spells the boolean coalesce literals false/true; SQLite
+// uses 0/1). The embedded continuation-line indentation is
+// load-bearing: modelSelectQuery composes these with the FROM/WHERE
+// tail so the emitted query text stays byte-identical to the former
+// per-site literals (same columns, same order, same placeholder
+// semantics).
+const modelSelectColumnsPG = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credentials_json, '[]'),
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)
-			FROM models WHERE id = $1`
-	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
-		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-		peak_hour_enabled, peak_hour_start, peak_hour_end,
-		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)
-		FROM models WHERE id = ?`
-}
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)`
 
-// modelSelectByNameQuery returns the dialect-appropriate single-model
-// SELECT by name (same shape GetModelByName builds inline).
-func (m *ModelsManager) modelSelectByNameQuery() string {
-	if m.store.Dialect == PostgreSQL {
-		return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
-			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credentials_json, '[]'),
-			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
-			peak_hour_enabled, peak_hour_start, peak_hour_end,
-			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)
-			FROM models WHERE name = $1`
-	}
-	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+const modelSelectColumnsSQLite = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)
-		FROM models WHERE name = ?`
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)`
+
+// modelSelectQuery returns the dialect-appropriate single-model
+// SELECT used by the strict reads (same shape the legacy GetModel /
+// GetModelByName build inline). where is the column the caller keys
+// on ("id" or "name").
+func (m *ModelsManager) modelSelectQuery(where string) string {
+	if m.store.Dialect == PostgreSQL {
+		return "SELECT " + modelSelectColumnsPG + "\n\t\t\tFROM models WHERE " + where + " = $1"
+	}
+	return "SELECT " + modelSelectColumnsSQLite + "\n\t\tFROM models WHERE " + where + " = ?"
 }
 
 // dbModelRowToConfig converts a scanned dbModelRow into the public
@@ -1162,16 +1153,16 @@ func (m *ModelsManager) getModelStrict(ctx context.Context, query, arg string) (
 // (nil, ErrModelNotFound) when the row does not exist — an error that
 // satisfies errors.Is(err, sql.ErrNoRows) — and (nil, err) with the
 // driver's error unchanged on infrastructure failure. Never conflates
-// the two (the legacy GetModel returns nil for both; store.go:862-863,
-// the 2026-08-27 incident crux).
+// the two (the legacy GetModel returns nil for both — the 2026-08-27
+// incident crux).
 func (m *ModelsManager) GetModelStrict(ctx context.Context, modelID string) (*models.ModelConfig, error) {
-	return m.getModelStrict(ctx, m.modelSelectByIDQuery(), modelID)
+	return m.getModelStrict(ctx, m.modelSelectQuery("id"), modelID)
 }
 
 // GetModelByNameStrict is the error-propagating twin of GetModelByName
 // with the same error discrimination as GetModelStrict.
 func (m *ModelsManager) GetModelByNameStrict(ctx context.Context, modelName string) (*models.ModelConfig, error) {
-	return m.getModelStrict(ctx, m.modelSelectByNameQuery(), modelName)
+	return m.getModelStrict(ctx, m.modelSelectQuery("name"), modelName)
 }
 
 // GetModelsStrict is the error-propagating twin of GetModels: a
@@ -1788,7 +1779,8 @@ func (m *ModelsManager) GetCredentials() []models.CredentialConfig {
 // the row does not exist, (nil, err) unchanged on infrastructure
 // failure, and CRITICALLY (nil, ErrDecryptionFailed) when the stored
 // API key cannot be decrypted. The legacy GetCredential WARNs and
-// serves the raw ciphertext as the APIKey (store.go:1530-1538 hazard);
+// serves the raw ciphertext as the APIKey (the legacy GetCredential's
+// ciphertext-serving hazard);
 // the strict twin NEVER serves ciphertext (arch §5, matrix row 5).
 func (m *ModelsManager) GetCredentialStrict(ctx context.Context, id string) (*models.CredentialConfig, error) {
 	m.mu.RLock()
@@ -2236,6 +2228,13 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 // Callers hold the decorator's cache lock; this method takes no lock
 // of its own — it touches only the supplied closures and the engine's
 // own mutex (on the 2+-credentials path). It performs no I/O.
+//
+// CONFIRMED INTENT (leader ruling, 2026-08-28): the supplied
+// credLookup does NOT strict-fill credentials that are missing from
+// the cache — a credential added to the DB after boot becomes
+// visible to resolution only via the next reconciler sweep (≤60s at
+// the default interval). This is the accepted consistency window;
+// do not "fix" it by strict-filling inside the resolver.
 func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.ModelConfig, conversationKey string, credLookup func(credentialID string) (*models.CredentialConfig, bool)) (ResolvedCredential, bool) {
 	if cached == nil || !cached.Internal {
 		return ResolvedCredential{}, false
@@ -2253,6 +2252,27 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.M
 		return cred
 	}
 
+	// resolveSingle is the shared tail of the two single-credential
+	// paths below (the legacy PrimaryCredentialID shape and the E-3
+	// fast path): resolve via exactly one credential ID or fail.
+	// NewlyBound is always false — no engine call, no binding write
+	// on either path.
+	resolveSingle := func(credID string) (ResolvedCredential, bool) {
+		cred := lookupCredential(credID)
+		if cred == nil {
+			return ResolvedCredential{}, false
+		}
+		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+		return ResolvedCredential{
+			Provider:      provider,
+			APIKey:        apiKey,
+			BaseURL:       baseURL,
+			InternalModel: actualModel,
+			CredentialID:  credID,
+			NewlyBound:    false,
+		}, true
+	}
+
 	// Nil engine (hand-constructed instances) and empty credential
 	// lists both degrade to the legacy single-credential shape —
 	// identical to ResolveInternalConfigWithAffinity.
@@ -2261,37 +2281,12 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.M
 		if primaryID == "" {
 			return ResolvedCredential{}, false
 		}
-		cred := lookupCredential(primaryID)
-		if cred == nil {
-			return ResolvedCredential{}, false
-		}
-		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
-		return ResolvedCredential{
-			Provider:      provider,
-			APIKey:        apiKey,
-			BaseURL:       baseURL,
-			InternalModel: actualModel,
-			CredentialID:  primaryID,
-			NewlyBound:    false,
-		}, true
+		return resolveSingle(primaryID)
 	}
 
 	// E-3 single-credential fast path: NO engine call, NO map writes.
 	if len(modelConfig.Credentials) == 1 {
-		fastID := modelConfig.Credentials[0].CredentialID
-		cred := lookupCredential(fastID)
-		if cred == nil {
-			return ResolvedCredential{}, false
-		}
-		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
-		return ResolvedCredential{
-			Provider:      provider,
-			APIKey:        apiKey,
-			BaseURL:       baseURL,
-			InternalModel: actualModel,
-			CredentialID:  fastID,
-			NewlyBound:    false, // fast path never stores a binding
-		}, true
+		return resolveSingle(modelConfig.Credentials[0].CredentialID)
 	}
 
 	// 2+ credentials: engine path (affinity for non-empty keys, fresh
@@ -2306,7 +2301,8 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.M
 	if cred == nil {
 		// Dangling reference (credential deleted while the model's
 		// credentials_json still references it) — same defensive heal
-		// as ResolveInternalConfigWithAffinity at store.go:1900-1902:
+		// as ResolveInternalConfigWithAffinity's dangling-reference
+		// heal:
 		// clear the engine state for the dead credential and rebind
 		// this conversation to a live one; THIS call still fails.
 		log.Printf("[WARN] [credentiallb] credential %s missing from cache for model %s — clearing engine state, resolution fails this call", credID, modelConfig.ID)

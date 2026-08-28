@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,24 +41,40 @@ func (e *configUnavailableError) Error() string {
 
 func (e *configUnavailableError) Unwrap() error { return modelscache.ErrConfigUnavailable }
 
+// Request-parse sentinels returned by initRequestContext and matched
+// with errors.Is at the HandleChatCompletions dispatch (tidy finding
+// 6). The message strings are the historical wire contract — they
+// must stay byte-identical (they were string-compared before).
+var (
+	// ErrInvalidUpstreamURL — the configured upstream URL could not
+	// be joined into a request target URL.
+	ErrInvalidUpstreamURL = errors.New("invalid_upstream_url")
+
+	// ErrReadBodyFailed — the request body could not be read.
+	ErrReadBodyFailed = errors.New("read_body_failed")
+
+	// ErrInvalidJSON — the request body is not valid JSON.
+	ErrInvalidJSON = errors.New("invalid_json")
+)
+
 // initRequestContext parses the incoming request, creates the request log,
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	conf := h.config.Clone()
 	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
 	if err != nil {
-		return nil, fmt.Errorf("invalid_upstream_url")
+		return nil, ErrInvalidUpstreamURL
 	}
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
-		return nil, fmt.Errorf("read_body_failed")
+		return nil, ErrReadBodyFailed
 	}
 	r.Body.Close()
 
 	var requestBody map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
-		return nil, fmt.Errorf("invalid_json")
+		return nil, ErrInvalidJSON
 	}
 
 	reqID := uuid.New().String()
@@ -111,8 +128,11 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
 	}
 
-	// db-cache-layer 1D — boundary fail-fast gate (the ONLY pkg/proxy
-	// source change besides its Anthropic mirror). A nil resolution is
+	// db-cache-layer 1D — boundary fail-fast gate (one of the three
+	// pkg/proxy source sites this feature touched: this gate in
+	// handler_functions.go, the sentinel→503/event conversion in
+	// handler.go, and the Anthropic mirror in handler_anthropic.go).
+	// A nil resolution is
 	// LEGITIMATE (an external/unknown model → passthrough, a real
 	// feature) ONLY when the config store can actually answer. When
 	// the store is unhealthy (DB outage, cache exhausted) nil means
@@ -239,4 +259,3 @@ func parseBufferResponseValue(v string) bool {
 		return false
 	}
 }
-

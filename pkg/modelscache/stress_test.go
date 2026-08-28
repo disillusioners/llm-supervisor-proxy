@@ -52,7 +52,7 @@ func TestStress_ConcurrentReadersMutatorReconciler(t *testing.T) {
 	tokInner := newFakeTokenStore()
 	tokPlain1 := seedStressToken(t, tokInner, "stress-tok-1")
 	tokPlain2 := seedStressToken(t, tokInner, "stress-tok-2")
-	cTokens := WrapTokens(tokInner, Options{Clock: clk.Now})
+	cTokens := NewCachedTokenStore(tokInner, Options{Clock: clk.Now})
 	defer cTokens.Stop()
 
 	// Track the mutator's last written state for the final-state

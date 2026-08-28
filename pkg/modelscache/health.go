@@ -52,11 +52,6 @@ var (
 	// config_store_unavailable.
 	ErrConfigUnavailable = errors.New("configuration store unavailable")
 
-	// ErrCredentialMissing — a cached model references a credential
-	// that is missing or undecryptable (matrix row 5). Never a
-	// dangling reference, never ciphertext.
-	ErrCredentialMissing = errors.New("credential missing or undecryptable")
-
 	// ErrDecryptionFailed is an alias of the database-level sentinel
 	// (single source of truth) so errors.Is matches across both
 	// packages.

@@ -171,7 +171,7 @@ func TestFailureModeMatrix_Row6_StaleDownServesLastKnownGood(t *testing.T) {
 
 func TestFailureModeMatrix_RowA_AuthKnownServesToken(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 	c.Stop()
 
 	plaintext, hash, _ := auth.GenerateToken()
@@ -194,7 +194,7 @@ func TestFailureModeMatrix_RowA_AuthKnownServesToken(t *testing.T) {
 
 func TestFailureModeMatrix_RowB_AuthInvalidNegativeRejects(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 	c.Stop()
 
 	plaintext, _, _ := auth.GenerateToken()
@@ -216,7 +216,7 @@ func TestFailureModeMatrix_RowC_AuthNeverSeenDownIs401Class(t *testing.T) {
 	inner.mu.Lock()
 	inner.infraErr = connRefused("connection refused")
 	inner.mu.Unlock()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 	c.Stop()
 
 	plaintext, _, _ := auth.GenerateToken()
@@ -229,7 +229,7 @@ func TestFailureModeMatrix_RowC_AuthNeverSeenDownIs401Class(t *testing.T) {
 func TestFailureModeMatrix_RowA2_StaleTierServesDuringInfraOutage(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 	c.Stop()
 
 	plaintext, hash, _ := auth.GenerateToken()
@@ -254,7 +254,7 @@ func TestFailureModeMatrix_RowA2_StaleTierServesDuringInfraOutage(t *testing.T) 
 func TestFailureModeMatrix_RowB2_VerdictsDoNotFallBackToStale(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 	c.Stop()
 
 	plaintext, hash, _ := auth.GenerateToken()
@@ -278,7 +278,7 @@ func TestFailureModeMatrix_RowB2_VerdictsDoNotFallBackToStale(t *testing.T) {
 
 func TestFailureModeMatrix_RowC2_DeleteTokenRemovesIDIndex(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 	c.Stop()
 
 	plaintext, hash, _ := auth.GenerateToken()

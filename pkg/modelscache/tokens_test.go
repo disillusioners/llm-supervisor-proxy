@@ -109,7 +109,7 @@ func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, u
 
 func TestCachedTokenStore_KeyingIsSHA256(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 	c.Stop()
 
 	plaintext, hash, _ := auth.GenerateToken()
@@ -149,7 +149,7 @@ func TestCachedTokenStore_KeyingIsSHA256(t *testing.T) {
 func TestCachedTokenStore_PositiveTTL(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 
 	plaintext, hash, _ := auth.GenerateToken()
 	inner.mu.Lock()
@@ -182,7 +182,7 @@ func TestCachedTokenStore_PositiveTTL(t *testing.T) {
 func TestCachedTokenStore_NegativeTTL(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 
 	plaintext, _, _ := auth.GenerateToken() // never stored
 
@@ -220,7 +220,7 @@ func TestCachedTokenStore_NegativeTTL(t *testing.T) {
 func TestCachedTokenStore_StaleTierHitsOnInfraError(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 
 	plaintext, hash, _ := auth.GenerateToken()
 	inner.mu.Lock()
@@ -255,7 +255,7 @@ func TestCachedTokenStore_StaleTierHitsOnInfraError(t *testing.T) {
 func TestCachedTokenStore_StaleTierDoesNotHitOnNegativeVerdict(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now})
 
 	plaintext, hash, _ := auth.GenerateToken()
 	inner.mu.Lock()
@@ -280,7 +280,7 @@ func TestCachedTokenStore_StaleTierDoesNotHitOnNegativeVerdict(t *testing.T) {
 func TestCachedTokenStore_StaleTierCapEjects(t *testing.T) {
 	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{Clock: clk.Now, StaleCap: 30 * time.Minute})
+	c := NewCachedTokenStore(inner, Options{Clock: clk.Now, StaleCap: 30 * time.Minute})
 
 	plaintext, hash, _ := auth.GenerateToken()
 	inner.mu.Lock()
@@ -306,7 +306,7 @@ func TestCachedTokenStore_NeverSeenTokenDuringOutageFailsClosed(t *testing.T) {
 	inner.mu.Lock()
 	inner.infraErr = connRefused("connection refused")
 	inner.mu.Unlock()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 
 	plaintext, _, _ := auth.GenerateToken()
 	if _, err := c.ValidateToken(context.Background(), plaintext); !isInfraError(err) {
@@ -318,7 +318,7 @@ func TestCachedTokenStore_NeverSeenTokenDuringOutageFailsClosed(t *testing.T) {
 
 func TestCachedTokenStore_LRUEvictsAtCap(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{LRUCap: 100})
+	c := NewCachedTokenStore(inner, Options{LRUCap: 100})
 
 	hashes := make([]string, 101)
 	for i := 0; i < 101; i++ {
@@ -355,7 +355,7 @@ func TestCachedTokenStore_LRUEvictsAtCap(t *testing.T) {
 
 func TestCachedTokenStore_DeleteClearsBothEntries(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 
 	// Seed a positive AND a negative entry for the same hash: positive
 	// first, then flip the inner verdict to not-found so the negative
@@ -392,7 +392,7 @@ func TestCachedTokenStore_DeleteClearsBothEntries(t *testing.T) {
 
 func TestCachedTokenStore_WriteThrough_CreateToken(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 
 	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", false, "", nil)
 	if err != nil || tok == nil {
@@ -421,7 +421,7 @@ func TestCachedTokenStore_WriteThrough_CreateToken(t *testing.T) {
 
 func TestCachedTokenStore_idToHashPopulatedOnValidateToken(t *testing.T) {
 	inner := newFakeTokenStore()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 
 	plaintext, hash, _ := auth.GenerateToken()
 	inner.mu.Lock()
@@ -442,7 +442,7 @@ func TestCachedTokenStore_idToHashPopulatedOnValidateToken(t *testing.T) {
 // ─── W2 / W5 ─────────────────────────────────────────────────────────────────
 
 func TestCachedTokenStore_StopNoop(t *testing.T) {
-	c := WrapTokens(newFakeTokenStore(), Options{})
+	c := NewCachedTokenStore(newFakeTokenStore(), Options{})
 	done := make(chan struct{})
 	go func() {
 		c.Stop()
@@ -462,7 +462,7 @@ func TestCachedTokenStore_ListTokensGetTokenByIDPassThrough(t *testing.T) {
 	inner.mu.Lock()
 	inner.listErr = dbErr
 	inner.mu.Unlock()
-	c := WrapTokens(inner, Options{})
+	c := NewCachedTokenStore(inner, Options{})
 
 	if _, err := c.ListTokens(context.Background()); err == nil {
 		t.Error("ListTokens must pass the DB error through (W5 — no cache hidden)")
