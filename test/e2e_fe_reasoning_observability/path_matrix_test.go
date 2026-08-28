@@ -4,7 +4,7 @@
 // proved one path (race-external non-stream). This matrix walks every
 // capture path the proxy has and asserts the SAME contract on each:
 //
-//	POSITIVE rows (R1..R10, M1..M2): upstream sends reasoning; the FE API
+//	POSITIVE rows (R1..R11, M1..M2): upstream sends reasoning; the FE API
 //	  GET /fe/api/requests/{id} assistant message `thinking` must equal the
 //	  expected reasoning BYTE-EXACT and be non-empty.
 //	NEGATIVE rows (N1..N4): upstream sends NO reasoning; the FE payload for
@@ -23,6 +23,8 @@
 //	R8  ultimate-internal  stream      same + stream:true
 //	R9  anthropic-client   stream      POST /v1/messages, internal model
 //	R10 anthropic-client   non-stream  POST /v1/messages, external upstream
+//	R11 anthropic-client   non-stream  POST /v1/messages, internal model —
+//	    the S3 cell (live-mode thinking AND content capture, fix 64da4ae)
 //	N1..N4  the four race/ultimate paths, non-stream, NO reasoning upstream
 //	M1  minimax translated race-external     stream  (reasoning_details → deltas)
 //	M2  minimax translated ultimate-external non-stream
@@ -93,7 +95,40 @@ func assertFEPositive(t *testing.T, env *testEnv, row, want string) string {
 // feMessageJSON is the generic message shape (thinking presence-checkable).
 type feMessageJSON struct {
 	Role     string `json:"role"`
+	Content  string `json:"content"`  // visible answer (S3 contract half)
 	Thinking string `json:"thinking"` // absent in JSON ⇒ "" after decode
+}
+
+// assertFEAssistantContentNonEmpty asserts the CONTENT half of the S3
+// contract on an already-asserted positive row: the FE assistant message
+// must carry non-empty content. The S3 bug (fixed by 64da4ae) persisted
+// BOTH thinking and content empty on live-mode non-stream internal-Anthropic
+// — a byte-exact thinking assertion alone would not catch a recurrence that
+// drops only content, so R11 checks both halves.
+func assertFEAssistantContentNonEmpty(t *testing.T, env *testEnv, row, id string) {
+	t.Helper()
+	status, raw := env.feGetRequest(t, id)
+	if status != http.StatusOK {
+		t.Fatalf("%s: FE detail status=%d body=%s", row, status, string(raw))
+	}
+	var detail struct {
+		Messages []feMessageJSON `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		t.Fatalf("%s: FE detail not JSON: %v — %s", row, err, string(raw))
+	}
+	if len(detail.Messages) == 0 {
+		t.Fatalf("%s: FE detail has no messages — %s", row, string(raw))
+	}
+	assistant := detail.Messages[len(detail.Messages)-1]
+	if assistant.Role != "assistant" {
+		t.Fatalf("%s: last message role=%q, want assistant — %s", row, assistant.Role, string(raw))
+	}
+	if assistant.Content == "" {
+		t.Errorf("%s: REAL FINDING (S3 class) — FE assistant.content is EMPTY (live non-stream internal capture dropped it). Payload:\n%s", row, string(raw))
+	} else {
+		t.Logf("EVIDENCE %s: id=%s assistant.content non-empty (%d bytes)", row, id, len(assistant.Content))
+	}
 }
 
 // assertFENegative runs the shared negative-row assertion: the FE payload
@@ -253,6 +288,30 @@ func TestPathMatrix_R10_AnthropicClient_External_NonStream(t *testing.T) {
 		t.Fatalf("R10: client status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	assertFEPositive(t, env, "R10", matrixReasoningFull)
+}
+
+// TestPathMatrix_R11_AnthropicClient_Internal_NonStream drives the Anthropic
+// Messages endpoint (POST /v1/messages) with a registered INTERNAL model,
+// stream:false, LIVE mode (no X-LLMProxy-Buffer-Response — the default) —
+// doAnthropicInternalRequest → handleNonStream capture (fix 64da4ae) → FE
+// persistence. This is the S3 cell: the matrix previously covered R9
+// (internal STREAM) and R10 (external NON-STREAM) but not this combination,
+// which is exactly where the S3 bug (empty persisted Thinking+Content in
+// live mode) hid. Asserts the full S3 contract: byte-exact FE thinking AND
+// non-empty FE content for the assistant message.
+func TestPathMatrix_R11_AnthropicClient_Internal_NonStream(t *testing.T) {
+	env := setupMatrixEnv(t, reasoningNonStreamHandler(matrixReasoningFull), matrixOptions{})
+	rr := env.runAnthropic(anthropicRequest{
+		model:    anthropicIntModel,
+		stream:   false,
+		token:    env.plainToken,
+		messages: matrixUserMessages,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("R11: client status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	id := assertFEPositive(t, env, "R11", matrixReasoningFull)
+	assertFEAssistantContentNonEmpty(t, env, "R11", id)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

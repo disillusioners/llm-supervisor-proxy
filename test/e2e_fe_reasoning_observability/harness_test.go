@@ -128,7 +128,8 @@ const (
 	minimaxCredID = "matrix-minimax-cred"
 
 	// anthropicIntModel is registered Internal:true for the anthropic-client
-	// stream row (R9): HandleAnthropicMessages → doAnthropicInternalRequest.
+	// rows (R9 stream / R11 non-stream): HandleAnthropicMessages →
+	// doAnthropicInternalRequest.
 	anthropicIntModel = "matrix-anthropic-internal"
 )
 
@@ -261,7 +262,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 	})
 
 	// Anthropic-client internal model (openai provider ⇒ translation mode,
-	// NOT anthropic passthrough — R9/R10 translate OpenAI→Anthropic).
+	// NOT anthropic passthrough — R9/R10/R11 translate OpenAI→Anthropic).
 	addModel(models.ModelConfig{
 		ID:            anthropicIntModel,
 		Name:          "Matrix Anthropic Internal",
