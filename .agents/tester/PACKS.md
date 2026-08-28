@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 11 packs across 26 packages
-- Unit: 10 | Integration: 1 | E2E: 1 | Mock: 1
+- Total: 14 unit packs (12 prior + gzipmw_unit_test + build_gate_test, added 2026-08-28 for the gzip feature gate) + mock/E2E packs below, across 37 Go packages
+- Unit: 14 | Integration: 1 | E2E: 1 | Mock: 1
 - All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
 
 ## Timeout Configuration
@@ -17,18 +17,20 @@
 |------|--------|-------|---------|----------|--------|
 | proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-28 | PASS (446+475 sub, 0 fail, 7 branch-gated skips; @ 22e76d6 rsd merge gate) |
 | ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-28 | PASS (152+87 sub, 0 fail, +7 vs d6368bd; @ 22e76d6 rsd merge gate) |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-28 | PASS (99 + 4 PG-skips; quarantined CloseLifecycle did NOT fire; @ 22e76d6 rsd gate) |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-28 | PASS (87 + 267 sub; StreamDeadline change green; @ 22e76d6 rsd gate) |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-28 | PASS (17/105; @ 22e76d6 rsd gate) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-28 | PASS (99 + 4 PG-skips; quarantined CloseLifecycle did NOT fire; @ 7a9ecff gzip gate) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-28 | PASS (87 + 267 sub; @ 7a9ecff gzip gate) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-28 | PASS (17/105; @ 7a9ecff gzip gate) |
 | loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-28 | PASS (33/33; @ 22e76d6 rsd gate) |
 | auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-28 | PASS (48+39; @ 22e76d6 rsd gate) |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-28 | PASS (23 + 123 sub, +5 sub vs d6368bd; @ 22e76d6 rsd gate) |
-| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-28 | PASS (245+471, 3 env-conditional SSRF skips; @ 22e76d6 rsd gate) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-28 | PASS (ok 0.158s non-verbose; prior baseline 23 + 123 sub; @ 7a9ecff gzip gate) |
+| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-28 | PASS (245+471, 3 env-conditional SSRF skips; @ 7a9ecff gzip gate) |
 | misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-28 | PASS (284+119, 9 pkgs; @ 22e76d6 rsd gate) |
 | translator_unit_test | test/packs/translator_unit_test.sh | pkg/proxy/translator — wire translation incl. incremental_stream (real-streaming-default Phase 3) | 120s | 2026-08-28 | PASS (169 entries, 19 incremental_stream cases; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
 | gap_unit_test | test/packs/gap_unit_test.sh | credentiallb, proxyheader, proxy/normalizers, loopdetection/fingerprint, store parent (memory) | 120s | 2026-08-28 | PASS (274 entries, 118 funcs; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
 | testroot_unit_test | test/packs/testroot_unit_test.sh | test/ root — access_control + integration_allowed_models | 120s | 2026-08-28 | PASS (35 entries; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
-| reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS (2 funcs / 14 subtests; @ 22e76d6 rsd gate) |
+| gzipmw_unit_test | test/packs/gzipmw_unit_test.sh | pkg/middleware/gzipmw — gzip request-body decompression middleware (21 test funcs) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
+| build_gate_test | test/packs/build_gate_test.sh | go build ./... + go vet ./... (Go-only gate; npm/tsc excluded by design — 30 standing tsc errors are known baseline debt) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
+| reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS (2 funcs / 14 subtests; @ 7a9ecff gzip gate) |
 
 ## Race Slices (real-streaming-default merge gate 2026-08-28)
 
@@ -59,6 +61,7 @@
 | rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-08-28 (final gate) | **PASS — E is HARD since e60de91** @ e60de91 (A: TTFB 1ms/incremental; B: 1551ms/single-burst; **E HARD: non-stream id-normalized byte-identity — both 322B, sha-identical, Anthropic-shape both, OpenAI-shape negative guard clean**; F: S3 records exact; C documented-impractical). See RESULTS/2026-08-28-rsd-m2-e-hard-gate-final.md |
 | rsd_m3_edge_cases | test/mock_rsd_m3_edge_cases.sh | Shell E2E (real binary; header truth table + first-wins + stream=false + disconnect; ports 10130/10131) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 21/21** @ 22e76d6 (truth table 12/12 incl. case+garbage; multi-line first-wins both directions; stream=false byte-identical; disconnect: healthz 200, no panic) |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E Mock (reasoning_content chain, streaming + non-stream) | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS 5 top-level + 7 sub @ 22e76d6 (rsd merge gate) |
+| gzip_request_decompression | test/mock_gzip_request_decompression.sh | Shell E2E (real binary; gzip request-body original scenario a-f; ports 10140/10141) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 6/6** @ 7a9ecff (gzip feature gate; byte-identity both /v1 protocols, corrupt→400, 150 MiB bomb→413 + liveness, SSE passthrough; 3 harness-only fixes on first run — see LESSONS/2026-08-28-gzip-e2e-harness-lessons.md) |
 
 #### anthropic_thinking_leak — historical note (superseded 2026-08-28)
 - Pre-rsd-gate baseline: PASS 3/3 @ 63b7701; mutation-proven non-vacuous (leak re-injected in worktree → S1 FAILs with 4 detections); S3 wire byte-identical at parent effc345.
@@ -205,4 +208,10 @@ ion verified:**
  blocked ✅
 ction — localhost URLs blocked ✅
  blocked ✅
+✅
+cked ✅
+ction — localhost URLs blocked ✅
+ blocked ✅
+✅
+blocked ✅
 ✅

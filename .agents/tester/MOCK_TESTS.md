@@ -552,3 +552,71 @@ Documented `X-LLMProxy-Buffer-Response` truth-table conformance on the live bina
 - **Cleanup verified**: ports 10130/10131 freed; proxy + mock processes killed; alarm subprocess reaped; no leaks.
 - **Report**: RESULTS/2026-08-28-real-streaming-default-m3-edge-cases.md
 
+
+
+---
+
+# Mock Test: Gzip Request-Body Decompression E2E (feature/gzip-request-support @ 7a9ecff)
+
+### Metadata
+- **Created**: 2026-08-28
+- **Script**: `test/mock_gzip_request_decompression.sh`
+- **Language**: Bash (+ embedded stub upstream; python3 or nc-based per existing mock conventions)
+- **Status**: ACTIVE — 6/6 scenarios PASS @ 7a9ecff (2026-08-28)
+
+### Configuration
+- **Timeout**: dual-layer — internal 240s self-kill / outer `timeout 300`
+- **Ports**: 10140 (proxy server under test), 10141 (stub upstream) — next free pair in the 101xx mock series (1011x/1012x/1013x taken by rsd mocks)
+- **Cleanup**: kill only PIDs this script started (verify via lsof on 10140/10141 before kill); NEVER kill by generic process name; port 8088 is the ensemble self-system — untouchable
+- **Server**: REAL binary (`go build ./cmd/main.go`), SQLite (no DATABASE_URL), fresh config dir
+
+### What It Tests
+Original feature requirement end-to-end: client sends gzip-compressed body with
+`Content-Encoding: gzip` → proxy transparently decompresses at entry → upstream body,
+supervision, and client response behave EXACTLY as if sent uncompressed. No header →
+zero behavior change. NO response compression was added.
+
+### Mock Services Required
+- Stub upstream on 10141: accepts POST, writes EXACT received body bytes to a numbered
+  file (`body_<n>.bin`) + headers to `hdr_<n>.txt`, returns fixed deterministic non-stream
+  OpenAI completion (same bytes every call).
+
+### Test Scenarios
+1. **a — /v1/chat/completions identity**: control POST (non-trivial JSON: unicode, nested
+   tool schema, `stream:false`) vs same bytes gzip'd + `Content-Encoding: gzip`.
+   Assert: both client responses 200 and byte-identical bodies; stub bodies byte-identical
+   (`cmp`); stub saw NO `Content-Encoding: gzip` on either; client response carries NO
+   `Content-Encoding` (response compression absent).
+2. **b — /v1/messages (Anthropic) identity**: same protocol via `x-api-key` +
+   `anthropic-version`; same four assertions as (a) on the translated upstream bytes.
+3. **c — gzip body WITHOUT header**: gzip'd JSON, NO Content-Encoding → expect 4xx from
+   JSON parsing (not 5xx, not 200); stub call-count unchanged (feature NOT triggered).
+4. **d — corrupt gzip + header**: invalid gzip bytes WITH header → expect 400; stub
+   call-count unchanged (rejected before handler/upstream).
+5. **e — zip bomb**: 150 MiB of zeros gzip'd (~150 KB) WITH header → expect **413**
+   (task expectation; report actual code if different); then healthz 200 + one normal
+   request 200 (server alive, not hung; bomb request must resolve < 30s).
+6. **f — passthrough untouched (no header)**: /healthz GET 200; `/fe/api/config` GET 200;
+   `/fe/api/events` SSE: connection holds ≥ 16s and delivers ≥ 1 byte (15s comment
+   heartbeat or event) within 20s; /v1 uncompressed behavior already proven by (a).
+
+### Success Criteria
+- [ ] All scenarios a–f PASS with printed evidence (status codes, cmp results, counts)
+- [ ] Per-scenario lines `SCENARIO <x>: PASS|FAIL — <evidence>` + final `RESULT: PASS|FAIL`
+- [ ] No process leaks; ports freed after
+- [ ] Total runtime < 240s internal
+
+### Implementation Notes
+- Mirror harness mechanics from `test/mock_rsd_m3_edge_cases.sh` / `test/mock_rsd_m2_anthropic_ultimate_ui.sh`
+  (binary startup, config/model/token seeding, healthz wait).
+- Read `pkg/middleware/gzipmw/gzip.go` for the actual decompression cap → align scenario e
+  size; assert 413 per requirement, report actual if it differs.
+- Byte-compare failure → dump `cmp -l | head` + `diff` evidence, do NOT fix source.
+- Report-only run: NO source modifications, NO commits.
+
+### Last Run
+- **Date**: — (pending)
+**: run-e2e-gzip (3650ec87)
+- **Result**: PASS — 6/6 scenarios (a: 276 B client + 411 B upstream byte-identical; b: 220 B upstream byte-identical; c: 400 + 0 upstream calls; d: 400 + 0 upstream calls; e: 413 in ~0s + post-bomb liveness; f: SSE 4383 B) — ~24s wall
+- **Quick Fixes**: 3 harness-only script fixes during first execution (header-path derivation; scenario-b client-body made informational due to per-request Anthropic msg-id; gzip via regular files not process substitution) — see LESSONS/2026-08-28-gzip-e2e-harness-lessons.md
+- **Report**: RESULTS/2026-08-28-gzip-request-support-verification.md
