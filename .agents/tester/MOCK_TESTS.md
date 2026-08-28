@@ -439,7 +439,7 @@ The proxy emits an SSE preamble `: connected\n\n` IMMEDIATELY in both modes (`pk
 - **Created**: 2026-08-28
 - **Script**: `test/mock_rsd_m2_anthropic_ultimate_ui.sh`
 - **Language**: Bash + python3
-- **Status**: PLANNED (merge-gate for feature/real-streaming-default @ 03a5339)
+- **Status**: ACTIVE (merge-gate for feature/real-streaming-default; final gate round @ e60de91)
 
 ### Configuration
 - **Timeout**: internal alarm 240s; outer `timeout 300`
@@ -459,17 +459,26 @@ Real streaming default on /v1/messages (Anthropic client path) and on the ultima
 2. /v1/messages WITH buffer header — TTFB ≥ 1300ms, single burst (≤250ms spread), assembled content identical to scenario 1.
 3. Ultimate external path: request with `X-Force-Ultimate-Model: 1` + token with ultimate permission, ultimate model = external type routed to mock 10121. DEFAULT: incremental (TTFB ≤ 1000ms). WITH buffer header: buffered. If not practical (config blockers), document exactly why + what was verified instead.
 4. UI records: GET /ui/ → 200 + HTML. One live-mode request + one buffered-mode request, then GET /fe/api/requests → BOTH records present, each with content and usage fields populated (mode-independent capture). Report record JSON snippets as evidence.
+5. (E, HARD since e60de91) NON-STREAM /v1/messages wire parity: identical `stream:false` requests, one live (no header) vs one buffered (`X-LLMProxy-Buffer-Response: true`). Hard asserts: BOTH bodies Anthropic-shape (`"type":"message"` present, `"object":"chat.completion"` ABSENT — negative OpenAI-shape guard) and byte-identity MODULO the proxy-random `id` (normalize `"id":"msg_[^"]*"` to a constant in both bodies, then require EXACT byte equality). Reports raw lengths + post-normalization sha256. Drives the overall gate.
+6. (F, HARD since 64da4ae) NON-STREAM UI records: both E-pair records carry non-empty assistant content AND non-empty thinking (S3 fix contract).
 
 ### Success Criteria
-- [ ] Scenarios 1,2,4 hard-pass; scenario 3 pass or documented-impractical with evidence
+- [ ] Scenarios 1,2,4,5,6 hard-pass (A+B+D+E+F drive the overall gate); scenario 3 pass or documented-impractical with evidence
 - [ ] No leaks; /healthz 200 at end; both attempts reported if timing retry used
 
 ### Implementation Notes
 - Anthropic client requests need x-api-key + anthropic-version headers (project precedent).
 - Ultimate: X-Force-Ultimate-Model fires immediately (no retry-counter env needed post trigger-schedule change); requires token ultimate permission.
 
-### Last Run
-- **Date**: 2026-08-28 (gate re-run @ 61fa02a + S3 fix 64da4ae; extended with E/F; E → ADVISORY while wire-shape divergence under adjudication)
+### Last Run (final gate round @ e60de91 — E restored to HARD GATE)
+- **Date**: 2026-08-28
+- **Worker Instance**: rsd-mock-m2-anthropic (E advisory→hard conversion + final gate re-run)
+- **Result**: **PASS (A+B+D+E+F hard; C documented-impractical)** — A PASS (TTFB=1ms, spread=1540ms, 5 big gaps, thinking_delta on wire); B PASS (TTFB=1551ms, spread=1ms, buffered shape); C documented-impractical (architectural: external ultimate hardcodes OpenAI wire for Anthropic clients); D PASS (2/2 records content+assistant, usage=null known gap); **E PASS as HARD GATE (shape split fixed by e60de91): live=336B anthropic-shape, buffered=336B anthropic-shape; negative OpenAI-shape guard clean (`"object":"chat.completion"` count=0 both sides, `"type":"message"` count=1 both sides); after normalizing `"id":"msg_[^"]*"` to a constant both bodies are 322B with IDENTICAL sha256 `47644debe104c3b5d4692ac780da9e39b31cbb66b09ea07ba284b2fbd5702080` — EXACT byte equality modulo the proxy-random id (deterministic: same normalized sha in two consecutive runs)**; F PASS (both non-stream records exact sentinel content+thinking — S3 contract). E re-enters the overall gate: `A && B && D && E && F`. /healthz 200 at end; ports 10120/10121 freed.
+- **Quick Fixes**: E_SHAPE_NOTE classifier embedded the proxy-random id inside the compared strings → false "STRUCTURAL SPLIT" printed even when both bodies were Anthropic-shape; fixed to compare (shape, keys) only and print the id separately as evidence (harness-only reporter fix — no assertion weakened or changed).
+- **Report**: RESULTS/2026-08-28-rsd-m2-e-hard-gate-final.md
+
+### Previous Run (advisory era @ 61fa02a + S3 fix 64da4ae)
+- **Date**: 2026-08-28 (gate re-run; extended with E/F; E → ADVISORY while wire-shape divergence under adjudication)
 - **Worker Instance**: rsd-mock-m2-anthropic (M2 re-validation + E/F extension + E→ADVISORY conversion)
 - **Result**: **PASS (A+B+D+F hard; E ADVISORY pending adjudication; C documented-impractical)** — A PASS (TTFB=2ms, 5 big gaps, thinking_delta on wire); B PASS (TTFB=1549ms, spread=0, pre-feature shape); C documented-impractical; D PASS (both stream records content+thinking, usage=null known gap); **E ADVISORY (does NOT drive overall pass/fail): non-stream live=352B OpenAI-shape vs buffered=336B Anthropic-shape — NOT byte-identical (structural split)**; F PASS (both non-stream records exact sentinel content+thinking — S3 fix verified at binary level). Drift classified NOT fix-induced (identical split at pre-fix 1d0c750; live wire bytes identical pre/post fix) — phase-3-era live-branch behavior; conflicts with docs TL;DR "non-stream: header is a no-op". **Per the no-red-harness rule (E is under adjudication, NOT fix-induced), E was converted from hard-fail to ADVISORY in test/mock_rsd_m2_anthropic_ultimate_ui.sh** — it now computes and reports per-mode byte lengths + sha256, shape classification of each body (OpenAI vs Anthropic), and first divergence offset, but does NOT drive the overall gate. Production code (cmd/, pkg/) is FROZEN. Script + RESULTS committed.
 - **Quick Fixes**: F_CHECK python quoting (f-string backslash-escape → %-format) — applied and re-run green. E→ADVISORY conversion — applied and re-run green (OVERALL PASS, A/B/D/F hard).

@@ -27,7 +27,7 @@ opt-in header.
 | ----------------------- | ----------------------------------------------------------------------- |
 | **Default mode**        | Real streaming — first byte reaches client before upstream `[DONE]`     |
 | **Opt-in to legacy**    | Send request header `X-LLMProxy-Buffer-Response: true` (or empty value) |
-| **Non-stream requests** | Unaffected — header is a no-op                                          |
+| **Non-stream requests** | **Identical wire response in both modes (byte-identical modulo request id; parity hard-pinned); the header is a no-op for non-stream.** |
 | **Mid-stream fallback** | Disabled after first forwarded byte (locked L4)                         |
 | **Mid-stream cred-LB**  | Disabled after first forwarded byte (locked L4)                         |
 | **Heartbeat / usage**   | Preserved in both modes                                                 |
