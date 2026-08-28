@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,26 +39,26 @@ import (
 // MaxDecompressedBytes caps the size of a decompressed request body
 // to defend against zip-bomb attacks.
 //
-// Parity story (with the proxy's existing per-path body caps of 10MB
-// in adapter_openai.go:34, handler_anthropic.go:51, handler_functions.go:31):
-//   - For uncompressed bodies up to 10MB and gzip bodies whose
-//     decompressed size is up to 10MB, behavior is byte-for-byte
-//     identical to the no-header path.
-//   - For gzip bodies whose decompressed size is 10MB..100MB, the
-//     proxy accepts the request (an equivalent uncompressed request
-//     would have already failed with the existing 10MB cap); this is
-//     the deliberate trade-off — gzip payloads can be 5-10x smaller
-//     than decompressed, so allowing up to 100MB of decompressed data
-//     lets clients ship large conversation histories that an
-//     uncompressed equivalent could not.
-//   - For decompressed bodies over MaxDecompressedBytes the middleware
-//     returns 413 Payload Too Large WITHOUT fully buffering the bomb.
-//     Decompression streams through io.LimitReader(gz,
-//     MaxDecompressedBytes+1); io.ReadAll then returns at most
-//     MaxDecompressedBytes+1 decompressed bytes regardless of the
-//     underlying gzip stream length, and we use an explicit
-//     len(decompressed) > MaxDecompressedBytes check to produce
-//     the 413. The in-memory cap is MaxDecompressedBytes+1.
+// Memory model: the decompressed body is fully buffered in memory up
+// to the cap. Peak allocation is bounded by the cap itself — the
+// middleware reads through io.LimitReader(gz, MaxDecompressedBytes+1)
+// and io.ReadAll, so the buffer holds at most MaxDecompressedBytes+1
+// bytes (≈100 MiB + 1) regardless of the underlying gzip stream's
+// decompressed length. The bomb protection is that the middleware
+// REFUSES to buffer beyond the cap: when the read yields more than
+// MaxDecompressedBytes, the truncated buffer is dropped and the
+// client gets a 413 Payload Too Large — no part of the oversized
+// payload is forwarded to downstream handlers.
+//
+// Relationship with downstream 10 MiB caps: the /v1 adapters truncate
+// their own body reads at 10 MiB (io.ReadAll(io.LimitReader(r.Body,
+// 10*1024*1024)) in adapter_openai.go:34, handler_anthropic.go:51,
+// handler_functions.go:31), so a decompressed body above 10 MiB still
+// hits the adapter's 10 MiB truncation on the main LLM paths. The
+// 100 MiB middleware cap is therefore a zip-bomb guard, NOT an
+// extended client payload budget — clients cannot use gzip to ship
+// bodies larger than the existing uncompressed 10 MiB cap and expect
+// them to be processed in full.
 const MaxDecompressedBytes = 100 * 1024 * 1024 // 100 MB
 
 // Content-Encoding header constants (canonical MIME form per net/http).
@@ -266,10 +267,17 @@ func DecompressRequest(next http.Handler) http.Handler {
 		// distinguishes pass (<=cap) from 413 (>cap).
 		decompressed, readErr := io.ReadAll(io.LimitReader(gz, MaxDecompressedBytes+1))
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			// Don't leak internal gzip jargon (e.g. "flate: corrupt
+			// input before offset X") to the client. Log the
+			// underlying error server-side for operators and return
+			// an opaque client-facing message; the envelope code
+			// stays invalid_gzip_body so callers can still branch on
+			// it programmatically.
+			log.Printf("gzipmw: mid-stream decompression error: %v", readErr)
 			_ = r.Body.Close()
 			writeClientError(w, http.StatusBadRequest,
 				"invalid_request_error", "invalid_gzip_body",
-				"failed to decompress request body: "+readErr.Error())
+				"invalid gzip request body")
 			return
 		}
 		if int64(len(decompressed)) > MaxDecompressedBytes {
@@ -302,6 +310,13 @@ func DecompressRequest(next http.Handler) http.Handler {
 		// forms are safe to Set).
 		r.Header.Del(headerContentEncoding)
 		r.Header.Set(headerContentLength, strconv.Itoa(len(decompressed)))
+		// Drop any stale Transfer-Encoding header. A chunked request that
+		// arrives with both Transfer-Encoding: chunked and a gzipped body
+		// gets a fixed Content-Length after decompression; leaving the
+		// chunked header in place would be a contradictory trap (RFC 7230
+		// §3.3.3 forbids both on the same message). Outbound copiers
+		// strip it today, but removing it here is the right invariant.
+		r.Header.Del("Transfer-Encoding")
 
 		next.ServeHTTP(w, r)
 	})

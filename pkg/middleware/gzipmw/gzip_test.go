@@ -13,6 +13,18 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HTTP/2 note (scope deferral)
+// ─────────────────────────────────────────────────────────────────────────────
+// The tests in this file exercise the middleware over HTTP/1.1 via
+// httptest.NewServer. HTTP/2 header handling is reasoned-safe but not
+// exercised here: Go's net/http2 server re-canonicalizes header keys
+// (textproto.CanonicalMIMEHeaderKey) and the middleware's
+// r.Header.Del/Set calls operate on the post-canonicalization map,
+// so the same TrimSpace + ToLower logic applies uniformly across
+// HTTP/1.1 and HTTP/2. Direct httptest with TLS+http2 wiring is a
+// future-work item; the security review approved deferral.
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -391,13 +403,28 @@ func TestDecompressRequest_UnsupportedEncoding_Returns415(t *testing.T) {
 
 // TestDecompressRequest_GzipCaseInsensitive verifies that "GZIP",
 // "Gzip", etc. all activate the decompression path (they should,
-// because RFC 7231 says encoding tokens are case-insensitive).
+// because RFC 7231 says encoding tokens are case-insensitive). Also
+// verifies that OWS (optional whitespace — leading/trailing space or
+// tab) per RFC 7230 §3.2.3 is tolerated by TrimSpace before the
+// case-fold comparison.
 func TestDecompressRequest_GzipCaseInsensitive(t *testing.T) {
 	plain := []byte(`{"model":"x","messages":[]}`)
 	compressed := gzipBytes(t, plain)
 
-	for _, variant := range []string{"gzip", "GZIP", "Gzip", "gZip"} {
-		t.Run(variant, func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  string
+	}{
+		{"gzip", "gzip"},
+		{"GZIP", "GZIP"},
+		{"Gzip", "Gzip"},
+		{"gZip", "gZip"},
+		{"GZip", "GZip"},
+		{"leading-trailing-space", " gzip "},
+		{"leading-tab", "\tgzip"},
+		{"trailing-tab", "gzip\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			srv, captured := newCapturingServer()
 			defer srv.Close()
 
@@ -406,7 +433,7 @@ func TestDecompressRequest_GzipCaseInsensitive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewRequest: %v", err)
 			}
-			req.Header.Set(headerContentEncoding, variant)
+			req.Header.Set(headerContentEncoding, tc.val)
 
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -419,7 +446,7 @@ func TestDecompressRequest_GzipCaseInsensitive(t *testing.T) {
 				t.Fatalf("status = %d, want 200; body=%q", resp.StatusCode, body)
 			}
 			if !bytes.Equal(captured.body, plain) {
-				t.Errorf("downstream body mismatch for variant %q", variant)
+				t.Errorf("downstream body mismatch for variant %q", tc.val)
 			}
 		})
 	}
@@ -447,6 +474,84 @@ func TestDecompressRequest_StackedEncoding_Returns400(t *testing.T) {
 	defer resp.Body.Close()
 
 	assertOpenAIErrorEnvelope(t, resp, http.StatusBadRequest, "unsupported_encoding")
+}
+
+// TestDecompressRequest_StackedGzipRepeated_Returns400 verifies that a
+// single Content-Encoding header line containing the SAME encoding
+// stacked ("gzip, gzip") is rejected via the comma/stacked branch
+// with 400 unsupported_encoding — distinct from the repeated-header
+// line case above, which is rejected via the multi-value branch.
+func TestDecompressRequest_StackedGzipRepeated_Returns400(t *testing.T) {
+	srv, _ := newCapturingServer()
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",
+		bytes.NewReader([]byte(`{"x":1}`)))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set(headerContentEncoding, "gzip, gzip")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	assertOpenAIErrorEnvelope(t, resp, http.StatusBadRequest, "unsupported_encoding")
+}
+
+// TestDecompressRequest_ChunkedBody_DecompressedAndHeadersFixed
+// verifies the success path for a request that arrives without a
+// Content-Length (ContentLength = -1), forcing the Go client to use
+// Transfer-Encoding: chunked on the wire. After decompression:
+//   - the request succeeds with 200,
+//   - the downstream handler observes the decompressed body,
+//   - r.ContentLength is set to the decompressed byte count,
+//   - the Content-Length header reflects the decompressed byte count,
+//   - Transfer-Encoding is absent from r.Header (fix #1 invariant).
+func TestDecompressRequest_ChunkedBody_DecompressedAndHeadersFixed(t *testing.T) {
+	plain := []byte(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`)
+	compressed := gzipBytes(t, plain)
+
+	srv, captured := newCapturingServer()
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",
+		bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentEncoding, encodingGzip)
+	// Force chunked transfer encoding on the wire by clearing
+	// ContentLength; the Go client will then send
+	// Transfer-Encoding: chunked.
+	req.ContentLength = -1
+	req.Header.Del("Content-Length")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%q", resp.StatusCode, body)
+	}
+	if !bytes.Equal(captured.body, plain) {
+		t.Errorf("downstream body = %q, want %q", captured.body, plain)
+	}
+	if captured.rContentLength != int64(len(plain)) {
+		t.Errorf("r.ContentLength = %d, want %d", captured.rContentLength, len(plain))
+	}
+	if got := captured.contentLengthHdr; got != strconv.Itoa(len(plain)) {
+		t.Errorf("Content-Length header = %q, want %q", got, strconv.Itoa(len(plain)))
+	}
+	if vals, ok := captured.allHeaders["Transfer-Encoding"]; ok && len(vals) > 0 {
+		t.Errorf("Transfer-Encoding should be absent after decompression, got %v", vals)
+	}
 }
 
 func TestDecompressRequest_RepeatedHeaderLine_Returns400(t *testing.T) {
