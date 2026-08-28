@@ -11,6 +11,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
 )
@@ -88,6 +89,21 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	var resolvedModel *models.ModelConfig
 	if conf.ModelsConfig != nil {
 		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
+	}
+
+	// db-cache-layer 1D — boundary fail-fast gate (the ONLY pkg/proxy
+	// source change besides its Anthropic mirror). A nil resolution is
+	// LEGITIMATE (an external/unknown model → passthrough, a real
+	// feature) ONLY when the config store can actually answer. When
+	// the store is unhealthy (DB outage, cache exhausted) nil means
+	// "cannot know" — silently passing such a request through to the
+	// external upstream is exactly the 2026-08-27 misroute class. The
+	// caller (HandleChatCompletions) converts the sentinel into a 503
+	// config_store_unavailable.
+	if resolvedModel == nil && conf.ModelsConfig != nil {
+		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
+			return nil, fmt.Errorf("%w: cannot resolve model %q", modelscache.ErrConfigUnavailable, originalModel)
+		}
 	}
 
 	// Build model list using resolved config
@@ -203,3 +219,4 @@ func parseBufferResponseValue(v string) bool {
 		return false
 	}
 }
+

@@ -17,6 +17,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
@@ -155,6 +156,23 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	var resolvedModel *models.ModelConfig
 	if conf.ModelsConfig != nil {
 		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
+	}
+
+	// db-cache-layer 1D — boundary fail-fast gate (mirror of
+	// handler_functions.go; N2 confirmed this block as :154-177). nil
+	// + unhealthy store → 503 config_store_unavailable, never a silent
+	// external passthrough on a DB error.
+	if resolvedModel == nil && conf.ModelsConfig != nil {
+		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
+			h.sendAnthropicError(w, "config_store_unavailable",
+				fmt.Sprintf("Configuration store is unavailable; cannot resolve model %q", originalModel),
+				http.StatusServiceUnavailable)
+			h.publishEvent("config_store_unavailable", map[string]interface{}{
+				"id":    reqID,
+				"model": originalModel,
+			})
+			return
+		}
 	}
 
 	// Build model list using resolved config
