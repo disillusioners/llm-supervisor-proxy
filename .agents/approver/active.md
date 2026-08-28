@@ -1,5 +1,5 @@
-Current Plan: Ultimate Model Trigger Schedule (5/10/20/30/40)
-Tracking File: ultimate-model-trigger-schedule-tracking.md
-Iteration: 003
+Current Plan: Real-Streaming Default + Buffered Opt-In (X-LLMProxy-Buffer-Response)
+Tracking File: real-streaming-default-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-08-26 22:05
+Last Updated: 2026-08-27 18:05
