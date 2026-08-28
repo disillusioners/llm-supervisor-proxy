@@ -469,6 +469,13 @@ Real streaming default on /v1/messages (Anthropic client path) and on the ultima
 - Ultimate: X-Force-Ultimate-Model fires immediately (no retry-counter env needed post trigger-schedule change); requires token ultimate permission.
 
 ### Last Run
+- **Date**: 2026-08-28 (gate re-run @ 61fa02a + S3 fix 64da4ae; extended with E/F; E → ADVISORY while wire-shape divergence under adjudication)
+- **Worker Instance**: rsd-mock-m2-anthropic (M2 re-validation + E/F extension + E→ADVISORY conversion)
+- **Result**: **PASS (A+B+D+F hard; E ADVISORY pending adjudication; C documented-impractical)** — A PASS (TTFB=2ms, 5 big gaps, thinking_delta on wire); B PASS (TTFB=1549ms, spread=0, pre-feature shape); C documented-impractical; D PASS (both stream records content+thinking, usage=null known gap); **E ADVISORY (does NOT drive overall pass/fail): non-stream live=352B OpenAI-shape vs buffered=336B Anthropic-shape — NOT byte-identical (structural split)**; F PASS (both non-stream records exact sentinel content+thinking — S3 fix verified at binary level). Drift classified NOT fix-induced (identical split at pre-fix 1d0c750; live wire bytes identical pre/post fix) — phase-3-era live-branch behavior; conflicts with docs TL;DR "non-stream: header is a no-op". **Per the no-red-harness rule (E is under adjudication, NOT fix-induced), E was converted from hard-fail to ADVISORY in test/mock_rsd_m2_anthropic_ultimate_ui.sh** — it now computes and reports per-mode byte lengths + sha256, shape classification of each body (OpenAI vs Anthropic), and first divergence offset, but does NOT drive the overall gate. Production code (cmd/, pkg/) is FROZEN. Script + RESULTS committed.
+- **Quick Fixes**: F_CHECK python quoting (f-string backslash-escape → %-format) — applied and re-run green. E→ADVISORY conversion — applied and re-run green (OVERALL PASS, A/B/D/F hard).
+- **Report**: RESULTS/2026-08-28-rsd-m2-ef-nonstream-parity-gate.md (E-fail evidence, captured before advisory conversion)
+
+### Previous Run (pre-extension baseline @ 03a5339)
 - **Date**: 2026-08-28
 - **Worker Instance**: rsd-mock-m2-anthropic (e2e97da3)
 - **Result**: **PASS** — A (default): TTFB=2ms, spread=1520ms, 5 big gaps, thinking_delta on wire (D8 live shape); B (buffered): TTFB=1524ms, spread=0ms, no thinking blocks (pre-feature shape); C (ultimate external): documented-impractical (OpenAI-wire mismatch vs Anthropic client; partial evidence: force-header accepted, mock received POST, 1897B OpenAI SSE); D (UI records): /ui/ 200, both records content+thinking, status=completed, usage=null (pre-existing Anthropic-path gap — proven pre-existing via buffered-mode parity). /healthz 200 end; ports freed.

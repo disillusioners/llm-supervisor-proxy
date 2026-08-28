@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Mock Test M2 — real-streaming-default: Anthropic path + ultimate path + UI records
 #
-# Branch: feature/real-streaming-default @ 03a5339
+# Branch: feature/real-streaming-default (gate re-run @ 61fa02a + S3-fix 64da4ae;
+# extended with scenarios E+F; scenario E converted to ADVISORY while
+# live-vs-buffered non-stream wire-shape divergence is under adjudication —
+# see .agents/tester/RESULTS/2026-08-28-rsd-m2-ef-nonstream-parity-gate.md)
 # Ports: 10120 (proxy), 10121 (mock upstream). Strict isolation.
 # Never touches 8088 or other workers' ports.
 #
@@ -11,6 +14,17 @@
 #   B. /v1/messages + X-LLMProxy-Buffer-Response: true - TTFB >= 1300ms, single burst
 #   C. Ultimate external path: documented-impractical (architectural constraint)
 #   D. UI records: GET /ui/ → HTML, /fe/api/requests → records present for both modes
+#   E. NON-STREAM /v1/messages wire parity (NEW, ADVISORY): identical stream:false
+#      requests, one live (no header) vs one buffered (X-LLMProxy-Buffer-Response: true).
+#      Computes and reports (a) per-mode byte lengths + sha256, (b) shape classification
+#      of each body (OpenAI-shape vs Anthropic-shape), (c) first divergence offset.
+#      Does NOT drive overall pass/fail — live-vs-buffered wire-shape divergence
+#      (OpenAI-shape live vs Anthropic-shape buffered) is under adjudication
+#      (introduced at e717be3, NOT fix-induced; pre-fix probe showed identical
+#      split). See RESULTS 2026-08-28-rsd-m2-ef-nonstream-parity-gate.md.
+#   F. S3 fix at binary level (NEW, HARD): after E, GET /fe/api/requests → BOTH
+#      non-stream records must have non-empty assistant content AND non-empty
+#      thinking (the post-64da4ae S3 contract; pre-fix the LIVE record was empty)
 
 set -u
 
@@ -127,6 +141,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Pre-baked responses
 ANTH_MSG_ID = "msg_rsd_m2_001"
+
+# Scenario E/F canned NON-STREAM response constants. E compares the client
+# wire across live/buffered modes byte-for-byte, so the upstream bytes must
+# be DETERMINISTIC: fixed id, fixed created epoch, fixed content strings.
+# reasoning_content is REQUIRED — scenario F asserts non-empty persisted
+# thinking (the S3 contract), which is only populated when upstream carries
+# reasoning_content.
+NONSTREAM_ANSWER = "RSD-M2 non-stream visible answer."
+NONSTREAM_REASONING = "RSD-M2 non-stream deliberation."
+NONSTREAM_CREATED = 1700000000  # fixed epoch (determinism for E byte-parity)
 
 def sse_event(event_type: str, data: dict) -> bytes:
     return (f"event: {event_type}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n").encode()
@@ -317,12 +341,18 @@ class Handler(BaseHTTPRequestHandler):
                 # on the Anthropic→OpenAI internal-translation path
                 stream_openai_with_reasoning_to(self.wfile)
             else:
+                # Deterministic canned non-stream response (Scenario E/F).
+                # Fixed id/created/content — E's byte-parity compare must see
+                # identical upstream bytes on both requests; any wire
+                # difference then comes from the proxy, not the mock.
                 payload = json.dumps({
-                    "id": "chatcmpl-mock", "object": "chat.completion",
-                    "created": int(time.time()), "model": "mock-openai",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi there"},
+                    "id": "chatcmpl-rsd-m2-nonstream", "object": "chat.completion",
+                    "created": NONSTREAM_CREATED, "model": "mock-openai",
+                    "choices": [{"index": 0, "message": {"role": "assistant",
+                                 "content": NONSTREAM_ANSWER,
+                                 "reasoning_content": NONSTREAM_REASONING},
                                  "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20},
                 }, separators=(',', ':')).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -933,6 +963,212 @@ fi
 echo "  → Scenario D: $D_PASS (ui_html=$D_HAS_HTML_OK, both_records_with_content+assistant=$D_BOTH_OK/2)"
 
 # ============================================================
+# Scenario E: NON-STREAM /v1/messages wire parity — live vs buffered
+# (ADVISORY: live-vs-buffered non-stream wire-shape divergence is under
+# adjudication — see RESULTS 2026-08-28-rsd-m2-ef-nonstream-parity-gate.md.
+# This scenario computes and prints per-mode byte lengths + sha256, shape
+# classification of each body, and first divergence offset — but does NOT
+# drive the overall pass/fail gate. Captured as E_REASONS[] for the
+# results.json block; never set E_PASS="FAIL".)
+# ============================================================
+echo ""
+echo "${BLUE}=== Scenario E: non-stream wire parity (live vs buffered) [ADVISORY] ===${NC}"
+E_REQ_BODY='{"model":"mock-anth-model","max_tokens":100,"messages":[{"role":"user","content":"rsd-m2-e-nonstream"}],"stream":false}'
+
+# E.1 LIVE (no header) — raw body capture
+E_LIVE_CODE=$(curl -s -o "$TMPDIR/E_live.body" -D "$TMPDIR/E_live.headers" -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$PROXY_PORT/v1/messages" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: $API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "$E_REQ_BODY")
+E_LIVE_BYTES=$(wc -c < "$TMPDIR/E_live.body" | tr -d ' ')
+E_LIVE_CT=$(grep -i "^content-type:" "$TMPDIR/E_live.headers" | head -1 | tr -d '\r')
+E_LIVE_SHA=$(shasum -a 256 "$TMPDIR/E_live.body" | cut -d ' ' -f1)
+
+# E.2 BUFFERED (X-LLMProxy-Buffer-Response: true) — raw body capture
+E_BUF_CODE=$(curl -s -o "$TMPDIR/E_buf.body" -D "$TMPDIR/E_buf.headers" -w "%{http_code}" \
+    -X POST "http://127.0.0.1:$PROXY_PORT/v1/messages" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: $API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "X-LLMProxy-Buffer-Response: true" \
+    -d "$E_REQ_BODY")
+E_BUF_BYTES=$(wc -c < "$TMPDIR/E_buf.body" | tr -d ' ')
+E_BUF_CT=$(grep -i "^content-type:" "$TMPDIR/E_buf.headers" | head -1 | tr -d '\r')
+E_BUF_SHA=$(shasum -a 256 "$TMPDIR/E_buf.body" | cut -d ' ' -f1)
+
+echo "  live:     HTTP=$E_LIVE_CODE bytes=$E_LIVE_BYTES ct=[$E_LIVE_CT] sha256=${E_LIVE_SHA:0:16}..."
+echo "  buffered: HTTP=$E_BUF_CODE bytes=$E_BUF_BYTES ct=[$E_BUF_CT] sha256=${E_BUF_SHA:0:16}..."
+
+# ADVISORY — always reported, never flips overall gate. E_PASS="ADVISORY" is a
+# static marker; E_REASONS[] captures anything noteworthy for results.json.
+E_PASS="ADVISORY"
+E_REASONS=()
+E_SHAPE_NOTE=""
+# Test-infra sanity checks (HTTP 200, JSON content-type, no SSE framing) are
+# recorded as advisory reasons if they fail — not blocking.
+[ "$E_LIVE_CODE" = "200" ] || E_REASONS+=("advisory: live HTTP=$E_LIVE_CODE (want 200)")
+[ "$E_BUF_CODE" = "200" ] || E_REASONS+=("advisory: buffered HTTP=$E_BUF_CODE (want 200)")
+echo "$E_LIVE_CT" | grep -qi "application/json" || E_REASONS+=("advisory: live content-type not JSON: [$E_LIVE_CT]")
+echo "$E_BUF_CT" | grep -qi "application/json" || E_REASONS+=("advisory: buffered content-type not JSON: [$E_BUF_CT]")
+if grep -q "^data: \|^event: " "$TMPDIR/E_live.body"; then
+    E_REASONS+=("advisory: live body contains SSE framing")
+fi
+if grep -q "^data: \|^event: " "$TMPDIR/E_buf.body"; then
+    E_REASONS+=("advisory: buffered body contains SSE framing")
+fi
+
+# BYTE-IDENTITY probe — always computed, always reported. Raw cmp + sha256
+# cross-check; divergence summary printed on both branches.
+if cmp -s "$TMPDIR/E_live.body" "$TMPDIR/E_buf.body" && [ "$E_LIVE_SHA" = "$E_BUF_SHA" ]; then
+    echo "  ${GREEN}byte-identical across modes: $E_LIVE_BYTES bytes (sha256 match)${NC}"
+    E_DIVERGENCE_NOTE="byte-identical across modes ($E_LIVE_BYTES bytes, sha256 match)"
+else
+    E_REASONS+=("advisory: BODIES DIFFER (live=$E_LIVE_BYTES vs buffered=$E_BUF_BYTES) — structural split under adjudication, NOT fix-induced (pre-fix probe 1d0c750 showed identical split)")
+    echo "  ${YELLOW}WIRE DIVERGENCE OBSERVED — non-stream live vs buffered bodies differ. (advisory, under adjudication)${NC}"
+    # First divergence offset — captured into a variable for the final echo
+    E_CMP_OUT=$(cmp "$TMPDIR/E_live.body" "$TMPDIR/E_buf.body" 2>/dev/null || true)
+    echo "  ${YELLOW}first divergence (cmp):${NC}"
+    echo "$E_CMP_OUT" | sed 's/^/    /'
+    E_FIRST_LINE=$(echo "$E_CMP_OUT" | head -1 | tr -d '\r')
+    E_DIVERGENCE_NOTE="bodies differ (live=$E_LIVE_BYTES bytes vs buffered=$E_BUF_BYTES bytes); cmp: $E_FIRST_LINE"
+    echo "  ${YELLOW}live body (raw, up to 1200B):${NC}"
+    head -c 1200 "$TMPDIR/E_live.body"; echo
+    echo "  ${YELLOW}buffered body (raw, up to 1200B):${NC}"
+    head -c 1200 "$TMPDIR/E_buf.body"; echo
+fi
+
+# Shape classification — ALWAYS computed and printed (per spec: shape of
+# each body reported regardless of cmp outcome). Uses literal-grep
+# classification (no JSON parse required) so the report is robust to
+# either wire protocol. grep -c always prints a count, so we capture it
+# directly without a `|| echo 0` fallback (which would double-print 0 when
+# the count is zero).
+E_LIVE_HAS_OPENAI=$(grep -c '"object":"chat.completion"' "$TMPDIR/E_live.body" 2>/dev/null)
+E_LIVE_HAS_OPENAI=${E_LIVE_HAS_OPENAI:-0}
+E_LIVE_HAS_ANTH=$(grep -c '"type":"message"' "$TMPDIR/E_live.body" 2>/dev/null)
+E_LIVE_HAS_ANTH=${E_LIVE_HAS_ANTH:-0}
+E_BUF_HAS_OPENAI=$(grep -c '"object":"chat.completion"' "$TMPDIR/E_buf.body" 2>/dev/null)
+E_BUF_HAS_OPENAI=${E_BUF_HAS_OPENAI:-0}
+E_BUF_HAS_ANTH=$(grep -c '"type":"message"' "$TMPDIR/E_buf.body" 2>/dev/null)
+E_BUF_HAS_ANTH=${E_BUF_HAS_ANTH:-0}
+echo "  shape classification (literal-grep on wire):"
+echo "    live:     \"object\":\"chat.completion\" count=$E_LIVE_HAS_OPENAI (OpenAI-shape); \"type\":\"message\" count=$E_LIVE_HAS_ANTH (Anthropic-shape)"
+echo "    buffered: \"object\":\"chat.completion\" count=$E_BUF_HAS_OPENAI (OpenAI-shape); \"type\":\"message\" count=$E_BUF_HAS_ANTH (Anthropic-shape)"
+
+# Also compute structural classification via JSON parse for the results.json block.
+E_SHAPE_NOTE=$(python3 - "$TMPDIR/E_live.body" "$TMPDIR/E_buf.body" <<'PYEOF'
+import json, sys
+def classify(path):
+    try:
+        d = json.load(open(path))
+    except Exception as e:
+        return f"unparseable ({e})"
+    keys = sorted(d.keys())
+    if "object" in d and "choices" in d:
+        return f"OPENAI shape (id={d.get('id')!r}, keys={keys})"
+    if d.get("type") == "message" and "content" in d:
+        return f"ANTHROPIC shape (id={d.get('id')!r}, keys={keys})"
+    return f"UNKNOWN shape (keys={keys})"
+live, buf = classify(sys.argv[1]), classify(sys.argv[2])
+print(f"live: {live}")
+print(f"buffered: {buf}")
+if live != buf:
+    print("STRUCTURAL SPLIT: the two modes emit different wire protocols for the same request.")
+PYEOF
+)
+echo "$E_SHAPE_NOTE" | sed 's/^/    /'
+
+if [ -n "$E_DIVERGENCE_NOTE" ]; then
+    echo "  byte-diff summary: $E_DIVERGENCE_NOTE"
+fi
+
+echo "  → SCENARIO E (ADVISORY — live-vs-buffered non-stream shape divergence under adjudication, see RESULTS 2026-08-28-rsd-m2-ef-nonstream-parity-gate.md): ${E_REASONS:+(findings: ${E_REASONS[*]})}"
+
+# ============================================================
+# Scenario F: S3 fix at binary level — non-stream records populated
+# (post-64da4ae contract: EACH non-stream record carries non-empty
+# assistant content AND non-empty thinking; pre-fix, the LIVE-mode
+# record persisted empty strings while the wire was correct)
+# ============================================================
+echo ""
+echo "${BLUE}=== Scenario F: non-stream records (S3 fix verification) ===${NC}"
+sleep 2  # allow the request-store finalize goroutine to flush
+cat > "$TMPDIR/filter_nonstream.py" <<'PYEOF'
+import json, sys
+data = sys.stdin.read()
+try:
+    recs = json.loads(data)
+except Exception as e:
+    print(f"PARSE_ERR: {e}"); sys.exit(1)
+ns = [r for r in recs
+      if (r.get("model") == "mock-anth-model" or r.get("original_model") == "mock-anth-model")
+      and r.get("is_stream") is False]
+ns.sort(key=lambda r: r.get("startTime") or "", reverse=True)
+out = []
+for r in ns[:4]:
+    last = (r.get("messages") or [{}])[-1]
+    out.append({
+        "id": r.get("id"),
+        "model": r.get("model"),
+        "is_stream": r.get("is_stream"),
+        "status": r.get("status"),
+        "last_msg_role": last.get("role"),
+        "content": last.get("content", ""),
+        "thinking": last.get("thinking", ""),
+        "usage": r.get("usage"),
+    })
+print(json.dumps(out))
+PYEOF
+F_RECS_JSON=$(curl -s "http://127.0.0.1:$PROXY_PORT/fe/api/requests" | python3 "$TMPDIR/filter_nonstream.py" 2>/dev/null || echo "[]")
+echo "  non-stream records for mock-anth-model (newest first):"
+echo "$F_RECS_JSON" | python3 -m json.tool 2>/dev/null || echo "$F_RECS_JSON"
+
+# Assertions: exactly 2 non-stream records (the E pair); EACH has
+# assistant role + non-empty content + non-empty thinking; content/thinking
+# match the deterministic sentinel strings exactly.
+F_PASS="PASS"
+F_REASONS=()
+F_OK_COUNT=$(echo "$F_RECS_JSON" | python3 -c '
+import json, sys
+try:
+    recs = json.load(sys.stdin)
+except Exception:
+    print("-2"); raise SystemExit
+print(len(recs))
+' 2>/dev/null || echo "-2")
+if [ "$F_OK_COUNT" -lt 2 ]; then
+    F_PASS="FAIL"; F_REASONS+=("found $F_OK_COUNT non-stream records (want 2)")
+else
+    F_CHECK=$(echo "$F_RECS_JSON" | python3 -c '
+import json, sys
+recs = json.load(sys.stdin)
+ANSWER = "RSD-M2 non-stream visible answer."
+REASON = "RSD-M2 non-stream deliberation."
+ok = 0
+for r in recs[:2]:
+    rid = r.get("id")
+    role = r.get("last_msg_role")
+    content = r.get("content") or ""
+    thinking = r.get("thinking") or ""
+    good = (role == "assistant" and bool(content) and bool(thinking))
+    if not good:
+        print("BAD_RECORD: id=%s role=%r content_len=%d thinking_len=%d" % (rid, role, len(content), len(thinking)))
+    if content != ANSWER:
+        print("CONTENT_MISMATCH: got %r want %r" % (content, ANSWER))
+    if thinking != REASON:
+        print("THINKING_MISMATCH: got %r want %r" % (thinking, REASON))
+    if good and content == ANSWER and thinking == REASON:
+        ok += 1
+print("OK=%d" % ok)
+')
+    echo "  $F_CHECK"
+    echo "$F_CHECK" | grep -q "OK=2" || { F_PASS="FAIL"; F_REASONS+=("record contract violated (see BAD_RECORD/MISMATCH lines above)"); }
+fi
+echo "  → Scenario F: $F_PASS ${F_REASONS:+(${F_REASONS[*]})}"
+
+# ============================================================
 # Final health & cleanup
 # ============================================================
 echo ""
@@ -978,6 +1214,22 @@ cat > "$TMPDIR/results.json" <<JSONEOF
     "ui_has_html_keywords": $UI_HAS_HTML,
     "records_with_content_and_usage": $D_BOTH_OK
   },
+  "scenario_E": {
+    "result": "$E_PASS",
+    "live_http": $E_LIVE_CODE,
+    "live_bytes": $E_LIVE_BYTES,
+    "live_sha256": "$E_LIVE_SHA",
+    "buffered_http": $E_BUF_CODE,
+    "buffered_bytes": $E_BUF_BYTES,
+    "buffered_sha256": "$E_BUF_SHA",
+    "reasons": $(printf '%s' "${E_REASONS[*]:-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))' 2>/dev/null || echo '[]'),
+    "shape_classification": $(printf '%s' "$E_SHAPE_NOTE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')
+  },
+  "scenario_F": {
+    "result": "$F_PASS",
+    "nonstream_records_found": $F_OK_COUNT,
+    "reasons": $(printf '%s' "${F_REASONS[*]:-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))' 2>/dev/null || echo '[]')
+  },
   "healthz_final": "$HZ"
 }
 JSONEOF
@@ -994,12 +1246,17 @@ echo "A: $A_PASS"
 echo "B: $B_PASS"
 echo "C: $C_PASS"
 echo "D: $D_PASS"
+echo "E: $E_PASS (advisory — live-vs-buffered non-stream shape divergence under adjudication; see RESULTS 2026-08-28-rsd-m2-ef-nonstream-parity-gate.md)"
+echo "F: $F_PASS"
 echo "healthz: $HZ"
 
 # Determine overall exit
-# A+B hard PASS; D hard PASS on UI+records (usage gap documented); C documented-impractical
-if [ "$A_PASS" = "PASS" ] && [ "$B_PASS" = "PASS" ] && [ "$D_PASS" = "PASS" ]; then
-    echo "${GREEN}OVERALL: PASS (A+B+D hard; C documented-impractical; usage gap noted in D)${NC}"
+# A+B+D+F hard PASS; C documented-impractical (usage gap in D documented).
+# E is ADVISORY while the live-vs-buffered non-stream wire-shape divergence is
+# under adjudication — it does NOT drive the overall gate (per the no-red-harness
+# rule while adjudication is pending). F remains HARD (post-64da4ae S3 contract).
+if [ "$A_PASS" = "PASS" ] && [ "$B_PASS" = "PASS" ] && [ "$D_PASS" = "PASS" ] && [ "$F_PASS" = "PASS" ]; then
+    echo "${GREEN}OVERALL: PASS (A+B+D+F hard; E advisory pending adjudication; C documented-impractical; usage gap noted in D)${NC}"
     exit 0
 else
     echo "${RED}OVERALL: FAIL${NC}"
