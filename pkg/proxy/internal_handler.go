@@ -380,6 +380,29 @@ func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody m
 // mode (the new default) persisted empty Thinking + Content + ToolCalls
 // while the wire response was correct (see
 // .agents/tester/LESSONS/2026-08-28-rsd-s3-nonstream-persistence-bug.md).
+//
+// Phase 3 E-fix (M2-E non-stream wire parity): in LIVE mode the wire
+// body must also be translated to Anthropic-shape — same as the
+// buffered path emits (handler_anthropic.go:842 calls
+// translator.TranslateNonStreamResponse on the recorder body and
+// writes the result). Live mode historically wrote OpenAI-shape JSON
+// (json.NewEncoder(w).Encode(resp)), breaking locked decision #3
+// "stream=false unaffected in both modes" — Anthropic clients
+// receiving stream:false got OpenAI bytes. The fix routes the live
+// non-stream wire through the SAME translator the buffered path uses,
+// via a small marshal-then-translate round-trip on the typed resp
+// (the typed resp marshals to the SAME JSON shape the buffered path's
+// recorder captures). Capture above remains intact; this only changes
+// the wire bytes, not the persistence fields. Buffered mode is
+// untouched (liveArc == nil → recorder path → its own translation
+// stays authoritative).
+//
+// Call-site survey: InternalHandler.HandleRequest (the only caller of
+// handleNonStream) is reachable from exactly two sites — both inside
+// doAnthropicInternalRequest in handler_anthropic.go (the Anthropic-
+// internal path). The OpenAI race path uses a DIFFERENT function
+// (`handleNonStreamingResponse` in race_executor.go:1116) and is not
+// affected. So liveArc != nil is a precise live-mode signal here.
 func (h *InternalHandler) handleNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
@@ -388,6 +411,8 @@ func (h *InternalHandler) handleNonStream(ctx context.Context, provider provider
 
 	// Live-mode capture (parity with buffered extractOpenAIResponseContentFromJSON
 	// at handler_anthropic.go:1440 — same fields, same source shape).
+	// Runs BEFORE wire translation so the arc mirror is independent
+	// of the translation outcome (S3 fix 64da4ae contract).
 	if h.liveArc != nil && len(resp.Choices) > 0 {
 		msg := resp.Choices[0].Message
 		if msg != nil {
@@ -406,6 +431,28 @@ func (h *InternalHandler) handleNonStream(ctx context.Context, provider provider
 				})
 			}
 		}
+	}
+
+	// Wire-shape routing. Live mode → Anthropic-shape (mirrors the
+	// buffered path's handleAnthropicInternalNonStreamResponse at
+	// handler_anthropic.go:842). Buffered mode → keep OpenAI-shape
+	// bytes (the recorder path needs them so its own
+	// extractOpenAIResponseContentFromJSON + TranslateNonStreamResponse
+	// pass can run on the recorder body).
+	if h.liveArc != nil {
+		openaiBytes, terr := json.Marshal(resp)
+		if terr != nil {
+			log.Printf("[DEBUG INTERNAL] live non-stream marshal failed: %v", terr)
+			return terr
+		}
+		anthropicResp, terr := translator.TranslateNonStreamResponse(openaiBytes, h.liveArc.originalModel)
+		if terr != nil {
+			log.Printf("[DEBUG INTERNAL] live non-stream translate failed: %v", terr)
+			return terr
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, werr := w.Write(anthropicResp)
+		return werr
 	}
 
 	w.Header().Set("Content-Type", "application/json")

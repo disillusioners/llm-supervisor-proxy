@@ -1726,3 +1726,175 @@ func TestLiveMode_NonStream_NoLiveArc_NoCapture(t *testing.T) {
 		t.Errorf("wire missing content %q; body=%q", "x", rw.Body.String())
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_NonStream_WireShapeParityWithBuffered is the hard
+// regression test for the Phase 3 M2-E fix — non-stream wire-shape
+// parity between live and buffered internal-Anthropic. The leader-
+// adjudicated ruling requires:
+//
+//   1. Both modes emit Anthropic-shape JSON (not OpenAI-shape) —
+//      locked decision #3 "stream=false unaffected in both modes".
+//   2. The bodies are byte-identical modulo the proxy-random `id`
+//      (TranslateNonStreamResponse generates a fresh `msg_…` per call).
+//   3. Both carry the Anthropic-shape structural assertions:
+//      `"type":"message"`, `content` is an array of blocks, etc.
+//
+// Before the fix the live path wrote OpenAI-shape JSON directly via
+// json.NewEncoder(w).Encode(resp) — breaking the parity invariant
+// and silently shipping OpenAI bytes to Anthropic clients sending
+// stream:false. The fix routes the live wire through
+// translator.TranslateNonStreamResponse (same call the buffered
+// path uses), producing the SAME Anthropic JSON for both modes.
+//
+// Test approach:
+//   - Drive the SAME typed *providers.ChatCompletionResponse through
+//     handleNonStream TWICE: once with liveArc installed (live mode),
+//     once without (buffered mode, with a recorder backing w).
+//   - Both bodies should be Anthropic-shape; normalize the proxy-
+//     random `id` in both and assert byte-equality.
+//   - Independent structural assertions catch future drift from
+//     either path (live or buffered).
+//
+// A failure of this test means the live vs buffered wire parity
+// invariant has been broken again — the M2-E class regression has
+// returned.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_NonStream_WireShapeParityWithBuffered(t *testing.T) {
+	// Shared typed response (deterministic — no `id`, `created`, etc.
+	// that would differ across the marshal-then-translate round-trip).
+	// The translator generates a fresh `msg_…` id at translation time
+	// (response.go:22 generateAnthropicMessageID), which we normalize
+	// out before the byte-comparison.
+	typedResp := &providers.ChatCompletionResponse{
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:             "assistant",
+					Content:          "RSD-M2 non-stream visible answer.",
+					ReasoningContent: "RSD-M2 non-stream deliberation.",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: providers.Usage{
+			PromptTokens:     11,
+			CompletionTokens: 9,
+			TotalTokens:      20,
+		},
+	}
+	provider := &liveNonStreamProvider{resp: typedResp}
+
+	// LIVE mode: liveArc installed → fix routes wire through translator.
+	liveHandler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	liveArc := &anthropicRequestContext{originalModel: "claude-sonnet-4-5"}
+	liveHandler.SetLiveArc(liveArc)
+
+	liveRec := httptest.NewRecorder()
+	liveRec.Body = &bytes.Buffer{}
+	liveRW := &flushingResponseRecorder{ResponseRecorder: liveRec}
+	liveReq := &providers.ChatCompletionRequest{Model: "test-model", Stream: false}
+	if err := liveHandler.handleNonStream(context.Background(), provider, liveReq, liveRW, "gpt-4"); err != nil {
+		t.Fatalf("live handleNonStream: %v", err)
+	}
+	liveBody := liveRW.Body.String()
+
+	// BUFFERED mode: liveArc NOT installed → handleNonStream writes
+	// the recorder body in OpenAI-shape (legacy — the recorder path
+	// downstream applies TranslateNonStreamResponse). The wire on a
+	// buffered client (post-recorder) is Anthropic-shape; we mirror
+	// that here by translating the recorder body ourselves (same call
+	// handleAnthropicInternalNonStreamResponse makes).
+	bufHandler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	// Deliberately no SetLiveArc — simulates buffered mode.
+	bufRec := httptest.NewRecorder()
+	bufRec.Body = &bytes.Buffer{}
+	bufRW := &flushingResponseRecorder{ResponseRecorder: bufRec}
+	if err := bufHandler.handleNonStream(context.Background(), provider, liveReq, bufRW, "gpt-4"); err != nil {
+		t.Fatalf("buffered handleNonStream: %v", err)
+	}
+	// Buffered's recorder body is OpenAI-shape; translate to mirror
+	// what the buffered client actually receives on its wire.
+	openaiBody := bufRW.Body.Bytes()
+	anthropicBufBody, terr := translator.TranslateNonStreamResponse(openaiBody, "claude-sonnet-4-5")
+	if terr != nil {
+		t.Fatalf("buffered translate (mirror): %v", terr)
+	}
+	bufBody := string(anthropicBufBody)
+
+	// STRUCTURAL ASSERTION 1: live body is Anthropic-shape.
+	if !strings.Contains(liveBody, `"type":"message"`) {
+		t.Errorf("M2-E fix: live wire not Anthropic-shape (missing type:message); body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, `"role":"assistant"`) {
+		t.Errorf("M2-E fix: live wire missing role:assistant; body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, `"content":[`) {
+		t.Errorf("M2-E fix: live wire content is not an array of blocks; body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, `"stop_reason"`) {
+		t.Errorf("M2-E fix: live wire missing stop_reason; body=%q", liveBody)
+	}
+	// STRUCTURAL ASSERTION 2: live body is NOT OpenAI-shape (the
+	// pre-fix wire).
+	if strings.Contains(liveBody, `"object":"chat.completion"`) {
+		t.Errorf("M2-E fix: live wire still carries OpenAI shape (object:chat.completion); body=%q", liveBody)
+	}
+	if strings.Contains(liveBody, `"choices":[{`) {
+		t.Errorf("M2-E fix: live wire still carries OpenAI shape (choices:[...]); body=%q", liveBody)
+	}
+	// STRUCTURAL ASSERTION 3: thinking block (translate emits from
+	// reasoning_content) AND text block both present.
+	if !strings.Contains(liveBody, `"type":"thinking"`) {
+		t.Errorf("M2-E fix: live wire missing thinking block; body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, `"type":"text"`) {
+		t.Errorf("M2-E fix: live wire missing text block; body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, "RSD-M2 non-stream visible answer.") {
+		t.Errorf("M2-E fix: live wire missing visible answer text; body=%q", liveBody)
+	}
+	if !strings.Contains(liveBody, "RSD-M2 non-stream deliberation.") {
+		t.Errorf("M2-E fix: live wire missing deliberation text; body=%q", liveBody)
+	}
+
+	// BYTE-IDENTITY ASSERTION (the dispatch's exact ask): live vs
+	// buffered bodies byte-identical modulo the proxy-random `id`.
+	// Normalize the `id` field on both before comparison.
+	normalizeID := func(body string) string {
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(body), &m); err != nil {
+			t.Fatalf("normalizeID unmarshal: %v body=%q", err, body)
+		}
+		m["id"] = "<NORMALIZED>"
+		out, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("normalizeID marshal: %v", err)
+		}
+		return string(out)
+	}
+	liveNorm := normalizeID(liveBody)
+	bufNorm := normalizeID(bufBody)
+	if liveNorm != bufNorm {
+		t.Errorf("M2-E parity: live vs buffered bodies differ modulo id:\n--- live ---\n%s\n--- buffered ---\n%s\n--- live normalized ---\n%s\n--- buffered normalized ---\n%s",
+			liveBody, bufBody, liveNorm, bufNorm)
+	} else {
+		t.Logf("M2-E parity: live vs buffered bodies byte-identical modulo id (len=%d each)", len(liveBody))
+	}
+
+	// FINAL: S3 capture is preserved (the dispatch's constraint 1).
+	if got, want := liveArc.accumulatedResponse.String(), "RSD-M2 non-stream visible answer."; got != want {
+		t.Errorf("M2-E + S3: live capture content = %q, want %q (S3 REGRESSED)", got, want)
+	}
+	if got, want := liveArc.accumulatedThinking.String(), "RSD-M2 non-stream deliberation."; got != want {
+		t.Errorf("M2-E + S3: live capture thinking = %q, want %q (S3 REGRESSED)", got, want)
+	}
+}
