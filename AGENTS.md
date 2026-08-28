@@ -430,3 +430,32 @@ CREATE TABLE configs (
    }
    ```
 3. Run `go build ./...` to embed new files
+
+## Real-Streaming Default (`X-LLMProxy-Buffer-Response`)
+
+Streaming requests now default to **real streaming** — chunks are forwarded to
+the client as they arrive from upstream, with no full-response accumulation. The
+previous fully-buffered supervised behavior is preserved behind an explicit
+opt-in header:
+
+- **Header `X-LLMProxy-Buffer-Response: true`** (or any truthy value, or empty
+  value) — opt INTO buffered mode (legacy behavior, bit-for-bit identical to
+  pre-feature).
+- **Header absent** (the default) — real streaming. First content byte reaches
+  the client before upstream completion.
+
+**Accepted degradations in live mode** (documented, not bugs):
+no racing/fallback/retry/mid-stream credential failover AFTER first forwarded
+byte; `StreamDeadline` redefined to "no forwardable byte ⇒ in-band SSE error
+envelope"; `race_winner_selected` fires mid-stream (UI must not assume completed
+buffers); first-byte winner may fail (no retry); wire-shape change on
+internal-Anthropic live mode emits `thinking_delta` blocks (NOT emitted in
+buffered mode); tokenizer-fallback estimator parity preserved via R2 Prune
+gating.
+
+**Rollback** (recommended): add `proxy_set_header X-LLMProxy-Buffer-Response
+"true";` (nginx) at the load balancer. Zero proxy code change.
+
+**Full feature doc:** [`docs/real-streaming-default.md`](docs/real-streaming-default.md)
+— header semantics, full feature matrix, 6-path coverage, accepted
+degradations, rollback procedure, parity-failure bisection procedure.

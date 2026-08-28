@@ -103,6 +103,18 @@ type requestContext struct {
 	// credential failover after the first forwarded byte. Set on the first
 	// successful client write inside the relay loop (set-site lands in
 	// Phase 2); zero readers exist today.
+	//
+	// INVARIANT (LEADER DECISION 3, real-streaming-default plan §Phase 5
+	// / Deferred #2): the WRITE-ONLY-NESS of this flag is INTENTIONAL.
+	// It is bookkeeping / state documentation — the actual enforcement
+	// invariant lives in the race coordinator's `c.winner != nil` check
+	// (`race_coordinator.go:653-655`) + the locked L4 "no racing /
+	// fallback / mid-stream credential failover after the first forwarded
+	// byte" rule. Do NOT add a consumer / getter just to satisfy
+	// write-only-ness; the flag exists for future readers that need a
+	// happens-before edge (the atomic type) and for state documentation.
+	// If a future PR adds a reader, it MUST document why the coordinator's
+	// winner-nil check is insufficient for that reader's purpose.
 	streamingNonRetryable atomic.Bool
 
 	// bufferMode is the per-request delivery mode parsed from the
