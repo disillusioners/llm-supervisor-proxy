@@ -1,7 +1,15 @@
 // Package e2e_anthropic_thinking_leak is the Task-4 spot-check of the
-// byte-identity constraint on branch fix/ui-reasoning-observability:
-// anthropic-format client streaming with thinking events must send ZERO
-// thinking blocks/bytes to the client wire on the INTERNAL path.
+// byte-identity constraint on branch feature/real-streaming-default:
+// anthropic-format client streaming with thinking events. The pack is
+// re-based against the real-streaming-default D8 wire-shape contract
+// (docs/real-streaming-default.md §D8, lines 181-199):
+//
+//	Buffered mode (X-LLMProxy-Buffer-Response: true) — no thinking bytes on
+//	  wire; sink captures concatenated reasoning into the persisted assistant
+//	  message (the legacy leak spot-check invariant).
+//	Live mode (header absent) — Anthropic thinking content_block +
+//	  thinking_delta events ARE emitted on the wire (deliberate wire-shape
+//	  change for live mode); sink capture ALSO preserved.
 //
 // It drives the FULL proxy handler (proxy.Handler.HandleAnthropicMessages)
 // in process — the same pattern as test/e2e_minimax_reasoning — wired to a
@@ -11,16 +19,25 @@
 //
 // Scenarios:
 //
-//	S1 — INTERNAL path, stream: the leak spot-check. The sink invariant
-//	     (internal_handler.go:225-242) must swallow thinking bytes on the
-//	     wire while handler_anthropic.go:482 persists them via the sink.
-//	S2 — EXTERNAL path, stream: byte-identity reference. reasoning_content
+//	S1A — INTERNAL path, stream, BUFFERED mode: the legacy leak spot-check.
+//	     Sends X-LLMProxy-Buffer-Response: true; asserts zero thinking bytes
+//	     on wire AND persisted Thinking == concatenated reasoning.
+//	S1B — INTERNAL path, stream, LIVE mode: the D8 positive mirror. No
+//	     header ⇒ live mode. Asserts thinking_delta + content_block_start
+//	     type:thinking ARE emitted on wire, reasoning text chunks appear
+//	     INSIDE thinking_delta payloads, reasoning_content stays absent
+//	     (no cross-protocol leak), AND persisted Thinking still equals the
+//	     concatenated reasoning (sink invariant preserved in live mode).
+//	S2  — EXTERNAL path, stream: byte-identity reference. reasoning_content
 //	     IS translated to thinking_delta on the wire by design (the
 //	     TestAnthropic_ThinkingStream contract) — guards against the sink
 //	     over-swallowing.
-//	S3 — INTERNAL path, non-stream: persisted thinking == reasoning value;
+//	S3  — INTERNAL path, non-stream: persisted thinking == reasoning value;
 //	     wire classified against the pre-fix base (fea5874) differential
 //	     since translator/response.go is unchanged since base.
+//	     (Currently failing for an UNRELATED reason on the non-stream
+//	     persistence path — under separate investigation; this pack does
+//	     NOT touch S3.)
 package e2e_anthropic_thinking_leak
 
 import (
@@ -312,9 +329,13 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 // ─────────────────────────────────────────────────────────────────────────────
 
 // anthropicRequest describes one anthropic-format client request.
+// extraHeaders is an optional map of additional headers applied in build();
+// used by S1A to opt into buffered mode via X-LLMProxy-Buffer-Response:true
+// (real-streaming-default D8 wire-shape contract — see docs/real-streaming-default.md).
 type anthropicRequest struct {
-	model  string
-	stream bool
+	model        string
+	stream       bool
+	extraHeaders map[string]string
 }
 
 func (ar anthropicRequest) build(t *testing.T) (*http.Request, *httptest.ResponseRecorder) {
@@ -333,6 +354,9 @@ func (ar anthropicRequest) build(t *testing.T) (*http.Request, *httptest.Respons
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", "leak-spot-check-key")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	for k, v := range ar.extraHeaders {
+		req.Header.Set(k, v)
+	}
 	return req, httptest.NewRecorder()
 }
 

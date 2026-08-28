@@ -1,4 +1,12 @@
-// Scenarios S1–S3 for the anthropic thinking-leak spot-check (Task 4).
+// Scenarios S1A/S1B/S2/S3 for the anthropic thinking-leak spot-check
+// (Task 4, re-based against the real-streaming-default D8 wire-shape
+// contract — docs/real-streaming-default.md §D8).
+//
+// S1A exercises BUFFERED mode (X-LLMProxy-Buffer-Response: true) and
+// asserts the legacy "no thinking bytes on wire" invariant. S1B exercises
+// LIVE mode (no header) and asserts the D8 positive contract — Anthropic
+// thinking content_block + thinking_delta ARE emitted on wire while the
+// sink side-channel capture is preserved. S2 and S3 are unchanged.
 //
 // Each scenario drives the full proxy.Handler.HandleAnthropicMessages against
 // a capturing mock OpenAI upstream and asserts the byte-identity constraint
@@ -13,9 +21,12 @@ import (
 )
 
 // leakSubstrings are the wire-greppable fragments that MUST NOT appear on
-// the INTERNAL-path wire. Each reasoning chunk is distinct so a substring
-// search catches partial leaks; the translated-marker strings catch any
-// thinking block/delta the translator would emit.
+// the INTERNAL-path BUFFERED-mode wire (S1A, the legacy leak spot-check).
+// Each reasoning chunk is distinct so a substring search catches partial
+// leaks; the translated-marker strings catch any thinking block/delta the
+// translator would emit. S1B (LIVE mode) DOES emit these on wire by D8
+// design (real-streaming-default.md §D8) and therefore uses positive
+// containment assertions rather than this leak list.
 var leakSubstrings = []string{
 	reasoningChunk1,
 	reasoningChunk2,
@@ -56,23 +67,32 @@ func assertAbsent(t *testing.T, wire, want, where string) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S1 — INTERNAL path, stream: the leak spot-check (both sides of the sink)
+// S1A — INTERNAL path, stream, BUFFERED mode: the legacy leak spot-check
 // ═════════════════════════════════════════════════════════════════════════════
 
-// TestS1_InternalStream_ThinkingLeakSpotCheck drives an Internal:true model
-// whose upstream emits reasoning_content SSE chunks. The fix
+// TestS1A_Buffered_InternalStream_NoThinkingOnWire drives an Internal:true
+// model whose upstream emits reasoning_content SSE chunks. The fix
 // (internal_handler.go:225-242 sink + handler_anthropic.go:482 install) must
 // keep ALL thinking bytes off the client wire while persisting the
 // concatenated reasoning into the assistant message via the side-channel
-// sink. This is the central assertion of the dev-verify leak closure.
-func TestS1_InternalStream_ThinkingLeakSpotCheck(t *testing.T) {
+// sink. This is the central assertion of the dev-verify leak closure,
+// re-exercised in BUFFERED mode under the real-streaming-default D8 contract
+// (X-LLMProxy-Buffer-Response: true ⇒ buffered, suppresses thinking on wire).
+//
+// S1B covers the LIVE-mode positive mirror (D8: live mode emits thinking
+// blocks on wire AND preserves sink capture).
+func TestS1A_Buffered_InternalStream_NoThinkingOnWire(t *testing.T) {
 	env := setupTestEnv(t, reasoningSSEHandler)
 
-	rr := env.run(anthropicRequest{model: intModel, stream: true})
+	rr := env.run(anthropicRequest{
+		model:        intModel,
+		stream:       true,
+		extraHeaders: map[string]string{"X-LLMProxy-Buffer-Response": "true"},
+	})
 	wire := rr.Body.String()
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("S1: status=%d body=%s", rr.Code, wire)
+		t.Fatalf("S1A: status=%d body=%s", rr.Code, wire)
 	}
 
 	// Routing proof: the captured upstream request must carry the internal
@@ -80,16 +100,16 @@ func TestS1_InternalStream_ThinkingLeakSpotCheck(t *testing.T) {
 	// not an accidental external fallback).
 	cap := env.mockUp.last()
 	if got, _ := cap.BodyParsed["model"].(string); got != intModelUpstreamName {
-		t.Fatalf("S1: upstream model=%q want %q (internal path not exercised); captured=%s",
+		t.Fatalf("S1A: upstream model=%q want %q (internal path not exercised); captured=%s",
 			got, intModelUpstreamName, string(cap.Body))
 	}
-	t.Logf("EVIDENCE S1: upstream model=%q (internal path confirmed)", intModelUpstreamName)
+	t.Logf("EVIDENCE S1A: upstream model=%q (internal path confirmed)", intModelUpstreamName)
 
 	// (a) NO-LEAK: zero occurrences of reasoning strings + translated
 	// thinking markers on the wire.
-	assertNoLeak(t, wire, "S1")
+	assertNoLeak(t, wire, "S1A")
 	for _, s := range leakSubstrings {
-		assertAbsent(t, wire, s, "S1")
+		assertAbsent(t, wire, s, "S1A")
 	}
 
 	// (b) CAPTURED THINKING: the persisted assistant message Thinking must
@@ -97,26 +117,118 @@ func TestS1_InternalStream_ThinkingLeakSpotCheck(t *testing.T) {
 	// sink invariant — swallowed on wire, persisted in store).
 	assistant, log, ok := env.lastAssistant()
 	if !ok {
-		t.Fatalf("S1: no persisted assistant message; logs=%v", env.reqStore.List())
+		t.Fatalf("S1A: no persisted assistant message; logs=%v", env.reqStore.List())
 	}
 	if got := assistant.Thinking; got != reasoningFull {
-		t.Errorf("S1: persisted thinking=%q want %q (sink must capture concatenated reasoning)",
+		t.Errorf("S1A: persisted thinking=%q want %q (sink must capture concatenated reasoning)",
 			got, reasoningFull)
 	} else {
-		t.Logf("EVIDENCE S1: persisted thinking == concatenated reasoning (%d bytes, exact)", len(got))
+		t.Logf("EVIDENCE S1A: persisted thinking == concatenated reasoning (%d bytes, exact)", len(got))
 	}
 	if assistant.Thinking == "" {
-		t.Errorf("S1: persisted thinking is EMPTY — sink invariant broken (captured nothing)")
+		t.Errorf("S1A: persisted thinking is EMPTY — sink invariant broken (captured nothing)")
 	}
 
 	// (c) CONTENT INTACT: the visible answer must survive on the wire.
-	assertContains(t, wire, wireContent, "S1/content")
+	assertContains(t, wire, wireContent, "S1A/content")
 	if got := assistant.Content; !strings.Contains(got, wireContent) {
-		t.Errorf("S1: persisted content=%q missing %q", got, wireContent)
+		t.Errorf("S1A: persisted content=%q missing %q", got, wireContent)
 	}
 
-	t.Logf("EVIDENCE S1: request id=%s status=%s", log.ID, log.Status)
-	t.Logf("EVIDENCE S1: wire length=%d bytes", len(wire))
+	t.Logf("EVIDENCE S1A: request id=%s status=%s", log.ID, log.Status)
+	t.Logf("EVIDENCE S1A: wire length=%d bytes", len(wire))
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// S1B — INTERNAL path, stream, LIVE mode: D8 positive mirror
+// ═════════════════════════════════════════════════════════════════════════════
+
+// TestS1B_Live_InternalStream_ThinkingDeltaEmitted drives the SAME internal
+// model and upstream reasoning SSE as S1A, but with NO
+// X-LLMProxy-Buffer-Response header — i.e. LIVE mode under the
+// real-streaming-default D8 wire-shape contract. Per D8 (docs/real-streaming-
+// default.md §D8, lines 181-199) live mode deliberately emits Anthropic
+// `thinking` content_block + `thinking_delta` events on the wire when
+// upstream carries reasoning_content, AND preserves sink side-channel
+// capture ("sink capture preserved in both modes"). S1A is the BUFFERED-
+// mode mirror (suppressed on wire, sink-only). S2 is the EXTERNAL-path
+// reference.
+//
+// Assertions:
+//   - "thinking_delta" PRESENT on client wire (D8 deliberate positive).
+//   - "type":"thinking" PRESENT (content_block_start).
+//   - reasoning text chunks appear INSIDE thinking_delta payloads (mirror
+//     of S2's positive checks on the external path).
+//   - "reasoning_content" still ABSENT (no cross-protocol leak — Anthropic
+//     translator must not echo the OpenAI-wire field name).
+//   - persisted assistant Thinking == concatenated reasoning (sink invariant
+//     preserved in live mode per D8).
+//   - visible answer text present on wire (content intact).
+func TestS1B_Live_InternalStream_ThinkingDeltaEmitted(t *testing.T) {
+	env := setupTestEnv(t, reasoningSSEHandler)
+
+	// No X-LLMProxy-Buffer-Response header ⇒ live mode (D8).
+	rr := env.run(anthropicRequest{model: intModel, stream: true})
+	wire := rr.Body.String()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("S1B: status=%d body=%s", rr.Code, wire)
+	}
+
+	// Routing proof: internal path must be exercised. S1A's buffered mode
+	// and S1B's live mode both route through the InternalHandler — only the
+	// buffering/flushing of the recorder differs.
+	cap := env.mockUp.last()
+	if got, _ := cap.BodyParsed["model"].(string); got != intModelUpstreamName {
+		t.Fatalf("S1B: upstream model=%q want %q (internal path not exercised); captured=%s",
+			got, intModelUpstreamName, string(cap.Body))
+	}
+	t.Logf("EVIDENCE S1B: upstream model=%q (internal path confirmed)", intModelUpstreamName)
+
+	// (a) D8 POSITIVE: live mode MUST emit Anthropic thinking blocks on
+	// the wire. Two distinct sentinels — the start-of-block marker and
+	// the streaming delta marker — confirm the translator ran end-to-end.
+	assertContains(t, wire, `"thinking_delta"`, "S1B/thinking_delta")
+	assertContains(t, wire, `"type":"thinking"`, "S1B/content_block_start_thinking")
+
+	// (b) Reasoning text MUST appear inside thinking_delta payloads
+	// (mirror of S2's positive checks on the external path). This proves
+	// the translator accumulated reasoning_content and emitted it as
+	// Anthropic thinking text rather than dropping it or leaking it as a
+	// different field.
+	assertContains(t, wire, reasoningChunk1, "S1B/reasoning1")
+	assertContains(t, wire, reasoningChunk2, "S1B/reasoning2")
+
+	// (c) CROSS-PROTOCOL LEAK GUARD: "reasoning_content" is the OpenAI-wire
+	// field name. The Anthropic translator must convert reasoning_content →
+	// thinking_delta and MUST NOT echo the OpenAI field name on the wire.
+	assertAbsent(t, wire, `"reasoning_content"`, "S1B/reasoning_content")
+
+	// (d) SINK CONTRACT PRESERVED IN LIVE MODE (D8 explicit guarantee:
+	// "sink capture preserved in both modes"). Persisted Thinking must
+	// equal the concatenated reasoning — the side-channel invariant must
+	// survive the deliberate wire-shape change.
+	assistant, log, ok := env.lastAssistant()
+	if !ok {
+		t.Fatalf("S1B: no persisted assistant message; logs=%v", env.reqStore.List())
+	}
+	if got := assistant.Thinking; got != reasoningFull {
+		t.Errorf("S1B: persisted thinking=%q want %q (sink must capture concatenated reasoning in live mode)",
+			got, reasoningFull)
+	} else {
+		t.Logf("EVIDENCE S1B: persisted thinking == concatenated reasoning (%d bytes, exact)", len(got))
+	}
+	if assistant.Thinking == "" {
+		t.Errorf("S1B: persisted thinking is EMPTY — sink invariant broken in live mode")
+	}
+
+	// (e) CONTENT INTACT: the visible answer must survive translation.
+	assertContains(t, wire, wireContent, "S1B/content")
+	if got := assistant.Content; !strings.Contains(got, wireContent) {
+		t.Errorf("S1B: persisted content=%q missing %q", got, wireContent)
+	}
+
+	t.Logf("EVIDENCE S1B: request id=%s status=%s wire length=%d", log.ID, log.Status, len(wire))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
