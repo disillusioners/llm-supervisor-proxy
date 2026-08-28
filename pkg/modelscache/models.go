@@ -28,10 +28,10 @@ const (
 // the hardcoded defaults above. Clock is the injection point for the
 // outage-simulation tests (correction N6); nil means time.Now.
 type Options struct {
-	PositiveTTL  time.Duration // models negative cache + tokens positive TTL
-	NegativeTTL  time.Duration // tokens negative TTL
-	StalenessCap time.Duration // models: last-known-good hard cap
-	StaleCap     time.Duration // tokens: stale-positive hard cap (alias of StalenessCap semantics)
+	PositiveTTL       time.Duration // models negative cache + tokens positive TTL
+	NegativeTTL       time.Duration // tokens negative TTL
+	StalenessCap      time.Duration // models: last-known-good hard cap
+	StaleCap          time.Duration // tokens: stale-positive hard cap (alias of StalenessCap semantics)
 	StrictFillTimeout time.Duration
 	LRUCap            int
 	ReconcileInterval time.Duration
@@ -115,9 +115,9 @@ type CachedModelsConfig struct {
 	stopOnce sync.Once
 	// scanCancel cancels the in-flight reconciler scan so Stop() can
 	// abort outstanding work (planner ruling Stop-cancel / W3).
-	scanMu       sync.Mutex
-	scanCancel   context.CancelFunc
-	reconcileWG  sync.WaitGroup
+	scanMu      sync.Mutex
+	scanCancel  context.CancelFunc
+	reconcileWG sync.WaitGroup
 }
 
 // WrapModels builds the decorator and synchronously primes it via the

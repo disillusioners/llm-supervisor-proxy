@@ -299,4 +299,3 @@ func (c *CachedTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.A
 var (
 	_ auth.TokenStoreInterface = (*CachedTokenStore)(nil)
 )
-

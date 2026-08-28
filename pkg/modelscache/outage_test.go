@@ -172,7 +172,7 @@ func newOutageStack(t *testing.T) *outageStack {
 	return &outageStack{
 		t: t, dbStore: dbStore, mgr: mgr, src: src, tokSrc: tokSrc,
 		models: modelsCache, tokens: WrapTokens(tokSrc, Options{Clock: clk.Now}),
-		clk:    clk,
+		clk: clk,
 	}
 }
 

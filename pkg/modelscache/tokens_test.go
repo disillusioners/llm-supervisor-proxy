@@ -18,12 +18,12 @@ import (
 
 // fakeTokenStore is an auth.TokenStoreInterface with injection.
 type fakeTokenStore struct {
-	mu        sync.Mutex
-	tokens    map[string]*auth.AuthToken // hash → token
-	validate  atomic.Int64
-	infraErr  error  // when non-nil, ValidateToken returns it
-	innerErr  error  // when non-nil (and infraErr nil), returned as-is
-	listErr   error
+	mu       sync.Mutex
+	tokens   map[string]*auth.AuthToken // hash → token
+	validate atomic.Int64
+	infraErr error // when non-nil, ValidateToken returns it
+	innerErr error // when non-nil (and infraErr nil), returned as-is
+	listErr  error
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -325,7 +325,7 @@ func TestCachedTokenStore_LRUEvictsAtCap(t *testing.T) {
 		plaintext, hash, _ := auth.GenerateToken()
 		hashes[i] = hash
 		inner.mu.Lock()
-		inner.tokens[hash] = &auth.AuthToken{ID: string(rune('a' + i%26)) + time.Now().Format("150405.000000000") + string(rune('0'+i%10)), TokenHash: hash}
+		inner.tokens[hash] = &auth.AuthToken{ID: string(rune('a'+i%26)) + time.Now().Format("150405.000000000") + string(rune('0'+i%10)), TokenHash: hash}
 		inner.mu.Unlock()
 		if _, err := c.ValidateToken(context.Background(), plaintext); err != nil {
 			t.Fatalf("validate %d: %v", i, err)

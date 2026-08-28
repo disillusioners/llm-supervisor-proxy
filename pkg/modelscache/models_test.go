@@ -55,13 +55,13 @@ type fakeStrictSource struct {
 	stall    chan struct{}
 
 	counts struct {
-		listModels, listEnabled, listCreds  int
-		getModel, getModelByName, getCred   int
-		legacyGetModel, legacyGetCred       int
-		legacyResolve, resolveAffinity      int
-		resolveCached                       int
-		addModel, updateModel, removeModel  int
-		addCred, updateCred, removeCred     int
+		listModels, listEnabled, listCreds int
+		getModel, getModelByName, getCred  int
+		legacyGetModel, legacyGetCred      int
+		legacyResolve, resolveAffinity     int
+		resolveCached                      int
+		addModel, updateModel, removeModel int
+		addCred, updateCred, removeCred    int
 	}
 }
 
