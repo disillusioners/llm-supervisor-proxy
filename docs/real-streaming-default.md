@@ -1,9 +1,8 @@
 # Real-Streaming Default (X-LLMProxy-Buffer-Response opt-in)
 
-> **Pinned to commit:** see `git log -1` on this branch (the head
-> commit of `feature/real-streaming-default` after Phase 5 review
-> fixes landed; pre-existing pin to `b3ecded` was the pre-Phase-5
-> snapshot and is no longer the source of truth).
+> **Pinned to commit:** `44f8e63` (Phase 5 review fixes — real passthrough
+> parity, variant goldens, event-ordering assertions, dead-code cleanup,
+> docs corrections).
 >
 > **Status:** Shipped — Phases 1–4 merged; Phase 5 parity + acceptance
 > harness landed. Path 1 (Anthropic→Anthropic passthrough) is now

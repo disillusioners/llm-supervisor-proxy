@@ -409,6 +409,16 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		// mode; if upstreamDone fired first the live-mode winner
 		// gate would be silently broken (winner would have been
 		// promoted by IsCompleted instead of by first-byte).
+		//
+		// Phase-5 review nit N3: the ordering gate below was
+		// conditional on sawRaceWinner — a total disappearance of
+		// race_winner_selected would pass silently. The event is
+		// deterministic in this harness (only requires eventBus !=
+		// nil, which newTestHandler wires), so its presence is
+		// part of the NB5 contract: enforce it unconditionally.
+		if !sawRaceWinner {
+			t.Errorf("race_winner_selected not observed before test end — event presence is part of the NB5 contract (newTestHandler wires eventBus != nil; the race path MUST publish race_winner_selected in live mode)")
+		}
 		if sawRaceWinner && !raceWinnerAt.IsZero() && !upstreamDone.IsZero() && raceWinnerAt.After(upstreamDone) {
 			t.Errorf("OpenAI live: race_winner_selected at %v arrived AFTER upstream done at %v — winner gate mis-wired (should be first-byte, not completion)",
 				raceWinnerAt, upstreamDone)
@@ -439,14 +449,6 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 // TestRealStreaming_FirstByteTiming_PredicateVariants — race-path
 // winner-selected-at-first-byte variants. The plan's §1.1 R1-variant
-// calls for role-only-first, thinking-first, and two-attempt
-// first-buffered-wins coverage. These are event-based: assert that
-// the first byte reaches the client within one tick (~150ms) of the
-// upstream emitting its first chunk.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// TestRealStreaming_FirstByteTiming_PredicateVariants — race-path
-// winner-selected-at-first-byte variants. The plan's §1.1 R1-variant
 // calls for role-only-first, thinking-first, and usage-first coverage.
 // These are EVENT-BASED structural assertions: assert that the first
 // byte reaches the client within one tick (~150ms) of the upstream
@@ -454,9 +456,8 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 //
 // Reviewer finding #7 — wasted fixture cleanup: each subtest used to
 // construct TWO httptest.NewServer instances (one bound to the probe,
-// one passed to newTestHandler), but only the second was ever hit.
-// The duplicate server construction is removed below — the proxy's
-// upstream is the server holding the probe (blockingStreamHandler).
+// one passed to newTestHandler), but only the second was ever hit —
+// the proxy's upstream is newTestHandler's server holding the probe.
 func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 	holdDuration := 500 * time.Millisecond
 
@@ -464,10 +465,8 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		probe := &upstreamProbe{}
 		// Role-only first chunk (no content), then content.
 		roleOnly := `{"choices":[{"index":0,"delta":{"role":"assistant"}}]}`
-		// The proxy's upstream IS the probe-holding server
-		// (single server — reviewer's wasted-fixture cleanup).
-		upstream := httptest.NewServer(blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration))
-		t.Cleanup(upstream.Close)
+		// The proxy's upstream IS newTestHandler's server (single
+		// server — reviewer's wasted-fixture cleanup).
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
@@ -481,8 +480,6 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 	t.Run("ThinkingFirst", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		thinkFirst := mockCreateReasoningChunk("thinking now")
-		upstream := httptest.NewServer(blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration))
-		t.Cleanup(upstream.Close)
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
@@ -496,8 +493,6 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 	t.Run("UsageFirst", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		usageFirst := mockCreateUsageChunk(1, 1)
-		upstream := httptest.NewServer(blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration))
-		t.Cleanup(upstream.Close)
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")

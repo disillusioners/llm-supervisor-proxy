@@ -415,7 +415,7 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		// when the per-request `publish` callback was wired —
 		// which itself only happens when BOTH `c.eventBus != nil`
 		// AND `c.engine != nil` (line 901). The mock setup here
-		// uses `NewHandler(... nil, nil, nil, nil)` — the 5th
+		// uses `NewHandler(... nil, nil, nil, nil)` — the 7th
 		// positional arg is the credential LB engine, and we pass
 		// nil. So model_credential_selected is GUARANTEED NOT TO
 		// PUBLISH in this harness, regardless of buffered/live
@@ -426,13 +426,13 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		//
 		// The POSITIVE half of L7 (model_credential_selected IS
 		// published when an engine IS wired) is pinned by
-		// TestLiveRelay_MultiCredential_* in
-		// race_coordinator_credfailover_test.go — that test
+		// TestCoordinator_ModelCredentialSelected_OncePerFirstBinding
+		// in race_coordinator_credfailover_test.go:334 — that test
 		// exercises the full engine + publish callback path and
 		// asserts W-1 / exit #4 (one event per newly-bound
 		// resolution).
 		if buf.saw("model_credential_selected") {
-			t.Errorf("buffered: model_credential_selected published — the test harness passes a nil LB engine (NewHandler 5th arg = nil); the publish callback at race_coordinator.go:901 is never wired. This is a test-fixture regression.")
+			t.Errorf("buffered: model_credential_selected published — the test harness passes a nil LB engine (NewHandler 7th arg = nil); the publish callback at race_coordinator.go:901 is never wired. This is a test-fixture regression.")
 		}
 		if live.saw("model_credential_selected") {
 			t.Errorf("live: model_credential_selected published — same nil-engine harness caveat (race_coordinator.go:901)")
