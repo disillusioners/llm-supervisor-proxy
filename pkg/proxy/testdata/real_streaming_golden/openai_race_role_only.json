@@ -1,0 +1,4 @@
+{
+  "body": "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n",
+  "content_type": "text/event-stream"
+}

@@ -1,0 +1,4 @@
+{
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":13,\"prompt_tokens\":7,\"total_tokens\":20}}\n\ndata: [DONE]\n",
+  "content_type": "text/event-stream"
+}

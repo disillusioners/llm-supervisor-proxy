@@ -1,0 +1,4 @@
+{
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"Looking up...\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"city\\\":\\\"SF\\\"}\",\"name\":\"get_weather\"},\"id\":\"call_test\",\"index\":0,\"type\":\"function\"}]},\"index\":0}],\"model\":\"mock-model\",\"object\":\"chat.completion.chunk\"}\n\n\n\ndata: [DONE]\n",
+  "content_type": "text/event-stream"
+}

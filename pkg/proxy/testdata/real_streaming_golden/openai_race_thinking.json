@@ -1,0 +1,4 @@
+{
+  "body": "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n",
+  "content_type": "text/event-stream"
+}

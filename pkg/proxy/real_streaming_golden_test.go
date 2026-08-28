@@ -27,12 +27,9 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,7 +39,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
 )
 
 var goldenUpdate = flag.Bool("update", false, "regenerate golden files under testdata/real_streaming_golden/")
@@ -85,38 +81,48 @@ func writeGolden(t *testing.T, name string, env goldenEnvelope) {
 // the wire body + content-type for goldenization.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// genOpenAIRaceText runs the standard 3-chunk text fixture through
-// the /v1/chat/completions handler in buffered mode and returns the
-// recorded wire output.
+// genOpenAIRaceText is kept as a tiny wrapper around the parameterized
+// genOpenAIRace(t, "text") for direct callers; the golden registry
+// uses genOpenAIRace directly with the variant list.
 func genOpenAIRaceText(t *testing.T) (string, string) {
-	t.Helper()
-	upstream := httptest.NewServer(fixtureSet()["text"].handler())
-	t.Cleanup(upstream.Close)
-
-	h, _ := newTestHandler(t, fixtureSet()["text"].handler(), models.NewModelsConfig())
-
-	req := makeRequest(t, simpleBody("mock-model", true))
-	req.Header.Set("X-LLMProxy-Buffer-Response", "true")
-	rec := httptest.NewRecorder()
-	h.HandleChatCompletions(rec, req)
-
-	return rec.Body.String(), rec.Header().Get("Content-Type")
+	return genOpenAIRace(t, "text")
 }
 
-// genAnthropicPassthroughText runs the text fixture through the
-// Anthropic passthrough path with header-present (buffered).
-func genAnthropicPassthroughText(t *testing.T) (string, string) {
+// genAnthropicPassthrough runs the named variant through the
+// Anthropic→Anthropic passthrough path with header-present
+// (buffered). Real passthrough fixture: internal model with
+// anthropic-provider credential pointing at the upstream.
+func genAnthropicPassthrough(t *testing.T, variant string) (string, string) {
 	t.Helper()
-	upstream := httptest.NewServer(fixtureSet()["text"].handler())
+	upstream := httptest.NewServer(anthropicRawPassthroughHandler(variant))
 	t.Cleanup(upstream.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 	mgr, _ := config.NewManager()
 	modelsCfg := models.NewModelsConfig()
+	if err := modelsCfg.AddCredential(models.CredentialConfig{
+		ID:       "anthropic-passthrough-cred",
+		Provider: "anthropic",
+		APIKey:   "sk-anthropic-test",
+		BaseURL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := modelsCfg.AddModel(models.ModelConfig{
+		ID:              "claude-passthrough",
+		Name:            "claude-passthrough",
+		Enabled:         true,
+		Internal:        true,
+		InternalModel:   "claude-sonnet-4-5",
+		InternalBaseURL: upstream.URL,
+		Credentials:     models.TestRefs("anthropic-passthrough-cred"),
+	}); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
 	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
-	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
+	body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
 	})
 	req := makeLiveAnthropicRequest(t, body, true)
@@ -126,11 +132,12 @@ func genAnthropicPassthroughText(t *testing.T) (string, string) {
 	return rec.Body.String(), rec.Header().Get("Content-Type")
 }
 
-// genAnthropicExternalText runs the text fixture through the
+// genAnthropicExternal runs the named variant through the
 // Anthropic→OpenAI-wire external translation path with header-present.
-func genAnthropicExternalText(t *testing.T) (string, string) {
+func genAnthropicExternal(t *testing.T, variant string) (string, string) {
 	t.Helper()
-	upstream := httptest.NewServer(fixtureSet()["text"].handler())
+	fixture := fixtureSet()[variant]
+	upstream := httptest.NewServer(fixture.handler())
 	t.Cleanup(upstream.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
@@ -149,17 +156,13 @@ func genAnthropicExternalText(t *testing.T) (string, string) {
 	return rec.Body.String(), rec.Header().Get("Content-Type")
 }
 
-// genAnthropicInternalText runs the text fixture through the
+// genAnthropicInternal runs the named variant through the
 // handleStream direct path with NO live translator wired (buffered
 // branch). The recorder body is the SSE wire shape.
-func genAnthropicInternalText(t *testing.T) (string, string) {
+func genAnthropicInternal(t *testing.T, variant string) (string, string) {
 	t.Helper()
-	provider := &liveStreamEventProvider{events: []providers.StreamEvent{
-		{Type: "content", Content: "Hello"},
-		{Type: "content", Content: " world"},
-		{Type: "content", Content: "!"},
-		{Type: "done", FinishReason: "stop"},
-	}}
+	events := streamEventsForVariant(variant)
+	provider := &liveStreamEventProvider{events: events}
 
 	handler := NewInternalHandler(
 		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
@@ -181,10 +184,31 @@ func genAnthropicInternalText(t *testing.T) (string, string) {
 	return rw.Body.String(), rec.Header().Get("Content-Type")
 }
 
+// genOpenAIRace runs the named variant through the
+// /v1/chat/completions OpenAI race path with header-present.
+func genOpenAIRace(t *testing.T, variant string) (string, string) {
+	t.Helper()
+	fixture := fixtureSet()[variant]
+	h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
+
+	reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+	reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
+	rec := httptest.NewRecorder()
+	h.HandleChatCompletions(rec, reqHTTP)
+
+	return rec.Body.String(), rec.Header().Get("Content-Type")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Golden registry — central table mapping golden names to generator
 // functions. Adding a new path: add an entry here + a generator
 // above + a subtest in TestRealStreaming_GoldenRecorder below.
+//
+// Variant matrix per path (reviewer finding #2): text + thinking +
+// tool_call + usage everywhere; role_only + usage_first + comment_first
+// on paths 2 and 4 (OpenAI-wire upstream; role_only/usage_first/
+// comment_first don't apply to the Anthropic-wire passthrough or the
+// typed-event internal handler).
 // ─────────────────────────────────────────────────────────────────────────────
 
 type goldenGen struct {
@@ -193,15 +217,46 @@ type goldenGen struct {
 }
 
 func goldenRegistry() []goldenGen {
-	return []goldenGen{
-		{"anthropic_passthrough_text", genAnthropicPassthroughText},
-		{"anthropic_external_text", genAnthropicExternalText},
-		{"anthropic_internal_text", genAnthropicInternalText},
-		{"openai_race_text", genOpenAIRaceText},
-		// Ultimate paths 5+6 are covered by existing
-		// pkg/ultimatemodel tests; their goldens are produced
-		// in that package's own test fixtures.
+	out := []goldenGen{}
+	// Path 1 — Anthropic→Anthropic passthrough (real fixture).
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage"} {
+		variant := variant
+		out = append(out, goldenGen{
+			name: "anthropic_passthrough_" + variant,
+			gen:  func(t *testing.T) (string, string) { return genAnthropicPassthrough(t, variant) },
+		})
 	}
+	// Path 2 — Anthropic→OpenAI-wire external translation.
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
+		variant := variant
+		out = append(out, goldenGen{
+			name: "anthropic_external_" + variant,
+			gen:  func(t *testing.T) (string, string) { return genAnthropicExternal(t, variant) },
+		})
+	}
+	// Path 3 — Anthropic→OpenAI-wire internal translation
+	// (typed-event channel; role_only/usage_first/comment_first
+	// don't apply — the internal handler normalizes into typed
+	// events and re-emits OpenAI-wire SSE).
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage"} {
+		variant := variant
+		out = append(out, goldenGen{
+			name: "anthropic_internal_" + variant,
+			gen:  func(t *testing.T) (string, string) { return genAnthropicInternal(t, variant) },
+		})
+	}
+	// Path 4 — /v1/chat/completions OpenAI race path.
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
+		variant := variant
+		out = append(out, goldenGen{
+			name: "openai_race_" + variant,
+			gen:  func(t *testing.T) (string, string) { return genOpenAIRace(t, variant) },
+		})
+	}
+	// Paths 5+6 — Ultimate external/internal stream — covered by
+	// existing pkg/ultimatemodel tests; their goldens are produced
+	// in that package's own test fixtures.
+	return out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,10 +366,6 @@ func (r *eventRecorder) saw(eventType string) bool {
 	return r.hits[eventType] > 0
 }
 
-// _ = io.Copy is referenced to keep the import alive when used only in
-// skipped subtests.
-var _ = io.Copy
-
 func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 	// The recorder is wired against the handler's bus; events are
 	// published on h.bus. We run the request once per mode with a
@@ -360,16 +411,31 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 
 		// LOCKED L7: OpenAI race path publishes
 		// model_credential_selected (single source of truth at
-		// race_executor.go:124-135). Both modes should publish it
-		// for the OpenAI race path (the credential resolution is
-		// pre-stream, identical in both modes).
-		// We assert presence (not absence) here — the L7 lock is
-		// about the Anthropic path's NON-publication.
-		if !buf.saw("model_credential_selected") {
-			t.Logf("buffered: model_credential_selected not seen (may be expected if resolver skipped; the test setup uses models.NewModelsConfig fallback)")
+		// race_coordinator.go:896-918). The publish fires ONLY
+		// when the per-request `publish` callback was wired —
+		// which itself only happens when BOTH `c.eventBus != nil`
+		// AND `c.engine != nil` (line 901). The mock setup here
+		// uses `NewHandler(... nil, nil, nil, nil)` — the 5th
+		// positional arg is the credential LB engine, and we pass
+		// nil. So model_credential_selected is GUARANTEED NOT TO
+		// PUBLISH in this harness, regardless of buffered/live
+		// mode. We assert absence with an explicit reason rather
+		// than silently logging it as a "may be expected" caveat
+		// (reviewer finding #4: no silent shrugs — name the
+		// structural reason the publication cannot fire).
+		//
+		// The POSITIVE half of L7 (model_credential_selected IS
+		// published when an engine IS wired) is pinned by
+		// TestLiveRelay_MultiCredential_* in
+		// race_coordinator_credfailover_test.go — that test
+		// exercises the full engine + publish callback path and
+		// asserts W-1 / exit #4 (one event per newly-bound
+		// resolution).
+		if buf.saw("model_credential_selected") {
+			t.Errorf("buffered: model_credential_selected published — the test harness passes a nil LB engine (NewHandler 5th arg = nil); the publish callback at race_coordinator.go:901 is never wired. This is a test-fixture regression.")
 		}
-		if !live.saw("model_credential_selected") {
-			t.Logf("live: model_credential_selected not seen (same fallback caveat)")
+		if live.saw("model_credential_selected") {
+			t.Errorf("live: model_credential_selected published — same nil-engine harness caveat (race_coordinator.go:901)")
 		}
 	})
 
@@ -412,10 +478,3 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		}
 	})
 }
-
-// _ unused vars to keep imports live when subtests are skipped.
-var (
-	_ = strings.Contains
-	_ = ultimatemodel.NewHandler
-	_ = fmt.Sprintf
-)

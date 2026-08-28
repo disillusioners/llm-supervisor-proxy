@@ -12,18 +12,23 @@
 // fires mid-stream — presence asserted, completion assumptions NOT)
 // and `request_completed` (terminal — fires AFTER upstream EOF). The
 // structural assertion: client reads first byte BEFORE the upstream
-// `Done()` fires.
-//
-// Wall-clock is a SECONDARY signal only (generous 250ms budget on
-// 500ms upstream sleeps +100ms tick). No test may depend on tight
-// wall-clock windows; no test uses long sleeps (>60s test runtimes
-// unacceptable).
+// `Done()` fires. Plan-NB5 primary gate: race_winner_selected is
+// observed on the bus BEFORE upstream `[DONE]` fires.
 //
 // The 5.10 fixed rollout order is preserved in subtest ordering.
+// What each subtest asserts (reviewer finding #3c — file header must
+// match what is actually asserted):
+//   - paths 1, 2, and the PredicateVariants subtests assert the
+//     STRUCTURAL property (client first-byte BEFORE upstream done)
+//     via assertFirstByteBeforeUpstreamDone + firstDataRecorder
+//   - path 4 (OpenAI race) asserts the EVENT-ORDERING property
+//     (race_winner_selected observed on bus BEFORE upstream done)
+//     via the event-bus subscriber
+//   - paths 5 and 6 are deferred to pkg/ultimatemodel tests
+//     (same rationale as real_streaming_parity_test.go header)
 package proxy
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,13 +39,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
 )
 
 // upstreamProbe records the wall-clock time of each significant
@@ -217,42 +219,70 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 	chunk1 := mockCreateChunk("FIRST")
 	chunk2 := mockCreateChunk("SECOND")
 
-	// (1) Anthropic→Anthropic passthrough (locked L3: already
-	// real-streams; this test is structural — verifies the
-	// passthrough still meets the first-byte property).
+	// (1) Anthropic→Anthropic passthrough (real fixture per finding
+	// #1 fix). Live mode = first byte reaches the client BEFORE the
+	// upstream holds past the hold duration. Asserts the structural
+	// property (firstDataRecorder timestamps the first Write to the
+	// ResponseRecorder, blockingStreamHandler timestamps the upstream's
+	// first byte and done — assertFirstByteBeforeUpstreamDone checks
+	// clientGap < upstreamDoneGap).
 	t.Run("1_AnthropicPassthrough_FirstByteBeforeDone", func(t *testing.T) {
 		probe := &upstreamProbe{}
-		// Use real OpenAI JSON chunks (the upstream the proxy talks
-		// to is OpenAI-shaped; the proxy's incremental translator
-		// converts to Anthropic wire format).
 		upstream := httptest.NewServer(blockingStreamHandler(probe, mockCreateChunk("HELLO-FIRST"), mockCreateChunk("HELLO-SECOND"), holdDuration))
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
 		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
+		// Real passthrough fixture: internal model with
+		// anthropic-provider credential pointing at the upstream
+		// (handler_anthropic.go:401-403 dispatch gate). Without
+		// this, the path falls back to external translation and
+		// the structural assertion below would still hold (the
+		// translator is also live-streaming), but the test would
+		// no longer exercise the passthrough code path — which is
+		// what subtest 1 is supposed to cover.
 		modelsCfg := models.NewModelsConfig()
+		if err := modelsCfg.AddCredential(models.CredentialConfig{
+			ID:       "anthropic-passthrough-cred",
+			Provider: "anthropic",
+			APIKey:   "sk-anthropic-test",
+			BaseURL:  upstream.URL,
+		}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := modelsCfg.AddModel(models.ModelConfig{
+			ID:              "claude-passthrough",
+			Name:            "claude-passthrough",
+			Enabled:         true,
+			Internal:        true,
+			InternalModel:   "claude-sonnet-4-5",
+			InternalBaseURL: upstream.URL,
+			Credentials:     models.TestRefs("anthropic-passthrough-cred"),
+		}); err != nil {
+			t.Fatalf("AddModel: %v", err)
+		}
 		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
-		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
+		body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
 			{"role": "user", "content": "hi"},
 		})
 		req := makeLiveAnthropicRequest(t, body, false) // LIVE mode
-		rr := httptest.NewRecorder()
-		h.HandleAnthropicMessages(rr, req)
+		rec := newFirstDataRecorder()
+		h.HandleAnthropicMessages(rec, req)
 
-		// The translator emits Anthropic SSE; the chunk1 content
-		// ("HELLO-FIRST") should appear in the wire.
-		if !strings.Contains(rr.Body.String(), "HELLO-FIRST") {
-			t.Fatalf("passthrough live: client body missing chunk1 content; body=%q", rr.Body.String())
-		}
 		_, firstUp, done, _ := probe.snapshot()
-		if firstUp.IsZero() || done.IsZero() {
-			t.Fatalf("upstream probe incomplete (first=%v done=%v)", firstUp, done)
-		}
+		// Structural gate (reviewer finding #3b): wire the helper
+		// to assert the client first-byte arrived before upstream
+		// done. The 250ms secondary budget tolerates CI noise.
+		assertFirstByteBeforeUpstreamDone(t, "AnthropicPassthrough", rec.firstDataAt, firstUp, done, holdDuration)
 	})
 
-	// (2) Anthropic→OpenAI-wire external translation.
+	// (2) Anthropic→OpenAI-wire external translation. Same shape as
+	// path 1 but the upstream speaks OpenAI wire and the proxy's
+	// incremental translator converts to Anthropic SSE on the fly.
+	// Structural property: live mode forwards the first translated
+	// chunk BEFORE upstream done.
 	t.Run("2_AnthropicExternalTranslation_FirstByteBeforeDone", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		upstream := httptest.NewServer(blockingStreamHandler(probe, chunk1, chunk2, holdDuration))
@@ -268,52 +298,36 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 			{"role": "user", "content": "hi"},
 		})
 		req := makeLiveAnthropicRequest(t, body, false)
-		rr := httptest.NewRecorder()
-		h.HandleAnthropicMessages(rr, req)
+		rec := newFirstDataRecorder()
+		h.HandleAnthropicMessages(rec, req)
 
-		// Buffered equivalent would block on upstream-done. Live
-		// must produce Anthropic SSE content (message_start + ping)
-		// within ~150ms of upstream first byte.
-		if !strings.Contains(rr.Body.String(), "message_start") {
-			t.Errorf("live mode: missing message_start; body=%q", rr.Body.String())
-		}
 		_, firstUp, done, _ := probe.snapshot()
-		clientFirst := time.Time{} // rr.Body is final; can't timestamp client here — defer to HTTP variant below.
-		_ = firstUp
-		_ = done
-		_ = clientFirst
+		assertFirstByteBeforeUpstreamDone(t, "AnthropicExternal", rec.firstDataAt, firstUp, done, holdDuration)
 	})
 
 	// (3) Anthropic→OpenAI-wire internal translation
-	// (handleStream direct, with live translator wired).
+	// (handleStream direct, with live translator wired). The
+	// first-byte property for this surface is pinned by
+	// TestAnthropicLiveStream_ForwardBytesBeforeCompletion in
+	// handler_anthropic_live_test.go (the dedicated
+	// typed-event-channel test). This subtest is intentionally
+	// skipped (same deferral rationale as paths 5+6).
 	t.Run("3_AnthropicInternalTranslation_FirstByteBeforeDone", func(t *testing.T) {
-		provider := &liveStreamEventProvider{events: []providers.StreamEvent{
-			{Type: "content", Content: "FIRST"},
-			// Hold the rest until the test releases the channel.
-			// The provider channel closes after all events; we use
-			// a release channel to defer the rest.
-		}}
-		_ = provider // placeholder; actual exercise below
-
-		// Use a controlled provider that emits content 1 immediately,
-		// then blocks until release before emitting the rest. This
-		// exercises the first-byte property in the internal variant.
-		released := make(chan struct{})
-		slowProvider := &liveStreamEventChannelCloserProvider{events: []providers.StreamEvent{
-			{Type: "content", Content: "FIRST"},
-		}}
-		_ = slowProvider
-		_ = released
-
-		t.Skip("internal translation first-byte timing pinned by handler_anthropic_live_test.go (TestAnthropicLiveStream_ForwardBytesBeforeCompletion); see file header")
+		// DEFERRED — pinned by handler_anthropic_live_test.go
+		// TestAnthropicLiveStream_ForwardBytesBeforeCompletion
+		// (typed-event channel; the structural assertion lives in
+		// that test, which exercises the live translator directly).
+		t.Skip("path 3 pinned by handler_anthropic_live_test.go TestAnthropicLiveStream_ForwardBytesBeforeCompletion")
 	})
 
 	// (4) OpenAI race path — first byte via the HANDLER directly
 	// (race_coordinator_live_test.go TestLiveRelay_HeaderDispatch
-	// pattern). We subscribe to the event bus BEFORE running the
-	// response recorder and assert that the request_completed
-	// event arrives AND the upstream probe shows the first byte
-	// before upstream EOF.
+	// pattern). Plan-NB5 primary gate (reviewer finding #3a): the
+	// race_winner_selected event fires mid-stream in live mode, and
+	// it MUST be observed on the bus BEFORE upstream [DONE]. The
+	// event-based ordering is the structural assertion; the
+	// wall-clock client-first-byte-before-upstream-done secondary
+	// signal pins live-mode relay behavior.
 	t.Run("4_OpenAIRacePath_FirstByteBeforeDone", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		// Create the proxy with a SINGLE upstream (the one
@@ -331,8 +345,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		defer bus.Unsubscribe(ch)
 
 		// Run the request in a goroutine; collect the client's
-		// first-byte time via a firstByteRecorder wrapping the
-		// response body.
+		// first-byte time via a firstDataRecorder.
 		var clientFirstByte atomic.Value // time.Time
 		clientFirstByte.Store(time.Time{})
 		reqDone := make(chan struct{})
@@ -340,22 +353,21 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 			defer close(reqDone)
 			req := makeRequest(t, simpleBody("mock-model", true))
 			req.Header.Del("X-LLMProxy-Buffer-Response") // live mode
-			// We can't use httptest.ResponseRecorder directly
-			// here — h.HandleChatCompletions writes through to
-			// the recorder (no real network). Use a buffered
-			// recorder that timestamps the first non-empty Write.
 			rec := newFirstDataRecorder()
-			start := time.Now()
 			h.HandleChatCompletions(rec, req)
-			_ = start
 			clientFirstByte.Store(rec.firstDataAt)
 		}()
 
 		// Drain events until we see request_completed (or timeout).
-		// The race_winner_selected event fires mid-stream in live mode.
+		// The race_winner_selected event fires mid-stream in live
+		// mode — we capture the WALL-CLOCK timestamp of the event
+		// delivery so we can compare it to the upstream's done
+		// timestamp (plan-NB5 primary gate).
 		eventTimeout := 3 * time.Second
 		deadline := time.After(eventTimeout)
-		var sawRaceWinner, sawRequestCompleted bool
+		var sawRaceWinner bool
+		var raceWinnerAt time.Time
+		var sawRequestCompleted bool
 	drain:
 		for {
 			select {
@@ -363,6 +375,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 				switch evt.Type {
 				case "race_winner_selected":
 					sawRaceWinner = true
+					raceWinnerAt = time.Now()
 				case "request_completed":
 					sawRequestCompleted = true
 					break drain
@@ -373,30 +386,39 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}
 		<-reqDone
 
-		_, firstUpstream, done, _ := probe.snapshot()
+		_, firstUpstream, upstreamDone, _ := probe.snapshot()
 		clientFB, _ := clientFirstByte.Load().(time.Time)
 
-		// EVENT-BASED assertion: request_completed fires AFTER
-		// upstream EOF. Live-mode first-byte property: client
-		// first byte arrives BEFORE upstream done.
-		if !sawRequestCompleted {
-			t.Errorf("live mode: never saw request_completed on event bus")
-		}
+		// Secondary wall-clock signal: client first byte arrives
+		// before upstream done. Live mode delivers per-chunk;
+		// buffered mode would not write anything until upstream
+		// done (~holdDuration later).
 		if firstUpstream.IsZero() {
 			t.Fatalf("upstream never recorded first byte (test fixture error)")
 		}
-		// Wall-clock + structural assertion: client received its
-		// first byte BEFORE upstream finished. Buffered mode would
-		// not write anything to the client until upstream done
-		// (~holdDuration later).
-		if done.IsZero() {
+		if upstreamDone.IsZero() {
 			t.Fatalf("upstream never recorded done (test fixture error)")
 		}
-		if !clientFB.IsZero() && clientFB.After(done) {
-			t.Errorf("OpenAI live: client first byte at %v arrived AFTER upstream done at %v — buffered mode?",
-				clientFB, done)
+		if !sawRequestCompleted {
+			t.Errorf("live mode: never saw request_completed on event bus")
 		}
-		_ = sawRaceWinner
+		// Plan-NB5 primary gate (reviewer finding #3a — wire the
+		// ordering assertion that was previously discarded):
+		// race_winner_selected MUST be observed on the bus BEFORE
+		// upstream [DONE]. The event fires mid-stream in live
+		// mode; if upstreamDone fired first the live-mode winner
+		// gate would be silently broken (winner would have been
+		// promoted by IsCompleted instead of by first-byte).
+		if sawRaceWinner && !raceWinnerAt.IsZero() && !upstreamDone.IsZero() && raceWinnerAt.After(upstreamDone) {
+			t.Errorf("OpenAI live: race_winner_selected at %v arrived AFTER upstream done at %v — winner gate mis-wired (should be first-byte, not completion)",
+				raceWinnerAt, upstreamDone)
+		}
+		// The live-mode first-byte property (clientFB < upstreamDone)
+		// is the structural mirror of the same invariant.
+		if !clientFB.IsZero() && clientFB.After(upstreamDone) {
+			t.Errorf("OpenAI live: client first byte at %v arrived AFTER upstream done at %v — buffered mode?",
+				clientFB, upstreamDone)
+		}
 	})
 
 	// (5) Ultimate external — pinned by existing
@@ -423,6 +445,18 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 // upstream emitting its first chunk.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// TestRealStreaming_FirstByteTiming_PredicateVariants — race-path
+// winner-selected-at-first-byte variants. The plan's §1.1 R1-variant
+// calls for role-only-first, thinking-first, and usage-first coverage.
+// These are EVENT-BASED structural assertions: assert that the first
+// byte reaches the client within one tick (~150ms) of the upstream
+// emitting its first chunk AND the upstream hasn't completed yet.
+//
+// Reviewer finding #7 — wasted fixture cleanup: each subtest used to
+// construct TWO httptest.NewServer instances (one bound to the probe,
+// one passed to newTestHandler), but only the second was ever hit.
+// The duplicate server construction is removed below — the proxy's
+// upstream is the server holding the probe (blockingStreamHandler).
 func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 	holdDuration := 500 * time.Millisecond
 
@@ -430,26 +464,18 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		probe := &upstreamProbe{}
 		// Role-only first chunk (no content), then content.
 		roleOnly := `{"choices":[{"index":0,"delta":{"role":"assistant"}}]}`
+		// The proxy's upstream IS the probe-holding server
+		// (single server — reviewer's wasted-fixture cleanup).
 		upstream := httptest.NewServer(blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration))
 		t.Cleanup(upstream.Close)
-
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
-		rec := httptest.NewRecorder()
+		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
 
 		_, firstUpstream, done, _ := probe.snapshot()
-		// Client body is final — we can only assert the proxy DID
-		// emit something containing the role marker. The structural
-		// assertion (client-first-byte < upstream-done) is via the
-		// upstream probe correlation.
-		if !strings.Contains(rec.Body.String(), `"role":"assistant"`) {
-			t.Errorf("live mode: missing role in body; body=%q", rec.Body.String())
-		}
-		if firstUpstream.IsZero() || done.IsZero() {
-			t.Fatalf("upstream probe incomplete (first=%v done=%v)", firstUpstream, done)
-		}
+		assertFirstByteBeforeUpstreamDone(t, "RoleOnlyFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 
 	t.Run("ThinkingFirst", func(t *testing.T) {
@@ -457,16 +483,14 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		thinkFirst := mockCreateReasoningChunk("thinking now")
 		upstream := httptest.NewServer(blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration))
 		t.Cleanup(upstream.Close)
-
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
-		rec := httptest.NewRecorder()
+		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
 
-		if !strings.Contains(rec.Body.String(), "thinking now") {
-			t.Errorf("live mode: missing thinking content; body=%q", rec.Body.String())
-		}
+		_, firstUpstream, done, _ := probe.snapshot()
+		assertFirstByteBeforeUpstreamDone(t, "ThinkingFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 
 	t.Run("UsageFirst", func(t *testing.T) {
@@ -474,17 +498,14 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		usageFirst := mockCreateUsageChunk(1, 1)
 		upstream := httptest.NewServer(blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration))
 		t.Cleanup(upstream.Close)
-
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration), models.NewModelsConfig())
 		req := makeRequest(t, simpleBody("mock-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
-		rec := httptest.NewRecorder()
+		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
 
-		// Live mode: first chunk (usage-only) is forwarded.
-		if !strings.Contains(rec.Body.String(), `"prompt_tokens":1`) {
-			t.Errorf("live mode: missing usage in body; body=%q", rec.Body.String())
-		}
+		_, firstUpstream, done, _ := probe.snapshot()
+		assertFirstByteBeforeUpstreamDone(t, "UsageFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 }
 
@@ -522,12 +543,3 @@ func TestRealStreaming_FirstByteTiming_NonStreamUnaffected(t *testing.T) {
 	}
 	// No deadline error, no in-band envelope — non-stream stays buffered.
 }
-
-// reference imports to keep the file consistent with the rest of the
-// test suite; some symbols are used only in skipped subtests.
-var (
-	_ = bufferstore.New
-	_ = ultimatemodel.NewHandler
-	_ = context.Background
-	_ = mockCreateToolCallChunk
-)

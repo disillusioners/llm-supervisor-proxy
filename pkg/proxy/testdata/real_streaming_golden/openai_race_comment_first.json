@@ -1,0 +1,4 @@
+{
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"first-data-after-preamble\"}}]}\n\ndata: [DONE]\n",
+  "content_type": "text/event-stream"
+}

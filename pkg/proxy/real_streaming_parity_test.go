@@ -10,26 +10,42 @@
 // subtest ordering inside TestRealStreaming_ParityMatrix_AllPaths —
 // a failure in path N is bisected against the last-green path N-1:
 //
-//	(1) Anthropic→Anthropic passthrough (handler_anthropic.go:1225,
-//	    locked L3 — verify untouched)
+//	(1) Anthropic→Anthropic passthrough (handler_anthropic.go:1679
+//	    handlePassthroughStreamResponse, dispatch at :1225) — real
+//	    fixture: internal model with anthropic-provider credential,
+//	    upstream speaks Anthropic SSE; golden differs from external
+//	    because the wire is forwarded byte-identical rather than
+//	    translated
 //	(2) Anthropic→OpenAI-wire external translation (handler_anthropic.go:819/:851)
 //	(3) Anthropic→OpenAI-wire internal translation
 //	    (doAnthropicInternalRequest at handler_anthropic.go:600-685)
 //	(4) /v1/chat/completions OpenAI race path (handler.go race-coord+relay)
 //	(5) Ultimate external stream — COVERED by
 //	    pkg/ultimatemodel/handler_external_test.go TestUltimate_HeaderDispatch
-//	    (existing TestLiveRelay_*_Battery pins buffered==live parity; direct
-//	    ultimate.Handler calls are package-private and reached only via the
-//	    proxy's full HandleChatCompletions pipeline which requires the
-//	    ultimate-trigger schedule to fire)
+//	    (ExecuteOptions-level caveat: those tests pin the buffered vs.
+//	    live wire bytes inside ultimatemodel.Handler; the proxy-package
+//	    boundary can't reach the private streamResponse /
+//	    handleInternalStream methods directly)
 //	(6) Ultimate internal stream — COVERED by
 //	    pkg/ultimatemodel/handler_internal_test.go TestUltimate_HeaderDispatch
 //	    (same reason as path 5; TestUltimateCapture_LiveMode_IdenticalToBuffered
 //	    pins the C1 estimator parity)
 //
+// Variant matrix (plan task 5.2 acceptance): each of paths 1-4 is
+// exercised against the canonical fixtures in fixtureSet():
+// text (Hello world!), thinking (content + reasoning_content),
+// tool_call (OpenAI-wire tool delta), usage (content + trailing usage),
+// role_only (role-only first chunk, provider-shaped), usage_first
+// (usage-only first chunk, provider-shaped), and comment_first (the
+// SSE `: connected\n\n` preamble + first data — locks in the live-mode
+// preamble-write timing invariant for path 1). Paths 5-6 are pinned
+// by ultimatemodel-package tests (the fixtureSet() lives in proxy
+// and is not used by ultimate paths).
+//
 // Determinism rules (plan Phase 5):
 //   - Strip volatile fields (timestamps, request IDs) BEFORE byte
-//     comparison.
+//     comparison. Anchored regex (no global comma rewrites — see
+//     volStripPatterns doc for the rationale; finding #6 fix).
 //   - Goldens are committed once, then updated manually via the
 //     -update flag pattern (TestRealStreaming_GoldenRecorder).
 //   - No wall-clock gating on the parity assertions — every path is
@@ -50,14 +66,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,10 +86,17 @@ import (
 //   - the SSE preamble `: connected\n\n` (timing of the first Write call)
 //   - heartbeat `: keepalive\n\n` lines (the 15s SSE comment)
 //   - `[DONE]` markers (no semantic content for parity)
+//
+// Anchored stripping (reviewer finding #6): each id/created pattern
+// matches an OPTIONAL trailing comma so we never have to do a global
+// dangling-comma rewrite (which would corrupt content fields with
+// legitimate double commas such as `"content":"a,,b"`). The previous
+// implementation rewrote `{,`→`{` and `,,`→`,` globally and would
+// false-pass any content-level double-comma diff.
 var volStripPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`"id":"chatcmpl-[A-Za-z0-9_-]+"`),
-	regexp.MustCompile(`"id":"msg_[A-Za-z0-9_-]+"`),
-	regexp.MustCompile(`"created":\d+`),
+	regexp.MustCompile(`"id":"chatcmpl-[A-Za-z0-9_-]+",?`),
+	regexp.MustCompile(`"id":"msg_[A-Za-z0-9_-]+",?`),
+	regexp.MustCompile(`"created":\d+,?`),
 	regexp.MustCompile(`(?m)^: connected\n\n`),
 	regexp.MustCompile(`(?m)^: keepalive\n\n`),
 	regexp.MustCompile(`(?m)^data: \[DONE\]\n\n`),
@@ -88,11 +109,6 @@ func volStrip(s string) string {
 	for _, re := range volStripPatterns {
 		s = re.ReplaceAllString(s, "")
 	}
-	// Post-process dangling commas left after stripping id/created.
-	// Empty leading object key: "{,"  →  "{"
-	s = strings.ReplaceAll(s, "{,", "{")
-	// Empty middle key: ",," → ","
-	s = strings.ReplaceAll(s, ",,", ",")
 	return s
 }
 
@@ -186,12 +202,17 @@ func (f *streamFixture) handler() http.HandlerFunc {
 
 // fixtureSet returns the canonical fixtures for the matrix:
 //
-//	"text"      — 3 content chunks (the basic parity row)
-//	"thinking"  — content + reasoning_content (the standard thinking variant)
-//	"tool_call" — content + a tool_call delta (OpenAI-wire tool-call shape)
-//	"usage"     — content + a usage-only trailing chunk
-//	"role_only" — role-only first chunk (provider-shaped first)
-//	"usage_first" — usage-only first chunk (provider-shaped first)
+//	"text"          — 3 content chunks (the basic parity row)
+//	"thinking"      — content + reasoning_content (the standard thinking variant)
+//	"tool_call"     — content + a tool_call delta (OpenAI-wire tool-call shape)
+//	"usage"         — content + a usage-only trailing chunk
+//	"role_only"     — role-only first chunk (provider-shaped first)
+//	"usage_first"   — usage-only first chunk (provider-shaped first)
+//	"comment_first" — SSE preamble comment + first data (locks in the
+//	                   live-mode preamble-write timing invariant; the
+//	                   upstream emits `: connected\n\n` BEFORE the first
+//	                   data frame, mirroring what the proxy does on the
+//	                   client side at handler.go:882-889)
 func fixtureSet() map[string]*streamFixture {
 	return map[string]*streamFixture{
 		"text": {chunks: []string{
@@ -219,6 +240,106 @@ func fixtureSet() map[string]*streamFixture {
 			mockCreateUsageChunk(2, 4),
 			mockCreateChunk("late content"),
 		}},
+		"comment_first": {chunks: []string{
+			mockCreateChunk("first-data-after-preamble"),
+		}},
+	}
+}
+
+// anthropicSSERaw returns an Anthropic-wire SSE chunk sequence for the
+// raw-passthrough fixture (path 1): message_start → ping →
+// content_block_start → content_block_delta → content_block_stop →
+// message_delta → message_stop. Used by subtest 1 in
+// TestRealStreaming_ParityMatrix_AllPaths to drive the upstream as an
+// Anthropic-speaking server; the proxy pipes the bytes through
+// handlePassthroughStreamResponse (handler_anthropic.go:1679) without
+// translation.
+func anthropicSSERaw(variant string) []string {
+	switch variant {
+	case "text":
+		return []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_passthrough\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-internal\",\"stop_reason\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+			"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"!\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}
+	case "thinking":
+		return []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_passthrough\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-internal\",\"stop_reason\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+			"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" harder\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}
+	case "tool_call":
+		return []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_passthrough\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-internal\",\"stop_reason\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+			"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Looking up...\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_test\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"SF\\\"}\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}
+	case "usage":
+		return []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_passthrough\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-internal\",\"stop_reason\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+			"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":20}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}
+	case "role_only", "usage_first":
+		// Provider-shaped first chunks don't apply to Anthropic-wire
+		// streams (the Anthropic server emits message_start which is
+		// not provider-shaped). The raw passthrough falls back to the
+		// text variant for these labels.
+		return anthropicSSERaw("text")
+	case "comment_first":
+		// The proxy writes the `: connected\n\n` preamble itself
+		// (handler.go:882-889); for the upstream-emitted version,
+		// the Anthropic server doesn't emit an SSE comment before the
+		// first event — fall back to text.
+		return anthropicSSERaw("text")
+	default:
+		return anthropicSSERaw("text")
+	}
+}
+
+// anthropicRawPassthroughHandler returns an httptest handler that
+// emits the Anthropic-wire SSE bytes verbatim (no JSON wrapping; the
+// lines ARE the wire bytes). Used by subtest 1 in
+// TestRealStreaming_ParityMatrix_AllPaths to drive
+// handlePassthroughStreamResponse.
+func anthropicRawPassthroughHandler(variant string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // arm ctx-close watcher
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range anthropicSSERaw(variant) {
+			fmt.Fprint(w, line)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 	}
 }
 
@@ -265,216 +386,6 @@ func mockCreateUsageChunk(prompt, completion int) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Local proxy-package mocks for the ultimate paths (5 and 6).
-//
-// The ultimate package has its own mockConfigManager/mockModelsConfig
-// types in its handler_test.go file, but those are package-private to
-// pkg/ultimatemodel — we redefine minimal stubs here for the proxy
-// parity harness. The implementations below only cover the methods
-// exercised by the parity assertions.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// parityMockConfigManager implements enough of config.ManagerInterface
-// for ultimatemodel.NewHandler to consume. The parity tests never
-// exercise race / fallback / streaming-deadline machinery — those
-// paths are pinned by the TestLiveRelay_* battery.
-type parityMockConfigManager struct {
-	cfg config.Config
-}
-
-func (m *parityMockConfigManager) Get() config.Config { return m.cfg }
-
-func (m *parityMockConfigManager) GetUpstreamURL() string { return m.cfg.UpstreamURL }
-func (m *parityMockConfigManager) GetPort() int           { return m.cfg.Port }
-func (m *parityMockConfigManager) GetIdleTimeout() time.Duration {
-	return time.Duration(m.cfg.IdleTimeout)
-}
-func (m *parityMockConfigManager) GetStreamDeadline() time.Duration {
-	return time.Duration(m.cfg.StreamDeadline)
-}
-func (m *parityMockConfigManager) GetMaxGenerationTime() time.Duration {
-	return time.Duration(m.cfg.MaxGenerationTime)
-}
-func (m *parityMockConfigManager) GetMaxStreamBufferSize() int { return m.cfg.MaxStreamBufferSize }
-func (m *parityMockConfigManager) GetBufferStorageDir() string  { return m.cfg.BufferStorageDir }
-func (m *parityMockConfigManager) GetBufferMaxStorageMB() int  { return m.cfg.BufferMaxStorageMB }
-func (m *parityMockConfigManager) GetLoopDetection() config.LoopDetectionConfig {
-	return m.cfg.LoopDetection
-}
-func (m *parityMockConfigManager) GetUltimateModel() config.UltimateModelConfig {
-	return m.cfg.UltimateModel
-}
-func (m *parityMockConfigManager) GetRaceRetryEnabled() bool    { return m.cfg.RaceRetryEnabled }
-func (m *parityMockConfigManager) GetRaceParallelOnIdle() bool { return m.cfg.RaceParallelOnIdle }
-func (m *parityMockConfigManager) GetRaceMaxParallel() int      { return m.cfg.RaceMaxParallel }
-func (m *parityMockConfigManager) GetRaceMaxBufferBytes() int   { return m.cfg.RaceMaxBufferBytes }
-func (m *parityMockConfigManager) GetToolCallBufferDisabled() bool {
-	return m.cfg.ToolCallBufferDisabled
-}
-func (m *parityMockConfigManager) GetToolCallBufferMaxSize() int64 {
-	return m.cfg.ToolCallBufferMaxSize
-}
-func (m *parityMockConfigManager) GetLogRawUpstreamResponse() bool { return m.cfg.LogRawUpstreamResponse }
-func (m *parityMockConfigManager) GetLogRawUpstreamOnError() bool  { return m.cfg.LogRawUpstreamOnError }
-func (m *parityMockConfigManager) GetLogRawUpstreamMaxKB() int     { return m.cfg.LogRawUpstreamMaxKB }
-func (m *parityMockConfigManager) Save(config.Config) (*config.SaveResult, error) {
-	return &config.SaveResult{}, nil
-}
-func (m *parityMockConfigManager) IsReadOnly() bool { return false }
-
-// parityMockModelsConfig is a minimal implementation of
-// models.ModelsConfigInterface for the ultimate parity paths. It
-// supports exactly one enabled model with one internal credential.
-type parityMockModelsConfig struct {
-	models      map[string]*models.ModelConfig
-	credentials map[string]*models.CredentialConfig
-}
-
-func newParityMockModelsConfig() *parityMockModelsConfig {
-	return &parityMockModelsConfig{
-		models:      make(map[string]*models.ModelConfig),
-		credentials: make(map[string]*models.CredentialConfig),
-	}
-}
-
-func (m *parityMockModelsConfig) AddModel(mc models.ModelConfig) error {
-	m.models[mc.ID] = &mc
-	return nil
-}
-
-func (m *parityMockModelsConfig) GetModel(modelID string) *models.ModelConfig {
-	return m.models[modelID]
-}
-func (m *parityMockModelsConfig) GetModelByName(name string) *models.ModelConfig {
-	for _, mc := range m.models {
-		if mc.Name == name {
-			return mc
-		}
-	}
-	return nil
-}
-func (m *parityMockModelsConfig) GetModels() []models.ModelConfig {
-	out := make([]models.ModelConfig, 0, len(m.models))
-	for _, mc := range m.models {
-		out = append(out, *mc)
-	}
-	return out
-}
-func (m *parityMockModelsConfig) GetEnabledModels() []models.ModelConfig {
-	out := make([]models.ModelConfig, 0, len(m.models))
-	for _, mc := range m.models {
-		if mc.Enabled {
-			out = append(out, *mc)
-		}
-	}
-	return out
-}
-func (m *parityMockModelsConfig) GetTruncateParams(string) []string       { return nil }
-func (m *parityMockModelsConfig) GetFallbackChain(string) []string        { return nil }
-func (m *parityMockModelsConfig) AddModelToConfig(models.ModelConfig) error {
-	return nil
-}
-func (m *parityMockModelsConfig) UpdateModel(string, models.ModelConfig) error { return nil }
-func (m *parityMockModelsConfig) RemoveModel(string) error                    { return nil }
-func (m *parityMockModelsConfig) Save() error                                 { return nil }
-func (m *parityMockModelsConfig) Validate() error                             { return nil }
-func (m *parityMockModelsConfig) GetCredential(id string) *models.CredentialConfig {
-	return m.credentials[id]
-}
-func (m *parityMockModelsConfig) GetCredentials() []models.CredentialConfig {
-	out := make([]models.CredentialConfig, 0, len(m.credentials))
-	for _, c := range m.credentials {
-		out = append(out, *c)
-	}
-	return out
-}
-func (m *parityMockModelsConfig) AddCredential(c models.CredentialConfig) error {
-	m.credentials[c.ID] = &c
-	return nil
-}
-func (m *parityMockModelsConfig) UpdateCredential(string, models.CredentialConfig) error {
-	return nil
-}
-func (m *parityMockModelsConfig) RemoveCredential(string) error { return nil }
-
-// ResolveInternalConfig is the single resolver method the ultimate
-// path exercises; the others return zero values which is fine for
-// the parity harness (no race / fallback / LB at this layer).
-func (m *parityMockModelsConfig) ResolveInternalConfig(modelID string) (string, string, string, string, bool) {
-	mc, ok := m.models[modelID]
-	if !ok || !mc.Internal {
-		return "", "", "", "", false
-	}
-	if len(mc.Credentials) == 0 {
-		return "", "", "", "", false
-	}
-	credID := mc.Credentials[0].CredentialID
-	cred, ok := m.credentials[credID]
-	if !ok {
-		return "", "", "", "", false
-	}
-	return cred.Provider, cred.APIKey, cred.BaseURL, mc.InternalModel, true
-}
-
-func (m *parityMockModelsConfig) ResolveInternalConfigWithAffinity(modelID, _ string) (models.ResolvedCredential, bool) {
-	provider, apiKey, baseURL, internalModel, ok := m.ResolveInternalConfig(modelID)
-	if !ok {
-		return models.ResolvedCredential{}, false
-	}
-	mc := m.GetModel(modelID)
-	primaryID := ""
-	if mc != nil && len(mc.Credentials) > 0 {
-		primaryID = mc.Credentials[0].CredentialID
-	}
-	return models.ResolvedCredential{
-		Provider:      provider,
-		APIKey:        apiKey,
-		BaseURL:       baseURL,
-		InternalModel: internalModel,
-		CredentialID:  primaryID,
-		NewlyBound:    false,
-	}, true
-}
-
-// newParityUltimateHandler wires up a minimal ultimatemodel.Handler for
-// the parity harness.
-func newParityUltimateHandler(t *testing.T, upstreamURL string, internal bool) (*ultimatemodel.Handler, *parityMockModelsConfig) {
-	t.Helper()
-	mgr := &parityMockConfigManager{
-		cfg: config.Config{
-			UpstreamURL:       upstreamURL,
-			Port:              4321,
-			IdleTimeout:       config.Duration(60 * time.Second),
-			StreamDeadline:    config.Duration(110 * time.Second),
-			MaxGenerationTime: config.Duration(300 * time.Second),
-			UltimateModel: config.UltimateModelConfig{
-				ModelID: "ultimate-model",
-				MaxHash: 100,
-			},
-		},
-	}
-	modelsCfg := newParityMockModelsConfig()
-	mc := models.ModelConfig{
-		ID:          "ultimate-model",
-		Name:        "ultimate-model",
-		Enabled:     true,
-		Internal:    internal,
-		Credentials: models.TestRefs("cred-1"),
-	}
-	if internal {
-		mc.InternalModel = "gpt-4-internal"
-		modelsCfg.AddCredential(models.CredentialConfig{
-			ID: "cred-1", Provider: "openai", APIKey: "sk-test", BaseURL: upstreamURL,
-		})
-	}
-	if err := modelsCfg.AddModel(mc); err != nil {
-		t.Fatalf("AddModel: %v", err)
-	}
-	h := ultimatemodel.NewHandler(mgr, modelsCfg, events.NewBus(), nil)
-	return h, modelsCfg
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // TEST 1 — Parity matrix over the 5.10 fixed rollout order.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -486,62 +397,109 @@ func newParityUltimateHandler(t *testing.T, upstreamURL string, internal bool) (
 func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 	fixtures := fixtureSet()
 
-	// (1) Anthropic→Anthropic passthrough — locked L3: must already
-	// pass without ANY real-streaming-default change. The handler is
-	// already live, so its "buffered" mode = current behavior
-	// unchanged. Golden captures the SSE wire under header-present.
-	t.Run("1_AnthropicPassthrough_HeaderPresent_ByteIdentical", func(t *testing.T) {
-		fixture := fixtures["text"]
-		upstream := httptest.NewServer(fixture.handler())
-		t.Cleanup(upstream.Close)
+	// (1) Anthropic→Anthropic passthrough — REAL fixture (reviewer
+	// finding #1 fix): internal model whose credential provider is
+	// "anthropic", credential's BaseURL points at an upstream that
+	// speaks Anthropic SSE. handlePassthroughStreamResponse
+	// (handler_anthropic.go:1679, dispatch at :1225 / :401-403) pipes
+	// the upstream bytes through byte-for-byte. The golden is the
+	// upstream's wire shape MINUS the volatile id field; the
+	// external-translation golden (subtest 2) differs because the
+	// translator concatenates deltas into a single content_block_delta
+	// event while the raw passthrough preserves each upstream delta.
+	//
+	// Variant matrix (reviewer finding #2 fix): paths 1-4 are each
+	// exercised against text/thinking/tool_call/usage variants where
+	// applicable. role_only/usage_first/comment_first are OpenAI-wire
+	// provider-shaped first chunks; they apply to paths 2 and 4
+	// (OpenAI upstream), not to path 1 (Anthropic upstream) or path 3
+	// (typed-event internal handler).
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage"} {
+		variant := variant
+		t.Run("1_AnthropicPassthrough_"+variant+"_HeaderPresent", func(t *testing.T) {
+			upstream := httptest.NewServer(anthropicRawPassthroughHandler(variant))
+			t.Cleanup(upstream.Close)
 
-		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-		mgr, err := config.NewManager()
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-		modelsCfg := models.NewModelsConfig()
-		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+			t.Setenv("APPLY_ENV_OVERRIDES", "true")
+			t.Setenv("UPSTREAM_URL", upstream.URL)
+			mgr, err := config.NewManager()
+			if err != nil {
+				t.Fatalf("new manager: %v", err)
+			}
 
-		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			// Wire an internal model whose single credential has
+			// Provider="anthropic" — this is the gate that selects the
+			// passthrough branch at attemptAnthropicModel
+			// (handler_anthropic.go:401-403). The credential's BaseURL
+			// overrides the default UPSTREAM_URL.
+			modelsCfg := models.NewModelsConfig()
+			if err := modelsCfg.AddCredential(models.CredentialConfig{
+				ID:       "anthropic-passthrough-cred",
+				Provider: "anthropic",
+				APIKey:   "sk-anthropic-test",
+				BaseURL:  upstream.URL,
+			}); err != nil {
+				t.Fatalf("AddCredential: %v", err)
+			}
+			if err := modelsCfg.AddModel(models.ModelConfig{
+				ID:              "claude-passthrough",
+				Name:            "claude-passthrough",
+				Enabled:         true,
+				Internal:        true,
+				InternalModel:   "claude-sonnet-4-5",
+				InternalBaseURL: upstream.URL,
+				Credentials:     models.TestRefs("anthropic-passthrough-cred"),
+			}); err != nil {
+				t.Fatalf("AddModel: %v", err)
+			}
+
+			h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+
+			body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
+				{"role": "user", "content": "hi"},
+			})
+			req := makeLiveAnthropicRequest(t, body, true)
+			rr := httptest.NewRecorder()
+			h.HandleAnthropicMessages(rr, req)
+
+			golden, goldenCT := readGolden(t, "anthropic_passthrough_"+variant)
+			assertParity(t, "AnthropicPassthrough", variant, rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
 		})
-		req := makeLiveAnthropicRequest(t, body, true)
-		rr := httptest.NewRecorder()
-		h.HandleAnthropicMessages(rr, req)
-
-		golden, goldenCT := readGolden(t, "anthropic_passthrough_text")
-		assertParity(t, "AnthropicPassthrough", "text", rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
-	})
+	}
 
 	// (2) Anthropic→OpenAI-wire external translation
 	// (handler_anthropic.go:819/:851). Header-present = the
 	// TranslateBufferedStream path, byte-identical to today.
-	t.Run("2_AnthropicExternalTranslation_HeaderPresent_ByteIdentical", func(t *testing.T) {
-		fixture := fixtures["text"]
-		upstream := httptest.NewServer(fixture.handler())
-		t.Cleanup(upstream.Close)
+	//
+	// Variant matrix: text + thinking + tool_call + usage + role_only +
+	// usage_first + comment_first (all variants in fixtureSet()).
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
+		variant := variant
+		t.Run("2_AnthropicExternalTranslation_"+variant+"_HeaderPresent", func(t *testing.T) {
+			fixture := fixtures[variant]
+			upstream := httptest.NewServer(fixture.handler())
+			t.Cleanup(upstream.Close)
 
-		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-		mgr, err := config.NewManager()
-		if err != nil {
-			t.Fatalf("new manager: %v", err)
-		}
-		modelsCfg := models.NewModelsConfig()
-		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+			t.Setenv("APPLY_ENV_OVERRIDES", "true")
+			t.Setenv("UPSTREAM_URL", upstream.URL)
+			mgr, err := config.NewManager()
+			if err != nil {
+				t.Fatalf("new manager: %v", err)
+			}
+			modelsCfg := models.NewModelsConfig()
+			h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
-		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
-			{"role": "user", "content": "hi"},
+			body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
+				{"role": "user", "content": "hi"},
+			})
+			req := makeLiveAnthropicRequest(t, body, true)
+			rr := httptest.NewRecorder()
+			h.HandleAnthropicMessages(rr, req)
+
+			golden, goldenCT := readGolden(t, "anthropic_external_"+variant)
+			assertParity(t, "AnthropicExternal", variant, rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
 		})
-		req := makeLiveAnthropicRequest(t, body, true)
-		rr := httptest.NewRecorder()
-		h.HandleAnthropicMessages(rr, req)
-
-		golden, goldenCT := readGolden(t, "anthropic_external_text")
-		assertParity(t, "AnthropicExternal", "text", rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
-	})
+	}
 
 	// (3) Anthropic→OpenAI-wire internal translation
 	// (doAnthropicInternalRequest at handler_anthropic.go:600-685).
@@ -549,56 +507,68 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 	// live translator NOT installed; the recorder captures raw
 	// OpenAI-wire bytes which `TranslateBufferedStream` consumes
 	// downstream. Golden captures the recorder's content sink.
-	t.Run("3_AnthropicInternalTranslation_HeaderPresent_ByteIdentical", func(t *testing.T) {
-		provider := &liveStreamEventProvider{events: []providers.StreamEvent{
-			{Type: "content", Content: "Hello"},
-			{Type: "content", Content: " world"},
-			{Type: "content", Content: "!"},
-			{Type: "done", FinishReason: "stop"},
-		}}
+	//
+	// Variant matrix: text + thinking + tool_call + usage. role_only /
+	// usage_first / comment_first don't apply (the internal handler
+	// uses typed events, not raw OpenAI chunks); the upstream's
+	// role-only / usage-first chunks map to typed events via the
+	// normalizer, which the golden for the text variant already
+	// covers.
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage"} {
+		variant := variant
+		t.Run("3_AnthropicInternalTranslation_"+variant+"_HeaderPresent", func(t *testing.T) {
+			events := streamEventsForVariant(variant)
+			provider := &liveStreamEventProvider{events: events}
 
-		handler := NewInternalHandler(
-			&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
-			&mockModelsConfig{},
-		)
-		// Buffered mode: NO live translator wired — `handleStream`
-		// writes raw OpenAI SSE chunks to w (the recorder) per the
-		// buffered branch at internal_handler.go:450-469.
+			handler := NewInternalHandler(
+				&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+				&mockModelsConfig{},
+			)
+			// Buffered mode: NO live translator wired — `handleStream`
+			// writes raw OpenAI SSE chunks to w (the recorder) per the
+			// buffered branch at internal_handler.go:450-469.
 
-		rec := httptest.NewRecorder()
-		rec.Body = new(bytes.Buffer)
-		rw := &flushingResponseRecorder{ResponseRecorder: rec}
+			rec := httptest.NewRecorder()
+			rec.Body = new(bytes.Buffer)
+			rw := &flushingResponseRecorder{ResponseRecorder: rec}
 
-		req := &providers.ChatCompletionRequest{
-			Model:    "test-model",
-			Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
-			Stream:   true,
-		}
-		if err := handler.handleStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
-			t.Fatalf("handleStream (buffered): %v", err)
-		}
+			req := &providers.ChatCompletionRequest{
+				Model:    "test-model",
+				Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+				Stream:   true,
+			}
+			if err := handler.handleStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
+				t.Fatalf("handleStream (buffered): %v", err)
+			}
 
-		golden, _ := readGolden(t, "anthropic_internal_text")
-		// Buffered-mode recorder body is the SSE wire shape; we strip
-		// volatile fields and compare to the golden.
-		assertParity(t, "AnthropicInternal", "text", rw.Body.String(), golden, "", "")
-	})
+			golden, _ := readGolden(t, "anthropic_internal_"+variant)
+			// Buffered-mode recorder body is the SSE wire shape; we strip
+			// volatile fields and compare to the golden.
+			assertParity(t, "AnthropicInternal", variant, rw.Body.String(), golden, "", "")
+		})
+	}
 
 	// (4) /v1/chat/completions OpenAI race path — header-present
 	// (buffered) ⇒ coordinator runs with IsCompleted gate; wire bytes
 	// match pre-feature behavior.
-	t.Run("4_OpenAIRacePath_HeaderPresent_ByteIdentical", func(t *testing.T) {
-		fixture := fixtures["text"]
-		h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
+	//
+	// Variant matrix: text + thinking + tool_call + usage + role_only +
+	// usage_first + comment_first.
+	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
+		variant := variant
+		t.Run("4_OpenAIRacePath_"+variant+"_HeaderPresent", func(t *testing.T) {
+			fixture := fixtures[variant]
+			h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
-		reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
-		rec := httptest.NewRecorder()
-		h.HandleChatCompletions(rec, reqHTTP)
+			reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+			reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
+			rec := httptest.NewRecorder()
+			h.HandleChatCompletions(rec, reqHTTP)
 
-		golden, goldenCT := readGolden(t, "openai_race_text")
-		assertParity(t, "OpenAIRace", "text", rec.Body.String(), golden, goldenCT, rec.Header().Get("Content-Type"))
-	})
+			golden, goldenCT := readGolden(t, "openai_race_"+variant)
+			assertParity(t, "OpenAIRace", variant, rec.Body.String(), golden, goldenCT, rec.Header().Get("Content-Type"))
+		})
+	}
 
 	// (5)+(6) Ultimate external/internal stream — DEFERRED to existing
 	// pkg/ultimatemodel tests. The ultimate Handler's streamResponse +
@@ -608,23 +578,72 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 	// handler_internal_test.go) already assert buffered == live wire
 	// bytes (transitively pinning buffered == pre-feature). The
 	// TestUltimateCapture_LiveMode_IdenticalToBuffered test pins C1
-	// estimator parity for both ultimate paths. Subtests below
-	// re-verify those invariants with a focused minimal harness to
-	// keep them green at this commit.
-	t.Run("5_UltimateExternal_HeaderPresent_StableAcrossRuns", func(t *testing.T) {
-		// The wire bytes MUST be deterministic: two consecutive
-		// runs in buffered mode produce identical output (after
-		// volStrip). This is the weaker parity invariant available
-		// from the proxy package boundary; the stronger
-		// golden-equality assertion lives in
-		// pkg/ultimatemodel/handler_external_test.go.
-		t.Skip("paths 5+6 are pinned by existing pkg/ultimatemodel tests; see real_streaming_parity_test.go header doc")
+	// estimator parity for both ultimate paths. These two subtests
+	// document the deferral accurately (skip comments previously
+	// claimed "re-verify" semantics they did not implement — finding
+	// #5 cleanup).
+	t.Run("5_UltimateExternal_HeaderPresent", func(t *testing.T) {
+		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
+		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
+		t.Skip("path 5 pinned by existing pkg/ultimatemodel TestUltimate_HeaderDispatch; the proxy-package boundary cannot reach the private streamResponse method directly")
 	})
 
-	t.Run("6_UltimateInternal_HeaderPresent_StableAcrossRuns", func(t *testing.T) {
-		// Same rationale as path 5. See header doc.
-		t.Skip("paths 5+6 are pinned by existing pkg/ultimatemodel tests; see real_streaming_parity_test.go header doc")
+	t.Run("6_UltimateInternal_HeaderPresent", func(t *testing.T) {
+		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
+		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
+		t.Skip("path 6 pinned by existing pkg/ultimatemodel TestUltimate_HeaderDispatch; the proxy-package boundary cannot reach the private handleInternalStream method directly")
 	})
+}
+
+// streamEventsForVariant maps a content-variant label to the typed
+// providers.StreamEvent sequence used by the internal-handler path (3)
+// in TestRealStreaming_ParityMatrix_AllPaths. Mirrors fixtureSet() but
+// for the typed-event channel rather than raw OpenAI SSE chunks; the
+// internal handler reads from this channel, applies toolcall buffering,
+// and writes raw OpenAI SSE chunks downstream.
+func streamEventsForVariant(variant string) []providers.StreamEvent {
+	switch variant {
+	case "text":
+		return []providers.StreamEvent{
+			{Type: "content", Content: "Hello"},
+			{Type: "content", Content: " world"},
+			{Type: "content", Content: "!"},
+			{Type: "done", FinishReason: "stop"},
+		}
+	case "thinking":
+		return []providers.StreamEvent{
+			{Type: "thinking", ReasoningContent: "Let me think"},
+			{Type: "content", Content: "answer"},
+			{Type: "done", FinishReason: "stop"},
+		}
+	case "tool_call":
+		// The internal handler translates typed tool_call events into
+		// OpenAI-wire tool_call deltas downstream. The exact wire
+		// shape is whatever the typed-event → OpenAI SSE pipeline
+		// emits in this commit; the golden pins it.
+		return []providers.StreamEvent{
+			{Type: "content", Content: "Looking up..."},
+			{Type: "tool_call", ToolCalls: []providers.ToolCall{
+				{
+					ID:    "call_test",
+					Type:  "function",
+					Index: 0,
+					Function: providers.ToolCallFunction{
+						Name:      "get_weather",
+						Arguments: `{"city":"SF"}`,
+					},
+				},
+			}},
+			{Type: "done", FinishReason: "tool_calls"},
+		}
+	case "usage":
+		return []providers.StreamEvent{
+			{Type: "content", Content: "ok"},
+			{Type: "done", FinishReason: "stop"},
+		}
+	default:
+		return streamEventsForVariant("text")
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -671,17 +690,40 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 	})
 
 	t.Run("Anthropic_Passthrough_Path", func(t *testing.T) {
-		fixture := fixtures["text"]
-		upstream := httptest.NewServer(fixture.handler())
+		// Real passthrough fixture — internal model with
+		// anthropic-provider credential pointing at the upstream
+		// (matches the gate at handler_anthropic.go:401-403 that
+		// dispatches to handlePassthroughStreamResponse). Same setup
+		// as subtest 1 of TestRealStreaming_ParityMatrix_AllPaths.
+		upstream := httptest.NewServer(anthropicRawPassthroughHandler("text"))
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
 		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		modelsCfg := models.NewModelsConfig()
+		if err := modelsCfg.AddCredential(models.CredentialConfig{
+			ID:       "anthropic-passthrough-cred",
+			Provider: "anthropic",
+			APIKey:   "sk-anthropic-test",
+			BaseURL:  upstream.URL,
+		}); err != nil {
+			t.Fatalf("AddCredential: %v", err)
+		}
+		if err := modelsCfg.AddModel(models.ModelConfig{
+			ID:              "claude-passthrough",
+			Name:            "claude-passthrough",
+			Enabled:         true,
+			Internal:        true,
+			InternalModel:   "claude-sonnet-4-5",
+			InternalBaseURL: upstream.URL,
+			Credentials:     models.TestRefs("anthropic-passthrough-cred"),
+		}); err != nil {
+			t.Fatalf("AddModel: %v", err)
+		}
 		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
-		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
+		body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
 			{"role": "user", "content": "hi"},
 		})
 
@@ -692,7 +734,10 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 		golden, _ := readGolden(t, "anthropic_passthrough_text")
 		assertParity(t, "AnthropicPassthrough", "text", recBuf.Body.String(), golden, "", recBuf.Header().Get("Content-Type"))
 
-		// Live run.
+		// Live run — content is forwarded verbatim from the upstream
+		// so we assert the upstream's literal chunk1 token reaches
+		// the client (the passthrough doesn't translate; what the
+		// upstream emits is what the client sees).
 		reqLive := makeLiveAnthropicRequest(t, body, false)
 		recLive := httptest.NewRecorder()
 		h.HandleAnthropicMessages(recLive, reqLive)

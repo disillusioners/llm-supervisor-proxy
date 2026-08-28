@@ -1,11 +1,19 @@
 # Real-Streaming Default (X-LLMProxy-Buffer-Response opt-in)
 
-> **Pinned to commit:** `b3ecded` (branch `feature/real-streaming-default`)
+> **Pinned to commit:** see `git log -1` on this branch (the head
+> commit of `feature/real-streaming-default` after Phase 5 review
+> fixes landed; pre-existing pin to `b3ecded` was the pre-Phase-5
+> snapshot and is no longer the source of truth).
 >
-> **Status:** Shipped — Phases 1–4 merged; Phase 5 parity + acceptance harness landed.
-> All 6 streaming paths covered by golden-trace parity (header-present ⇒ byte-identical
-> to pre-feature behavior) and event-based first-byte timing (header-absent ⇒ first byte
-> reaches the client before upstream EOF).
+> **Status:** Shipped — Phases 1–4 merged; Phase 5 parity + acceptance
+> harness landed. Path 1 (Anthropic→Anthropic passthrough) is now
+> exercised by a REAL passthrough fixture (internal model with
+> anthropic-provider credential pointing at an Anthropic-wire upstream;
+> see `real_streaming_parity_test.go:1_AnthropicPassthrough_*`). All 6
+> streaming paths are covered by golden-trace parity (header-present ⇒
+> byte-identical to pre-feature behavior) and event-based first-byte
+> timing (header-absent ⇒ first byte reaches the client before upstream
+> EOF).
 
 `llm-supervisor-proxy` defaults to **real streaming** on streaming requests: chunks are
 forwarded to the client as they arrive from upstream, with no full-response accumulation.
@@ -48,6 +56,15 @@ as ABSENT (⇒ live) and a non-zero slice (even with `""` as the first value) as
 **Multi-value first-wins** (leader decision 2): if a client sends multiple
 `X-LLMProxy-Buffer-Response` headers, the first value wins. The Go canonical-form parser
 does this by default (`Values()[0]`).
+
+**Comma-joined single-line form** (reviewer finding #8c): Go's `net/http` also
+canonicalizes a single header line with an embedded comma into a ONE-value slice
+(`["a, b"]` rather than `["a", "b"]`). So
+`X-LLMProxy-Buffer-Response: a, b` arrives at the parser as a single value `"a, b"`
+which is not in the truth table → live mode. This is distinct from the multi-line
+form (separate `X-LLMProxy-Buffer-Response:` lines on the request) where the first
+value wins. Operators sending literal comma lists should use the multi-line form or
+send the value as a single canonical truthy/falsy value.
 
 ---
 
@@ -238,20 +255,34 @@ Per the plan's 5.10 fixed rollout order (each path differs from the prior by exa
 one architectural surface, so a failure in path N bisects against the last-green
 path N-1):
 
-| # | Path | Plan pin | Coverage |
-|---|------|----------|----------|
-| 1 | Anthropic→Anthropic passthrough | `handler_anthropic.go:1225` (locked L3 — verify untouched) | `TestRealStreaming_ParityMatrix_AllPaths/1_*` |
-| 2 | Anthropic→OpenAI-wire external translation | `handler_anthropic.go:819/:851` | `TestRealStreaming_ParityMatrix_AllPaths/2_*` |
-| 3 | Anthropic→OpenAI-wire internal translation | `doAnthropicInternalRequest` at `handler_anthropic.go:600-685` | `TestRealStreaming_ParityMatrix_AllPaths/3_*` |
-| 4 | `/v1/chat/completions` OpenAI race path | `handler.go` race-coord+relay | `TestRealStreaming_ParityMatrix_AllPaths/4_*` |
-| 5 | Ultimate external stream | `pkg/ultimatemodel/handler_external.go:438-500` | `pkg/ultimatemodel/handler_external_test.go TestUltimate_HeaderDispatch` (existing) |
-| 6 | Ultimate internal stream | `pkg/ultimatemodel/handler_internal.go:484-755` | `pkg/ultimatemodel/handler_internal_test.go TestUltimate_HeaderDispatch` (existing) |
+| # | Path | Plan pin | New-matrix goldens | Pre-feature parity pin |
+|---|------|----------|--------------------|------------------------|
+| 1 | Anthropic→Anthropic passthrough (real fixture) | `handler_anthropic.go:1225 / :1679 handlePassthroughStreamResponse` | `TestRealStreaming_ParityMatrix_AllPaths/1_AnthropicPassthrough_{text,thinking,tool_call,usage}` (4 goldens) | same subtest names |
+| 2 | Anthropic→OpenAI-wire external translation | `handler_anthropic.go:819/:851` | `.../2_AnthropicExternalTranslation_{text,thinking,tool_call,usage,role_only,usage_first,comment_first}` (7 goldens) | same subtest names |
+| 3 | Anthropic→OpenAI-wire internal translation | `doAnthropicInternalRequest` at `handler_anthropic.go:600-685` | `.../3_AnthropicInternalTranslation_{text,thinking,tool_call,usage}` (4 goldens; role_only/usage_first/comment_first don't apply — internal handler normalizes into typed events) | same subtest names |
+| 4 | `/v1/chat/completions` OpenAI race path | `handler.go` race-coord+relay | `.../4_OpenAIRacePath_{text,thinking,tool_call,usage,role_only,usage_first,comment_first}` (7 goldens) | same subtest names |
+| 5 | Ultimate external stream | `pkg/ultimatemodel/handler_external.go:438-500` | NO new goldens (out of scope for proxy package; ExecuteOptions-level caveat below) | `pkg/ultimatemodel/handler_external_test.go TestUltimate_HeaderDispatch` (existing) |
+| 6 | Ultimate internal stream | `pkg/ultimatemodel/handler_internal.go:484-755` | NO new goldens (same ExecuteOptions-level caveat) | `pkg/ultimatemodel/handler_internal_test.go TestUltimate_HeaderDispatch` (existing) |
+
+**ExecuteOptions-level caveat (paths 5+6):** the ultimatemodel-package
+`streamResponse` / `handleInternalStream` methods are package-private
+(lowercase) and are reached only via the proxy's full
+`HandleChatCompletions` pipeline (which requires the ultimate-trigger
+schedule to fire). The `ExecuteOptions` envelope is the proxy's only
+reach-into-the-package handle, and the existing ultimatemodel tests
+already exercise it directly (with the same buffered/live semantics
+and the C1 estimator parity pin).
+
+**Coverage scope summary:**
+- **Paths 1-4 (new goldens via this commit):** 4 + 7 + 4 + 7 = **22 new goldens** under
+  `pkg/proxy/testdata/real_streaming_golden/`, covering text/thinking/tool_call/usage on all
+  four paths and role_only/usage_first/comment_first on the two OpenAI-wire paths.
+- **Paths 5-6 (existing ultimatemodel tests):** unchanged; pinned by
+  `pkg/ultimatemodel TestUltimate_HeaderDispatch` + `TestUltimateCapture_LiveMode_IdenticalToBuffered`.
 
 The `TestRealStreaming_*` files cover paths 1-4 directly (the surfaces reachable
 from the proxy package). Paths 5-6 are pinned by existing ultimatemodel-package
-tests — those methods are package-private (lowercase) and only reachable via the
-proxy's full `HandleChatCompletions` pipeline (which requires the ultimate trigger
-schedule to fire).
+tests.
 
 ---
 
@@ -346,10 +377,13 @@ When `TestRealStreaming_ParityMatrix_AllPaths` fails on a path, follow this
 
 ```bash
 git bisect start
-git bisect bad b3ecded
+# The harness landed in commit d608014; bisect from the harness-era
+# head backward to the pre-feature baseline.
+git bisect bad d608014
 git bisect good 9842c77
 # Run the failing fixture at each step:
-go test -count=1 -run TestRealStreaming_GoldenRecorder/<name> ./pkg/proxy/
+go test -count=1 -run TestRealStreaming_GoldenRecorder/<name> ./pkg/proxy/ -update
+go test -count=1 -run TestRealStreaming_ParityMatrix_AllPaths ./pkg/proxy/
 ```
 
 The first commit that flips the test from PASS to FAIL is the regression.
@@ -358,15 +392,22 @@ The first commit that flips the test from PASS to FAIL is the regression.
 
 ## Test fixtures & goldens
 
-- **Goldens:** `pkg/proxy/testdata/real_streaming_golden/*.json` — one per path ×
-  content variant. Generator:
+- **Goldens:** `pkg/proxy/testdata/real_streaming_golden/*.json` — one
+  per path × content variant (paths 1-4 from the parity matrix).
+  Path 1 covers text/thinking/tool_call/usage (4 goldens); paths 2
+  and 4 additionally cover role_only/usage_first/comment_first
+  (provider-shaped first chunks, plan Files row 4) for 7 goldens
+  each; path 3 covers text/thinking/tool_call/usage (4 goldens).
+  Total: 22 proxy-package goldens. Paths 5-6 have NO goldens in this
+  package — they live in `pkg/ultimatemodel/handler_*_test.go`. The
+  TestUltimate_HeaderDispatch tests pin buffered == live wire bytes
+  (which transitively pins buffered == pre-feature).
+  Generator:
   `go test -count=1 -run TestRealStreaming_GoldenRecorder ./pkg/proxy/ -update`.
 - **Determinism rules:** volatile fields stripped before byte comparison
   (`chatcmpl-*` IDs, `msg_*` IDs, `created` timestamps, `: connected`, `: keepalive`,
-  `[DONE]` markers).
-- **Paths 5/6** have NO goldens in this package — they live in
-  `pkg/ultimatemodel/handler_*_test.go`. The TestUltimate_HeaderDispatch tests pin
-  buffered == live wire bytes (which transitively pins buffered == pre-feature).
+  `[DONE]` markers). Anchored regex (no global comma rewrites — see
+  `volStripPatterns` doc in `real_streaming_parity_test.go`).
 
 ---
 
