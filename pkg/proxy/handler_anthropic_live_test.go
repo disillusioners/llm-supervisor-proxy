@@ -1456,3 +1456,273 @@ func TestLiveMode_ChannelClosedFlushesHeldToolCall(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// liveNonStreamProvider is a fixture for the live-mode non-stream
+// regression test (Phase 3 S3 fix — real-streaming-default merge-gate
+// blocker). Returns a typed *providers.ChatCompletionResponse carrying
+// the same fields the buffered path's
+// extractOpenAIResponseContentFromJSON pulls out of the recorder body:
+// Content (string), ReasoningContent, ToolCalls. The provider mirrors
+// the shape OpenAIProvider.ChatCompletion would produce for an internal
+// model with reasoning + a tool call.
+type liveNonStreamProvider struct {
+	resp *providers.ChatCompletionResponse
+}
+
+func (p *liveNonStreamProvider) Name() string { return "mock" }
+func (p *liveNonStreamProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	return p.resp, nil
+}
+func (p *liveNonStreamProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	ch := make(chan providers.StreamEvent, 1)
+	close(ch)
+	return ch, nil
+}
+func (p *liveNonStreamProvider) IsRetryable(err error) bool { return false }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_NonStream_PersistedContentThinkingToolCalls is the unit-
+// level regression test for the Phase 3 S3 fix (real-streaming-default
+// merge-gate blocker). Before the fix, handleNonStream wrote the typed
+// OpenAI ChatCompletionResponse to the wire but NEVER captured
+// content/reasoning/tool_calls into the arc — so live-mode
+// internal-Anthropic non-stream requests persisted empty Thinking +
+// Content + ToolCalls while the wire response was correct. The fix
+// captures content/reasoning/tool_calls directly from
+// resp.Choices[0].Message in handleNonStream when liveArc != nil, matching
+// the buffered path's extractOpenAIResponseContentFromJSON shape
+// (handler_anthropic.go:1440).
+//
+// Mirrors the e2e S3 test's assertions
+// (test/e2e_anthropic_thinking_leak/e2e_anthropic_thinking_leak_test.go:304)
+// at the unit level — same fields, same parity invariant:
+//
+//   - arc.accumulatedResponse   = "visible answer"  (the visible content)
+//   - arc.accumulatedThinking   = "deliberation"    (reasoning_content)
+//   - arc.accumulatedToolCalls  = one entry with id+name+args
+//   - wire response             = correct Anthropic JSON shape (zero
+//                                 wire changes per dispatch)
+//
+// A failure of this test means the live-mode non-stream persistence
+// path is broken again — the S3-class regression has returned.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_NonStream_PersistedContentThinkingToolCalls(t *testing.T) {
+	const (
+		visibleAnswer = "Visible answer for the anthropic client."
+		deliberation  = "Hmm, internal deliberation over the leak constraint"
+	)
+
+	provider := &liveNonStreamProvider{resp: &providers.ChatCompletionResponse{
+		ID:    "chatcmpl-nsstream-test",
+		Model: "gpt-4",
+		Choices: []providers.Choice{
+			{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role:             "assistant",
+					Content:          visibleAnswer,
+					ReasoningContent: deliberation,
+					ToolCalls: []providers.ToolCall{
+						{
+							ID:   "toolu_nsstream",
+							Type: "function",
+							Function: providers.ToolCallFunction{
+								Name:      "lookup",
+								Arguments: `{"q":"hi"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}}
+
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+
+	// Live-mode wiring: liveArc must be installed for the S3 fix to
+	// capture into the arc builders. No liveTranslator needed because
+	// handleNonStream captures directly from the typed resp.
+	arc := &anthropicRequestContext{originalModel: "claude-sonnet-4-5"}
+	handler.SetLiveArc(arc)
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{
+		Model:    "test-model",
+		Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+		Stream:   false, // non-stream — exercises the S3 path
+	}
+
+	if err := handler.handleNonStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
+		t.Fatalf("handleNonStream: %v", err)
+	}
+
+	// WIRE RESPONSE: must be a valid Anthropic non-stream JSON with
+	// the visible content. This proves the S3 fix is capture-only —
+	// no wire changes per the dispatch's pin.
+	wire := rw.Body.String()
+	if !strings.Contains(wire, `"content"`) {
+		t.Errorf("wire response missing content field; body=%q", wire)
+	}
+	if !strings.Contains(wire, visibleAnswer) {
+		t.Errorf("wire response missing visible answer %q; body=%q", visibleAnswer, wire)
+	}
+	// The Anthropic translator (response.go) emits a thinking block
+	// when reasoning_content is present — by-design pre-feature
+	// behavior, NOT a fix-introduced leak (tester confirmed in S3
+	// analysis). We don't assert against it (no wire change).
+
+	// CORE PERSISTENCE CONTRACT (the fix's guarantee): content +
+	// reasoning + tool_calls land in the arc builders.
+	if got, want := arc.accumulatedResponse.String(), visibleAnswer; got != want {
+		t.Errorf("S3 fix: arc.accumulatedResponse = %q, want %q (PERSISTED CONTENT EMPTY)", got, want)
+	}
+	if got, want := arc.accumulatedThinking.String(), deliberation; got != want {
+		t.Errorf("S3 fix: arc.accumulatedThinking = %q, want %q (PERSISTED THINKING EMPTY)", got, want)
+	}
+	if len(arc.accumulatedToolCalls) != 1 {
+		t.Fatalf("S3 fix: arc.accumulatedToolCalls len = %d, want 1", len(arc.accumulatedToolCalls))
+	}
+	tc := arc.accumulatedToolCalls[0]
+	if tc.ID != "toolu_nsstream" {
+		t.Errorf("S3 fix: tool call ID = %q, want %q", tc.ID, "toolu_nsstream")
+	}
+	if tc.Function.Name != "lookup" {
+		t.Errorf("S3 fix: tool call name = %q, want %q", tc.Function.Name, "lookup")
+	}
+	if got, want := tc.Function.Arguments, `{"q":"hi"}`; got != want {
+		t.Errorf("S3 fix: tool call args = %q, want %q", got, want)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_NonStream_BufferedParity is the parity-anchor test —
+// drives the SAME typed response through the live-mode handleNonStream
+// (liveArc installed) and asserts the captured arc builders equal the
+// buffered path's extraction. The buffered path captures via
+// extractOpenAIResponseContentFromJSON (handler_anthropic.go:1440) on
+// the JSON-encoded recorder body; the live path captures directly
+// from the typed resp. Both must produce the SAME persistence fields.
+//
+// This is the structural assertion that the S3 fix restored parity.
+// If either path's extraction drifts from the other, this test fails.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_NonStream_BufferedParity(t *testing.T) {
+	const (
+		visibleAnswer = "parity test answer"
+		deliberation  = "parity test deliberation"
+	)
+	toolArgs := `{"q":"parity"}`
+
+	typedResp := &providers.ChatCompletionResponse{
+		Choices: []providers.Choice{
+			{
+				Message: &providers.ChatMessage{
+					Content:          visibleAnswer,
+					ReasoningContent: deliberation,
+					ToolCalls: []providers.ToolCall{
+						{
+							ID:   "toolu_parity",
+							Type: "function",
+							Function: providers.ToolCallFunction{
+								Name:      "lookup",
+								Arguments: toolArgs,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// LIVE capture: drive handleNonStream directly with the typed resp.
+	liveProvider := &liveNonStreamProvider{resp: typedResp}
+	liveHandler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	liveArc := &anthropicRequestContext{}
+	liveHandler.SetLiveArc(liveArc)
+
+	liveRec := httptest.NewRecorder()
+	liveRec.Body = &bytes.Buffer{}
+	liveRW := &flushingResponseRecorder{ResponseRecorder: liveRec}
+	liveReq := &providers.ChatCompletionRequest{Model: "test-model", Stream: false}
+	if err := liveHandler.handleNonStream(context.Background(), liveProvider, liveReq, liveRW, "gpt-4"); err != nil {
+		t.Fatalf("live handleNonStream: %v", err)
+	}
+
+	// BUFFERED capture: drive the SAME extraction function the buffered
+	// path uses. We encode the typed resp to JSON and run it through
+	// extractOpenAIResponseContentFromJSON — exactly the buffered path's
+	// capture mechanism (handler_anthropic.go:830-839 calls this).
+	bufJSON, _ := json.Marshal(typedResp)
+	bufContent, bufThinking, bufToolCalls := extractOpenAIResponseContentFromJSON(bufJSON)
+
+	// Parity: live arc fields must equal buffered extraction.
+	if got, want := liveArc.accumulatedResponse.String(), bufContent; got != want {
+		t.Errorf("parity: live content=%q, buffered=%q (must be equal)", got, want)
+	}
+	if got, want := liveArc.accumulatedThinking.String(), bufThinking; got != want {
+		t.Errorf("parity: live thinking=%q, buffered=%q (must be equal)", got, want)
+	}
+	if len(liveArc.accumulatedToolCalls) != len(bufToolCalls) {
+		t.Fatalf("parity: live tool calls len=%d, buffered=%d", len(liveArc.accumulatedToolCalls), len(bufToolCalls))
+	}
+	if len(bufToolCalls) > 0 {
+		if liveArc.accumulatedToolCalls[0].ID != bufToolCalls[0].ID {
+			t.Errorf("parity: live tool ID=%q, buffered=%q", liveArc.accumulatedToolCalls[0].ID, bufToolCalls[0].ID)
+		}
+		if liveArc.accumulatedToolCalls[0].Function.Name != bufToolCalls[0].Function.Name {
+			t.Errorf("parity: live tool name=%q, buffered=%q", liveArc.accumulatedToolCalls[0].Function.Name, bufToolCalls[0].Function.Name)
+		}
+		if liveArc.accumulatedToolCalls[0].Function.Arguments != bufToolCalls[0].Function.Arguments {
+			t.Errorf("parity: live tool args=%q, buffered=%q", liveArc.accumulatedToolCalls[0].Function.Arguments, bufToolCalls[0].Function.Arguments)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestLiveMode_NonStream_NoLiveArc_NoCapture confirms the buffered-mode
+// shape is unchanged: when liveArc is nil (the buffered-mode path), the
+// fix in handleNonStream does NOT capture into any arc — capture is
+// handled by the recorder path's extractOpenAIResponseContentFromJSON.
+// This guards against accidental capture into a nil arc (which would
+// panic) and against double-capture into the buffered-mode arc.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestLiveMode_NonStream_NoLiveArc_NoCapture(t *testing.T) {
+	provider := &liveNonStreamProvider{resp: &providers.ChatCompletionResponse{
+		Choices: []providers.Choice{
+			{Message: &providers.ChatMessage{Content: "x", ReasoningContent: "y"}},
+		},
+	}}
+
+	handler := NewInternalHandler(
+		&models.ModelConfig{ID: "test-model", InternalModel: "gpt-4"},
+		&mockModelsConfig{},
+	)
+	// Deliberately DO NOT call SetLiveArc — simulates buffered mode.
+
+	rec := httptest.NewRecorder()
+	rec.Body = &bytes.Buffer{}
+	rw := &flushingResponseRecorder{ResponseRecorder: rec}
+
+	req := &providers.ChatCompletionRequest{Model: "test-model", Stream: false}
+	// Should NOT panic — the fix's `if h.liveArc != nil` guard is correct.
+	if err := handler.handleNonStream(context.Background(), provider, req, rw, "gpt-4"); err != nil {
+		t.Fatalf("handleNonStream without liveArc: %v", err)
+	}
+	// Wire response still correct.
+	if !strings.Contains(rw.Body.String(), `"x"`) {
+		t.Errorf("wire missing content %q; body=%q", "x", rw.Body.String())
+	}
+}

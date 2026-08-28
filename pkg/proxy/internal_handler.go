@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -366,10 +367,45 @@ func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody m
 }
 
 // handleNonStream handles non-streaming requests
+//
+// Phase 3 S3 fix (real-streaming-default merge-gate blocker): in LIVE
+// mode (liveArc != nil), the live branch of doAnthropicInternalRequest
+// drives the real ResponseWriter here — there is NO recorder round-trip,
+// so the buffered path's extractOpenAIResponseContentFromJSON-based
+// capture never runs. We capture content/reasoning_content/tool_calls
+// directly from the typed *providers.ChatCompletionResponse here,
+// matching the buffered path's extraction shape (same fields, same
+// source shape — OpenAI ChatCompletionResponse.Choices[0].Message).
+// Without this, every internal-Anthropic non-stream request in live
+// mode (the new default) persisted empty Thinking + Content + ToolCalls
+// while the wire response was correct (see
+// .agents/tester/LESSONS/2026-08-28-rsd-s3-nonstream-persistence-bug.md).
 func (h *InternalHandler) handleNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
 	resp, err := provider.ChatCompletion(ctx, req)
 	if err != nil {
 		return err
+	}
+
+	// Live-mode capture (parity with buffered extractOpenAIResponseContentFromJSON
+	// at handler_anthropic.go:1440 — same fields, same source shape).
+	if h.liveArc != nil && len(resp.Choices) > 0 {
+		msg := resp.Choices[0].Message
+		if msg != nil {
+			if s, ok := msg.Content.(string); ok {
+				h.liveArc.accumulatedResponse.WriteString(s)
+			}
+			h.liveArc.accumulatedThinking.WriteString(msg.ReasoningContent)
+			for _, tc := range msg.ToolCalls {
+				h.liveArc.accumulatedToolCalls = append(h.liveArc.accumulatedToolCalls, store.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: store.Function{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				})
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
