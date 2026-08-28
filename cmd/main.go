@@ -21,6 +21,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
@@ -87,7 +88,39 @@ func main() {
 
 	// Phase 3 — the interface-typed modelsConfig used by proxyConfig +
 	// uiServer points at the same concrete *ModelsManager.
-	modelsConfig = modelsMgr
+	//
+	// db-cache-layer 1C — CACHE_LAYER_ENABLED env flag (leader
+	// decision 5: default ON; explicit "false" disables — the instant
+	// rollback lever, no rebuild needed). With the cache enabled the
+	// decorator wraps the manager at this seam: boot priming is
+	// synchronous (DB-down at boot keeps today's log.Fatalf fail-fast
+	// posture, leader decision 4); a 60s reconciler keeps the cache
+	// fresh; the boundary sites 503 config_store_unavailable when the
+	// store is unhealthy (1D).
+	cacheLayerEnabled := os.Getenv("CACHE_LAYER_ENABLED") != "false"
+	log.Printf("[cache] CACHE_LAYER_ENABLED=%v", cacheLayerEnabled)
+
+	var wrappedModels *modelscache.CachedModelsConfig
+	var wrappedTokens *modelscache.CachedTokenStore
+
+	if cacheLayerEnabled {
+		// Options.UpstreamURL feeds only the boot-time dead-default
+		// (localhost:4001) WARN tripwire; read the config snapshot
+		// locally (cfg is materialized further below).
+		wrappedModels, err = modelscache.WrapModels(modelsMgr, modelscache.Options{
+			PositiveTTL:       60 * time.Second,
+			NegativeTTL:       60 * time.Second,
+			StalenessCap:      24 * time.Hour,
+			StrictFillTimeout: 5 * time.Second,
+			UpstreamURL:       configMgr.Get().UpstreamURL,
+		})
+		if err != nil {
+			log.Fatalf("Failed to prime models cache: %v", err)
+		}
+		modelsConfig = wrappedModels
+	} else {
+		modelsConfig = modelsMgr
+	}
 
 	// Phase 3 / Round 3g — engine stop is the LAST defer registered
 	// before srv.Shutdown, so LIFO fires it first after srv.Shutdown
@@ -136,7 +169,24 @@ func main() {
 	}
 
 	// Initialize Token Store
-	tokenStore := auth.NewTokenStore(dbStore.DB, dbStore.Dialect)
+	// db-cache-layer 1C — the same CACHE_LAYER_ENABLED seam wraps the
+	// token store: three-tier cache (positive 60s / stale-positive
+	// served only on infra-class errors / negative 60s, LRU 10k) so
+	// known tokens stay authorized through a DB outage (criterion C).
+	// The same tokenStore variable flows to ui.NewServer, proxy.
+	// NewHandler, and mcp.NewServer unchanged.
+	var tokenStore auth.TokenStoreInterface
+	if cacheLayerEnabled {
+		wrappedTokens = modelscache.WrapTokens(auth.NewTokenStore(dbStore.DB, dbStore.Dialect), modelscache.Options{
+			PositiveTTL: 60 * time.Second,
+			NegativeTTL: 60 * time.Second,
+			LRUCap:      10000,
+			StaleCap:    24 * time.Hour,
+		})
+		tokenStore = wrappedTokens
+	} else {
+		tokenStore = auth.NewTokenStore(dbStore.DB, dbStore.Dialect)
+	}
 
 	// Initialize Usage Counter
 	var usageCounter *usage.Counter
@@ -231,6 +281,26 @@ func main() {
 	// "identity") pass through untouched so uncompressed clients
 	// experience zero behavior change. See pkg/middleware/gzipmw for
 	// the contract and cap story.
+	// db-cache-layer 1C (W2) — cache teardown ordering. The final
+	// shutdown sequence on signal must be:
+	//   srv.Shutdown (drains HTTP; called explicitly below)
+	//   → wrappedModels.Stop (cancels the reconciler + in-flight scan)
+	//   → wrappedTokens.Stop (no-op by contract, kept for symmetry)
+	//   → credLB.Stop (engine janitor)
+	//   → modelsMgr.Close (event-bus unsubscribe)
+	//   → dbStore.Close (closes the DB)
+	// Defers register in source order and fire LIFO, so these two are
+	// registered LAST (right before the listen block, after the
+	// credLB/modelsMgr/dbStore defers above) with nil guards for the
+	// CACHE_LAYER_ENABLED=false path. Registration order here is
+	// tokens-then-models so LIFO fires models-then-tokens.
+	if wrappedTokens != nil {
+		defer wrappedTokens.Stop()
+	}
+	if wrappedModels != nil {
+		defer wrappedModels.Stop()
+	}
+
 	srv := &http.Server{
 		Addr:           ":" + strconv.Itoa(cfg.Port),
 		Handler:        recoveryMiddleware(gzipmw.DecompressRequest(mux)),
