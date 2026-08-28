@@ -231,6 +231,12 @@ func (c *CachedModelsConfig) Healthy() bool {
 // in-flight scan context first; an un-cancellable scan may run to
 // completion but its result is discarded (the swap re-checks stopCh).
 // Idempotent.
+//
+// The reconciler-wait is bounded by ~6s (review remediation
+// 2026-08-28): a stuck driver must not hang teardown. On timeout a
+// WARN is logged and Stop returns — the reconciler goroutine is
+// abandoned mid-scan; sync.Once keeps idempotent Stop safe across
+// multiple callers.
 func (c *CachedModelsConfig) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stopCh)
@@ -240,7 +246,16 @@ func (c *CachedModelsConfig) Stop() {
 		}
 		c.scanMu.Unlock()
 	})
-	c.reconcileWG.Wait()
+	done := make(chan struct{})
+	go func() {
+		c.reconcileWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		log.Printf("[WARN] [cache] reconciler did not stop within 6s — abandoned mid-scan; teardown proceeding")
+	}
 }
 
 // reconcileLoop drives the 60s reconciler (task 1.B.7).

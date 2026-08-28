@@ -74,6 +74,12 @@ var infraErrorFragments = []string{
 	"i/o timeout",
 	"connection reset",
 	"database is closed", // sqlite pool closed under the cache (dev mode / teardown races)
+	// PostgreSQL mid-flight disconnect shapes (review remediation
+	// 2026-08-28). Without these, a TTL-expired valid token 401s
+	// instead of stale-serving for the seconds-wide outage-onset
+	// window where the connection drops mid-call.
+	"unexpected eof",
+	"server closed the connection unexpectedly",
 }
 
 // isInfraError classifies an inner-store error as "infrastructure

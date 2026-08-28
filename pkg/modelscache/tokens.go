@@ -193,12 +193,27 @@ func (c *CachedTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 		// (leader decision 1 / C2 — the >=1h-zero-failure goal).
 		// Without one this is a cold miss during an outage: fail like
 		// today (matrix row C → 401).
+		//
+		// TOCTOU close (review remediation 2026-08-28): re-Peek under
+		// c.mu to read the freshest cache state. Between the pre-call
+		// Peek and this branch, a concurrent DeleteToken or a racing
+		// verdict-class validate may have replaced the positive with a
+		// definitive verdict; without this re-read, the pre-call `raw`
+		// would let one stale token slip past a freshly-recorded
+		// ErrTokenNotFound. The re-Peek closes the race — if the
+		// entry is no longer a usable stale-positive, fall through to
+		// the not-found path instead of serving a now-revoked token.
 		if hit {
-			e := raw.(*tokenEntry)
-			if e.kind == tierPositive && e.token != nil &&
-				now.Sub(e.cachedAt) <= c.opts.StaleCap {
-				log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
-				return e.token, nil
+			c.mu.RLock()
+			fresh, ok := c.entries.Peek(hash)
+			c.mu.RUnlock()
+			if ok {
+				e := fresh.(*tokenEntry)
+				if e.kind == tierPositive && e.token != nil &&
+					now.Sub(e.cachedAt) <= c.opts.StaleCap {
+					log.Printf("[WARN] [cache] token store unreachable (%v) — serving stale-positive token %s (degraded-allow)", err, e.token.ID)
+					return e.token, nil
+				}
 			}
 		}
 		return nil, err

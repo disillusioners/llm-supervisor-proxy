@@ -497,3 +497,37 @@ func TestIsInfraError_Classification(t *testing.T) {
 		}
 	}
 }
+
+// TestIsInfraError_ShapeInjection (review remediation 2026-08-28):
+// shape-injection coverage for the isInfraError string-fragment
+// whitelist. Asserts both new PG mid-flight disconnect shapes
+// classify as infra, pins one pre-existing fragment as a regression
+// guard, and asserts that an unrelated "no rows in result set" string
+// (a verdict-class message, not infrastructure) classifies as NOT
+// infra — a control to keep the whitelist from drifting into verdict
+// territory.
+func TestIsInfraError_ShapeInjection(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		// New PG mid-flight shapes (review remediation 2026-08-28).
+		{"PG unexpected EOF", errors.New("read tcp 10.0.0.1:5432: read: unexpected EOF"), true},
+		{"PG server closed connection unexpectedly", errors.New("server closed the connection unexpectedly"), true},
+		// Pre-existing fragment — regression guard so a refactor of
+		// the whitelist cannot silently drop "connection refused".
+		{"connection refused (existing)", errors.New("dial tcp 10.0.0.1:5432: connect: connection refused"), true},
+		// Non-infra control — "sql: no rows in result set" is a
+		// verdict (sql.ErrNoRows surfaces through database/sql);
+		// it must NOT be classified as infra.
+		{"sql no rows in result set", errors.New("sql: no rows in result set"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInfraError(tc.err); got != tc.want {
+				t.Errorf("isInfraError(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
