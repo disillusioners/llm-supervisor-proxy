@@ -68,3 +68,24 @@
 | `3f5e761` | Fixed go vet errors in handler_external_test.go (resp used before err check) |
 | 2026-03-31 | `5881e6e` | Removed unused imports in handlers_usage.go |
 | 2026-03-31 | `4b1c3ad` | Fixed race condition in counting_hooks_test.go |
+
+---
+
+## 2026-08-28 — real-streaming-default merge gate
+
+### Coverage gaps CLOSED (new packs, all green)
+- `pkg/proxy/translator` → translator_unit_test (169 entries; includes 19 incremental_stream cases — was ZERO pack coverage despite holding the feature's new production code)
+- `pkg/credentiallb`, `pkg/proxyheader`, `pkg/proxy/normalizers`, `pkg/loopdetection/fingerprint`, `pkg/store` (parent) → gap_unit_test (274 entries)
+- `test/` root (access_control + integration_allowed_models) → testroot_unit_test (35 entries)
+- `test/reasoning_content/` → inline slice (14 subtests)
+
+### Race coverage
+- 3 scoped -race slices (proxy live battery, TestUltimate, translator full) — zero races.
+
+### Coverage gaps REMAINING (follow-ups)
+- `cmd`, `pkg/logger`, `pkg/store/database/db`, `scripts` — no test files exist (nothing to run; noted for completeness).
+- fe_reasoning_observability matrix: no anthropic-internal NON-STREAM row — the exact cell where the S3-class persistence bug (first-bad e717be3) was only caught by the thinking-leak e2e. ADD post-fix.
+- openai_internal_buffered shell mock: 0/60 effective until its credential-LB payload fix lands (pre-existing rot).
+
+### Mode-independence evidence (new, binary-level)
+- UI/request records captured with content+thinking in BOTH live and buffered modes for streaming paths (M2-D); stream=false identity verified byte-level (M3).

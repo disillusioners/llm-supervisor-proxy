@@ -379,3 +379,160 @@ Closes the specific leak the dev-verify pass caught pre-fix on `fix/ui-reasoning
 - **Non-vacuity**: leak re-injected in isolated worktree → S1 FAILs with 4 detections (leak shape confirmed); S3 wire thinking block classified pre-existing via base differential at `effc345` (identical 371-byte wire; `response.go` unchanged since base `fea5874`)
 - **Quick Fixes**: none to production code; harness compile-fix iteration only
 - **Report**: RESULTS/2026-08-21-anthropic-thinking-leak-spotcheck.md
+
+---
+
+# Mock Test: real-streaming-default M1 — OpenAI path live-binary TTFB smoke (merge gate)
+
+### Metadata
+- **Created**: 2026-08-28
+- **Script**: `test/mock_rsd_m1_openai_ttfb.sh` (created from scratch; prior attempt left no script)
+- **Language**: Bash + python3 (timestamped chunk reader)
+- **Status**: ACTIVE — A+B+D hard PASS, C informational byte-difference noted
+
+### Configuration
+- **Timeout**: dual-layer — internal alarm 240s; outer `timeout 300 bash test/mock_rsd_m1_openai_ttfb.sh`
+- **Service Port**: 10110 (proxy under test)
+- **Mock Ports**: 10111 (mock OpenAI upstream)
+- **Cleanup**: kill PIDs on 10110/10111 before start and on EXIT trap; verify ports freed; NEVER touch 8088 or any process not bound to 10110/10111
+- **Isolation (HARD)**: proxy config MUST live in a temp dir (temp HOME and/or explicit config path / DATABASE_URL to temp SQLite). MUST NOT read/write the developer's real ~/.config/llm-supervisor-proxy. Follow the config-isolation precedent of test/test_mock_ultimate_model.sh.
+
+### What It Tests
+The user's original complaint, against the REAL binary: default = REAL streaming on the OpenAI race path (/v1/chat/completions); `X-LLMProxy-Buffer-Response: true` = buffered (legacy) — first byte reaches client only after upstream completes.
+
+### Mock Services Required
+- OpenAI-format SSE upstream on 10111: POST /v1/chat/completions → stream of 5 content chunks, 300ms inter-chunk delay (total ≈1.5s). Chunks MUST be real OpenAI wire: `data: {"id":"chatcmpl-mock","object":"chat.completion.chunk","model":"mock-openai-m1","choices":[{"index":0,"delta":{"content":"chunkN"},"finish_reason":null}]}\n\n`, final chunk with `finish_reason="stop"` + `usage`, then `data: [DONE]\n\n`. Script MUST self-verify mock output parses as OpenAI chunks (JSON fields, SSE framing) before trusting results.
+
+### Test Scenarios
+1. DEFAULT (no header), stream:true — assert: TTFB(first `data:` line at client) ≤ 1000ms AND < 60% of total stream duration; ≥3 distinct chunk-arrival timestamps ≥150ms apart (incremental, NOT one burst); assembled content == expected concatenation.
+2. WITH `X-LLMProxy-Buffer-Response: true` — assert: TTFB ≥ 1300ms (nothing before upstream completes); all bytes arrive in a single burst (arrival spread ≤ 250ms); assembled content identical to scenario 1.
+3. Soft check: raw SSE body bytes scenario1 vs scenario2 — report equal/diff verbatim (content equality is the hard assert; byte equality is informational for the byte-for-byte claim).
+4. After both: proxy /healthz still 200 (no panic).
+
+### Why TTFB uses first `data:` line (not first body byte)
+The proxy emits an SSE preamble `: connected\n\n` IMMEDIATELY in both modes (`pkg/proxy/handler.go:897`). Naive TTFB (first body byte) returns ~0ms for both modes — the test cannot distinguish live vs buffered. The probe measures TTFB as the time of the FIRST `data: ` line arrival at the client. This correctly distinguishes live (~102ms) vs buffered (~1602ms). The probe handles HTTP/1.1 chunked transfer encoding transparently by treating the body as opaque bytes.
+
+### Success Criteria
+- [x] All hard asserts pass (no timing-boundary retry needed; numbers stable across 2 runs)
+- [x] No process leaks; ports freed; /healthz 200 at end
+- [x] Mock wire-format self-verification included in output (`[mock-openai] self-check OK: 5 content deltas`)
+
+### Implementation Notes
+- Client probe: python3 socket, recv() loop with time.time() timestamps per arrival; byte-position-walk attributes each `data:` line to its containing recv() arrival.
+- Timing margins assume 5×300ms upstream stream; margins are generous — do not tighten without reason.
+- Build binary from HEAD: `go build -o <tmpdir>/rsd_m1_proxy ./cmd` (or repo equivalent).
+- UNREGISTERED model name in client request triggers race-external path (no auth required, no credential config needed).
+- Result bodies differ between A and B by 54 bytes (live mode emits extra `: keepalive` heartbeats during the 1.5s upstream stream; buffered mode emits none); both bodies assemble to identical text.
+
+### Last Run
+- **Date**: 2026-08-28
+- **Session**: Worker (executor session)
+- **Result**: PASS — A (ttfb=102ms, total=1523ms, big_gaps=5), B (ttfb=1602ms, total=1602ms, spread=0ms), D (healthz=200); stable across 2 runs
+- **Quick Fixes**: probe TTFB definition changed from "first body byte" to "first `data:` line" to skip the proxy's `: connected\n\n` preamble — without this fix, both modes show TTFB≈0ms and the test is unable to distinguish them
+- **Report**: RESULTS/2026-08-28-real-streaming-default-m1-openai.md
+
+---
+
+# Mock Test: real-streaming-default M2 — Anthropic path + ultimate path + UI records (merge gate)
+
+### Metadata
+- **Created**: 2026-08-28
+- **Script**: `test/mock_rsd_m2_anthropic_ultimate_ui.sh`
+- **Language**: Bash + python3
+- **Status**: PLANNED (merge-gate for feature/real-streaming-default @ 03a5339)
+
+### Configuration
+- **Timeout**: internal alarm 240s; outer `timeout 300`
+- **Service Port**: 10120 (proxy)
+- **Mock Ports**: 10121 (mock Anthropic upstream)
+- **Cleanup / Isolation**: same rules as M1 (trap-kill 10120/10121 only; temp-dir config; never 8088)
+
+### What It Tests
+Real streaming default on /v1/messages (Anthropic client path) and on the ultimate external path; UI request records fed by capture taps are mode-independent.
+
+### Mock Services Required
+- Anthropic-format SSE upstream on 10121: POST /v1/messages → proper event sequence: `message_start`, `content_block_start`(thinking), `content_block_delta`(thinking_delta), `content_block_stop`, `content_block_start`(text), 5× `content_block_delta`(text_delta) with 300ms delays, `content_block_stop`, `message_delta`(usage), `message_stop`. Real wire framing (`event: X\ndata: {...}\n\n`). Self-verify mock parses as Anthropic events before trusting results.
+- Same mock also serves stream=false with a deterministic canned JSON response (for M3 reuse and any non-stream sanity).
+
+### Test Scenarios
+1. /v1/messages DEFAULT (no header) — TTFB ≤ 1000ms, incremental (≥3 arrivals ≥150ms apart), thinking_delta present on the client wire (live mode, D8 shape), assembled text correct.
+2. /v1/messages WITH buffer header — TTFB ≥ 1300ms, single burst (≤250ms spread), assembled content identical to scenario 1.
+3. Ultimate external path: request with `X-Force-Ultimate-Model: 1` + token with ultimate permission, ultimate model = external type routed to mock 10121. DEFAULT: incremental (TTFB ≤ 1000ms). WITH buffer header: buffered. If not practical (config blockers), document exactly why + what was verified instead.
+4. UI records: GET /ui/ → 200 + HTML. One live-mode request + one buffered-mode request, then GET /fe/api/requests → BOTH records present, each with content and usage fields populated (mode-independent capture). Report record JSON snippets as evidence.
+
+### Success Criteria
+- [ ] Scenarios 1,2,4 hard-pass; scenario 3 pass or documented-impractical with evidence
+- [ ] No leaks; /healthz 200 at end; both attempts reported if timing retry used
+
+### Implementation Notes
+- Anthropic client requests need x-api-key + anthropic-version headers (project precedent).
+- Ultimate: X-Force-Ultimate-Model fires immediately (no retry-counter env needed post trigger-schedule change); requires token ultimate permission.
+
+### Last Run
+- **Date**: 2026-08-28
+- **Worker Instance**: rsd-mock-m2-anthropic (e2e97da3)
+- **Result**: **PASS** — A (default): TTFB=2ms, spread=1520ms, 5 big gaps, thinking_delta on wire (D8 live shape); B (buffered): TTFB=1524ms, spread=0ms, no thinking blocks (pre-feature shape); C (ultimate external): documented-impractical (OpenAI-wire mismatch vs Anthropic client; partial evidence: force-header accepted, mock received POST, 1897B OpenAI SSE); D (UI records): /ui/ 200, both records content+thinking, status=completed, usage=null (pre-existing Anthropic-path gap — proven pre-existing via buffered-mode parity). /healthz 200 end; ports freed.
+- **Quick Fixes**: none (script authored fresh, 994 lines)
+- **Report**: RESULTS/2026-08-28-real-streaming-default-m2-anthropic.md
+
+---
+
+# Mock Test: real-streaming-default M3 — header truth table + edge cases (merge gate)
+
+### Metadata
+- **Created**: 2026-08-28
+- **Script**: `test/mock_rsd_m3_edge_cases.sh`
+- **Language**: Bash + python3
+- **Status**: PLANNED (merge-gate for feature/real-streaming-default @ 03a5339)
+
+### Configuration
+- **Timeout**: internal alarm 240s; outer `timeout 300`
+- **Service Port**: 10130 (proxy)
+- **Mock Ports**: 10131 (mock upstream, OpenAI wire; 4 chunks × 250ms for speed)
+- **Cleanup / Isolation**: same rules as M1 (trap-kill 10130/10131 only; temp-dir config; never 8088)
+
+### What It Tests
+Documented `X-LLMProxy-Buffer-Response` truth-table conformance on the live binary, multi-value first-wins, stream=false neutrality, client-disconnect safety.
+
+### Test Scenarios
+1. Truth table: for EACH documented header variant (expected values: TRUE/1/yes/on/empty/false/0/no/off/garbage + ABSENT — exact expected mode per docs/real-streaming-default.md, embedded in dispatch): one streaming request; classify LIVE (TTFB ≤ ~800ms, incremental) vs BUFFERED (TTFB ≥ ~1.0s with 4×250ms mock, single burst); assert classification == documented expectation.
+2. Multi-value: header sent twice — (`true` then `false`) ⇒ buffered; (`false` then `true`) ⇒ live (documented first-wins).
+3. stream=false: with header vs without — responses must be identical (deterministic canned mock response; compare full bodies); content-type JSON, no SSE framing in either.
+4. Client disconnect mid-stream (live mode): read 1 chunk then hard-close socket; wait 2s; assert proxy still alive (/healthz 200), no panic/SIGSEGV in captured proxy stderr (the 9842c77 class).
+
+### Success Criteria
+- [ ] Every truth-table row matches the documented expectation (any mismatch = FAIL with evidence)
+- [ ] First-wins both directions; stream=false identical; disconnect leaves healthy proxy
+- [ ] No leaks; ports freed
+
+### Implementation Notes
+- Timing classifier margins: 4×250ms ⇒ live TTFB ≤ 800ms; buffered TTFB ≥ 1000ms. One retry per row on boundary only, both attempts reported.
+- Truth table to be embedded verbatim from docs (via W1 extraction) in the dispatch message — assert against the DOC, not assumptions.
+- AFTER-RUN FINDING (refines classifier): the absolute TTFB is too sensitive to local-loopback latency
+  (proxy→mock on 127.0.0.1 adds variable latency). The reliable MODE signal is the streaming PATTERN:
+  big_gaps ≥ 2 ⇒ LIVE; big_gaps == 0 + spread ≤ 250ms ⇒ BUFFERED. Implementation classifies on pattern,
+  with TTFB recorded as a sanity hint only. Buffered rows observed at TTFB ≈ 800ms (not 1000ms) on
+  this machine — the local mock-to-proxy loop is fast; docs line 42-48 truth table is what we assert.
+
+### Last Run
+- **Date**: 2026-08-28
+- **Session**: Worker (executor session)
+- **Branch/HEAD**: `feature/real-streaming-default` @ `22e76d6` (dispatch said `03a5339`; HEAD advanced to `22e76d6`
+  before run due to a parallel test rebase — same branch, M3 assertions hold)
+- **Result**: PASS — 12/12 truth-table rows + 3/3 multi-value + 3/3 stream=false identity + 3/3 disconnect safety
+- **Runtime**: ≈50s (well under 240s internal alarm)
+- **Quick Fixes** (script-only, no production changes):
+  1. `UPSTREAM_URL` must NOT include `/v1` — the proxy appends `/v1/chat/completions` for external models, so
+     `http://host:port/v1` becomes `http://host:port/v1/v1/chat/completions` (404). Fix: `UPSTREAM_URL="http://host:port"`.
+  2. Initial classifier used absolute TTFB (LIVE ≤ 800ms, BUFFERED ≥ 1000ms) which is brittle on local
+     loopback — observed buffered rows at TTFB ≈ 800ms. Switched to pattern-based: big_gaps ≥ 2 ⇒ LIVE;
+     big_gaps == 0 + spread ≤ 250ms ⇒ BUFFERED. Both absolute TTFB and pattern are reported.
+  3. SO_LINGER for hard-close on macOS: `struct.pack('ii', 1, 0)` (l_onoff=1, l_linger=0); the raw
+     `(1).to_bytes(2, 'little') + (0).to_bytes(2, 'little')` form (4-byte total) raises OSError [Errno 22]
+     on macOS — `struct linger` is 8 bytes (int+int). Included an explicit byte fallback for safety.
+  4. Scenario 3 initially mixed two body-capture mechanisms (PROBE_PY jsonl vs raw socket write); replaced
+     with a single `probe_nonstream_raw` so both 3a (no header) and 3b (with header) use the same raw-body
+     capture path — this fixed the byte-count mismatch (was 351 vs 285; now both 285).
+- **Cleanup verified**: ports 10130/10131 freed; proxy + mock processes killed; alarm subprocess reaped; no leaks.
+- **Report**: RESULTS/2026-08-28-real-streaming-default-m3-edge-cases.md
+

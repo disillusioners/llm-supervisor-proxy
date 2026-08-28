@@ -15,16 +15,28 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-26 | PASS (376+370, 7 skips — byte-identical to baseline; @ 315f4e8 Phase-2 gate) |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-26 | PASS (145/145, +3 TestUltimateInternal_* failover; @ d6368bd FINAL gate) |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-26 | PASS (99 + 4 PG-skips, flat vs 315f4e8; @ d6368bd FINAL gate) |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-26 | PASS (87 + 267 sub, flat; PEAK-DBG gone; @ d6368bd FINAL gate) |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-26 | PASS (17/105, 3-gate identical; @ d6368bd FINAL gate) |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-26 | PASS (33/33, 3-gate identical; @ d6368bd FINAL gate) |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-26 | PASS (48/48, 3-gate identical; @ d6368bd FINAL gate) |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-26 | PASS (23 + 118 sub, 3-gate stable; @ d6368bd FINAL gate) |
-| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-26 | PASS (245/474 identical; @ 315f4e8 Phase-2 gate) |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-26 | PASS (258+90, 9 pkgs; @ 315f4e8 Phase-2 gate) |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-28 | PASS (446+475 sub, 0 fail, 7 branch-gated skips; @ 22e76d6 rsd merge gate) |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-28 | PASS (152+87 sub, 0 fail, +7 vs d6368bd; @ 22e76d6 rsd merge gate) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-28 | PASS (99 + 4 PG-skips; quarantined CloseLifecycle did NOT fire; @ 22e76d6 rsd gate) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-28 | PASS (87 + 267 sub; StreamDeadline change green; @ 22e76d6 rsd gate) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-28 | PASS (17/105; @ 22e76d6 rsd gate) |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-28 | PASS (33/33; @ 22e76d6 rsd gate) |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-28 | PASS (48+39; @ 22e76d6 rsd gate) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-28 | PASS (23 + 123 sub, +5 sub vs d6368bd; @ 22e76d6 rsd gate) |
+| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-28 | PASS (245+471, 3 env-conditional SSRF skips; @ 22e76d6 rsd gate) |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-28 | PASS (284+119, 9 pkgs; @ 22e76d6 rsd gate) |
+| translator_unit_test | test/packs/translator_unit_test.sh | pkg/proxy/translator — wire translation incl. incremental_stream (real-streaming-default Phase 3) | 120s | 2026-08-28 | PASS (169 entries, 19 incremental_stream cases; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
+| gap_unit_test | test/packs/gap_unit_test.sh | credentiallb, proxyheader, proxy/normalizers, loopdetection/fingerprint, store parent (memory) | 120s | 2026-08-28 | PASS (274 entries, 118 funcs; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
+| testroot_unit_test | test/packs/testroot_unit_test.sh | test/ root — access_control + integration_allowed_models | 120s | 2026-08-28 | PASS (35 entries; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
+| reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS (2 funcs / 14 subtests; @ 22e76d6 rsd gate) |
+
+## Race Slices (real-streaming-default merge gate 2026-08-28)
+
+| Slice | Exact command | Result |
+|-------|---------------|--------|
+| raceA_proxy | `timeout 300 go test -race -run 'TestRealStreaming\|TestLiveRelay\|TestLiveMode\|TestUltimateCapturePersistence' -count=1 ./pkg/proxy/ -timeout 280s` | **PASS** — 0 races, 24s |
+| raceB_ultimate | `timeout 300 go test -race -run 'TestUltimate' -count=1 ./pkg/ultimatemodel/ -timeout 280s` | **PASS** — 0 races, 2.8s |
+| raceC_translator | `timeout 300 go test -race -count=1 ./pkg/proxy/translator/ -timeout 280s` | **PASS** — 0 races, 1.1s |
 
 ## Mock Test Packs
 
@@ -34,15 +46,22 @@
 | frontend_api_cache_mock | test/mock_frontend_api_cache.mjs | Unit | 60s | 2026-04-09 | PASS |
 | allowed_models_integration | test/integration_allowed_models_test.go | Integration | N/A (Go test) | 2026-05-01 | PASS |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E | N/A (Go test) | 2026-05-05 | PASS |
-| ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-27 | **PASS 49/49** @ a0f4cd1 (§8 merge gate; Test 8 header-exact on milestones 5/10/20/30/40, 41st exhausted `ultimate_model_retry_exhausted` "attempt 41 of 40 max"; URL-leak 0; ~150s wall incl. cleanup reaping) |
-| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-21 | PASS (60/60 @ db7aca0+) |
-| e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-21 | PASS @ db7aca0+ (negative-control suite stays green through capture rewrite) |
-| minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 120s internal (observed @ a0f4cd1) / `timeout 300` outer | 2026-08-27 | **PASS 53/53** @ a0f4cd1 (§8 merge gate; T15: 5-request trigger under new 5/10/20/30/40 schedule + ultimate-path translation ON; URL-leak 0; ⚠ ran the FULL 120s internal alarm window — near-cap, split/trim if it grows) |
-| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS 43/43** @ db7aca0+ (drift counter delta 0; S14 header hygiene 0 leaks; unchanged from 2026-08-19 baseline) |
+| ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-28 | **PASS 49/49** @ 22e76d6 (rsd merge gate; real-binary ultimate paths incl. live streaming defaults; ~150s wall) |
+| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-28 | **FAIL 0/60 — setup-phase script rot, NOT feature-caused**: legacy `credential_id` model-creation payload rejected by credential-LB schema (`credentials: []` required, pkg/ui/server.go:436). Broken at base 9842c77 (credential-LB merge predates branch). Needs ~3-line payload fix: `credentials: [{"credential_id":...,"weight":1,"position":0}]`. Also never sends buffer header (pre-dates it) — post-fix it would exercise LIVE defaults unless the header is added. |
+| e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-28 | PASS 1/1 @ 22e76d6 (rsd merge gate) |
+| minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 120s internal / `timeout 300` outer | 2026-08-28 | **PASS 53/53** @ 22e76d6 (rsd merge gate; 11s wall — previous near-cap warning RESOLVED, was a cold-build artifact) |
+| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 43/43** @ 22e76d6 (rsd merge gate; drift delta 0; header hygiene 0 leaks) |
 | minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
 | proxyheader_header_table | inline: `go test ./pkg/proxyheader/ -run 'Interleaved' -count=1` | Unit (P3-7 header value truth table verify) | `timeout 300` | 2026-08-19 | **PASS** — satisfied by existing 21 sub-cases (all 7 plan values covered, file:line-cited); precedent match confirmed; single-source semantics confirmed (2 call sites via proxyheader.*); NO gap-fill needed |
-| fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS** — closure gate 4/4 (glm-5.3 non-stream → FE `messages[last].thinking` byte-exact, request-side, negative-omitempty, TSX field-shape match) + matrix 16/16 (R1-R10 all paths × modes, N1-N4 zero-thinking cleanliness, M1-M2 minimax translated) @ commits `2a3cf7e`/`2317a59` |
-| anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-21 | **PASS** — 3/3 scenarios @ `63b7701`; mutation-proven non-vacuous (leak re-injected in worktree → S1 FAILs with 4 detections); S3 wire byte-identical at parent `effc345` (translated block pre-existing from translator/response.go, not fix-introduced) |
+| fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 20/20** @ 22e76d6 (rsd merge gate: closure 4/4 + matrix 16/16; capture taps mode-independent; NOTE: no anthropic-internal-nonstream row — S3-class bug not covered here) |
+| anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PARTIAL @ 22e76d6 (post S1 re-base 22e76d6)**: S1A buffered ✅ S1B live thinking_delta ✅ (D8) S2 ✅ — **S3 ❌ REAL BUG** (internal-Anthropic NON-stream persistence empty; first-bad e717be3; see LESSONS/2026-08-28-rsd-s3-nonstream-persistence-bug.md) |
+| rsd_m1_openai_ttfb | test/mock_rsd_m1_openai_ttfb.sh | Shell E2E (real binary; OpenAI path TTFB default-vs-buffered; ports 10110/10111) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 103ms vs total 1536ms, 5 gaps ≥150ms; B: TTFB 1603ms spread 0ms; C info: byte-diff = live `: keepalive` only, content identical; D healthz 200; 3× stable) |
+| rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 2ms/incremental/thinking_delta on wire; B: TTFB 1524ms/single-burst/pre-feature shape; D: UI records content+thinking both modes, usage=null pre-existing gap; C documented-impractical w/ partial evidence) |
+| rsd_m3_edge_cases | test/mock_rsd_m3_edge_cases.sh | Shell E2E (real binary; header truth table + first-wins + stream=false + disconnect; ports 10130/10131) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 21/21** @ 22e76d6 (truth table 12/12 incl. case+garbage; multi-line first-wins both directions; stream=false byte-identical; disconnect: healthz 200, no panic) |
+| e2e_reasoning_content | test/e2e_reasoning_content/ | E2E Mock (reasoning_content chain, streaming + non-stream) | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS 5 top-level + 7 sub @ 22e76d6 (rsd merge gate) |
+
+#### anthropic_thinking_leak — historical note (superseded 2026-08-28)
+- Pre-rsd-gate baseline: PASS 3/3 @ 63b7701; mutation-proven non-vacuous (leak re-injected in worktree → S1 FAILs with 4 detections); S3 wire byte-identical at parent effc345.
 
 #### minimax_interleaved_matrix — exact runnable command
 
