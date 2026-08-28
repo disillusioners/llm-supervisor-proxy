@@ -615,7 +615,11 @@ func (c *CachedModelsConfig) AddModel(model models.ModelConfig) error {
 }
 
 // UpdateModel delegates to the inner store, then replaces the cached
-// entry (handling renames by rebuilding the name index).
+// entry (handling renames by rebuilding the name index) and clears the
+// negative entries for the model's (possibly new) ID and name —
+// parity with AddModel; without this, a model renamed onto a name
+// that was negative-cached in the prior TTL window would shadow the
+// live entry in GetModelByName.
 func (c *CachedModelsConfig) UpdateModel(modelID string, model models.ModelConfig) error {
 	if err := c.inner.UpdateModel(modelID, model); err != nil {
 		return err
@@ -629,6 +633,8 @@ func (c *CachedModelsConfig) UpdateModel(modelID string, model models.ModelConfi
 	delete(c.modelsByID, modelID)
 	c.modelsByID[cp.ID] = cp
 	c.modelsByName[cp.Name] = cp.ID
+	delete(c.negByID, cp.ID)
+	delete(c.negByName, cp.Name)
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
 	c.healthy = true
 	return nil

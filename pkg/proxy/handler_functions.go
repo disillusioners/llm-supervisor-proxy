@@ -20,6 +20,26 @@ import (
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 
+// configUnavailableError is the sentinel returned by initRequestContext
+// when the boundary fail-fast gate trips. It wraps
+// modelscache.ErrConfigUnavailable (so errors.Is keeps matching at the
+// caller) and carries the request-scoped context (reqID, model) the
+// caller needs to publish the config_store_unavailable event — the
+// requestContext is nil on this path, so the event fields must ride on
+// the error (review 2026-08-28: the former `rc != nil` guard in
+// HandleChatCompletions was dead code and the OpenAI-boundary event
+// never published, unlike the Anthropic mirror).
+type configUnavailableError struct {
+	reqID string
+	model string
+}
+
+func (e *configUnavailableError) Error() string {
+	return fmt.Sprintf("%s: cannot resolve model %q", modelscache.ErrConfigUnavailable, e.model)
+}
+
+func (e *configUnavailableError) Unwrap() error { return modelscache.ErrConfigUnavailable }
+
 // initRequestContext parses the incoming request, creates the request log,
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
@@ -102,7 +122,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// config_store_unavailable.
 	if resolvedModel == nil && conf.ModelsConfig != nil {
 		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
-			return nil, fmt.Errorf("%w: cannot resolve model %q", modelscache.ErrConfigUnavailable, originalModel)
+			return nil, &configUnavailableError{reqID: reqID, model: originalModel}
 		}
 	}
 

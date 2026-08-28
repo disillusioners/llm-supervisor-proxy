@@ -637,6 +637,41 @@ func TestCachedModelsConfig_NegativeCache_TTLAndRevalidation(t *testing.T) {
 	}
 }
 
+// TestCachedModelsConfig_UpdateModelClearsNegativeCache — review fix
+// 2026-08-28 (finding 1): a model updated/renamed onto an ID or name
+// that was negative-cached within the TTL window must resolve
+// immediately — parity with AddModel. Previously UpdateModel left the
+// negative entries in place, and GetModelByName checks negByName
+// BEFORE modelsByName, so a renamed-on model shadowed its own live
+// entry for up to the TTL.
+func TestCachedModelsConfig_UpdateModelClearsNegativeCache(t *testing.T) {
+	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+	// Prime fresh negative entries for an absent ID and absent name.
+	if c.GetModel("m-renamed") != nil {
+		t.Fatal("absent ID must not resolve")
+	}
+	if c.GetModelByName("renamed") != nil {
+		t.Fatal("absent name must not resolve")
+	}
+
+	// Update m-gamma onto BOTH the negative-cached ID and name —
+	// within the TTL window (clock not advanced).
+	renamed := models.ModelConfig{ID: "m-renamed", Name: "renamed", Enabled: true}
+	if err := c.UpdateModel("m-gamma", renamed); err != nil {
+		t.Fatalf("UpdateModel: %v", err)
+	}
+
+	if m := c.GetModel("m-renamed"); m == nil {
+		t.Error("GetModel must clear the negative ID entry on update (parity with AddModel)")
+	}
+	if m := c.GetModelByName("renamed"); m == nil {
+		t.Error("GetModelByName must clear the negative name entry on update (parity with AddModel)")
+	}
+}
+
 // ─── reconciler ──────────────────────────────────────────────────────────────
 
 func TestCachedModelsConfig_Reconciler_HappyDownRecover(t *testing.T) {

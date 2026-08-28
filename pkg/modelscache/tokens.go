@@ -56,9 +56,8 @@ type CachedTokenStore struct {
 	// idToHash fans out DeleteToken (planner ruling F / W4): Delete
 	// only receives the ID, so a reverse index is required to clear
 	// the hash-keyed entries. Bounded at defaultIDIndexCap.
-	idToHash   map[string]string
-	idOrder    []string // FIFO bound for idToHash (simple cap eviction)
-	staleUntil time.Time
+	idToHash map[string]string
+	idOrder  []string // FIFO bound for idToHash (simple cap eviction)
 
 	stopOnce sync.Once
 }

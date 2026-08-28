@@ -61,6 +61,12 @@ func TestOpenAIBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	mc := &healthStubModels{ModelsConfig: models.NewModelsConfig(), healthy: false}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
 
+	// Review fix 2026-08-28 (finding 2): the 503 path must ALSO
+	// publish config_store_unavailable — parity with the Anthropic
+	// boundary site. Before the fix the `rc != nil` guard here was
+	// dead code (initRequestContext returns nil on this path) and the
+	// event never fired. The shared drainEvents helper replays the bus
+	// history (last 100 events), so subscribing after the call is fine.
 	w := httptest.NewRecorder()
 	h.HandleChatCompletions(w, makeRequest(t, simpleBody("never-seen-model", false)))
 
@@ -73,6 +79,21 @@ func TestOpenAIBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Error("503 must NEVER forward the request upstream (the misroute class)")
+	}
+
+	matches := drainEvents(h.bus, "config_store_unavailable")
+	if len(matches) == 0 {
+		t.Fatal("503 path must publish config_store_unavailable on the event bus (UI event log parity)")
+	}
+	data, ok := matches[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("event data must be a map, got %T", matches[0].Data)
+	}
+	if data["model"] != "never-seen-model" {
+		t.Errorf("event must carry the model name, got %v", data["model"])
+	}
+	if id, _ := data["id"].(string); id == "" {
+		t.Error("event must carry a non-empty request id (sentinel-carried reqID)")
 	}
 }
 

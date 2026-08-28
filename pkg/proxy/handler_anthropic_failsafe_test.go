@@ -58,6 +58,9 @@ func TestAnthropicBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	mc := &healthStubModels{ModelsConfig: models.NewModelsConfig(), healthy: false}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
 
+	// Lock the unconditional publish this site always had (review fix
+	// 2026-08-28 parity check for the OpenAI mirror). drainEvents
+	// replays bus history, so subscribing after the call is fine.
 	w := httptest.NewRecorder()
 	h.HandleAnthropicMessages(w, anthropicRequest(t, "never-seen-model"))
 
@@ -70,6 +73,21 @@ func TestAnthropicBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Error("503 must NEVER forward the request upstream (the misroute class)")
+	}
+
+	matches := drainEvents(h.bus, "config_store_unavailable")
+	if len(matches) == 0 {
+		t.Fatal("503 path must publish config_store_unavailable on the event bus")
+	}
+	data, ok := matches[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("event data must be a map, got %T", matches[0].Data)
+	}
+	if data["model"] != "never-seen-model" {
+		t.Errorf("event must carry the model name, got %v", data["model"])
+	}
+	if id, _ := data["id"].(string); id == "" {
+		t.Error("event must carry a non-empty request id")
 	}
 }
 

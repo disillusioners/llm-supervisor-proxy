@@ -392,12 +392,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// class). The existing sendError helper already supports any
 			// code/message (1.D.3).
 			h.sendError(w, http.StatusServiceUnavailable, err.Error(), "config_store_unavailable", "")
-			if rc != nil {
-				h.publishEvent("config_store_unavailable", map[string]interface{}{
-					"id":    rc.reqID,
-					"model": rc.reqLog.OriginalModel,
-				})
+			// rc is nil on this path, so the event fields ride on the
+			// sentinel (configUnavailableError) — parity with the
+			// Anthropic boundary site (handler_anthropic.go), which
+			// publishes unconditionally.
+			evtID, evtModel := "", ""
+			var cue *configUnavailableError
+			if errors.As(err, &cue) {
+				evtID, evtModel = cue.reqID, cue.model
 			}
+			h.publishEvent("config_store_unavailable", map[string]interface{}{
+				"id":    evtID,
+				"model": evtModel,
+			})
 			return
 		}
 		if err.Error() == "invalid_upstream_url" {

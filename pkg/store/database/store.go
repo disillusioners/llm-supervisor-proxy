@@ -2233,9 +2233,9 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 // affinity and credFailover behave identically to the DB-backed
 // resolver — with ZERO database reads on a warm cache.
 //
-// Callers hold the decorator's cache lock; this method only touches
-// m.mu (RLock, released before any engine call path that could
-// re-enter) and the engine's own mutex. It performs no I/O.
+// Callers hold the decorator's cache lock; this method takes no lock
+// of its own — it touches only the supplied closures and the engine's
+// own mutex (on the 2+-credentials path). It performs no I/O.
 func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.ModelConfig, conversationKey string, credLookup func(credentialID string) (*models.CredentialConfig, bool)) (ResolvedCredential, bool) {
 	if cached == nil || !cached.Internal {
 		return ResolvedCredential{}, false

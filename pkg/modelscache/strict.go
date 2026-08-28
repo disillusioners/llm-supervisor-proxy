@@ -13,9 +13,9 @@ import (
 // resolver variant. The concrete *database.ModelsManager satisfies
 // it; the decorator is the consumer, never the implementer.
 //
-// Compile-time assertion lives in strict_assert_test.go (external
-// test package) to keep this package's import graph limited to what
-// the alias in health.go already needs.
+// Compile-time assertion lives in outage_test.go (alongside the
+// strict-matrix outage assertions) to keep this package's import
+// graph limited to what the alias in health.go already needs.
 type strictSource interface {
 	models.ModelsConfigInterface
 
