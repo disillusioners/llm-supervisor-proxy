@@ -47,7 +47,7 @@
 | allowed_models_integration | test/integration_allowed_models_test.go | Integration | N/A (Go test) | 2026-05-01 | PASS |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E | N/A (Go test) | 2026-05-05 | PASS |
 | ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-28 | **PASS 49/49** @ 22e76d6 (rsd merge gate; real-binary ultimate paths incl. live streaming defaults; ~150s wall) |
-| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-28 | **FAIL 0/60 — setup-phase script rot, NOT feature-caused**: legacy `credential_id` model-creation payload rejected by credential-LB schema (`credentials: []` required, pkg/ui/server.go:436). Broken at base 9842c77 (credential-LB merge predates branch). Needs ~3-line payload fix: `credentials: [{"credential_id":...,"weight":1,"position":0}]`. Also never sends buffer header (pre-dates it) — post-fix it would exercise LIVE defaults unless the header is added. |
+| openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-28 (re-run) | **PASS 60/60** @ 61fa02a — harness repaired by 61fa02a (credentials[] payload + buffer header on all 15 curls); prior FAIL 0/60 (credential-LB schema rot) superseded |
 | e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-28 | PASS 1/1 @ 22e76d6 (rsd merge gate) |
 | minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 120s internal / `timeout 300` outer | 2026-08-28 | **PASS 53/53** @ 22e76d6 (rsd merge gate; 11s wall — previous near-cap warning RESOLVED, was a cold-build artifact) |
 | e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 43/43** @ 22e76d6 (rsd merge gate; drift delta 0; header hygiene 0 leaks) |
@@ -56,7 +56,7 @@
 | fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 20/20** @ 22e76d6 (rsd merge gate: closure 4/4 + matrix 16/16; capture taps mode-independent; NOTE: no anthropic-internal-nonstream row — S3-class bug not covered here) |
 | anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PARTIAL @ 22e76d6 (post S1 re-base 22e76d6)**: S1A buffered ✅ S1B live thinking_delta ✅ (D8) S2 ✅ — **S3 ❌ REAL BUG** (internal-Anthropic NON-stream persistence empty; first-bad e717be3; see LESSONS/2026-08-28-rsd-s3-nonstream-persistence-bug.md) |
 | rsd_m1_openai_ttfb | test/mock_rsd_m1_openai_ttfb.sh | Shell E2E (real binary; OpenAI path TTFB default-vs-buffered; ports 10110/10111) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 103ms vs total 1536ms, 5 gaps ≥150ms; B: TTFB 1603ms spread 0ms; C info: byte-diff = live `: keepalive` only, content identical; D healthz 200; 3× stable) |
-| rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 2ms/incremental/thinking_delta on wire; B: TTFB 1524ms/single-burst/pre-feature shape; D: UI records content+thinking both modes, usage=null pre-existing gap; C documented-impractical w/ partial evidence) |
+| rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-08-28 (re-run) | **PASS** @ 93f06d4 (A: TTFB 2ms/incremental/thinking_delta; B: TTFB 1550ms/single-burst; D: records both modes; **F HARD: S3-fix records verified at binary level**; E ADVISORY: live=352B OpenAI-shape vs buffered=336B Anthropic-shape non-stream split — feature-introduced at e717be3, proven absent at base, pending adjudication; C documented-impractical) |
 | rsd_m3_edge_cases | test/mock_rsd_m3_edge_cases.sh | Shell E2E (real binary; header truth table + first-wins + stream=false + disconnect; ports 10130/10131) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 21/21** @ 22e76d6 (truth table 12/12 incl. case+garbage; multi-line first-wins both directions; stream=false byte-identical; disconnect: healthz 200, no panic) |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E Mock (reasoning_content chain, streaming + non-stream) | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS 5 top-level + 7 sub @ 22e76d6 (rsd merge gate) |
 
@@ -191,6 +191,14 @@ Update after each test run:
 | Quick Fixes | 1 | Missing error field in testResult (commit `ab85359`) |
 
 **Browser automation verified:**
+- Test A: Add Server mode — button calls `/fe/api/mcp-servers/test-connection` ✅
+- Test B: Edit Server mode — button calls API ✅
+- Test C: SSRF protection — localhost URLs blocked ✅
+ blocked ✅
+ction — localhost URLs blocked ✅
+ blocked ✅
+✅
+ion verified:**
 - Test A: Add Server mode — button calls `/fe/api/mcp-servers/test-connection` ✅
 - Test B: Edit Server mode — button calls API ✅
 - Test C: SSRF protection — localhost URLs blocked ✅
