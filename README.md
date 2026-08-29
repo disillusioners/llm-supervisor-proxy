@@ -85,6 +85,17 @@ The proxy uses a three-tier configuration system with the following precedence:
 | `SSE_HEARTBEAT_ENABLED` | `false` | Enable SSE heartbeat for streaming responses (keeps connections alive during buffering). |
 | `DATABASE_URL` | *(empty)* | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`). If unset, uses SQLite. |
 | `INTERNAL_ENCRYPTION_KEY` | *(empty)* | Base64-encoded 32-byte key for encrypting stored API keys. |
+| `CACHE_LAYER_ENABLED` | `true` | In-process DB caching/resilience layer (models + credentials + auth tokens). Set `false` to disable — instant rollback to pre-cache behavior on restart, no rebuild. See "Database Outage Resilience" below. |
+
+### Database Outage Resilience (cache layer)
+
+The proxy wraps its configuration/token database access with an in-process cache (enabled by `CACHE_LAYER_ENABLED`, default on) so a database outage of **≥1 hour** causes no silent failures:
+
+- **Models & credentials** are boot-primed into memory (boot fails fast if the DB is down at startup — same behavior as before) and refreshed by a background reconciler every **60s**. During an outage the proxy keeps serving **last-known-good** configuration (hard cap **24h**), including decrypted credentials — plaintext keys live in memory only and are never logged or written to disk.
+- **Auth tokens** use a three-tier cache: fresh positives (**60s** TTL), stale positives (served **only** when the database is unreachable — degraded-allow), and negatives (**60s** TTL, never stale-served). Known tokens stay authorized through an outage; unknown tokens still get 401.
+- **Fail-fast instead of silent misroute**: a request for a model the proxy has never seen while the DB is unreachable returns **503 `config_store_unavailable`** — never a silent passthrough to the external upstream (the 2026-08-27 incident class). Genuinely external models keep passing through when the store is healthy.
+- **Recovery**: once the DB returns, the cache converges within **≤120s** worst case (60s reconciler tick + scan). Revoking a token or changing a model takes effect within **60s** worst case via the same TTLs; API/UI mutations apply immediately via synchronous write-through.
+- Credentials that fail decryption are never served (503 path) and never expose ciphertext.
 
 ### Race Retry Configuration
 

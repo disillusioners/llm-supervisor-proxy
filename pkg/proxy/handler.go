@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
@@ -383,11 +385,33 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 	rc, err := h.initRequestContext(r)
 	if err != nil {
-		if err.Error() == "invalid_upstream_url" {
+		if errors.Is(err, modelscache.ErrConfigUnavailable) {
+			// db-cache-layer 1D — fail-fast 503: the model could not be
+			// resolved AND the config store is unhealthy. Never a silent
+			// external passthrough on a DB error (2026-08-27 incident
+			// class). The existing sendError helper already supports any
+			// code/message (1.D.3).
+			h.sendError(w, http.StatusServiceUnavailable, err.Error(), "config_store_unavailable", "")
+			// rc is nil on this path, so the event fields ride on the
+			// sentinel (configUnavailableError) — parity with the
+			// Anthropic boundary site (handler_anthropic.go), which
+			// publishes unconditionally.
+			evtID, evtModel := "", ""
+			var cue *configUnavailableError
+			if errors.As(err, &cue) {
+				evtID, evtModel = cue.reqID, cue.model
+			}
+			h.publishEvent("config_store_unavailable", map[string]interface{}{
+				"id":    evtID,
+				"model": evtModel,
+			})
+			return
+		}
+		if errors.Is(err, ErrInvalidUpstreamURL) {
 			http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
-		} else if err.Error() == "read_body_failed" {
+		} else if errors.Is(err, ErrReadBodyFailed) {
 			http.Error(w, "Failed to read body", http.StatusInternalServerError)
-		} else if err.Error() == "invalid_json" {
+		} else if errors.Is(err, ErrInvalidJSON) {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		}
 		return

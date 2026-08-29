@@ -580,7 +580,31 @@ func TestStoreEngine_BusDrainForwardsCredentialsChanged(t *testing.T) {
 	}
 	defer mgr.Close()
 
+	// Sentinel: subscribers are iterated in Subscribe() order so the
+	// sentinel receives every event AFTER the drain's channel. Once
+	// the sentinel observes an event (Publish's non-blocking sends
+	// preserve order), the drain's channel has buffered it too. This
+	// replaces a fixed time.Sleep as a synchronization barrier — the
+	// sleep was sensitive to scheduler jitter and produced an
+	// observed 2-of-13 historical flake.
+	sentinel, err := bus.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bus.Unsubscribe(sentinel)
+
 	seedModelCreds(t, mgr, "bd", models.TestRefs("cA", "cB"))
+
+	// Wait for the drain goroutine to have buffered the AddModel
+	// publish; small grace period covers the drain's GetModel +
+	// OnModelChanged work so engine state is stable at [cA,cB]
+	// before we inject stale state below.
+	select {
+	case <-sentinel:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("drain sentinel: AddModel publish not observed within deadline")
+	}
+	time.Sleep(50 * time.Millisecond)
 
 	// Inject STALE engine state — single credential cA only
 	// (overriding the direct OnModelChanged call that seedModelCreds
@@ -604,16 +628,23 @@ func TestStoreEngine_BusDrainForwardsCredentialsChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Drain any residual subscription-side events from the
-	// seedModelCreds publish (mgr.AddModel publishes via the bus).
-	time.Sleep(20 * time.Millisecond)
-
 	// Publish the SINGLE credentials-changed event on the REAL bus.
 	bus.Publish(events.Event{
 		Type:      credentiallb.EventCredentialsChanged,
 		Timestamp: time.Now().Unix(),
 		Data:      map[string]interface{}{"model_id": "bd"},
 	})
+
+	// Wait for the drain goroutine to have buffered the test's
+	// publish; small grace period covers the drain's GetModel +
+	// OnModelChanged work so engine state is stable at [cA,cB,cC]
+	// before the probabilistic cC pick poll below.
+	select {
+	case <-sentinel:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("drain sentinel: test publish not observed within deadline")
+	}
+	time.Sleep(50 * time.Millisecond)
 
 	// Wait for the drain to converge. Poll a fresh-key pick on a
 	// unique conversation key: once the engine knows cC (post-

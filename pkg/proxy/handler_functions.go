@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
 )
@@ -19,24 +21,60 @@ import (
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────
 
+// configUnavailableError is the sentinel returned by initRequestContext
+// when the boundary fail-fast gate trips. It wraps
+// modelscache.ErrConfigUnavailable (so errors.Is keeps matching at the
+// caller) and carries the request-scoped context (reqID, model) the
+// caller needs to publish the config_store_unavailable event — the
+// requestContext is nil on this path, so the event fields must ride on
+// the error (review 2026-08-28: the former `rc != nil` guard in
+// HandleChatCompletions was dead code and the OpenAI-boundary event
+// never published, unlike the Anthropic mirror).
+type configUnavailableError struct {
+	reqID string
+	model string
+}
+
+func (e *configUnavailableError) Error() string {
+	return fmt.Sprintf("%s: cannot resolve model %q", modelscache.ErrConfigUnavailable, e.model)
+}
+
+func (e *configUnavailableError) Unwrap() error { return modelscache.ErrConfigUnavailable }
+
+// Request-parse sentinels returned by initRequestContext and matched
+// with errors.Is at the HandleChatCompletions dispatch (tidy finding
+// 6). The message strings are the historical wire contract — they
+// must stay byte-identical (they were string-compared before).
+var (
+	// ErrInvalidUpstreamURL — the configured upstream URL could not
+	// be joined into a request target URL.
+	ErrInvalidUpstreamURL = errors.New("invalid_upstream_url")
+
+	// ErrReadBodyFailed — the request body could not be read.
+	ErrReadBodyFailed = errors.New("read_body_failed")
+
+	// ErrInvalidJSON — the request body is not valid JSON.
+	ErrInvalidJSON = errors.New("invalid_json")
+)
+
 // initRequestContext parses the incoming request, creates the request log,
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	conf := h.config.Clone()
 	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
 	if err != nil {
-		return nil, fmt.Errorf("invalid_upstream_url")
+		return nil, ErrInvalidUpstreamURL
 	}
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
-		return nil, fmt.Errorf("read_body_failed")
+		return nil, ErrReadBodyFailed
 	}
 	r.Body.Close()
 
 	var requestBody map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
-		return nil, fmt.Errorf("invalid_json")
+		return nil, ErrInvalidJSON
 	}
 
 	reqID := uuid.New().String()
@@ -88,6 +126,24 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	var resolvedModel *models.ModelConfig
 	if conf.ModelsConfig != nil {
 		resolvedModel = conf.ModelsConfig.GetModel(originalModel)
+	}
+
+	// db-cache-layer 1D — boundary fail-fast gate (one of the three
+	// pkg/proxy source sites this feature touched: this gate in
+	// handler_functions.go, the sentinel→503/event conversion in
+	// handler.go, and the Anthropic mirror in handler_anthropic.go).
+	// A nil resolution is
+	// LEGITIMATE (an external/unknown model → passthrough, a real
+	// feature) ONLY when the config store can actually answer. When
+	// the store is unhealthy (DB outage, cache exhausted) nil means
+	// "cannot know" — silently passing such a request through to the
+	// external upstream is exactly the 2026-08-27 misroute class. The
+	// caller (HandleChatCompletions) converts the sentinel into a 503
+	// config_store_unavailable.
+	if resolvedModel == nil && conf.ModelsConfig != nil {
+		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
+			return nil, &configUnavailableError{reqID: reqID, model: originalModel}
+		}
 	}
 
 	// Build model list using resolved config

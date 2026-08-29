@@ -620,3 +620,77 @@ zero behavior change. NO response compression was added.
 - **Result**: PASS — 6/6 scenarios (a: 276 B client + 411 B upstream byte-identical; b: 220 B upstream byte-identical; c: 400 + 0 upstream calls; d: 400 + 0 upstream calls; e: 413 in ~0s + post-bomb liveness; f: SSE 4383 B) — ~24s wall
 - **Quick Fixes**: 3 harness-only script fixes during first execution (header-path derivation; scenario-b client-body made informational due to per-request Anthropic msg-id; gzip via regular files not process substitution) — see LESSONS/2026-08-28-gzip-e2e-harness-lessons.md
 - **Report**: RESULTS/2026-08-28-gzip-request-support-verification.md
+
+
+## Mock Test: dbcache_outage (Pack A — incident close-out, scenarios 1–3)
+
+### Metadata
+- **Created**: 2026-08-29
+- **Script**: test/test_e2e_dbcache_outage.sh (PLANNED)
+- **Language**: Bash (real binary + curl + jq)
+- **Status**: PLANNED
+
+### Configuration
+- **Timeout**: 280s internal self-timer / `timeout 300` outer
+- **Proxy port**: 10150
+- **Mock healthy upstream**: 10151 (captures Authorization header + path per request)
+- **Misroute sentinel**: 4001 (listener that records ANY hit; must stay at 0 during outage — the incident's dead-default target)
+- **Cleanup**: kill processes on all ports before/after; verify bound port (lsof) before any kill; NEVER touch port 8088
+
+### What It Tests (original 2026-08-27 incident chain)
+1. Warm cache with known internal models (single-cred openai-internal, multi-cred, anthropic-internal, one deliberate-external model pointing at 10151) + valid sk- token → induce HARD DB outage on the live process (empirically-chosen mechanism: truncate DB file / rm+mkdir / chmod — whichever produces real driver errors on live queries) → request flow at t≈0/15/30/45/60/75/90s: **all known models 200, ZERO hits on 4001 sentinel, ZERO "credential external not found" WARN in proxy log**.
+2. Unknown model (never-seen) during outage on /v1/chat/completions AND /v1/messages → **HTTP 503 + error_type config_store_unavailable**, never passthrough.
+3. Valid token at t≈65s/80s (past 60s positive TTL) → **200 via stale tier**; revoked/deleted-before-outage token → **401 always**; invalid-format token → 401.
+4. Restore DB → direct-to-DB out-of-band insert (sqlite3 CLI) of a new model → reconciler surfaces it via /fe/api/models within **≤120s** (criterion H); sentinel still 0 (no unknown-model probes post-recovery).
+
+### Mock Services Required
+- Healthy upstream on 10151 (echo server capturing Authorization + path, returns minimal valid OpenAI/Anthropic SSE/non-stream responses)
+- Misroute sentinel on 4001 (records hits, returns 502)
+
+### Success Criteria
+- [ ] Scenarios 1–3 all PASS, sentinel hit count == 0, credential-external WARN count == 0
+- [ ] Recovery (criterion H) observed ≤120s
+- [ ] No process leaks; ports freed
+
+### Implementation Notes
+- DB outage mechanism must be determined EMPIRICALLY first (candidate: truncate-to-0 on live file → real driver error on existing pooled conns; rm+mkdir → new-conn open failure). Report observed driver error strings — cross-checked against mock audit.
+- Sentinel 4001 is shared with Pack B — Pack A must fully release it (process exit) before Pack B starts (todo edge n5→n6).
+
+### EMPIRICAL OUTAGE MECHANISM RESOLVED (2026-08-29, W4)
+- **Chosen: M2** — `dd` same-size garbage over `config.db` (conv=notrunc) + `rm -f` the `-wal`/`-shm`. Real driver errors on the LIVE process: `file is not a database (26)` / `database disk image is malformed (11)` (reads), `unable to open database file: out of memory (14)` (writers).
+- **M1 rejected** (rm+mkdir): pool serves reads from deleted inodes forever — no outage for reads. **M3 rejected** (truncate -s 0): SIGBUS crash — modernc mmaps `-shm`. **M4 rejected** (chmod 000 dir): open fds unaffected.
+- **Recovery caveat:** a live process NEVER recovers from M2 even after byte-identical restore (mmap/pool stays broken, perpetual `malformed (11)`) → A8 restarts the proxy after restore. (PG deployments reconnect; SQLite file-corruption requires restart — surfaced as process-level finding.)
+- macOS: Go ignores XDG_CONFIG_HOME on darwin — DB lands under `$HOME/Library/Application Support/`; packs discover via `find`.
+
+### Last Run
+- **Date**: 2026-08-29 (re-gate @ a09877d, worker regate-packA) | **Result**: **PASS — exit 0** (163.7s; A4 28/28 through outage, A6 T_valid 200 stale-tier t70/t90, A5 503+CSU both endpoints, A7 zero misroutes + zero Race-attempt + matched SQLite WARN `(11)`, A8 recovery 61s≤120s). Pre-fix FAIL ×3 (F1) retained as regression history — this pack is the F1 regression gate | **Report**: RESULTS/2026-08-29-dbcache-layer-gate.md (delta re-gate section)
+
+---
+
+## Mock Test: dbcache_rollback_ui (Pack B — scenarios 4–5 + UI)
+
+### Metadata
+- **Created**: 2026-08-29
+- **Script**: test/test_e2e_dbcache_rollback_ui.sh (PLANNED)
+- **Language**: Bash
+- **Status**: PLANNED
+
+### Configuration
+- **Timeout**: 280s internal / `timeout 300` outer
+- **Proxy port**: 10160 | **Mock upstream**: 10161 | **Sentinel**: 4001 (EXCLUSIVE — runs only after Pack A released it)
+- **Cleanup**: same rules as Pack A
+
+### What It Tests
+1. **Rollback (scenario 5)** — boot with `CACHE_LAYER_ENABLED=false`, healthy DB: internal requests work. Induce DB outage → known internal model request → **OLD pre-MVP behavior reproduces**: nil-model → external passthrough → 4001 sentinel gets ≥1 hit, NO 503 config_store_unavailable. Proves the flag fully bypasses the cache layer.
+2. **Default ON + healthy DB**: UI loads (`GET /ui/` 200 HTML); `/fe/api/models` + `/fe/api/tokens` return seeded JSON (ListTokens/GetTokenByID pass-through not broken); no 5xx.
+3. **Write-through (scenario 4)**: add model via API → immediate 200 via its upstream; update model → change visible immediately; remove model → next request no longer internal; credential add/update → new key observed at mock upstream within a burst of fresh-conversation requests; token create → immediate use 200; token delete → immediate 401.
+4. Sentinel must be 0 during phase 2/3 (no unknown-model probes with healthy DB).
+
+### Success Criteria
+- [ ] Flag-off misroute reproduced (≥1 sentinel hit) with zero 503s
+- [ ] UI + FE API healthy under cache-on
+- [ ] All 9 mutators observable as immediate cache-visible changes (model ×3, credential ×2-add/update, token create/delete)
+- [ ] No leaks; ports freed
+
+### Last Run
+- **Date**: 2026-08-29 (formal, W6 worker dbcache-packB-run) | **Result**: **PASS** (exit 0; smoke + formal identical) — B1 flag-off ✓, B2 no CSU-503 (known-model reads survive via page cache on SQLite; recorded), B3 unknown-model 8/8 sentinel misroute repro (original bug with cache off) ✓, B5 UI/FE-API healthy under cache-on ✓, B6.1/B6.4/B6.5 immediate write-through ✓, B6.2 attach-rejected-until-tick (F2) + B6.3 rotation ~55s (F3) reproduced with zero stale-key leakage, B7 sentinel 0 during boot 2 ✓ | **Report**: RESULTS/2026-08-29-dbcache-layer-gate.md

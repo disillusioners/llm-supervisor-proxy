@@ -742,7 +742,16 @@ func (m *ModelsManager) Save() error {
 
 // scanModels executes a query and scans the results into model configs
 func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.ModelConfig, error) {
-	rows, err := m.store.DB.QueryContext(context.Background(), query, args...)
+	return m.scanModelsContext(context.Background(), query, args...)
+}
+
+// scanModelsContext is the ctx-aware core of scanModels (Phase 1A —
+// consumed by the strict list reads so the cache decorator can bound
+// every strict fill with a 5s timeout; the legacy GetModels/
+// GetEnabledModels keep their byte-identical behavior by delegating
+// here with context.Background()).
+func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, args ...interface{}) ([]models.ModelConfig, error) {
+	rows, err := m.store.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return []models.ModelConfig{}, err
 	}
@@ -996,6 +1005,190 @@ func (m *ModelsManager) GetEnabledModels() []models.ModelConfig {
 		return []models.ModelConfig{}
 	}
 	return result
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1A (db-cache-layer) — strict, error-propagating read methods.
+//
+// These are ADDITIVE ONLY (planner ruling C1): every legacy signature
+// above is byte-identical; the strict twins exist so the pkg/modelscache
+// decorator can distinguish row-not-found from infrastructure errors
+// and never mistake a DB outage for an empty configuration (the
+// 2026-08-27 conflated-nil misroute class). The decorator is the sole
+// consumer; no production caller reaches the legacy silent-nil paths
+// once the decorator is wired at cmd/main.go.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Strict-read sentinel errors (Phase 1A). ErrModelNotFound and
+// ErrCredentialNotFound WRAP sql.ErrNoRows so consumers can use either
+// errors.Is(err, ErrModelNotFound) or errors.Is(err, sql.ErrNoRows).
+var (
+	// ErrModelNotFound — the queried model row does not exist. Wraps
+	// sql.ErrNoRows (satisfies errors.Is(err, sql.ErrNoRows)).
+	ErrModelNotFound = fmt.Errorf("model not found: %w", sql.ErrNoRows)
+	// ErrCredentialNotFound — the queried credential row does not exist.
+	// Wraps sql.ErrNoRows.
+	ErrCredentialNotFound = fmt.Errorf("credential not found: %w", sql.ErrNoRows)
+	// ErrDecryptionFailed — the stored credential API key could not be
+	// decrypted (GetCredentialStrict hardening: the legacy GetCredential
+	// WARNs and serves ciphertext as the APIKey; the strict twin NEVER
+	// serves ciphertext — arch §5 / matrix row 5).
+	ErrDecryptionFailed = errors.New("credential decryption failed")
+	// ErrDecryptionFailureInScan — a bulk credential scan hit a row whose
+	// stored API key could not be decrypted; the whole scan aborts
+	// (planner ruling J: a partial swap would mask configuration
+	// corruption). The partial slice returned alongside this error must
+	// be treated as unusable by callers (boot priming / reconciler
+	// abort on ANY non-nil error).
+	ErrDecryptionFailureInScan = errors.New("credential scan aborted: decryption failure")
+)
+
+// modelSelectColumnsPG and modelSelectColumnsSQLite are the shared
+// column lists of the single-model strict SELECTs, one per dialect
+// (PostgreSQL spells the boolean coalesce literals false/true; SQLite
+// uses 0/1). The embedded continuation-line indentation is
+// load-bearing: modelSelectQuery composes these with the FROM/WHERE
+// tail so the emitted query text stays byte-identical to the former
+// per-site literals (same columns, same order, same placeholder
+// semantics).
+const modelSelectColumnsPG = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+			coalesce(release_stream_chunk_deadline, 0), coalesce(internal, false), coalesce(credentials_json, '[]'),
+			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+			peak_hour_enabled, peak_hour_start, peak_hour_end,
+			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)`
+
+const modelSelectColumnsSQLite = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
+		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
+		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
+		peak_hour_enabled, peak_hour_start, peak_hour_end,
+		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)`
+
+// modelSelectQuery returns the dialect-appropriate single-model
+// SELECT used by the strict reads (same shape the legacy GetModel /
+// GetModelByName build inline). where is the column the caller keys
+// on ("id" or "name").
+func (m *ModelsManager) modelSelectQuery(where string) string {
+	if m.store.Dialect == PostgreSQL {
+		return "SELECT " + modelSelectColumnsPG + "\n\t\t\tFROM models WHERE " + where + " = $1"
+	}
+	return "SELECT " + modelSelectColumnsSQLite + "\n\t\tFROM models WHERE " + where + " = ?"
+}
+
+// dbModelRowToConfig converts a scanned dbModelRow into the public
+// models.ModelConfig shape (shared by the strict single-row reads).
+func dbModelRowToConfig(dbModel *dbModelRow) *models.ModelConfig {
+	model := &models.ModelConfig{
+		ID:                           dbModel.ID,
+		Name:                         dbModel.Name,
+		Enabled:                      dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                     dbModel.isInternal(),
+		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:              dbModel.InternalBaseURL,
+		InternalModel:                dbModel.InternalModel,
+		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
+		PeakHourStart:                dbModel.PeakHourStart,
+		PeakHourEnd:                  dbModel.PeakHourEnd,
+		PeakHourTimezone:             dbModel.PeakHourTimezone,
+		PeakHourModel:                dbModel.PeakHourModel,
+		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
+		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
+	}
+
+	// Parse fallback chain
+	if dbModel.FallbackChainJSON != "" {
+		json.Unmarshal([]byte(dbModel.FallbackChainJSON), &model.FallbackChain)
+	}
+
+	// Parse truncate params
+	if dbModel.TruncateParamsJSON != "" {
+		json.Unmarshal([]byte(dbModel.TruncateParamsJSON), &model.TruncateParams)
+	}
+
+	return model
+}
+
+// getModelStrict is the shared core of GetModelStrict /
+// GetModelByNameStrict: run the single-row query, discriminate
+// not-found (→ ErrModelNotFound, which wraps sql.ErrNoRows) from
+// infrastructure errors (→ propagate unchanged).
+func (m *ModelsManager) getModelStrict(ctx context.Context, query, arg string) (*models.ModelConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var dbModel dbModelRow
+	err := m.store.DB.QueryRowContext(ctx, query, arg).Scan(
+		&dbModel.ID,
+		&dbModel.Name,
+		&dbModel.Enabled,
+		&dbModel.FallbackChainJSON,
+		&dbModel.TruncateParamsJSON,
+		&dbModel.CreatedAt,
+		&dbModel.UpdatedAt,
+		&dbModel.ReleaseStreamChunkDeadline,
+		&dbModel.Internal,
+		&dbModel.CredentialsJSON,
+		&dbModel.InternalBaseURL,
+		&dbModel.InternalModel,
+		&dbModel.PeakHourEnabled,
+		&dbModel.PeakHourStart,
+		&dbModel.PeakHourEnd,
+		&dbModel.PeakHourTimezone,
+		&dbModel.PeakHourModel,
+		&dbModel.SecondaryUpstreamModel,
+		&dbModel.ExcludeFromUltimateSwitching,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrModelNotFound
+		}
+		return nil, err
+	}
+	return dbModelRowToConfig(&dbModel), nil
+}
+
+// GetModelStrict is the error-propagating twin of GetModel: returns
+// (nil, ErrModelNotFound) when the row does not exist — an error that
+// satisfies errors.Is(err, sql.ErrNoRows) — and (nil, err) with the
+// driver's error unchanged on infrastructure failure. Never conflates
+// the two (the legacy GetModel returns nil for both — the 2026-08-27
+// incident crux).
+func (m *ModelsManager) GetModelStrict(ctx context.Context, modelID string) (*models.ModelConfig, error) {
+	return m.getModelStrict(ctx, m.modelSelectQuery("id"), modelID)
+}
+
+// GetModelByNameStrict is the error-propagating twin of GetModelByName
+// with the same error discrimination as GetModelStrict.
+func (m *ModelsManager) GetModelByNameStrict(ctx context.Context, modelName string) (*models.ModelConfig, error) {
+	return m.getModelStrict(ctx, m.modelSelectQuery("name"), modelName)
+}
+
+// GetModelsStrict is the error-propagating twin of GetModels: a
+// transient infrastructure error returns (nil, err); a legitimate
+// empty table returns ([], nil). Consumers (boot priming / reconciler)
+// treat ANY non-nil error as "snapshot unusable — do not swap".
+func (m *ModelsManager) GetModelsStrict(ctx context.Context) ([]models.ModelConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result, err := m.scanModelsContext(ctx, m.qb.GetAllModels())
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// GetEnabledModelsStrict is the error-propagating twin of
+// GetEnabledModels (same contract as GetModelsStrict).
+func (m *ModelsManager) GetEnabledModelsStrict(ctx context.Context) ([]models.ModelConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result, err := m.scanModelsContext(ctx, m.qb.GetEnabledModels())
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // GetTruncateParams returns truncate params for a model
@@ -1581,6 +1774,111 @@ func (m *ModelsManager) GetCredentials() []models.CredentialConfig {
 	return result
 }
 
+// GetCredentialStrict is the error-propagating twin of GetCredential:
+// returns (nil, ErrCredentialNotFound) — wrapping sql.ErrNoRows — when
+// the row does not exist, (nil, err) unchanged on infrastructure
+// failure, and CRITICALLY (nil, ErrDecryptionFailed) when the stored
+// API key cannot be decrypted. The legacy GetCredential WARNs and
+// serves the raw ciphertext as the APIKey (the legacy GetCredential's
+// ciphertext-serving hazard);
+// the strict twin NEVER serves ciphertext (arch §5, matrix row 5).
+func (m *ModelsManager) GetCredentialStrict(ctx context.Context, id string) (*models.CredentialConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials WHERE id = ?`
+	if m.store.Dialect == PostgreSQL {
+		query = `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials WHERE id = $1`
+	}
+
+	var dbCred dbCredentialRow
+	err := m.store.DB.QueryRowContext(ctx, query, id).Scan(
+		&dbCred.ID,
+		&dbCred.Provider,
+		&dbCred.APIKey,
+		&dbCred.BaseURL,
+		&dbCred.CreatedAt,
+		&dbCred.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrCredentialNotFound
+		}
+		return nil, err
+	}
+
+	cred := &models.CredentialConfig{
+		ID:       dbCred.ID,
+		Provider: dbCred.Provider,
+		APIKey:   dbCred.APIKey,
+		BaseURL:  dbCred.BaseURL,
+	}
+
+	// Decrypt API key — decrypt failure is a HARD error here (never
+	// serve ciphertext).
+	if dbCred.APIKey != "" {
+		decrypted, err := crypto.Decrypt(dbCred.APIKey)
+		if err != nil {
+			return nil, ErrDecryptionFailed
+		}
+		cred.APIKey = decrypted
+	}
+
+	return cred, nil
+}
+
+// GetCredentialsStrict is the error-propagating twin of GetCredentials.
+// Per planner ruling J: a per-row crypto.Decrypt failure ABORTS the
+// whole scan and returns (partial, ErrDecryptionFailureInScan) — the
+// row with the raw ciphertext MUST NOT appear in the partial slice,
+// and consumers must treat any non-nil error as "do not swap" (a
+// partial swap would risk masking configuration corruption such as a
+// wrong encryption key or manual SQL edit). A legitimate empty
+// credential table returns ([], nil); an infrastructure error returns
+// (nil, err).
+func (m *ModelsManager) GetCredentialsStrict(ctx context.Context) ([]models.CredentialConfig, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	query := `SELECT id, provider, api_key, coalesce(base_url, ''), created_at, updated_at FROM credentials ORDER BY id`
+	rows, err := m.store.DB.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []models.CredentialConfig
+	for rows.Next() {
+		var dbCred dbCredentialRow
+		if err := rows.Scan(&dbCred.ID, &dbCred.Provider, &dbCred.APIKey, &dbCred.BaseURL, &dbCred.CreatedAt, &dbCred.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan error: %w", err)
+		}
+
+		cred := models.CredentialConfig{
+			ID:       dbCred.ID,
+			Provider: dbCred.Provider,
+			APIKey:   dbCred.APIKey,
+			BaseURL:  dbCred.BaseURL,
+		}
+
+		// Decrypt API key — per-row failure aborts the entire scan
+		// ([PLANNER-J]); the offending row is never appended.
+		if cred.APIKey != "" {
+			decrypted, err := crypto.Decrypt(cred.APIKey)
+			if err != nil {
+				return result, ErrDecryptionFailureInScan
+			}
+			cred.APIKey = decrypted
+		}
+
+		result = append(result, cred)
+	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("rows error: %w", err)
+	}
+	return result, nil
+}
+
 // AddCredential adds a new credential configuration
 func (m *ModelsManager) AddCredential(cred models.CredentialConfig) error {
 	if err := cred.Validate(); err != nil {
@@ -1900,6 +2198,116 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 		log.Printf("[WARN] [credentiallb] credential %s vanished mid-flight for model %s — clearing engine state, resolution fails this call", credID, modelID)
 		m.engine.OnCredentialDeleted(credID)
 		m.engine.ExcludeAndReselect(modelID, conversationKey, credID, 0)
+		return ResolvedCredential{}, false
+	}
+
+	provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+	return ResolvedCredential{
+		Provider:      provider,
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		InternalModel: actualModel,
+		CredentialID:  credID,
+		NewlyBound:    newlyBound,
+	}, true
+}
+
+// ResolveInternalConfigWithAffinityCached is the resolver variant the
+// pkg/modelscache decorator consumes on its hot path (planner
+// correction 3 / council D3): identical branching to
+// ResolveInternalConfigWithAffinity, but (a) it skips the m.GetModel
+// re-read at the top — the caller supplies the CACHED model config —
+// and (b) every m.GetCredential(...) call is replaced by the supplied
+// credLookup closure, which the decorator backs with its in-memory
+// credential map. The 2+-credentials engine path (GetOrSelect) and the
+// dangling-reference defensive heal (OnCredentialDeleted +
+// ExcludeAndReselect) are preserved verbatim, so multi-credential
+// affinity and credFailover behave identically to the DB-backed
+// resolver — with ZERO database reads on a warm cache.
+//
+// Callers hold the decorator's cache lock; this method takes no lock
+// of its own — it touches only the supplied closures and the engine's
+// own mutex (on the 2+-credentials path). It performs no I/O.
+//
+// CONFIRMED INTENT (leader ruling, 2026-08-28): the supplied
+// credLookup does NOT strict-fill credentials that are missing from
+// the cache — a credential added to the DB after boot becomes
+// visible to resolution only via the next reconciler sweep (≤60s at
+// the default interval). This is the accepted consistency window;
+// do not "fix" it by strict-filling inside the resolver.
+func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.ModelConfig, conversationKey string, credLookup func(credentialID string) (*models.CredentialConfig, bool)) (ResolvedCredential, bool) {
+	if cached == nil || !cached.Internal {
+		return ResolvedCredential{}, false
+	}
+	modelConfig := cached
+
+	lookupCredential := func(id string) *models.CredentialConfig {
+		if credLookup == nil {
+			return nil
+		}
+		cred, ok := credLookup(id)
+		if !ok {
+			return nil
+		}
+		return cred
+	}
+
+	// resolveSingle is the shared tail of the two single-credential
+	// paths below (the legacy PrimaryCredentialID shape and the E-3
+	// fast path): resolve via exactly one credential ID or fail.
+	// NewlyBound is always false — no engine call, no binding write
+	// on either path.
+	resolveSingle := func(credID string) (ResolvedCredential, bool) {
+		cred := lookupCredential(credID)
+		if cred == nil {
+			return ResolvedCredential{}, false
+		}
+		provider, apiKey, baseURL, actualModel := resolveWithCredential(modelConfig, cred)
+		return ResolvedCredential{
+			Provider:      provider,
+			APIKey:        apiKey,
+			BaseURL:       baseURL,
+			InternalModel: actualModel,
+			CredentialID:  credID,
+			NewlyBound:    false,
+		}, true
+	}
+
+	// Nil engine (hand-constructed instances) and empty credential
+	// lists both degrade to the legacy single-credential shape —
+	// identical to ResolveInternalConfigWithAffinity.
+	if m.engine == nil || len(modelConfig.Credentials) == 0 {
+		primaryID := modelConfig.PrimaryCredentialID()
+		if primaryID == "" {
+			return ResolvedCredential{}, false
+		}
+		return resolveSingle(primaryID)
+	}
+
+	// E-3 single-credential fast path: NO engine call, NO map writes.
+	if len(modelConfig.Credentials) == 1 {
+		return resolveSingle(modelConfig.Credentials[0].CredentialID)
+	}
+
+	// 2+ credentials: engine path (affinity for non-empty keys, fresh
+	// weighted pick without binding for empty keys). The engine is
+	// already zero-DB-per-request (snapshot refreshed via
+	// RebindFromStore / OnModelChanged), so this stays DB-free.
+	credID, newlyBound, err := m.engine.GetOrSelect(modelConfig.ID, conversationKey)
+	if err != nil || credID == "" {
+		return ResolvedCredential{}, false
+	}
+	cred := lookupCredential(credID)
+	if cred == nil {
+		// Dangling reference (credential deleted while the model's
+		// credentials_json still references it) — same defensive heal
+		// as ResolveInternalConfigWithAffinity's dangling-reference
+		// heal:
+		// clear the engine state for the dead credential and rebind
+		// this conversation to a live one; THIS call still fails.
+		log.Printf("[WARN] [credentiallb] credential %s missing from cache for model %s — clearing engine state, resolution fails this call", credID, modelConfig.ID)
+		m.engine.OnCredentialDeleted(credID)
+		m.engine.ExcludeAndReselect(modelConfig.ID, conversationKey, credID, 0)
 		return ResolvedCredential{}, false
 	}
 
