@@ -75,23 +75,20 @@ note_fail() { FAILURES=$((FAILURES+1)); FAILED_CHECKS="${FAILED_CHECKS} $1"; }
 
 cleanup() {
     local code=$?
-    # Kill only what we spawned, lsof-verified by command pattern (binary and
-    # helper names are unique to this run's TMPDIR — never a foreign process,
-    # never the script itself, never anything on 8088).
-    for port in "$PROXY_PORT" "$MOCK_PORT" "$SENTINEL_PORT"; do
-        for pid in $(lsof -ti:"$port" 2>/dev/null || true); do
-            cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
-            case "$cmd" in
-                *dbcache_proxy_a*|*dbcache_a_mock*|*dbcache_a_sentinel*) kill -9 "$pid" 2>/dev/null || true ;;
-                *) echo "  [cleanup] port $port pid $pid not ours ($cmd) — left alone" ;;
-            esac
-        done
-    done
-    if [ -n "$ALARM_PID" ]; then kill "$ALARM_PID" 2>/dev/null || true; fi
-    if [ -n "$PROXY_PID" ]; then kill "$PROXY_PID" 2>/dev/null || true; fi
-    if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null || true; fi
-    if [ -n "$SENTINEL_PID" ]; then kill "$SENTINEL_PID" 2>/dev/null || true; fi
-    [ -d "$TMPDIR_PATH" ] && rm -rf "$TMPDIR_PATH"
+    # FAST teardown: we already track every PID we spawn (PROXY_PID, MOCK_PID,
+    # SENTINEL_PID, ALARM_PID), so kill -9 them directly with no wait. The
+    # previous lsof+ps-cmd port-sweep could take 1-3s on busy systems and
+    # would push the script past its 280s self-watchdog before the EXIT trap
+    # could propagate the script's true exit code (RESULT: FAIL was printed
+    # but the process was SIGKILL'd mid-cleanup, exit code 0). kill -9 (no
+    # wait) keeps the trap short so rc propagates promptly. Port safety is
+    # preserved by the pre-flight check at line ~117; tracked PIDs are by
+    # construction the children of this script ($! after &).
+    [ -n "$ALARM_PID"    ] && kill -9 "$ALARM_PID"    2>/dev/null || true
+    [ -n "$PROXY_PID"    ] && kill -9 "$PROXY_PID"    2>/dev/null || true
+    [ -n "$MOCK_PID"     ] && kill -9 "$MOCK_PID"     2>/dev/null || true
+    [ -n "$SENTINEL_PID" ] && kill -9 "$SENTINEL_PID" 2>/dev/null || true
+    [ -d "$TMPDIR_PATH"  ] && rm -rf "$TMPDIR_PATH"  2>/dev/null || true
     return "$code"
 }
 trap 'rc=$?; if [ -f "$TMPDIR_PATH/TIMEOUT" ]; then cleanup; echo "RESULT: TIMEOUT"; exit 124; fi; cleanup; exit $rc' EXIT
