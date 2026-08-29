@@ -663,7 +663,7 @@ zero behavior change. NO response compression was added.
 - macOS: Go ignores XDG_CONFIG_HOME on darwin — DB lands under `$HOME/Library/Application Support/`; packs discover via `find`.
 
 ### Last Run
-- **Date**: 2026-08-29 (formal, W5 worker dbcache-packA-run; 3rd run by W8 after exit-code fix) | **Result**: **FAIL — DETERMINISTIC (×3), known product finding F1** (A4/A6: valid-token 401 >60s into outage on SQLite file-corruption — stale-tier classifier gap; all other checks PASS: zero misroutes, zero Race-attempt WARNs, 503+config_store_unavailable both endpoints, recovery 59s) | **Report**: RESULTS/2026-08-29-dbcache-layer-gate.md
+- **Date**: 2026-08-29 (re-gate @ a09877d, worker regate-packA) | **Result**: **PASS — exit 0** (163.7s; A4 28/28 through outage, A6 T_valid 200 stale-tier t70/t90, A5 503+CSU both endpoints, A7 zero misroutes + zero Race-attempt + matched SQLite WARN `(11)`, A8 recovery 61s≤120s). Pre-fix FAIL ×3 (F1) retained as regression history — this pack is the F1 regression gate | **Report**: RESULTS/2026-08-29-dbcache-layer-gate.md (delta re-gate section)
 
 ---
 

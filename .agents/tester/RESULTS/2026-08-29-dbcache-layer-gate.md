@@ -111,3 +111,38 @@ All PASS @ b48a14f: proxy root 57.6s · proxy subpkgs ~2s · **modelscache -race
 - Race/build/vet/ensure gates: ✅ ALL GREEN
 - ≥1h zero-failure outage goal: ❌ **NOT met for SQLite (default) deployments** — blocked by F1 (fix classifier to cover SQLite error shapes, or document PG-only resilience); F2/F3/F5/F7 to triage
 - **Testing Complete: ❌ NOT READY — F1 must be fixed (or explicitly accepted as PG-only) before ship**
+
+
+---
+
+# DELTA RE-GATE (2026-08-29, fix commit a09877d) — VERDICT: ✅ READY-TO-MERGE
+
+Fix under test: `a09877d` (5 files, +394/−33, all pkg/modelscache) — F1 classifier SQLite shapes + F2/F3 credential write-through + comment fold-in.
+
+## 1. Pack A re-run (worker regate-packA, /tmp/packA_regate.log)
+**RESULT: PASS, exit 0, 163.7s** — A4 **28/28 requests 200 through the entire ~90s SQLite-corruption outage** (was: 401s from t≈60s); A6 **T_valid 200 via stale tier at t=70 AND t=90** (was 401); T_revoked/garbage still 401; A7 zero misroutes + zero Race-attempt WARNs + strict-read WARN now shows the matched SQLite shape (`database disk image is malformed (11)`); A8 recovery 61s ≤120s; A5 503+CSU both endpoints unchanged. **F1 CONFIRMED FIXED at process level on the default (SQLite) dialect.**
+
+## 2. Commit a09877d review (worker regate-diff-review) — PASS, 0 blockers
+- Classifier: 3 new fragments (`unable to open database file` / `file is not a database` / `database disk image is malformed`) — all ≥22 chars, multi-word, SQLite-specific; no over-breadth. **Non-infra control verified**: `no such table` asserted `want=false` (tokens_test.go:535-540). Matrix forms (26)/(11)/(14) shape-injection tests present (tokens_test.go:522-524). Verdict-class precedence intact ahead of infra classification on both tokens and models paths.
+- Write-through: AddCredential upserts decrypted (no ciphertext path exists in credEntry); UpdateCredential re-fetches via GetCredentialStrict (5s StrictFillTimeout), never trusts caller plaintext, re-fetch failure → WARN + preserve OLD entry; RemoveCredential evicts with engine/event side effects preserved; inner-store error → cache untouched on all 3 mutators (early-return guards, 4 sub-tests).
+- Old invalidate-only test deleted; 4 new immediate-visibility tests assert **no reconciler list reads** during write-through. Regression surface contained to pkg/modelscache. outage_test.go change is comment-only (one word, line 358).
+- 1 informational non-blocker: UpdateCredential returns nil (not error) on post-write re-fetch failure — intentional + commented; suggest a godoc note in a follow-up.
+
+## 3. Scenario verdicts (delta)
+- **Scenario 1: PASS** (SQLite included) — 28/28 through outage, zero misroutes, zero external-credential lookups.
+- **Scenario 3: PASS** (SQLite included) — stale tier serves >60s; revoked/garbage fail-closed. (F5 /v1/messages auth-parity gap remains a pre-existing, documented residual risk — unchanged, non-blocking.)
+- **Scenario 4: PASS** — credential attach accepted first-try (0 bounded-wait iterations, was: rejected until tick); key rotation visible at iter 1 (was iter ~25/~55s); zero stale-key leakage. Models/tokens were already immediate.
+- F4/F6/F7 unchanged (informational; F7 restart-after-file-corruption remains a documented operational caveat, not a blocker).
+
+## 4. Flake fix holds
+c9559cf (`TestStoreEngine_BusDrainForwardsCredentialsChanged`): green in the full-suite re-gate slice (pkg/store/database ok 13.6s, zero FAIL lines). Quarantined CloseLifecycle did not fire.
+
+## 5. Full `go test ./... -race` @ a09877d — ALL GREEN (5 consolidated whitelisted slices)
+- s1 `./pkg/proxy/` ok 57.2s (run twice: 57.2s/57.3s, deterministic)
+- s2 `./pkg/modelscache/` **-race -count=10 → 10/10**, ok 36.6s
+- s3 `./pkg/store/...` + proxy subpkgs ok (store/database 13.6s, translator/normalizers/token ok)
+- s4 mcp/ultimatemodel/loopdetection/toolrepair/toolcall ok (6 pkgs, 20s)
+- s5 13 misc pkgs + test/ + 5 e2e dirs + cmd — **20 ok packages**, 0 FAIL, build+vet silent (anthropic_thinking_leak green as expected; S3 fix holds)
+
+## Verdict
+**✅ READY-TO-MERGE.** All gate findings resolved (F1/F2/F3 verified fixed end-to-end and by review; F4/F5/F6/F7 documented non-blockers), full -race suite green, ensure.md Critical 4/4 (unchanged by delta; build+vet re-verified), E2E regression harnesses in place and green (`test/test_e2e_dbcache_outage.sh` PASS exit 0; `test/test_e2e_dbcache_rollback_ui.sh` PASS).
