@@ -9,6 +9,7 @@ package modelscache
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -85,6 +86,18 @@ func (o *outageModelsSource) GetCredentialStrict(ctx context.Context, id string)
 	return o.ModelsManager.GetCredentialStrict(ctx, id)
 }
 
+// ─── mutator overrides (additive, edge-case coverage) ─────────────────────
+//
+// The original outageModelsSource only wrapped the strict reads so
+// out-of-band writes could reach the physical DB during an outage
+// simulation (the existing recovery test calls st.mgr.AddModel
+// directly). Edge-case coverage for the cache's write-through path
+// during outage (e.g. db-cache-layer edge-case test (d)) needs the
+// mutators to honor the down flag too. Existing tests never call
+// these overrides with down=true (mutators always go through
+// st.mgr.X), so the additions are behavior-preserving for the
+// existing test corpus.
+
 // outageTokenStore delegates to the real token store while up.
 type outageTokenStore struct {
 	auth.TokenStoreInterface
@@ -96,6 +109,56 @@ func (o *outageTokenStore) ValidateToken(ctx context.Context, plaintext string) 
 		return nil, connRefused("connection refused")
 	}
 	return o.TokenStoreInterface.ValidateToken(ctx, plaintext)
+}
+
+// outageMutatorError is returned by the outageModelsSource mutator
+// overrides when down=true. The synthetic *net.OpError shape is
+// reserved for the contract-matrix outage wrappers that feed
+// isInfraError; the cache's write-through path here is exercised
+// with a plain error so the mutator-failure behavior matches what
+// a real SQLite I/O error would look like in production.
+var outageMutatorError = errors.New("outage: connection refused")
+
+func (o *outageModelsSource) AddModel(model models.ModelConfig) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.AddModel(model)
+}
+
+func (o *outageModelsSource) UpdateModel(modelID string, model models.ModelConfig) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.UpdateModel(modelID, model)
+}
+
+func (o *outageModelsSource) RemoveModel(modelID string) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.RemoveModel(modelID)
+}
+
+func (o *outageModelsSource) AddCredential(cred models.CredentialConfig) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.AddCredential(cred)
+}
+
+func (o *outageModelsSource) UpdateCredential(id string, cred models.CredentialConfig) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.UpdateCredential(id, cred)
+}
+
+func (o *outageModelsSource) RemoveCredential(id string) error {
+	if o.down.Load() {
+		return outageMutatorError
+	}
+	return o.ModelsManager.RemoveCredential(id)
 }
 
 // ─── fixtures over the real stack ────────────────────────────────────────────
