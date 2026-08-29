@@ -54,6 +54,14 @@ type fakeStrictSource struct {
 	credErr  error // injected into single-row credential reads
 	stall    chan struct{}
 
+	// Mutator error injection (db-cache-layer F2/F3, 2026-08-29):
+	// when set, the corresponding credential mutator returns the
+	// injected error without modifying in-memory state, exercising
+	// the cache's write-through failure branch.
+	addCredErr    error
+	updateCredErr error
+	removeCredErr error
+
 	counts struct {
 		listModels, listEnabled, listCreds int
 		getModel, getModelByName, getCred  int
@@ -379,6 +387,9 @@ func (f *fakeStrictSource) AddCredential(cred models.CredentialConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts.addCred++
+	if f.addCredErr != nil {
+		return f.addCredErr
+	}
 	for i := range f.creds {
 		if f.creds[i].ID == cred.ID {
 			f.creds[i] = cred
@@ -393,6 +404,9 @@ func (f *fakeStrictSource) UpdateCredential(id string, cred models.CredentialCon
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts.updateCred++
+	if f.updateCredErr != nil {
+		return f.updateCredErr
+	}
 	for i := range f.creds {
 		if f.creds[i].ID == id {
 			f.creds[i] = cred
@@ -406,6 +420,9 @@ func (f *fakeStrictSource) RemoveCredential(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts.removeCred++
+	if f.removeCredErr != nil {
+		return f.removeCredErr
+	}
 	for i := range f.creds {
 		if f.creds[i].ID == id {
 			f.creds = append(f.creds[:i], f.creds[i+1:]...)
@@ -572,37 +589,310 @@ func TestCachedModelsConfig_WriteThrough_ModelMutators(t *testing.T) {
 	}
 }
 
-func TestCachedModelsConfig_WriteThrough_CredentialMutatorsInvalidateOnly(t *testing.T) {
+// TestCachedModelsConfig_WriteThrough_CredentialAttachVisibleImmediately
+// (db-cache-layer F2, 2026-08-29): AddCredential must make the new
+// credential visible to GetCredential immediately — no reconciler
+// tick required (the inner store just returned success, the API is
+// the change source).
+func TestCachedModelsConfig_WriteThrough_CredentialAttachVisibleImmediately(t *testing.T) {
+	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
 	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
-	c := mustWrap(t, inner, Options{})
+	c := mustWrap(t, inner, Options{Clock: clk.Now})
 
-	if err := c.UpdateCredential("cred-1", models.CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "sk-rotated"}); err != nil {
-		t.Fatalf("UpdateCredential: %v", err)
-	}
+	// Sanity: the reconciled list read has run once during boot
+	// priming. From here on no list read should be needed for a
+	// cache-resident credential.
+	bootLists, _, _ := inner.snapshotCounts()
+	bootLists = inner.listCalls()
+
+	// The new credential is NOT in the cache yet.
 	c.mu.RLock()
-	_, cached := c.credsByID["cred-1"]
+	_, present := c.credsByID["cred-3"]
 	c.mu.RUnlock()
-	if cached {
-		t.Error("credential mutators must INVALIDATE (lazy refill), not write-through")
-	}
-	// Lazy refill: next read picks up the rotated key from the inner store.
-	if cred := c.GetCredential("cred-1"); cred == nil || cred.APIKey != "sk-rotated" {
-		t.Errorf("lazy refill after invalidation: %+v", cred)
+	if present {
+		t.Fatal("cred-3 must not be cached before AddCredential")
 	}
 
 	if err := c.AddCredential(models.CredentialConfig{ID: "cred-3", Provider: "grok", APIKey: "sk-3"}); err != nil {
 		t.Fatalf("AddCredential: %v", err)
 	}
-	if cred := c.GetCredential("cred-3"); cred == nil {
-		t.Error("lazy refill must serve the added credential")
+
+	// Write-through: cache holds the entry WITHOUT any reconciler
+	// tick.
+	c.mu.RLock()
+	entry, present := c.credsByID["cred-3"]
+	c.mu.RUnlock()
+	if !present {
+		t.Fatal("AddCredential must write-through — cache must hold the new entry immediately")
+	}
+	if !entry.decryptOK || entry.cred == nil {
+		t.Errorf("write-through entry must be decryptOK=true with non-nil cred, got %+v", entry)
 	}
 
-	if err := c.RemoveCredential("cred-3"); err != nil {
+	// Read path picks up the new credential — and the reconciler
+	// did NOT need to tick (list-call count unchanged from boot).
+	got := c.GetCredential("cred-3")
+	if got == nil || got.APIKey != "sk-3" || got.Provider != "grok" {
+		t.Errorf("GetCredential(cred-3) write-through: %+v", got)
+	}
+	if got := inner.listCalls(); got != bootLists {
+		t.Errorf("write-through must serve the new credential without a reconciler list read (boot=%d, now=%d)", bootLists, got)
+	}
+}
+
+// TestCachedModelsConfig_WriteThrough_CredentialKeyRotationVisibleImmediately
+// (db-cache-layer F3, 2026-08-29): an UpdateCredential that rotates
+// the API key must serve the rotated key via GetCredential
+// immediately — the cache re-fetches via GetCredentialStrict (so
+// caller-supplied plaintext is NEVER trusted into the cache) and
+// installs the fresh decrypted value in the same locked section.
+func TestCachedModelsConfig_WriteThrough_CredentialKeyRotationVisibleImmediately(t *testing.T) {
+	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+	bootGets := inner.counts.getCred // from boot priming only
+
+	if err := c.UpdateCredential("cred-1", models.CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "sk-rotated"}); err != nil {
+		t.Fatalf("UpdateCredential: %v", err)
+	}
+
+	// The cache holds the rotated key immediately.
+	c.mu.RLock()
+	entry, present := c.credsByID["cred-1"]
+	c.mu.RUnlock()
+	if !present {
+		t.Fatal("UpdateCredential must write-through — cache must hold the rotated entry immediately")
+	}
+	if entry.cred == nil || entry.cred.APIKey != "sk-rotated" {
+		t.Errorf("write-through must cache the rotated key, got %+v", entry.cred)
+	}
+
+	// Read-path serves the rotated key without a reconciler tick.
+	if got := c.GetCredential("cred-1"); got == nil || got.APIKey != "sk-rotated" {
+		t.Errorf("GetCredential(cred-1) write-through: %+v", got)
+	}
+
+	// Inner GetCredentialStrict was called exactly once for the
+	// re-fetch (the post-write authoritative read). Boot primed
+	// 0 strict single-row credential reads, so total = 1.
+	if inner.counts.getCred != bootGets+1 {
+		t.Errorf("UpdateCredential must re-fetch via GetCredentialStrict exactly once, gotCred=%d, want %d", inner.counts.getCred, bootGets+1)
+	}
+
+	// No reconciler-list-read happened (listCalls unchanged from
+	// boot's priming-3-list-calls accounting).
+	if got := inner.listCalls(); got != 3 {
+		t.Errorf("write-through rotation must not trigger reconciler list reads, listCalls=%d, want 3 (boot-only)", got)
+	}
+}
+
+// TestCachedModelsConfig_WriteThrough_CredentialRemoveVisibleImmediately
+// (db-cache-layer F2, 2026-08-29): RemoveCredential must evict the
+// cached entry immediately — no reconciler tick required.
+func TestCachedModelsConfig_WriteThrough_CredentialRemoveVisibleImmediately(t *testing.T) {
+	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+	// Sanity: cred-1 is cached by boot priming.
+	c.mu.RLock()
+	_, present := c.credsByID["cred-1"]
+	c.mu.RUnlock()
+	if !present {
+		t.Fatal("cred-1 must be cached by boot priming")
+	}
+
+	if err := c.RemoveCredential("cred-1"); err != nil {
 		t.Fatalf("RemoveCredential: %v", err)
 	}
-	if cred := c.GetCredential("cred-3"); cred != nil {
-		t.Errorf("removed credential must not resolve: %+v", cred)
+
+	// Write-through: cache no longer holds the entry.
+	c.mu.RLock()
+	_, present = c.credsByID["cred-1"]
+	c.mu.RUnlock()
+	if present {
+		t.Fatal("RemoveCredential must evict the cached entry immediately")
 	}
+
+	// Read path returns nil (the removed credential is gone) without
+	// a reconciler tick.
+	if got := c.GetCredential("cred-1"); got != nil {
+		t.Errorf("GetCredential(removed cred-1): got %+v, want nil", got)
+	}
+}
+
+// TestCachedModelsConfig_WriteThrough_CredentialInnerErrorLeavesCacheIntact
+// (db-cache-layer F2/F3, 2026-08-29): an inner-store error from any
+// of the three credential mutators must NOT mutate the cache — the
+// "API is the change source" rule only applies on inner success.
+// Also covers the UpdateCredential re-fetch-failure branch
+// (decrypt-class error from the post-write re-fetch → old cache
+// entry stays).
+func TestCachedModelsConfig_WriteThrough_CredentialInnerErrorLeavesCacheIntact(t *testing.T) {
+	clk := newFakeClock(time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+
+	t.Run("AddCredential inner error leaves existing cache intact", func(t *testing.T) {
+		boom := errors.New("simulated inner AddCredential failure")
+		inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(), addCredErr: boom}
+		c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+		// Reject the new credential at the inner store.
+		err := c.AddCredential(models.CredentialConfig{ID: "cred-boom", Provider: "grok", APIKey: "sk-boom"})
+		if err == nil || !strings.Contains(err.Error(), "simulated inner AddCredential failure") {
+			t.Fatalf("AddCredential must surface the inner error, got %v", err)
+		}
+		// Cache must be untouched: no cred-boom, original creds intact.
+		c.mu.RLock()
+		_, hadBoom := c.credsByID["cred-boom"]
+		cred1, has1 := c.credsByID["cred-1"]
+		cred2, has2 := c.credsByID["cred-2"]
+		c.mu.RUnlock()
+		if hadBoom {
+			t.Error("inner AddCredential failure must not write cred-boom into the cache")
+		}
+		if !has1 || !cred1.decryptOK || cred1.cred.APIKey != "sk-plain-1" {
+			t.Errorf("cred-1 must be untouched on inner AddCredential failure: has=%v entry=%+v", has1, cred1)
+		}
+		if !has2 || !cred2.decryptOK || cred2.cred.APIKey != "sk-plain-2" {
+			t.Errorf("cred-2 must be untouched on inner AddCredential failure: has=%v entry=%+v", has2, cred2)
+		}
+	})
+
+	t.Run("UpdateCredential inner error leaves old cache entry intact", func(t *testing.T) {
+		boom := errors.New("simulated inner UpdateCredential failure")
+		inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(), updateCredErr: boom}
+		c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+		// Pin the pre-call state of cred-1.
+		c.mu.RLock()
+		before, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok || before.cred == nil {
+			t.Fatal("cred-1 must be cached by boot priming")
+		}
+
+		err := c.UpdateCredential("cred-1", models.CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "sk-should-not-stick"})
+		if err == nil || !strings.Contains(err.Error(), "simulated inner UpdateCredential failure") {
+			t.Fatalf("UpdateCredential must surface the inner error, got %v", err)
+		}
+
+		// Cache must still hold the ORIGINAL (pre-update) decrypted
+		// entry; the rejected update must not leak into the cache.
+		c.mu.RLock()
+		after, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok {
+			t.Fatal("cred-1 must remain cached on inner UpdateCredential failure")
+		}
+		if after.cred == nil || after.cred.APIKey != before.cred.APIKey {
+			t.Errorf("cred-1 cache entry must NOT change on inner error: before=%q after=%q",
+				func() string {
+					if before.cred != nil {
+						return before.cred.APIKey
+					}
+					return "<nil>"
+				}(),
+				func() string {
+					if after.cred != nil {
+						return after.cred.APIKey
+					}
+					return "<nil>"
+				}())
+		}
+		if refreshedAt, beforeAt := after.refreshedAt, before.refreshedAt; !refreshedAt.Equal(beforeAt) {
+			t.Errorf("cred-1 refreshedAt must NOT advance on inner error: before=%v after=%v", beforeAt, refreshedAt)
+		}
+	})
+
+	t.Run("UpdateCredential re-fetch failure leaves old cache entry intact", func(t *testing.T) {
+		// Inner UpdateCredential succeeds (no updateCredErr), but
+		// the post-write re-fetch fails — exercises the
+		// decrypt-class / infra-class re-fetch fallback that keeps
+		// the old cache entry rather than caching ciphertext.
+		reFetchBoom := errors.New("simulated re-fetch failure")
+		inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(), credErr: reFetchBoom}
+		c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+		c.mu.RLock()
+		before, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok || before.cred == nil {
+			t.Fatal("cred-1 must be cached by boot priming")
+		}
+
+		// Update returns nil: the cache's invariant is "inner
+		// succeeded — the call succeeded at the public boundary,
+		// even though we could not re-cache the fresh value".
+		if err := c.UpdateCredential("cred-1", models.CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "sk-rotated-unfetchable"}); err != nil {
+			t.Fatalf("UpdateCredential surface err, got %v", err)
+		}
+
+		// Re-fetch failure → old entry preserved (the rotated
+		// plaintext is NEVER trusted into the cache).
+		c.mu.RLock()
+		after, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok {
+			t.Fatal("cred-1 must remain cached on re-fetch failure")
+		}
+		if after.cred == nil || after.cred.APIKey != before.cred.APIKey {
+			t.Errorf("cred-1 cache entry must keep its pre-update key on re-fetch failure: before=%q after=%q",
+				func() string {
+					if before.cred != nil {
+						return before.cred.APIKey
+					}
+					return "<nil>"
+				}(),
+				func() string {
+					if after.cred != nil {
+						return after.cred.APIKey
+					}
+					return "<nil>"
+				}())
+		}
+	})
+
+	t.Run("RemoveCredential inner error leaves cache entry intact", func(t *testing.T) {
+		boom := errors.New("simulated inner RemoveCredential failure")
+		inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(), removeCredErr: boom}
+		c := mustWrap(t, inner, Options{Clock: clk.Now})
+
+		c.mu.RLock()
+		before, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok || before.cred == nil {
+			t.Fatal("cred-1 must be cached by boot priming")
+		}
+
+		err := c.RemoveCredential("cred-1")
+		if err == nil || !strings.Contains(err.Error(), "simulated inner RemoveCredential failure") {
+			t.Fatalf("RemoveCredential must surface the inner error, got %v", err)
+		}
+
+		// Cache must still hold the entry.
+		c.mu.RLock()
+		after, ok := c.credsByID["cred-1"]
+		c.mu.RUnlock()
+		if !ok {
+			t.Fatal("cred-1 must remain cached on inner RemoveCredential failure")
+		}
+		if after.cred == nil || after.cred.APIKey != before.cred.APIKey {
+			t.Errorf("cred-1 cache entry must be unchanged: before=%q after=%q",
+				func() string {
+					if before.cred != nil {
+						return before.cred.APIKey
+					}
+					return "<nil>"
+				}(),
+				func() string {
+					if after.cred != nil {
+						return after.cred.APIKey
+					}
+					return "<nil>"
+				}())
+		}
+	})
 }
 
 // ─── negative cache ──────────────────────────────────────────────────────────

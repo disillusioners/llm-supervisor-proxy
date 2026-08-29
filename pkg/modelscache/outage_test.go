@@ -358,7 +358,7 @@ func TestOutageSimulation_NoMisroutes_OneHourSimulated(t *testing.T) {
 
 		// The never-seen model is the ONLY failure class: nil + not
 		// healthy → the boundary 503s (asserted end-to-end in the 1D
-		// failsafe tests; here we pin the signal).
+		// boundary tests; here we pin the signal).
 		if m := st.models.GetModel("never-seen-model"); m != nil {
 			t.Errorf("iter %d: never-seen model resolved during outage", i)
 		} else {

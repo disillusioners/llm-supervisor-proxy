@@ -700,32 +700,74 @@ func (c *CachedModelsConfig) RemoveModel(modelID string) error {
 	return nil
 }
 
-// AddCredential delegates to the inner store and invalidates only
-// (lazy refill on next read) — arch §3: avoids empty-key /
-// keep-existing-payload ambiguity in update requests.
+// AddCredential delegates to the inner store, then writes the
+// authoritative payload through — caller-supplied plaintext IS the
+// decrypted form (the inner store encrypts on its way to disk), so
+// the existing snapshot-style deep-copy convention is the right
+// parity with AddModel. Inner-store success is the gate; on error
+// the cache is untouched and the reconciler will heal it on the
+// next tick (db-cache-layer F2, 2026-08-29).
 func (c *CachedModelsConfig) AddCredential(cred models.CredentialConfig) error {
 	if err := c.inner.AddCredential(cred); err != nil {
 		return err
 	}
+	cp := deepCopyCredentialConfig(&cred)
 	c.mu.Lock()
-	delete(c.credsByID, cred.ID)
+	c.credsByID[cp.ID] = credEntry{
+		cred:        cp,
+		decryptOK:   true,
+		refreshedAt: c.now(),
+	}
 	c.mu.Unlock()
 	return nil
 }
 
-// UpdateCredential delegates to the inner store and invalidates only.
+// UpdateCredential delegates to the inner store (which may rotate
+// the ciphertext — e.g. a re-encryption under a fresh key, or a
+// plan change that mutates storage), then re-fetches via the
+// strict single-row read to cache the FRESH decrypted value.
+// Caller-supplied plaintext is NEVER trusted into the cache
+// (decryption happens inside the inner store; we hold plaintext
+// only after observing a successful GetCredentialStrict). On a
+// re-fetch error the cached entry is preserved — the reconciler
+// will heal it on the next tick (db-cache-layer F3, 2026-08-29).
+//
+// Rename handling: if the update changed the credential ID, the old
+// cache entry is evicted in the same locked section so a renamed
+// credential never has a stale twin under its prior ID.
 func (c *CachedModelsConfig) UpdateCredential(id string, cred models.CredentialConfig) error {
 	if err := c.inner.UpdateCredential(id, cred); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.opts.StrictFillTimeout)
+	fresh, err := c.inner.GetCredentialStrict(ctx, cred.ID)
+	cancel()
+	if err != nil {
+		// Re-fetch failed (decrypt or other infra). Per the
+		// decrypt-failure contract (arch §5 / matrix row 5) we
+		// never cache ciphertext; the OLD entry stays in place
+		// until the reconciler handles it.
+		log.Printf("[WARN] [cache] UpdateCredential: post-write re-fetch failed for %s — old cache entry preserved (%v)", cred.ID, err)
+		return nil
+	}
+	cp := deepCopyCredentialConfig(fresh)
 	c.mu.Lock()
-	delete(c.credsByID, id)
+	if id != cp.ID {
+		delete(c.credsByID, id)
+	}
+	c.credsByID[cp.ID] = credEntry{
+		cred:        cp,
+		decryptOK:   true,
+		refreshedAt: c.now(),
+	}
 	c.mu.Unlock()
 	return nil
 }
 
-// RemoveCredential delegates to the inner store and drops the cached
-// credential by ID.
+// RemoveCredential delegates to the inner store, then evicts the
+// cached entry by ID — parity with RemoveModel and the model's
+// "API is the change source" write-through semantics
+// (db-cache-layer F2, 2026-08-29).
 func (c *CachedModelsConfig) RemoveCredential(id string) error {
 	if err := c.inner.RemoveCredential(id); err != nil {
 		return err

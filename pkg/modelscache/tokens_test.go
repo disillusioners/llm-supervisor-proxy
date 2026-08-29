@@ -498,20 +498,30 @@ func TestIsInfraError_Classification(t *testing.T) {
 	}
 }
 
-// TestIsInfraError_ShapeInjection (review remediation 2026-08-28):
+// TestIsInfraError_ShapeInjection (db-cache-layer F1, 2026-08-29):
 // shape-injection coverage for the isInfraError string-fragment
-// whitelist. Asserts both new PG mid-flight disconnect shapes
-// classify as infra, pins one pre-existing fragment as a regression
-// guard, and asserts that an unrelated "no rows in result set" string
-// (a verdict-class message, not infrastructure) classifies as NOT
-// infra — a control to keep the whitelist from drifting into verdict
-// territory.
+// whitelist. Asserts the real modernc.org/sqlite outage shapes
+// classify as infra (review finding 1: file-level SQLite outages
+// must engage the token stale-tier on the default deployment
+// dialect), pins pre-existing fragments as regression guards, and
+// asserts SQLite-adjacent verdict-class errors do NOT drift into
+// the whitelist. The classifier lowercases its input and
+// strings.Contains against the bare fragment, so the driver
+// code-suffixed real forms ("(26)", "(11)", "(14)") match as
+// well.
 func TestIsInfraError_ShapeInjection(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
+		// SQLite file-level outage shapes (db-cache-layer F1,
+		// 2026-08-29). The (26)/(11)/(14) suffix is the real
+		// modernc.org/sqlite output (SQLITE_NOTADB /
+		// SQLITE_CORRUPT / SQLITE_CANTOPEN respectively).
+		{"SQLite file is not a database (26)", errors.New("file is not a database (26)"), true},
+		{"SQLite database disk image is malformed (11)", errors.New("database disk image is malformed (11)"), true},
+		{"SQLite unable to open database file: out of memory (14)", errors.New("unable to open database file: out of memory (14)"), true},
 		// New PG mid-flight shapes (review remediation 2026-08-28).
 		{"PG unexpected EOF", errors.New("read tcp 10.0.0.1:5432: read: unexpected EOF"), true},
 		{"PG server closed connection unexpectedly", errors.New("server closed the connection unexpectedly"), true},
@@ -522,6 +532,12 @@ func TestIsInfraError_ShapeInjection(t *testing.T) {
 		// verdict (sql.ErrNoRows surfaces through database/sql);
 		// it must NOT be classified as infra.
 		{"sql no rows in result set", errors.New("sql: no rows in result set"), false},
+		// SQLite-adjacent verdict-class control — a real
+		// modernc.org/sqlite error shape that is a verdict
+		// (table missing from a truncated DB), not an outage; it
+		// must NOT be classified as infra so the whitelist does
+		// not drift into "any sqlite-shaped string" territory.
+		{"SQLite SQL logic error: no such table", errors.New("SQL logic error: no such table: models (1)"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

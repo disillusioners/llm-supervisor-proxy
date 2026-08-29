@@ -10,8 +10,9 @@
 //     decrypted credentials; deep copy-on-read; negative caching; boot
 //     priming with abort-on-error; 60s reconciler with
 //     swap-only-on-success; 24h staleness cap; synchronous
-//     write-through on model mutators; invalidate-only on credential
-//     mutators).
+//     write-through on model AND credential mutators — the credential
+//     path re-fetches via GetCredentialStrict on Update so the cache
+//     never holds caller-supplied plaintext).
 //   - CachedTokenStore wraps auth.TokenStoreInterface (three-tier:
 //     positive / stale-positive served ONLY on infra-class error /
 //     negative never stale; 60s positive & negative TTL; LRU cap 10k).
@@ -75,6 +76,18 @@ var infraErrorFragments = []string{
 	// window where the connection drops mid-call.
 	"unexpected eof",
 	"server closed the connection unexpectedly",
+	// SQLite file-level outage shapes (db-cache-layer F1,
+	// 2026-08-29). The default deployment runs modernc.org/sqlite
+	// in-process — net.OpError never appears; without these the
+	// token stale-tier never engages on file-level outages
+	// (SQLITE_NOTADB / SQLITE_CORRUPT / SQLITE_CANTOPEN) and valid
+	// tokens 401 at t≈60s. The real driver appends the sqlite
+	// error code (e.g. "(26)", "(11)", "(14)") to the message;
+	// strings.Contains matches the bare substring so the
+	// code-suffixed form classifies infra as well.
+	"unable to open database file",
+	"file is not a database",
+	"database disk image is malformed",
 }
 
 // isInfraError classifies an inner-store error as "infrastructure
