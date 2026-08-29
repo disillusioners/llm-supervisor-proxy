@@ -56,12 +56,14 @@
 | minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
 | proxyheader_header_table | inline: `go test ./pkg/proxyheader/ -run 'Interleaved' -count=1` | Unit (P3-7 header value truth table verify) | `timeout 300` | 2026-08-19 | **PASS** — satisfied by existing 21 sub-cases (all 7 plan values covered, file:line-cited); precedent match confirmed; single-source semantics confirmed (2 call sites via proxyheader.*); NO gap-fill needed |
 | fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 20/20** @ 22e76d6 (rsd merge gate: closure 4/4 + matrix 16/16; capture taps mode-independent; NOTE: no anthropic-internal-nonstream row — S3-class bug not covered here) |
-| anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PARTIAL @ 22e76d6 (post S1 re-base 22e76d6)**: S1A buffered ✅ S1B live thinking_delta ✅ (D8) S2 ✅ — **S3 ❌ REAL BUG** (internal-Anthropic NON-stream persistence empty; first-bad e717be3; see LESSONS/2026-08-28-rsd-s3-nonstream-persistence-bug.md) |
+| anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-29 | **PASS 4/4 @ b48a14f (feature/db-cache-layer, -race)** — S3 FIXED on this branch (fixes 64da4ae + e60de91 are ancestors); prior PARTIAL @ 22e76d6 superseded — see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md |
 | rsd_m1_openai_ttfb | test/mock_rsd_m1_openai_ttfb.sh | Shell E2E (real binary; OpenAI path TTFB default-vs-buffered; ports 10110/10111) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 103ms vs total 1536ms, 5 gaps ≥150ms; B: TTFB 1603ms spread 0ms; C info: byte-diff = live `: keepalive` only, content identical; D healthz 200; 3× stable) |
 | rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-08-28 (final gate) | **PASS — E is HARD since e60de91** @ e60de91 (A: TTFB 1ms/incremental; B: 1551ms/single-burst; **E HARD: non-stream id-normalized byte-identity — both 322B, sha-identical, Anthropic-shape both, OpenAI-shape negative guard clean**; F: S3 records exact; C documented-impractical). See RESULTS/2026-08-28-rsd-m2-e-hard-gate-final.md |
 | rsd_m3_edge_cases | test/mock_rsd_m3_edge_cases.sh | Shell E2E (real binary; header truth table + first-wins + stream=false + disconnect; ports 10130/10131) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 21/21** @ 22e76d6 (truth table 12/12 incl. case+garbage; multi-line first-wins both directions; stream=false byte-identical; disconnect: healthz 200, no panic) |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E Mock (reasoning_content chain, streaming + non-stream) | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS 5 top-level + 7 sub @ 22e76d6 (rsd merge gate) |
 | gzip_request_decompression | test/mock_gzip_request_decompression.sh | Shell E2E (real binary; gzip request-body original scenario a-f; ports 10140/10141) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 6/6** @ 7a9ecff (gzip feature gate; byte-identity both /v1 protocols, corrupt→400, 150 MiB bomb→413 + liveness, SSE passthrough; 3 harness-only fixes on first run — see LESSONS/2026-08-28-gzip-e2e-harness-lessons.md) |
+| dbcache_outage | test/test_e2e_dbcache_outage.sh | Shell E2E (real binary + real SQLite; incident close-out scenarios 1–3; dd-corruption DB outage; ports 10150/10151 + 4001 misroute sentinel) | 280s internal / `timeout 300` outer | 2026-08-29 | **FAIL (DETERMINISTIC ×3 — KNOWN PRODUCT FINDING F1)** @ 0be8b8f: A4/A6 valid-token 401 after 60s TTL (stale-tier classifier misses SQLite NOTADB/malformed shapes); everything else PASS incl. zero misroutes, 503 config_store_unavailable both endpoints, recovery 59s≤120s. Regression gate for the F1 fix |
+| dbcache_rollback_ui | test/test_e2e_dbcache_rollback_ui.sh | Shell E2E (real binary; rollback flag-off misroute repro + write-through mutations + UI checks; ports 10160/10161 + 4001 sentinel) | 240s internal / `timeout 300` outer | 2026-08-29 | **PASS** @ 0be8b8f (smoke + formal identical; findings F2/F3 reproduced as documented: credential attach rejected until reconciler tick; key rotation propagates ~55s/iter-25; zero stale-key leakage; UI + FE API healthy under cache-on) |
 
 #### anthropic_thinking_leak — historical note (superseded 2026-08-28)
 - Pre-rsd-gate baseline: PASS 3/3 @ 63b7701; mutation-proven non-vacuous (leak re-injected in worktree → S1 FAILs with 4 detections); S3 wire byte-identical at parent effc345.
@@ -215,3 +217,21 @@ ction — localhost URLs blocked ✅
 ✅
 blocked ✅
 ✅
+
+
+## Race Slices (db-cache-layer gate 2026-08-29 @ b48a14f — full `go test ./... -race` equivalence, split into 12 scoped slices each under 5 min)
+
+| Slice | Exact scope | Result |
+|-------|-------------|--------|
+| race_proxy_root | `timeout 300 go test -race -count=1 -timeout 280s ./pkg/proxy/` | **PASS** — 57.6s, 468 funcs, 0 races |
+| race_proxy_sub | same + `-race` on `./pkg/proxy/translator/ ./pkg/proxy/normalizers/ ./pkg/proxy/token/` | **PASS** — ~2s |
+| race_modelscache_x10 | `timeout 300 go test -race -count=10 -timeout 280s ./pkg/modelscache/` | **PASS** — 10/10 clean, 36.2s (USER-MANDATED repetition; incl. new realerror + edge-case tests @ b48a14f) |
+| race_store | `./pkg/store/...` | **PASS** — 14.2s; stabilized BusDrain test deterministic; quarantined CloseLifecycle did not fire |
+| race_mcp | `./pkg/mcp/...` | **PASS** — 19s |
+| race_ult_loop_tool | `./pkg/ultimatemodel/... ./pkg/loopdetection/... ./pkg/toolrepair/ ./pkg/toolcall/` | **PASS** — 8s |
+| race_misc_small | `./pkg/{models,auth,config,crypto,credentiallb,providers,proxyheader,events,bufferstore,supervisor,usage,ui,middleware}/...` | **PASS** — 13/13 pkgs, ~21s wall (gzipmw 20.7s dominant) |
+| race_testroot_buildgate | `./test/ ./test/reasoning_content/ ./cmd/...` + `go build ./... && go vet ./...` | **PASS** — 10s; build+vet silent |
+| race_e2e_g1 | `./test/e2e_reasoning_content/ ./test/e2e_ultimate_internal_reasoning/` | **PASS** — 4.3s |
+| race_e2e_g2 | `./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/` | **PASS** — 18.5s (240s historical plain budget NOT approached under race) |
+| race_e2e_anthropic | `./test/e2e_anthropic_thinking_leak/` | **PASS 4/4** — S3 FIXED on this branch (see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md) |
+| race_repo_root | `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |
