@@ -35,7 +35,7 @@ spec:
               protocol: TCP
           env:
             - name: GOMEMLIMIT
-              value: {{ .Values.goMemLimit | default .Values.resources.limits.memory | default "1Gi" }}
+              value: {{ .Values.goMemLimit | default .Values.resources.limits.memory | default "1GiB" }}
             - name: DATABASE_URL
               {{- if .Values.database.url }}
               value: {{ .Values.database.url | quote }}

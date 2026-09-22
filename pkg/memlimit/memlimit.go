@@ -2,7 +2,7 @@
 // (runtime/debug.SetMemoryLimit) for non-k8s deployments — bare
 // binaries, systemd units, and dev runs. k8s pods get GOMEMLIMIT from
 // the helm chart (k8s/templates/deployment.yaml; goMemLimit default
-// "1Gi" in k8s/values.yaml, ~50% of the 2Gi container limit — see
+// "1GiB" in k8s/values.yaml, ~50% of the 2Gi container limit — see
 // docs/2026-09-22-fe-api-payload-ram-incident.md); everywhere else the
 // limit used to be math.MaxInt64 (unbounded).
 //
