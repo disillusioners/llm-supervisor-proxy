@@ -32,6 +32,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   stream_ended_unexpectedly: () => 'Stream ended unexpectedly without [DONE]',
   fallback_triggered: (e) => `Fallback: ${e.data?.from_model || '?'} -> ${e.data?.to_model || '?'}`,
   all_models_failed: () => 'All models failed after retries',
+  auth_failed: (e) => `Authentication failed${e.data?.error ? ` - ${e.data.error}` : ''}`,
   error: (e) => `Error: ${e.data?.error || 'Unknown error'}`,
   request_completed: () => 'Request completed successfully.',
   response_logged: (e) => {
@@ -107,6 +108,7 @@ const EVENT_COLORS: Record<EventType, string> = {
   fallback_triggered: 'text-orange-400',
   error_max_upstream_error_retries: 'text-red-400',
   all_models_failed: 'text-red-400',
+  auth_failed: 'text-red-400',
   error: 'text-red-400',
   timeout_idle: 'text-yellow-400',
   error_deadline_exceeded: 'text-yellow-400',
@@ -159,6 +161,7 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   stream_ended_unexpectedly: 'UNEXPECTED_EOF',
   fallback_triggered: 'FALLBACK',
   all_models_failed: 'ALL_MODELS_FAILED',
+  auth_failed: 'AUTH_FAILED',
   timeout_idle: 'TIMEOUT_IDLE',
   error: 'ERROR',
   loop_detected: 'LOOP_DETECTED',

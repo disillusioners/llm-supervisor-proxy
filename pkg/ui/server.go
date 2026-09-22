@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -152,7 +154,16 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/models/test", s.handleTestModel)
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
-	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetail)
+	// /fe/api/requests/{id} and /fe/api/requests/{id}/summary share a
+	// single mux entry because stdlib ServeMux matches the registered
+	// PREFIX /fe/api/requests/ as a subtree: both /fe/api/requests/x
+	// and /fe/api/requests/x/summary land here. handleRequestDetail
+	// and handleRequestSummary are dispatched from inside this single
+	// handler based on the URL suffix, not by ServeMux longest-prefix
+	// resolution (only ONE pattern ending in "/" can match any
+	// subtree, so we can't register them separately and still keep
+	// the summary route working).
+	mux.HandleFunc("/fe/api/requests/", s.handleRequestDetailOrSummary)
 	mux.HandleFunc("/fe/api/app-tags", s.handleAppTags)
 	mux.HandleFunc("/fe/api/buffers/", s.handleBufferContent)
 	// Token management
@@ -206,29 +217,203 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(providersList)
 }
 
+// RequestSummary is the metadata-only projection returned by
+// handleRequests() and handleRequestSummary() (P0-1).
+//
+// Heavy fields (`messages`, `parameters`) are deliberately omitted so
+// that a default /fe/api/requests fetch returns a tiny payload (~50 KB
+// instead of ~96 MB for a 100-entry store). FE clients that need the
+// full body can either:
+//
+//   - request the detail endpoint: GET /fe/api/requests/{id} (full
+//     shape including messages), OR
+//   - opt-in via /fe/api/requests?include=messages (legacy parity).
+//
+// Adding fields here is intentionally a no-default-omission change —
+// every json tag is plain (no `omitempty` on required projection fields)
+// so the wire shape is stable. Fields that are zero in the source are
+// emitted as zero values so the FE schema is predictable.
+//
+// New fields added by this struct:
+//   - MessageCount: int — number of stored messages on this request.
+//   - TotalSizeBytes: int — approximate in-memory byte cost (see
+//     store.RequestLog.Size for the heuristic). Surfaced so the UI can
+//     show payload weights and the operator can spot outlier requests
+//     before opening them.
+type RequestSummary struct {
+	ID                string                 `json:"id"`
+	Status            string                 `json:"status"`
+	Model             string                 `json:"model"`
+	StartTime         time.Time              `json:"startTime"`
+	EndTime           time.Time              `json:"endTime"`
+	Duration          string                 `json:"duration"`
+	Retries           int                    `json:"retries"`
+	Error             string                 `json:"error,omitempty"`
+	Usage             *store.Usage           `json:"usage,omitempty"`
+	TokenID           string                 `json:"token_id,omitempty"`
+	TokenName         string                 `json:"token_name,omitempty"`
+	OriginalModel     string                 `json:"original_model,omitempty"`
+	FallbackUsed      []string               `json:"fallback_used,omitempty"`
+	CurrentFallback   string                 `json:"current_fallback,omitempty"`
+	UltimateModelUsed bool                   `json:"ultimate_model_used"`
+	UltimateModelID   string                 `json:"ultimate_model_id,omitempty"`
+	IsStream          bool                   `json:"is_stream"`
+	AppTag            string                 `json:"app_tag,omitempty"`
+	UpstreamRequests  store.UpstreamRequestStatus `json:"upstream_requests,omitempty"`
+	// P0-1 summary projection additions:
+	MessageCount    int   `json:"message_count"`
+	TotalSizeBytes  int64 `json:"total_size_bytes"`
+}
+
+// summaryFromRequest builds a RequestSummary from a stored *store.RequestLog.
+// Cheap: only the per-string-field copies are touched. The TotalSizeBytes
+// value uses the O(1) sizeByID lookup via store.SizeOf(id) — NOT r.Size()
+// (which is O(n) over messages and would dominate the list endpoint's
+// cost on the FE API payload fix). The list path calls this once per
+// entry so the per-entry constant matters.
+func summaryFromRequest(s *Server, r *store.RequestLog) RequestSummary {
+	return RequestSummary{
+		ID:                r.ID,
+		Status:            r.Status,
+		Model:             r.Model,
+		StartTime:         r.StartTime,
+		EndTime:           r.EndTime,
+		Duration:          r.Duration,
+		Retries:           r.Retries,
+		Error:             r.Error,
+		Usage:             r.Usage,
+		TokenID:           r.TokenID,
+		TokenName:         r.TokenName,
+		OriginalModel:     r.OriginalModel,
+		FallbackUsed:      r.FallbackUsed,
+		CurrentFallback:   r.CurrentFallback,
+		UltimateModelUsed: r.UltimateModelUsed,
+		UltimateModelID:   r.UltimateModelID,
+		IsStream:          r.IsStream,
+		AppTag:            r.AppTag,
+		UpstreamRequests:  r.UpstreamRequests,
+		MessageCount:      len(r.Messages),
+		TotalSizeBytes:    s.store.SizeOf(r.ID),
+	}
+}
+
+// Pagination defaults & caps for handleRequests (P0-1).
+const (
+	defaultListLimit = 50
+	maxListLimit     = 200
+)
+
+// parsePagination extracts limit/offset query parameters with the
+// following rules:
+//
+//   - limit: defaults to defaultListLimit (50) when absent, blank,
+//     non-numeric, negative, or zero. Values above maxListLimit (200)
+//     are clamped DOWN to maxListLimit. Non-numeric strings silently
+//     fall back to the default (NOT a 400 — bad input is treated as
+//     "no input" so an old URL with stale query junk still works).
+//   - offset: defaults to 0; negative values are clamped UP to 0.
+//
+// Returns limit, offset, and a bool indicating whether the caller
+// passed ANY pagination parameter (even an invalid one). The handler
+// uses that bool to decide whether to apply pagination OR (when
+// include=messages AND no pagination params) return everything.
+func parsePagination(q url.Values) (limit, offset int, hasParams bool) {
+	limit = defaultListLimit
+	offset = 0
+
+	if v := q.Get("limit"); v != "" {
+		hasParams = true
+		if n, err := strconv.Atoi(v); err == nil {
+			if n > 0 {
+				limit = n
+			} else {
+				// n <= 0 (including negative): fall back to default.
+				limit = defaultListLimit
+			}
+		}
+		// err != nil: leave limit at default; bad input is non-fatal.
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+
+	if v := q.Get("offset"); v != "" {
+		hasParams = true
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+		// err != nil OR n <= 0: leave offset at 0 (negative clamps up).
+	}
+
+	return limit, offset, hasParams
+}
+
+// applyPagination returns a sub-slice of items bounded by offset and
+// limit. The returned slice MAY alias items' backing array — callers
+// must not mutate the elements (which are pointers; mutating *RequestLog
+// fields through the sub-slice would mutate the originals). The slice
+// itself is a fresh slice header with its own len/cap pointing into
+// the source's storage; mutating the header (e.g. items[0] = nil) is
+// safe but mutating *items[i] is NOT.
+func applyPagination(items []*store.RequestLog, limit, offset int) []*store.RequestLog {
+	if offset >= len(items) {
+		return []*store.RequestLog{}
+	}
+	items = items[offset:]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
 func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	appFilter := r.URL.Query().Get("app")
+	q := r.URL.Query()
+	appFilter := q.Get("app")
+	includeMessages := q.Get("include") == "messages"
+	limit, offset, hasPaginationParams := parsePagination(q)
 
 	var requests []*store.RequestLog
 	switch appFilter {
 	case "", "all":
-		// Show all requests
 		requests = s.store.List()
 	case "default":
-		// Show requests without app tag (empty string filter)
 		requests = s.store.ListFiltered("")
 	default:
-		// Filter by specific app tag
 		requests = s.store.ListFiltered(appFilter)
 	}
 
+	// Legacy parity: include=messages WITHOUT pagination params returns
+	// the entire filtered list (external scripts may depend on this).
+	// Any pagination param (limit or offset, even invalid) switches
+	// us into the paginated/contracted path. include=messages WITH
+	// pagination params is honored: messages stay in payload, but the
+	// page is bounded by limit/offset.
+	if includeMessages && !hasPaginationParams {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(requests)
+		return
+	}
+
+	requests = applyPagination(requests, limit, offset)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(requests)
+	if includeMessages {
+		// include=messages WITH pagination → full per-item shape,
+		// but paged.
+		json.NewEncoder(w).Encode(requests)
+		return
+	}
+
+	summaries := make([]RequestSummary, len(requests))
+	for i, req := range requests {
+		summaries[i] = summaryFromRequest(s, req)
+	}
+	json.NewEncoder(w).Encode(summaries)
 }
 
 func (s *Server) handleAppTags(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +428,7 @@ func (s *Server) handleAppTags(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
-	// /fe/api/requests/{id}
+	// /fe/api/requests/{id} — full payload incl. messages
 	id := r.URL.Path[len("/fe/api/requests/"):]
 	if id == "" {
 		http.Error(w, "Missing ID", http.StatusBadRequest)
@@ -258,6 +443,58 @@ func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(req)
+}
+
+// handleRequestDetailOrSummary dispatches /fe/api/requests/{id} and
+// /fe/api/requests/{id}/summary to the right handler. Both share the
+// same prefix (which is why we route them through one mux entry: the
+// stdlib ServeMux's subtree match for /fe/api/requests/ catches both).
+//
+// The suffix /summary goes to handleRequestSummary; anything else
+// (including the bare /fe/api/requests/ prefix with no ID) goes to
+// handleRequestDetail. We intentionally do NOT split into two mux
+// entries — stdlib ServeMux would not allow both /fe/api/requests/
+// (catch-all) and /fe/api/requests/{anything} (exact match) to coexist
+// with deterministic ordering, so the dispatcher keeps the routing
+// surface explicit and testable.
+func (s *Server) handleRequestDetailOrSummary(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/summary") {
+		s.handleRequestSummary(w, r)
+		return
+	}
+	s.handleRequestDetail(w, r)
+}
+
+// handleRequestSummary serves GET /fe/api/requests/{id}/summary — the
+// metadata-only projection of a single request, no `messages`.
+//
+// Used by the FE to insert brand-new rows arriving via SSE
+// `request_started` events WITHOUT triggering a full list refetch. The
+// shape is exactly one element of the default handleRequests() output,
+// so the FE can append the JSON directly into its list state.
+func (s *Server) handleRequestSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Path is /fe/api/requests/{id}/summary
+	const prefix = "/fe/api/requests/"
+	const suffix = "/summary"
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	req := s.store.Get(id)
+	if req == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summaryFromRequest(s, req))
 }
 
 func (s *Server) handleBufferContent(w http.ResponseWriter, r *http.Request) {

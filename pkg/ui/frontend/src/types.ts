@@ -171,7 +171,13 @@ export interface UpstreamRequestStatus {
   fallback: 'success' | 'failed' | 'not_started';
 }
 
-export interface Request {
+// Lightweight metadata projection of a request, as returned by the
+// default `GET /fe/api/requests` list endpoint. Designed to be cheap to
+// serialize/parse so the list can be polled frequently. Full conversation
+// bodies live on `RequestDetail` and require the `?include=messages`
+// variant (`GET /fe/api/requests?include=messages`) or the
+// `GET /fe/api/requests/{id}` detail endpoint.
+export interface RequestListItem {
   id: string;
   model: string;
   status: 'running' | 'completed' | 'failed' | 'retrying';
@@ -183,9 +189,7 @@ export interface Request {
   original_model?: string;
   is_stream?: boolean;
   fallback_used?: string[];
-  parameters?: Record<string, unknown>;
-  tool_calls?: ToolCall[];
-  thinking?: string;
+  // Tool call / thinking are NOT included in the list projection.
   // Ultimate model tracking
   ultimate_model_used?: boolean;
   ultimate_model_id?: string;
@@ -193,11 +197,29 @@ export interface Request {
   app_tag?: string;
   // Upstream request status tracking (for race retry)
   upstream_requests?: UpstreamRequestStatus;
+  // Conversation size metadata (list projection only — no message bodies)
+  message_count?: number;
+  total_size_bytes?: number;
+}
+
+// Full request shape including conversation bodies. Returned by:
+//   * `GET /fe/api/requests/{id}`  (always includes messages)
+//   * `GET /fe/api/requests?include=messages`  (legacy / opt-in full list)
+export interface Request extends RequestListItem {
+  // Optional in list context (omitted by default), required in detail context.
+  messages?: Message[];
+  // Full request parameters (only present with include=messages or /{id}).
+  parameters?: Record<string, unknown>;
+  // Tool call / thinking surfaces on the full shape (kept for back-compat
+  // with consumers that still expect them inline). New code should read
+  // them out of `messages[*].tool_calls` / `messages[*].thinking`.
+  tool_calls?: ToolCall[];
+  thinking?: string;
 }
 
 export interface RequestDetail extends Request {
-  messages: Message[]; // Full conversation including assistant response
-  // Note: Response content is in messages[last].content, thinking in messages[last].thinking
+  // Detail is the only shape that always carries the full conversation.
+  messages: Message[];
   parameters?: Record<string, unknown>;
 }
 
@@ -219,6 +241,7 @@ export type EventType =
   | 'stream_ended_unexpectedly'
   | 'fallback_triggered'
   | 'all_models_failed'
+  | 'auth_failed'
   | 'loop_detected'
   | 'loop_interrupted'
   | 'tool_repair'

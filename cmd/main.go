@@ -37,7 +37,13 @@ func main() {
 
 	// Initialize Shared Components
 	bus := events.NewBus()
-	reqStore := store.NewRequestStore(100) // Keep last 100 requests
+	// 100-entry count cap + 256 MiB cumulative byte cap (P2-5b from
+	// docs/2026-09-22-fe-api-payload-ram-incident.md §5). The byte
+	// budget bounds the heap pinned by the ring buffer independent of
+	// GOMEMLIMIT — a single large FE API payload (~256 MiB) would
+	// otherwise fit under the 100-entry count cap yet still OOM the
+	// process on a busy proxy.
+	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 
 	var configMgr config.ManagerInterface
 	// Phase 3 — main.go now binds modelsMgr at the concrete
@@ -260,23 +266,42 @@ func main() {
 	// This prevents connection pool exhaustion
 	idleTimeout := 300 * time.Second
 
-	// Transparent request-body gzip decompression is wired as the
-	// INNER of two middlewares wrapping the mux. Order matters: gzipmw
-	// runs FIRST so every handler — proxy, ultimatemodel (which
+	// Middleware ordering (innermost → outermost): mux →
+	//   gzipmw.CompressResponse → gzipmw.DecompressRequest →
+	//   recoveryMiddleware.
+	//
+	// CompressResponse (P1-4, response-side gzip) is the INNERMOST
+	// wrapper so it sees every response from every handler (mux,
+	// proxy /v1/*, /fe/api/*, MCP). The middleware is self-scoped:
+	// it only touches /fe/api/* paths (excluding /fe/api/events which
+	// is SSE — compressing it broke clients before, see
+	// docs/cloudflare-drop-hang-bug.md), so the proxy paths, healthz,
+	// static files, and other routes pass through verbatim. Bodies
+	// below 1 KiB are also passed through uncompressed (small JSON
+	// rarely benefits from gzip and the CPU cost is wasted work on
+	// the hot path).
+	//
+	// DecompressRequest is the next layer; it runs FIRST on the
+	// request side so every handler — proxy, ultimatemodel (which
 	// ultimately calls Execute → executeExternal with body bytes
 	// produced from r.Body via initRequestContext's parse), UI, MCP
-	// — sees a decompressed body. recoveryMiddleware is the OUTER
-	// wrapper so a panic inside gzipmw (e.g. on a pathological
-	// gzip header) still gets a 500 instead of crashing the process.
-	// Gzip errors are handled explicitly inside gzipmw and emit
-	// OpenAI-shape 4xx envelopes; recoveryMiddleware only catches
-	// the unexpected.
+	// — sees a decompressed body. CompressResponse's response-side
+	// work is independent of DecompressRequest's request-side work;
+	// they never share state.
 	//
-	// Compression scope: gzipmw is conditional on Content-Encoding:
-	// gzip and ONLY gzip; requests without that header (or with
-	// "identity") pass through untouched so uncompressed clients
-	// experience zero behavior change. See pkg/middleware/gzipmw for
-	// the contract and cap story.
+	// recoveryMiddleware is the OUTER wrapper so a panic inside
+	// either gzipmw layer (e.g. on a pathological gzip header) still
+	// gets a 500 instead of crashing the process. Gzip errors are
+	// handled explicitly inside gzipmw and emit OpenAI-shape 4xx
+	// envelopes; recoveryMiddleware only catches the unexpected.
+	//
+	// Compression scope: DecompressRequest is conditional on
+	// Content-Encoding: gzip and ONLY gzip; requests without that
+	// header (or with "identity") pass through untouched so
+	// uncompressed clients experience zero behavior change.
+	// CompressResponse is conditional on Accept-Encoding: gzip AND
+	// path scope (/fe/api/* only). See pkg/middleware/gzipmw for the
+	// contract and cap story.
 	// db-cache-layer 1C (W2) — cache teardown ordering. The final
 	// shutdown sequence on signal must be:
 	//   srv.Shutdown (drains HTTP; called explicitly below)
@@ -299,7 +324,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:           ":" + strconv.Itoa(cfg.Port),
-		Handler:        recoveryMiddleware(gzipmw.DecompressRequest(mux)),
+		Handler:        recoveryMiddleware(gzipmw.DecompressRequest(gzipmw.CompressResponse(mux))),
 		ReadTimeout:    readTimeout,
 		WriteTimeout:   writeTimeout,
 		IdleTimeout:    idleTimeout,

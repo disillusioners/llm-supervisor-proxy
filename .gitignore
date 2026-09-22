@@ -17,10 +17,6 @@ test_output.txt
 /pkg/ui/frontend/node_modules/
 /pkg/ui/frontend/dist/
 
-# Built static files (uncomment to ignore built files)
-/pkg/ui/static/assets/
-/pkg/ui/static/index.html
-
 cmd/__debug_bin*
 proxy.log
 proxy.pid

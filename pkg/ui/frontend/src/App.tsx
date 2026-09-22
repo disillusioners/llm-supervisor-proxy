@@ -4,14 +4,22 @@ import { lazy, Suspense } from 'preact/compat';
 import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
 import { LoadingFallback } from './components/LoadingFallback';
 import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
-import type { Request } from './types';
+import type { RequestListItem } from './types';
 
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
  
 export function App() {
   // API hooks - fetch data once at the top level
-  const { requests, loading: requestsLoading, refetch: refetchRequests, setAppTag: setRequestsAppTag } = useRequests();
+  const {
+    requests,
+    loading: requestsLoading,
+    refetch: refetchRequests,
+    forceRefetch: forceRefetchRequests,
+    patchListEntry,
+    fetchAndPatchById,
+    setAppTag: setRequestsAppTag,
+  } = useRequests();
   const { config, updateConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel } = useModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
@@ -40,6 +48,9 @@ export function App() {
         requests={requests}
         requestsLoading={requestsLoading}
         refetchRequests={refetchRequests}
+        forceRefetchRequests={forceRefetchRequests}
+        patchListEntry={patchListEntry}
+        fetchAndPatchById={fetchAndPatchById}
         setRequestsAppTag={setRequestsAppTag}
         refetchAppTags={refetchAppTags}
         appTags={appTags}
@@ -53,15 +64,21 @@ function DashboardRoute({
   requests,
   requestsLoading,
   refetchRequests,
+  forceRefetchRequests,
+  patchListEntry,
+  fetchAndPatchById,
   setRequestsAppTag,
   refetchAppTags,
   appTags,
 }: {
   path?: string;
   default?: boolean;
-  requests: Request[];
+  requests: RequestListItem[];
   requestsLoading: boolean;
   refetchRequests: () => void;
+  forceRefetchRequests: () => void;
+  patchListEntry: <K extends keyof RequestListItem>(id: string, partial: Pick<RequestListItem, K>) => void;
+  fetchAndPatchById: (id: string) => Promise<void>;
   setRequestsAppTag: (tag: string | undefined) => void;
   refetchAppTags: () => void;
   appTags: string[];
@@ -76,13 +93,20 @@ function DashboardRoute({
     const { detail: selectedDetail, loading: selectedDetailLoading } = useRequestDetail(selectedRequestId);
     const { displayedEvents: selectedEvents, containerRef: selectedContainerRef, clearEvents: clearSelectedEvents } = useEvents(selectedRequestId, autoScroll);
     
-    // Event refresh callback
+    // Event refresh callback. The SSE-driven path uses `forceRefetch`
+    // (NOT the SWR `refetch`) so the 3 s debounced burst always hits
+    // the network and picks up the freshly-merged state — including
+    // any optimistic `request_completed` patch applied moments earlier.
+    // The SWR cache only stores server responses, so serving it back
+    // after a patch would silently revert the optimistic update for up
+    // to 5 s (the TTL). List is now metadata-only + limit=50, so a real
+    // fetch on each debounced burst is cheap (~50 KB).
     const handleEventRefresh = useCallback(() => {
-        refetchRequests();
+        forceRefetchRequests();
         refetchAppTags();
-    }, [refetchRequests, refetchAppTags]);
-    
-    useEventRefresh(handleEventRefresh);
+    }, [forceRefetchRequests, refetchAppTags]);
+
+    useEventRefresh(handleEventRefresh, { patchListEntry, fetchAndPatchById });
     
     // Handlers
     const handleSelectRequest = useCallback((id: string) => {
