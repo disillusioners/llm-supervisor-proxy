@@ -1,7 +1,7 @@
 # Test Packs
 
 ## Summary
-- Total: 14 unit packs (12 prior + gzipmw_unit_test + build_gate_test, added 2026-08-28 for the gzip feature gate) + mock/E2E packs below, across 37 Go packages
+- Total: 14 unit packs (12 prior + gzipmw_unit_test + build_gate_test, added 2026-08-28 for the gzip feature gate) + mock/E2E packs below, across 37 Go packages; + 2 FE inline packs (fe_vitest_suite, fe_typecheck, added 2026-09-22)
 - Unit: 14 | Integration: 1 | E2E: 1 | Mock: 1
 - All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
 
@@ -31,6 +31,8 @@
 | gzipmw_unit_test | test/packs/gzipmw_unit_test.sh | pkg/middleware/gzipmw — gzip request-body decompression middleware (21 test funcs) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
 | build_gate_test | test/packs/build_gate_test.sh | go build ./... + go vet ./... (Go-only gate; npm/tsc excluded by design — 30 standing tsc errors are known baseline debt) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
 | reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS (2 funcs / 14 subtests; @ 7a9ecff gzip gate) |
+| fe_vitest_suite | inline: `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE windowing + RequestDetail (npm-managed, happy-dom) | 300s outer | 2026-09-22 | PASS 52/52 (36 windowing + 16 component; @ 7022be1 fix/fe-scroll-long-last-message pre-commit gate; ran ×2 incl. post-stash-pop) |
+| fe_typecheck | inline: `cd pkg/ui/frontend && timeout 240 npx tsc --noEmit` | FE TypeScript error gate (vite build does NOT type-check) | 240s | 2026-09-22 | PASS-scoped (0 new-debt in changed files; 30 pre-existing baseline errors in unrelated files — documented debt) |
 
 ## Race Slices (real-streaming-default merge gate 2026-08-28)
 

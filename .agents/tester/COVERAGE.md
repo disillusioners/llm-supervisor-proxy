@@ -89,3 +89,24 @@
 
 ### Mode-independence evidence (new, binary-level)
 - UI/request records captured with content+thinking in BOTH live and buffered modes for streaming paths (M2-D); stream=false identity verified byte-level (M3).
+
+---
+
+## 2026-09-22 — FE scroll fix gate (fix/fe-scroll-long-last-message @ 7022be1, uncommitted)
+
+### FE test inventory (npm-managed, happy-dom — NEW coverage from this fix)
+
+| Area | Test File(s) | Tests | Status |
+|------|-------------|-------|--------|
+| FE windowing (computeWindowedRange, buildOffsets, isPinnedToBottom) | `pkg/ui/frontend/src/utils/__tests__/windowing.test.ts` | 36 (was ~10 pre-fix) | ✅ PASS |
+| FE RequestDetail (windowed list, anchor/pin behavior) | `pkg/ui/frontend/src/components/__tests__/RequestDetail.test.tsx` | 16 (was ~20 pre-fix, reshaped) | ✅ PASS |
+| **FE total** | 2 files | **52** (baseline 30) | ✅ 52/52 ×2 |
+
+### Regression-catcher proof (scoped source-only stash: post-fix tests vs pre-fix source)
+
+- Symptom 1 (overshoot → empty slice → jump-back loop): **4/4 catchers FAIL on pre-fix** (windowing.test.ts:158/165/176 assertion errors; :297 TypeError buildOffsets)
+- Symptom 2 (initial anchor lands mid-message): **initial-anchor test FAILS on pre-fix** (`expected +0 to be 10000` — never anchors) + overflowAnchor FAILS pre-fix; the `:392` overshoot and `:439` jump-to-last component tests are shim-masked (pass pre-fix) — improvement recommendations logged in RESULTS/2026-09-22-fe-scroll-fix-gate.md §6
+
+### Headless coverage gap (permanent, happy-dom)
+
+Late height materialization (ResizeObserver on real layout) is structurally untestable headless — symptom-2's production trigger needs manual smoke (checklist in RESULTS §8).

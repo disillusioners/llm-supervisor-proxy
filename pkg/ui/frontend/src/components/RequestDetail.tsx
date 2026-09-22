@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback, MutableRef } from 'preact/hooks';
+import { useState, useRef, useEffect, useMemo, useCallback, useLayoutEffect, MutableRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import DOMPurify from 'dompurify';
@@ -6,7 +6,7 @@ import { marked } from 'marked';
 
 import type { RequestDetail as RequestDetailType } from '../types';
 import { escapeHtml, escapeHtmlLight, generateCurlCommand, parseThinkTags } from '../utils/helpers';
-import { computeWindowedRange } from '../utils/windowing';
+import { buildOffsets, computeWindowedRange, isPinnedToBottom } from '../utils/windowing';
 
 interface RequestDetailProps {
   detail: RequestDetailType | null;
@@ -14,28 +14,40 @@ interface RequestDetailProps {
 }
 
 // Estimated average rendered height of a single message bubble. Used by
-// the windowed list to compute which slice of messages should be mounted.
-// Inaccuracies here only affect scrollbar smoothness, not correctness —
-// the actual rendered messages retain their true height and the visible
-// window is updated continuously from scrollTop.
+// the windowed list to (a) size the spacers and (b) seed offsets for
+// indices that haven't been measured yet. The hook updates offsets from
+// a per-bubble ResizeObserver, so once a bubble is measured its real
+// height drives the window math — the estimate is only a fallback.
 const WINDOW_MESSAGE_ESTIMATED_HEIGHT = 220;
 const WINDOW_OVERSCAN = 6;
+// "Near bottom" threshold (px) for the pinned-to-bottom predicate. We
+// treat any scroll position within this many pixels of the maximum as
+// pinned; the user has clearly indicated they want to be at the bottom
+// and we keep them there across late height materialization.
+const PIN_TO_BOTTOM_THRESHOLD = 16;
 
 // Hand-rolled virtual list. The expensive parts of a message render
 // (parseThinkTags + CollapsibleText with its markdown parse + DOMPurify)
 // only run for messages in [start, end). For a 794-message detail that
 // drops the initial render cost from "freeze the tab" to ~30 messages.
 //
-// Returns { start, end } such that 0 <= start <= end <= total and the
-// messages in [start, end) cover the visible viewport (plus overscan).
+// The hook reads scrollTop + clientHeight off the live container on every
+// scroll/resize tick and delegates the actual slice math to
+// `computeWindowedRange` (which accepts a prefix-sum offsets array so
+// real, measured bubble heights drive the math — not a uniform estimate).
+//
+// Also tracks a "pinned to bottom" flag the parent uses to decide
+// whether to programmatically re-anchor scrollTop when heights change.
 function useWindowedMessageRange(
   total: number,
   scrollRef: MutableRef<HTMLDivElement | null>,
-): { start: number; end: number } {
+  measuredOffsets: ReadonlyArray<number> | null,
+): { start: number; end: number; pinnedToBottomRef: MutableRef<boolean> } {
   const [range, setRange] = useState(() => ({
     start: 0,
     end: Math.min(total, 20),
   }));
+  const pinnedToBottomRef = useRef(false);
 
   useEffect(() => {
     if (total === 0) {
@@ -49,14 +61,16 @@ function useWindowedMessageRange(
     let raf = 0;
     const update = () => {
       raf = 0;
-      const { scrollTop, clientHeight } = el;
+      const { scrollTop, clientHeight, scrollHeight } = el;
       const { start: first, end: last } = computeWindowedRange(
         scrollTop,
         clientHeight,
         total,
         WINDOW_MESSAGE_ESTIMATED_HEIGHT,
         WINDOW_OVERSCAN,
+        measuredOffsets ?? undefined,
       );
+      pinnedToBottomRef.current = isPinnedToBottom(scrollTop, clientHeight, scrollHeight, PIN_TO_BOTTOM_THRESHOLD);
       setRange((prev) =>
         prev.start === first && prev.end === last ? prev : { start: first, end: last },
       );
@@ -78,9 +92,9 @@ function useWindowedMessageRange(
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [scrollRef, total]);
+  }, [scrollRef, total, measuredOffsets]);
 
-  return range;
+  return { start: range.start, end: range.end, pinnedToBottomRef };
 }
 
 // Memoized markdown parser cache with LRU eviction
@@ -659,25 +673,133 @@ const CollapsibleText = memo(function CollapsibleText({ text, role }: { text: st
   );
 });
 
+// Wrapper that observes its own height via ResizeObserver and reports
+// any change to the parent's height map. Memoized so the underlying
+// message bubble only re-renders when the parent passes new content
+// (not when the height map updates). Keys off `index` so React reconciles
+// the same wrapper across scrolls in/out of the windowed range.
+const MeasuredBubble = memo(function MeasuredBubble({
+  index,
+  onMeasure,
+  children,
+}: {
+  index: number;
+  onMeasure: (index: number, height: number) => void;
+  children: preact.ComponentChildren;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let lastHeight = -1;
+    const report = (h: number) => {
+      if (h > 0 && Math.abs(h - lastHeight) > 0.5) {
+        lastHeight = h;
+        onMeasure(index, h);
+      }
+    };
+    // Report immediately for the initial layout — ResizeObserver fires on
+    // mutation but not on the first paint, and we want the offsets array
+    // populated as soon as the bubble is in the DOM.
+    report(el.getBoundingClientRect().height);
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        report(entry.contentRect.height);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [index, onMeasure]);
+  return (
+    <div ref={ref} data-message-index={index}>
+      {children}
+    </div>
+  );
+});
+
 export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [expandedThoughts, setExpandedThoughts] = useState<Set<number | string>>(new Set());
   const [showModal, setShowModal] = useState(false);
   const [showCurlModal, setShowCurlModal] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const totalMessages = detail?.messages?.length ?? 0;
-  const windowedRange = useWindowedMessageRange(totalMessages, messagesContainerRef);
+  // Per-message measured height map. Index → height-in-px. Populated by
+  // MeasuredBubble's ResizeObserver; consumed by `buildOffsets` to seed
+  // the prefix-sum array the windowed hook reads.
+  const [heights, setHeights] = useState<Map<number, number>>(() => new Map());
+  const handleBubbleMeasure = useCallback((index: number, height: number) => {
+    setHeights((prev) => {
+      const existing = prev.get(index);
+      if (existing === height) return prev;
+      const next = new Map(prev);
+      next.set(index, height);
+      return next;
+    });
+  }, []);
+  const offsets = useMemo(
+    () => buildOffsets(totalMessages, heights, WINDOW_MESSAGE_ESTIMATED_HEIGHT),
+    [totalMessages, heights],
+  );
+  const { start, end, pinnedToBottomRef } = useWindowedMessageRange(
+    totalMessages,
+    messagesContainerRef,
+    totalMessages > 0 ? offsets : null,
+  );
+  const windowedRange = { start, end };
 
+  // Anchor to the bottom on detail change. Deferred to the next animation
+  // frame so any test-time layout shim that mutates scrollHeight AFTER
+  // the render commit is visible to the read. In production the
+  // one-frame delay between paint and the anchor is imperceptible
+  // compared to the round-trip cost of clicking a new request.
+  //
+  // Also marks the position as pinned so the offsets-change effect below
+  // keeps us at the bottom as late height materialization finishes.
+  //
+  // Programmatic scrollTop assignment does NOT fire a 'scroll' event, so
+  // without dispatching one the windowing hook's scroll listener would
+  // never see this anchor and the user would land on the bottom SPACER
+  // (empty) instead of the last message.
   useEffect(() => {
-    // Scroll to the bottom on detail change. Programmatic scrollTop
-    // assignment does NOT fire a 'scroll' event, so without dispatching
-    // one here the windowing hook's scroll listener never wakes up and
-    // the user lands on the bottom SPACER (empty) instead of the last
-    // message. Synthesise the event so the window recomputes.
+    // On cross-request switch (A → B), reset the per-message height map
+    // BEFORE scheduling the rAF anchor. Otherwise A's per-index
+    // measurements leak into B's offsets for ≥1 frame, the detail-change
+    // rAF anchors against B's `scrollHeight` polluted by A's stale
+    // prefix sums, and the `existing === height` short-circuit inside
+    // `handleBubbleMeasure` prolongs the pollution (no-op setHeights
+    // returns the same Map identity, so the `offsets` useMemo never
+    // recomputes). Clearing `pinnedToBottomRef.current` synchronously
+    // also stops the useLayoutEffect that fires on the immediate
+    // heights-driven `offsets` recomputation from programmatically
+    // re-anchoring against the still-estimating scrollHeight — the rAF
+    // below is the single, deterministic anchor.
+    setHeights(() => new Map());
+    pinnedToBottomRef.current = false;
+    const rafId = requestAnimationFrame(() => {
+      const el = messagesContainerRef.current;
+      if (!el) return;
+      pinnedToBottomRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      el.dispatchEvent(new Event('scroll'));
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [detail, pinnedToBottomRef]);
+
+  // Re-anchor when the height map changes and the user is pinned to the
+  // bottom. This is what survives the "tall last message materializes
+  // after initial anchor" case: as each bubble's real height comes in,
+  // scrollHeight grows, and we slide scrollTop to the new maximum.
+  //
+  // Critical: we only touch scrollTop when pinnedToBottomRef is true. If
+  // the user has scrolled away from the bottom, we never programmatically
+  // move them — that's the user's territory.
+  useLayoutEffect(() => {
     const el = messagesContainerRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    el.dispatchEvent(new Event('scroll'));
-  }, [detail]);
+    if (!el || totalMessages === 0) return;
+    if (pinnedToBottomRef.current) {
+      el.scrollTop = el.scrollHeight - el.clientHeight;
+    }
+  }, [offsets, pinnedToBottomRef, totalMessages]);
 
   const toggleThought = (index: number) => {
     setExpandedThoughts(prev => {
@@ -693,16 +815,28 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
   // Jump helpers — for 800-message logs, "scroll to bottom" via the
   // scrollbar alone is unreliable (spacer-based windowing). These buttons
-  // compute scrollTop directly from message index.
+  // compute scrollTop directly from message index, using the real prefix-
+  // sum offsets so a very tall last message lands correctly instead of
+  // overshooting into the spacer.
   const jumpToMessage = useCallback((targetIndex: number) => {
     const el = messagesContainerRef.current;
     if (!el) return;
     const clamped = Math.max(0, Math.min(targetIndex, totalMessages - 1));
-    el.scrollTop = Math.max(
-      0,
-      clamped * WINDOW_MESSAGE_ESTIMATED_HEIGHT - el.clientHeight / 2,
-    );
-  }, [totalMessages]);
+    // offsets[i] is the y-offset of the top of message i. For clamped,
+    // use the real offset when available; otherwise fall back to the
+    // uniform estimate so the helper still works before any bubble has
+    // been measured.
+    const topOffset = offsets[clamped] ?? clamped * WINDOW_MESSAGE_ESTIMATED_HEIGHT;
+    el.scrollTop = Math.max(0, topOffset - el.clientHeight / 2);
+    // Programmatic scrollTop assignment does NOT fire a 'scroll' event,
+    // so without dispatching one the windowing hook's scroll listener
+    // would never wake up and the visible slice would stay stale even
+    // though the scrollbar moved — a regression of shipped UI behaviour
+    // (the '⤒ First' / '⤓ Last' buttons must actually move the window).
+    // Mirror the detail-change effect's pattern at the top of this
+    // component: assign scrollTop, then synthesise the event.
+    el.dispatchEvent(new Event('scroll'));
+  }, [totalMessages, offsets]);
 
   if (loading) {
     return (
@@ -790,18 +924,24 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
       {showModal && <AdvancedInfoModal detail={detail} onClose={() => setShowModal(false)} />}
       {showCurlModal && <CurlModal detail={detail} onClose={() => setShowCurlModal(false)} />}
 
-      {/* Messages - Scrollable, windowed for large conversations */}
+      {/* Messages - Scrollable, windowed for large conversations.
+          overflowAnchor is explicitly disabled because the component
+          manages scroll anchoring itself via the useLayoutEffect above;
+          letting the browser auto-anchor would fight the windowing math
+          whenever a measured bubble resizes. */}
       <div
         ref={messagesContainerRef}
         class="flex-1 overflow-y-auto min-h-0 p-4 monitor-font text-sm"
+        style={{ overflowAnchor: 'none' }}
       >
-        {/* Jump nav for long conversations (≥ 50 messages). Uses the
-            estimated height as a scroll proxy — the scrollbar is itself
-            inaccurate under windowing, so users need explicit anchors. */}
+        {/* Jump nav for long conversations (≥ 50 messages). Uses real
+            measured offsets as the scroll proxy where available — the
+            scrollbar is itself inaccurate under windowing, so users
+            need explicit anchors. */}
         {totalMessages >= 50 && (
           <div class="mb-3 flex items-center justify-between gap-2 text-xs">
             <span class="text-gray-500">
-              Showing {windowedRange.start + 1}–{Math.min(windowedRange.end, totalMessages)} of {totalMessages} messages
+              Showing {Math.min(windowedRange.start + 1, Math.min(windowedRange.end, totalMessages))}–{Math.min(windowedRange.end, totalMessages)} of {totalMessages} messages
             </span>
             <div class="flex items-center gap-1">
               <button
@@ -836,10 +976,13 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
           </div>
         )}
 
-        {/* Spacer above the visible window — keeps scroll height realistic */}
+        {/* Spacer above the visible window — keeps scroll height realistic.
+            Sized from the real prefix-sum offsets so a tall last message
+            no longer makes this spacer undersized (the original "uniform
+            estimate" bug). */}
         {windowedRange.start > 0 && (
           <div
-            style={{ height: `${windowedRange.start * WINDOW_MESSAGE_ESTIMATED_HEIGHT}px` }}
+            style={{ height: `${offsets[windowedRange.start] ?? windowedRange.start * WINDOW_MESSAGE_ESTIMATED_HEIGHT}px` }}
             aria-hidden="true"
           />
         )}
@@ -852,7 +995,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
               : { thinking: [], content: message.content };
 
             return (
-              <div key={index}>
+              <MeasuredBubble key={index} index={index} onMeasure={handleBubbleMeasure}>
                 {/* Inline Think Tags - Visually distinct from separate thinking field */}
                 {parsed.thinking.length > 0 && (
                   <div class="ml-8 mr-0 mt-1 space-y-2">
@@ -943,15 +1086,20 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
                     ))}
                   </div>
                 )}
-              </div>
+              </MeasuredBubble>
             );
           })}
 
         </div>
-        {/* Spacer below the visible window — keeps scroll height realistic */}
+        {/* Spacer below the visible window — keeps scroll height realistic.
+            (total scroll height) - (top of first not-rendered row) =
+            offset[total] - offset[end]. Falls back to the uniform
+            estimate if offsets aren't ready yet (very first render). */}
         {windowedRange.end < totalMessages && (
           <div
-            style={{ height: `${(totalMessages - windowedRange.end) * WINDOW_MESSAGE_ESTIMATED_HEIGHT}px` }}
+            style={{
+              height: `${(offsets[totalMessages] ?? totalMessages * WINDOW_MESSAGE_ESTIMATED_HEIGHT) - (offsets[windowedRange.end] ?? windowedRange.end * WINDOW_MESSAGE_ESTIMATED_HEIGHT)}px`,
+            }}
             aria-hidden="true"
           />
         )}
