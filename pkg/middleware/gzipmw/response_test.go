@@ -249,6 +249,124 @@ func TestCompressResponse_AcceptEncodingIdentity_PassesThrough(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// R5b — Accept-Encoding q-value parsing (RFC 9110 §12.5.3)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// End-to-end checks for the q=0 cases. The middleware MUST NOT compress
+// when the client advertises gzip with q=0 (or any valid zero form),
+// even though the request is otherwise identical to a compressible
+// gzip-accepting request. The unit tests in
+// TestClientAcceptsGzip cover the parser in isolation; these tests pin
+// the behavior through the full CompressResponse stack (path scope +
+// header negotiation + writer state machine).
+
+func TestCompressResponse_AcceptEncodingGzipQ0_PassesThrough(t *testing.T) {
+	// Each row is one Accept-Encoding value that should NOT trigger
+	// compression even though it mentions gzip.
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{"gzip;q=0 integer", "gzip;q=0"},
+		{"gzip;q=0.0 float", "gzip;q=0.0"},
+		{"gzip;q=0.000 extra precision", "gzip;q=0.000"},
+		{"GZIP;Q=0 upper case", "GZIP;Q=0"},
+		{"gzip with surrounding whitespace and q=0", " gzip ; q=0 "},
+		{"deflate then gzip;q=0", "deflate, gzip;q=0"},
+		{"gzip;q=0 then deflate", "gzip;q=0, deflate"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			h := &echoJSONHandler{bodyLen: 8 * 1024} // well above 1KiB threshold
+			server := buildResponseMiddleware(t, CompressResponse, map[string]http.HandlerFunc{
+				"/fe/api/data": h.serve,
+			})
+			defer server.Close()
+
+			req, _ := http.NewRequest(http.MethodGet, server.URL+"/fe/api/data", nil)
+			req.Header.Set("Accept-Encoding", tc.header)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if got := resp.Header.Get("Content-Encoding"); got != "" {
+				t.Errorf("Accept-Encoding %q MUST NOT trigger compression; Content-Encoding=%q",
+					tc.header, got)
+			}
+			// Note: Vary is NOT expected here — when clientAcceptsGzip
+			// returns false the middleware short-circuits and never
+			// instantiates a gzipResponseWriter, so Vary is not added.
+			// That matches the behavior of TestCompressResponse_
+			// AcceptEncodingIdentity_PassesThrough.
+			// Body must pass through as plain JSON (no gzip header).
+			body, _ := io.ReadAll(resp.Body)
+			if !bytes.HasPrefix(body, []byte(`{"data":`)) {
+				t.Errorf("body should pass through uncompressed; got prefix %q",
+					string(body[:min(20, len(body))]))
+			}
+		})
+	}
+}
+
+// TestCompressResponse_MultipleAcceptEncodingHeaders_Joined verifies that
+// two separate Accept-Encoding header fields are joined per RFC 9110.
+// We send a "negation" header first and a positive "gzip" second; the
+// middleware must see both and (since gzip has no q=0 in the joined
+// list) compress. Conversely, a "gzip;q=0" first + "gzip" second must
+// still NOT compress — once gzip is disabled in any header it is off.
+func TestCompressResponse_MultipleAcceptEncodingHeaders_Joined(t *testing.T) {
+	h := &echoJSONHandler{bodyLen: 8 * 1024}
+
+	// Case 1: identity (separate header) + gzip (separate header) → compress.
+	t.Run("identity-then-gzip compresses", func(t *testing.T) {
+		server := buildResponseMiddleware(t, CompressResponse, map[string]http.HandlerFunc{
+			"/fe/api/data": h.serve,
+		})
+		defer server.Close()
+
+		req, _ := http.NewRequest(http.MethodGet, server.URL+"/fe/api/data", nil)
+		// r.Header.Add appends rather than Set, producing two
+		// separate header fields (http.Header.Values sees both).
+		req.Header.Add("Accept-Encoding", "identity")
+		req.Header.Add("Accept-Encoding", "gzip")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Content-Encoding"); got != "gzip" {
+			t.Errorf("joined header (identity,gzip) should compress; Content-Encoding=%q", got)
+		}
+	})
+
+	// Case 2: gzip;q=0 (separate header) + gzip (separate header) →
+	// do NOT compress. The q=0 in the first header disables gzip and
+	// the second header does not override it.
+	t.Run("gzip;q=0 then gzip stays disabled", func(t *testing.T) {
+		server := buildResponseMiddleware(t, CompressResponse, map[string]http.HandlerFunc{
+			"/fe/api/data2": h.serve,
+		})
+		defer server.Close()
+
+		req, _ := http.NewRequest(http.MethodGet, server.URL+"/fe/api/data2", nil)
+		req.Header.Add("Accept-Encoding", "gzip;q=0")
+		req.Header.Add("Accept-Encoding", "gzip")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Content-Encoding"); got != "" {
+			t.Errorf("joined header (gzip;q=0,gzip) must NOT compress; Content-Encoding=%q", got)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SSE exclusion (/fe/api/events MUST NOT be compressed)
 // ─────────────────────────────────────────────────────────────────────────────
 
