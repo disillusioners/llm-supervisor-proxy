@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'preact/hooks';
-import type { Event } from '../types';
+import type { Event, EventType } from '../types';
 
 // Configuration constants
 const MAX_EVENTS_PER_REQUEST = 500;
@@ -210,28 +210,64 @@ export function useEvents(selectedRequestId: string | null, autoScroll: boolean)
   };
 }
 
-// Hook to detect events that should trigger request list refresh
-// Debounces SSE-driven refetches to avoid cascading HTTP calls when multiple events arrive close together
-export function useEventRefresh(onRefresh: () => void) {
+// Hook to detect events that should trigger request list refresh.
+//
+// Strategy:
+//   * 3 s trailing debounce so SSE bursts (continuous agent traffic
+//     emits request_started/completed rapidly) coalesce into one
+//     refetch. The previous 300 ms value matched the cadence of agent
+//     traffic 1:1 → one refetch every few seconds → constant 96 MB
+//     transfers. 3 s is the lower bound of the user task window so it
+//     does not feel stale while cutting network load by ~10×.
+//   * When an SSE payload carries enough data to update a list row
+//     directly (`patchListEntry`), apply the patch immediately so the
+//     user sees instant visual feedback, AND kick off the debounced
+//     full-refetch so the row gets reconciled with backend ground
+//     truth. The patch is purely a UI optimisation; the refresh is
+//     the source of truth.
+//   * Dead event names (retry_attempt, timeout_idle, loop_interrupted)
+//     were removed: the backend never publishes them, so they were
+//     unreachable noise that made the hook longer than necessary.
+//
+// Callers that don't need patch-by-id can omit `options`; behaviour
+// degrades gracefully to plain debounced full-refetch.
+export function useEventRefresh(
+  onRefresh: () => void,
+  options?: {
+    patchListEntry?: <K extends keyof import('../types').RequestListItem>(
+      id: string,
+      partial: Pick<import('../types').RequestListItem, K>,
+    ) => void;
+    fetchAndPatchById?: (id: string) => Promise<void>;
+  },
+) {
   // Single debounce ref for all refetches
   const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep ref to latest onRefresh to avoid stale closure and unnecessary re-subscriptions
+  // Keep ref to latest callbacks to avoid stale closure and unnecessary re-subscriptions
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
+  const patchRef = useRef(options?.patchListEntry);
+  patchRef.current = options?.patchListEntry;
+  const fetchByIdRef = useRef(options?.fetchAndPatchById);
+  fetchByIdRef.current = options?.fetchAndPatchById;
 
   useEffect(() => {
-    // Event types that trigger data refetch
-    const refreshTypes = [
+    // Event types that benefit from patch-by-id (status transitions on an
+    // existing request). Other event types fall through to the full
+    // refetch debounce below.
+    const PATCH_TYPES = new Set<EventType>(['request_completed']);
+
+    // Event types that trigger data refetch (full list refresh).
+    // Anything else is intentionally ignored — the backend doesn't
+    // publish retry_attempt / timeout_idle / loop_interrupted, so the
+    // original list was dead code.
+    const REFRESH_TYPES: EventType[] = [
       'request_started',
-      'request_completed',
-      'retry_attempt',
-      'error_max_upstream_error_retries',
-      'timeout_idle',
-      'loop_interrupted',
       'fallback_triggered',
       'all_models_failed',
       'auth_failed',
+      'error_max_upstream_error_retries',
     ];
 
     const debouncedRefresh = () => {
@@ -240,11 +276,44 @@ export function useEventRefresh(onRefresh: () => void) {
       }
       refreshDebounceRef.current = setTimeout(() => {
         onRefreshRef.current();
-      }, 300);
+      }, 3000);
     };
 
     const handleEvent = (data: Event) => {
-      if (refreshTypes.includes(data.type)) {
+      // Try to patch a single list entry first; this is the optimistic
+      // UI fast-path for status transitions on an existing row. The
+      // trailing debouncedRefresh() below provides the ground-truth
+      // reconciliation.
+      if (PATCH_TYPES.has(data.type) && patchRef.current) {
+        const id = data.data?.id || data.data?.request_id;
+        if (typeof id === 'string') {
+          if (data.type === 'request_completed') {
+            // request_completed carries enough info to flip the row to
+            // 'completed' client-side. If the row is NOT in the list yet,
+            // patchListEntry silently no-ops; the trailing refresh will
+            // pick it up. fetchAndPatchById is only invoked on
+            // request_started below — it fetches and inserts new rows.
+            patchRef.current(id, { status: 'completed' });
+            debouncedRefresh();
+            return;
+          }
+        }
+      }
+
+      // request_started is the event where we may need to insert a
+      // brand-new row. fetchAndPatchById is a no-op if the row already
+      // exists, so duplicate events for known IDs are safe.
+      if (data.type === 'request_started' && fetchByIdRef.current) {
+        const id = data.data?.id || data.data?.request_id;
+        if (typeof id === 'string') {
+          fetchByIdRef.current(id);
+          // Still debounce-refresh so we pick up rows we missed.
+          debouncedRefresh();
+          return;
+        }
+      }
+
+      if (REFRESH_TYPES.includes(data.type)) {
         debouncedRefresh();
       }
     };
@@ -257,5 +326,5 @@ export function useEventRefresh(onRefresh: () => void) {
         clearTimeout(refreshDebounceRef.current);
       }
     };
-  }, []); // No deps - subscribe once, use ref for onRefresh
+  }, []); // No deps - subscribe once, use refs for callbacks
 }

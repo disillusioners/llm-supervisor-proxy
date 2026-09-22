@@ -1,9 +1,9 @@
 import { FunctionComponent } from 'preact';
-import { Request } from '../types';
+import { RequestListItem } from '../types';
 import { formatLocaleTime, formatDuration } from '../utils/helpers';
 
 interface RequestListProps {
-  requests: Request[];
+  requests: RequestListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onRefresh: () => void;
@@ -19,6 +19,16 @@ const statusColors = {
   running: 'bg-blue-500 animate-pulse',
   retrying: 'bg-purple-500 animate-pulse',
 };
+
+// Compact byte formatter for tooltips. Renders KB/MB with one decimal.
+// Clamps negatives to 0 as a defensive measure against any upstream
+// unsigned-int cast gone wrong — we never want "-3KB" in the UI.
+function formatBytes(bytes: number): string {
+  const safe = Math.max(0, bytes);
+  if (safe < 1024) return `${safe}B`;
+  if (safe < 1024 * 1024) return `${(safe / 1024).toFixed(1)}KB`;
+  return `${(safe / (1024 * 1024)).toFixed(1)}MB`;
+}
 
 // Upstream status indicator component
 const UpstreamStatusIndicator: FunctionComponent<{ status: string }> = ({ status }) => {
@@ -120,6 +130,11 @@ const RequestList: FunctionComponent<RequestListProps> = ({
                 <div class="text-xs text-gray-400 flex items-center gap-2">
                   <span>{formatLocaleTime(req.startTime)}</span>
                   {req.duration && <span class="text-gray-500">• {formatDuration(req.duration)}</span>}
+                  {req.message_count !== undefined && (
+                    <span class="text-gray-500" title={`${req.message_count} messages, ${formatBytes(req.total_size_bytes ?? 0)}`}>
+                      • {req.message_count}msg
+                    </span>
+                  )}
                 </div>
                 {/* Upstream request status breakdown */}
                 {!req.ultimate_model_used && req.upstream_requests && (

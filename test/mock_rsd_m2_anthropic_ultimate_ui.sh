@@ -879,7 +879,7 @@ echo "  /ui/: status=$UI_STATUS bytes=$UI_HTML_BYTES html_keywords=$UI_HAS_HTML"
 # Send one live + one buffered request — already done in A & B
 # Capture request IDs from /fe/api/requests list, find newest for our model
 sleep 2  # Allow the proxy's request store finalize goroutine to flush
-REQUESTS_JSON=$(curl -s "http://127.0.0.1:$PROXY_PORT/fe/api/requests")
+REQUESTS_JSON=$(curl -s "http://127.0.0.1:$PROXY_PORT/fe/api/requests?include=messages")
 echo "  /fe/api/requests raw (first 400 chars): $(echo "$REQUESTS_JSON" | head -c 400)"
 # Filter by model=mock-anth-model using a real script file (heredoc + pipe conflict)
 cat > "$TMPDIR/filter_records.py" <<'PYEOF'
@@ -1143,7 +1143,7 @@ for r in ns[:4]:
     })
 print(json.dumps(out))
 PYEOF
-F_RECS_JSON=$(curl -s "http://127.0.0.1:$PROXY_PORT/fe/api/requests" | python3 "$TMPDIR/filter_nonstream.py" 2>/dev/null || echo "[]")
+F_RECS_JSON=$(curl -s "http://127.0.0.1:$PROXY_PORT/fe/api/requests?include=messages" | python3 "$TMPDIR/filter_nonstream.py" 2>/dev/null || echo "[]")
 echo "  non-stream records for mock-anth-model (newest first):"
 echo "$F_RECS_JSON" | python3 -m json.tool 2>/dev/null || echo "$F_RECS_JSON"
 

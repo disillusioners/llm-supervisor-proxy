@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'preact/hooks';
-import type { Request, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest } from '../types';
+import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
+import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
+// Default page size for the metadata-only list endpoint. The list is now
+// bounded by count (not bytes), and the backend caps it at 200.
+const REQUEST_LIST_LIMIT = 50;
 
 // Generic fetch helper
 async function apiFetch<T>(path: string, options?: RequestInit & { signal?: AbortSignal }): Promise<T> {
@@ -31,12 +34,34 @@ function isAbortError(err: unknown): boolean {
 }
 
 // Requests API
+//
+// Returns a list of metadata-only entries (`RequestListItem`) by default.
+// This is a deliberate contract change to keep the list payload small
+// (the previous shape carried full message bodies for every entry, which
+// dominated RAM and bandwidth). Callers that need the full conversation
+// fetch `RequestDetail` via `useRequestDetail(id)`.
+//
+// The list is cached with a short TTL and served stale-while-revalidate:
+//   * `refetch()` no longer pre-deletes the cache entry, so an SSE burst
+//     that triggers N refetches within the TTL window only downloads
+//     once. The next call after expiry fetches fresh data and updates
+//     the cache, but callers always see the previous snapshot instantly.
+//   * `patchListEntry(id, partial)` lets SSE handlers splice in updates
+//     from event payloads without ever re-downloading the whole list.
 export function useRequests(initialAppTag?: string) {
-  const [requests, setRequests] = useState<Request[]>([]);
+  const [requests, setRequests] = useState<RequestListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentAppTag, setCurrentAppTag] = useState(initialAppTag);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Mirror of `requests` for synchronous read in non-render callbacks
+  // (e.g. fetchAndPatchById's "is the row already there?" check). The
+  // ref avoids a setRequests-as-read hack and is updated every render.
+  const requestsRef = useRef<RequestListItem[]>(requests);
+  useEffect(() => {
+    requestsRef.current = requests;
+  }, [requests]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -47,21 +72,29 @@ export function useRequests(initialAppTag?: string) {
         const tag = initialAppTag !== undefined ? initialAppTag : currentAppTag;
         // Use cache key based on app tag filter
         const cacheKey = tag ? `requests:${tag}` : 'requests';
-        const data = await defaultAPICache.getOrFetch<Request[]>(cacheKey, async () => {
-          const response = await fetch(`${API_BASE}${tag ? `/requests?app=${encodeURIComponent(tag)}` : '/requests'}`, {
+        const qs = new URLSearchParams();
+        qs.set('limit', String(REQUEST_LIST_LIMIT));
+        // offset intentionally omitted (= 0) on the initial / cache-keyed path;
+        // cache key does not encode offset so pagination stays simple.
+        const queryString = qs.toString();
+        const data = await defaultAPICache.getOrFetch<RequestListItem[]>(cacheKey, async () => {
+          const path = `/requests?${queryString}${tag ? `&app=${encodeURIComponent(tag)}` : ''}`;
+          const response = await fetch(`${API_BASE}${path}`, {
             signal: controller.signal,
             headers: { 'Content-Type': 'application/json' },
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.json() as Promise<Request[]>;
+          return response.json() as Promise<RequestListItem[]>;
         }, 5000);
-        setRequests(data || []);
-        setError(null);
+        if (!controller.signal.aborted) {
+          setRequests(data || []);
+          setError(null);
+        }
       } catch (err) {
         if (isAbortError(err)) return;
         setError(err instanceof Error ? err.message : 'Failed to fetch requests');
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
 
@@ -69,15 +102,84 @@ export function useRequests(initialAppTag?: string) {
     return () => controller.abort();
   }, [currentAppTag, initialAppTag, refreshKey]);
 
+  // SWR refetch: do NOT pre-delete the cache. If the entry is still
+  // fresh, getOrFetch returns it instantly without hitting the network.
+  // If it's expired, getOrFetch kicks the fetcher in the background;
+  // component state updates when fresh data arrives. Either way, the
+  // user sees the previous snapshot instantly, no spinner flicker.
   const refetch = useCallback(() => {
-    // Invalidate cache so next refetch gets fresh data
+    setRefreshKey(k => k + 1);
+  }, []);
+
+  // Patch a single list entry by id from an SSE payload. Avoids the full
+  // refetch when the event already carries the data we need to update
+  // the row (e.g. status transition from running → completed).
+  const patchListEntry = useCallback(<K extends keyof RequestListItem>(
+    id: string,
+    partial: Pick<RequestListItem, K>,
+  ) => {
+    setRequests(prev => {
+      const idx = prev.findIndex(r => r.id === id);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...partial };
+      return next;
+    });
+  }, []);
+
+  // Fetch a single request's metadata from the detail endpoint and
+  // merge it into the cached list. Used when an SSE event tells us
+  // a new request was created but doesn't carry enough data to
+  // synthesize the list entry client-side.
+  //
+  // Optimization: when the row is already in the cached list (e.g.
+  // it was inserted by an earlier full list refresh), skip the fetch
+  // entirely. Any drift between the row we already have and the
+  // backend ground truth is reconciled by the SSE handler's trailing
+  // debouncedRefresh() (which uses forceRefetch and so always hits
+  // the network). Saves one HTTP roundtrip on the common
+  // request_started-during-active-traffic case.
+  const fetchAndPatchById = useCallback(async (id: string) => {
+    if (requestsRef.current.some(r => r.id === id)) return;
+    try {
+      const data = await apiFetch<RequestListItem>(`/requests/${id}/summary`);
+      setRequests(prev => {
+        const idx = prev.findIndex(r => r.id === id);
+        if (idx === -1) {
+          return [data, ...prev];
+        }
+        const next = prev.slice();
+        next[idx] = { ...next[idx], ...data };
+        return next;
+      });
+    } catch (err) {
+      // Fall back to a full refetch on failure so we never miss updates
+      // due to a single bad fetch.
+      if (isAbortError(err)) return;
+      setRefreshKey(k => k + 1);
+    }
+  }, []);
+
+  // Force-refetch (skip cache). Used after explicit mutations (delete,
+  // config change) where stale data is unacceptable. Named distinctly
+  // from `refetch` to make call sites self-documenting.
+  const forceRefetch = useCallback(() => {
     const tag = initialAppTag !== undefined ? initialAppTag : currentAppTag;
     const cacheKey = tag ? `requests:${tag}` : 'requests';
     defaultAPICache.delete(cacheKey);
     setRefreshKey(k => k + 1);
   }, [currentAppTag, initialAppTag]);
 
-  return { requests, loading, error, refetch, setAppTag: setCurrentAppTag };
+  return {
+    requests,
+    loading,
+    error,
+    refetch,
+    forceRefetch,
+    patchListEntry,
+    fetchAndPatchById,
+    setAppTag: setCurrentAppTag,
+  };
 }
 
 export function useRequestDetail(id: string | null) {

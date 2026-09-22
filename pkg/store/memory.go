@@ -1,9 +1,88 @@
 package store
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
+
+// Size returns an approximate in-memory byte cost for this RequestLog.
+// It is intentionally cheap: it sums the JSON-encoded byte lengths of
+// the heavy string fields (id/status/model/error/duration/token_*/…),
+// the per-message content + thinking + tool-call JSON + arguments,
+// the parameter map (best-effort, fmt.Sprint'ed), and a fixed per-field
+// overhead constant so the approximation tracks reality closely enough
+// for byte-budget eviction.
+//
+// This is NOT a precise heap-allocator measurement; it is a stable,
+// O(n) in message count upper bound that the store uses to enforce its
+// cumulative payload byte budget (P2-5b). Exposed publicly so the FE
+// API summary projection can surface it as `total_size_bytes` for the
+// UI.
+//
+// IMPORTANT: this heuristic is the SAME whether the request log is in
+// its first-Added form or has been mutated since. The byte-budget
+// accounting in RequestStore.Add tracks "last-accounted size" per id in
+// sizeByID, so any delta (growth via in-place Messages append, etc.)
+// is reflected in totalBytes regardless of how many times the same
+// *RequestLog pointer is re-Added. Do NOT replace this with a JSON
+// encoder (which would be both slow and surprising for tests that check
+// deterministic size values).
+func (r *RequestLog) Size() int64 {
+	// Fixed per-field overhead: each field carries a JSON name + a
+	// few bytes of structural overhead (quotes, comma, etc.). Using
+	// len()+16 is a conservative estimator that avoids measuring the
+// exact JSON encoding on every Add.
+	const perFieldOverhead = 16
+	// Fields we charge an overhead for (must match the actual struct
+	// fields + the per-field `n += len(...)` calls below):
+	//   ID, Status, Model, Duration, Error, TokenID, TokenName,
+	//   OriginalModel, AppTag, UltimateModelID, CurrentFallback (11 strings;
+	//   the slice of strings FallbackUsed is charged per-element below).
+	//   Plus the Usage object (1 wrapper overhead) and the UpstreamRequests
+	//   struct (1 wrapper overhead).
+	// Total charged overheads = 13. Keep this list in sync with the per-
+	// field n += len(...) lines below — if you add a field, bump this count.
+	const fieldsCharged = 13
+	n := int64(perFieldOverhead) * fieldsCharged
+
+	n += int64(len(r.ID))
+	n += int64(len(r.Status))
+	n += int64(len(r.Model))
+	n += int64(len(r.Duration))
+ n += int64(len(r.Error))
+	n += int64(len(r.TokenID))
+	n += int64(len(r.TokenName))
+	n += int64(len(r.OriginalModel))
+	n += int64(len(r.AppTag))
+	n += int64(len(r.UltimateModelID))
+	n += int64(len(r.CurrentFallback))
+
+	for _, fb := range r.FallbackUsed {
+		n += int64(len(fb)) + perFieldOverhead
+	}
+
+	for _, msg := range r.Messages {
+		n += int64(perFieldOverhead) * 4 // role, content, tool_calls, thinking
+		n += int64(len(msg.Role))
+		n += int64(len(msg.Content))
+		n += int64(len(msg.Thinking))
+		for _, tc := range msg.ToolCalls {
+			n += int64(perFieldOverhead) * 4 // id, type, function name, function arguments
+			n += int64(len(tc.ID))
+			n += int64(len(tc.Type))
+			n += int64(len(tc.Function.Name))
+			n += int64(len(tc.Function.Arguments))
+		}
+	}
+
+	for k, v := range r.Parameters {
+		n += int64(perFieldOverhead) + int64(len(k))
+		n += int64(len(fmt.Sprintf("%v", v)))
+	}
+
+	return n
+}
 
 type Function struct {
 	Name      string `json:"name"`
@@ -81,17 +160,126 @@ type RequestStore struct {
 	maxSize  int
 	ByID     map[string]*RequestLog
 
+	// sizeByID is the last-accounted byte cost for each id currently
+	// held in `requests`. Used to compute byte-budget deltas on
+	// in-place mutation + re-Add (the dominant pattern: pkg/proxy/
+	// handler_finalize.go:39 appends Messages to rc.reqLog then
+	// re-Adds the SAME pointer; Size() of the same pointer before
+	// and after the append returns the NEW size, so naive
+	// `totalBytes -= existing.Size(); += req.Size()` cancels to
+	// zero and the store drifts). Tracking last-accounted size
+	// per-id gives an O(1) correct delta on every Add.
+	sizeByID map[string]int64
+
 	// Cache for GetUniqueAppTags() results
 	appTagsCache      []string
 	appTagsCacheDirty bool
+
+	// maxBytes is the cumulative payload byte budget for the ring buffer.
+	// 0 disables byte-based eviction (count-only, original behavior).
+	maxBytes int64
+	// totalBytes is the running sum of sizeByID entries for every
+	// request currently held in `requests`. Maintained atomically
+	// alongside the slice mutations so the eviction check is O(1).
+	// Invariant: totalBytes == sum(sizeByID[id] for id in ByID).
+	totalBytes int64
 }
 
-func NewRequestStore(maxSize int) *RequestStore {
-	return &RequestStore{
+// RequestStoreOption mutates a RequestStore during construction. Used to
+// add optional knobs (e.g. byte-budget eviction) without breaking the
+// existing single-arg constructor that the rest of the codebase calls.
+type RequestStoreOption func(*RequestStore)
+
+// WithMaxBytes enables cumulative payload byte-budget eviction.
+//
+// When set, the store keeps evicting the OLDEST entry until the running
+// total of approximate per-entry sizes fits within maxBytes. The count
+// cap (NewRequestStore's first arg) is still enforced — byte eviction
+// fires only when count is below cap AND bytes is over budget.
+//
+// Pass 0 (or omit) to disable byte-based eviction (legacy behavior).
+func WithMaxBytes(maxBytes int64) RequestStoreOption {
+	return func(s *RequestStore) { s.maxBytes = maxBytes }
+}
+
+func NewRequestStore(maxSize int, opts ...RequestStoreOption) *RequestStore {
+	s := &RequestStore{
 		requests: make([]*RequestLog, 0, maxSize),
 		maxSize:  maxSize,
 		ByID:     make(map[string]*RequestLog),
+		sizeByID: make(map[string]int64),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// MaxBytes returns the configured cumulative payload byte budget. 0
+// means byte-budget eviction is disabled (count-only, original behavior).
+func (s *RequestStore) MaxBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxBytes
+}
+
+// TotalBytes returns the current running sum of last-accounted sizes
+// held in the store. Cheap O(1) snapshot for telemetry / tests.
+func (s *RequestStore) TotalBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalBytes
+}
+
+// SizeOf returns the last-accounted size for the given id, or 0 if
+// the id is not present. O(1) accessor for the FE API summary hot
+// path so handleRequests / handleRequestSummary do not have to call
+// the O(messages) Size() on every list element. Returns the same
+// value Size() would return for that entry's CURRENT mutation state,
+// because sizeByID is updated to track every growth on re-Add.
+func (s *RequestStore) SizeOf(id string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sizeByID[id]
+}
+
+// enforceBudget drops the OLDEST entries (front of the slice) until
+// the running totalBytes fits within maxBytes, OR the store empties.
+// Called from Add after BOTH the new-entry and overwrite paths so
+// byte-budget eviction fires regardless of how the entry got bigger
+// (first Add, in-place Messages append + re-Add, count-cap replacement).
+//
+// Pre-condition: caller holds s.mu (write lock). enforceBudget also
+// updates sizeByID / ByID atomically with the slice mutation so the
+// totalBytes invariant holds on every path.
+func (s *RequestStore) enforceBudget() {
+	if s.maxBytes <= 0 {
+		return
+	}
+	for s.totalBytes > s.maxBytes && len(s.requests) > 0 {
+		s.evictOldest()
+	}
+}
+
+// evictOldest removes the oldest entry (front of the slice) and
+// decrements totalBytes by its last-accounted size. Caller holds
+// s.mu (write lock).
+func (s *RequestStore) evictOldest() {
+	if len(s.requests) == 0 {
+		return
+	}
+	oldest := s.requests[0]
+	oldestSize := s.sizeByID[oldest.ID]
+	s.totalBytes -= oldestSize
+	if s.totalBytes < 0 {
+		// Defensive: should never happen with correct sizeByID
+		// accounting, but guard against bookkeeping drift silently
+		// disabling byte-budget eviction (the C1 failure mode).
+		s.totalBytes = 0
+	}
+	delete(s.ByID, oldest.ID)
+	delete(s.sizeByID, oldest.ID)
+	s.requests = s.requests[1:]
 }
 
 func (s *RequestStore) Add(req *RequestLog) {
@@ -101,25 +289,47 @@ func (s *RequestStore) Add(req *RequestLog) {
 	// Invalidate app tags cache on any modification
 	s.appTagsCacheDirty = true
 
-	// If we have an ID collision (shouldn't happen with UUIDs, but safety first), overwrite?
-	// or assume Add is for new requests.
-	// actually, we might update existing ones.
-	// Let's assume Add is for NEW or UPDATE.
+	newSize := req.Size()
 
 	if existing, exists := s.ByID[req.ID]; exists {
+		// Overwrite path. Compute the delta against the LAST-accounted
+		// size in sizeByID, not against Size() of `existing` — those
+		// are the SAME pointer after the handler's in-place mutation
+		// (e.g. handler_finalize.go:39 appends Messages then re-Adds),
+		// so a Size()-based delta would cancel to zero and the store
+		// would drift toward negative totalBytes on the next eviction.
+		//
+		// Total deltas after this block: totalBytes += newSize -
+		// sizeByID[req.ID]; sizeByID[req.ID] = newSize; invariant
+		// holds regardless of how many messages were appended in
+		// place between Adds.
+		prevSize := s.sizeByID[req.ID]
 		*existing = *req
+		s.totalBytes += newSize - prevSize
+		s.sizeByID[req.ID] = newSize
+		// Enforce the byte budget on the OVERWRITE path too (M4 fix):
+		// a single growing conversation that exceeds the budget via
+		// repeated in-place re-Add must be evicted promptly, without
+		// waiting for the next NEW request to arrive.
+		s.enforceBudget()
 		return
 	}
 
+	// New-entry path: count-cap eviction first, then add, then
+	// byte-budget eviction. The byte-budget loop also enforces the
+	// cap repeatedly so a single very large entry that exceeds the
+	// budget is dropped immediately (otherwise totalBytes would
+	// exceed maxBytes until the next Add).
 	if len(s.requests) >= s.maxSize {
-		// Remove oldest
-		oldest := s.requests[0]
-		delete(s.ByID, oldest.ID)
-		s.requests = s.requests[1:]
+		s.evictOldest()
 	}
 
 	s.requests = append(s.requests, req)
 	s.ByID[req.ID] = req
+	s.sizeByID[req.ID] = newSize
+	s.totalBytes += newSize
+
+	s.enforceBudget()
 }
 
 func (s *RequestStore) Get(id string) *RequestLog {

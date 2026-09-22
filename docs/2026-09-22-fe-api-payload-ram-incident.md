@@ -213,3 +213,38 @@ After implementation, all of the following must hold with a UI tab open and agen
 1. **Close the Web UI tab when not actively watching** — stops the 96 MB polling loop immediately; RAM growth from traffic alone is slow.
 2. If RSS approaches ~1.9 Gi: `kubectl rollout restart deployment/llm-supervisor-proxy -n llmproxy` (drops in-flight agent requests — they retry; config/models/tokens are safe in Postgres; only in-memory last-100 history is lost).
 3. Optionally drop `GOMEMLIMIT` to 1 Gi now (env var change, pod restart) — cheap pressure relief, no code needed.
+## Resolution (2026-09-22)
+
+### 1. Status
+
+Fixed on branch `fix/fe-api-payload-ram-incident` (local commit to follow; not yet merged/pushed). Items implemented: P0-1, P0-2, P1-3, P1-4, P2-5, P2-5b. P2-6 (Postgres persistence) deferred — out of scope for this fix.
+
+### 2. What changed
+
+- **API surface (P0-1)** — `handleRequests` now emits a metadata-only projection (`RequestListItem`) by default, with first-class `limit`/`offset` pagination and `?include=messages` for legacy/debug payloads. `GET /fe/api/requests/{id}/summary` returns a bounded summary slice for the detail view. (`pkg/ui/server.go`)
+- **Compression (P0-2)** — `gzipmw.CompressResponse` middleware added with explicit SSE exclusion: `text/event-stream` responses are never compressed (no buffering behind the wire; SSE headers remain `Content-Type: text/event-stream`, no `Content-Encoding`). Compresses JSON / HTML / JS / CSS only. (`pkg/middleware/gzipmw/response.go`)
+- **Store byte-budget (P1-3)** — `RequestStore` accepts a `WithMaxBytes` cap; `sizeByID` tracks the last accounted byte size per entry, so same-pointer `Add` (idempotent update of an existing request) does not double-debit on re-Add. Eviction is now bounded by total bytes, not just count. `-race` clean. (`pkg/store/memory.go`)
+- **Frontend (P1-4, P2-5, P2-5b)** — `RequestListItem` type split from full `Request`; SWR-based refetch with 3 s debounce; patch-by-id updates avoid full-list refetch when a single request changes; windowed (virtualized) detail view replaces the unbounded conversation renderer. (`pkg/ui/frontend/src/`)
+- **k8s sizing** — `GOMEMLIMIT` reduced to 1 Gi; `requests.memory` raised to 512 Mi; `limits.memory` left at 2 Gi unchanged. (`k8s/values.yaml`)
+- **Mock harness** — `test/mock_rsd_m2_anthropic_ultimate_ui.sh` migrated from `?full=1` to `?include=messages`, matching the new default-projection contract.
+
+### 3. Corrections to this document
+
+- **(a) §6 acceptance criterion — heartbeat cadence.** The UI-SSE heartbeat is **30 s** (`pkg/ui/server.go:366`); the 5 s figure cited in §6 is the proxy-stream heartbeat (`pkg/proxy/heartbeat.go:17`), not the UI-SSE heartbeat. The "SSE unaffected" criterion still holds; only the cadence number was wrong.
+- **(b) FE event wiring.** The frontend listened for three event names that the backend never published: `retry_attempt`, `timeout_idle`, `loop_interrupted`. These have been pruned from the FE refresh wiring; the refresh path now reacts only to events the backend actually emits.
+
+### 4. Verification summary
+
+- `go build ./...` and `go vet ./...` clean.
+- **Full suite:** 31 packages OK, 2 FAIL-groups — both **proven pre-existing on base `b832ea3f`** via a separate worktree (`pkg/mcp` SSRF deterministic subtests; `pkg/usage` SQLITE_BUSY flaky tests).
+- **Targeted run:** **276 PASS / 0 FAIL** across `pkg/ui` (114), `pkg/middleware/gzipmw` (35), and `pkg/store` (17), `-race` clean. Regression coverage includes: legacy `?include=messages` byte-level parity; bodyless 204 under gzip (no body, no `Content-Encoding`); panic-after-partial-write truncation safety; same-pointer re-Add byte-accounting.
+- **Runtime smoke** on the real binary: default `GET /fe/api/requests` returns **2 811 B** for 5 entries with `message_count` + `total_size_bytes` and **no `messages` key** (previously ~96 MB for 100 entries); `?include=messages` legacy shape intact; gzip on default response **2 811 → 592 B (−79 %)**, decode-identical, `Vary: Accept-Encoding` set; SSE responses carry **no** `Content-Encoding` and stream unchanged; `/ui/` serves all three new hashed bundles with zero 404s; FE `vite build` SHA-256 byte-identical to the committed bundle assets; mock pack `rsd_m2` OVERALL PASS, exit 0.
+- **Review: 2 rounds.** Round 1 rejected on 4 probe-confirmed defects: byte-accounting drift on same-pointer re-Add; bodyless 204 promoted to 200 under gzip; panic-after-partial-write escaping the writer; byte-budget enforcement unreachable on overwrite. All four fixed with regression tests; round 2 approved.
+
+### 5. Residuals & follow-ups
+
+- Browser QA of the windowed detail view on the reproducer conversation (~800 messages) before relying on it in production.
+- `kubectl top` RSS curve under `GOMEMLIMIT=1Gi` for ~24 h post-rollout to confirm the pod-floor claim from §1.
+- Verify the deployment config does **not** set `LOG_RAW_UPSTREAM_RESPONSE=true`; code default is `false` (`pkg/config/config.go:208`).
+- Pre-existing `pkg/mcp` SSRF subtests and `pkg/usage` SQLITE_BUSY flakes need an upstream fix outside this incident.
+- Deferred review nits for a follow-up PR: FE `tsc` strict-mode standing debt; `Accept-Encoding` `q`-value parsing in `gzipmw`; dispatcher edge-case tests; `HEAD`-as-`GET` consideration on `/summary`.

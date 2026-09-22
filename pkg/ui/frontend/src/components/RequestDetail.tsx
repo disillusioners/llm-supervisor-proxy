@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'preact/hooks';
+import { useState, useRef, useEffect, useMemo, useCallback, MutableRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import DOMPurify from 'dompurify';
@@ -10,6 +10,77 @@ import { escapeHtml, escapeHtmlLight, generateCurlCommand, parseThinkTags } from
 interface RequestDetailProps {
   detail: RequestDetailType | null;
   loading: boolean;
+}
+
+// Estimated average rendered height of a single message bubble. Used by
+// the windowed list to compute which slice of messages should be mounted.
+// Inaccuracies here only affect scrollbar smoothness, not correctness —
+// the actual rendered messages retain their true height and the visible
+// window is updated continuously from scrollTop.
+const WINDOW_MESSAGE_ESTIMATED_HEIGHT = 220;
+const WINDOW_OVERSCAN = 6;
+
+// Hand-rolled virtual list. The expensive parts of a message render
+// (parseThinkTags + CollapsibleText with its markdown parse + DOMPurify)
+// only run for messages in [start, end). For a 794-message detail that
+// drops the initial render cost from "freeze the tab" to ~30 messages.
+//
+// Returns { start, end } such that 0 <= start <= end <= total and the
+// messages in [start, end) cover the visible viewport (plus overscan).
+function useWindowedMessageRange(
+  total: number,
+  scrollRef: MutableRef<HTMLDivElement | null>,
+): { start: number; end: number } {
+  const [range, setRange] = useState(() => ({
+    start: 0,
+    end: Math.min(total, 20),
+  }));
+
+  useEffect(() => {
+    if (total === 0) {
+      setRange({ start: 0, end: 0 });
+      return;
+    }
+
+    const el = scrollRef.current;
+    if (!el) return;
+
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const { scrollTop, clientHeight } = el;
+      const first = Math.max(
+        0,
+        Math.floor(scrollTop / WINDOW_MESSAGE_ESTIMATED_HEIGHT) - WINDOW_OVERSCAN,
+      );
+      const last = Math.min(
+        total,
+        Math.ceil((scrollTop + clientHeight) / WINDOW_MESSAGE_ESTIMATED_HEIGHT) + WINDOW_OVERSCAN,
+      );
+      setRange((prev) =>
+        prev.start === first && prev.end === last ? prev : { start: first, end: last },
+      );
+    };
+
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(update);
+    };
+
+    update();
+    el.addEventListener('scroll', onScroll, { passive: true });
+
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [scrollRef, total]);
+
+  return range;
 }
 
 // Memoized markdown parser cache with LRU eviction
@@ -45,6 +116,82 @@ const MarkdownContent = memo(function MarkdownContent({ text }: { text: string }
     />
   );
 });
+
+// Lazy wrapper around MarkdownContent. The expensive marked.parse +
+// DOMPurify.sanitize only runs when the element is within ~1.5 viewports
+// of the visible area; otherwise a tiny placeholder occupies the slot so
+// the bubble's vertical footprint stays predictable. This is what keeps a
+// 794-message conversation from blocking the main thread on initial mount.
+const LazyMarkdownContent = memo(function LazyMarkdownContent({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const active = useNearViewport(ref, '1500px 0px');
+
+  if (!active) {
+    // Use the windowing estimated row height as the placeholder's
+    // minimum so that, once the row enters the visible window and
+    // activates, the bubble doesn't dramatically resize and shift
+    // surrounding messages. Subtract ~24 px to compensate for the
+    // bubble's `p-3` padding (12 px each side) so the bubble's OUTER
+    // height is roughly WINDOW_MESSAGE_ESTIMATED_HEIGHT — close to
+    // what windowing's spacer math assumes.
+    const placeholderMinHeight = Math.max(32, WINDOW_MESSAGE_ESTIMATED_HEIGHT - 24);
+    return (
+      <div
+        ref={ref}
+        class="text-xs text-gray-600 italic select-none"
+        style={{ minHeight: `${placeholderMinHeight}px` }}
+        aria-hidden="true"
+      >
+        …
+      </div>
+    );
+  }
+
+  return <MarkdownContent text={text} />;
+});
+
+// Returns true once the ref'd element is within ~rootMargin of the
+// viewport. Sticky (never goes back to false) — once mounted and parsed,
+// a message stays parsed even if the user scrolls it offscreen again.
+// This avoids flicker on re-entry.
+function useNearViewport(
+  ref: MutableRef<HTMLDivElement | null>,
+  rootMargin: string,
+): boolean {
+  const [near, setNear] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    // Cheap fast-path: if the element is already near the viewport on
+    // mount (typical for the first ~20 messages of a freshly-loaded
+    // detail), activate immediately without an observer.
+    const rect = el.getBoundingClientRect();
+    const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
+    if (rect.top < viewportH * 2 && rect.bottom > -200) {
+      setNear(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setNear(true);
+            observer.disconnect();
+            return;
+          }
+        }
+      },
+      { rootMargin },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, rootMargin]);
+
+  return near;
+}
 
 // Tool Call Display Component - Collapsible with formatted arguments
 const ToolCallDisplay = memo(function ToolCallDisplay({ toolCall }: { toolCall: { function: { name: string; arguments: string } } }) {
@@ -459,13 +606,13 @@ const CollapsibleText = memo(function CollapsibleText({ text, role }: { text: st
   const lines = text ? text.split('\n') : [];
 
   if (lines.length <= 40) {
-    return <MarkdownContent text={text} />;
+    return <LazyMarkdownContent text={text} />;
   }
 
   if (isExpanded) {
     return (
       <div class="flex flex-col">
-        <MarkdownContent text={text} />
+        <LazyMarkdownContent text={text} />
         <button
           onClick={() => setIsExpanded(false)}
           class={`mt-3 self-center text-xs px-3 py-1 rounded border transition-colors ${
@@ -487,7 +634,7 @@ const CollapsibleText = memo(function CollapsibleText({ text, role }: { text: st
   return (
     <div class="flex flex-col">
       <div class="relative overflow-hidden">
-        <MarkdownContent text={firstHalf} />
+        <LazyMarkdownContent text={firstHalf} />
       </div>
 
       <div class="flex items-center justify-center my-3 opacity-80 hover:opacity-100 transition-opacity">
@@ -506,7 +653,7 @@ const CollapsibleText = memo(function CollapsibleText({ text, role }: { text: st
       </div>
 
       <div class="relative overflow-hidden opacity-75">
-        <MarkdownContent text={secondHalf} />
+        <LazyMarkdownContent text={secondHalf} />
       </div>
     </div>
   );
@@ -517,11 +664,19 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
   const [showModal, setShowModal] = useState(false);
   const [showCurlModal, setShowCurlModal] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const totalMessages = detail?.messages?.length ?? 0;
+  const windowedRange = useWindowedMessageRange(totalMessages, messagesContainerRef);
 
   useEffect(() => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-    }
+    // Scroll to the bottom on detail change. Programmatic scrollTop
+    // assignment does NOT fire a 'scroll' event, so without dispatching
+    // one here the windowing hook's scroll listener never wakes up and
+    // the user lands on the bottom SPACER (empty) instead of the last
+    // message. Synthesise the event so the window recomputes.
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    el.dispatchEvent(new Event('scroll'));
   }, [detail]);
 
   const toggleThought = (index: number) => {
@@ -535,6 +690,19 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
       return next;
     });
   };
+
+  // Jump helpers — for 800-message logs, "scroll to bottom" via the
+  // scrollbar alone is unreliable (spacer-based windowing). These buttons
+  // compute scrollTop directly from message index.
+  const jumpToMessage = useCallback((targetIndex: number) => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const clamped = Math.max(0, Math.min(targetIndex, totalMessages - 1));
+    el.scrollTop = Math.max(
+      0,
+      clamped * WINDOW_MESSAGE_ESTIMATED_HEIGHT - el.clientHeight / 2,
+    );
+  }, [totalMessages]);
 
   if (loading) {
     return (
@@ -622,15 +790,64 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
       {showModal && <AdvancedInfoModal detail={detail} onClose={() => setShowModal(false)} />}
       {showCurlModal && <CurlModal detail={detail} onClose={() => setShowCurlModal(false)} />}
 
-      {/* Messages - Scrollable */}
+      {/* Messages - Scrollable, windowed for large conversations */}
       <div
         ref={messagesContainerRef}
         class="flex-1 overflow-y-auto min-h-0 p-4 monitor-font text-sm"
       >
+        {/* Jump nav for long conversations (≥ 50 messages). Uses the
+            estimated height as a scroll proxy — the scrollbar is itself
+            inaccurate under windowing, so users need explicit anchors. */}
+        {totalMessages >= 50 && (
+          <div class="mb-3 flex items-center justify-between gap-2 text-xs">
+            <span class="text-gray-500">
+              Showing {windowedRange.start + 1}–{Math.min(windowedRange.end, totalMessages)} of {totalMessages} messages
+            </span>
+            <div class="flex items-center gap-1">
+              <button
+                onClick={() => jumpToMessage(0)}
+                class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200"
+                title="Jump to first message"
+              >
+                ⤒ First
+              </button>
+              <button
+                onClick={() => jumpToMessage(Math.max(0, windowedRange.start - 20))}
+                class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200"
+                title="Jump back 20 messages"
+              >
+                −20
+              </button>
+              <button
+                onClick={() => jumpToMessage(Math.min(totalMessages - 1, windowedRange.end + 20))}
+                class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200"
+                title="Jump forward 20 messages"
+              >
+                +20
+              </button>
+              <button
+                onClick={() => jumpToMessage(totalMessages - 1)}
+                class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200"
+                title="Jump to last message"
+              >
+                ⤓ Last
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Spacer above the visible window — keeps scroll height realistic */}
+        {windowedRange.start > 0 && (
+          <div
+            style={{ height: `${windowedRange.start * WINDOW_MESSAGE_ESTIMATED_HEIGHT}px` }}
+            aria-hidden="true"
+          />
+        )}
         <div class="space-y-3">
-          {detail.messages.map((message, index) => {
+          {detail.messages.slice(windowedRange.start, windowedRange.end).map((message, idx) => {
+            const index = windowedRange.start + idx;
             // Parse inline think tags for assistant messages
-            const parsed = message.role === 'assistant' 
+            const parsed = message.role === 'assistant'
               ? parseThinkTags(message.content)
               : { thinking: [], content: message.content };
 
@@ -640,7 +857,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
                 {parsed.thinking.length > 0 && (
                   <div class="ml-8 mr-0 mt-1 space-y-2">
                     {parsed.thinking.map((thinkContent, thinkIndex) => (
-                      <details 
+                      <details
                         key={thinkIndex}
                         class="bg-slate-800/50 border border-slate-500/30 rounded-lg overflow-hidden"
                         open={expandedThoughts.has(`inline-${index}-${thinkIndex}`)}
@@ -695,7 +912,7 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
 
                 {/* Separate Thinking Field - Distinct styling from inline tags */}
                 {message.thinking && (
-                  <details 
+                  <details
                     class="ml-8 mr-0 mt-1"
                     open={expandedThoughts.has(index)}
                   >
@@ -731,6 +948,13 @@ export function RequestDetail({ detail, loading }: RequestDetailProps) {
           })}
 
         </div>
+        {/* Spacer below the visible window — keeps scroll height realistic */}
+        {windowedRange.end < totalMessages && (
+          <div
+            style={{ height: `${(totalMessages - windowedRange.end) * WINDOW_MESSAGE_ESTIMATED_HEIGHT}px` }}
+            aria-hidden="true"
+          />
+        )}
       </div>
     </div>
   );
