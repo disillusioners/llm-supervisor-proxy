@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
@@ -28,11 +29,25 @@ type ModelHourlyUsageRow struct {
 	TotalTokens      int
 }
 
-// Counter tracks token usage statistics per hour bucket
+// Counter tracks token usage statistics per hour bucket.
+//
+// Writes are serialized with an internal mutex. SQLite is single-writer at the
+// pager level, and the production pool (MaxOpenConns=10 + busy_timeout=5000) is
+// best-effort under high contention — busy_timeout does not guarantee that all
+// contending writers eventually win, so without explicit serialization the
+// Counter occasionally returns SQLITE_BUSY under heavy concurrent load. The
+// in-process mutex serializes UPSERTs cheaply (one round-trip per call, micro-
+// second-scale critical section) while leaving the underlying connection pool
+// free to serve concurrent reads.
 type Counter struct {
 	db      *sql.DB
 	dialect database.Dialect
 	qb      *database.QueryBuilder
+
+	// writeMu serializes UPSERTs (Increment / IncrementModelUsage). Reads
+	// (GetTokenUsage / GetModelUsage) are not guarded — WAL allows concurrent
+	// readers on multiple connections.
+	writeMu sync.Mutex
 }
 
 // NewCounter creates a new usage counter for the given database
@@ -45,8 +60,13 @@ func NewCounter(db *sql.DB, dialect database.Dialect) *Counter {
 }
 
 // Increment increments usage counters for a token within an hour bucket
-// Uses UPSERT to atomically add counts to the existing values
+// Uses UPSERT to atomically add counts to the existing values.
+//
+// Writes are serialized via Counter.writeMu — see Counter doc comment.
 func (c *Counter) Increment(ctx context.Context, tokenID, hourBucket string, reqCount, promptTok, completionTok, totalTok int) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	var query string
 	if c.dialect == database.PostgreSQL {
 		query = `INSERT INTO token_hourly_usage (token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens)
@@ -115,8 +135,13 @@ func (c *Counter) GetTokenUsage(ctx context.Context, tokenID, fromHour, toHour s
 }
 
 // IncrementModelUsage increments usage counters for a model within an hour bucket
-// Uses UPSERT to atomically add counts to the existing values
+// Uses UPSERT to atomically add counts to the existing values.
+//
+// Writes are serialized via Counter.writeMu — see Counter doc comment.
 func (c *Counter) IncrementModelUsage(ctx context.Context, modelID, hourBucket string, reqCount, promptTok, completionTok, totalTok int) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	var query string
 	if c.dialect == database.PostgreSQL {
 		query = `INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens)
