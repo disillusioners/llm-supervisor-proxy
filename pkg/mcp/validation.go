@@ -11,6 +11,19 @@ import (
 
 var blockedHosts = []string{"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
+// ValidateUpstreamURL validates that rawURL is an http/https URL whose host is
+// safe to connect to. It rejects:
+//
+//   - non-http(s) schemes
+//   - empty hosts and known string-form loopback names ("localhost", "127.0.0.1",
+//     "0.0.0.0", "::1")
+//   - canonical IPv4/IPv6 hosts that parse as loopback, private, or link-local
+//     (covers 10/8, 172.16/12, 192.168/16, 169.254/16, ::1, fc00::/7, etc.)
+//   - hostnames whose DNS resolution maps to a loopback/private/link-local IP
+//   - hosts whose string form is a non-canonical IPv4 encoding — hex
+//     ("0x7f000001"), decimal ("2130706433"), or octal ("0177.0.0.01"). These
+//     bypass net.ParseIP's strict IPv4 format check, and most DNS resolvers do
+//     not recognize them either, so DNS lookup alone cannot catch them.
 func ValidateUpstreamURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -23,18 +36,28 @@ func ValidateUpstreamURL(rawURL string) error {
 		return fmt.Errorf("host is required")
 	}
 	host := u.Hostname()
+	// Defense-in-depth: strip a single trailing '.' so "localhost." or
+	// "127.0.0.1." don't slip past the equality checks below.
+	host = strings.TrimSuffix(host, ".")
 	for _, blocked := range blockedHosts {
-		if host == blocked {
+		if strings.EqualFold(host, blocked) {
 			return fmt.Errorf("localhost URLs are not allowed")
 		}
 	}
+	// Reject non-canonical numeric IP encodings (hex/decimal/octal/short forms).
+	// Most DNS resolvers do NOT recognize these, so the DNS-lookup defense
+	// below cannot catch them on its own. Real hostnames contain letters
+	// outside the [0-9.xX] set and pass through unchanged.
+	if isNonCanonicalNumericHost(host) {
+		return fmt.Errorf("invalid IP encoding in host: %s", host)
+	}
 	ip := net.ParseIP(host)
 	if ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 			return fmt.Errorf("private/local network URLs are not allowed")
 		}
 	}
-	// Resolve hostname via DNS to catch hex/decimal/octal IPs that bypass net.ParseIP
+	// Resolve hostname via DNS to catch hostnames pointing at private/loopback IPs.
 	ips, err := net.LookupIP(host)
 	if err == nil {
 		for _, ip := range ips {
@@ -44,6 +67,99 @@ func ValidateUpstreamURL(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+// isNonCanonicalNumericHost reports whether host is a non-canonical IPv4
+// encoding that net.ParseIP's strict IPv4 parser would not accept. Such hosts
+// are common SSRF bypass vectors:
+//   - hex with 0x/0X prefix:    "0x7f000001", "0X7F000001"
+//   - decimal as a single uint32: "2130706433"
+//   - dotted with octal-leading segments: "0177.0.0.01"
+//   - dotted with per-segment hex:  "0x7f.0.0.1"
+//
+// Real hostnames contain letters outside the hex alphabet and return false.
+// Canonical IPv4 like "127.0.0.1" returns false (handled by net.ParseIP
+// below); canonical IPv6 like "::1" returns false (handled by the string-based
+// blockedHosts check above).
+func isNonCanonicalNumericHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	// 1. Hex with 0x/0X prefix. If the suffix is entirely hex digits, the
+	//    whole host is a hex-encoded IPv4 (e.g. "0x7f000001"). If the
+	//    suffix contains a non-hex character (notably '.'), do NOT return
+	//    false here — fall through to branch 3 so per-segment forms like
+	//    "0x7f.0.0.1" are caught by the dotted-form check rather than
+	//    being silently accepted as a real hostname.
+	if len(host) > 2 && (host[0:2] == "0x" || host[0:2] == "0X") {
+		allHex := true
+		for _, r := range host[2:] {
+			if !isHexDigit(r) {
+				allHex = false
+				break
+			}
+		}
+		if allHex {
+			return true
+		}
+		// fall through to branch 3 (dotted form)
+	}
+	// 2. Pure decimal digits: single uint32-as-IP encoding.
+	if isAllDigits(host) {
+		return true
+	}
+	// 3. Dotted form. Two sub-checks:
+	//    (a) Shorthand dotted forms like "127.1", "10.1", "172.31.1" have
+	//        fewer than 4 segments but every segment looks canonical, so
+	//        the per-segment checks below would miss them. If the segment
+	//        count is not 4 and every segment is numeric, treat as a
+	//        non-canonical numeric encoding.
+	//    (b) For 4-segment forms, check each segment for octal-leading
+	//        (more than one digit and starts with '0') or per-segment
+	//        0x/0X hex.
+	if strings.Contains(host, ".") {
+		parts := strings.Split(host, ".")
+		if len(parts) != 4 {
+			allNumeric := true
+			for _, p := range parts {
+				if p == "" || !isAllDigits(p) {
+					allNumeric = false
+					break
+				}
+			}
+			if allNumeric {
+				return true
+			}
+		}
+		for _, p := range parts {
+			if p == "" {
+				return false
+			}
+			if len(p) > 2 && (p[0:2] == "0x" || p[0:2] == "0X") {
+				return true
+			}
+			if len(p) > 1 && p[0] == '0' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isHexDigit(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 var blockedHeaders = map[string]bool{

@@ -164,25 +164,68 @@ func TestValidateUpstreamURL(t *testing.T) {
 			wantErr: true,
 		},
 
-		// SSRF IP format tests (hex, decimal, octal for 127.0.0.1)
-		// These are skipped if DNS can resolve them (environment-specific behavior)
+		// SSRF IP format tests (hex, decimal, octal for 127.0.0.1).
+		// The pre-DNS validation function is now load-bearing for catching
+		// these forms — these tests no longer carry a skipIfDNS hatch and
+		// must reject the URL regardless of DNS environment.
 		{
-			name:      "SSRF hex IP should be rejected",
-			url:       "http://0x7f000001/",
-			wantErr:   true,
-			skipIfDNS: true, // Will be skipped if DNS resolves this URL
+			name:    "SSRF hex IP should be rejected",
+			url:     "http://0x7f000001/",
+			wantErr: true,
 		},
 		{
-			name:      "SSRF decimal IP should be rejected",
-			url:       "http://2130706433/",
-			wantErr:   true,
-			skipIfDNS: true, // Will be skipped if DNS resolves this URL
+			name:    "SSRF decimal IP should be rejected",
+			url:     "http://2130706433/",
+			wantErr: true,
 		},
 		{
-			name:      "SSRF octal IP should be rejected",
-			url:       "http://0177.0.0.01/",
-			wantErr:   true,
-			skipIfDNS: true, // Will be skipped if DNS resolves this URL
+			name:    "SSRF octal IP should be rejected",
+			url:     "http://0177.0.0.01/",
+			wantErr: true,
+		},
+
+		// Reviewer-specified SSRF tightening regression pins (A1-A6).
+		// All must be rejected by the pre-DNS validation; none use the
+		// skipIfDNS hatch — the pre-DNS function is now load-bearing.
+		{
+			name:    "dotted shorthand 127.1 rejected",
+			url:     "http://127.1/",
+			wantErr: true,
+		},
+		{
+			name:    "dotted shorthand 10.1 rejected",
+			url:     "http://10.1/",
+			wantErr: true,
+		},
+		{
+			name:    "dotted shorthand 172.31.1 rejected",
+			url:     "http://172.31.1/",
+			wantErr: true,
+		},
+		{
+			name:    "0x-prefix dotted form 0x7f.0.0.1 rejected (pins doc-comment L78)",
+			url:     "http://0x7f.0.0.1/",
+			wantErr: true,
+		},
+		{
+			name:    "octal-leading segment 127.0.0.01 rejected",
+			url:     "http://127.0.0.01/",
+			wantErr: true,
+		},
+		{
+			name:    "decimal uint32 3232235521 rejected",
+			url:     "http://3232235521/",
+			wantErr: true,
+		},
+		{
+			name:    "zone'd link-local IPv6 fe80::1%25eth0 rejected",
+			url:     "http://[fe80::1%25eth0]/",
+			wantErr: true,
+		},
+		{
+			name:    "canonical private IPv4 192.168.0.1 rejected (layering pin)",
+			url:     "http://192.168.0.1/",
+			wantErr: true,
 		},
 	}
 
