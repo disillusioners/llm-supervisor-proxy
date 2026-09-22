@@ -75,19 +75,19 @@ func TestClientAcceptsGzip(t *testing.T) {
 			name:    "gzip;q=0",
 			header:  "gzip;q=0",
 			want:    false,
-			comment: "[CHANGED] q=0 ⇒ MUST NOT compress",
+			comment: "q=0 ⇒ MUST NOT compress (pre-fix also returned false via literal zero-list match \"0\"; only 0.000+ forms were missed pre-fix)",
 		},
 		{
 			name:    "gzip;q=0.0",
 			header:  "gzip;q=0.0",
 			want:    false,
-			comment: "[CHANGED] q=0.0 ⇒ MUST NOT compress",
+			comment: "q=0.0 ⇒ MUST NOT compress (pre-fix also returned false via literal zero-list match \"0.0\"; only 0.000+ forms were missed pre-fix)",
 		},
 		{
 			name:    "gzip;q=0.00",
 			header:  "gzip;q=0.00",
 			want:    false,
-			comment: "[CHANGED] q=0.00 ⇒ MUST NOT compress (pre-fix only checked 0.0/0.00, missed 0.000)",
+			comment: "q=0.00 ⇒ MUST NOT compress (pre-fix also returned false via literal zero-list match \"0.00\"; only 0.000+ forms were missed pre-fix)",
 		},
 		{
 			name:    "gzip;q=0.000",
