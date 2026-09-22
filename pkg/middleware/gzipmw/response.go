@@ -40,6 +40,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -377,6 +378,8 @@ func CompressResponseWithOptions(next http.Handler, excludedPaths []string, minS
 //	"gzip;q=abc" / "gzip;q=2" / "gzip;q="    → true  (malformed q ⇒ treated as absent ⇒ q=1)
 //	"identity" / "*" / "x-gzip"              → false (current behavior preserved; see Wildcards below)
 //
+// Malformed-q policy details (incl. the NaN guard): see extractQValue.
+//
 // Wildcards / aliases: this function does NOT honor the "*" wildcard
 // token (RFC 9110 §12.5.3) or the "x-gzip" historical alias for gzip.
 // Clients that advertise only "*" or "x-gzip" will not get a gzipped
@@ -458,9 +461,11 @@ func extractQValue(params string) (float64, bool) {
 		}
 		val = strings.TrimSpace(val)
 		f, err := strconv.ParseFloat(val, 64)
-		if err != nil || f < 0 || f > 1 {
+		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
 			// Malformed or out-of-range weight ⇒ treat as absent
-			// (q=1) per RFC's silent-on-malformed default.
+			// (q=1) per RFC's silent-on-malformed default. IsNaN is
+			// required because ParseFloat accepts "NaN" without error
+			// and NaN fails every range comparison.
 			return 1.0, false
 		}
 		return f, true

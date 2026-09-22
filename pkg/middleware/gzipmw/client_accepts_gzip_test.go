@@ -125,7 +125,13 @@ func TestClientAcceptsGzip(t *testing.T) {
 			name:    "GZIP;Q=0",
 			header:  "GZIP;Q=0",
 			want:    false,
-			comment: "[CHANGED] uppercase Q parameter; pre-fix used params[2:] on original casing so Q=0 yielded qVal==\"=0\" and FAILED the zero check",
+			comment: "uppercase codec+param ⇒ no compress; pre-fix gave the SAME result via the case-SENSITIVE codec check (\"GZIP\" != \"gzip\" ⇒ coding skipped before q was ever examined) — outcome identical ⇒ not [CHANGED]",
+		},
+		{
+			name:    "gzip;Q=0",
+			header:  "gzip;Q=0",
+			want:    false,
+			comment: "uppercase Q param ⇒ no compress; pre-fix also returned false — the q NAME was already matched case-insensitively (ToLower prefix check + positional params[2:] slice ⇒ qVal \"0\"), so no param-name case bug existed",
 		},
 		{
 			name:    "GZIP; q=0.5",
@@ -240,6 +246,12 @@ func TestClientAcceptsGzip(t *testing.T) {
 			header:  "gzip;q",
 			want:    true,
 			comment: "[POLICY] bare q with no `=` ⇒ no value ⇒ treated as absent ⇒ q=1 ⇒ compress",
+		},
+		{
+			name:    "gzip;q=NaN",
+			header:  "gzip;q=NaN",
+			want:    true,
+			comment: "[POLICY] ParseFloat(\"NaN\") returns no error and NaN fails every range comparison ⇒ explicit IsNaN guard treats it as malformed ⇒ absent ⇒ q=1 ⇒ compress (same observable outcome as before the guard, now guaranteed rather than accidental)",
 		},
 
 		// ── Other q-form sanity (in-range forms) ────────────────────
