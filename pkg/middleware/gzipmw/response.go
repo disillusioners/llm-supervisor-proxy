@@ -40,7 +40,9 @@ import (
 	"bufio"
 	"compress/gzip"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -319,9 +321,12 @@ func CompressResponseWithOptions(next http.Handler, excludedPaths []string, minS
 		}
 
 		// Accept-Encoding negotiation. Absent → no compression.
-		// "identity" → no compression. "gzip" (alone or with
-		// q-values) → compress.
-		if !clientAcceptsGzip(r.Header.Get("Accept-Encoding")) {
+		// "identity" → no compression. "gzip" (alone or with q-values) → compress.
+		// Multiple Accept-Encoding header fields are joined with "," per
+		// RFC 9110 §12.5.3 (http.Header.Values returns the per-field slice,
+		// which we concatenate here so clientAcceptsGzip sees a single
+		// comma-separated value).
+		if !clientAcceptsGzip(strings.Join(r.Header.Values("Accept-Encoding"), ",")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -357,10 +362,42 @@ func CompressResponseWithOptions(next http.Handler, excludedPaths []string, minS
 	})
 }
 
-// clientAcceptsGzip returns true when the Accept-Encoding header
-// advertises gzip with non-zero q-value. Accept-Encoding: identity or
-// absent → false. Chained encodings ("gzip, br") without explicit gzip
-// → checks if gzip is listed.
+// clientAcceptsGzip returns true when the Accept-Encoding header advertises
+// gzip with a non-zero q-value per RFC 9110 §12.5.3 / RFC 7231 §5.3.4.
+//
+// Behavior summary (see client_accepts_gzip_test.go for the full table):
+//
+//	""                                       → false (no header)
+//	"gzip"                                   → true
+//	"gzip;q=1"                               → true
+//	"gzip;q=0.5"                             → true
+//	"gzip;q=0" / "gzip;q=0.0" / "gzip;q=0.000" → false (q=0 in any valid zero form ⇒ not acceptable)
+//	"GZIP;Q=0"                               → false (case-insensitive codec + q)
+//	" gzip ; q=0 "                           → false (whitespace around tokens/= tolerated)
+//	"deflate, gzip;q=0"                      → false (mixed list — gzip disabled)
+//	"gzip;q=abc" / "gzip;q=2" / "gzip;q="    → true  (malformed q ⇒ treated as absent ⇒ q=1)
+//	"identity" / "*" / "x-gzip"              → false (current behavior preserved; see Wildcards below)
+//
+// Malformed-q policy details (incl. the NaN guard): see extractQValue.
+//
+// Wildcards / aliases: this function does NOT honor the "*" wildcard
+// token (RFC 9110 §12.5.3) or the "x-gzip" historical alias for gzip.
+// Clients that advertise only "*" or "x-gzip" will not get a gzipped
+// response. This matches the pre-fix behavior; relaxing it is a
+// separate change.
+//
+// Malformed q-value policy: RFC 9110 §12.5.3 requires that the weight be
+// a real number in [0, 1] and is silent on what to do with unparseable
+// values. We treat unparseable OR out-of-range weights as if the q
+// parameter were absent (default q=1.0). Rationale: most clients set
+// q explicitly only to disable a coding (q=0); accepting a coding whose
+// q is malformed is less surprising than silently rejecting an
+// otherwise-valid Accept-Encoding.
+//
+// Multiple header fields: the caller is expected to concatenate all
+// Accept-Encoding values with "," before calling this function (see
+// CompressResponseWithOptions). Internally, the function already
+// accepts a comma-separated string.
 func clientAcceptsGzip(acceptEncoding string) bool {
 	if acceptEncoding == "" {
 		return false
@@ -374,21 +411,66 @@ func clientAcceptsGzip(acceptEncoding string) bool {
 		params := ""
 		if i := strings.IndexByte(part, ';'); i >= 0 {
 			codec = strings.TrimSpace(part[:i])
-			params = strings.TrimSpace(part[i+1:])
+			// Preserve original casing/whitespace in params; the q
+			// parameter name is matched case-insensitively inside
+			// extractQValue.
+			params = part[i+1:]
 		}
-		if codec != "gzip" {
+		// Per RFC 9110 §12.5.3 content codings are case-insensitive
+		// tokens (gzip == GZIP == GZip == gZip …).
+		if !strings.EqualFold(codec, "gzip") {
 			continue
 		}
-		// Reject if q=0 (explicitly disabled).
-		if strings.HasPrefix(strings.ToLower(params), "q=") {
-			qVal := strings.TrimSpace(params[2:])
-			if qVal == "0" || qVal == "0.0" || qVal == "0.00" {
-				return false
-			}
+		// Look for the q parameter (case-insensitive name, whitespace
+		// around `=` tolerated per RFC 7231 §3.2.6).
+		q, hasQ := extractQValue(params)
+		if hasQ && q <= 0 {
+			// q=0 in any valid zero form ⇒ gzip is explicitly not
+			// acceptable. We do NOT fall through to other codings;
+			// the client told us gzip is off.
+			return false
 		}
+		// q>0 (or absent, treated as q=1) ⇒ gzip is acceptable.
 		return true
 	}
 	return false
+}
+
+// extractQValue parses the q parameter from an Accept-Encoding coding's
+// parameter list (the substring after the first ';' in the coding).
+// Returns (weight, true) when a q parameter was found and parsed as a
+// valid number in [0, 1]. Returns (1.0, false) when the q parameter is
+// absent OR present but malformed (unparseable or outside [0, 1]); the
+// caller treats this as RFC default q=1.0 — gzip is acceptable.
+func extractQValue(params string) (float64, bool) {
+	if params == "" {
+		return 1.0, false
+	}
+	for _, p := range strings.Split(params, ";") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// strings.Cut splits at the first '=' (or returns the whole
+		// string and hasSep=false when no '=' is present). We do not
+		// care about hasSep here: a bare "q" token with no value is
+		// malformed and falls through to the ParseFloat error path.
+		name, val, _ := strings.Cut(p, "=")
+		if !strings.EqualFold(strings.TrimSpace(name), "q") {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
+			// Malformed or out-of-range weight ⇒ treat as absent
+			// (q=1) per RFC's silent-on-malformed default. IsNaN is
+			// required because ParseFloat accepts "NaN" without error
+			// and NaN fails every range comparison.
+			return 1.0, false
+		}
+		return f, true
+	}
+	return 1.0, false
 }
 
 // Ensure *gzipResponseWriter satisfies http.Flusher.

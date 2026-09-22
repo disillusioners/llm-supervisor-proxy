@@ -6,6 +6,7 @@ import { marked } from 'marked';
 
 import type { RequestDetail as RequestDetailType } from '../types';
 import { escapeHtml, escapeHtmlLight, generateCurlCommand, parseThinkTags } from '../utils/helpers';
+import { computeWindowedRange } from '../utils/windowing';
 
 interface RequestDetailProps {
   detail: RequestDetailType | null;
@@ -49,13 +50,12 @@ function useWindowedMessageRange(
     const update = () => {
       raf = 0;
       const { scrollTop, clientHeight } = el;
-      const first = Math.max(
-        0,
-        Math.floor(scrollTop / WINDOW_MESSAGE_ESTIMATED_HEIGHT) - WINDOW_OVERSCAN,
-      );
-      const last = Math.min(
+      const { start: first, end: last } = computeWindowedRange(
+        scrollTop,
+        clientHeight,
         total,
-        Math.ceil((scrollTop + clientHeight) / WINDOW_MESSAGE_ESTIMATED_HEIGHT) + WINDOW_OVERSCAN,
+        WINDOW_MESSAGE_ESTIMATED_HEIGHT,
+        WINDOW_OVERSCAN,
       );
       setRange((prev) =>
         prev.start === first && prev.end === last ? prev : { start: first, end: last },

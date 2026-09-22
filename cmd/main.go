@@ -19,6 +19,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/memlimit"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
@@ -34,6 +35,27 @@ var Version = "dev"
 
 func main() {
 	ctx := context.Background()
+
+	// Soft memory limit (RAM-incident residual R7). k8s pods get
+	// GOMEMLIMIT from the helm chart (k8s/templates/deployment.yaml,
+	// "1Gi" default in k8s/values.yaml); bare binaries, systemd units,
+	// and dev runs otherwise start unbounded. Precedence: when
+	// GOMEMLIMIT is present the Go runtime has ALREADY applied it
+	// natively before main() runs ("" and "off" mean disabled;
+	// malformed values are fatal at runtime startup) — memlimit.Resolve
+	// then returns Apply=false and we never call SetMemoryLimit, so the
+	// limit is never double-applied or overridden. The in-code default
+	// is 1 GiB (k8s convention) rather than a no-op because a soft
+	// limit only paces the GC toward it — the process may still exceed
+	// it under real pressure — so it cannot OOM a workload that would
+	// otherwise survive, and non-k8s runs stop being unbounded by
+	// default. Override with SOFT_MEMORY_LIMIT (same value grammar as
+	// GOMEMLIMIT, plus "off"); see pkg/memlimit.
+	memLimit := memlimit.Resolve(os.Getenv(memlimit.EnvGOMEMLIMIT), os.Getenv(memlimit.EnvSoftMemoryLimit))
+	if memLimit.Apply {
+		debug.SetMemoryLimit(memLimit.Limit)
+	}
+	log.Printf("[memory] %s", memLimit.Source)
 
 	// Initialize Shared Components
 	bus := events.NewBus()

@@ -56,7 +56,7 @@ env:
 # Go runtime memory limit (should be ~50% of the 2Gi container limit;
 # leaves generous headroom for GC and avoids the RSS-ratchet pattern
 # observed before the FE API payload fix landed — see docs/2026-09-22-fe-api-payload-ram-incident.md).
-goMemLimit: "1Gi"
+goMemLimit: "1GiB"
 
 # Resources
 resources:
