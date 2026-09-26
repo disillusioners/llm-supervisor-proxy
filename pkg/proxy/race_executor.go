@@ -353,6 +353,16 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		isStream = stream
 	}
 
+	// P1-8(a) gate widening (fix/minimax-reasoning-translation-gate):
+	// the MiniMax reasoning translation must fire whenever the client
+	// ECHOED `reasoning_content` in messages — not only when they
+	// opted-in via X-Proxy-Interleaved-Thinking. On a fallback the
+	// proxy chose MiniMax, so a client that never heard of the
+	// header still needs its reasoning_content translated to
+	// reasoning_details + reasoning_split=true. Empty string does
+	// NOT count (matches TranslateMessagesReasoning's empty-skip).
+	hasReasoning := translator.HasReasoningContent(bodyMap)
+
 	// P1-8(a): twin A — gate runs in this CALLER of convertToProviderRequest
 	// per W6 (converter stays pure). When the gate fires, the translator
 	// mutates bodyMap in place (top-level reasoning_split + per-message
@@ -361,7 +371,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// through map→struct hydration (D1 reasoning_details on ChatMessage +
 	// top-level reasoning_split is set by the caller after convertRequest
 	// returns — see the typed-field setter below).
-	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) {
+	if (interleaved || hasReasoning) && raceIntProviderIsMiniMax(cfg, req.modelID) {
 		if err := translator.TranslateRequestBody(bodyMap); err != nil {
 			return fmt.Errorf("race-internal translator: %w", err)
 		}
@@ -383,7 +393,12 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// assignment providerReq.ReasoningSplit would stay nil and
 	// json.Marshal(req) would drop the field via omitempty whenever the
 	// struct is re-marshalled (logging, future typed sites, etc.).
-	if interleaved && raceIntProviderIsMiniMax(cfg, req.modelID) && providerReq.ReasoningSplit == nil {
+	//
+	// P1-8(d) gate widening (fix/minimax-reasoning-translation-gate):
+	// condition MUST mirror the TranslateRequestBody gate above —
+	// translation without the typed ReasoningSplit is an untested
+	// half-state (the known-good ensemble path always has both).
+	if (interleaved || hasReasoning) && raceIntProviderIsMiniMax(cfg, req.modelID) && providerReq.ReasoningSplit == nil {
 		t := true
 		providerReq.ReasoningSplit = &t
 	}

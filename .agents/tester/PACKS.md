@@ -54,7 +54,7 @@
 | openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-28 (re-run) | **PASS 60/60** @ 61fa02a — harness repaired by 61fa02a (credentials[] payload + buffer header on all 15 curls); prior FAIL 0/60 (credential-LB schema rot) superseded |
 | e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-28 | PASS 1/1 @ 22e76d6 (rsd merge gate) |
 | minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 120s internal / `timeout 300` outer | 2026-08-28 | **PASS 53/53** @ 22e76d6 (rsd merge gate; 11s wall — previous near-cap warning RESOLVED, was a cold-build artifact) |
-| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 43/43** @ 22e76d6 (rsd merge gate; drift delta 0; header hygiene 0 leaks) |
+| e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-09-26 | **PASS (all S1–S14, 4.101s) @ cc5e15c** — S8 flag-absent expectations updated to body-content gate (3 subtests `assertUntouched`→`assertTranslated`, +14/−7); prior 2026-08-28 PASS 43/43 @ 22e76d6 superseded (3 S8 subtests failed @ 6829d98 with stale header-only contract — see LESSONS/2026-09-26-stale-e2e-contract-after-gate-widening.md) |
 | minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
 | proxyheader_header_table | inline: `go test ./pkg/proxyheader/ -run 'Interleaved' -count=1` | Unit (P3-7 header value truth table verify) | `timeout 300` | 2026-08-19 | **PASS** — satisfied by existing 21 sub-cases (all 7 plan values covered, file:line-cited); precedent match confirmed; single-source semantics confirmed (2 call sites via proxyheader.*); NO gap-fill needed |
 | fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 20/20** @ 22e76d6 (rsd merge gate: closure 4/4 + matrix 16/16; capture taps mode-independent; NOTE: no anthropic-internal-nonstream row — S3-class bug not covered here) |
@@ -82,6 +82,22 @@ timeout 300 go test ./pkg/proxy/ ./pkg/ultimatemodel/ -run 'Interleaved|MiniMax|
 Expected: 17 test funcs in `pkg/proxy` + 17 in `pkg/ultimatemodel` = **34 test functions** (46 `--- PASS` lines incl. 12 subtests), exit 0. If output says `[no tests to run]`, the quoting regression has returned — see `LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md`.
 
 ---
+
+## 2026-09-26 — fix/minimax-reasoning-translation-gate full sweep (inline packs, @ 6829d98→cc5e15c)
+
+Full `go test ./...` equivalence executed as 5 parallel per-package-group inline packs, each `timeout 300` outer (see RESULTS/2026-09-26-minimax-reasoning-gate-verification.md):
+
+| Inline pack | Command | Result |
+|-------------|---------|--------|
+| regA_proxy | `timeout 300 go test -count=1 ./pkg/proxy` | **PASS** ok 55.042s (incl. NEW race_minimax_fallback_e2e_test.go) |
+| regB_ultimate_translator | `timeout 300 go test -count=1 ./pkg/ultimatemodel ./pkg/proxy/translator ./pkg/proxy/normalizers ./pkg/proxy/token` | **PASS** (~6.2s) |
+| regC_store_cache_lb | `timeout 300 go test -count=1 ./pkg/store/database ./pkg/store ./pkg/modelscache ./pkg/credentiallb` | **PASS** (~4s) |
+| regD_light | `timeout 300 go test -count=1 . ./cmd ./pkg/auth ./pkg/bufferstore ./pkg/config ./pkg/crypto ./pkg/events ./pkg/logger ./pkg/loopdetection ./pkg/loopdetection/fingerprint ./pkg/mcp ./pkg/memlimit ./pkg/middleware/gzipmw ./pkg/models ./pkg/proxyheader ./pkg/providers ./pkg/supervisor ./pkg/toolcall ./pkg/toolrepair ./pkg/ui ./pkg/usage` | **PASS** (18 ok + 3 no-test-files; slowest mcp 17.5s) |
+| regE_test_tree | `timeout 300 go test -count=1 ./test/...` | **PASS after fix** — e2e_minimax_reasoning 3 stale S8 subtests failed @ 6829d98 (old header-only contract), fixed by cc5e15c, package re-run PASS 4.101s |
+
+NEW pack member: `pkg/proxy/race_minimax_fallback_e2e_test.go` (commit 578512f) — E2E incident path: primary scripted streaming-429 → race coordinator fallback (`trigger=main_error`) → MiniMax wire body carries `reasoning_details` + `reasoning_split:true` + no raw `reasoning_content`; guard test pins non-MiniMax non-translation. Stable ×5, `-race` clean, 0.421s both.
+
+Boot smoke: `go build ./...` exit 0; boot <1s; `/healthz` 200; one request graceful JSON 502, no panic. (PORT requires `APPLY_ENV_OVERRIDES=1`; default port 4321.)
 
 ## Updating PACKS.md
 

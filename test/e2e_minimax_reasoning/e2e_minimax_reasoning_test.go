@@ -550,10 +550,14 @@ func TestS7_StreamResponse_Internal(t *testing.T) {
 // S8 — Flag-absent quadrant (all 4 paths)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// TestS8_FlagAbsent_Quadrant: flag ABSENT + MiniMax credential ⇒ no
-// translation either direction on any path. Request side:
-// reasoning_content preserved verbatim in the same slot, no reasoning_split.
-// Response side: upstream reasoning_content passes through unchanged.
+// TestS8_FlagAbsent_Quadrant: flag ABSENT + MiniMax credential. Post-6829d98
+// the request-side gate widens to (header || non-empty reasoning_content),
+// so the request translates on the three changed paths (race-internal,
+// ultimate-external, ultimate-internal) and stays untouched only on
+// race-external (path unchanged). Response side: untouched on all four
+// paths — ultimate-external's response translator also widens, but the
+// fixture response carries no reasoning_details, so TranslateNonStream
+// is a no-op for it (passthrough-thinking survives).
 func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 	// Response carries plain reasoning_content (no details) — passthrough.
 	reasoningOnlyResp := rawStringHandler(http.StatusOK,
@@ -581,24 +585,27 @@ func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
 
+	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
 	t.Run("race_internal_flag_absent", func(t *testing.T) {
 		env := setupTestEnv(t, reasoningOnlyResp, envOptions{})
 		rr := env.run(chatRequest{model: raceIntModel, token: env.plainToken, messages: reasoningMessages})
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/race-int/request")
+		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/race-int/request")
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
 
+	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
 	t.Run("ultimate_external_flag_absent", func(t *testing.T) {
 		env := setupTestEnv(t, reasoningOnlyResp, envOptions{ultimateModelID: ultExtModel})
 		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, forceUlt: true, messages: reasoningMessages})
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-ext/request")
+		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-ext/request")
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
 
+	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
 	t.Run("ultimate_internal_flag_absent", func(t *testing.T) {
 		env := setupTestEnv(t, reasoningOnlyResp, envOptions{ultimateModelID: ultIntModel})
 		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, forceUlt: true, messages: reasoningMessages})
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-int/request")
+		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-int/request")
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
 }

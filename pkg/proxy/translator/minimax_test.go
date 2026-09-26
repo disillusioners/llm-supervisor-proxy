@@ -752,3 +752,193 @@ func TestEmptyInputNoOp(t *testing.T) {
 		}
 	})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HasReasoningContent — body-content signal for the widened
+// (interleaved || hasReasoning) gate at every MiniMax reasoning
+// translation site (fix/minimax-reasoning-translation-gate).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestHasReasoningContent covers the shape rules the gate sites rely
+// on. The function is a pure read-only scan; the input map is never
+// mutated. The unit matrix mirrors the bugfix doc's test cases:
+//
+//  1. nil body → false (defensive — gate sites tolerate nil)
+//  2. absent `messages` key → false (no signal in body)
+//  3. messages present but non-[]any → false (shape mismatch ⇒ no signal)
+//  4. empty messages array → false
+//  5. message with `reasoning_content: ""` → false (empty doesn't count)
+//  6. message with non-string reasoning_content → false
+//  7. message with non-empty string reasoning_content → true
+//  8. mixed: user (no rc) + assistant (non-empty rc) → true
+//  9. native reasoning_details client (no reasoning_content string) → false
+//  10. multiple messages, only the LAST has non-empty rc → true (returns on first hit)
+func TestHasReasoningContent(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+		want bool
+	}{
+		{
+			name: "nil body",
+			body: nil,
+			want: false,
+		},
+		{
+			name: "absent messages",
+			body: map[string]any{"model": "m"},
+			want: false,
+		},
+		{
+			name: "messages present but non-array",
+			body: map[string]any{"messages": "not-an-array"},
+			want: false,
+		},
+		{
+			name: "empty messages array",
+			body: map[string]any{"messages": []any{}},
+			want: false,
+		},
+		{
+			name: "empty string reasoning_content does NOT count",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{"role": "assistant", "content": "answer", "reasoning_content": ""},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "non-string reasoning_content does NOT count",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{"role": "assistant", "content": "answer", "reasoning_content": map[string]any{"foo": "bar"}},
+					map[string]any{"role": "assistant", "content": "answer2", "reasoning_content": []any{}},
+					map[string]any{"role": "assistant", "content": "answer3", "reasoning_content": 42},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "single non-empty reasoning_content returns true",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{"role": "user", "content": "hi"},
+					map[string]any{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "user + assistant-with-rc returns true",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{"role": "user", "content": "hi"},
+					map[string]any{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "native reasoning_details client (no reasoning_content string) returns false",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{
+						"role":    "assistant",
+						"content": "answer",
+						"reasoning_details": []any{
+							map[string]any{
+								"type":   "reasoning.text",
+								"id":     "reasoning-text-1",
+								"format": "MiniMax-response-v1",
+								"text":   "client-side reasoning",
+							},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "multiple messages — only last has rc",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{"role": "user", "content": "q1"},
+					map[string]any{"role": "assistant", "content": "a1"},
+					map[string]any{"role": "user", "content": "q2"},
+					map[string]any{"role": "assistant", "content": "a2", "reasoning_content": "think-final"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "non-map message entries are skipped",
+			body: map[string]any{
+				"messages": []any{
+					"not-a-map",
+					42,
+					map[string]any{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "empty rc + native details both present returns false (no reasoning_content string signal)",
+			body: map[string]any{
+				"messages": []any{
+					map[string]any{
+						"role":              "assistant",
+						"content":           "answer",
+						"reasoning_content": "",
+						"reasoning_details": []any{},
+					},
+				},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := HasReasoningContent(tc.body)
+			if got != tc.want {
+				t.Errorf("HasReasoningContent = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasReasoningContent_DoesNotMutateInput is a defensive contract
+// assertion — gate sites compute hasReasoning from a map that the
+// translator may then mutate, so a leak (e.g. cache insertion) would
+// silently corrupt downstream translation. The scan reads
+// reasoning_content by value and returns on first hit; this test
+// proves the input map is exactly the same before and after.
+func TestHasReasoningContent_DoesNotMutateInput(t *testing.T) {
+	body := map[string]any{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+		},
+	}
+	// Round-trip deep copy (same idiom as TestTranslateRequestBody_Idempotent):
+	// marshal → unmarshal into a fresh map, giving an independent
+	// snapshot to compare against the original after the call.
+	beforeBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal before: %v", err)
+	}
+	var beforeCopy map[string]any
+	if err := json.Unmarshal(beforeBytes, &beforeCopy); err != nil {
+		t.Fatalf("unmarshal before: %v", err)
+	}
+
+	if got := HasReasoningContent(body); !got {
+		t.Fatalf("HasReasoningContent returned false on a body that should have a hit")
+	}
+
+	if !reflect.DeepEqual(beforeCopy, body) {
+		afterBytes, _ := json.Marshal(body)
+		t.Errorf("input map was mutated by HasReasoningContent:\n before=%s\n  after=%s", beforeBytes, afterBytes)
+	}
+}
