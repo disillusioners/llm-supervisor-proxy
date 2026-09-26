@@ -33,6 +33,7 @@
 | **Ultimate Model External** | `pkg/ultimatemodel/handler_external_test.go` | **~27** | ✅ PASS |
 | **Ultimate Model Internal** | `pkg/ultimatemodel/handler_internal_test.go` | **~28** | ✅ PASS |
 | **E2E Ultimate-Internal Reasoning** | `test/e2e_ultimate_internal_reasoning/` | 1 (multi-assert) | ✅ PASS (new 2026-08-18, commit `c3a4b35`) |
+| **E2E Race Fallback → MiniMax gate** | `pkg/proxy/race_minimax_fallback_e2e_test.go` | 2 (multi-assert) | ✅ PASS (new 2026-09-26, commit `578512f`) — incident path: primary 429 → race fallback → translated wire body + non-MiniMax guard |
 | Usage Counter | `pkg/usage/counter_test.go` | ~10 | ✅ PASS |
 | **Total** | | **~819** | |
 
