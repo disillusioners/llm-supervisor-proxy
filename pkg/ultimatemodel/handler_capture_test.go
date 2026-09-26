@@ -124,7 +124,7 @@ func TestCapture_ExternalStream_ReturnsContentAndThinking(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	result, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	result, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}

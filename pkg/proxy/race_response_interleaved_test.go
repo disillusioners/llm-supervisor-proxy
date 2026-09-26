@@ -598,10 +598,17 @@ func TestRaceInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testin
 		},
 	}
 
-	inputBody := []byte(`{"model":"minimax-model-internal","messages":[{"role":"assistant","content":"answer","reasoning_content":"think-1"}]}`)
+	inputBody := []byte(`{"model":"minimax-model-internal","messages":[{"role":"assistant","content":"answer"}]}`)
 	upstreamReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "minimax-model-internal", 1024*1024)
 
-	// interleaved=false — flag absent.
+	// interleaved=false — flag absent. Body has NO reasoning_content
+	// (fix/minimax-reasoning-translation-gate): the widened gate is
+	// (interleaved || hasReasoning) && provider is MiniMax, so a
+	// reasoning-less body keeps the gate off. This test asserts the
+	// negative-case contract; the positive case ("flag absent +
+	// reasoning_content ⇒ translate") is covered by
+	// TestRaceInternal_BodyGate_NoHeader_ReasoningContent_MiniMax_Translates
+	// in race_minimax_body_gate_test.go.
 	if err := executeInternalRequest(context.Background(), cfg, inputBody, upstreamReq, false); err != nil {
 		t.Fatalf("executeInternalRequest: %v", err)
 	}
@@ -610,20 +617,17 @@ func TestRaceInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *testin
 	if captured == nil {
 		t.Fatal("provider did not capture the request")
 	}
-	// ReasoningSplit MUST be nil (gate is off: flag absent).
+	// ReasoningSplit MUST be nil (gate is off: flag absent + no
+	// reasoning_content).
 	if captured.ReasoningSplit != nil {
-		t.Errorf("ReasoningSplit = %v, want nil (flag absent)", *captured.ReasoningSplit)
+		t.Errorf("ReasoningSplit = %v, want nil (flag absent + no reasoning_content)", *captured.ReasoningSplit)
 	}
 	if len(captured.Messages) != 1 {
 		t.Fatalf("len(Messages) = %d, want 1", len(captured.Messages))
 	}
 	// ReasoningDetails MUST be empty (translator not run).
 	if len(captured.Messages[0].ReasoningDetails) != 0 {
-		t.Errorf("ReasoningDetails = %+v, want empty (flag absent)", captured.Messages[0].ReasoningDetails)
-	}
-	// ReasoningContent preserved (pre-existing behavior).
-	if captured.Messages[0].ReasoningContent != "think-1" {
-		t.Errorf("ReasoningContent = %q, want think-1", captured.Messages[0].ReasoningContent)
+		t.Errorf("ReasoningDetails = %+v, want empty (flag absent + no reasoning_content)", captured.Messages[0].ReasoningDetails)
 	}
 }
 

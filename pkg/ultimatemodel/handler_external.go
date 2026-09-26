@@ -46,9 +46,12 @@ var sharedHTTPClient = &http.Client{
 // Phase-1 multi-credential refactor moved to the
 // `modelCfg.PrimaryCredentialID()` back-compat shim that returns
 // Credentials[0].CredentialID or "".)
-// The gate fires iff interleaved && upstreamProvider == providers.ProviderMiniMax
-// (case-insensitive). Gate lives in this function so H5 (short-circuit
-// BEFORE parse/marshal) is guaranteed at the strongest no-op site.
+// The gate fires iff (interleaved || hasReasoning) && upstreamProvider == providers.ProviderMiniMax
+// (case-insensitive). hasReasoning is computed once from the
+// already-parsed requestBody (fix/minimax-reasoning-translation-gate)
+// — see HasReasoningContent in pkg/proxy/translator/minimax.go.
+// Gate lives in this function so H5 (short-circuit BEFORE parse/marshal)
+// is guaranteed at the strongest no-op site.
 //
 // opts (Phase 4 / task 4.1) selects the stream wire mode: absent/zero =
 // live streaming (per-chunk write-through); ExecuteOptions{BufferMode:
@@ -75,6 +78,14 @@ func (h *Handler) executeExternal(
 	if upstreamURL == "" {
 		return nil, fmt.Errorf("upstream URL not configured")
 	}
+
+	// P1-8(b) gate widening (fix/minimax-reasoning-translation-gate):
+	// mirror the race-internal twin-A + ultimate-internal twin-B
+	// widening. The body-content signal comes from the parsed
+	// requestBody (already in scope as a function parameter) — no
+	// re-parse. Computed once, threaded through streamResponse so
+	// every gate site in this function sees the same value.
+	hasReasoning := translator.HasReasoningContent(requestBody)
 
 	// Prepare request body with model ID override
 	bodyCopy := make(map[string]interface{})
@@ -109,7 +120,7 @@ func (h *Handler) executeExternal(
 	// == "minimax"; package is imported above) for the case-insensitive
 	// match per handler_anthropic.go:297 precedent.
 	providerIsMiniMax := upstreamProvider != "" && upstreamProvider == strings.ToLower(string(providers.ProviderMiniMax))
-	if interleaved && providerIsMiniMax {
+	if (interleaved || hasReasoning) && providerIsMiniMax {
 		outBytes, terr := translator.TranslateRequestBytes(bodyBytes)
 		if terr != nil {
 			return nil, fmt.Errorf("ultimate-external translator: %w", terr)
@@ -166,7 +177,7 @@ func (h *Handler) executeExternal(
 
 	if isStream {
 		// Stream response directly
-		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes, interleaved, providerIsMiniMax, opt)
+		return h.streamResponse(w, resp, modelCfg.ID, requestBodyBytes, interleaved, hasReasoning, providerIsMiniMax, opt)
 	}
 
 	// Non-streaming: read body, extract usage, then translate + copy to response
@@ -177,11 +188,12 @@ func (h *Handler) executeExternal(
 
 	// P2-4 (d): ultim-ext non-stream — invoke the response
 	// translator on the upstream body BEFORE writing to the client.
-	// Gate is (interleaved && providerIsMiniMax) — short-circuits
-	// BEFORE any parse (H5). Gated-off is a pure no-op on this
-	// verbatim-byte path (strictest invariant — the gate must
-	// guarantee byte-identical behavior on ultim-ext non-stream).
-	if interleaved && providerIsMiniMax {
+	// Gate is (interleaved || hasReasoning) && providerIsMiniMax —
+	// short-circuits BEFORE any parse (H5). Gated-off is a pure
+	// no-op on this verbatim-byte path (strictest invariant — the
+	// gate must guarantee byte-identical behavior on ultim-ext
+	// non-stream).
+	if (interleaved || hasReasoning) && providerIsMiniMax {
 		translated, terr := translator.TranslateNonStreamResponseBytes(bodyBytes)
 		if terr != nil {
 			// §6.1: non-stream KEEPS error return; caller routes
@@ -280,9 +292,11 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 // interleaved is the X-Proxy-Interleaved-Thinking flag (re-parsed
 // from r.Header in Execute, threaded through executeExternal).
 // providerIsMiniMax is the credential-derived provider gate. Both
-// must be true to construct a StreamTranslator instance; gated-off
-// is a pure no-op (H5 — strictest invariant on this verbatim-byte
-// path; gate short-circuits BEFORE any parse).
+// must be true (after the body-content widening in
+// fix/minimax-reasoning-translation-gate) to construct a
+// StreamTranslator instance; gated-off is a pure no-op (H5 —
+// strictest invariant on this verbatim-byte path; gate short-circuits
+// BEFORE any parse).
 //
 // opts (Phase 4 / task 4.2) selects the wire mode. LIVE (default,
 // BufferMode=false): every chunk the existing translator + toolcall
@@ -299,7 +313,7 @@ func extractUsageFromResponse(body []byte) *store.Usage {
 // live mode each wire write appends the SAME bytes to buf in the SAME
 // iteration (ExecuteOptions.writeChunk), so the estimator input is
 // byte-identical between modes by construction.
-func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, providerIsMiniMax bool, opts ...ExecuteOptions) (*ExecuteResult, error) {
+func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, modelID string, requestBodyBytes []byte, interleaved bool, hasReasoning bool, providerIsMiniMax bool, opts ...ExecuteOptions) (*ExecuteResult, error) {
 	opt := resolveExecuteOptions(opts)
 
 	// Set SSE headers
@@ -338,8 +352,15 @@ func (h *Handler) streamResponse(w http.ResponseWriter, resp *http.Response, mod
 	// per-stream instance ONLY when the gate fires. Gated-off ⇒ no
 	// instance ⇒ no per-chunk work ⇒ byte-identical passthrough.
 	// The instance's lifetime is the loop scope (P2-3 / §3.3).
+	//
+	// Gate widening (fix/minimax-reasoning-translation-gate): same
+	// (interleaved || hasReasoning) condition as the request-side
+	// gate in executeExternal — request translation and response
+	// translation must be kept in lock-step so a body that triggers
+	// request translation also strips reasoning_details on the way
+	// back to the client.
 	var streamTranslator *translator.StreamTranslator
-	if interleaved && providerIsMiniMax {
+	if (interleaved || hasReasoning) && providerIsMiniMax {
 		streamTranslator = translator.NewStreamTranslator()
 	}
 

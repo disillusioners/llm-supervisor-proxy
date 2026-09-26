@@ -132,7 +132,7 @@ func TestStreamResponse_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Flag=true, providerIsMiniMax=false ⇒ gate OFF.
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestStreamResponse_PositiveCase_MiniMaxEmitsReasoning(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	// Flag=true, providerIsMiniMax=true ⇒ gate fires.
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestStreamResponse_PositiveCase_FramingPreserved(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, true, false, true, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 	if err != nil {
 		t.Fatalf("streamResponse: %v", err)
 	}
@@ -542,16 +542,23 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *tes
 	_ = httptest.NewRequest("POST", "/v1/chat/completions", nil) // flag absent
 	// NO X-Proxy-Interleaved-Thinking header — flag absent.
 
-	body := map[string]interface{}{
+	inputBodyMap := map[string]interface{}{
 		"model": "minimax-model",
 		"messages": []interface{}{
-			map[string]interface{}{"role": "assistant", "content": "answer", "reasoning_content": "think-1"},
+			map[string]interface{}{"role": "user", "content": "hi"},
+			map[string]interface{}{"role": "assistant", "content": "answer"},
 		},
 	}
-	requestBodyBytes, _ := json.Marshal(body)
+	inputBodyBytes, _ := json.Marshal(inputBodyMap)
 
-	// interleaved=false — flag absent.
-	_, err := h.executeInternal(context.Background(), w, body, requestBodyBytes, modelsCfg.GetModel("minimax-model"), false, false, "")
+	// interleaved=false — flag absent. Body has NO reasoning_content
+	// (fix/minimax-reasoning-translation-gate): the widened gate is
+	// (interleaved || hasReasoning) && provider is MiniMax, so a
+	// reasoning-less body keeps the gate off. This test asserts the
+	// negative-case contract; the positive case ("flag absent +
+	// reasoning_content ⇒ translate") is covered by the body-gate
+	// unit matrix in handler_minimax_body_gate_test.go.
+	_, err := h.executeInternal(context.Background(), w, inputBodyMap, inputBodyBytes, modelsCfg.GetModel("minimax-model"), false, false, "")
 	if err != nil {
 		t.Fatalf("executeInternal: %v", err)
 	}
@@ -560,20 +567,17 @@ func TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_NoTranslator(t *tes
 		t.Fatal("provider did not capture the request")
 	}
 
-	// ReasoningSplit MUST be nil (flag absent).
+	// ReasoningSplit MUST be nil (gate is off: flag absent + no
+	// reasoning_content).
 	if mock.capturedReq.ReasoningSplit != nil {
-		t.Errorf("ReasoningSplit = %v, want nil (flag absent)", *mock.capturedReq.ReasoningSplit)
+		t.Errorf("ReasoningSplit = %v, want nil (flag absent + no reasoning_content)", *mock.capturedReq.ReasoningSplit)
 	}
-	if len(mock.capturedReq.Messages) != 1 {
-		t.Fatalf("len(Messages) = %d, want 1", len(mock.capturedReq.Messages))
+	if len(mock.capturedReq.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(mock.capturedReq.Messages))
 	}
-	// ReasoningDetails MUST be empty (W5 translator not run).
-	if len(mock.capturedReq.Messages[0].ReasoningDetails) != 0 {
-		t.Errorf("ReasoningDetails = %+v, want empty (flag absent)", mock.capturedReq.Messages[0].ReasoningDetails)
-	}
-	// ReasoningContent preserved (pre-existing behavior).
-	if mock.capturedReq.Messages[0].ReasoningContent != "think-1" {
-		t.Errorf("ReasoningContent = %q, want think-1", mock.capturedReq.Messages[0].ReasoningContent)
+	// ReasoningDetails MUST be empty (translator not run).
+	if len(mock.capturedReq.Messages[0].ReasoningDetails) != 0 || len(mock.capturedReq.Messages[1].ReasoningDetails) != 0 {
+		t.Errorf("ReasoningDetails = %+v / %+v, want empty (flag absent + no reasoning_content)", mock.capturedReq.Messages[0].ReasoningDetails, mock.capturedReq.Messages[1].ReasoningDetails)
 	}
 }
 
