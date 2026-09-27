@@ -109,6 +109,17 @@ func (h *Handler) executeInternalWithResolved(
 		return nil, fmt.Errorf("failed to convert request: %w", err)
 	}
 
+	// P1-8(d) gate widening (fix/minimax-reasoning-translation-gate):
+	// widen the MiniMax gate beyond the X-Proxy-Interleaved-Thinking
+	// client header to also fire when the body echoes non-empty
+	// reasoning_content. On a fallback the proxy chose MiniMax, so
+	// a client that never heard of the header still needs its
+	// reasoning_content translated to reasoning_details +
+	// ReasoningSplit=true. Computed once before the gate from the
+	// already-parsed requestBody map — cheap read-only scan, no
+	// re-parse. Symmetric with race_executor.go twin A.
+	hasReasoning := translator.HasReasoningContent(requestBody)
+
 	// P1-8(d) / W5: twin B — typed-field setter AND
 	// message-level reasoning_content→reasoning_details
 	// translation. When the gate fires (flag AND credential is
@@ -134,7 +145,7 @@ func (h *Handler) executeInternalWithResolved(
 	// handler_anthropic.go:297 precedent. The provider string
 	// comes from ResolveInternalConfig (already a normalized
 	// canonical value from the credential).
-	if interleaved && strings.ToLower(provider) == strings.ToLower(string(providers.ProviderMiniMax)) {
+	if (interleaved || hasReasoning) && strings.ToLower(provider) == strings.ToLower(string(providers.ProviderMiniMax)) {
 		t := true
 		req.ReasoningSplit = &t
 		// W5 — mirror the race-internal twin A

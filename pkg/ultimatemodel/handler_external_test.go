@@ -417,7 +417,7 @@ func TestStreamResponse_SSEHeadersSet(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -461,7 +461,7 @@ func TestStreamResponse_DataForwarding(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -497,7 +497,7 @@ func TestStreamResponse_DONEMarker(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -530,7 +530,7 @@ func TestStreamResponse_UsageExtraction(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	usage, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	usage, err := h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -566,7 +566,7 @@ func TestStreamResponse_EmptyStream(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -602,7 +602,7 @@ func TestStreamResponse_MultipleChunks(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse returned error: %v", err)
@@ -644,7 +644,7 @@ func TestStreamResponse_WithToolCallBuffer(t *testing.T) {
 	defer resp.Body.Close()
 
 	w := httptest.NewRecorder()
-	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
+	_, err = h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, ExecuteOptions{BufferMode: true}) // H8 flip (plan section 7 row 15): buffered-era test opts into buffered mode
 
 	if err != nil {
 		t.Errorf("streamResponse with tool buffer returned error: %v", err)
@@ -936,7 +936,7 @@ func TestUltimateExternal_LiveStream_ForwardBytesBeforeCompletion(t *testing.T) 
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// No options = live mode (the new default).
-		if _, serr := h.streamResponse(w, resp, "ultimate-model", nil, false, false); serr != nil {
+		if _, serr := h.streamResponse(w, resp, "ultimate-model", nil, false, false, false); serr != nil {
 			t.Errorf("streamResponse: %v", serr)
 		}
 	}))
@@ -1012,7 +1012,7 @@ func TestUltimate_HeaderDispatch(t *testing.T) {
 			defer resp.Body.Close()
 
 			rec := &countingRecorder{ResponseRecorder: httptest.NewRecorder()}
-			result, serr := h.streamResponse(rec, resp, "ultimate-model", nil, false, false, opts...)
+			result, serr := h.streamResponse(rec, resp, "ultimate-model", nil, false, false, false, opts...)
 			if serr != nil {
 				t.Fatalf("streamResponse: %v", serr)
 			}
@@ -1120,7 +1120,7 @@ func TestUltimateCapture_LiveMode_IdenticalToBuffered(t *testing.T) {
 		defer resp.Body.Close()
 
 		w := httptest.NewRecorder()
-		result, serr := h.streamResponse(w, resp, "ultimate-model", nil, false, false, opts...)
+		result, serr := h.streamResponse(w, resp, "ultimate-model", nil, false, false, false, opts...)
 		if serr != nil {
 			t.Fatalf("streamResponse: %v", serr)
 		}

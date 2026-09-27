@@ -166,3 +166,47 @@ func InjectReasoningSplit(body map[string]any) error {
 	body["reasoning_split"] = true
 	return nil
 }
+
+// HasReasoningContent reports whether any message in body["messages"]
+// carries a non-empty `reasoning_content` string. Used by the request-side
+// gate sites (race-internal + ultimate-internal + ultimate-external) to
+// widen the MiniMax reasoning translation beyond the
+// X-Proxy-Interleaved-Thinking client header — clients that echo
+// reasoning_content without the header are the untranslated-passthrough
+// class that MiniMax rejects with 400 (2013) on fallback (see
+// docs/2026-09-25-minimax-fallback-reasoning-translation-gate.md).
+//
+// Same shape rules as TranslateMessagesReasoning: nil body, absent
+// messages, non-[]any messages, non-map entries, non-string
+// reasoning_content, and empty strings all return false (an empty
+// `reasoning_content: ""` MUST NOT count as present — see the unit
+// matrix in the bugfix doc, test case 4).
+//
+// Pure read-only scan; the input map is not mutated. Cheap: iterates
+// messages once, returns true on first hit.
+func HasReasoningContent(body map[string]any) bool {
+	rawMessages, exists := body["messages"]
+	if !exists {
+		return false
+	}
+	messages, ok := rawMessages.([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		rc, present := msg["reasoning_content"]
+		if !present {
+			continue
+		}
+		text, ok := rc.(string)
+		if !ok || text == "" {
+			continue
+		}
+		return true
+	}
+	return false
+}
