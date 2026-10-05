@@ -2,7 +2,11 @@
 # Test script for internal upstream API key authentication
 # Usage: ./test-api-key.sh [API_KEY] [MODEL] [PROXY_URL]
 
-API_KEY="${1:-sk-a96c6864f2d86ee77ee33c6a2612d934ccb56236e2cc16edbe93bdbf350e3e26}"
+# The previously inline token at this position was a DEMO key that has already
+# been ROTATED (no live exposure) and is deliberately kept out of the repo so
+# future readers/agents do not re-flag it. Read from LLM_PROXY_TEST_TOKEN and
+# fail fast if unset. Positional $1 still wins (script Usage unchanged).
+API_KEY="${1:-${LLM_PROXY_TEST_TOKEN:?LLM_PROXY_TEST_TOKEN env var is required (or pass API_KEY as \$1)}}"
 MODEL="${2:-MiniMax-M2.5}"
 PROXY_URL="${3:-http://localhost:4321}"
 
