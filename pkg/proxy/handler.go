@@ -234,6 +234,13 @@ func (h *Handler) saveRawResponse(requestID string, rawBytes []byte, rawRequestB
 
 // HandleModels returns the list of available models in OpenAI-compatible format.
 // GET /v1/models
+//
+// ImgGen Models commission / BE-D6 / T1.3.1: image-gen models are
+// excluded from the OpenAI-compatible list. The check uses
+// ModelConfig.IsImageGen() (the same helper the /fe/api/models
+// ?kind= filter and the T1.3.3 chat-misroute early-reject use);
+// the list is built from GetEnabledModels() so a disabled image-gen
+// model is already excluded regardless of kind.
 func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -243,9 +250,14 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	cfg := h.config.Clone()
 	enabledModels := cfg.ModelsConfig.GetEnabledModels()
 
-	// Build OpenAI-compatible response
+	// Build OpenAI-compatible response. Exclude image-gen models:
+	// they are served by /v1/image_generation and must never appear
+	// in the OpenAI-compatible chat pickers.
 	models := make([]map[string]interface{}, 0, len(enabledModels))
 	for _, m := range enabledModels {
+		if m.IsImageGen() {
+			continue
+		}
 		models = append(models, map[string]interface{}{
 			"id":       m.ID,
 			"object":   "model",
@@ -424,6 +436,29 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			rc.reset()
 		}
 	}()
+
+	// ImgGen Models commission / BE-D6 + Leader Ruling L1 + Architect
+	// Amendment 4 — T1.3.3 IsImageGen() early-reject (CRITICAL —
+	// unskippable). A chat request naming an image-gen model is
+	// rejected here, AFTER model resolve succeeded (so we know it's
+	// a real, configured model — not a typo) and BEFORE any
+	// upstream / auth-race / metering work. Without this guard, the
+	// chat path would resolve, pass auth, run the race coordinator,
+	// and make a REAL upstream chat call to MiniMax with
+	// model=image-01 that fails upstream — burning real money AND
+	// polluting model_hourly_usage.request_count on the image-gen
+	// model. The reject returns an OpenAI-envelope 400 with the
+	// standard models.NewOpenAIError shape (matches the
+	// self-generated error posture for /v1/image_generation at
+	// pkg/imggen, BE-T3 Amendment 5). The guard is intentionally
+	// the ONLY pkg/proxy change from this commission.
+	if rc.resolvedModel != nil && rc.resolvedModel.IsImageGen() {
+		log.Printf("[imggen] rejecting chat misroute to image-gen model=%s (model is served by /v1/image_generation only)", rc.resolvedModel.ID)
+		h.sendError(w, http.StatusBadRequest,
+			"image-gen models are served by /v1/image_generation only",
+			models.ErrorTypeServerError, "image_gen_misroute")
+		return
+	}
 
 	// Check if this request requires internal authentication
 	// (model is internal and needs client API key validation)
