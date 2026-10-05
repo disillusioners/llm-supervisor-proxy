@@ -290,6 +290,103 @@ export function useModels() {
       method: 'POST',
       body: JSON.stringify(model),
     });
+    // C-07 (symmetric side of useImgGenModels): drop both keys so a chat
+    // mutation also refreshes the image-gen tab.
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  const updateModel = useCallback(async (id: string, updates: Partial<Model>) => {
+    const current = models.find(m => m.id === id);
+    const merged = { ...current, ...updates, id };
+    await apiFetch<Model>(`/models/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(merged),
+    });
+    // C-07 (symmetric side of useImgGenModels).
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    await fetchModels();
+  }, [fetchModels, models]);
+
+  const deleteModel = useCallback(async (id: string) => {
+    await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
+    // C-07 (symmetric side of useImgGenModels).
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchModels(controller.signal);
+    return () => controller.abort();
+  }, [fetchModels]);
+
+  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels };
+}
+
+// ImgGen Models API — image-gen kind only
+//
+// Phase: ImgGen Commission 2026-10-05. See fe-spec.md §2.3 and decisions.md
+// BE-D4 / FE-7. This hook is a near-mirror of useModels() with two load-bearing
+// differences:
+//
+//   1. Fetch URL: /fe/api/models?kind=image-gen (server-side filter; the BE
+//      is the source of truth, not a client filter on the default-GET list).
+//   2. Cache key: 'imggen-models' (distinct from 'models' per R7 in
+//      phase2-plan.md so each hook owns its own staleness window).
+//
+// On every write (POST/PUT/DELETE) BOTH cache keys are dropped (C-07). The
+// reason: a chat tab mounted in the same tree may be reading from the
+// 'models' key, and an image-gen mutation should never leave a chat tab
+// reading stale data after a refetch — the inverse is also true, so the
+// image-gen key gets the same treatment when a chat mutation lands (the
+// existing useModels() also drops 'imggen-models' for symmetry).
+export function useImgGenModels() {
+  const [models, setModels] = useState<Model[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Error surfacing (fe-spec §2.7 / A11Y-3). The hook silently logged
+  // before; surfacing the error lets the tab render an alert-role banner
+  // and offer a Retry button. Kept on this hook only — useModels() does
+  // not surface errors, and the spec's contract for this hook
+  // ("Returns: { models, loading, addModel, updateModel, deleteModel,
+  // refetch }") is intentionally preserved; the error field is additive
+  // and the tab handles a `null` error gracefully.
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchModels = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await defaultAPICache.getOrFetch<Model[]>('imggen-models', async () => {
+        const response = await fetch(`${API_BASE}/models?kind=image-gen`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<Model[]>;
+      }, 15000);
+      setModels(data || []);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      const message = err instanceof Error ? err.message : 'Failed to fetch image-gen models';
+      console.error('Failed to fetch image-gen models:', err);
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const addModel = useCallback(async (model: Omit<Model, 'id'> & { id: string }) => {
+    await apiFetch<Model>('/models', {
+      method: 'POST',
+      body: JSON.stringify(model),
+    });
+    // C-07: dual cache invalidation. Both hooks own their key; mutation in
+    // either must drop the other so the next read is fresh from the BE.
+    defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels]);
@@ -301,12 +398,16 @@ export function useModels() {
       method: 'PUT',
       body: JSON.stringify(merged),
     });
+    // C-07: dual cache invalidation — see addModel comment.
+    defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
+    // C-07: dual cache invalidation — see addModel comment.
+    defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     await fetchModels();
   }, [fetchModels]);
@@ -317,7 +418,7 @@ export function useModels() {
     return () => controller.abort();
   }, [fetchModels]);
 
-  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels };
+  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels, error };
 }
 
 // Duration formatting utility - backend now accepts string durations directly
