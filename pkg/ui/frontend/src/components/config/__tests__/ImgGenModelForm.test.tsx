@@ -180,6 +180,71 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
     });
   });
 
+  describe('edit-mode credential-provider race (review finding #1)', () => {
+    it('skips the credential-provider check while credentials are still loading (no spurious error on a valid row)', async () => {
+      // Regression for the leader-approved FE review finding #1: in
+      // edit mode, the credential-provider check resolves credential_id
+      // against the credentials list. If the list is still loading, the
+      // resolver sees an empty list and flags every credential as
+      // "unknown → not minimax" — a spurious "All credentials must be
+      // MiniMax" error against a perfectly valid row. The fix: skip the
+      // check while loadingCredentials is true (validation self-heals
+      // once the fetch resolves).
+      //
+      // We simulate "still loading" by making getCredentials return a
+      // never-resolving promise for the first (mount-time) call. The
+      // credentials list stays empty for the entire test, mirroring the
+      // race window a user sees on slow networks / cold mounts.
+      const useApiModule = await import('../../../hooks/useApi');
+      (useApiModule.getCredentials as Mock).mockImplementationOnce(
+        () => new Promise(() => { /* never resolves — credentials stay loading */ }),
+      );
+
+      const onSave = vi.fn();
+      const initial: ImgGenModel = {
+        id: 'valid-row',
+        name: 'Valid Row',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_provider: 'minimax',
+        internal_model: 'image-01',
+        internal_base_url: 'https://api.minimax.io/v1',
+        // cred-mini-1 IS a minimax credential — would pass C-13 once
+        // the credentials list loads. With the list still empty
+        // (loadingCredentials === true), the OLD code would false-
+        // negative on this perfectly valid row.
+        credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
+        exclude_from_ultimate_switching: true,
+      };
+      const { container } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+
+      // Click submit BEFORE the credentials fetch has resolved.
+      const submit = container.querySelector('[data-testid="imggen-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+
+      // Let the validator micro-task queue drain. With the fix, the
+      // provider check is skipped (loadingCredentials === true); without
+      // it, the error would render synchronously inside handleSubmit.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Assertion (the binding contract from finding #1): NO spurious
+      // "All credentials must be MiniMax" error rendered. Validation
+      // self-heals: once the credentials fetch resolves, the next
+      // submit click will run the provider check normally.
+      expect(container.textContent).not.toContain('All credentials must be MiniMax');
+    });
+  });
+
   describe('valid submit (C-14)', () => {
     it('C-14 — calls onSave once with the expected payload shape and hard-coded fields', async () => {
       const onSave = vi.fn().mockResolvedValue(undefined);

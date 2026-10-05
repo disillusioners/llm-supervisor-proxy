@@ -339,7 +339,6 @@ export function SettingsPage({
               emoji so SRs only announce the binding literal "ImgGen Models". */}
           <button
             type="button"
-            aria-hidden={undefined}
             class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'imggen_models'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'

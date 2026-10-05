@@ -108,19 +108,30 @@ export function ImgGenModelForm({
   // `availableCredentials` to provider === 'minimax' at the form level so
   // the editor itself stays provider-agnostic (and the existing
   // same-provider invariant in MultiCredentialEditor is preserved).
+  //
+  // AbortController mirrors the hook pattern in `useApi.ts` (see e.g.
+  // useRequests at useApi.ts:66-103): the controller's signal is checked
+  // before any setState so a fetch that resolves after unmount does not
+  // trigger a React warning, and cleanup abort()s to close the
+  // setState-after-unmount window.
   useEffect(() => {
+    const controller = new AbortController();
     const fetchCreds = async () => {
       setLoadingCredentials(true);
       try {
         const data = await getCredentials();
-        setCredentials(data || []);
+        if (!controller.signal.aborted) {
+          setCredentials(data || []);
+        }
       } catch (e) {
+        if (controller.signal.aborted) return;
         console.error('Failed to fetch credentials:', e);
       } finally {
-        setLoadingCredentials(false);
+        if (!controller.signal.aborted) setLoadingCredentials(false);
       }
     };
     fetchCreds();
+    return () => controller.abort();
   }, []);
 
   // Re-hydrate when initialData changes (e.g. tab switches between
@@ -161,12 +172,22 @@ export function ImgGenModelForm({
         // The dropdown is filtered to minimax above, but a stale row may
         // carry a now-deleted credential; we resolve the provider through
         // the full credentials list to catch this.
-        const nonMinimax = fields.credentials.find((c) => {
-          const found = credentials.find((cd) => cd.id === c.credential_id);
-          return !found || found.provider !== 'minimax';
-        });
-        if (nonMinimax) {
-          nextErrors.credential_provider = 'All credentials must be MiniMax';
+        //
+        // Race guard: in edit mode, the form may mount BEFORE the
+        // credentials fetch resolves. At that point the credentials list
+        // is empty, so the resolver sees every credential_id as unknown
+        // and (per C-13) flags a spurious "All credentials must be
+        // MiniMax" error against a perfectly valid row. Skip the check
+        // while credentials are still loading — once the fetch resolves
+        // the gate self-heals (handleSubmit re-runs on the next click).
+        if (!loadingCredentials) {
+          const nonMinimax = fields.credentials.find((c) => {
+            const found = credentials.find((cd) => cd.id === c.credential_id);
+            return !found || found.provider !== 'minimax';
+          });
+          if (nonMinimax) {
+            nextErrors.credential_provider = 'All credentials must be MiniMax';
+          }
         }
       }
     }

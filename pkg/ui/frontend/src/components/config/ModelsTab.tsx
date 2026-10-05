@@ -141,21 +141,29 @@ export function ModelsTab({
 
           {/* Models List */}
           <div class="space-y-2">
-            {models.length === 0 ? (
-              <div class="bg-gray-700/50 rounded-md p-6 border border-gray-700 border-dashed flex flex-col items-center justify-center">
-                <svg class="w-10 h-10 text-gray-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                </svg>
-                <p class="text-gray-400 text-sm">No models configured</p>
-              </div>
-            ) : (
+            {(() => {
               // C-16 (fe-spec §2.6 / T2.4.5) — chat-tab client-side filter.
               // The BE default GET /fe/api/models (no ?kind=) returns ALL
               // models per BE-D4; this one-line filter is the FE's
               // belt-and-suspenders so image-gen rows never appear in the
               // chat Models tab. Degrades to a no-op when kind is absent
               // from the wire (R1 mitigation: undefined !== 'image-gen').
-              models.filter((model) => model.kind !== 'image-gen').map((model) => (
+              //
+              // Hoisted before the empty-state ternary so a config
+              // containing only image-gen rows still renders the
+              // "No models configured" empty state — otherwise the
+              // ternary would see models.length > 0, skip the empty
+              // branch, and render an invisible (filtered-to-empty) list.
+              const chatModels = models.filter((model) => model.kind !== 'image-gen');
+              return chatModels.length === 0 ? (
+                <div class="bg-gray-700/50 rounded-md p-6 border border-gray-700 border-dashed flex flex-col items-center justify-center">
+                  <svg class="w-10 h-10 text-gray-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  <p class="text-gray-400 text-sm">No models configured</p>
+                </div>
+              ) : (
+                chatModels.map((model) => (
                 <div
                   key={model.id}
                   class="flex items-center justify-between bg-gray-700/80 rounded-md p-3 border border-gray-600/50 hover:bg-gray-700 transition-colors"
@@ -253,8 +261,9 @@ export function ModelsTab({
                     </button>
                   </div>
                 </div>
-              ))
-            )}
+                ))
+              );
+            })()}
           </div>
         </>
       ) : (

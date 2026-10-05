@@ -62,4 +62,36 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
     expect(container.textContent).toContain('A');
     expect(container.textContent).toContain('B');
   });
+
+  it('review finding #2 — config with ONLY image-gen rows renders the "No models configured" empty state', () => {
+    // Regression for the leader-approved FE review finding #2: the
+    // chat-tab filter (`kind !== 'image-gen'`) sat INSIDE the non-empty
+    // branch of the empty-state ternary. A config containing only
+    // image-gen rows (e.g. an operator who only uses image-gen, or a
+    // fresh config before any chat models are added) would have
+    // models.length > 0, take the non-empty branch, and render an
+    // invisible filtered-to-empty list — never surfacing the
+    // "No models configured" empty state to the user.
+    //
+    // The fix hoists the filter to `chatModels` BEFORE the ternary and
+    // branches on chatModels.length, so the empty state renders whenever
+    // the chat-tab-filtered list is empty (whether `models` itself is
+    // empty OR all of its rows are image-gen).
+    const imgOnly = makeModel({ id: 'image', name: 'Image B', kind: 'image-gen' });
+    const { container } = render(
+      <ModelsTab
+        models={[imgOnly]}
+        onAddModel={vi.fn()}
+        onUpdateModel={vi.fn()}
+        onDeleteModel={vi.fn()}
+        onToggleModel={vi.fn()}
+        status={null}
+        setStatus={vi.fn()}
+      />,
+    );
+    // The image-gen row is filtered out (C-16 / T2.4.5), AND the
+    // empty-state now renders because chatModels.length === 0.
+    expect(container.textContent).not.toContain('Image B');
+    expect(container.textContent).toContain('No models configured');
+  });
 });
