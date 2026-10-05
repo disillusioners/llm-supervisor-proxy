@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -665,19 +667,37 @@ func TestHandler_RequestOverCap_413(t *testing.T) {
 	}
 }
 
-// T1.7.2 — handler has no io.ReadAll of uncapped body / no
-// io.Copy of resp.Body. Asserted via static analysis: the
-// handler file uses io.LimitReader + io.ReadAll(limit-reader)
-// only. This test exists as a sentinel that must be manually
-// audited (task 1.8.2).
-func TestHandler_RAMDiscipline_AuditSentinel(t *testing.T) {
-	// This is a sentinel — see phase1-plan.md T1.8.2 / SC8
-	// (single-materialization audit) for the grep-based check.
-	// The test exists so a future refactor that adds a second
-	// io.ReadAll or io.Copy of resp.Body fails CI; the actual
-	// check is in the audit script (Makefile target or
-	// pre-commit hook).
-	t.Skip("static audit sentinel — see task 1.8.2 / SC8 / Amendment 12")
+// Architect Amendment 9 / review F2 — mechanical import guard:
+// pkg/imggen must never import pkg/proxy (chat-supervision
+// exclusion boundary, pkg/imggen/doc.go). This test mirrors the
+// grep gate wired into the Makefile `test` target so a plain
+// `go test ./pkg/imggen/` enforces the same invariant without
+// make. Replaces the old t.Skip RAM-audit sentinel, which never
+// enforced anything (the RAM single-materialization audit
+// remains a documented manual check — doc.go Amendment 12).
+func TestPackage_ImportGuard_NoProxyImports(t *testing.T) {
+	const banned = `github\.com/disillusioners/llm-supervisor-proxy/pkg/proxy(/|")`
+	re, err := regexp.Compile(banned)
+	if err != nil {
+		t.Fatalf("bad guard regex: %v", err)
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		src, err := os.ReadFile(e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if loc := re.FindIndex(src); loc != nil {
+			line := 1 + bytes.Count(src[:loc[0]], []byte("\n"))
+			t.Errorf("%s:%d references the pkg/proxy import path — forbidden by the pkg/imggen import guard (Amendment 9)", e.Name(), line)
+		}
+	}
 }
 
 // disconnectWriter is an http.ResponseWriter whose body write

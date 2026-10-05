@@ -51,6 +51,11 @@ run: all
 
 test:
 	@echo "Running tests..."
+	@echo ">> import guard: pkg/imggen must not import pkg/proxy (Amendment 9)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/proxy(/|")' pkg/imggen/; then \
+		echo "FAIL: pkg/imggen must not import pkg/proxy (import guard, Amendment 9 — see pkg/imggen/doc.go)"; \
+		exit 1; \
+	fi
 	@go test ./...
 
 clean:

@@ -9,8 +9,11 @@
 // Architectural rules (binding on the package):
 //
 //   - Import direction: pkg/imggen → {pkg/models, pkg/auth,
-//     pkg/usage, pkg/events} ONLY; never pkg/proxy. The build-time
-//     import guard (task 1.8.2) fails CI on any pkg/proxy import.
+//     pkg/usage, pkg/events} ONLY; never pkg/proxy. The import
+//     guard (task 1.8.2) is mechanical: a grep gate in the
+//     `make test` target, mirrored by the in-package
+//     TestPackage_ImportGuard_NoProxyImports test, fails the
+//     build on any pkg/proxy import.
 //   - One upstream attempt per request (no retry, no fallback, no
 //     MonitoredReader idle wrap; the live 17-60s silent generation
 //     would false-fire any idle/silence-based supervision).
