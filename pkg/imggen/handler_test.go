@@ -488,6 +488,23 @@ func TestHandler_UnknownModel_404(t *testing.T) {
 	}
 }
 
+// T1.4.4f / review F3 — credential resolution failure ⇒ 502
+// (upstream-class failure, OpenAI envelope; same family as the
+// unsupported-provider path), not 500.
+func TestHandler_CredentialUnresolved_502(t *testing.T) {
+	env := newEnv(t, fakeScript{status: 200, body: successBody(1, 0)})
+	env.handler.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {
+		return models.ResolvedCredential{}, false
+	})
+	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (credential resolution is an upstream-class failure)", rec.Code)
+	}
+	if env.fake.hitCount.Load() != 0 {
+		t.Errorf("upstream was called despite credential failure: hit count = %d", env.fake.hitCount.Load())
+	}
+}
+
 // T1.7.2 — auth gating: invalid token ⇒ 401; no upstream call.
 func TestHandler_Auth_InvalidToken_401(t *testing.T) {
 	env := newEnv(t, fakeScript{status: 200, body: successBody(1, 0)})

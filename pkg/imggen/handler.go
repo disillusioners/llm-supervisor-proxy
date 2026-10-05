@@ -285,7 +285,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			"duration_ms":    time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
-		h.openAIError(w, http.StatusInternalServerError,
+		h.openAIError(w, http.StatusBadGateway,
 			fmt.Sprintf("no credentials configured for model %q", modelID))
 		return
 	}
