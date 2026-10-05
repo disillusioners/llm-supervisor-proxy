@@ -634,10 +634,16 @@ func (h *Handler) openAIError(w http.ResponseWriter, code int, message string) {
 		models.ErrorTypeServerError, "", message))
 }
 
-// sendAuthError writes the OpenAI-envelope 401 (mirrors
-// handler.go:335-343).
+// sendAuthError writes the OpenAI-envelope 401. Maps 401 to
+// "authentication_error" (matches pkg/proxy/handler.go:346-355 —
+// the public-surface decision the chat handler adopted so FE
+// and other clients parse 4xx envelopes identically across
+// /v1/chat/completions and /v1/image_generation).
 func (h *Handler) sendAuthError(w http.ResponseWriter) {
-	h.openAIError(w, http.StatusUnauthorized, "Invalid or expired API key")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(models.NewOpenAIError(
+		models.ErrorTypeAuthenticationError, "", "Invalid or expired API key"))
 }
 
 // sendModelNotAllowedError writes the nested 403 envelope (mirrors

@@ -493,6 +493,10 @@ func TestHandler_CredentialUnresolved_502(t *testing.T) {
 }
 
 // T1.7.2 — auth gating: invalid token ⇒ 401; no upstream call.
+// Error type MUST be "authentication_error" (public-surface
+// alignment with the chat handler at pkg/proxy/handler.go:346-355;
+// clients / FE parse 4xx envelopes identically across the two
+// endpoints).
 func TestHandler_Auth_InvalidToken_401(t *testing.T) {
 	env := newEnv(t, fakeScript{status: 200, body: successBody(1, 0)})
 	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`"}`, map[string]string{
@@ -500,6 +504,18 @@ func TestHandler_Auth_InvalidToken_401(t *testing.T) {
 	})
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response body is not the OpenAI envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if body.Error.Type != "authentication_error" {
+		t.Errorf("error.type = %q, want authentication_error", body.Error.Type)
 	}
 	if env.fake.hitCount.Load() != 0 {
 		t.Errorf("upstream was called despite auth failure: hit count = %d", env.fake.hitCount.Load())
