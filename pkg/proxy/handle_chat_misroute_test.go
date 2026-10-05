@@ -116,4 +116,3 @@ func TestHandleChatCompletions_ChatModelUnaffected(t *testing.T) {
 		}
 	}
 }
-

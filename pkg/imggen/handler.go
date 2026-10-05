@@ -89,10 +89,10 @@ type configGetter interface {
 // handler degrades gracefully so test / legacy setups work.
 func NewHandler(configMgr configGetter, bus *events.Bus, tokenStore auth.TokenStoreInterface, usageCounter *usage.Counter) *Handler {
 	return &Handler{
-		configMgr: configMgr,
-		bus:       bus,
+		configMgr:  configMgr,
+		bus:        bus,
 		tokenStore: tokenStore,
-		usage:     usageCounter,
+		usage:      usageCounter,
 	}
 }
 
@@ -140,11 +140,11 @@ func (h *Handler) imageGenTimeout() time.Duration {
 //     classifier seam, Amendment 3). PassAsIs ⇒ relay verbatim;
 //     PromoteToError ⇒ write RelayStatus + upstream body.
 //  10. Meter: IncrementTokenImages + IncrementModelImages with
-//      request_count=1, image_count=BillableImages(body) (0 on
-//      error-in-200). Documented divergence from chat's success-
-//      only convention (Amendment 14).
+//     request_count=1, image_count=BillableImages(body) (0 on
+//     error-in-200). Documented divergence from chat's success-
+//     only convention (Amendment 14).
 //  11. Telemetry: events.Bus.Publish(image_generation, plain
-//      map) — nil-safe (no-op on nil bus).
+//     map) — nil-safe (no-op on nil bus).
 func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
@@ -170,9 +170,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			h.publishEvent("image_generation", map[string]interface{}{
-				"outcome":        "request_too_large",
-				"max_bytes":      maxRequestBodyBytes,
-				"duration_ms":    time.Since(startTime).Milliseconds(),
+				"outcome":         "request_too_large",
+				"max_bytes":       maxRequestBodyBytes,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
 				"upstream_status": 0,
 			})
 			h.openAIError(w, http.StatusRequestEntityTooLarge,
@@ -180,9 +180,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "request_read_failed",
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "request_read_failed",
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusInternalServerError,
@@ -196,8 +196,8 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	authToken, ok := h.authenticate(r)
 	if !ok {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "auth_failed",
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "auth_failed",
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.sendAuthError(w)
@@ -212,9 +212,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "invalid_json",
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "invalid_json",
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadRequest, "invalid JSON body")
@@ -223,8 +223,8 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	modelID, _ := bodyMap["model"].(string)
 	if modelID == "" {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "missing_model",
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "missing_model",
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadRequest, "model field is required")
@@ -242,9 +242,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		// 404 — unknown model (BE-A1 / Amendment 17). Distinct
 		// from 403 (model known but not in token's allowed_models).
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "model_not_found",
-			"model":          modelID,
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "model_not_found",
+			"model":           modelID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusNotFound,
@@ -261,10 +261,10 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	if authToken != nil && len(authToken.AllowedModels) > 0 {
 		if !authToken.IsModelAllowed(modelID) {
 			h.publishEvent("image_generation", map[string]interface{}{
-				"outcome":     "model_not_allowed",
-				"model":       modelID,
-				"token":       authToken.ID,
-				"duration_ms": time.Since(startTime).Milliseconds(),
+				"outcome":         "model_not_allowed",
+				"model":           modelID,
+				"token":           authToken.ID,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
 				"upstream_status": 0,
 			})
 			h.sendModelNotAllowedError(w, modelID)
@@ -280,9 +280,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	cred, ok := h.resolveCredential(modelID)
 	if !ok {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "credential_unresolved",
-			"model":          modelID,
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "credential_unresolved",
+			"model":           modelID,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadGateway,
@@ -296,10 +296,10 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	provider, ok := lookup(cred.Provider)
 	if !ok {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "unsupported_provider",
-			"model":          modelID,
-			"provider":       cred.Provider,
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "unsupported_provider",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadGateway,
@@ -310,10 +310,10 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, bodyBytes)
 	if err != nil {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "build_failed",
-			"model":          modelID,
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "build_failed",
+			"model":           modelID,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadRequest, err.Error())
@@ -331,11 +331,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, strings.NewReader(string(upstreamBody)))
 	if err != nil {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "request_build_failed",
-			"model":          modelID,
-			"provider":       cred.Provider,
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "request_build_failed",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusInternalServerError,
@@ -373,11 +373,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			outcome = "deadline"
 		}
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        outcome,
-			"model":          modelID,
-			"provider":       cred.Provider,
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         outcome,
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, status, fmt.Sprintf("upstream request failed: %v", err))
@@ -398,11 +398,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
 	if err != nil {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "upstream_read_failed",
-			"model":          modelID,
-			"provider":       cred.Provider,
-			"error":          err.Error(),
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "upstream_read_failed",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": resp.StatusCode,
 		})
 		h.openAIError(w, http.StatusBadGateway, "upstream read failed")
@@ -411,11 +411,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	}
 	if len(respBody) > int(cap) {
 		h.publishEvent("image_generation", map[string]interface{}{
-			"outcome":        "response_too_large",
-			"model":          modelID,
-			"provider":       cred.Provider,
-			"max_bytes":      cap,
-			"duration_ms":    time.Since(startTime).Milliseconds(),
+			"outcome":         "response_too_large",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"max_bytes":       cap,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": resp.StatusCode,
 		})
 		h.openAIError(w, http.StatusBadGateway,

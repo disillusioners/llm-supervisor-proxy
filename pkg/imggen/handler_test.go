@@ -104,22 +104,22 @@ func mustJSON(v interface{}) []byte {
 // ---------- Handler test harness ----------
 
 type handlerTestEnv struct {
-	t           *testing.T
-	upstream    *httptest.Server
-	fake        *fakeMiniMax
-	handler     *Handler
-	bus         *events.Bus
-	usage       *usage.Counter
-	usageDB     *usageCounterDB
-	tokenStore  *memTokenStore
-	modelID     string
-	credBaseURL string
+	t               *testing.T
+	upstream        *httptest.Server
+	fake            *fakeMiniMax
+	handler         *Handler
+	bus             *events.Bus
+	usage           *usage.Counter
+	usageDB         *usageCounterDB
+	tokenStore      *memTokenStore
+	modelID         string
+	credBaseURL     string
 	imageGenTimeout time.Duration
 }
 
 type usageCounterDB struct {
-	mu     sync.Mutex
-	db     map[string]int // key = "token:model:hour"
+	mu sync.Mutex
+	db map[string]int // key = "token:model:hour"
 }
 
 // memTokenStore is an in-memory auth.TokenStoreInterface used by
@@ -241,12 +241,12 @@ func newEnv(t *testing.T, script fakeScript) *handlerTestEnv {
 			return nil, false
 		}
 		return &models.ModelConfig{
-			ID:             modelID,
-			Name:           "Image Gen 01",
-			Kind:           models.KindImageGen,
-			Enabled:        true,
-			Internal:       true,
-			InternalModel:  "image-01",
+			ID:              modelID,
+			Name:            "Image Gen 01",
+			Kind:            models.KindImageGen,
+			Enabled:         true,
+			Internal:        true,
+			InternalModel:   "image-01",
 			InternalBaseURL: credBaseURL,
 			Credentials: []models.CredentialRef{
 				{CredentialID: "cred-1", Weight: 1, Position: 0},
@@ -277,16 +277,16 @@ func newEnv(t *testing.T, script fakeScript) *handlerTestEnv {
 	ts.add(tok)
 
 	return &handlerTestEnv{
-		t:           t,
-		upstream:    upstream,
-		fake:        fake,
-		handler:     h,
-		bus:         bus,
-		usage:       uc,
-		usageDB:     &usageCounterDB{db: map[string]int{}},
-		tokenStore:  ts,
-		modelID:     modelID,
-		credBaseURL: credBaseURL,
+		t:               t,
+		upstream:        upstream,
+		fake:            fake,
+		handler:         h,
+		bus:             bus,
+		usage:           uc,
+		usageDB:         &usageCounterDB{db: map[string]int{}},
+		tokenStore:      ts,
+		modelID:         modelID,
+		credBaseURL:     credBaseURL,
 		imageGenTimeout: 200 * time.Millisecond,
 	}
 }

@@ -18,7 +18,8 @@
 //
 // Build:  go test -tags live_imggen -run TestLiveE2E ./pkg/imggen/...
 // Run:    (ensure .env-minimax is populated; the key is NEVER
-//         inlined into the test source or the worktree).
+//
+//	inlined into the test source or the worktree).
 package imggen
 
 import (

@@ -39,13 +39,13 @@ func (s *stubModelsConfig) GetEnabledModels() []models.ModelConfig {
 	copy(out, s.enabled)
 	return out
 }
-func (s *stubModelsConfig) GetModel(string) *models.ModelConfig   { return nil }
+func (s *stubModelsConfig) GetModel(string) *models.ModelConfig { return nil }
 func (s *stubModelsConfig) GetModelByName(string) *models.ModelConfig {
 	return nil
 }
-func (s *stubModelsConfig) GetTruncateParams(string) []string  { return nil }
-func (s *stubModelsConfig) GetFallbackChain(string) []string    { return nil }
-func (s *stubModelsConfig) AddModel(models.ModelConfig) error   { return nil }
+func (s *stubModelsConfig) GetTruncateParams(string) []string { return nil }
+func (s *stubModelsConfig) GetFallbackChain(string) []string  { return nil }
+func (s *stubModelsConfig) AddModel(models.ModelConfig) error { return nil }
 func (s *stubModelsConfig) UpdateModel(string, models.ModelConfig) error {
 	return nil
 }
@@ -62,7 +62,7 @@ func (s *stubModelsConfig) AddCredential(models.CredentialConfig) error {
 func (s *stubModelsConfig) UpdateCredential(string, models.CredentialConfig) error {
 	return nil
 }
-func (s *stubModelsConfig) RemoveCredential(string) error  { return nil }
+func (s *stubModelsConfig) RemoveCredential(string) error { return nil }
 func (s *stubModelsConfig) ResolveInternalConfig(string) (string, string, string, string, bool) {
 	return "", "", "", "", false
 }
