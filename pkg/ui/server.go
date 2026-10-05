@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -47,6 +48,12 @@ type Model struct {
 	Enabled        bool     `json:"enabled"`
 	FallbackChain  []string `json:"fallback_chain"`
 	TruncateParams []string `json:"truncate_params,omitempty"`
+	// Kind discriminates between chat and image-generation models
+	// (ImgGen Models commission / BE-D3). The wire form is a plain
+	// string with omitempty so existing payloads (no kind field)
+	// round-trip unchanged. Validated server-side by the shared
+	// models.ValidateKindRules helper.
+	Kind string `json:"kind,omitempty"`
 	// Internal upstream fields
 	Internal        bool                   `json:"internal"`
 	Credentials     []models.CredentialRef `json:"credentials,omitempty"`       // Ordered, weighted credential refs (Phase 4 wire shape)
@@ -742,15 +749,40 @@ func validateCredentials(creds []models.CredentialRef, internal bool, existingCr
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// ImgGen Models commission / BE-D4: optional ?kind= server-side
+		// filter. Absent ⇒ today's behavior (all models). kind=image-gen
+		// ⇒ only IsImageGen(). kind=chat ⇒ only non-image-gen. An
+		// unknown value is treated as chat with a server log warning
+		// (per the approver advisory; the operator-visible default
+		// keeps the back-compat posture of the chat picker).
+		kindParam := r.URL.Query().Get("kind")
+		var kindFilter func(*models.ModelConfig) bool
+		switch kindParam {
+		case "":
+			kindFilter = nil // no filter
+		case models.KindImageGen:
+			kindFilter = func(m *models.ModelConfig) bool { return m.IsImageGen() }
+		case models.KindChat:
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() }
+		default:
+			log.Printf("[models] GET /fe/api/models unknown kind=%q, treating as chat (server-log warning)", kindParam)
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() }
+		}
+
 		modelConfigs := s.modelsConfig.GetModels()
-		models := make([]Model, len(modelConfigs))
-		for i, mc := range modelConfigs {
-			models[i] = Model{
+		out := make([]Model, 0, len(modelConfigs))
+		for i := range modelConfigs {
+			mc := &modelConfigs[i]
+			if kindFilter != nil && !kindFilter(mc) {
+				continue
+			}
+			out = append(out, Model{
 				ID:                           mc.ID,
 				Name:                         mc.Name,
 				Enabled:                      mc.Enabled,
 				FallbackChain:                mc.FallbackChain,
 				TruncateParams:               mc.TruncateParams,
+				Kind:                         mc.Kind,
 				Internal:                     mc.Internal,
 				Credentials:                  mc.Credentials,
 				InternalBaseURL:              mc.InternalBaseURL,
@@ -763,11 +795,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				PeakHourModel:                mc.PeakHourModel,
 				SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
 				ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
-			}
+			})
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models)
+		json.NewEncoder(w).Encode(out)
 
 	case http.MethodPost:
 		// Limit request body to 64KB to prevent memory exhaustion attacks
@@ -827,6 +859,97 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// ImgGen Models commission / T1.2.3: inline image-gen
+		// validation mirroring models.ValidateKindRules (the shared
+		// helper is also called by AddModel → store/ModelsManager
+		// → validateModelAgainstCredentials; this is the inline
+		// fast-path that returns 400 + {"error": "..."} in the
+		// house pattern of server.go:792-798). Unknown kind value
+		// ⇒ 400.
+		if newModel.Kind != "" && newModel.Kind != models.KindChat && newModel.Kind != models.KindImageGen {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("unknown kind %q (expected %q or %q)", newModel.Kind, models.KindChat, models.KindImageGen),
+			})
+			return
+		}
+		if newModel.Kind == models.KindImageGen {
+			if !newModel.Internal {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" requires internal to be true",
+				})
+				return
+			}
+			if newModel.InternalModel == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" requires internal_model to be set (the body-rewrite alias has nothing to resolve)",
+				})
+				return
+			}
+			if len(newModel.Credentials) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" requires at least one credential",
+				})
+				return
+			}
+			// Derive the primary credential's provider (T1.2.3:
+			// "internal_provider == \"minimax\" — the only provider
+			// Phase 1 ships" — derived from the primary credential
+			// via the same lookup the shared ValidateKindRules
+			// helper uses).
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider != "" && primaryProvider != "minimax" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q (got %q)", "minimax", primaryProvider),
+				})
+				return
+			}
+			if len(newModel.FallbackChain) != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" does not support fallback_chain",
+				})
+				return
+			}
+			if newModel.SecondaryUpstreamModel != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" does not support secondary_upstream_model",
+				})
+				return
+			}
+			if newModel.PeakHourEnabled {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" does not support peak_hour_enabled",
+				})
+				return
+			}
+			if newModel.ReleaseStreamChunkDeadline != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"image-gen\" does not support release_stream_chunk_deadline (image responses are not streamed)",
+				})
+				return
+			}
+		}
+
 		// Generate ID if not provided
 		if newModel.ID == "" {
 			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
@@ -841,6 +964,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			Enabled:                      newModel.Enabled,
 			FallbackChain:                newModel.FallbackChain,
 			TruncateParams:               newModel.TruncateParams,
+			Kind:                         newModel.Kind,
 			Internal:                     newModel.Internal,
 			Credentials:                  newModel.Credentials,
 			InternalBaseURL:              newModel.InternalBaseURL,
@@ -948,6 +1072,76 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// ImgGen Models commission / T1.2.3: PUT mirrors the POST
+		// inline image-gen validation. Identical rules (helper
+		// would invite drift; the inline form matches the existing
+		// peak-hour / secondary-upstream 400 patterns at
+		// server.go:1042-1059).
+		if updatedModel.Kind != "" && updatedModel.Kind != models.KindChat && updatedModel.Kind != models.KindImageGen {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("unknown kind %q (expected %q or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen),
+			})
+			return
+		}
+		if updatedModel.Kind == models.KindImageGen {
+			if !updatedModel.Internal {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" requires internal to be true"})
+				return
+			}
+			if updatedModel.InternalModel == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" requires internal_model to be set (the body-rewrite alias has nothing to resolve)"})
+				return
+			}
+			if len(updatedModel.Credentials) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" requires at least one credential"})
+				return
+			}
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider != "" && primaryProvider != "minimax" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q (got %q)", "minimax", primaryProvider),
+				})
+				return
+			}
+			if len(updatedModel.FallbackChain) != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support fallback_chain"})
+				return
+			}
+			if updatedModel.SecondaryUpstreamModel != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support secondary_upstream_model"})
+				return
+			}
+			if updatedModel.PeakHourEnabled {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support peak_hour_enabled"})
+				return
+			}
+			if updatedModel.ReleaseStreamChunkDeadline != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support release_stream_chunk_deadline (image responses are not streamed)"})
+				return
+			}
+		}
+
 		// Keep the same ID
 		updatedModel.ID = id
 
@@ -959,6 +1153,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			Enabled:                      updatedModel.Enabled,
 			FallbackChain:                updatedModel.FallbackChain,
 			TruncateParams:               updatedModel.TruncateParams,
+			Kind:                         updatedModel.Kind,
 			Internal:                     updatedModel.Internal,
 			Credentials:                  updatedModel.Credentials,
 			InternalBaseURL:              updatedModel.InternalBaseURL,
