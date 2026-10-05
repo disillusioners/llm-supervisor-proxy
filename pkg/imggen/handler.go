@@ -55,6 +55,14 @@ const (
 	maxResponseBodyBytes = 64 << 20
 )
 
+// maxResponseBodyBytesForTest lets the over-cap unit test use a
+// smaller threshold so the test doesn't have to allocate
+// 64MB+1 bytes (the production constant is preserved above for
+// the live path). 0 means "use the production constant". This
+// is package-private; only the imggen test suite can override
+// it.
+var maxResponseBodyBytesForTest int64
+
 // Handler is the /v1/image_generation HTTP handler. Construction
 // is the single composition root in main.go: pass the config
 // manager (for the deadline), the event bus (for telemetry), the
@@ -383,7 +391,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// triggers a separate branch below; the over-cap body is
 	// never materialized into a second []byte — single read,
 	// single classification, single relay).
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
+	cap := int64(maxResponseBodyBytes)
+	if maxResponseBodyBytesForTest > 0 {
+		cap = maxResponseBodyBytesForTest
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
 	if err != nil {
 		h.publishEvent("image_generation", map[string]interface{}{
 			"outcome":        "upstream_read_failed",
@@ -397,17 +409,17 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		h.meterFailure(r, authToken, modelID, "upstream_read_failed")
 		return
 	}
-	if len(respBody) > maxResponseBodyBytes {
+	if len(respBody) > int(cap) {
 		h.publishEvent("image_generation", map[string]interface{}{
 			"outcome":        "response_too_large",
 			"model":          modelID,
 			"provider":       cred.Provider,
-			"max_bytes":      maxResponseBodyBytes,
+			"max_bytes":      cap,
 			"duration_ms":    time.Since(startTime).Milliseconds(),
 			"upstream_status": resp.StatusCode,
 		})
 		h.openAIError(w, http.StatusBadGateway,
-			fmt.Sprintf("upstream response exceeds %d MB cap (BE-G2)", maxResponseBodyBytes>>20))
+			fmt.Sprintf("upstream response exceeds %d MB cap (BE-G2)", cap>>20))
 		h.meterFailure(r, authToken, modelID, "response_too_large")
 		return
 	}
