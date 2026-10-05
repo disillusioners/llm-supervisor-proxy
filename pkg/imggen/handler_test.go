@@ -680,6 +680,96 @@ func TestHandler_RAMDiscipline_AuditSentinel(t *testing.T) {
 	t.Skip("static audit sentinel — see task 1.8.2 / SC8 / Amendment 12")
 }
 
+// disconnectWriter is an http.ResponseWriter whose body write
+// blocks until `release` is closed, then fails — simulating a
+// client that goes away mid-relay (the upstream response is
+// already fully read when the handler attempts the client
+// write). writeEntered is closed when the handler attempts the
+// body write, so the test can cancel the request context at a
+// deterministic point (review F1).
+type disconnectWriter struct {
+	header       http.Header
+	code         int
+	ctx          context.Context
+	writeEntered chan struct{}
+	enterOnce    sync.Once
+	release      chan struct{}
+}
+
+func newDisconnectWriter(ctx context.Context) *disconnectWriter {
+	return &disconnectWriter{
+		header:       make(http.Header),
+		ctx:          ctx,
+		writeEntered: make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+}
+
+func (w *disconnectWriter) Header() http.Header { return w.header }
+
+func (w *disconnectWriter) WriteHeader(code int) { w.code = code }
+
+func (w *disconnectWriter) Write(p []byte) (int, error) {
+	w.enterOnce.Do(func() { close(w.writeEntered) })
+	<-w.release // hold until the test simulates the disconnect
+	return 0, w.ctx.Err()
+}
+
+// Review F1 — metering must survive a client disconnect. The
+// upstream call has completed by the time metering runs, so the
+// billing writes go to a detached context; a request context
+// cancelled mid-relay (client gone) must not suppress them.
+// Regression guard: meter() used to run on r.Context(), so the
+// usage rows silently vanished on disconnect ("we still bill"
+// claim at the write-failure branch was false).
+func TestHandler_Metering_SurvivesClientDisconnect(t *testing.T) {
+	env := newEnv(t, fakeScript{status: 200, body: successBody(1, 0)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := httptest.NewRequest(http.MethodPost, "/v1/image_generation", strings.NewReader(`{"model":"`+env.modelID+`"}`))
+	r.Header.Set("Authorization", defaultAuthHeader)
+	r = r.WithContext(ctx)
+	w := newDisconnectWriter(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.handler.HandleImageGeneration(w, r)
+	}()
+
+	// Wait until the upstream response is fully relayed into the
+	// (blocking) client write — the upstream is complete and the
+	// handler is mid-relay.
+	select {
+	case <-w.writeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never reached the client write")
+	}
+
+	cancel()         // simulate the disconnect cancelling the request context
+	close(w.release) // the client write now fails like a dead-client write
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not finish after disconnect")
+	}
+
+	// The point of the fix: usage rows exist despite the cancelled
+	// request context (request_count=1, image_count=1).
+	rows, err := env.usage.GetModelUsage(context.Background(), startHour(time.Now()), startHour(time.Now()))
+	if err != nil {
+		t.Fatalf("GetModelUsage: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 model usage row despite disconnect, got %d", len(rows))
+	}
+	if rows[0].RequestCount != 1 || rows[0].ImageCount != 1 {
+		t.Errorf("request_count=%d image_count=%d, want 1/1 (metering must survive disconnect)", rows[0].RequestCount, rows[0].ImageCount)
+	}
+}
+
 // T1.7.2 — Metering: success ⇒ image_count=1.
 func TestHandler_Metering_Success_ImageCount1(t *testing.T) {
 	env := newEnv(t, fakeScript{status: 200, body: successBody(1, 0)})

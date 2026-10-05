@@ -381,7 +381,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			"upstream_status": 0,
 		})
 		h.openAIError(w, status, fmt.Sprintf("upstream request failed: %v", err))
-		h.meterFailure(r, authToken, modelID, outcome)
+		h.meterFailure(authToken, modelID, outcome)
 		return
 	}
 	defer resp.Body.Close()
@@ -406,7 +406,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			"upstream_status": resp.StatusCode,
 		})
 		h.openAIError(w, http.StatusBadGateway, "upstream read failed")
-		h.meterFailure(r, authToken, modelID, "upstream_read_failed")
+		h.meterFailure(authToken, modelID, "upstream_read_failed")
 		return
 	}
 	if len(respBody) > int(cap) {
@@ -420,7 +420,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		})
 		h.openAIError(w, http.StatusBadGateway,
 			fmt.Sprintf("upstream response exceeds %d MB cap (BE-G2)", cap>>20))
-		h.meterFailure(r, authToken, modelID, "response_too_large")
+		h.meterFailure(authToken, modelID, "response_too_large")
 		return
 	}
 
@@ -477,7 +477,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		n, _ := provider.BillableImages(respBody)
 		billable = n
 	}
-	h.meter(r.Context(), authToken, modelID, billable)
+	h.meter(authToken, modelID, billable)
 
 	// Telemetry. Plain map (BE-E1); outcome + success/failure
 	// counts lifted from the response body when classification
@@ -552,12 +552,23 @@ func extractAPIKey(r *http.Request) string {
 // also bumps request_count but not image_count — Amendment 14
 // documented divergence from chat's success-only convention).
 //
+// Metering runs on a DETACHED context (Background + 5s bound),
+// never the request context: the upstream call has already
+// completed by the time metering runs, so a client disconnect
+// mid-relay must not cancel the billing (review F1; chat
+// precedent — pkg/proxy/handler.go increments its usage counter
+// on context.Background()).
+//
 // Nil-safe: when h.usage is nil, the call is a no-op so legacy /
 // test setups work without a usage counter.
-func (h *Handler) meter(ctx context.Context, authToken *auth.AuthToken, modelID string, imageCount int) {
+func (h *Handler) meter(authToken *auth.AuthToken, modelID string, imageCount int) {
 	if h.usage == nil {
 		return
 	}
+	// Deliberately detached from the request context (see doc
+	// comment); 5s bounds the DB write.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	hourBucket := time.Now().UTC().Format("2006-01-02T15")
 	var tokenID string
 	if authToken != nil {
@@ -577,10 +588,13 @@ func (h *Handler) meter(ctx context.Context, authToken *auth.AuthToken, modelID 
 // meterFailure increments request_count only (imageCount=0) for
 // mapped-error paths. Per Amendment 14, the image route counts
 // request_count on success AND on mapped errors; chat counts
-// request_count only on success.
-func (h *Handler) meterFailure(r *http.Request, authToken *auth.AuthToken, modelID, outcome string) {
+// request_count only on success. Metering is detached from the
+// request context (see meter) — mapped-error paths include
+// client-visible timeouts where the request context may already
+// be dead.
+func (h *Handler) meterFailure(authToken *auth.AuthToken, modelID, outcome string) {
 	_ = outcome // reserved for future structured metering — currently a no-op
-	h.meter(r.Context(), authToken, modelID, 0)
+	h.meter(authToken, modelID, 0)
 }
 
 // publishEvent is a nil-safe wrapper around bus.Publish. The map
