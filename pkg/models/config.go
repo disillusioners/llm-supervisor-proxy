@@ -83,6 +83,105 @@ func GetConfigPath() string {
 // the JSON column and the engine inputs stay aligned.
 const MaxCredentialRefs = 16
 
+// Kind discriminator values (ImgGen Models commission / BE-D1).
+// Models default to chat (empty/KindChat); image-gen models are served
+// exclusively by /v1/image_generation and excluded from /v1/models and
+// the chat picker surfaces. Unknown values are rejected by Validate.
+const (
+	// KindChat is the default; every existing pre-ImgGen model is
+	// implicitly chat. Empty Kind also normalizes to chat.
+	KindChat = "chat"
+
+	// KindImageGen marks models served by /v1/image_generation.
+	// Per BE-D2 these require Internal==true, InternalModel!="",
+	// Credentials non-empty, provider=="minimax", FallbackChain empty,
+	// SecondaryUpstreamModel=="", PeakHourEnabled==false,
+	// ReleaseStreamChunkDeadline==0. Excluded from /v1/models.
+	KindImageGen = "image-gen"
+)
+
+// IsImageGen reports whether the model is served by the image
+// generation endpoint. Empty Kind is treated as chat.
+func (m *ModelConfig) IsImageGen() bool {
+	return m != nil && m.Kind == KindImageGen
+}
+
+// ValidateKindRules enforces the `kind` discriminator rules
+// (ImgGen Models commission / BE-D2). It is the single source of
+// truth called from BOTH `ModelsConfig.Validate` (JSON-file backend)
+// AND `ModelsManager.validateModelAgainstCredentials` (DB-backed
+// production write path) — the Architect Amendment 2 split-brain
+// fix. Returns nil for empty/KindChat (existing chat rules apply
+// unchanged).
+//
+// `internalProvider` is the lowercase provider string of the model's
+// PRIMARY credential (`Credentials[0]`). Pass "" when unknown — the
+// provider check is then skipped and the image-gen row with a
+// non-minimax provider will be caught the moment the credential is
+// persisted (the legacy `validateModelAgainstCredentials` per-ref
+// provider-match invariant still fires).
+//
+// The caller is responsible for the cross-cutting chat-validation
+// rules (InternalModel != "" when Internal, credentials non-empty,
+// etc.); this helper ONLY adds the kind-specific gates. The
+// image-gen rule set is:
+//
+//   - Internal == true
+//   - InternalModel != "" (the body-rewrite alias has a target)
+//   - Credentials non-empty
+//   - internalProvider == "minimax" (Phase 1 ships minimax-only)
+//   - FallbackChain empty
+//   - SecondaryUpstreamModel == ""
+//   - PeakHourEnabled == false
+//   - ReleaseStreamChunkDeadline == 0 (no stream chunks in image resp)
+//
+// Unknown `kind` values are rejected (typo protection — `image_gen`
+// silently meaning chat is exactly the failure mode this guard
+// prevents).
+func ValidateKindRules(m *ModelConfig, internalProvider string) error {
+	if m == nil {
+		return nil
+	}
+	switch m.Kind {
+	case "", KindChat:
+		return nil
+	case KindImageGen:
+		return validateImageGenRules(m, internalProvider)
+	default:
+		return fmt.Errorf("model %s: unknown kind %q (expected %q or %q)", m.ID, m.Kind, KindChat, KindImageGen)
+	}
+}
+
+// validateImageGenRules enforces the image-gen rule set (BE-D2).
+// Pulled out of ValidateKindRules for readability.
+func validateImageGenRules(m *ModelConfig, internalProvider string) error {
+	if !m.Internal {
+		return fmt.Errorf("model %s: kind %q requires internal to be true", m.ID, KindImageGen)
+	}
+	if m.InternalModel == "" {
+		return fmt.Errorf("model %s: kind %q requires internal_model to be set (the body-rewrite alias has nothing to resolve)", m.ID, KindImageGen)
+	}
+	if len(m.Credentials) == 0 {
+		return fmt.Errorf("model %s: kind %q requires at least one credential", m.ID, KindImageGen)
+	}
+	if internalProvider != "" && internalProvider != "minimax" {
+		return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q (got %q)", m.ID, KindImageGen, "minimax", internalProvider)
+	}
+	if len(m.FallbackChain) != 0 {
+		return fmt.Errorf("model %s: kind %q does not support fallback_chain", m.ID, KindImageGen)
+	}
+	if m.SecondaryUpstreamModel != "" {
+		return fmt.Errorf("model %s: kind %q does not support secondary_upstream_model", m.ID, KindImageGen)
+	}
+	if m.PeakHourEnabled {
+		return fmt.Errorf("model %s: kind %q does not support peak_hour_enabled", m.ID, KindImageGen)
+	}
+	if m.ReleaseStreamChunkDeadline != 0 {
+		return fmt.Errorf("model %s: kind %q does not support release_stream_chunk_deadline (image responses are not streamed)", m.ID, KindImageGen)
+	}
+	return nil
+}
+
 // CredentialRef is a single (credential, weight, position) entry in a
 // model's ordered, weighted credential list.
 //
@@ -142,6 +241,23 @@ type ModelConfig struct {
 
 	// ExcludeFromUltimateSwitching prevents this model from being used in ultimate model switching
 	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
+
+	// Kind discriminates between chat and image-generation models
+	// (ImgGen Models commission / BE-D1). `chat` (default; also
+	// implied by an empty value) is the historical chat / completion
+	// surface; `image-gen` is served exclusively by /v1/image_generation
+	// and is excluded from /v1/models and all chat pickers. Unknown
+	// values are rejected by ModelsConfig.Validate (via the shared
+	// ValidateKindRules helper called from BOTH ModelsConfig.Validate
+	// AND ModelsManager.validateModelAgainstCredentials, per
+	// Architect Amendment 2). Internally, `kind:"image-gen"` also
+	// forces ExcludeFromUltimateSwitching to true on write so the
+	// chat-side path stays correct even if the operator edits a row
+	// from the chat form. Client `fallback_chain`,
+	// `secondary_upstream_model`, `peak_hour_*`, and
+	// `release_stream_chunk_deadline` are rejected on image-gen
+	// rows (BE-D2 + the FE-5 hidden-field posture).
+	Kind string `json:"kind,omitempty"`
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.
@@ -694,6 +810,20 @@ func (mc *ModelsConfig) Validate() error {
 			if model.PeakHourStart == model.PeakHourEnd {
 				return fmt.Errorf("model %s: peak_hour_start and peak_hour_end cannot be the same", model.ID)
 			}
+		}
+
+		// ImgGen Models commission / BE-D2 + Architect Amendment 2:
+		// call the shared kind-rule validator. For image-gen rows the
+		// primary-credential provider is read from mc.Credentials (best
+		// effort, may be nil when the credential set isn't loaded yet).
+		var primaryProvider string
+		if mc.Credentials != nil && len(model.Credentials) > 0 {
+			if pcred := mc.Credentials.GetCredential(model.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+		}
+		if err := ValidateKindRules(&model, primaryProvider); err != nil {
+			return err
 		}
 	}
 

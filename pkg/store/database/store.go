@@ -1666,6 +1666,23 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 		}
 	}
 
+	// ImgGen Models commission / BE-D2 + Architect Amendment 2:
+	// call the shared kind-rule validator. primaryProvider is
+	// the lowercased provider of Credentials[0] (best effort —
+	// unknown primary ⇒ "" so the image-gen provider gate
+	// degrades gracefully). An image-gen row with zero
+	// credentials will be rejected by the image-gen rule
+	// "Credentials non-empty" regardless.
+	var primaryProvider string
+	if len(model.Credentials) > 0 {
+		if pcred := m.GetCredential(model.Credentials[0].CredentialID); pcred != nil {
+			primaryProvider = strings.ToLower(pcred.Provider)
+		}
+	}
+	if err := models.ValidateKindRules(&model, primaryProvider); err != nil {
+		return err
+	}
+
 	return nil
 }
 
