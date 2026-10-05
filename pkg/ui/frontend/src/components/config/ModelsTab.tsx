@@ -149,7 +149,13 @@ export function ModelsTab({
                 <p class="text-gray-400 text-sm">No models configured</p>
               </div>
             ) : (
-              models.map((model) => (
+              // C-16 (fe-spec §2.6 / T2.4.5) — chat-tab client-side filter.
+              // The BE default GET /fe/api/models (no ?kind=) returns ALL
+              // models per BE-D4; this one-line filter is the FE's
+              // belt-and-suspenders so image-gen rows never appear in the
+              // chat Models tab. Degrades to a no-op when kind is absent
+              // from the wire (R1 mitigation: undefined !== 'image-gen').
+              models.filter((model) => model.kind !== 'image-gen').map((model) => (
                 <div
                   key={model.id}
                   class="flex items-center justify-between bg-gray-700/80 rounded-md p-3 border border-gray-600/50 hover:bg-gray-700 transition-colors"
