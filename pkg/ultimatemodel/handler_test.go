@@ -66,6 +66,15 @@ func (m *mockConfigManager) GetMaxGenerationTime() time.Duration {
 	return time.Duration(m.cfg.MaxGenerationTime)
 }
 
+// GetImageGenTimeout returns the per-request deadline for
+// /v1/image_generation (ImgGen Models commission / BE-T1). The
+// ultimatemodel tests don't drive the imggen handler; the 0
+// return is a no-op signal that the package default would apply
+// at the imggen handler seam. Phase 1 test compatibility only.
+func (m *mockConfigManager) GetImageGenTimeout() time.Duration {
+	return time.Duration(m.cfg.ImageGenTimeout)
+}
+
 func (m *mockConfigManager) GetMaxStreamBufferSize() int {
 	return m.cfg.MaxStreamBufferSize
 }

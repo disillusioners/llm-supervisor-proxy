@@ -271,6 +271,16 @@ func (m *ConfigManager) GetMaxGenerationTime() time.Duration {
 	return time.Duration(m.cfg.MaxGenerationTime)
 }
 
+// GetImageGenTimeout returns the configured per-request deadline
+// for /v1/image_generation (ImgGen Models commission / BE-T1).
+// 0 means "use the package default" (the imggen handler's own
+// default, applied at the handler seam).
+func (m *ConfigManager) GetImageGenTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.cfg.ImageGenTimeout)
+}
+
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes
 func (m *ConfigManager) GetMaxStreamBufferSize() int {
 	m.mu.RLock()
