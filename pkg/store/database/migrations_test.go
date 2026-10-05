@@ -611,3 +611,49 @@ var _ = models.MaxCredentialRefs
 func jsonUnmarshalString(s string, v interface{}) error {
 	return json.Unmarshal([]byte(s), v)
 }
+
+// TestMigration029_ForwardFreshDB asserts that migration 029 lands
+// in the registry (CRITICAL — unskippable per Architect Amendment 1
+// + decisions.md BE-M1) AND the image_count column is present on
+// both token_hourly_usage and model_hourly_usage after a fresh
+// RunMigrations. Catches the failure mode where the SQL files are
+// dropped into the dialect dirs but the registry entry is missing
+// (silently inert migration).
+func TestMigration029_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	// schema_migrations must contain row 029.
+	versions, err := store.GetAppliedMigrations(context.Background())
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "029" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 029 (registry append missing) — applied versions: %v", versions)
+	}
+
+	// image_count must be present on both tables.
+	if !columnExists(t, store.DB, "token_hourly_usage", "image_count") {
+		t.Error("image_count column missing from token_hourly_usage (029 SQL not applied)")
+	}
+	if !columnExists(t, store.DB, "model_hourly_usage", "image_count") {
+		t.Error("image_count column missing from model_hourly_usage (029 SQL not applied)")
+	}
+}

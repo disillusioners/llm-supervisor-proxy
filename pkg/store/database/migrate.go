@@ -50,6 +50,12 @@ var migrations = []migration{
 	{"026", "026_add_mcp_servers.up"},
 	{"027", "027_add_exclude_from_ultimate_switching.up"},
 	{"028", "028_add_model_credentials.up"},
+	// ImgGen Models commission / BE-M1 + Architect Amendment 1
+	// (CRITICAL — unskippable). This registry is an ordered slice,
+	// NOT a directory scanner; appending this entry is what
+	// activates the 029 SQL files. Forgetting the append = silently
+	// inert migration (the SQL files load fine but never run).
+	{"029", "029_add_image_count.up"},
 }
 
 // RunMigrations executes database schema migrations
