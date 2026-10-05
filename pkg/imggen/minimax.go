@@ -198,9 +198,9 @@ func (p *minimaxProvider) BillableImages(body []byte) (int, error) {
 // register here without touching the handler.
 var registry = map[string]UpstreamProvider{}
 
-// init registers the MiniMax identity provider. Module-init
-// registration keeps the seam explicit (the package-import
-// happens here) and is cheap (one map entry).
+// init registers the MiniMax identity provider. The map is
+// init-only-written under Go's import-time single-thread invariant
+// (no concurrent access until after main starts), so no mutex.
 func init() {
 	registry[MiniMaxProviderName] = NewMiniMaxProvider()
 }

@@ -2,7 +2,6 @@ package imggen
 
 import (
 	"database/sql"
-	"testing"
 
 	_ "modernc.org/sqlite"
 )
@@ -44,13 +43,4 @@ func openSQLiteForUsage() (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
-}
-
-// ensure compile-time check
-var _ = func(t *testing.T) {
-	db, err := openSQLiteForUsage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
 }

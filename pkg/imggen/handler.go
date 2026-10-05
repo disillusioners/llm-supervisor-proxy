@@ -18,6 +18,7 @@
 package imggen
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,12 @@ const (
 	// constant — not a config knob (thin iteration). The +1
 	// lets the handler detect over-cap distinctly.
 	maxResponseBodyBytes = 64 << 20
+
+	// eventTypeImageGeneration is the events.Bus type for every
+	// telemetry payload the handler publishes (BE-E1). Centralised
+	// so the 15 publish sites stay in lockstep with the
+	// /fe/api/events SSE forwarder contract.
+	eventTypeImageGeneration = "image_generation"
 )
 
 // maxResponseBodyBytesForTest lets the over-cap unit test use a
@@ -169,7 +176,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		// is the only correct pointer target.
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			h.publishEvent("image_generation", map[string]interface{}{
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 				"outcome":         "request_too_large",
 				"max_bytes":       maxRequestBodyBytes,
 				"duration_ms":     time.Since(startTime).Milliseconds(),
@@ -179,7 +186,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 				"request body exceeds 16 MB cap (BE-G1)")
 			return
 		}
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "request_read_failed",
 			"error":           err.Error(),
 			"duration_ms":     time.Since(startTime).Milliseconds(),
@@ -195,7 +202,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// nil ⇒ auth disabled (BE-A1 / Leader Ruling L2).
 	authToken, ok := h.authenticate(r)
 	if !ok {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "auth_failed",
 			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
@@ -211,7 +218,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// canonical decode + alias rewrite.
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "invalid_json",
 			"error":           err.Error(),
 			"duration_ms":     time.Since(startTime).Milliseconds(),
@@ -222,7 +229,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	}
 	modelID, _ := bodyMap["model"].(string)
 	if modelID == "" {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "missing_model",
 			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
@@ -237,11 +244,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// parallel attempts, no race, no loop detection, no
 	// toolcall buffer, no toolrepair — the exclusions table at
 	// phase1-plan.md:L49-59 is binding.
-	modelConfig, ok := h.resolveModel(modelID)
+	_, ok = h.resolveModel(modelID)
 	if !ok {
 		// 404 — unknown model (BE-A1 / Amendment 17). Distinct
 		// from 403 (model known but not in token's allowed_models).
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "model_not_found",
 			"model":           modelID,
 			"duration_ms":     time.Since(startTime).Milliseconds(),
@@ -251,7 +258,6 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			fmt.Sprintf("unknown model %q (image-gen models are served by /v1/image_generation only)", modelID))
 		return
 	}
-	_ = modelConfig // currently unused at the handler layer — IsImageGen() gating lives in pkg/proxy per Leader Ruling L1.
 
 	// 4) Token allow-list check. Empty AllowedModels = all
 	// models allowed (mirrors chat; pkg/auth/token.go:129-144).
@@ -260,7 +266,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// case).
 	if authToken != nil && len(authToken.AllowedModels) > 0 {
 		if !authToken.IsModelAllowed(modelID) {
-			h.publishEvent("image_generation", map[string]interface{}{
+			h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 				"outcome":         "model_not_allowed",
 				"model":           modelID,
 				"token":           authToken.ID,
@@ -279,7 +285,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// Amendment 18.
 	cred, ok := h.resolveCredential(modelID)
 	if !ok {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "credential_unresolved",
 			"model":           modelID,
 			"duration_ms":     time.Since(startTime).Milliseconds(),
@@ -295,7 +301,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// does not silently fall back to a different provider).
 	provider, ok := lookup(cred.Provider)
 	if !ok {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "unsupported_provider",
 			"model":           modelID,
 			"provider":        cred.Provider,
@@ -309,7 +315,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 
 	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, bodyBytes)
 	if err != nil {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "build_failed",
 			"model":           modelID,
 			"error":           err.Error(),
@@ -328,9 +334,9 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), h.imageGenTimeout())
 	defer cancel()
 
-	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, strings.NewReader(string(upstreamBody)))
+	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
 	if err != nil {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "request_build_failed",
 			"model":           modelID,
 			"provider":        cred.Provider,
@@ -372,7 +378,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 			status = http.StatusGatewayTimeout
 			outcome = "deadline"
 		}
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         outcome,
 			"model":           modelID,
 			"provider":        cred.Provider,
@@ -397,7 +403,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	}
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
 	if err != nil {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "upstream_read_failed",
 			"model":           modelID,
 			"provider":        cred.Provider,
@@ -410,7 +416,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(respBody) > int(cap) {
-		h.publishEvent("image_generation", map[string]interface{}{
+		h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 			"outcome":         "response_too_large",
 			"model":           modelID,
 			"provider":        cred.Provider,
@@ -447,9 +453,14 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		// Amendment 5 family decision; the MiniMax-native
 		// client reads base_resp from the preserved body).
 		if outcome.RelayStatus == http.StatusOK {
-			// Defensive: an adapter that returns RelayStatus==200
-			// for a non-success path would silently relabel the
-			// upstream's failure as success. Log + clamp to 502.
+			// FUTURE-PROOFING TRIPWIRE (reviewer-deferred item):
+			// an adapter that returns RelayStatus==200 on a
+			// non-success path would silently relabel the
+			// upstream's failure as success. The Inspector
+			// contract is "non-zero RelayStatus ⇒ fail"; if a
+			// future adapter wants to bypass this clamp it
+			// must signal success through Outcome.RelayStatus==0
+			// (PassAsIs) instead. Log + clamp to 502.
 			log.Printf("[imggen] adapter returned RelayStatus=200 on a non-success outcome (%s) — clamping to 502", outcome.Reason)
 			w.WriteHeader(http.StatusBadGateway)
 		} else {
@@ -498,7 +509,7 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	} else if failedCount > 0 {
 		eventOutcome = "partial_success"
 	}
-	h.publishEvent("image_generation", map[string]interface{}{
+	h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
 		"model":           modelID,
 		"provider":        cred.Provider,
 		"success_count":   successCount,
@@ -644,30 +655,16 @@ func (h *Handler) sendModelNotAllowedError(w http.ResponseWriter, modelName stri
 	})
 }
 
-// resolveModel + resolveCredential are the modelConfig +
-// credential seam. They are defined as interface methods on the
-// Handler so tests can substitute a stub; in production they read
-// from the chat handler's ModelsConfig via a thin shim installed
-// at construction time (see imggenHandlerWithBridge in
-// production.go).
-//
-// In Phase 1 the imggen package is wired to the same
-// ModelsConfig / ResolveInternalConfig seam that chat uses, so a
-// model created via /fe/api/models is reachable through
-// /v1/image_generation without a separate store.
-
-// resolveModel + resolveCredential default stubs. In production
-// the cmd/main.go wiring installs a real implementation via
-// SetModelResolver / SetCredentialResolver (test seam; see the
-// handler_extensions.go file for the production wiring). The
-// default stubs return ok=false so a unit test that forgets to
-// install the shim surfaces as a clean 502 (not a panic).
-//
-// The Handler stores the resolvers as function values; the package
-// owns no ModelsConfigInterface import (the import direction is
-// `pkg/imggen → {pkg/models, pkg/auth, pkg/usage, pkg/events}`
-// only, per BE-R2 / T1.4.1; the production wiring lives in a
-// separate file that the import-guard task 1.8.2 audits).
+// resolveModel + resolveCredential are the modelConfig + credential
+// seam. They are stored as struct fields on the Handler so tests
+// can substitute a stub; in production cmd/main.go:238-251 wires
+// them to the same modelsConfig + ResolveInternalConfigWithAffinity
+// seam the chat path uses (single source of truth for model
+// resolution; no separate store). The default stubs return
+// ok=false so a unit test that forgets to install the shim
+// surfaces as a clean 502 (not a panic). The package owns no
+// ModelsConfigInterface import — the production wiring lives in
+// cmd/main.go (the import guard at task 1.8.2 audits this).
 
 // modelResolver returns the model config for a model ID.
 type modelResolver func(modelID string) (*models.ModelConfig, bool)

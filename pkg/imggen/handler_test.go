@@ -34,8 +34,6 @@ type fakeMiniMax struct {
 	hitCount  atomic.Int64
 	lastBody  []byte
 	lastAuthH string
-	lastCT    string
-	lastHdrs  http.Header
 	script    fakeScript
 	startedCh chan struct{} // closed on first request, optional
 }
@@ -58,8 +56,6 @@ func newFakeMiniMax(t *testing.T, script fakeScript) (*httptest.Server, *fakeMin
 		body, _ := io.ReadAll(r.Body)
 		f.lastBody = body
 		f.lastAuthH = r.Header.Get("Authorization")
-		f.lastCT = r.Header.Get("Content-Type")
-		f.lastHdrs = r.Header.Clone()
 		f.mu.Unlock()
 		f.hitCount.Add(1)
 		if script.delay > 0 {
@@ -104,22 +100,14 @@ func mustJSON(v interface{}) []byte {
 // ---------- Handler test harness ----------
 
 type handlerTestEnv struct {
-	t               *testing.T
-	upstream        *httptest.Server
-	fake            *fakeMiniMax
-	handler         *Handler
-	bus             *events.Bus
-	usage           *usage.Counter
-	usageDB         *usageCounterDB
-	tokenStore      *memTokenStore
-	modelID         string
-	credBaseURL     string
-	imageGenTimeout time.Duration
-}
-
-type usageCounterDB struct {
-	mu sync.Mutex
-	db map[string]int // key = "token:model:hour"
+	t          *testing.T
+	upstream   *httptest.Server
+	fake       *fakeMiniMax
+	handler    *Handler
+	bus        *events.Bus
+	usage      *usage.Counter
+	tokenStore *memTokenStore
+	modelID    string
 }
 
 // memTokenStore is an in-memory auth.TokenStoreInterface used by
@@ -277,17 +265,14 @@ func newEnv(t *testing.T, script fakeScript) *handlerTestEnv {
 	ts.add(tok)
 
 	return &handlerTestEnv{
-		t:               t,
-		upstream:        upstream,
-		fake:            fake,
-		handler:         h,
-		bus:             bus,
-		usage:           uc,
-		usageDB:         &usageCounterDB{db: map[string]int{}},
-		tokenStore:      ts,
-		modelID:         modelID,
-		credBaseURL:     credBaseURL,
-		imageGenTimeout: 200 * time.Millisecond,
+		t:          t,
+		upstream:   upstream,
+		fake:       fake,
+		handler:    h,
+		bus:        bus,
+		usage:      uc,
+		tokenStore: ts,
+		modelID:    modelID,
 	}
 }
 
@@ -708,8 +693,6 @@ func TestPackage_ImportGuard_NoProxyImports(t *testing.T) {
 // body write, so the test can cancel the request context at a
 // deterministic point (review F1).
 type disconnectWriter struct {
-	header       http.Header
-	code         int
 	ctx          context.Context
 	writeEntered chan struct{}
 	enterOnce    sync.Once
@@ -718,16 +701,15 @@ type disconnectWriter struct {
 
 func newDisconnectWriter(ctx context.Context) *disconnectWriter {
 	return &disconnectWriter{
-		header:       make(http.Header),
 		ctx:          ctx,
 		writeEntered: make(chan struct{}),
 		release:      make(chan struct{}),
 	}
 }
 
-func (w *disconnectWriter) Header() http.Header { return w.header }
+func (w *disconnectWriter) Header() http.Header { return make(http.Header) }
 
-func (w *disconnectWriter) WriteHeader(code int) { w.code = code }
+func (w *disconnectWriter) WriteHeader(code int) {}
 
 func (w *disconnectWriter) Write(p []byte) (int, error) {
 	w.enterOnce.Do(func() { close(w.writeEntered) })

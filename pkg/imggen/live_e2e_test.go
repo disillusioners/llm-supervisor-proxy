@@ -25,58 +25,17 @@ package imggen
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
-
-// envFilePath is the absolute path the test reads the MiniMax
-// API key from. Per HR-4, the worktree MUST NOT contain
-// .env-minimax — the key is sourced only by this absolute path.
-const envFilePath = "/home/nea/Code/opensource-projects/llm-supervisor-proxy/.env-minimax"
-
-// loadAPIKeyFromAbsolutePath sources the .env-minimax file via
-// `bash -c "source <abs> && echo -n $MINIMAX_API_KEY"`. The
-// in-process env is then populated so the test can read the
-// key from os.Getenv. The key is NEVER copied into the worktree
-// or the test source.
-func loadAPIKeyFromAbsolutePath(t *testing.T) (string, bool) {
-	t.Helper()
-	if _, err := os.Stat(envFilePath); err != nil {
-		return "", false
-	}
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("source %q && echo -n \"$MINIMAX_API_KEY\"", envFilePath))
-	out, err := cmd.Output()
-	if err != nil {
-		return "", false
-	}
-	key := strings.TrimSpace(string(out))
-	if key == "" {
-		return "", false
-	}
-	return key, true
-}
-
-// maskKey returns the key with all but the last 4 chars replaced
-// with asterisks. Used in any log / assertion / error message
-// so a grep for the key value never finds it (HR-3).
-func maskKey(key string) string {
-	if len(key) <= 4 {
-		return "****"
-	}
-	return strings.Repeat("*", len(key)-4) + key[len(key)-4:]
-}
 
 // TestLiveE2E_HappyPath is the only live e2e call the Phase 1
 // implementation makes (HR-2 budget = 3, ledger reserves 2 for
@@ -85,6 +44,10 @@ func maskKey(key string) string {
 // real MiniMax image generation call through the proxy and
 // asserts: HTTP 200, non-empty data.image_urls, no MINIMAX_API_KEY
 // occurrences in the captured log/assertion output (HR-3).
+//
+// loadAPIKeyFromAbsolutePath / maskKey live in the untagged
+// file (no_key_in_artifacts_test.go) so the static-check test
+// compiles in the default `go test` suite.
 func TestLiveE2E_HappyPath(t *testing.T) {
 	apiKey, ok := loadAPIKeyFromAbsolutePath(t)
 	if !ok {
@@ -179,38 +142,3 @@ func TestLiveE2E_HappyPath(t *testing.T) {
 	}
 	t.Logf("[live e2e] success: %d image URL(s) returned (key=%s)", len(data), masked)
 }
-
-// TestLiveE2E_NoKeyInArtifacts is a static check: the test
-// source MUST NOT contain the API key value. The grep pattern
-// is intentionally permissive (any non-empty string starting
-// with sk- followed by hex); a real key would match. Catches
-// the failure mode where a test author pastes a key into the
-// source.
-func TestLiveE2E_NoKeyInArtifacts(t *testing.T) {
-	// The package sources the key from the absolute-path env
-	// file at run time. There is no static key to leak. The
-	// check is a meta-assertion: the test file is the
-	// assertion.
-	apiKey, ok := loadAPIKeyFromAbsolutePath(t)
-	if !ok {
-		t.Skip("no key; static-check only")
-	}
-	masked := maskKey(apiKey)
-	// The masked form (****...last4) is the only allowed
-	// key-bearing string in the test source. If a contributor
-	// pastes the plaintext key, the masked form would change
-	// to the real key; this test exists to remind the next
-	// reader.
-	if strings.Contains(t.Name(), apiKey) {
-		t.Fatalf("test name contains plaintext key")
-	}
-	t.Logf("[live e2e] key masked for artifacts: %s", masked)
-}
-
-// Ensure the auth package is used (so an import-only refactor
-// doesn't drop it).
-var _ = auth.HashToken
-
-// Ensure the usage package is used (so the live e2e is wired
-// to a real usage counter when the test driver wants it).
-var _ = usage.NewCounter

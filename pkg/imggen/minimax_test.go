@@ -1,6 +1,7 @@
 package imggen
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -180,19 +181,19 @@ func TestMiniMax_BuildUpstream(t *testing.T) {
 	}
 	// Verify body model rewrite + other keys preserved.
 	ubStr := string(ub)
-	if !contains(ubStr, `"model":"image-01"`) {
+	if !strings.Contains(ubStr, `"model":"image-01"`) {
 		t.Errorf("upstream body missing model rewrite: %s", ubStr)
 	}
-	if !contains(ubStr, `"prompt":"a cat"`) {
+	if !strings.Contains(ubStr, `"prompt":"a cat"`) {
 		t.Errorf("upstream body missing prompt: %s", ubStr)
 	}
-	if !contains(ubStr, `"n":1`) {
+	if !strings.Contains(ubStr, `"n":1`) {
 		t.Errorf("upstream body missing n: %s", ubStr)
 	}
-	if !contains(ubStr, `"style":"foo"`) {
+	if !strings.Contains(ubStr, `"style":"foo"`) {
 		t.Errorf("upstream body missing style (CN param must pass through): %s", ubStr)
 	}
-	if contains(ubStr, `"model":"minimax-image-01"`) {
+	if strings.Contains(ubStr, `"model":"minimax-image-01"`) {
 		t.Errorf("upstream body still carries client-facing model (should be rewritten): %s", ubStr)
 	}
 }
@@ -210,7 +211,7 @@ func TestMiniMax_BuildUpstream_TrailingSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildUpstream error: %v", err)
 	}
-	if !contains(string(ub), `"model":"image-01"`) {
+	if !strings.Contains(string(ub), `"model":"image-01"`) {
 		t.Errorf("upstream body should rewrite model to image-01: %s", string(ub))
 	}
 }
@@ -240,13 +241,4 @@ func TestRegistry_MiniMaxRegistered(t *testing.T) {
 	if p == nil {
 		t.Fatal("registry returned nil for minimax")
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

@@ -164,6 +164,10 @@ func validateImageGenRules(m *ModelConfig, internalProvider string) error {
 	if len(m.Credentials) == 0 {
 		return fmt.Errorf("model %s: kind %q requires at least one credential", m.ID, KindImageGen)
 	}
+	// Pass "" from callers without a loaded credential (JSON-file
+	// Validate path); the per-ref provider-match invariant in
+	// ModelsManager.validateModelAgainstCredentials catches the
+	// non-minimax provider at DB write time.
 	if internalProvider != "" && internalProvider != "minimax" {
 		return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q (got %q)", m.ID, KindImageGen, "minimax", internalProvider)
 	}
