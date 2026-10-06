@@ -56,6 +56,11 @@ var migrations = []migration{
 	// activates the 029 SQL files. Forgetting the append = silently
 	// inert migration (the SQL files load fine but never run).
 	{"029", "029_add_image_count.up"},
+	// Ship-blocker fix 2026-10-06 (kind persistence): Amendment-1
+	// trap applies — this registry is an ordered slice, NOT a
+	// directory scanner; without this append the 030 SQL files are
+	// silently inert and image-gen kind stays memory-only.
+	{"030", "030_add_model_kind.up"},
 }
 
 // RunMigrations executes database schema migrations

@@ -1,0 +1,29 @@
+-- Migration 030: Add `kind` discriminator column to `models`
+-- (ImgGen Models commission — ship-blocker fix, 2026-10-06).
+--
+-- ModelConfig.Kind is the chat / image-gen discriminator
+-- (pkg/models/config.go BE-D1). The commission's FE filter and the
+-- /v1/models leak path both branch on it, but the store layer never
+-- persisted it: post-restart every image-gen model loaded as chat
+-- (Kind == "") — leaking into chat surfaces and vanishing from the
+-- ImgGen tab. This column is the persistence half of that fix; the
+-- load mappings normalize NULL/'' → "" (chat) via coalesce(kind, '')
+-- and the write paths (InsertModel / UpdateModel) bind model.Kind.
+--
+-- Semantics: NULL or '' = chat (back-compat — every pre-ImgGen row
+-- is implicitly chat); 'image-gen' = image. Nullable TEXT with no
+-- DEFAULT: legacy rows keep NULL and normalize to chat on load, so
+-- no backfill statement is needed.
+--
+-- Registry note: migration 029's header reserved "030+" for the
+-- models.credential_id shadow-column drop promised in 028's
+-- comments (M-1 teardown). That drop moves to a later number;
+-- 030 is the kind column so the ship-blocker fix lands adjacent
+-- to the commission's other migrations (029).
+--
+-- Down form (separate file): plain DROP COLUMN (the 023 form —
+-- NOT 022's "DROP COLUMN IF EXISTS"; SQLite's grammar has no
+-- IF EXISTS. Downs are manual-run artifacts; see the 029 down
+-- operator note for the schema_migrations hygiene step).
+
+ALTER TABLE models ADD COLUMN kind TEXT;
