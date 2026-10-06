@@ -490,6 +490,11 @@ func TestHandler_CredentialUnresolved_502(t *testing.T) {
 	if env.fake.hitCount.Load() != 0 {
 		t.Errorf("upstream was called despite credential failure: hit count = %d", env.fake.hitCount.Load())
 	}
+	// 502 body must be a structured OpenAI JSON envelope (the
+	// client gets a parseable error, not an empty body).
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"error"`)) {
+		t.Errorf("502 body must be a JSON envelope with an \"error\" field, got=%s", rec.Body.String())
+	}
 }
 
 // T1.7.2 — auth gating: invalid token ⇒ 401; no upstream call.
@@ -651,6 +656,11 @@ func TestHandler_ResponseOverCap_502(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte("upstream response exceeds")) {
 		t.Errorf("expected over-cap error message, got=%s", rec.Body.String())
+	}
+	// The over-cap 502 is also a structured envelope (same
+	// openAIError path as the other handler-side 502s).
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"error"`)) {
+		t.Errorf("502 body must be a JSON envelope with an \"error\" field, got=%s", rec.Body.String())
 	}
 }
 
