@@ -271,6 +271,16 @@ func (m *ConfigManager) GetMaxGenerationTime() time.Duration {
 	return time.Duration(m.cfg.MaxGenerationTime)
 }
 
+// GetImageGenTimeout returns the configured per-request deadline
+// for /v1/image_generation (ImgGen Models commission / BE-T1).
+// 0 means "use the package default" (the imggen handler's own
+// default, applied at the handler seam).
+func (m *ConfigManager) GetImageGenTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.cfg.ImageGenTimeout)
+}
+
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes
 func (m *ConfigManager) GetMaxStreamBufferSize() int {
 	m.mu.RLock()
@@ -467,6 +477,10 @@ type dbModelRow struct {
 	SecondaryUpstreamModel string
 	// Exclude from ultimate model switching
 	ExcludeFromUltimateSwitching interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
+	// Kind discriminator (migration 030): "" = chat (legacy rows carry
+	// NULL, normalized to '' by coalesce(kind, '') in every SELECT),
+	// "image-gen" = image (pkg/models.KindImageGen).
+	Kind string
 }
 
 // dbCredentialRow represents a row from the credentials table
@@ -780,6 +794,7 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 			&dbModel.PeakHourModel,
 			&dbModel.SecondaryUpstreamModel,
 			&dbModel.ExcludeFromUltimateSwitching,
+			&dbModel.Kind,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
@@ -801,6 +816,7 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 			PeakHourModel:                dbModel.PeakHourModel,
 			SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 			ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
+			Kind:                         dbModel.Kind,
 		}
 
 		// Parse fallback chain
@@ -833,7 +849,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -842,7 +858,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -867,6 +883,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
+		&dbModel.Kind,
 	)
 	if err != nil {
 		return nil
@@ -888,6 +905,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		PeakHourModel:                dbModel.PeakHourModel,
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
+		Kind:                         dbModel.Kind,
 	}
 
 	// Parse fallback chain
@@ -913,7 +931,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')
 		FROM models WHERE name = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -922,7 +940,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')
 			FROM models WHERE name = $1`
 	}
 
@@ -947,6 +965,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
+		&dbModel.Kind,
 	)
 	if err != nil {
 		return nil
@@ -968,6 +987,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		PeakHourModel:                dbModel.PeakHourModel,
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
+		Kind:                         dbModel.Kind,
 	}
 
 	// Parse fallback chain
@@ -1056,14 +1076,14 @@ const modelSelectColumnsPG = `id, name, enabled, fallback_chain_json, truncate_p
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false)`
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')`
 
 const modelSelectColumnsSQLite = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0)`
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')`
 
 // modelSelectQuery returns the dialect-appropriate single-model
 // SELECT used by the strict reads (same shape the legacy GetModel /
@@ -1095,6 +1115,7 @@ func dbModelRowToConfig(dbModel *dbModelRow) *models.ModelConfig {
 		PeakHourModel:                dbModel.PeakHourModel,
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
+		Kind:                         dbModel.Kind,
 	}
 
 	// Parse fallback chain
@@ -1139,6 +1160,7 @@ func (m *ModelsManager) getModelStrict(ctx context.Context, query, arg string) (
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
+		&dbModel.Kind,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1220,6 +1242,7 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
+		&dbModel.Kind,
 	)
 	if err != nil {
 		return nil
@@ -1268,6 +1291,7 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
+		&dbModel.Kind,
 	)
 	if err != nil {
 		return nil
@@ -1324,7 +1348,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
@@ -1361,6 +1385,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.PeakHourModel,
 		model.SecondaryUpstreamModel,
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
+		model.Kind,
 	)
 	if err != nil {
 		return err // no engine invalidation on write failure (P2-4)
@@ -1410,7 +1435,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -1445,6 +1470,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.PeakHourModel,
 		model.SecondaryUpstreamModel,
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
+		model.Kind,
 		modelID,
 	)
 	if err != nil {
@@ -1469,7 +1495,7 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -1664,6 +1690,23 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 		if model.PeakHourStart == model.PeakHourEnd {
 			return fmt.Errorf("model %s: peak_hour_start and peak_hour_end cannot be the same", model.ID)
 		}
+	}
+
+	// ImgGen Models commission / BE-D2 + Architect Amendment 2:
+	// call the shared kind-rule validator. primaryProvider is
+	// the lowercased provider of Credentials[0] (best effort —
+	// unknown primary ⇒ "" so the image-gen provider gate
+	// degrades gracefully). An image-gen row with zero
+	// credentials will be rejected by the image-gen rule
+	// "Credentials non-empty" regardless.
+	var primaryProvider string
+	if len(model.Credentials) > 0 {
+		if pcred := m.GetCredential(model.Credentials[0].CredentialID); pcred != nil {
+			primaryProvider = strings.ToLower(pcred.Provider)
+		}
+	}
+	if err := models.ValidateKindRules(&model, primaryProvider); err != nil {
+		return err
 	}
 
 	return nil

@@ -1,9 +1,9 @@
 # Test Packs
 
 ## Summary
-- Total: 14 unit packs (12 prior + gzipmw_unit_test + build_gate_test, added 2026-08-28 for the gzip feature gate) + mock/E2E packs below, across 37 Go packages; + 2 FE inline packs (fe_vitest_suite, fe_typecheck, added 2026-09-22)
-- Unit: 14 | Integration: 1 | E2E: 1 | Mock: 1
-- All packs enforce **2-minute timeout** via `timeout` command (subprocess-based)
+- Total: 17 unit packs (14 prior + imggen_unit_test + orphan_unit_test + e2e_mock_regression_test, added 2026-10-06 for the imggen final verification) + mock/E2E packs below, across 40 Go packages; + 2 FE inline packs (fe_vitest_suite, fe_typecheck)
+- Unit: 17 | Integration: 1 | E2E: 1 | Mock: 1
+- All packs enforce dual-layer timeout (`timeout` command outer + script/go-test internal)
 
 ## Timeout Configuration
 - **Script timeout**: 120s (`timeout 120s`)
@@ -15,24 +15,29 @@
 
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
-| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-08-28 | PASS (446+475 sub, 0 fail, 7 branch-gated skips; @ 22e76d6 rsd merge gate) |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-08-28 | PASS (152+87 sub, 0 fail, +7 vs d6368bd; @ 22e76d6 rsd merge gate) |
-| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-08-28 | PASS (99 + 4 PG-skips; quarantined CloseLifecycle did NOT fire; @ 7a9ecff gzip gate) |
-| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-08-28 | PASS (87 + 267 sub; @ 7a9ecff gzip gate) |
-| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-08-28 | PASS (17/105; @ 7a9ecff gzip gate) |
-| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-08-28 | PASS (33/33; @ 22e76d6 rsd gate) |
-| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-08-28 | PASS (48+39; @ 22e76d6 rsd gate) |
-| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts, encoding, extraction | 120s | 2026-08-28 | PASS (ok 0.158s non-verbose; prior baseline 23 + 123 sub; @ 7a9ecff gzip gate) |
-| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-08-28 | PASS (245+471, 3 env-conditional SSRF skips; @ 7a9ecff gzip gate) |
-| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-08-28 | PASS (284+119, 9 pkgs; @ 22e76d6 rsd gate) |
-| translator_unit_test | test/packs/translator_unit_test.sh | pkg/proxy/translator — wire translation incl. incremental_stream (real-streaming-default Phase 3) | 120s | 2026-08-28 | PASS (169 entries, 19 incremental_stream cases; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
-| gap_unit_test | test/packs/gap_unit_test.sh | credentiallb, proxyheader, proxy/normalizers, loopdetection/fingerprint, store parent (memory) | 120s | 2026-08-28 | PASS (274 entries, 118 funcs; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
-| testroot_unit_test | test/packs/testroot_unit_test.sh | test/ root — access_control + integration_allowed_models | 120s | 2026-08-28 | PASS (35 entries; FIRST registered run — closed coverage gap; @ 22e76d6 rsd gate) |
-| gzipmw_unit_test | test/packs/gzipmw_unit_test.sh | pkg/middleware/gzipmw — gzip request-body decompression middleware (21 test funcs) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
-| build_gate_test | test/packs/build_gate_test.sh | go build ./... + go vet ./... (Go-only gate; npm/tsc excluded by design — 30 standing tsc errors are known baseline debt) | 120s | — | PASS (FIRST run 2026-08-28; @ 7a9ecff gzip gate) |
-| reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS (2 funcs / 14 subtests; @ 7a9ecff gzip gate) |
-| fe_vitest_suite | inline: `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE windowing + RequestDetail (npm-managed, happy-dom) | 300s outer | 2026-09-22 | PASS 52/52 (36 windowing + 16 component; @ 7022be1 fix/fe-scroll-long-last-message pre-commit gate; ran ×2 incl. post-stash-pop) |
-| fe_typecheck | inline: `cd pkg/ui/frontend && timeout 240 npx tsc --noEmit` | FE TypeScript error gate (vite build does NOT type-check) | 240s | 2026-09-22 | PASS-scoped (0 new-debt in changed files; 30 pre-existing baseline errors in unrelated files — documented debt) |
+| proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-10-06 | PASS (474P/0F/7S long-wait heartbeat skips; incl. NEW imggen misroute+filter tests; @ e2d93c3 imggen final verification) |
+| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-10-06 | PASS (169+101 sub, 0 fail; @ e2d93c3 imggen final verification) |
+| store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-10-06 | PASS (182P/0F/4S PG-conditional skips; migration 029 fresh-DB green; imggen kind gates 8/8; CloseLifecycle ran+passed on Linux; re-verified post pack-script fix @ 3ea122c) |
+| models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-10-06 | PASS (92 top/276 sub incl. full kind-discriminator validation matrix; @ e2d93c3) |
+| toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-10-06 | PASS (17/105; @ e2d93c3) |
+| loopdetection_unit_test | test/packs/loopdetection_unit_test.sh | detector, fingerprint, strategies | 120s | 2026-10-06 | PASS (33/33; @ e2d93c3) |
+| auth_unit_test | test/packs/auth_unit_test.sh | token, store | 120s | 2026-10-06 | PASS (87P/0F/0S; @ e2d93c3) |
+| token_unit_test | pkg/proxy/token/ (inline) | counter, prompts (scope text stale: encoding/extraction files no longer present) | 120s | 2026-10-06 | PASS (ok 0.878s non-verbose; @ e2d93c3) |
+| mcp_unit_test | test/packs/mcp_unit_test.sh | pkg/mcp/ — store, validation, auth, proxy, handlers_sse, handlers_streamable, handlers_api, e2e, endpoint_split_validation | 120s | 2026-10-06 | PASS (245 top, 0F/0S; SSRF-hex/octal/decimal guards RAN and PASSED — the 2026-09-22 env-deterministic quarantine no longer reproduces on this VM (needs 3× to formally clear); httpbin.org flake did NOT fire; @ e2d93c3) |
+| misc_unit_test | test/packs/misc_unit_test.sh | config, crypto, events, bufferstore, providers, supervisor, toolcall, ui, usage | 120s | 2026-10-06 | PASS (422P/0F/1S file-gated log-skip; usage 44s incl. IncrementTokenImages/IncrementModelImages; @ e2d93c3) |
+| translator_unit_test | test/packs/translator_unit_test.sh | pkg/proxy/translator — wire translation incl. incremental_stream (real-streaming-default Phase 3) | 120s | 2026-10-06 | PASS (125P/0F/0S; @ 2a7e6d4 pre-bundle — zero .go delta since) |
+| gap_unit_test | test/packs/gap_unit_test.sh | credentiallb, proxyheader, proxy/normalizers, loopdetection/fingerprint, store parent (memory) | 120s | 2026-10-06 | PASS-with-quarantine (284/284 ×2 @ 2a7e6d4; @ 3ea122c 1 FAIL = TestEngine_GetOrSelect_TOCTOU_CoolingReverify — flaky, load-context only, QUARANTINED 2026-10-06; 4/5 pkgs ok incl. isolated 3×P) |
+| testroot_unit_test | test/packs/testroot_unit_test.sh | test/ root — access_control + integration_allowed_models | 120s | 2026-10-06 | PASS (35 top + 8 sub; @ e2d93c3) |
+| gzipmw_unit_test | test/packs/gzipmw_unit_test.sh | pkg/middleware/gzipmw — gzip request-body decompression middleware | 120s | 2026-10-06 | PASS (39P/0F/0S; @ e2d93c3) |
+| build_gate_test | test/packs/build_gate_test.sh | go build ./... + go vet ./... (Go-only gate; npm/tsc excluded by design) | 120s | 2026-10-06 | PASS (4s; @ 2a7e6d4 pre-bundle; re-verified via bundle-regen go build @ e2d93c3) |
+| reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-10-06 | PASS (2 funcs / 14 subtests; @ e2d93c3) |
+| imggen_unit_test | inline: `go test ./pkg/imggen/ -v -count=1 -timeout 110s` (outer `timeout 300`) | pkg/imggen — handler, minimax, no_key_in_artifacts (live_e2e_test.go EXCLUDED via `//go:build live_imggen`) | 300s outer / 110s go | 2026-10-06 | PASS (42P/0F/0S @ 2a7e6d4; re-run 42P @ 548006f after cov-adds +10 assertion lines; NoKeyInArtifacts confirmed EXECUTED untagged; FIRST registered run) — **re-test @ 0d08e3e PASS: 42/0/0 identical baseline (no regression from store fix)** |
+| orphan_unit_test | inline: `go test ./pkg/memlimit/ ./pkg/modelscache/ -count=1 -timeout 110s` (outer `timeout 120`) | pkg/memlimit + pkg/modelscache — pre-existing pack orphans surfaced by 2026-10-06 inventory (formerly one-off regC/regD sweeps) | 120s outer / 110s go | 2026-10-06 | PASS (both ok: 0.009s + 4.101s; FIRST registered run) |
+| e2e_mock_regression_test | inline: `go test ./test/e2e_anthropic_thinking_leak/ ./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/ ./test/e2e_reasoning_content/ ./test/e2e_ultimate_internal_reasoning/ -v -count=1 -timeout 240s` (outer `timeout 300`) | ALL 5 registered in-process httptest e2e mock suites in one invocation | 300s outer / 240s go | 2026-10-06 | PASS (94 RUN / 94 PASS / 0F / 0S; 27s; zero network-shaped errors; FIRST registered combined run) |
+| fe_vitest_suite | inline: `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE full suite (windowing, RequestDetail, ImgGen tab/form/hook, chatFilter, SettingsPage tabs) | 300s outer | 2026-10-06 | PASS 83/83 (7 files; 23 imggen-specific; 5.65s; @ 2a7e6d4 imggen final verification) |
+| fe_typecheck | inline: `cd pkg/ui/frontend && timeout 240 npx tsc --noEmit` | FE TypeScript error gate (vite build does NOT type-check) | 240s | 2026-10-06 | PASS-scoped (26 errors / 11 files = documented baseline; ZERO errors in imggen or commission-touched files; @ 2a7e6d4) |
+
+**2026-10-06 pack-script fix (commit 3ea122c)**: all 15 test/packs/*.sh — the timed `go test` line is now guarded (`|| EXIT_CODE=$?`) so `RESULT: FAIL/TIMEOUT` + verbose evidence are ALWAYS emitted (previously `set -euo pipefail` made failure output unreachable and the EXIT trap destroyed it). FAIL path proven live by the TOCTOU flake the same day.
 
 ## Race Slices (real-streaming-default merge gate 2026-08-28)
 
@@ -253,3 +258,4 @@ blocked ✅
 | race_e2e_g2 | `./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/` | **PASS** — 18.5s (240s historical plain budget NOT approached under race) |
 | race_e2e_anthropic | `./test/e2e_anthropic_thinking_leak/` | **PASS 4/4** — S3 FIXED on this branch (see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md) |
 | race_repo_root | `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |
+| `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |

@@ -44,6 +44,7 @@ func setupStressTestDB(t *testing.T) (*sql.DB, func()) {
 			prompt_tokens      INTEGER NOT NULL DEFAULT 0,
 			completion_tokens  INTEGER NOT NULL DEFAULT 0,
 			total_tokens       INTEGER NOT NULL DEFAULT 0,
+			image_count        INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (token_id, hour_bucket)
 		)
 	`)
@@ -61,6 +62,7 @@ func setupStressTestDB(t *testing.T) (*sql.DB, func()) {
 			prompt_tokens      INTEGER NOT NULL DEFAULT 0,
 			completion_tokens  INTEGER NOT NULL DEFAULT 0,
 			total_tokens       INTEGER NOT NULL DEFAULT 0,
+			image_count        INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (model_id, hour_bucket)
 		)
 	`)
@@ -651,6 +653,7 @@ func BenchmarkConcurrentIncrement(b *testing.B) {
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
+			image_count INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (token_id, hour_bucket)
 		)
 	`)

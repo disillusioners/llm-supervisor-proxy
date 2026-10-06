@@ -4,6 +4,7 @@ import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionCon
 import { getCredentials } from '../hooks/useApi';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
+import { ImgGenModelsTab } from './config/ImgGenModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
@@ -20,6 +21,15 @@ interface SettingsPageProps {
   onAddModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
+  // ImgGen Commission 2026-10-05 (fe-spec §2.5). Pre-filtered server-side
+  // to kind: 'image-gen' via /fe/api/models?kind=image-gen.
+  imgGenModels: Model[];
+  onAddImgGenModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
+  onUpdateImgGenModel: (id: string, updates: Partial<Model>) => Promise<void>;
+  onDeleteImgGenModel: (id: string) => Promise<void>;
+  // Error surfacing for the image-gen list (fe-spec §2.7, A11Y-3).
+  imgGenError?: string | null;
+  onRetryImgGenModels?: () => void;
   tokens: ApiToken[];
   onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
@@ -27,7 +37,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
+type TabType = 'proxy' | 'models' | 'imggen_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -39,6 +49,12 @@ export function SettingsPage({
   onAddModel,
   onUpdateModel,
   onDeleteModel,
+  imgGenModels,
+  onAddImgGenModel,
+  onUpdateImgGenModel,
+  onDeleteImgGenModel,
+  imgGenError,
+  onRetryImgGenModels,
   tokens,
   onCreateToken,
   onDeleteToken,
@@ -197,6 +213,18 @@ export function SettingsPage({
     }
   };
 
+  // ImgGen model handlers (ImgGen Commission 2026-10-05). Mirror the chat
+  // toggle path; the underlying mutation hooks drop both cache keys
+  // ('models' and 'imggen-models') so a cross-tab refetch is consistent.
+  const handleToggleImgGenModel = async (model: Model) => {
+    try {
+      await onUpdateImgGenModel(model.id, { enabled: !model.enabled });
+      addToast('success', 'Image-gen model toggled successfully');
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Failed to toggle image-gen model');
+    }
+  };
+
   // Loop Detection handler
   const handleApplyLoopDetection = async (loopConfig: LoopDetectionConfig) => {
     try {
@@ -283,7 +311,11 @@ export function SettingsPage({
       {/* Tabs */}
       <div class="bg-gray-800 border-b border-gray-700 px-6">
         <div class="flex overflow-x-auto">
+          {/* type="button" on every tab so accidental Enter inside any
+              form mounted below does not submit a form whose button the
+              tab accidentally lives in. A11Y-5 (fe-spec §4.8). */}
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'proxy'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -293,6 +325,7 @@ export function SettingsPage({
             Proxy Settings
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'models'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -301,7 +334,23 @@ export function SettingsPage({
           >
             Models
           </button>
+          {/* ImgGen Commission 2026-10-05 (fe-spec §2.2) — slot 3 of 9, between
+              Models and Credentials. 🖼️ prefix glyph; aria-hidden on the
+              emoji so SRs only announce the binding literal "ImgGen Models". */}
           <button
+            type="button"
+            class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'imggen_models'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('imggen_models')}
+            data-tab-id="imggen_models"
+          >
+            <span aria-hidden="true">🖼️</span>
+            ImgGen Models
+          </button>
+          <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'credentials'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -314,6 +363,7 @@ export function SettingsPage({
             Credentials
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'loop_detection'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -323,6 +373,7 @@ export function SettingsPage({
             Loop Detection
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'tool_repair'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -332,6 +383,7 @@ export function SettingsPage({
             Tool Repair
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'tokens'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -341,6 +393,7 @@ export function SettingsPage({
             Tokens
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'usage'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -350,6 +403,7 @@ export function SettingsPage({
             📊 Usage
           </button>
           <button
+            type="button"
             class={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${activeTab === 'mcp_servers'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-white'
@@ -417,6 +471,27 @@ export function SettingsPage({
               onToggleModel={handleToggleModel}
               setStatus={setStatusWrapper}
               onNavigateToCredentials={() => setActiveTab('credentials')}
+            />
+          )}
+
+          {/* ImgGen Commission 2026-10-05 (fe-spec §2.5) — image-gen list. The
+              parent receives imgGenModels already pre-filtered server-side
+              (useImgGenModels hits /fe/api/models?kind=image-gen). The form
+              inside stamps kind: 'image-gen' on the submit payload so a
+              chat row can never round-trip into this surface. fetchError +
+              onRetry plumb the hook's error state for the alert-role banner
+              (§2.7, A11Y-3). */}
+          {activeTab === 'imggen_models' && (
+            <ImgGenModelsTab
+              models={imgGenModels}
+              onAddModel={onAddImgGenModel}
+              onUpdateModel={onUpdateImgGenModel}
+              onDeleteModel={onDeleteImgGenModel}
+              onToggleModel={handleToggleImgGenModel}
+              setStatus={setStatusWrapper}
+              onNavigateToCredentials={() => setActiveTab('credentials')}
+              fetchError={imgGenError}
+              onRetry={onRetryImgGenModels}
             />
           )}
 

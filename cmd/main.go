@@ -18,6 +18,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/imggen"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/memlimit"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
@@ -229,6 +230,26 @@ func main() {
 	// ResolveInternalConfigWithAffinity's nil-engine branch.
 	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter, credLB)
 
+	// Initialize ImgGen Handler (ImgGen Models commission / BE-R3 +
+	// T1.4.8). Constructed next to proxyHandler; production wiring
+	// installed via SetModelResolver / SetCredentialResolver so
+	// pkg/imggen never imports pkg/proxy (the import guard at
+	// task 1.8.2 audits this). The model + credential lookups go
+	// through the same modelsConfig + ResolveInternalConfigWithAffinity
+	// seam the chat path uses (single source of truth for model
+	// resolution).
+	imggenHandler := imggen.NewHandler(configMgr, bus, tokenStore, usageCounter)
+	imggenHandler.SetModelResolver(imggen.NewModelResolverFromConfig(func(modelID string) *models.ModelConfig {
+		return modelsConfig.GetModel(modelID)
+	}))
+	imggenHandler.SetCredentialResolver(imggen.NewCredentialResolverFromConfig(func(modelID string) (models.ResolvedCredential, bool) {
+		// Stable key (modelID, modelID) per BE-A3 + Amendment 18.
+		// The chat-side helper participates in the affinity engine
+		// when wired (Phase 3 / pkg/credentiallb) and degrades to
+		// single-credential resolution on the nil-engine branch.
+		return modelsConfig.ResolveInternalConfigWithAffinity(modelID, modelID)
+	}))
+
 	// Setup Server
 	mux := http.NewServeMux()
 
@@ -261,6 +282,13 @@ func main() {
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChatCompletions)
 	mux.HandleFunc("/v1/messages", proxyHandler.HandleAnthropicMessages) // Anthropic Messages API endpoint
 	mux.HandleFunc("/v1/models", proxyHandler.HandleModels)              // OpenAI-compatible models list
+	// ImgGen Models commission / BE-R3 / T1.4.8: image-generation
+	// route registered as a sibling of the chat routes. POST-only
+	// is enforced inside HandleImageGeneration (in-handler
+	// method guard; matches the HandleModels house style at
+	// handler.go:239-242, NOT Go 1.22 method-pattern mux syntax
+	// used nowhere else in the codebase).
+	mux.HandleFunc("/v1/image_generation", imggenHandler.HandleImageGeneration)
 
 	// Health check endpoint
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +395,7 @@ func main() {
 		log.Printf("OpenAI endpoint: http://localhost:%d/v1/chat/completions", cfg.Port)
 		log.Printf("Anthropic endpoint: http://localhost:%d/v1/messages", cfg.Port)
 		log.Printf("Models endpoint: http://localhost:%d/v1/models", cfg.Port)
+		log.Printf("Image generation endpoint: http://localhost:%d/v1/image_generation", cfg.Port)
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)

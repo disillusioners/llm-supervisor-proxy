@@ -1,0 +1,36 @@
+-- Migration 029: Add image_count column to token_hourly_usage +
+-- model_hourly_usage (ImgGen Models commission / BE-M1).
+--
+-- Per-image metering for /v1/image_generation. Symmetric with the
+-- existing token+model counter split (counter.go:66-96, 141-171);
+-- zero new read paths; plain ADD COLUMN is the lowest-risk
+-- dual-dialect migration. Respects "no join tables" house style.
+--
+-- Both columns are NOT NULL DEFAULT 0 so existing rows are
+-- backfilled to zero (no data loss). Per-image billable truth =
+-- the upstream's metadata.success_count (string-typed); coercion
+-- happens in pkg/imggen at BillableImages() — single point of
+-- truth.
+--
+-- Per-request accounting model:
+--   request_count += 1  (success OR mapped error — Amendment 14
+--                        divergence from chat's success-only; the
+--                        FE must not assume parity)
+--   image_count   += coerced metadata.success_count (0 on error,
+--                        partial-success billable count on
+--                        status_code==0)
+--   prompt_tokens = completion_tokens = total_tokens = 0  (the
+--                        "0-token row"; the image route has no
+--                        token usage)
+--
+-- Migration registry note (Architect Amendment 13): the
+-- models.credential_id DROP COLUMN promised in 028's comments
+-- now lands at 030+ to prevent numbering conflation.
+--
+-- Down form (separate file): plain DROP COLUMN image_count (use
+-- the 023 form — NOT 022's DROP COLUMN IF EXISTS; SQLite's grammar
+-- has no IF EXISTS, latent bug in 022 never fired because downs
+-- are manual-run artifacts).
+
+ALTER TABLE token_hourly_usage ADD COLUMN image_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE model_hourly_usage ADD COLUMN image_count INTEGER NOT NULL DEFAULT 0;

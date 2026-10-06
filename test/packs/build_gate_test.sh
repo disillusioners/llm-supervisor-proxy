@@ -24,12 +24,12 @@ trap cleanup EXIT
 echo "=== Test Pack: ${PACK_NAME} (Go build + vet, total <= 120s) ==="
 
 # Phase 1: go build ./...
-timeout 90s bash -c "cd '$PROJECT_ROOT' && go build ./..." > "$BUILD_OUTPUT" 2>&1
-BUILD_EXIT=$?
+BUILD_EXIT=0
+timeout 90s bash -c "cd '$PROJECT_ROOT' && go build ./..." > "$BUILD_OUTPUT" 2>&1 || BUILD_EXIT=$?
 
 # Phase 2: go vet ./...
-timeout 90s bash -c "cd '$PROJECT_ROOT' && go vet ./..." > "$VET_OUTPUT" 2>&1
-VET_EXIT=$?
+VET_EXIT=0
+timeout 90s bash -c "cd '$PROJECT_ROOT' && go vet ./..." > "$VET_OUTPUT" 2>&1 || VET_EXIT=$?
 
 # Decide outcome: TIMEOUT > FAIL > PASS
 if [ $BUILD_EXIT -eq 124 ] || [ $VET_EXIT -eq 124 ]; then

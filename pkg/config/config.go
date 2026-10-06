@@ -92,6 +92,16 @@ type Config struct {
 	ToolCallBufferDisabled bool  `json:"tool_call_buffer_disabled"` // When true, tool calls are streamed as-is (for clients that can handle partial JSON)
 	ToolCallBufferMaxSize  int64 `json:"tool_call_buffer_max_size"` // Max bytes to buffer per request (default: 1MB)
 
+	// ImgGen Models commission / BE-T1 / T1.4.7: ImageGenTimeout
+	// is the per-request deadline for /v1/image_generation
+	// (MiniMax is 17-60s silent; 120s is 2-6× live headroom and
+	// 2.5× under the 5-min server WriteTimeout floor). Default
+	// 120s, clamp [30s, 4min]. Knob, not per-model field
+	// (thin iteration; per-model deadlines would duplicate the
+	// dormant ReleaseStreamChunkDeadline mistake — config.go:129-141
+	// "DORMANT" note).
+	ImageGenTimeout Duration `json:"image_gen_timeout,omitempty"`
+
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse bool `json:"log_raw_upstream_response"` // Log successful upstream responses (default: false)
 	LogRawUpstreamOnError  bool `json:"log_raw_upstream_on_error"` // Log failed/error upstream responses (default: false)
@@ -121,6 +131,10 @@ type ManagerInterface interface {
 	GetLogRawUpstreamResponse() bool
 	GetLogRawUpstreamOnError() bool
 	GetLogRawUpstreamMaxKB() int
+	// ImgGen Models commission / BE-T1: image-gen deadline
+	// accessor. 0 means "use the package default" (the imggen
+	// handler's own default).
+	GetImageGenTimeout() time.Duration
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -211,6 +225,12 @@ var Defaults = Config{
 	// Idle Termination
 	IdleTerminationEnabled: true,
 	IdleTerminationTimeout: Duration(120 * time.Second),
+
+	// ImgGen Models commission / BE-T1: image-gen deadline. Live
+	// 17s + docs 20-60s ⇒ 120s is 2-6× headroom, comfortably
+	// under the 5-min server WriteTimeout floor. Configurable
+	// per BE-T1; clamp [30s, 4min] enforced in Validate.
+	ImageGenTimeout: Duration(120 * time.Second),
 }
 
 // Validate ensures config values are valid before saving
@@ -239,6 +259,22 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxGenerationTime < Duration(time.Second) {
 		return errors.New("max_generation_time must be at least 1s")
+	}
+	// ImgGen Models commission / BE-T1: ImageGenTimeout clamp
+	// [30s, 4min]. The lower bound is well under the live
+	// 17-60s latency range; the upper bound keeps the per-request
+	// deadline safely under the 5-min server WriteTimeout floor
+	// (main.go:279-285). 0 falls back to the default (applied at
+	// the imggen handler seam — config.go:166 sets the 120s
+	// default in Defaults{}, so 0 here only happens on a hand-
+	// edited config).
+	if c.ImageGenTimeout > 0 {
+		if c.ImageGenTimeout < Duration(30*time.Second) {
+			return errors.New("image_gen_timeout must be at least 30s when set")
+		}
+		if c.ImageGenTimeout > Duration(4*time.Minute) {
+			return errors.New("image_gen_timeout must be at most 4m when set")
+		}
 	}
 	if c.MaxStreamBufferSize < 0 {
 		return errors.New("max_stream_buffer_size cannot be negative")
@@ -595,6 +631,15 @@ func (m *Manager) GetMaxGenerationTime() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.MaxGenerationTime.Duration()
+}
+
+// GetImageGenTimeout returns the configured per-request deadline
+// for /v1/image_generation. 0 means "use the package default"
+// (the imggen handler's own default, applied at the handler seam).
+func (m *Manager) GetImageGenTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.ImageGenTimeout.Duration()
 }
 
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes
