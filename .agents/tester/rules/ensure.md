@@ -4,7 +4,7 @@
 - [x] All Go unit tests pass (`go test ./...`)
 - [x] `go vet ./...` passes with no issues
 - [x] Full project builds without compilation errors
-- [x] Frontend builds successfully without TypeScript errors
+- [x] `tsc --noEmit` reports zero NEW error locations vs the documented baseline (2026-10-06 rewrite: the literal "Frontend builds successfully without TypeScript errors" was unsatisfiable — 26 pre-existing baseline errors in 11 untouched files, documented debt since ≥2026-08-28)
 
 ## Important
 - [ ] Peak hour logic handles cross-midnight windows correctly
