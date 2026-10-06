@@ -14,8 +14,8 @@ trap cleanup EXIT
 
 echo "=== Test Pack: ${PACK_NAME} ==="
 
-timeout 120s bash -c "cd '$PROJECT_ROOT' && go test -v -count=1 -timeout=110s ./pkg/store/database/" > "$OUTPUT_FILE" 2>&1
-EXIT_CODE=$?
+EXIT_CODE=0
+timeout 120s bash -c "cd '$PROJECT_ROOT' && go test -v -count=1 -timeout=110s ./pkg/store/database/" > "$OUTPUT_FILE" 2>&1 || EXIT_CODE=$?
 
 cat "$OUTPUT_FILE"
 
