@@ -25,6 +25,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 		prompt_tokens INTEGER NOT NULL DEFAULT 0,
 		completion_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
+		image_count INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (token_id, hour_bucket)
 	)`)
 	if err != nil {
@@ -187,6 +188,7 @@ func setupModelUsageTestDB(t *testing.T) *sql.DB {
 		prompt_tokens INTEGER NOT NULL DEFAULT 0,
 		completion_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
+		image_count INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (model_id, hour_bucket)
 	)`)
 	if err != nil {

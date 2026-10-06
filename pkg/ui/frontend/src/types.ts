@@ -114,6 +114,16 @@ export interface Model {
   enabled: boolean;
   fallback_chain: string[];
   truncate_params?: string[];
+  // Additive kind discriminator (Phase 4 / ImgGen Commission — 2026-10-05).
+  // "image-gen" pins the model to the /v1/image_generation route and the
+  // MiniMax-only validator. Absent / "chat" is the legacy default.
+  // Optional so existing chat models keep working without a migration.
+  kind?: 'chat' | 'image-gen';
+  // Additive internal_provider typing drift fix (R10 from phase2-plan.md).
+  // The chat tab already renders this value via ModelsTab.tsx:175 but the
+  // FE interface did not declare it. Optional because not every model has
+  // an internal upstream and the BE may omit the field for chat-shaped rows.
+  internal_provider?: InternalProvider;
   // Internal upstream fields
   internal?: boolean;
   // Multi-credential load balancing (Phase 4). The first entry is the primary
@@ -135,6 +145,12 @@ export interface Model {
   // Ultimate model exclusion
   exclude_from_ultimate_switching?: boolean;
 }
+
+// Narrowed Model alias for image-gen rows. The FE consumes this in
+// ImgGenModelsTab and ImgGenModelForm so a chat row can never leak
+// into the image-gen surface. Server-side filter (?kind=image-gen) is
+// the source of truth; the narrow type is a belt-and-suspenders check.
+export type ImgGenModel = Model & { kind: 'image-gen' };
 
 export interface ApiToken {
   id: string;

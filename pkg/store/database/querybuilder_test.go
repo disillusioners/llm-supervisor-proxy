@@ -229,13 +229,15 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		if !contains(got, "ON CONFLICT") {
 			t.Errorf("PostgreSQL InsertModel() should use ON CONFLICT")
 		}
-		// Verify it has 18 placeholders (17 fields + credentials_json + credential_id shadow + WHERE excluded — INSERT only).
+		// Verify it has 19 placeholders (18 columns + kind — the
+		// kind discriminator persisted via migration 030).
 		// Phase 1 M-1 contract: the INSERT writes BOTH credentials_json AND
 		// credential_id (Go-computed shadow) so the column count grew from 17
 		// to 18 in this statement. See technical-analysis.md §API Contract
 		// store-layer write-path and Round-2 reviewer punch-list #12.
-		if countOccurrences(got, "$") != 18 {
-			t.Errorf("PostgreSQL InsertModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "$"))
+		// Ship-blocker fix 2026-10-06: kind grew it to 19.
+		if countOccurrences(got, "$") != 19 {
+			t.Errorf("PostgreSQL InsertModel() should have 19 placeholders (18 cols + kind), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
@@ -252,11 +254,13 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "UPDATE models SET") {
 			t.Errorf("SQLite UpdateModel() should use UPDATE models SET")
 		}
-		// Verify it has 18 ? placeholders (17 fields + WHERE id = ?). M-1
-		// shadow adds credential_id alongside credentials_json in the same
-		// UPDATE statement.
-		if countOccurrences(got, "?") != 18 {
-			t.Errorf("SQLite UpdateModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "?"))
+		// Verify it has 19 ? placeholders (18 SET columns incl. kind
+		// + WHERE id = ?). M-1 shadow adds credential_id alongside
+		// credentials_json in the same UPDATE statement; the
+		// ship-blocker fix (2026-10-06) adds kind as the 18th SET
+		// column.
+		if countOccurrences(got, "?") != 19 {
+			t.Errorf("SQLite UpdateModel() should have 19 placeholders (18 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
 		}
 	})
 
@@ -267,9 +271,9 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "$1") || !contains(got, "$18") {
 			t.Errorf("PostgreSQL UpdateModel() should use $N placeholders, got: %v", got)
 		}
-		// Verify it has 18 placeholders (17 fields + WHERE id = $18)
-		if countOccurrences(got, "$") != 18 {
-			t.Errorf("PostgreSQL UpdateModel() should have 18 placeholders (M-1 shadow), got: %d", countOccurrences(got, "$"))
+		// Verify it has 19 placeholders (18 SET columns incl. kind + WHERE id = $19)
+		if countOccurrences(got, "$") != 19 {
+			t.Errorf("PostgreSQL UpdateModel() should have 19 placeholders (18 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }

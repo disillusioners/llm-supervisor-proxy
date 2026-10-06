@@ -17,6 +17,7 @@ type HourlyUsageRow struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	ImageCount       int // ImgGen Models commission / BE-M2 (T1.5.2). 0 for chat rows.
 }
 
 // ModelHourlyUsageRow represents a row from the model_hourly_usage table
@@ -27,6 +28,7 @@ type ModelHourlyUsageRow struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	ImageCount       int // ImgGen Models commission / BE-M2 (T1.5.2). 0 for chat rows.
 }
 
 // Counter tracks token usage statistics per hour bucket.
@@ -95,16 +97,67 @@ func (c *Counter) Increment(ctx context.Context, tokenID, hourBucket string, req
 	return nil
 }
 
+// IncrementTokenImages increments the image_count (and request_count)
+// for a token within an hour bucket (ImgGen Models commission /
+// BE-M2 / T1.5.2). Same UPSERT shape as Increment, with the
+// image_count column added in migration 029.
+//
+// EXCLUSIVE WRITER for /v1/image_generation token_hourly_usage
+// (Architect Amendment 6). Do NOT co-call Increment for the same
+// request — request_count would double. The 0-token row
+// (request_count=1, prompt/completion/total=0, image_count=n) is
+// the intended shape for the image route (no token usage to bill).
+//
+// reqCount is 1 for the per-request call (the per-image cost
+// lives in imageCount, billed via the coerced
+// metadata.success_count). Passing reqCount>1 IS supported (the
+// shape is generic) but the call site is per-request.
+//
+// Read-path honesty (Architect Amendment 7 / T1.5.4):
+// HourlyUsageRow.ImageCount is honest prep, no current consumer.
+// GetTokenUsage / GetModelUsage have zero production callers;
+// the FE usage views run their own raw SQL in
+// pkg/ui/handlers_usage.go:197-258+ with explicit SUM column
+// lists. FE image_count surfacing is a Phase 2 task — extend
+// those query variants, not these methods.
+func (c *Counter) IncrementTokenImages(ctx context.Context, tokenID, hourBucket string, reqCount, imageCount int) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	var query string
+	if c.dialect == database.PostgreSQL {
+		query = `INSERT INTO token_hourly_usage (token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count)
+			VALUES ($1, $2, $3, 0, 0, 0, $4)
+			ON CONFLICT (token_id, hour_bucket) DO UPDATE SET
+				request_count = token_hourly_usage.request_count + EXCLUDED.request_count,
+				image_count   = token_hourly_usage.image_count + EXCLUDED.image_count`
+	} else {
+		query = `INSERT INTO token_hourly_usage (token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count)
+			VALUES (?, ?, ?, 0, 0, 0, ?)
+			ON CONFLICT (token_id, hour_bucket) DO UPDATE SET
+				request_count = request_count + excluded.request_count,
+				image_count   = image_count + excluded.image_count`
+	}
+
+	args := []interface{}{tokenID, hourBucket, reqCount, imageCount}
+
+	_, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to increment token images: %w", err)
+	}
+	return nil
+}
+
 // GetTokenUsage retrieves usage statistics for a token within a time range
 func (c *Counter) GetTokenUsage(ctx context.Context, tokenID, fromHour, toHour string) ([]HourlyUsageRow, error) {
 	var query string
 	if c.dialect == database.PostgreSQL {
-		query = `SELECT token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+		query = `SELECT token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count
 			FROM token_hourly_usage
 			WHERE token_id = $1 AND hour_bucket >= $2 AND hour_bucket <= $3
 			ORDER BY hour_bucket`
 	} else {
-		query = `SELECT token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+		query = `SELECT token_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count
 			FROM token_hourly_usage
 			WHERE token_id = ? AND hour_bucket >= ? AND hour_bucket <= ?
 			ORDER BY hour_bucket`
@@ -121,7 +174,7 @@ func (c *Counter) GetTokenUsage(ctx context.Context, tokenID, fromHour, toHour s
 	var result []HourlyUsageRow
 	for rows.Next() {
 		var row HourlyUsageRow
-		if err := rows.Scan(&row.TokenID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
+		if err := rows.Scan(&row.TokenID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.ImageCount); err != nil {
 			return nil, fmt.Errorf("failed to scan usage row: %w", err)
 		}
 		result = append(result, row)
@@ -170,16 +223,54 @@ func (c *Counter) IncrementModelUsage(ctx context.Context, modelID, hourBucket s
 	return nil
 }
 
+// IncrementModelImages increments the image_count (and request_count)
+// for a model within an hour bucket (ImgGen Models commission /
+// BE-M2 / T1.5.2). Same UPSERT shape as IncrementModelUsage, with
+// the image_count column added in migration 029.
+//
+// EXCLUSIVE WRITER for /v1/image_generation model_hourly_usage
+// (Architect Amendment 6). Do NOT co-call IncrementModelUsage for
+// the same request — request_count would double. The 0-token row
+// shape (request_count=1, prompt/completion/total=0, image_count=n)
+// is the intended shape for the image route.
+func (c *Counter) IncrementModelImages(ctx context.Context, modelID, hourBucket string, reqCount, imageCount int) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	var query string
+	if c.dialect == database.PostgreSQL {
+		query = `INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count)
+			VALUES ($1, $2, $3, 0, 0, 0, $4)
+			ON CONFLICT (model_id, hour_bucket) DO UPDATE SET
+				request_count = model_hourly_usage.request_count + EXCLUDED.request_count,
+				image_count   = model_hourly_usage.image_count + EXCLUDED.image_count`
+	} else {
+		query = `INSERT INTO model_hourly_usage (model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count)
+			VALUES (?, ?, ?, 0, 0, 0, ?)
+			ON CONFLICT (model_id, hour_bucket) DO UPDATE SET
+				request_count = request_count + excluded.request_count,
+				image_count   = image_count + excluded.image_count`
+	}
+
+	args := []interface{}{modelID, hourBucket, reqCount, imageCount}
+
+	_, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to increment model images: %w", err)
+	}
+	return nil
+}
+
 // GetModelUsage retrieves usage statistics for models within a time range
 func (c *Counter) GetModelUsage(ctx context.Context, fromHour, toHour string) ([]ModelHourlyUsageRow, error) {
 	var query string
 	if c.dialect == database.PostgreSQL {
-		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count
 			FROM model_hourly_usage
 			WHERE hour_bucket >= $1 AND hour_bucket <= $2
 			ORDER BY model_id, hour_bucket`
 	} else {
-		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens
+		query = `SELECT model_id, hour_bucket, request_count, prompt_tokens, completion_tokens, total_tokens, image_count
 			FROM model_hourly_usage
 			WHERE hour_bucket >= ? AND hour_bucket <= ?
 			ORDER BY model_id, hour_bucket`
@@ -196,7 +287,7 @@ func (c *Counter) GetModelUsage(ctx context.Context, fromHour, toHour string) ([
 	var result []ModelHourlyUsageRow
 	for rows.Next() {
 		var row ModelHourlyUsageRow
-		if err := rows.Scan(&row.ModelID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens); err != nil {
+		if err := rows.Scan(&row.ModelID, &row.HourBucket, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.ImageCount); err != nil {
 			return nil, fmt.Errorf("failed to scan model usage row: %w", err)
 		}
 		result = append(result, row)

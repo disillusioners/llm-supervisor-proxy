@@ -1,5 +1,5 @@
-Current Plan: DB Caching/Resilience Layer — MVP Release
-Tracking File: db-cache-layer-mvp-tracking.md
+Current Plan: ImgGen Models Commission (image-generation endpoint, MiniMax pass-through + FE "ImgGen Models" tab)
+Tracking File: imggen-models-commission-tracking.md
 Iteration: 001
 Status: APPROVED
-Last Updated: 2026-08-28 20:56
+Last Updated: 2026-10-05 20:53Z

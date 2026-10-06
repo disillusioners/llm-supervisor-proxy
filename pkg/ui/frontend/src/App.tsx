@@ -3,7 +3,7 @@ import { Router } from 'preact-router';
 import { lazy, Suspense } from 'preact/compat';
 import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
 import { LoadingFallback } from './components/LoadingFallback';
-import { useRequests, useRequestDetail, useConfig, useModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
+import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
 import type { RequestListItem } from './types';
 
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -22,6 +22,12 @@ export function App() {
   } = useRequests();
   const { config, updateConfig } = useConfig();
   const { models, addModel, updateModel, deleteModel } = useModels();
+  // useImgGenModels — ImgGen Commission 2026-10-05 (fe-spec §2.3, FE-7).
+  // Returns only kind: 'image-gen' models. Mutation hooks also invalidate
+  // the chat 'models' cache (symmetric with useModels), so the two tabs
+  // never show stale cross-data. The `error` field is plumbed through to
+  // the ImgGenModelsTab for the alert-role error banner (§2.7, A11Y-3).
+  const { models: imgGenModels, addModel: addImgGenModel, updateModel: updateImgGenModel, deleteModel: deleteImgGenModel, refetch: refetchImgGenModels, error: imgGenError } = useImgGenModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
  
  const { appTags, refetch: refetchAppTags } = useAppTags();
@@ -36,6 +42,12 @@ export function App() {
         onAddModel={addModel}
         onUpdateModel={updateModel}
         onDeleteModel={deleteModel}
+        imgGenModels={imgGenModels}
+        onAddImgGenModel={addImgGenModel}
+        onUpdateImgGenModel={updateImgGenModel}
+        onDeleteImgGenModel={deleteImgGenModel}
+        imgGenError={imgGenError}
+        onRetryImgGenModels={refetchImgGenModels}
         tokens={tokens}
         onCreateToken={createToken}
         onDeleteToken={deleteToken}
@@ -175,6 +187,12 @@ function SettingsRoute({
     onAddModel,
     onUpdateModel,
     onDeleteModel,
+    imgGenModels,
+    onAddImgGenModel,
+    onUpdateImgGenModel,
+    onDeleteImgGenModel,
+    imgGenError,
+    onRetryImgGenModels,
     tokens,
     onCreateToken,
     onDeleteToken,
@@ -188,10 +206,21 @@ function SettingsRoute({
     onAddModel: (model: any) => Promise<void>;
     onUpdateModel: (id: string, updates: any) => Promise<void>;
     onDeleteModel: (id: string) => Promise<void>;
+    // Image-gen (ImgGen Commission 2026-10-05). Pre-filtered server-side to
+    // kind: 'image-gen' via /fe/api/models?kind=image-gen. The form's
+    // submit handler stamps kind: 'image-gen' on the payload; we never
+    // pass chat rows through these callbacks.
+    imgGenModels: any[];
+    onAddImgGenModel: (model: any) => Promise<void>;
+    onUpdateImgGenModel: (id: string, updates: any) => Promise<void>;
+    onDeleteImgGenModel: (id: string) => Promise<void>;
+    // Error surfacing for the image-gen list (fe-spec §2.7, A11Y-3).
+    imgGenError?: string | null;
+    onRetryImgGenModels?: () => void;
     tokens: any[];
-    onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean) => Promise<any>;
+    onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
-    onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean) => Promise<boolean>;
+    onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[]) => Promise<boolean>;
     onRefetchTokens: () => void;
 }) {
     return (
@@ -204,6 +233,12 @@ function SettingsRoute({
             onAddModel={onAddModel}
             onUpdateModel={onUpdateModel}
             onDeleteModel={onDeleteModel}
+            imgGenModels={imgGenModels}
+            onAddImgGenModel={onAddImgGenModel}
+            onUpdateImgGenModel={onUpdateImgGenModel}
+            onDeleteImgGenModel={onDeleteImgGenModel}
+            imgGenError={imgGenError}
+            onRetryImgGenModels={onRetryImgGenModels}
             tokens={tokens}
             onCreateToken={onCreateToken}
             onDeleteToken={onDeleteToken}
