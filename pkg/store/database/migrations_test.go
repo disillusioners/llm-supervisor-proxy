@@ -657,3 +657,54 @@ func TestMigration029_ForwardFreshDB(t *testing.T) {
 		t.Error("image_count column missing from model_hourly_usage (029 SQL not applied)")
 	}
 }
+
+// TestMigration030_ForwardFreshDB asserts that migration 030 (the
+// ship-blocker fix for kind persistence, 2026-10-06) lands in the
+// registry (Amendment-1 trap — the migrations slice is an ordered
+// list, NOT a directory scanner; the SQL files alone are silently
+// inert) AND the kind column is present on models after a fresh
+// RunMigrations. Same shape as TestMigration029_ForwardFreshDB.
+func TestMigration030_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	// schema_migrations must contain row 030.
+	versions, err := store.GetAppliedMigrations(context.Background())
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "030" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 030 (registry append missing) — applied versions: %v", versions)
+	}
+
+	// kind must be present on models.
+	if !columnExists(t, store.DB, "models", "kind") {
+		t.Error("kind column missing from models (030 SQL not applied)")
+	}
+
+	// Legacy rows carry NULL kind (no DEFAULT / no backfill — the
+	// load mappings normalize NULL/'' to chat).
+	var kindVal interface{}
+	if err := store.DB.QueryRow(
+		`SELECT kind FROM models LIMIT 1`,
+	).Scan(&kindVal); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("select kind from (empty) models: %v", err)
+	}
+}
