@@ -123,9 +123,10 @@ func TestLiveE2E_HappyPath(t *testing.T) {
 	if id, _ := parsed["id"].(string); id == "" {
 		t.Fatalf("proxy body missing id: %s", string(respBody))
 	}
-	data, _ := parsed["data"].([]interface{})
-	if len(data) == 0 {
-		t.Fatalf("proxy data is empty: %s", string(respBody))
+	dataMap, _ := parsed["data"].(map[string]interface{})
+	imageURLs, _ := dataMap["image_urls"].([]interface{})
+	if len(imageURLs) == 0 {
+		t.Fatalf("proxy image_urls empty: %s", string(respBody))
 	}
-	t.Logf("[live e2e] success: %d image URL(s) returned (key=%s)", len(data), masked)
+	t.Logf("[live e2e] success: %d image URL(s) returned (key=%s)", len(imageURLs), masked)
 }
