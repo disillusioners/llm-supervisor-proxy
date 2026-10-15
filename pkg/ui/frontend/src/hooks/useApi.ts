@@ -441,8 +441,12 @@ export function useImgGenModels() {
 
 // Decision Models API — decision kind only
 //
-// Phase: Decision Commission 2026-10-15. Mirror of useImgGenModels with
-// the decision-specific cache key + URL:
+// Phase: Decision Commission 2026-10-15. See decision-model-type plan
+// §6.3 (.agents/shared/planning/decision-model-type/plan.md) for the hook
+// contract; this docblock deliberately mirrors the useImgGenModels
+// precedent above (P3 review S1) — read that block first for the
+// invalidation rationale shared by all three model-list hooks.
+// Mirror of useImgGenModels with the decision-specific cache key + URL:
 //
 //   1. Fetch URL: /fe/api/models?kind=decision (server-side filter; the
 //      BE is the source of truth, not a client filter on the default
