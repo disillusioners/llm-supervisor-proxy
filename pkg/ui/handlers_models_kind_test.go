@@ -9,7 +9,9 @@ package ui
 //     approver advisory)
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -220,6 +222,13 @@ func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKin
 	// KindDecision exists. The unknown-kind branch still falls
 	// back to a chat filter (back-compat with operators who
 	// typo'd a URL).
+	//
+	// Finding 8 fix: this test now CAPTURES the log line
+	// emitted by the unknown-kind branch and asserts all
+	// three kind names appear in the captured line. (The
+	// previous test name implied this assertion but the
+	// implementation only checked the chat filter — review
+	// round 1 caught the gap.)
 	ts := newImgGenTestServer()
 	server := ts.serve()
 	defer server.Close()
@@ -227,6 +236,17 @@ func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKin
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+
+	// Capture log output during the request.
+	var logBuf bytes.Buffer
+	origLogger := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origLogger)
+		log.SetFlags(origFlags)
+	}()
 
 	u := server.URL + "/fe/api/models?kind=unknown-value"
 	resp, err := http.Get(u)
@@ -242,6 +262,21 @@ func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKin
 	// chat-1 passes; img-1 + dec-1 are excluded.
 	if len(got) != 1 || got[0].ID != "chat-1" {
 		t.Errorf("unknown-kind fallback should treat as chat (excluding image-gen + decision); got %+v", got)
+	}
+
+	// Capture-assert: the warning line must mention ALL THREE
+	// accepted kinds (chat + image-gen + decision). Without
+	// this assertion the test would silently pass even if a
+	// future refactor drops the decision kind from the
+	// message.
+	logLine := logBuf.String()
+	if logLine == "" {
+		t.Fatalf("no log line captured; the default-arm branch should emit a warning")
+	}
+	for _, kind := range []string{models.KindChat, models.KindImageGen, models.KindDecision} {
+		if !strings.Contains(logLine, kind) {
+			t.Errorf("log line does not mention kind %q: %s", kind, logLine)
+		}
 	}
 }
 
