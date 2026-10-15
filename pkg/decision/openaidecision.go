@@ -129,11 +129,14 @@ func (p *openaiDecisionProvider) BuildUpstream(cred models.ResolvedCredential, r
 //     and the bytes verbatim (no envelope of our own —
 //     the upstream's error shape is what the client
 //     pattern-matches; research-web §Q1).
-//   - non-200 with `error` envelope ⇒ PassAsIs (upstream's
-//     own error shape with its own status; relay verbatim).
-//     Using PassAsIs on the upstream's non-200 is the same
-//     posture as imggen (miniMax errors carry their own
-//     status; the handler relays `resp.StatusCode`).
+//   - non-200 with `error` envelope ⇒ PromoteToError (502);
+//     the handler surfaces its own status and preserves the
+//     upstream body verbatim. Verified P2 behavior: ALL error
+//     envelopes promote — regardless of upstream status (401
+//     auth rejections included; live e2e probe 2026-10-15
+//     confirmed the preserved invalid_api_key envelope). The
+//     status code is owned by the proxy; the client still
+//     pattern-matches the upstream's own envelope shape.
 func (p *openaiDecisionProvider) InspectResponse(respBytes []byte, originalReq *DecisionRequest) (*DecisionResponse, *Outcome, error) {
 	if len(respBytes) == 0 {
 		// Empty body is a fail-closed 502 (Amendment 11 from
