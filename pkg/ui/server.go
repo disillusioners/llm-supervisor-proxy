@@ -762,11 +762,30 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			kindFilter = nil // no filter
 		case models.KindImageGen:
 			kindFilter = func(m *models.ModelConfig) bool { return m.IsImageGen() }
+		case models.KindDecision:
+			// Decision Models commission / §3.1 site 7: only
+			// decision-kind models. The chat-arm fix below is
+			// critical — adding KindDecision WITHOUT also extending
+			// the chat arm to exclude decision kinds leaks decision
+			// models into `?kind=chat` for any non-UI direct API
+			// consumer (finding 1, the highest-severity review
+			// finding).
+			kindFilter = func(m *models.ModelConfig) bool { return m.IsDecision() }
 		case models.KindChat:
-			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() }
+			// Decision Models / §3.1 site 7 — chat arm EXTENDED.
+			// Without `&& !m.IsDecision()`, decision models leak
+			// into `?kind=chat` (the FE ModelsTab.filter mitigates
+			// the in-UI path but direct API consumers do not see
+			// the in-UI filter; the leak was the Review Round 1
+			// chat-arm-leak finding).
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() }
 		default:
-			log.Printf("[models] GET /fe/api/models unknown kind=%q, treating as chat (server-log warning)", kindParam)
-			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() }
+			// Decision Models commission — default-arm warning
+			// wording updated for 3 kinds (chat / image-gen /
+			// decision).
+			log.Printf("[models] GET /fe/api/models unknown kind=%q, treating as chat (server-log warning; accepted kinds: %q, %q, %q)",
+				kindParam, models.KindChat, models.KindImageGen, models.KindDecision)
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() }
 		}
 
 		modelConfigs := s.modelsConfig.GetModels()
@@ -865,12 +884,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		// → validateModelAgainstCredentials; this is the inline
 		// fast-path that returns 400 + {"error": "..."} in the
 		// house pattern of server.go:792-798). Unknown kind value
-		// ⇒ 400.
-		if newModel.Kind != "" && newModel.Kind != models.KindChat && newModel.Kind != models.KindImageGen {
+		// ⇒ 400. Decision Models / §3.1 site 7 + §5.6 mirror:
+		// "decision" added to the whitelist; 3-kind error wording.
+		if newModel.Kind != "" && newModel.Kind != models.KindChat && newModel.Kind != models.KindImageGen && newModel.Kind != models.KindDecision {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{
-				"error": fmt.Sprintf("unknown kind %q (expected %q or %q)", newModel.Kind, models.KindChat, models.KindImageGen),
+				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, or %q)", newModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision),
 			})
 			return
 		}
@@ -945,6 +965,101 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
 					"error": "kind \"image-gen\" does not support release_stream_chunk_deadline (image responses are not streamed)",
+				})
+				return
+			}
+		}
+		// Decision Models commission / §3.1 site 7 + §5.6:
+		// POST-inline mirror of models.validateDecisionRules
+		// (D1-D9). The parity test (P1.9) asserts POST ≡ PUT ≡
+		// ValidateKindRules; the rule set IS validateDecisionRules,
+		// just spelled out inline so the 400 carries the route's
+		// house {"error":"..."} envelope instead of bubbling a
+		// DB-layer error message (architectural posture — T1.2.3).
+		if newModel.Kind == models.KindDecision {
+			if !newModel.Internal {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" requires internal to be true",
+				})
+				return
+			}
+			if newModel.InternalModel == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" requires internal_model to be set",
+				})
+				return
+			}
+			if len(newModel.Credentials) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" requires at least one credential",
+				})
+				return
+			}
+			// D4 provider gate — recommended identity B
+			// ("openai" reused + "typesafe" new).
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q or %q (got %q)", "openai", "typesafe", primaryProvider),
+				})
+				return
+			}
+			// D5
+			if len(newModel.FallbackChain) != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" does not support fallback_chain",
+				})
+				return
+			}
+			// D6
+			if newModel.SecondaryUpstreamModel != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" does not support secondary_upstream_model",
+				})
+				return
+			}
+			// D7
+			if newModel.PeakHourEnabled {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" does not support peak_hour_enabled",
+				})
+				return
+			}
+			// D8
+			if newModel.ReleaseStreamChunkDeadline != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" does not support release_stream_chunk_deadline (decision responses are not streamed)",
+				})
+				return
+			}
+			// D9 — EXPLICIT enforcement. Unlike image-gen (which
+			// has the documented doc/code drift at config.go:258-259),
+			// decision ships with belt-and-suspenders write-time
+			// enforcement of exclude_from_ultimate_switching=true.
+			if !newModel.ExcludeFromUltimateSwitching {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "kind \"decision\" requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)",
 				})
 				return
 			}
@@ -1076,12 +1191,15 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// inline image-gen validation. Identical rules (helper
 		// would invite drift; the inline form matches the existing
 		// peak-hour / secondary-upstream 400 patterns at
-		// server.go:1042-1059).
-		if updatedModel.Kind != "" && updatedModel.Kind != models.KindChat && updatedModel.Kind != models.KindImageGen {
+		// server.go:1042-1059). Decision Models / §3.1 site 7 +
+		// §5.6: PUT-inline mirror of models.validateDecisionRules
+		// (D1-D9). Same rule set as POST — the P1.9 parity test
+		// asserts POST ≡ PUT ≡ ValidateKindRules.
+		if updatedModel.Kind != "" && updatedModel.Kind != models.KindChat && updatedModel.Kind != models.KindImageGen && updatedModel.Kind != models.KindDecision {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{
-				"error": fmt.Sprintf("unknown kind %q (expected %q or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen),
+				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision),
 			})
 			return
 		}
@@ -1138,6 +1256,78 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support release_stream_chunk_deadline (image responses are not streamed)"})
+				return
+			}
+		}
+		// Decision Models PUT-inline mirror (D1-D9; Decision
+		// Models / §3.1 site 7 + §5.6). Same rule set as POST
+		// above and as models.validateDecisionRules — the P1.9
+		// parity test enforces that all three stay in sync.
+		if updatedModel.Kind == models.KindDecision {
+			if !updatedModel.Internal {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires internal to be true"})
+				return
+			}
+			if updatedModel.InternalModel == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires internal_model to be set"})
+				return
+			}
+			if len(updatedModel.Credentials) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires at least one credential"})
+				return
+			}
+			// D4 — recommended identity B (openai + typesafe).
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q or %q (got %q)", "openai", "typesafe", primaryProvider),
+				})
+				return
+			}
+			// D5
+			if len(updatedModel.FallbackChain) != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" does not support fallback_chain"})
+				return
+			}
+			// D6
+			if updatedModel.SecondaryUpstreamModel != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" does not support secondary_upstream_model"})
+				return
+			}
+			// D7
+			if updatedModel.PeakHourEnabled {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" does not support peak_hour_enabled"})
+				return
+			}
+			// D8
+			if updatedModel.ReleaseStreamChunkDeadline != 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" does not support release_stream_chunk_deadline (decision responses are not streamed)"})
+				return
+			}
+			// D9 — explicit enforce.
+			if !updatedModel.ExcludeFromUltimateSwitching {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)"})
 				return
 			}
 		}
