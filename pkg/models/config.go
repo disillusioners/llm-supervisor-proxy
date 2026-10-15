@@ -721,9 +721,16 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 		return ErrModelNotFound
 	}
 
-	// Validate the updated config
+	// Validate the updated config. Copy BOTH Models AND
+	// Credentials into the testConfig — without the credentials
+	// mirror, validateModelAgainstCredentials' "credential_id
+	// references non-existent credential" check fires on every
+	// internal model with a ref, blocking PUT updates for every
+	// kind (chat / image-gen / decision) equally. AddModel at
+	// line 678 already does this; the asymmetry is the bug.
 	testConfig := &ModelsConfig{
-		Models: make([]ModelConfig, len(mc.Models)),
+		Models:      make([]ModelConfig, len(mc.Models)),
+		Credentials: mc.Credentials,
 	}
 	copy(testConfig.Models, mc.Models)
 
