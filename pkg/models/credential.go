@@ -21,6 +21,11 @@ var validProviders = map[string]bool{
 	"minimax":   true,
 	"grok":      true,
 	"deepseek":  true,
+	// Decision Models / §5.2 — "typesafe" is the new identity
+	// for /v1/decisions upstream. The D4 provider-gate
+	// (validateDecisionRules) only accepts {"openai","typesafe"}
+	// for decision-kind models.
+	"typesafe": true,
 }
 
 // isValidProvider checks if the provider is in the allowed list
