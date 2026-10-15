@@ -75,6 +75,15 @@ func (m *mockConfigManager) GetImageGenTimeout() time.Duration {
 	return time.Duration(m.cfg.ImageGenTimeout)
 }
 
+// GetDecisionTimeout returns the per-request deadline for
+// /v1/decisions (Decision Models commission / §3.7 / §8.1).
+// The ultimatemodel tests don't drive the decision handler; the
+// configured value is returned as-is. Phase 1 test
+// compatibility.
+func (m *mockConfigManager) GetDecisionTimeout() time.Duration {
+	return time.Duration(m.cfg.DecisionTimeout)
+}
+
 func (m *mockConfigManager) GetMaxStreamBufferSize() int {
 	return m.cfg.MaxStreamBufferSize
 }

@@ -41,6 +41,32 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
     expect(container.textContent).not.toContain('Image B');
   });
 
+  it('Decision Commission P3.2 — decision rows are filtered out alongside image-gen rows', () => {
+    // Locked-by-test (Decision Commission 2026-10-15 / plan §6.5):
+    // a model with kind: 'decision' must be filtered OUT of `chatModels`
+    // alongside image-gen rows, so a chat-tab render never shows
+    // non-chat models. Mirrors the C-16 image-gen exclusion above.
+    const chat = makeModel({ id: 'chat', name: 'Chat A' });
+    const decision = makeModel({ id: 'decision-1', name: 'Decision B', kind: 'decision' });
+    const img = makeModel({ id: 'image', name: 'Image C', kind: 'image-gen' });
+    const { container } = render(
+      <ModelsTab
+        models={[chat, decision, img]}
+        onAddModel={vi.fn()}
+        onUpdateModel={vi.fn()}
+        onDeleteModel={vi.fn()}
+        onToggleModel={vi.fn()}
+        status={null}
+        setStatus={vi.fn()}
+      />,
+    );
+    // Chat row is rendered.
+    expect(container.textContent).toContain('Chat A');
+    // Decision + image-gen rows are filtered out.
+    expect(container.textContent).not.toContain('Decision B');
+    expect(container.textContent).not.toContain('Image C');
+  });
+
   it('FE-15 (optional) — rows without a kind field are NOT filtered (degraded behavior)', () => {
     // Per spec §2.6 "R1 mitigation": if kind is undefined, the filter
     // returns true for the row (undefined !== 'image-gen' is true). This

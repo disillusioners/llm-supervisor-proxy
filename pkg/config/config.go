@@ -102,6 +102,15 @@ type Config struct {
 	// "DORMANT" note).
 	ImageGenTimeout Duration `json:"image_gen_timeout,omitempty"`
 
+	// Decision Models commission / §3.7 / §8.1 — DecisionTimeout
+	// is the per-request deadline for /v1/decisions. Defaults
+	// to 30s with clamp [10s, 60s] (Q14 / amendment 8 — vendor
+	// "10× faster than Responses API" claim is unverified
+	// marketing; the tight default surfaces latency early and
+	// the clamp keeps a misconfigured upstream from holding the
+	// loop longer than a single decision).
+	DecisionTimeout Duration `json:"decision_timeout,omitempty"`
+
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse bool `json:"log_raw_upstream_response"` // Log successful upstream responses (default: false)
 	LogRawUpstreamOnError  bool `json:"log_raw_upstream_on_error"` // Log failed/error upstream responses (default: false)
@@ -135,6 +144,11 @@ type ManagerInterface interface {
 	// accessor. 0 means "use the package default" (the imggen
 	// handler's own default).
 	GetImageGenTimeout() time.Duration
+	// Decision Models commission / §3.7 / §8.1: decision
+	// deadline accessor. 0 means "use the package default"
+	// (the decision handler's own default, applied at the
+	// handler seam — config.go:Default sets 30s).
+	GetDecisionTimeout() time.Duration
 	Save(Config) (*SaveResult, error)
 	IsReadOnly() bool
 }
@@ -231,6 +245,13 @@ var Defaults = Config{
 	// under the 5-min server WriteTimeout floor. Configurable
 	// per BE-T1; clamp [30s, 4min] enforced in Validate.
 	ImageGenTimeout: Duration(120 * time.Second),
+
+	// Decision Models commission / §3.7 / §8.1 — decision
+	// deadline. 30s default with clamp [10s, 60s] enforced in
+	// Validate. Both vendors return synchronously; the tight
+	// defaults surface latency issues early. 0 falls back to
+	// the package default (applied at the decision handler seam).
+	DecisionTimeout: Duration(30 * time.Second),
 }
 
 // Validate ensures config values are valid before saving
@@ -274,6 +295,20 @@ func (c *Config) Validate() error {
 		}
 		if c.ImageGenTimeout > Duration(4*time.Minute) {
 			return errors.New("image_gen_timeout must be at most 4m when set")
+		}
+	}
+	// Decision Models commission / §3.7 / §8.1: DecisionTimeout
+	// clamp [10s, 60s]. Tight defaults per Q14 + architect
+	// amendment 8 — vendor "10× faster than Responses API"
+	// claim is unverified marketing; live tuning expected.
+	// 0 falls back to the 30s default (handled at the decision
+	// handler seam).
+	if c.DecisionTimeout > 0 {
+		if c.DecisionTimeout < Duration(10*time.Second) {
+			return errors.New("decision_timeout must be at least 10s when set")
+		}
+		if c.DecisionTimeout > Duration(60*time.Second) {
+			return errors.New("decision_timeout must be at most 60s when set")
 		}
 	}
 	if c.MaxStreamBufferSize < 0 {
@@ -640,6 +675,17 @@ func (m *Manager) GetImageGenTimeout() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.ImageGenTimeout.Duration()
+}
+
+// GetDecisionTimeout returns the configured per-request deadline
+// for /v1/decisions (Decision Models commission / §3.7 / §8.1).
+// 0 means "use the package default" (the decision handler's own
+// default, applied at the handler seam — config.go:Default sets
+// 30s).
+func (m *Manager) GetDecisionTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.DecisionTimeout.Duration()
 }
 
 // GetMaxStreamBufferSize returns the max stream buffer size in bytes

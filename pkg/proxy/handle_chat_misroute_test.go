@@ -114,5 +114,71 @@ func TestHandleChatCompletions_ChatModelUnaffected(t *testing.T) {
 		if strings.Contains(body, "/v1/image_generation") {
 			t.Errorf("chat model triggered image-gen early-reject; body=%s", body)
 		}
+		if strings.Contains(body, "/v1/decisions") {
+			t.Errorf("chat model triggered decision early-reject; body=%s", body)
+		}
+	}
+}
+
+// TestHandleChatCompletions_RejectsDecisionMisroute — Decision
+// Models commission / §3.1 site 5 + §9.2 — a chat completion
+// request naming a decision model is rejected with OpenAI-envelope
+// 400 (code "decision_misroute"), BEFORE any upstream call, auth-
+// race, or metering work. Mirrors the image-gen misroute test
+// above in shape; the upstream hit counter must stay at 0; the
+// chat-path's request store (if any) is never written for the
+// misroute.
+func TestHandleChatCompletions_RejectsDecisionMisroute(t *testing.T) {
+	stub := &models.ModelsConfig{}
+	credCfg := models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"}
+	if err := stub.AddCredential(credCfg); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	cred := []models.CredentialRef{{CredentialID: "openai-cred", Weight: 1, Position: 0}}
+	if err := stub.AddModel(models.ModelConfig{
+		ID: "dec-1", Name: "Decision 1", Enabled: true,
+		Kind: models.KindDecision, Internal: true,
+		InternalModel: "gpt-6-luna", Credentials: cred,
+		ExcludeFromUltimateSwitching: true,
+	}); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
+
+	var upstreamHits int
+	h, _ := newTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		// This should NEVER run for the misroute case.
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"x"}}]}`))
+	}, stub)
+
+	rec := httptest.NewRecorder()
+	body := `{"model":"dec-1","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.HandleChatCompletions(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (OpenAI envelope)", rec.Code)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("upstream was called for a chat→decision misroute; hit count = %d", upstreamHits)
+	}
+	// Verify the body is the OpenAI envelope with code "decision_misroute".
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("body not JSON: %v; body=%s", err, rec.Body.String())
+	}
+	errObj, ok := parsed["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("body has no 'error' object: %s", rec.Body.String())
+	}
+	code, _ := errObj["code"].(string)
+	if code != "decision_misroute" {
+		t.Errorf("error.code = %q, want %q", code, "decision_misroute")
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "/v1/decisions") {
+		t.Errorf("error message = %q, want it to mention /v1/decisions", msg)
 	}
 }

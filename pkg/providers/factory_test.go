@@ -54,8 +54,25 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	if len(types) != 9 {
-		t.Errorf("expected 9 provider types, got %d", len(types))
+	// 10 types post-P2 (decision commission / §5.2 added
+	// ProviderTypesafe for /v1/decisions). Chat layer doesn't
+	// speak System One — typesafe returns
+	// "not yet implemented" from NewProvider, but the id
+	// is registered so /fe/api/providers and the FE
+	// DecisionModelForm provider dropdown can see it.
+	if len(types) != 10 {
+		t.Errorf("expected 10 provider types, got %d", len(types))
+	}
+	// Spot-check the typesafe addition.
+	foundTypesafe := false
+	for _, t := range types {
+		if t == ProviderTypesafe {
+			foundTypesafe = true
+			break
+		}
+	}
+	if !foundTypesafe {
+		t.Errorf("ProviderTypesafe missing from GetProviderTypes()")
 	}
 }
 
