@@ -721,9 +721,16 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 		return ErrModelNotFound
 	}
 
-	// Validate the updated config
+	// Validate the updated config. Copy BOTH Models AND
+	// Credentials into the testConfig — without the credentials
+	// mirror, validateModelAgainstCredentials' "credential_id
+	// references non-existent credential" check fires on every
+	// internal model with a ref, blocking PUT updates for every
+	// kind (chat / image-gen / decision) equally. AddModel at
+	// line 678 already does this; the asymmetry is the bug.
 	testConfig := &ModelsConfig{
-		Models: make([]ModelConfig, len(mc.Models)),
+		Models:      make([]ModelConfig, len(mc.Models)),
+		Credentials: mc.Credentials,
 	}
 	copy(testConfig.Models, mc.Models)
 
@@ -753,9 +760,16 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 		return ErrModelNotFound
 	}
 
-	// Validate after removal (check for dangling references)
+	// Validate after removal (check for dangling references).
+	// Mirror the UpdateModel fix: copy BOTH Models AND Credentials
+	// into the testConfig — without the credentials mirror, the
+	// surviving internal model with a credential ref trips
+	// validateModelAgainstCredentials' "credential_id
+	// references non-existent credential" guard and the
+	// semantically valid DELETE returns 404 spuriously.
 	testConfig := &ModelsConfig{
-		Models: make([]ModelConfig, len(mc.Models)),
+		Models:      make([]ModelConfig, len(mc.Models)),
+		Credentials: mc.Credentials,
 	}
 	copy(testConfig.Models, mc.Models)
 
