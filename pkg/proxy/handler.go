@@ -250,12 +250,13 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	cfg := h.config.Clone()
 	enabledModels := cfg.ModelsConfig.GetEnabledModels()
 
-	// Build OpenAI-compatible response. Exclude image-gen models:
-	// they are served by /v1/image_generation and must never appear
-	// in the OpenAI-compatible chat pickers.
+	// Build OpenAI-compatible response. Exclude image-gen and
+	// decision models: they are served by /v1/image_generation
+	// and /v1/decisions respectively and must never appear in the
+	// OpenAI-compatible chat pickers (Decision Models / §3.1 site 6).
 	models := make([]map[string]interface{}, 0, len(enabledModels))
 	for _, m := range enabledModels {
-		if m.IsImageGen() {
+		if m.IsImageGen() || m.IsDecision() {
 			continue
 		}
 		models = append(models, map[string]interface{}{
@@ -457,6 +458,24 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		h.sendError(w, http.StatusBadRequest,
 			"image-gen models are served by /v1/image_generation only",
 			models.ErrorTypeServerError, "image_gen_misroute")
+		return
+	}
+
+	// Decision Models commission / §3.1 site 5 — sibling guard
+	// for decision-kind models. Intentionally a SECOND `if`
+	// branch (not a boolean `||` in the arm above) so the
+	// `decision_misroute` error code stays distinct from
+	// `image_gen_misroute` and the resolved-model kind is clear
+	// in the log line. Code string follows the cross-route
+	// canonical naming ("decision_misroute" identifies the
+	// misroute class everywhere; the Anthropic route emits the
+	// same code string through its own envelope family — see
+	// handler_anthropic.go post-resolve guard).
+	if rc.resolvedModel != nil && rc.resolvedModel.IsDecision() {
+		log.Printf("[decision] rejecting chat misroute to decision model=%s (model is served by /v1/decisions only)", rc.resolvedModel.ID)
+		h.sendError(w, http.StatusBadRequest,
+			"decision models are served by /v1/decisions only",
+			models.ErrorTypeServerError, "decision_misroute")
 		return
 	}
 

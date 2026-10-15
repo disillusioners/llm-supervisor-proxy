@@ -175,6 +175,37 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Decision Models commission / §3.1 site 8 — NEW post-resolve
+	// guard on the /v1/messages (Anthropic) route. The route had
+	// ZERO misroute checks today (a verified gap); a decision
+	// model posted here would otherwise reach the chat upstream
+	// and burn a real upstream call. Reject here, AFTER model
+	// resolve (so a typo gets a real 404 elsewhere, not a 400
+	// masking a misconfig) and BEFORE auth / upstream call.
+	//
+	// Error envelope is the ROUTE'S family (Anthropic — per
+	// finding 23: route-local envelope family). The code string
+	// `"decision_misroute"` is intentionally the same as the
+	// chat-side guard at handler.go:~462 so consumers can pattern-
+	// match the misroute class without parsing the error type.
+	//
+	// NOTE: a pre-existing image-gen gap on this same route is
+	// documented out-of-scope (decision commission does NOT
+	// backport the image-gen fix; that is a separate commission).
+	if resolvedModel != nil && resolvedModel.IsDecision() {
+		log.Printf("[decision] rejecting anthropic misroute to decision model=%s (model is served by /v1/decisions only)", resolvedModel.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"invalid_request_error", "decision_misroute",
+			"decision models are served by /v1/decisions only"))
+		h.publishEvent("decision_misroute", map[string]interface{}{
+			"id":    reqID,
+			"model": originalModel,
+		})
+		return
+	}
+
 	// Build model list using resolved config
 	var modelList []string
 	if resolvedModel != nil {
