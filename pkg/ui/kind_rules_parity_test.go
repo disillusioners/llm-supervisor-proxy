@@ -166,12 +166,18 @@ func releaseDeadlineString(d models.Duration) string {
 // test. Iterates the D1-D9 matrix and asserts that:
 //
 //	models.ValidateKindRules(m, primaryProvider)  ⇒  errSubstring
-//	POST inline mirror                             ⇒  errSubstring OR status=201
-//	PUT  inline mirror (model must exist)          ⇒  errSubstring OR status=200
+//	POST inline mirror                             ⇒  400 + errSubstring
+//	PUT  inline mirror (model must exist)          ⇒  400 + errSubstring
 //
-// At least one of POST/PUT must reject with the same substring
-// as the helper (otherwise the rule is enforced at neither
-// site — a silent drift class).
+// EACH mirror is asserted independently and unconditionally: both
+// POST AND PUT must return 400 carrying the rule's phrase (P1
+// review fix — the previous form only errored when BOTH mirrors
+// accepted a violation, so a single drifting mirror passed
+// silently). Any drift at any of the three enforcement sites
+// fails loudly. (D3 exception: the phrase arrives via the
+// pre-empting cross-cutting credential rule — see the D3 case
+// comment for the evidence; both mirrors are still asserted at
+// 400 with that phrase.)
 func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 	type ruleCase struct {
 		name  string
@@ -192,50 +198,70 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 		},
 		{
 			// D3 (decision-requires-credentials) is intentionally
-			// REDUNDANT with the cross-cutting chat rule (server.go:
-			// internal ⇒ credentials non-empty). The cross-cutting
-			// rule fires first at server.go:813-815 with a
-			// different (more verbose) message that mentions
-			// "at least one credential". The plan §2.1 documents
-			// D3 as belt-and-suspenders for the kind-rule
-			// helper. The parity assertion for D3 therefore ONLY
-			// checks that POST/PUT reject the model with 400 (the
-			// rule IS enforced at the wire level — just by a
-			// different phrasing).
+			// REDUNDANT with the cross-cutting chat rule
+			// (validateCredentials rule (a): internal ⇒ credentials
+			// non-empty; pkg/ui/server.go, POST block ~:860 + PUT
+			// block ~:1183 — both run BEFORE the kind mirrors).
+			//
+			// Dual-enforcement overlap, decided from source evidence
+			// (not assumption): every payload that reaches the
+			// decision mirror's own D3 check has already passed D1
+			// (internal=true, since D1 fires first in both mirrors
+			// and in the helper) and has len(credentials)==0 — which
+			// is exactly rule (a)'s trigger. The cross-cutting rule
+			// therefore provably ALWAYS fires first at the wire for
+			// every D3-violating payload, with the message
+			// "credentials: at least one credential is required when
+			// internal is true (…)", prefixed "invalid credentials: ".
+			// The D3 mirror phrase `kind "decision" requires at
+			// least one credential` is wire-unreachable in POST/PUT
+			// (defense-in-depth: still live at the DB/helper layer
+			// via AddModel → ValidateKindRules).
+			//
+			// Stance per the P1 review: keep the overlap substring
+			// "at least one credential" (shared by BOTH phrasings),
+			// and assert BOTH mirrors return 400 — the rule IS
+			// enforced at the wire level, just by the pre-empting
+			// cross-cutting phrasing.
 			name:   "D3_decision_requires_credentials",
 			substr: "at least one credential",
 			mutate: func(m *models.ModelConfig) { m.Credentials = nil },
 		},
 		{
+			// Phrase shared by helper ("model <id>: kind \"decision\"
+			// requires the primary credential's provider to be …"),
+			// POST mirror and PUT mirror — pinned to the exact
+			// allowed-provider list so a provider-list drift
+			// anywhere fails loudly.
 			name:   "D4_decision_provider_gate_rejects_minimax",
-			substr: "kind \"decision\" requires the primary credential's provider to be",
+			substr: `requires the primary credential's provider to be "openai" or "typesafe"`,
 			mutate: func(m *models.ModelConfig) {
 				m.Credentials = decisionRefs("minimax-cred")
 			},
 		},
 		{
 			name:   "D5_decision_rejects_fallback_chain",
-			substr: "fallback_chain",
+			substr: "does not support fallback_chain",
 			mutate: func(m *models.ModelConfig) { m.FallbackChain = []string{"other"} },
 		},
 		{
 			name:   "D6_decision_rejects_secondary_upstream_model",
-			substr: "secondary_upstream_model",
+			substr: "does not support secondary_upstream_model",
 			mutate: func(m *models.ModelConfig) { m.SecondaryUpstreamModel = "x" },
 		},
 		{
 			name:   "D7_decision_rejects_peak_hour_enabled",
-			substr: "peak_hour_enabled",
+			substr: "does not support peak_hour_enabled",
 			mutate: func(m *models.ModelConfig) { m.PeakHourEnabled = true },
 		},
 		{
 			name:   "D8_decision_rejects_release_stream_chunk_deadline",
-			substr: "release_stream_chunk_deadline",
+			substr: "does not support release_stream_chunk_deadline",
 			mutate: func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
 		},
 		{
 			name:   "D9_decision_requires_exclude_from_ultimate_switching",
-			substr: "exclude_from_ultimate_switching to be true",
+			substr: "requires exclude_from_ultimate_switching to be true",
 			mutate: func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
 		},
 	}
@@ -277,35 +303,32 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 				t.Fatalf("helper err %q does not contain expected rule phrase %q — models.validateDecisionRules may have drifted", helperErr, tc.substr)
 			}
 
-			// --- POST inline mirror ---
+			// --- POST inline mirror (P1.9 fix: hard 400 + phrase) ---
 			postStatus, postErrSubstr := postDecisionModel(t, srv.URL, marshalBrokenModel(broken))
-			if postStatus == http.StatusBadRequest {
-				if !strings.Contains(postErrSubstr, tc.substr) {
-					t.Errorf("POST inline err %q does not contain expected rule phrase %q — server.go POST inline has drifted", postErrSubstr, tc.substr)
-				}
+			if postStatus != http.StatusBadRequest {
+				t.Errorf("POST inline mirror ACCEPTED the broken model (status=%d, err=%q) — server.go POST inline has drifted for %s; must reject with 400",
+					postStatus, postErrSubstr, tc.name)
+			} else if !strings.Contains(postErrSubstr, tc.substr) {
+				t.Errorf("POST inline err %q does not contain expected rule phrase %q — server.go POST inline has drifted", postErrSubstr, tc.substr)
 			}
 
-			// --- PUT inline mirror ---
+			// --- PUT inline mirror (P1.9 fix: hard 400 + phrase) ---
 			// Seed the valid base model first (PUT requires it
 			// to exist).
 			if err := ts.mockModels.AddModel(base); err != nil {
 				t.Fatalf("seed base model: %v", err)
 			}
 			putStatus, putErrSubstr := putDecisionModel(t, srv.URL, "decision-1", marshalBrokenModel(broken))
-			if putStatus == http.StatusBadRequest {
-				if !strings.Contains(putErrSubstr, tc.substr) {
-					t.Errorf("PUT inline err %q does not contain expected rule phrase %q — server.go PUT inline has drifted", putErrSubstr, tc.substr)
-				}
+			if putStatus != http.StatusBadRequest {
+				t.Errorf("PUT inline mirror ACCEPTED the broken model (status=%d, err=%q) — server.go PUT inline has drifted for %s; must reject with 400",
+					putStatus, putErrSubstr, tc.name)
+			} else if !strings.Contains(putErrSubstr, tc.substr) {
+				t.Errorf("PUT inline err %q does not contain expected rule phrase %q — server.go PUT inline has drifted", putErrSubstr, tc.substr)
 			}
 
-			// Final assertion: the helper MUST reject the model
-			// (already checked above) AND at least one of POST/PUT
-			// must reject with the same substring — otherwise the
-			// rule is enforced at neither site, a silent drift class.
-			if postStatus != http.StatusBadRequest && putStatus != http.StatusBadRequest {
-				t.Errorf("rule %q rejected by helper only; BOTH POST (status=%d) and PUT (status=%d) inline mirrors accepted the broken model — at least one inline mirror must catch this rule",
-					tc.substr, postStatus, putStatus)
-			}
+			// No OR-shortcut: each mirror above is asserted
+			// independently (400 + phrase), so a single drifting
+			// mirror fails this subtest on its own.
 		})
 	}
 }
