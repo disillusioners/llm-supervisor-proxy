@@ -1804,6 +1804,11 @@ func TestValidator_BooleanStringCollision_MixedTypes(t *testing.T) {
 			wantFail: false,
 		},
 		{
+			name:     "mixed bool+string is legal (mirrored bool-first ordering)",
+			req:      choiceQ("x", true, "maybe"),
+			wantFail: false,
+		},
+		{
 			name:     "all strings incl true/false literals: no booleans, no collision",
 			req:      choiceQ("x", "true", "false", "maybe"),
 			wantFail: false,

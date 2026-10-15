@@ -26,8 +26,8 @@ func TestAnswerMarshalJSON_ScoreProbabilitiesOnWire(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	var wire struct {
-		Type          string `json:"type"`
-		Score         *float64 `json:"score"`
+		Type          string             `json:"type"`
+		Score         *float64           `json:"score"`
 		Probabilities []ScoreAnswerEntry `json:"probabilities"`
 	}
 	if err := json.Unmarshal(b, &wire); err != nil {

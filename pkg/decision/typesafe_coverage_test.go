@@ -128,9 +128,9 @@ func TestStringifyValue_Forms(t *testing.T) {
 // array with no text content.
 func TestDeriveStateText_Rejections(t *testing.T) {
 	cases := []struct {
-		name     string
-		input    string
-		wantSub  string
+		name    string
+		input   string
+		wantSub string
 	}{
 		{name: "neither_string_nor_array", input: `42`, wantSub: "neither a string nor a message array"},
 		{name: "empty_part_type", input: `[{"role":"user","parts":[{"type":"","text":"x"}]}]`, wantSub: "has no type"},
