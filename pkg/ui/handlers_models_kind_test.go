@@ -11,7 +11,6 @@ package ui
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -214,6 +213,122 @@ func readBody(resp *http.Response) string {
 	return sb.String()
 }
 
-// url.Values is unused in the body above but reserved for
-// future ?kind= unit tests that need query params.
-var _ = url.Values{}
+func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKinds(t *testing.T) {
+	// Decision Models commission / §9.2 (R1.2 / approver polish
+	// item 4) — the default-arm warning wording must mention
+	// THREE kinds (chat + image-gen + decision) now that
+	// KindDecision exists. The unknown-kind branch still falls
+	// back to a chat filter (back-compat with operators who
+	// typo'd a URL).
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+
+	u := server.URL + "/fe/api/models?kind=unknown-value"
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var got []Model
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Default-arm fallback: chat filter = !IsImageGen && !IsDecision.
+	// chat-1 passes; img-1 + dec-1 are excluded.
+	if len(got) != 1 || got[0].ID != "chat-1" {
+		t.Errorf("unknown-kind fallback should treat as chat (excluding image-gen + decision); got %+v", got)
+	}
+}
+
+func TestHandleModels_GET_KindFilter_ChatExcludesImageGenAndDecision(t *testing.T) {
+	// Decision Models commission / §3.1 site 7 — the chat arm
+	// was EXTENDED in P1.4 to `!m.IsImageGen() && !m.IsDecision()`.
+	// Before the fix, decision models leaked into `?kind=chat`
+	// for any non-UI direct API consumer (Review Round 1 finding 1).
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+
+	u := server.URL + "/fe/api/models?kind=chat"
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var got []Model
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "chat-1" {
+		t.Errorf("?kind=chat must return chat-1 only (no image-gen, no decision); got %+v", got)
+	}
+	for _, m := range got {
+		if m.ID == "img-1" {
+			t.Error("?kind=chat returned image-gen model (would leak to chat pickers)")
+		}
+		if m.ID == "dec-1" {
+			t.Error("?kind=chat returned decision model (P1.4 fix regression — Review Round 1 finding 1 re-emerged)")
+		}
+	}
+}
+
+func TestHandleModels_GET_KindFilter_ImageGenExcludesDecision(t *testing.T) {
+	// Decision Models / §9.2 — `?kind=image-gen` must return
+	// ONLY image-gen models. Decision models on this arm would
+	// leak into the image-gen picker.
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+
+	u := server.URL + "/fe/api/models?kind=image-gen"
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var got []Model
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "img-1" {
+		t.Errorf("?kind=image-gen must return image-gen models only; got %+v", got)
+	}
+}
+
+func TestHandleModels_GET_KindFilter_Decision(t *testing.T) {
+	// Decision Models / §3.1 site 7 — `?kind=decision` returns
+	// ONLY decision models. P1.4 acceptance text.
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+
+	u := server.URL + "/fe/api/models?kind=decision"
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var got []Model
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "dec-1" {
+		t.Errorf("?kind=decision must return decision models only; got %+v", got)
+	}
+}
