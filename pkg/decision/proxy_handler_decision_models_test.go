@@ -16,7 +16,6 @@ package decision
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,11 +89,45 @@ func makeDecisionHandler(t *testing.T, modelID, kind string) *Handler {
 }
 
 // decisionRequestBody builds a wire-shape POST body for
-// /v1/decisions. The body is parsed via json.Unmarshal into a
-// map; the `model` field is the only field the handler reads
-// at P1 (typed parse is P2).
+// /v1/decisions. The body is typed-parsed at P2 (Decision
+// Models commission §3.2 step 4) so it must include at
+// least one valid question to pass the typed validator chain.
+// `decisionRequestBodyBody` keeps the legacy minimal shape
+// (just model + input) for tests that fail on parse before
+// the validator runs (e.g. invalid-JSON paths); everything
+// else uses the typed shape.
 func decisionRequestBody(model string) string {
-	return fmt.Sprintf(`{"model": %q, "input": "test"}`, model)
+	return decisionRequestBodyWithQuestion(model, "is_x", "Is this true?", "predicate")
+}
+
+// decisionRequestBodyWithQuestion adds a single question to the
+// body so the typed parse + validator chain runs through
+// (mirrors what a real client would send).
+func decisionRequestBodyWithQuestion(model string, name string, instructions string, kind string) string {
+	questionBody := map[string]interface{}{
+		"type":         kind,
+		"name":         name,
+		"instructions": instructions,
+	}
+	// All three types need at least 2 entries per
+	// validation rules.
+	switch kind {
+	case "choice":
+		questionBody["choices"] = []map[string]interface{}{
+			{"value": "a"}, {"value": "b"},
+		}
+	case "score":
+		questionBody["levels"] = []map[string]interface{}{
+			{"label": "low"}, {"label": "high"},
+		}
+	}
+	body := map[string]interface{}{
+		"model":     model,
+		"input":     "test input",
+		"questions": []interface{}{questionBody},
+	}
+	b, _ := json.Marshal(body)
+	return string(b)
 }
 
 // TestDecision_Resolver_DecisionKind_404Unknown — unknown
@@ -178,15 +211,49 @@ func TestDecision_Resolver_ImageGenModelMisroute_400_DecisionMisroute(t *testing
 	}
 }
 
-// TestDecision_Resolver_DecisionModel_PassesGuard_502OnRegistry —
-// decision model posted to /v1/decisions PASSES the IsDecision()
-// guard AND the model-already-exists check, then hits the empty
-// provider registry (P1 design) → 502 "no decision adapter
-// registered for provider". This is the documented P1 exit
-// criterion — the route is live but returns 502 until P2
-// registers openai + typesafe.
-func TestDecision_Resolver_DecisionModel_PassesGuard_502OnRegistry(t *testing.T) {
-	h := makeDecisionHandler(t, "dec-1", models.KindDecision)
+// TestDecision_Resolver_DecisionModel_ProviderLookup_502 —
+// P1-era test was for "empty registry → 502". At P2 init()
+// registers BOTH openai + typesafe adapters, so a decision
+// model with provider "openai" no longer 502s at the
+// registry step. This test now exercises the same 502 path
+// but with a NON-registered provider ("anthropic") — the
+// registry is populated for openai + typesafe but NOT for
+// anything else. Cleaned up post-P2 to remain a focused
+// registry-not-found test (the full BuildUpstream-error
+// path is exercised in TestHandler_ProviderLookup_502 in
+// handler_test.go).
+func TestDecision_Resolver_DecisionModel_ProviderLookup_502(t *testing.T) {
+	t.Helper()
+	getModel := func(id string) *models.ModelConfig {
+		if id != "dec-1" {
+			return nil
+		}
+		return &models.ModelConfig{
+			ID:                         "dec-1",
+			Name:                       "Decision 1",
+			Enabled:                    true,
+			Kind:                       models.KindDecision,
+			Internal:                   true,
+			InternalModel:              "gpt-6-luna",
+			Credentials:                []models.CredentialRef{{CredentialID: "anth-cred", Weight: 1, Position: 0}},
+			ExcludeFromUltimateSwitching: true,
+		}
+	}
+	resolveCred := func(id string) (models.ResolvedCredential, bool) {
+		if id != "dec-1" {
+			return models.ResolvedCredential{}, false
+		}
+		// Anthropic is NOT in the decision providerRegistry
+		// (only openai + typesafe are registered post-P2).
+		return models.ResolvedCredential{
+			Provider:      "anthropic",
+			APIKey:        "sk-anth",
+			InternalModel: "gpt-6-luna",
+		}, true
+	}
+	h := NewHandler(&stubConfigMgr{}, nil, nil, nil)
+	h.SetModelResolver(NewModelResolverFromConfig(getModel))
+	h.SetCredentialResolver(NewCredentialResolverFromConfig(resolveCred))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/decisions", strings.NewReader(decisionRequestBody("dec-1")))
@@ -194,7 +261,7 @@ func TestDecision_Resolver_DecisionModel_PassesGuard_502OnRegistry(t *testing.T)
 	h.HandleDecision(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("decision model on /v1/decisions (P1): status = %d, want 502 (empty provider registry); body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("decision model on /v1/decisions with unregistered provider: status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
@@ -205,8 +272,8 @@ func TestDecision_Resolver_DecisionModel_PassesGuard_502OnRegistry(t *testing.T)
 		t.Fatalf("body has no 'error' object: %s", rec.Body.String())
 	}
 	msg, _ := errObj["message"].(string)
-	if !strings.Contains(msg, "openai") {
-		t.Errorf("error.message = %q, want it to mention the provider (openai) that has no registered adapter", msg)
+	if !strings.Contains(msg, "anthropic") {
+		t.Errorf("error.message = %q, want it to mention the unregistered provider (anthropic)", msg)
 	}
 }
 

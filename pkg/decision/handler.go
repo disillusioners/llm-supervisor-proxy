@@ -1,22 +1,48 @@
 // Package decision handler. Skeleton modeled on pkg/imggen/handler.go
 // (~80% copy-and-rename of the handler shell; Decision Models
-// commission / §3.2 / §3.2.a: P1 owns ONLY the handler shell —
-// the typed wire parser (Step 4 parseBody), provider adapters
-// (Steps 10 BuildUpstream + 14 InspectResponse), gotcha
-// validators (Step 5), metering (Step 16), and event publish
-// (Step 17) all land in P2).
+// commission / §3.2 / §3.2.a). At P2 the handler owns the
+// complete 17-step lifecycle:
 //
-// Deviations from the imggen template:
-//   - Misroute guard is the REVERSE direction (imggen is the
-//     "kind tagged at write" guard on /v1/image_generation — here
-//     we're inside /v1/decisions and reject chat/image-gen
-//     models in resolveModel with 400 + code "decision_misroute",
-//     a house OpenAI envelope). Closes the imggen reverse-
-//     direction gap that imggen itself never closed (§3.4 row 3).
-//   - The shared registry is EMPTY at P1 — provider lookup
-//     returns ok=false by design; the route is live but the
-//     handler returns 502 until P2 registers openai/typesafe.
-//     This is the documented P1 exit criterion (§10).
+//  1. POST-only method guard (house style; 405 via http.Error).
+//  2. MaxBytesReader at 16 MB → 413 (house OpenAI envelope on
+//     *http.MaxBytesError).
+//  3. Auth (extractAPIKey + ValidateToken with 5s ctx). tokenStore
+//     nil ⇒ auth disabled. Invalid token ⇒ 401 (house envelope).
+//  4. parseBody: typed parse into DecisionRequest ONCE (the
+//     original raw bytes are buffered for the openai-decision
+//     byte-faithful pass-through at step 10).
+//  5. Typed gotcha validators (validators.go) — 400 + house
+//     OpenAI envelope on the first failure (typed validation).
+//  6. resolveModel + EXPLICIT IsDecision() check — chat / image-gen
+//     models posted here return 400 + code "decision_misroute"
+//     (closes imggen reverse-direction gap).
+//  7. Token allow-list (403 only when AllowedModels is non-empty
+//     AND the model is not in the list).
+//  8. Credential resolution (stable affinity key (modelID, modelID)).
+//  9. Provider lookup on the local registry. Unknown provider ⇒ 502
+//     + "no decision adapter registered for provider" (finding 6
+//     trimmed message).
+// 10. provider.BuildUpstream(cred, req, rawBody). On err ⇒ 502 +
+//     house envelope code "decision_upstream_build_failed" (Q15).
+// 11. Timeout ctx (DecisionTimeout, default 30s, clamp [10s,60s]).
+// 12. sharedHTTPClient.Do with the timeout ctx threaded via
+//     http.NewRequestWithContext (finding 4; NEVER r.Context() —
+//     would leak parent request lifecycle and defeat the
+//     per-request clamp).
+// 13. Response cap io.LimitReader(cap+1) at 64MB (mirror
+//     pkg/imggen/handler.go:404); over-cap ⇒ 502.
+// 14. provider.InspectResponse(respBytes, originalReq) — unified
+//     2-arg typed signature (finding 5). On success returns typed
+//     *DecisionResponse for relay; on PromoteToError returns
+//     Outcome{RelayStatus, Reason} with body preserved verbatim.
+// 15. Relay write: Outcome.RelayStatus == 0 ⇒ body verbatim;
+//     != 0 ⇒ set that status, body preserved verbatim.
+// 16. Meter on success only — Increment + IncrementModelUsage with
+//     input_tokens + output_tokens (chat semantics; chat at
+//     pkg/proxy/handler.go:899 / :915); detached 5s ctx (mirror
+//     pkg/imggen/handler.go:581). Failures write NO usage row.
+// 17. DecisionEvent via events.Bus on every completed decision
+//     (sibling of imggen eventTypeImageGeneration).
 package decision
 
 import (
@@ -59,6 +85,9 @@ const (
 	// payloads). The +1 lets the handler detect over-cap
 	// distinctly.
 	maxResponseBodyBytes = 64 << 20
+
+	// meterTimeout bounds the detached DB write (mirror imggen).
+	meterTimeout = 5 * time.Second
 
 	// eventTypeDecision is the events.Bus type for every
 	// telemetry payload the handler publishes. Mirrors
@@ -116,42 +145,11 @@ func (h *Handler) decisionTimeout() time.Duration {
 }
 
 // HandleDecision is the POST /v1/decisions entry point
-// (Decision Models commission / §3.2 / §10 P1). It is registered
-// in cmd/main.go as a sibling of the chat routes. POST-only is
-// enforced in-handler (house style; no Go 1.22 mux method patterns
-// anywhere else in the codebase per cmd/main.go:286-290).
-//
-// P1 flow (steps 1-3, 6-9, 11-12 of §3.2 lifecycle — steps 4
-// parseBody, 5 validators, 10 BuildUpstream, 13-14 inspect, 15
-// relay, 16 meter, 17 event are P2 landers):
-//
-//  1. POST-only method guard (house style; 405 via http.Error).
-//  2. MaxBytesReader at 16 MB → 413 (house OpenAI envelope on
-//     *http.MaxBytesError).
-//  3. Auth (extractAPIKey + ValidateToken with 5s ctx). tokenStore
-//     nil ⇒ auth disabled (mirrors chat + imggen). Invalid token
-//     ⇒ 401 (house OpenAI envelope).
-//  6. Resolve model via the resolver fn; unknown ⇒ 404 (house
-//     envelope). EXPLICIT IsDecision() check — chat / image-gen
-//     models posted here return 400 + code "decision_misroute"
-//     (closes imggen reverse-direction gap per §3.4 row 3).
-//  7. Token allow-list (403 only when AllowedModels is non-empty
-//     AND the model is not in the list; mirrors imggen).
-//  8. Credential resolution via the resolver fn (stable
-//     affinity key (modelID, modelID) — main.go wires this to
-//     modelsConfig.ResolveInternalConfigWithAffinity). nil ⇒ 502.
-//  9. Provider lookup on the local registry. P1: registry is
-//     empty by design ⇒ 502 (documented P1 exit criterion). P2
-//     registers openai + typesafe.
-//  11. Timeout ctx (DecisionTimeout / default 30s / clamp
-//      [10s, 60s]).
-//  12. (At P1 the body is NOT relayed to an upstream — the
-//      registry lookup already returned 502 at step 9.)
-//
-// The P1 body parse is minimal — we use a single-pass
-// io.ReadAll on the request body and decode-once into a generic
-// map to read the `model` field for resolution. The full typed
-// parse into DecisionRequest (with body reuse for relay) is P2.
+// (Decision Models commission / §3.2 / §10 P1+P2). It is
+// registered in cmd/main.go as a sibling of the chat routes.
+// POST-only is enforced in-handler (house style; no Go 1.22 mux
+// method patterns anywhere else in the codebase per
+// cmd/main.go:286-290).
 func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
@@ -164,7 +162,11 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 	// Step 2 — MaxBytesReader at 16 MB → 413 on *http.MaxBytesError.
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
-	bodyBytes, err := io.ReadAll(r.Body)
+	// rawBody is the exact request bytes — buffered ONCE before
+	// parse for the openai-decision byte-faithful pass-through
+	// (Q18 / A26). The typed parse below consumes the typed
+	// shape but does NOT touch the raw bytes.
+	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -202,11 +204,11 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P1 body parse is minimal: read the `model` field for the
-	// resolver lookup. P2 lands the typed parse into
-	// DecisionRequest and reuses the same body bytes for relay.
-	var bodyMap map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
+	// Step 4 — parseBody: typed parse into the typed
+	// DecisionRequest. The raw bytes are kept for the
+	// openai-decision adapter (Q18 byte-faithful pass-through).
+	var req DecisionRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
 			"outcome":         "invalid_json",
 			"error":           err.Error(),
@@ -216,14 +218,30 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		h.openAIError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	modelID, _ := bodyMap["model"].(string)
-	if modelID == "" {
+	if req.Model == "" {
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
 			"outcome":         "missing_model",
 			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadRequest, "model field is required")
+		return
+	}
+	modelID := req.Model
+
+	// Step 5 — Typed gotcha validators (typed predicates in
+	// validators.go). 400 + house OpenAI envelope on the first
+	// failure (Q4 — typed validation lives at the edge; typesafe
+	// re-asserts a subset at BuildUpstream as defense-in-depth).
+	if msg, failed := validateFirstFailed(&req); failed {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "validation_failed",
+			"model":           modelID,
+			"error":           msg,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -291,12 +309,11 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 9 — Provider lookup. P1: local registry is empty by
-	// design — the handler returns 502 here at the documented
-	// P1 exit criterion. P2 registers openai + typesafe
-	// adapters (and any future adapter slots into the registry
-	// without touching the handler).
-	_, ok = lookup(cred.Provider)
+	// Step 9 — Provider lookup. Empty registry ⇒ 502 (clean
+	// operational fact post-P2; finding 6 trimmed the P1
+	// wording to drop the stale "(P1 ships with an empty
+	// registry by design; P2 registers ...)" clause).
+	provider, ok := lookup(cred.Provider)
 	if !ok {
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
 			"outcome":         "unsupported_provider",
@@ -306,30 +323,227 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 			"upstream_status": 0,
 		})
 		h.openAIError(w, http.StatusBadGateway,
-			fmt.Sprintf("no decision adapter registered for provider %q (P1 ships with an empty registry by design; P2 registers openai + typesafe)", cred.Provider))
+			fmt.Sprintf("no decision adapter registered for provider %q", cred.Provider))
 		return
 	}
 
-	// Step 11 — timeout ctx (plumbing only at P1; the upstream
-	// call lands in P2 alongside the BuildUpstream + InspectResponse
-	// adapters).
-	_, cancel := context.WithTimeout(r.Context(), h.decisionTimeout())
+	// Step 9.5 — Provider-specific pre-flight edge checks.
+	// These are edge cases the typesafe adapter's
+	// BuildUpstream re-validates as defense-in-depth
+	// (amendment 4), but the proxy's house posture is to
+	// surface them as 400 BEFORE any upstream call so the
+	// client gets a deterministic status. The openai path
+	// forwards data URLs as-is (Q3 / R2 posture) so no
+	// pre-flight check is needed there.
+	if cred.Provider == TypesafeProviderName {
+		if msg, failed := typesafePreflightValidate(&req); failed {
+			h.publishEvent(eventTypeDecision, map[string]interface{}{
+				"outcome":         "typesafe_preflight_failed",
+				"model":           modelID,
+				"provider":        cred.Provider,
+				"error":           msg,
+				"duration_ms":     time.Since(startTime).Milliseconds(),
+				"upstream_status": 0,
+			})
+			h.openAIError(w, http.StatusBadRequest, msg)
+			return
+		}
+	}
+
+	// Step 10 — BuildUpstream. err ⇒ 502 + house envelope code
+	// "decision_upstream_build_failed" (Q15; BuildUpstream-
+	// level vs validation-level distinction).
+	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, &req, rawBody)
+	if err != nil {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "build_failed",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIErrorWithCode(w, http.StatusBadGateway,
+			"failed to construct upstream request: "+err.Error(),
+			"decision_upstream_build_failed")
+		return
+	}
+
+	// Step 11 — timeout ctx. The ctx is owned here (not
+	// r.Context()) so the per-request clamp binds only this
+	// step (finding 4). Threaded through the upstream call via
+	// http.NewRequestWithContext at step 12 (NEVER r.Context() —
+	// would leak the parent request lifecycle and defeat the
+	// per-request DecisionTimeout clamp).
+	ctx, cancel := context.WithTimeout(context.Background(), h.decisionTimeout())
 	defer cancel()
 
-	// P1 exits here. Steps 12-17 (sharedHTTPClient.Do, response
-	// cap, InspectResponse, relay, success-only meter, event
-	// publish) all land in P2 once the openai-decision +
-	// typesafe adapters are registered at init() time.
+	// Step 12 — sharedHTTPClient.Do with the timeout ctx
+	// threaded via http.NewRequestWithContext (finding 4).
+	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "request_build_failed",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIError(w, http.StatusInternalServerError,
+			"failed to build upstream HTTP request")
+		return
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+	// Strip client auth headers + hop-by-hop headers (proxy's
+	// sk- token must never reach the decision upstream —
+	// parallel of imggen BE-A2).
+	for key, values := range r.Header {
+		if isHopByHopHeader(key) || isClientAuthHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			upstreamReq.Header.Add(key, value)
+		}
+	}
 
-	// Defensive: keep a bodyBytes reference so go vet / deadcode
-	// does not strip the Step 2 read; P2 reuses these bytes for
-	// the openai-decision byte-faithful pass-through (Q18).
-	_ = bodyBytes
+	// Single upstream call (no retry / fallback / race — the
+	// decision shape is sync + token-billed, decisions are
+	// cheap+fast).
+	resp, err := sharedHTTPClient.Do(upstreamReq)
+	if err != nil {
+		// Deadline / context expiry surfaces here as well —
+		// 504 on context.DeadlineExceeded; 502 on transport
+		// error.
+		status := http.StatusBadGateway
+		outcome := "upstream_transport_error"
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+			status = http.StatusGatewayTimeout
+			outcome = "deadline"
+		}
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         outcome,
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": 0,
+		})
+		h.openAIError(w, status, fmt.Sprintf("upstream request failed: %v", err))
+		h.publishFinalFailureEvent(modelID, cred.Provider, startTime, 0, "transport_failure", nil)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Step 13 — Response read bounded (BE-G2 mirror). The +1
+	// byte triggers a separate over-cap branch.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
+	if err != nil {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "upstream_read_failed",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": resp.StatusCode,
+		})
+		h.openAIError(w, http.StatusBadGateway, "upstream read failed")
+		h.publishFinalFailureEvent(modelID, cred.Provider, startTime, resp.StatusCode, "upstream_read_failed", nil)
+		return
+	}
+	if len(respBody) > maxResponseBodyBytes {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "response_too_large",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"max_bytes":       maxResponseBodyBytes,
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": resp.StatusCode,
+		})
+		h.openAIError(w, http.StatusBadGateway,
+			fmt.Sprintf("upstream response exceeds %d MB cap", maxResponseBodyBytes>>20))
+		h.publishFinalFailureEvent(modelID, cred.Provider, startTime, resp.StatusCode, "response_too_large", nil)
+		return
+	}
+
+	// Step 14 — InspectResponse (unified 2-arg signature;
+	// finding 5). The typed response is the relay payload on
+	// success; the Outcome carries the relay decision.
+	typedResp, outcome, err := provider.InspectResponse(respBody, &req)
+	if err != nil {
+		h.publishEvent(eventTypeDecision, map[string]interface{}{
+			"outcome":         "inspect_error",
+			"model":           modelID,
+			"provider":        cred.Provider,
+			"error":           err.Error(),
+			"duration_ms":     time.Since(startTime).Milliseconds(),
+			"upstream_status": resp.StatusCode,
+		})
+		h.openAIError(w, http.StatusBadGateway, "inspect error: "+err.Error())
+		h.publishFinalFailureEvent(modelID, cred.Provider, startTime, resp.StatusCode, "inspect_error", respBody)
+		return
+	}
+
+	// Step 15 — Relay write. Outcome.RelayStatus == 0 ⇒
+	// PassAsIs; != 0 ⇒ PromoteToError (imggen-style; status +
+	// body preserved verbatim — no envelope of our own).
+	if outcome.RelayStatus == 0 {
+		// PassAsIs — the typed response IS the relay. Encode
+		// and write; the upstream HTTP status is the relay
+		// status (typically 200, but PassAsIs covers upstream
+		// HTTP ≥400 passthrough too — e.g. an upstream that
+		// returns 200 with a typed DecisionResponse shape).
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		if typedResp != nil {
+			if err := json.NewEncoder(w).Encode(typedResp); err != nil {
+				log.Printf("[decision] write to client failed: %v (model=%s, provider=%s)", err, modelID, cred.Provider)
+			}
+		} else {
+			// 200 with no typed response — relay the raw
+			// bytes verbatim (PassAsIs).
+			if _, err := w.Write(respBody); err != nil {
+				log.Printf("[decision] write to client failed: %v (model=%s, provider=%s)", err, modelID, cred.Provider)
+			}
+		}
+	} else {
+		// PromoteToError. The upstream body is preserved
+		// verbatim — no envelope of our own on error-in-200
+		// (imggen-style; the upstream's own error shape is
+		// what clients pattern-match).
+		if outcome.RelayStatus == http.StatusOK {
+			// FUTURE-PROOFING TRIPWIRE (imggen
+			// reviewer-deferred item): an adapter that
+			// returns RelayStatus==200 on a non-success
+			// path would silently relabel the upstream's
+			// failure as success. Clamp to 502.
+			log.Printf("[decision] adapter returned RelayStatus=200 on a non-success outcome (%s) — clamping to 502", outcome.Reason)
+			w.WriteHeader(http.StatusBadGateway)
+		} else {
+			w.WriteHeader(outcome.RelayStatus)
+		}
+		if _, err := w.Write(respBody); err != nil {
+			log.Printf("[decision] write to client failed: %v (model=%s, provider=%s)", err, modelID, cred.Provider)
+		}
+	}
+
+	// Step 16 — Meter on success only (chat semantics, NOT
+	// imggen's meterFailure). Detached 5s ctx (mirror imggen)
+	// so client disconnect cannot cancel billing. Reads
+	// input_tokens + output_tokens from the typed Usage.
+	if outcome.RelayStatus == 0 {
+		h.meterOnSuccess(authToken, modelID, provider, typedResp)
+	}
+
+	// Step 17 — Final decision event for telemetry. The event
+	// is published AFTER the relay write so the duration covers
+	// the entire round-trip including the client write.
+	h.publishFinalOutcomeEvent(modelID, cred.Provider, startTime, resp.StatusCode, outcome, typedResp)
 }
 
-// authenticate mirrors pkg/proxy/handler.go and pkg/imggen/handler.go.
-// tokenStore nil ⇒ auth disabled. Returns (token, true) on success /
-// disabled, (nil, false) on auth failure.
+// ---------- Auth + low-level helpers ----------
+
 func (h *Handler) authenticate(r *http.Request) (*auth.AuthToken, bool) {
 	if h.tokenStore == nil {
 		return nil, true
@@ -347,8 +561,6 @@ func (h *Handler) authenticate(r *http.Request) (*auth.AuthToken, bool) {
 	return token, true
 }
 
-// extractAPIKey mirrors pkg/proxy/handler.go:265-285 — Authorization
-// Bearer, X-API-Key, x-api-key.
 func extractAPIKey(r *http.Request) string {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
@@ -363,8 +575,57 @@ func extractAPIKey(r *http.Request) string {
 	return ""
 }
 
-// publishEvent is a nil-safe wrapper around bus.Publish. Mirrors
-// pkg/imggen/handler.go:614.
+// ---------- Meter (success-only, detached) ----------
+
+// meterOnSuccess writes a single usage row only when the
+// upstream response is a successful relay. Mirrors the chat
+// writer set (pkg/proxy/handler.go:899/915): Increment +
+// IncrementModelUsage with input_tokens + output_tokens. The
+// 5s ctx is detached (background) so client disconnect cannot
+// cancel billing (review F1; precedent: pkg/imggen/handler.go:581).
+//
+// On failure paths (outcome.RelayStatus != 0) NOTHING is
+// written — success-only semantics per amendment 5 / Q5.
+// Failure telemetry flows via publishFinalFailureEvent.
+func (h *Handler) meterOnSuccess(authToken *auth.AuthToken, modelID string, provider UpstreamProvider, resp *DecisionResponse) {
+	if h.usage == nil {
+		return
+	}
+	if resp == nil {
+		return
+	}
+	usage := provider.ExtractUsage(resp)
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
+		// Defensive — zero-token usage is not the policy
+		// (success-only meters success). Log + skip.
+		log.Printf("[decision] skipping meter for zero-token usage (model=%s)", modelID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), meterTimeout)
+	defer cancel()
+	hourBucket := time.Now().UTC().Format("2006-01-02T15")
+	var tokenID string
+	if authToken != nil {
+		tokenID = authToken.ID
+	}
+	promptTokens := int(usage.InputTokens)
+	completionTokens := int(usage.OutputTokens)
+	totalTokens := promptTokens + completionTokens
+
+	if err := h.usage.Increment(ctx, tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+		log.Printf("[decision] Increment failed: %v (model=%s, token=%s)", err, modelID, tokenID)
+	}
+	if err := h.usage.IncrementModelUsage(ctx, modelID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+		log.Printf("[decision] IncrementModelUsage failed: %v (model=%s)", err, modelID)
+	}
+}
+
+// ---------- Telemetry ----------
+
+// publishEvent is a nil-safe wrapper around bus.Publish.
+// Sibling of pkg/imggen/handler.go:614 — accepts a free-form
+// map; the Event payload shape is the same.
 func (h *Handler) publishEvent(eventType string, data map[string]interface{}) {
 	if h.bus == nil {
 		return
@@ -376,16 +637,46 @@ func (h *Handler) publishEvent(eventType string, data map[string]interface{}) {
 	})
 }
 
+// publishFinalOutcomeEvent is the success-path telemetry —
+// fires AFTER the relay write so the duration covers the
+// full round-trip + client write.
+func (h *Handler) publishFinalOutcomeEvent(modelID, providerName string, startTime time.Time, upstreamStatus int, outcome *Outcome, typedResp *DecisionResponse) {
+	eventOutcome := "success"
+	if outcome == nil || outcome.RelayStatus != 0 {
+		eventOutcome = "error"
+	}
+	var usage Usage
+	if typedResp != nil {
+		usage = typedResp.Usage
+	}
+	h.publishEvent(eventTypeDecision, map[string]interface{}{
+		"model":           modelID,
+		"provider":        providerName,
+		"input_tokens":    usage.InputTokens,
+		"output_tokens":   usage.OutputTokens,
+		"upstream_status": upstreamStatus,
+		"duration_ms":     time.Since(startTime).Milliseconds(),
+		"outcome":         eventOutcome,
+	})
+}
+
+// publishFinalFailureEvent is the failure-path telemetry. The
+// typed response is nil; we emit only the outcome / status
+// fields.
+func (h *Handler) publishFinalFailureEvent(modelID, providerName string, startTime time.Time, upstreamStatus int, outcome string, _ []byte) {
+	h.publishEvent(eventTypeDecision, map[string]interface{}{
+		"model":           modelID,
+		"provider":        providerName,
+		"upstream_status": upstreamStatus,
+		"duration_ms":     time.Since(startTime).Milliseconds(),
+		"outcome":         outcome,
+	})
+}
+
+// ---------- OpenAI-envelope error helpers ----------
+
 // openAIError writes a house OpenAI-envelope 4xx/5xx via
-// models.NewOpenAIError. Mirrors imggen/handler.go:629 verbatim
-// when no errorCode is needed — the envelope carries
-// ErrorTypeServerError + empty code.
-//
-// For decision_misroute-style cases where the error code MUST
-// be in the envelope (e.g., the chat-side guard at site 5 +
-// resolver kind-misroute at /v1/decisions), use
-// openAIErrorWithCode which threads the code through the
-// envelope exactly.
+// models.NewOpenAIError (mirrors pkg/imggen/handler.go:629).
 func (h *Handler) openAIError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -393,13 +684,9 @@ func (h *Handler) openAIError(w http.ResponseWriter, code int, message string) {
 		models.ErrorTypeServerError, "", message))
 }
 
-// openAIErrorWithCode is the decision-aware error variant.
-// Writes OpenAI envelope with ErrorTypeServerError as the
-// type and the supplied errorCode as the code field. Used by
-// the chat-side guard (site 5) and the /v1/decisions
-// resolver IsDecision() guard (site 7 + the
-// reverse-direction closure) so consumers can pattern-match
-// the misroute class.
+// openAIErrorWithCode threads the supplied errorCode into the
+// envelope (decision_misroute / decision_upstream_build_failed
+// / similar typed codes).
 func (h *Handler) openAIErrorWithCode(w http.ResponseWriter, code int, message, errorCode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -407,11 +694,6 @@ func (h *Handler) openAIErrorWithCode(w http.ResponseWriter, code int, message, 
 		models.ErrorTypeServerError, errorCode, message))
 }
 
-// sendAuthError writes the house OpenAI-envelope 401. Matches
-// pkg/imggen/handler.go:642 (authentication_error envelope
-// family — FE + other clients parse 4xx envelopes identically
-// across /v1/chat/completions, /v1/image_generation, and
-// /v1/decisions).
 func (h *Handler) sendAuthError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
@@ -419,8 +701,6 @@ func (h *Handler) sendAuthError(w http.ResponseWriter) {
 		models.ErrorTypeAuthenticationError, "", "Invalid or expired API key"))
 }
 
-// sendModelNotAllowedError writes the nested 403 envelope. Mirrors
-// pkg/imggen/handler.go:652 — same shape as the chat handler.
 func (h *Handler) sendModelNotAllowedError(w http.ResponseWriter, modelName string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
@@ -433,25 +713,11 @@ func (h *Handler) sendModelNotAllowedError(w http.ResponseWriter, modelName stri
 	})
 }
 
-// resolveModel + resolveCredential are the modelConfig +
-// credential seam. Stored as struct fields on the Handler so
-// tests can substitute a stub; in production cmd/main.go wires
-// them to the same modelsConfig + ResolveInternalConfigWithAffinity
-// seam the chat path uses (single source of truth). The package
-// owns no ModelsConfigInterface import — the production wiring
-// lives in cmd/main.go, and the import guard audits this.
-//
-// Default stubs return ok=false so a unit test that forgets to
-// install the shim surfaces as a clean 502 / 404 (not a panic).
-// The empty stubs match imggen's posture (handler.go:664-697).
+// ---------- Resolvers + composition ----------
 
-// modelResolver returns the model config for a model ID.
 type modelResolver func(modelID string) (*models.ModelConfig, bool)
-
-// credentialResolver returns the resolved credential for a model ID.
 type credentialResolver func(modelID string) (models.ResolvedCredential, bool)
 
-// SetModelResolver installs the model-lookup function. nil-safe.
 func (h *Handler) SetModelResolver(fn modelResolver) {
 	if h == nil {
 		return
@@ -459,8 +725,6 @@ func (h *Handler) SetModelResolver(fn modelResolver) {
 	h.resolveModel = fn
 }
 
-// SetCredentialResolver installs the credential-lookup function.
-// nil-safe.
 func (h *Handler) SetCredentialResolver(fn credentialResolver) {
 	if h == nil {
 		return
@@ -468,13 +732,6 @@ func (h *Handler) SetCredentialResolver(fn credentialResolver) {
 	h.resolveCredential = fn
 }
 
-// safeResolveModel is a nil-safe wrapper around h.resolveModel:
-// if no resolver is installed, returns (nil, false). Defends
-// against nil-pointer panics in unit tests that forget to wire
-// the resolver seam — surfaces as 404 (mirrors imggen posture at
-// handler.go:664-697: "default stubs return ok=false so a unit
-// test that forgets to install the shim surfaces as a clean 502
-// (not a panic)").
 func (h *Handler) safeResolveModel(modelID string) (*models.ModelConfig, bool) {
 	if h.resolveModel == nil {
 		return nil, false
@@ -482,8 +739,6 @@ func (h *Handler) safeResolveModel(modelID string) (*models.ModelConfig, bool) {
 	return h.resolveModel(modelID)
 }
 
-// safeResolveCredential mirrors safeResolveModel for the
-// credential lookup.
 func (h *Handler) safeResolveCredential(modelID string) (models.ResolvedCredential, bool) {
 	if h.resolveCredential == nil {
 		return models.ResolvedCredential{}, false
@@ -491,15 +746,6 @@ func (h *Handler) safeResolveCredential(modelID string) (models.ResolvedCredenti
 	return h.resolveCredential(modelID)
 }
 
-// NewModelResolverFromConfig is the small adapter cmd/main.go
-// uses to install the model-lookup function from a
-// models.ModelsConfigInterface without pkg/decision importing
-// the interface.
-//
-// Mirrors imggen/handler.go:715 verbatim. The signature is
-// narrow: model ID in, (*models.ModelConfig, bool) out.
-// Production wiring stays inside cmd/main.go's composition
-// root.
 func NewModelResolverFromConfig(getModel func(string) *models.ModelConfig) modelResolver {
 	return func(modelID string) (*models.ModelConfig, bool) {
 		if getModel == nil {
@@ -513,10 +759,6 @@ func NewModelResolverFromConfig(getModel func(string) *models.ModelConfig) model
 	}
 }
 
-// NewCredentialResolverFromConfig is the matching shim for the
-// credential lookup. Mirrors imggen/handler.go:735.
-//
-// Stable key (modelID, modelID) per BE-A3 + amendment 18.
 func NewCredentialResolverFromConfig(resolve func(string) (models.ResolvedCredential, bool)) credentialResolver {
 	return func(modelID string) (models.ResolvedCredential, bool) {
 		if resolve == nil {
@@ -526,11 +768,20 @@ func NewCredentialResolverFromConfig(resolve func(string) (models.ResolvedCreden
 	}
 }
 
-// Reserved for P2 — the byte-faithful openai-decision pass-through
-// reuses the captured request bytes after BuildUpstream. The
-// import block currently pulls in `bytes` for the future
-// `bytes.NewReader(upstreamBody)` site; go vet / doc lint catches
-// the unused-import noise once P2 lands — we keep it now so the
-// package shape matches the imggen template exactly (less
-// churn in P2).
-var _ = bytes.NewReader
+// ---------- Header helpers (mirror imggen) ----------
+
+func isHopByHopHeader(h string) bool {
+	switch strings.ToLower(h) {
+	case "host", "content-length", "transfer-encoding":
+		return true
+	}
+	return false
+}
+
+func isClientAuthHeader(h string) bool {
+	switch strings.ToLower(h) {
+	case "authorization", "x-api-key":
+		return true
+	}
+	return false
+}

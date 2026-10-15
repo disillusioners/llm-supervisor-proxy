@@ -261,10 +261,12 @@ func main() {
 	// seam the chat + imggen paths use (single source of truth
 	// for model resolution).
 	//
-	// P1 ships with an empty provider registry (decision_providerRegistry
-	// in pkg/decision/registry.go is empty by design) — the route
-	// is live but the handler returns 502 at Step 9 until P2
-	// registers openai + typesafe.
+	// P2 (Decision Models commission / §3.3 + §10 P2):
+	// provider registry is now POPULATED (init() in
+	// pkg/decision/registry.go registers both openai +
+	// typesafe adapters). The route is live and the handler
+	// routes to the right adapter by cred.Provider at
+	// step 9.
 	decisionHandler := decision.NewHandler(configMgr, bus, tokenStore, usageCounter)
 	decisionHandler.SetModelResolver(decision.NewModelResolverFromConfig(func(modelID string) *models.ModelConfig {
 		return modelsConfig.GetModel(modelID)
