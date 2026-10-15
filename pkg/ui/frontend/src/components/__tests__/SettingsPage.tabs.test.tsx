@@ -31,6 +31,7 @@ afterEach(() => {
 function makeProps(overrides: Partial<{
   models: Model[];
   imgGenModels: ImgGenModel[];
+  decisionModels: Model[];
   config: AppConfig | null;
 }> = {}) {
   const baseConfig: AppConfig = {
@@ -85,6 +86,10 @@ function makeProps(overrides: Partial<{
     onAddImgGenModel: vi.fn(),
     onUpdateImgGenModel: vi.fn(),
     onDeleteImgGenModel: vi.fn(),
+    decisionModels: [] as Model[],
+    onAddDecisionModel: vi.fn(),
+    onUpdateDecisionModel: vi.fn(),
+    onDeleteDecisionModel: vi.fn(),
     tokens: [] as ApiToken[],
     onCreateToken: vi.fn(),
     onDeleteToken: vi.fn(),
@@ -94,7 +99,7 @@ function makeProps(overrides: Partial<{
   };
 }
 
-describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1)', () => {
+describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decision Commission P3.5)', () => {
   it('renders the 9-tab bar with the 🖼️ ImgGen Models button at slot 3', () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
 
@@ -106,16 +111,87 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1)', () =
     expect(imggenTab.textContent).toContain('🖼️');
     expect(imggenTab.textContent).toContain('ImgGen Models');
 
-    // Position check (fe-spec C-02): the button immediately preceding the
-    // new tab is "Models" and the button immediately following is
-    // "Credentials". The tab bar is a flex container; we walk the DOM.
+    // Position check (Decision Commission P3.5 / plan §6.1): the
+    // ImgGen tab is now followed by the Decision Models tab (added
+    // in P3.5 at slot 4 of 10), NOT by Credentials anymore. The tab
+    // bar is a flex container; we walk the DOM.
     const tabs = Array.from(
       container.querySelectorAll('div.flex.overflow-x-auto > button'),
     ) as HTMLButtonElement[];
     const imggenIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'imggen_models');
     expect(imggenIdx).toBeGreaterThan(0);
     expect(tabs[imggenIdx - 1].textContent).toContain('Models');
-    expect(tabs[imggenIdx + 1].textContent).toContain('Credentials');
+    // The button immediately following imggen is now the Decision Models
+    // tab (P3.5 / plan §6.1 slot 4 of 10). The Credentials tab is one
+    // further down.
+    expect(tabs[imggenIdx + 1].textContent).toContain('Decision Models');
+  });
+
+  it('Decision Commission P3.5 — renders the 🎯 Decision Models button at slot 4 (Q19 default)', () => {
+    // P3.5 acceptance / plan §6.1: the new Decision Models tab is
+    // wired at slot 4 of 10, between ImgGen Models and Credentials,
+    // with the Q19 default emoji 🎯 (target/bullseye) and the
+    // recommended-default label "Decision Models".
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    const decisionTab = container.querySelector('[data-tab-id="decision_models"]') as HTMLButtonElement;
+    expect(decisionTab).not.toBeNull();
+    expect(decisionTab.textContent).toContain('🎯');
+    expect(decisionTab.textContent).toContain('Decision Models');
+
+    // Position check (P3.5 / plan §6.1 slot 4 of 10): the button
+    // immediately preceding the new Decision tab is the ImgGen tab,
+    // and the button immediately following is the Credentials tab.
+    const tabs = Array.from(
+      container.querySelectorAll('div.flex.overflow-x-auto > button'),
+    ) as HTMLButtonElement[];
+    const decisionIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'decision_models');
+    expect(decisionIdx).toBeGreaterThan(0);
+    expect(tabs[decisionIdx - 1].textContent).toContain('ImgGen Models');
+    expect(tabs[decisionIdx + 1].textContent).toContain('Credentials');
+  });
+
+  it('clicking the 🎯 Decision Models tab mounts the DecisionModelsTab empty state (P3.5)', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    // Default active tab is 'proxy' — the DecisionModelsTab content
+    // markers are absent. The tab BUTTON is always present (so the
+    // assertion below uses the empty-state copy "No decision models
+    // configured" and the "Add Decision Model" CTA — neither renders
+    // until the user clicks the Decision tab).
+    expect(container.textContent).not.toContain('No decision models configured');
+
+    // Click the new tab.
+    const decisionTab = container.querySelector('[data-tab-id="decision_models"]') as HTMLButtonElement;
+    fireEvent.click(decisionTab);
+
+    // The DecisionModelsTab mounts; the empty-state copy proves it.
+    await waitFor(() => {
+      expect(container.textContent).toContain('No decision models configured');
+    });
+    // The "Add Decision Model" button is the spec's binding label.
+    expect(container.textContent).toContain('Add Decision Model');
+  });
+
+  it('clicking back to Models tab hides the DecisionModelsTab content', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    // Go to Decision first.
+    fireEvent.click(container.querySelector('[data-tab-id="decision_models"]') as HTMLButtonElement);
+    await waitFor(() => expect(container.textContent).toContain('No decision models configured'));
+
+    // Now go back to Models.
+    const modelsTab = Array.from(container.querySelectorAll('div.flex.overflow-x-auto > button'))
+      .find((b) => b.textContent && b.textContent.trim() === 'Models') as HTMLButtonElement;
+    expect(modelsTab).toBeDefined();
+    fireEvent.click(modelsTab);
+
+    await waitFor(() => {
+      // The chat tab renders the spec's chrome header "Available Models".
+      expect(container.textContent).toContain('Available Models');
+      // The Decision tab's empty state is gone.
+      expect(container.textContent).not.toContain('No decision models configured');
+    });
   });
 
   it('clicking the 🖼️ ImgGen Models tab mounts the ImgGenModelsTab empty state (C-17)', async () => {
@@ -161,9 +237,13 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1)', () =
 
   it('A11Y-4 — emoji span carries aria-hidden="true"', () => {
     const { container } = render(<SettingsPage {...makeProps()} />);
-    // The new tab is the first place we put aria-hidden on an emoji.
-    const emojiSpan = container.querySelector('[data-tab-id="imggen_models"] span[aria-hidden="true"]');
-    expect(emojiSpan).not.toBeNull();
+    // Both the ImgGen and Decision Commission emojis carry aria-hidden.
+    // ImgGen (🖼️) was the first place we put aria-hidden on an emoji;
+    // Decision Commission 2026-10-15 (Q19) extends the pattern with 🎯.
+    const imggenEmoji = container.querySelector('[data-tab-id="imggen_models"] span[aria-hidden="true"]');
+    expect(imggenEmoji).not.toBeNull();
+    const decisionEmoji = container.querySelector('[data-tab-id="decision_models"] span[aria-hidden="true"]');
+    expect(decisionEmoji).not.toBeNull();
   });
 
   it('A11Y-5 — every tab button has type="button" (Preact best practice)', () => {

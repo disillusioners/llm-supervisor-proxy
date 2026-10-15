@@ -3,7 +3,7 @@ import { ModelMultiSelect } from './ModelMultiSelect';
 import type { ApiToken } from '../../types';
 
 interface TokenFormProps {
-  models: { name: string; id: string }[];
+  models: { name: string; id: string; kind?: 'chat' | 'image-gen' | 'decision' }[];
   token?: ApiToken;  // For editing existing tokens
   onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[], ultimateModel?: string) => Promise<void>;
   onCancel: () => void;
@@ -24,6 +24,13 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
   const [saving, setSaving] = useState(false);
 
   const isEditing = !!token;
+
+  // Decision Commission 2026-10-15 (plan §6.7.a / P3.8 / amendment 7):
+  // Both pickers here list chat-only models. The filter shape
+  // `!m.kind || m.kind === 'chat'` matches the chat-kind baseline (no
+  // kind / kind === 'chat') and excludes both image-gen + decision.
+  // Same pattern as C-16 (`ModelsTab.tsx:157`).
+  const chatModels = models.filter((m) => !m.kind || m.kind === 'chat');
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -92,13 +99,16 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
           <p class="text-xs text-gray-400 mt-1">Leave empty for no expiration</p>
         </div>
 
-        {/* Allowed Models Multi-Select */}
+        {/* Allowed Models Multi-Select — Decision Commission 2026-10-15
+            (plan §6.7.a / P3.8 / amendment 7): filtered to chat-only models
+            so image-gen + decision models never leak into the allowed-models
+            picker. Same filter shape as ModelsTab.tsx:157 / C-16. */}
         <div>
           <label class="block text-sm font-medium text-gray-300 mb-1">
             Allowed Models <span class="text-gray-500">(optional)</span>
           </label>
           <ModelMultiSelect
-            models={models}
+            models={chatModels}
             selected={selectedModels}
             onChange={setSelectedModels}
           />
@@ -154,7 +164,16 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
               class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
             >
               <option value="">Global Default</option>
-              {[...models]
+              {/* Decision Commission 2026-10-15 (plan §6.7.a / P3.8 /
+                  amendment 7): filter the per-token ultimate-model
+                  options to chat-only models. The filter shape
+                  (!m.kind || m.kind === 'chat') excludes image-gen
+                  and decision kinds. Same pattern as
+                  ModelsTab.tsx:157 / C-16. The global ultimate
+                  model_id (free-text, SettingsPage:104) is NOT
+                  kind-gated — see plan §6.7.a ultimate-target note
+                  (Q16 scope-defer). */}
+              {[...chatModels]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((model) => (
                   <option key={model.id} value={model.id}>

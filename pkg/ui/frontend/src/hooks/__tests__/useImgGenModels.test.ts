@@ -98,10 +98,15 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
         });
       });
 
-      // Both keys are deleted at least once during the add flow.
+      // Decision Commission 2026-10-15 (amendment 9d): every mutation
+      // hook deletes all THREE keys, not just two. The third key
+      // (decision-models) is the sibling list the DecisionModelsTab
+      // reads; a stale decision cache after an image-gen mutation
+      // would silently leak.
       const deletedKeys = deleteSpy.mock.calls.map(([k]) => k as string);
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
+      expect(deletedKeys).toContain('decision-models');
 
       deleteSpy.mockRestore();
     });
@@ -128,9 +133,11 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
         await result.current.updateModel('img-1', { name: 'IMG2' });
       });
 
+      // Decision Commission 2026-10-15 (amendment 9d): see addModel comment.
       const deletedKeys = deleteSpy.mock.calls.map(([k]) => k as string);
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
+      expect(deletedKeys).toContain('decision-models');
 
       deleteSpy.mockRestore();
     });
@@ -155,9 +162,11 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
         await result.current.deleteModel('img-1');
       });
 
+      // Decision Commission 2026-10-15 (amendment 9d): see addModel comment.
       const deletedKeys = deleteSpy.mock.calls.map(([k]) => k as string);
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
+      expect(deletedKeys).toContain('decision-models');
 
       deleteSpy.mockRestore();
     });

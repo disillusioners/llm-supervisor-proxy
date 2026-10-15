@@ -3,7 +3,7 @@ import { Router } from 'preact-router';
 import { lazy, Suspense } from 'preact/compat';
 import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
 import { LoadingFallback } from './components/LoadingFallback';
-import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
+import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useDecisionModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
 import type { RequestListItem } from './types';
 
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -28,6 +28,13 @@ export function App() {
   // never show stale cross-data. The `error` field is plumbed through to
   // the ImgGenModelsTab for the alert-role error banner (§2.7, A11Y-3).
   const { models: imgGenModels, addModel: addImgGenModel, updateModel: updateImgGenModel, deleteModel: deleteImgGenModel, refetch: refetchImgGenModels, error: imgGenError } = useImgGenModels();
+  // useDecisionModels — Decision Commission 2026-10-15 (plan §6.3 / P3.4).
+  // Returns only kind: 'decision' models. Mutation hooks invalidate
+  // BOTH the chat 'models' cache AND the 'imggen-models' cache (triple-key
+  // invalidation per amendment 9d), so all three tabs stay in lock-step.
+  // The `error` field is plumbed through to the DecisionModelsTab for the
+  // alert-role error banner (plan §6.7 / A11Y-3).
+  const { models: decisionModels, addModel: addDecisionModel, updateModel: updateDecisionModel, deleteModel: deleteDecisionModel, refetch: refetchDecisionModels, error: decisionError } = useDecisionModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
  
  const { appTags, refetch: refetchAppTags } = useAppTags();
@@ -48,6 +55,12 @@ export function App() {
         onDeleteImgGenModel={deleteImgGenModel}
         imgGenError={imgGenError}
         onRetryImgGenModels={refetchImgGenModels}
+        decisionModels={decisionModels}
+        onAddDecisionModel={addDecisionModel}
+        onUpdateDecisionModel={updateDecisionModel}
+        onDeleteDecisionModel={deleteDecisionModel}
+        decisionError={decisionError}
+        onRetryDecisionModels={refetchDecisionModels}
         tokens={tokens}
         onCreateToken={createToken}
         onDeleteToken={deleteToken}
@@ -193,6 +206,12 @@ function SettingsRoute({
     onDeleteImgGenModel,
     imgGenError,
     onRetryImgGenModels,
+    decisionModels,
+    onAddDecisionModel,
+    onUpdateDecisionModel,
+    onDeleteDecisionModel,
+    decisionError,
+    onRetryDecisionModels,
     tokens,
     onCreateToken,
     onDeleteToken,
@@ -217,6 +236,16 @@ function SettingsRoute({
     // Error surfacing for the image-gen list (fe-spec §2.7, A11Y-3).
     imgGenError?: string | null;
     onRetryImgGenModels?: () => void;
+    // Decision (Decision Commission 2026-10-15 / plan §6.1). Pre-filtered
+    // server-side to kind: 'decision' via /fe/api/models?kind=decision.
+    // The form's submit handler stamps kind: 'decision' on the payload;
+    // we never pass chat or image-gen rows through these callbacks.
+    decisionModels: any[];
+    onAddDecisionModel: (model: any) => Promise<void>;
+    onUpdateDecisionModel: (id: string, updates: any) => Promise<void>;
+    onDeleteDecisionModel: (id: string) => Promise<void>;
+    decisionError?: string | null;
+    onRetryDecisionModels?: () => void;
     tokens: any[];
     onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
@@ -239,6 +268,12 @@ function SettingsRoute({
             onDeleteImgGenModel={onDeleteImgGenModel}
             imgGenError={imgGenError}
             onRetryImgGenModels={onRetryImgGenModels}
+            decisionModels={decisionModels}
+            onAddDecisionModel={onAddDecisionModel}
+            onUpdateDecisionModel={onUpdateDecisionModel}
+            onDeleteDecisionModel={onDeleteDecisionModel}
+            decisionError={decisionError}
+            onRetryDecisionModels={onRetryDecisionModels}
             tokens={tokens}
             onCreateToken={onCreateToken}
             onDeleteToken={onDeleteToken}

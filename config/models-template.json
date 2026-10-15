@@ -19,6 +19,26 @@
       "internal": true,
       "credential_id": "minimax-mindspath",
       "internal_model": "MiniMax-M2.5"
+    },
+    {
+      "id": "decision-router-openai",
+      "name": "Decision Router (OpenAI)",
+      "enabled": true,
+      "kind": "decision",
+      "internal": true,
+      "credential_id": "openai-default",
+      "internal_model": "gpt-6-luna",
+      "exclude_from_ultimate_switching": true
+    },
+    {
+      "id": "decision-router-typesafe",
+      "name": "Decision Router (TypeSafe)",
+      "enabled": true,
+      "kind": "decision",
+      "internal": true,
+      "credential_id": "typesafe-default",
+      "internal_model": "jev-latest",
+      "exclude_from_ultimate_switching": true
     }
   ]
 }

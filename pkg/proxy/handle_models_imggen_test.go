@@ -123,6 +123,48 @@ func TestHandleModels_FilterImageGen(t *testing.T) {
 	}
 }
 
+// TestHandleModels_FilterDecision — Decision Models / §3.1
+// site 6: decision models are excluded from /v1/models (served
+// by /v1/decisions instead). The exclusion clause
+// `|| m.IsDecision()` in HandleModels (pkg/proxy/handler.go)
+// had no test coverage — a refactor dropping it would silently
+// leak decision models into the OpenAI-compatible chat pickers.
+// Sibling of TestHandleModels_FilterImageGen (same harness);
+// the image-gen assertions above remain intact there.
+func TestHandleModels_FilterDecision(t *testing.T) {
+	h, _ := newImgGenFilterHarness(t, []models.ModelConfig{
+		{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x"},
+		{ID: "decision-1", Name: "Decision 1", Enabled: true, Kind: models.KindDecision, Internal: true, InternalModel: "decider-01"},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	h.HandleModels(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Object string                   `json:"object"`
+		Data   []map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+
+	got := make(map[string]bool)
+	for _, m := range body.Data {
+		if id, ok := m["id"].(string); ok {
+			got[id] = true
+		}
+	}
+	if !got["chat-1"] {
+		t.Errorf("expected chat-1 in /v1/models; got=%v", got)
+	}
+	if got["decision-1"] {
+		t.Errorf("decision-1 (enabled decision model) leaked into /v1/models — the m.IsDecision() exclusion clause (site 6) has been dropped; got=%v", got)
+	}
+}
+
 // TestHandleModels_OnlyImageGen_EmptyData — when EVERY enabled
 // model is image-gen, /v1/models returns data:[] (200, not 404).
 func TestHandleModels_OnlyImageGen_EmptyData(t *testing.T) {

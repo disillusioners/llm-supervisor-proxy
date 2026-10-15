@@ -5,6 +5,7 @@ import { getCredentials } from '../hooks/useApi';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { ImgGenModelsTab } from './config/ImgGenModelsTab';
+import { DecisionModelsTab } from './config/DecisionModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
@@ -30,6 +31,17 @@ interface SettingsPageProps {
   // Error surfacing for the image-gen list (fe-spec §2.7, A11Y-3).
   imgGenError?: string | null;
   onRetryImgGenModels?: () => void;
+  // Decision Commission 2026-10-15 (plan §6.1 / P3.5). Pre-filtered
+  // server-side to kind: 'decision' via /fe/api/models?kind=decision.
+  // Mirrors the ImgGen model props exactly — same shape, same
+  // server-side source of truth, same error-surfacing plumbing for
+  // the alert-role banner.
+  decisionModels: Model[];
+  onAddDecisionModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
+  onUpdateDecisionModel: (id: string, updates: Partial<Model>) => Promise<void>;
+  onDeleteDecisionModel: (id: string) => Promise<void>;
+  decisionError?: string | null;
+  onRetryDecisionModels?: () => void;
   tokens: ApiToken[];
   onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
@@ -37,7 +49,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'imggen_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
+type TabType = 'proxy' | 'models' | 'imggen_models' | 'decision_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -55,6 +67,12 @@ export function SettingsPage({
   onDeleteImgGenModel,
   imgGenError,
   onRetryImgGenModels,
+  decisionModels,
+  onAddDecisionModel,
+  onUpdateDecisionModel,
+  onDeleteDecisionModel,
+  decisionError,
+  onRetryDecisionModels,
   tokens,
   onCreateToken,
   onDeleteToken,
@@ -225,6 +243,20 @@ export function SettingsPage({
     }
   };
 
+  // Decision model handlers (Decision Commission 2026-10-15). Mirror the
+  // imgGen toggle path; the underlying mutation hooks in useDecisionModels
+  // drop ALL three cache keys ('models' + 'imggen-models' +
+  // 'decision-models') on every mutation per amendment 9d. Cross-tab
+  // refetch is consistent across all three lists.
+  const handleToggleDecisionModel = async (model: Model) => {
+    try {
+      await onUpdateDecisionModel(model.id, { enabled: !model.enabled });
+      addToast('success', 'Decision model toggled successfully');
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Failed to toggle decision model');
+    }
+  };
+
   // Loop Detection handler
   const handleApplyLoopDetection = async (loopConfig: LoopDetectionConfig) => {
     try {
@@ -348,6 +380,23 @@ export function SettingsPage({
           >
             <span aria-hidden="true">🖼️</span>
             ImgGen Models
+          </button>
+          {/* Decision Commission 2026-10-15 (plan §6.1 / Q19) — slot 4
+              of 10, between ImgGen Models and Credentials. 🎯 prefix
+              glyph (Q19 default — recommended default "target/bullseye"
+              per decisions.md); aria-hidden on the emoji so SRs only
+              announce the binding literal "Decision Models". */}
+          <button
+            type="button"
+            class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'decision_models'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('decision_models')}
+            data-tab-id="decision_models"
+          >
+            <span aria-hidden="true">🎯</span>
+            Decision Models
           </button>
           <button
             type="button"
@@ -492,6 +541,28 @@ export function SettingsPage({
               onNavigateToCredentials={() => setActiveTab('credentials')}
               fetchError={imgGenError}
               onRetry={onRetryImgGenModels}
+            />
+          )}
+
+          {/* Decision Commission 2026-10-15 (plan §6.1 / §6.5) —
+              decision list. Same posture as the ImgGen tab above:
+              parent receives decisionModels pre-filtered server-side
+              via /fe/api/models?kind=decision. The form inside stamps
+              kind: 'decision' + provider (openai|typesafe) so a chat
+              or image-gen row can never round-trip into this surface.
+              fetchError + onRetry plumb the hook's error state for the
+              alert-role banner (plan §6.7 / A11Y-3). */}
+          {activeTab === 'decision_models' && (
+            <DecisionModelsTab
+              models={decisionModels}
+              onAddModel={onAddDecisionModel}
+              onUpdateModel={onUpdateDecisionModel}
+              onDeleteModel={onDeleteDecisionModel}
+              onToggleModel={handleToggleDecisionModel}
+              setStatus={setStatusWrapper}
+              onNavigateToCredentials={() => setActiveTab('credentials')}
+              fetchError={decisionError}
+              onRetry={onRetryDecisionModels}
             />
           )}
 

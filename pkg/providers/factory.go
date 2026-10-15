@@ -17,6 +17,12 @@ const (
 	ProviderMiniMax   ProviderType = "minimax"
 	ProviderGrok      ProviderType = "grok"
 	ProviderDeepSeek  ProviderType = "deepseek"
+	// ProviderTypesafe is the identity for TypeSafe (Jev) decision
+	// models served at /v1/decisions (Decision Models commission
+	// / §5.1 — recommended identity B; the chat provider layer does
+	// not speak System One; the decision handler builds its own
+	// upstream HTTP client mirroring how imggen handles minimax).
+	ProviderTypesafe ProviderType = "typesafe"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -64,6 +70,14 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "https://api.deepseek.com"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderTypesafe:
+		// Decision Models / §5.5 — the chat provider layer does
+		// NOT speak System One (TypeSafe / Jev's wire shape).
+		// The decision handler builds its own upstream HTTP
+		// client in pkg/decision/typesafe.go (mirrors imggen's
+		// minimax posture). Adding a chat-shaped entry here would
+		// imply System One is chat-compatible — it isn't.
+		return nil, fmt.Errorf("typesafe provider not yet implemented")
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", providerType)
 	}
@@ -72,7 +86,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderTypesafe:
 		return true
 	default:
 		return false
@@ -151,6 +165,16 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "indigo",
 		description: "DeepSeek AI",
 	},
+	ProviderTypesafe: {
+		// Decision Models / §5.1 — the "TypeSafe (Jev)" identity
+		// shows up verbatim in the FE /fe/api/providers dropdown.
+		// The proxy serves it for /v1/decisions only (the chat
+		// layer returns "not yet implemented" above).
+		name:        "TypeSafe (Jev)",
+		baseURL:     "https://api.typesafe.ai",
+		color:       "violet",
+		description: "TypeSafe (Jev) decision API",
+	},
 }
 
 // GetProviders returns a list of all providers with their metadata
@@ -182,5 +206,10 @@ func GetProviderTypes() []ProviderType {
 		ProviderMiniMax,
 		ProviderGrok,
 		ProviderDeepSeek,
+		// Decision Models / §5.2 — typesafe is auto-included via
+		// providerMetadataMap; the inclusion here makes it
+		// appear in the GET /fe/api/providers FE dropdown (used
+		// by the DecisionModelForm provider filter — P3, not P2).
+		ProviderTypesafe,
 	}
 }

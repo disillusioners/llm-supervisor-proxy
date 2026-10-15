@@ -292,8 +292,14 @@ export function useModels() {
     });
     // C-07 (symmetric side of useImgGenModels): drop both keys so a chat
     // mutation also refreshes the image-gen tab.
+    // Decision Commission 2026-10-15 (amendment 9b): explicit key list
+    // ['models','imggen-models','decision-models']; never `deleteByPrefix`.
+    // Prefix deletion misses in-flight promise entries and `imggen-models`
+    // / `decision-models` do NOT start with `models` — they would be
+    // dropped on every mutation. Keep as 3 explicit deletes.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -305,16 +311,20 @@ export function useModels() {
       body: JSON.stringify(merged),
     });
     // C-07 (symmetric side of useImgGenModels).
+    // Decision Commission 2026-10-15 (amendment 9b): see addModel above.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
     // C-07 (symmetric side of useImgGenModels).
+    // Decision Commission 2026-10-15 (amendment 9b): see addModel above.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -386,8 +396,12 @@ export function useImgGenModels() {
     });
     // C-07: dual cache invalidation. Both hooks own their key; mutation in
     // either must drop the other so the next read is fresh from the BE.
+    // Decision Commission 2026-10-15 (amendment 9b): extend to a triple —
+    // drop the decision-models key too so a single mutation invalidates
+    // all three model lists in lock-step. Explicit key list, no prefix.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -399,16 +413,119 @@ export function useImgGenModels() {
       body: JSON.stringify(merged),
     });
     // C-07: dual cache invalidation — see addModel comment.
+    // Decision Commission 2026-10-15: triple, see addModel comment.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
     // C-07: dual cache invalidation — see addModel comment.
+    // Decision Commission 2026-10-15: triple, see addModel comment.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
+    defaultAPICache.delete('decision-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchModels(controller.signal);
+    return () => controller.abort();
+  }, [fetchModels]);
+
+  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels, error };
+}
+
+// Decision Models API — decision kind only
+//
+// Phase: Decision Commission 2026-10-15. See decision-model-type plan
+// §6.3 (.agents/shared/planning/decision-model-type/plan.md) for the hook
+// contract; this docblock deliberately mirrors the useImgGenModels
+// precedent above (P3 review S1) — read that block first for the
+// invalidation rationale shared by all three model-list hooks.
+// Mirror of useImgGenModels with the decision-specific cache key + URL:
+//
+//   1. Fetch URL: /fe/api/models?kind=decision (server-side filter; the
+//      BE is the source of truth, not a client filter on the default
+//      GET list).
+//   2. Cache key: 'decision-models' (distinct from 'models' and
+//      'imggen-models' per the three-list invalidation contract —
+//      amendment 9d — so each hook owns its own staleness window).
+//
+// On every write (POST/PUT/DELETE) ALL THREE keys are dropped (C-07 +
+// Decision Commission 2026-10-15 amendment 9b). Explicit key list,
+// never `deleteByPrefix`: prefix deletion misses in-flight promise
+// entries and `imggen-models` / `decision-models` do NOT start with
+// `models`. Three explicit deletes per mutation keep all three lists
+// in lock-step — that's the strict invariant amendment 9d locks down.
+export function useDecisionModels() {
+  const [models, setModels] = useState<Model[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Error surfacing — same posture as useImgGenModels
+  // (fe-spec §2.7 / A11Y-3). The hook silently logged before; the
+  // DecisionModelsTab renders an alert-role banner with a Retry button.
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchModels = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await defaultAPICache.getOrFetch<Model[]>('decision-models', async () => {
+        const response = await fetch(`${API_BASE}/models?kind=decision`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<Model[]>;
+      }, 15000);
+      setModels(data || []);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      const message = err instanceof Error ? err.message : 'Failed to fetch decision models';
+      console.error('Failed to fetch decision models:', err);
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const addModel = useCallback(async (model: Omit<Model, 'id'> & { id: string }) => {
+    await apiFetch<Model>('/models', {
+      method: 'POST',
+      body: JSON.stringify(model),
+    });
+    // Decision Commission 2026-10-15 (amendment 9b): triple-key
+    // invalidation. Explicit list — see file-level note. Every model
+    // mutation drops the three list keys in lock-step.
+    defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  const updateModel = useCallback(async (id: string, updates: Partial<Model>) => {
+    const current = models.find(m => m.id === id);
+    const merged = { ...current, ...updates, id };
+    await apiFetch<Model>(`/models/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(merged),
+    });
+    // Decision Commission 2026-10-15 (amendment 9b): see addModel comment.
+    defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    await fetchModels();
+  }, [fetchModels, models]);
+
+  const deleteModel = useCallback(async (id: string) => {
+    await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
+    // Decision Commission 2026-10-15 (amendment 9b): see addModel comment.
+    defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
     await fetchModels();
   }, [fetchModels]);
 

@@ -56,6 +56,16 @@ test:
 		echo "FAIL: pkg/imggen must not import pkg/proxy (import guard, Amendment 9 — see pkg/imggen/doc.go)"; \
 		exit 1; \
 	fi
+	@echo ">> import guard: pkg/decision must not import pkg/proxy (Decision Models commission / §3.5)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/proxy(/|")' pkg/decision/; then \
+		echo "FAIL: pkg/decision must not import pkg/proxy (import guard, Decision Models §3.5 — see pkg/decision/doc.go)"; \
+		exit 1; \
+	fi
+	@echo ">> import guard: pkg/decision must not import pkg/imggen (Decision Models commission / §3.5, transitive-closure improvement over imggen)"
+	@if grep -rnE 'github\.com/disillusioners/llm-supervisor-proxy/pkg/imggen(/|")' pkg/decision/; then \
+		echo "FAIL: pkg/decision must not import pkg/imggen (import guard, Decision Models §3.5 transitive closure)"; \
+		exit 1; \
+	fi
 	@go test ./...
 
 clean:

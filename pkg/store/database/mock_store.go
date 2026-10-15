@@ -108,6 +108,16 @@ func (m *MockConfigManager) GetImageGenTimeout() time.Duration {
 	return time.Duration(m.Config.ImageGenTimeout)
 }
 
+// GetDecisionTimeout returns the configured per-request deadline
+// for /v1/decisions (Decision Models commission / §3.7 / §8.1).
+// 0 means "use the package default" (the decision handler's own
+// default, applied at the handler seam).
+func (m *MockConfigManager) GetDecisionTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.Config.DecisionTimeout)
+}
+
 // GetMaxStreamBufferSize returns the max stream buffer size from the current config.
 func (m *MockConfigManager) GetMaxStreamBufferSize() int {
 	m.mu.RLock()

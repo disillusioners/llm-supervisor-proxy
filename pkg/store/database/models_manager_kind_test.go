@@ -489,3 +489,188 @@ func TestModelsManager_LegacyNullKindRow_LoadsAsChat(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// Decision Models commission / §9.2 — kind = "decision" variants.
+// Decision is the THIRD accepted kind (Decision Models / §3.1 site 1,
+// appendix A). Recommended identity B: provider ∈ {"openai", "typesafe"}.
+// The tests below cover the D-rule matrix at the ModelsManager.AddModel
+// write path (the production DB write path; mirrors the JSON-file path
+// via shared validateDecisionRules call at validateModelAgainstCredentials
+// :1696-1708). Image-gen + chat tests above stay unchanged.
+// =============================================================================
+
+// setupDecisionManager creates a ModelsManager with a minimax +
+// openai + typesafe credential so the D4 provider gate can be
+// tested (pass=openai/typesafe; fail=minimax).
+func setupDecisionManager(t *testing.T) (*ModelsManager, func()) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("create SQLite: %v", err)
+	}
+	if err := store.RunMigrations(context.Background()); err != nil {
+		store.Close()
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := NewModelsManager(store, nil)
+	if err != nil {
+		store.Close()
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	mgr.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"})
+	mgr.AddCredential(models.CredentialConfig{ID: "openai-cred", Provider: "openai", APIKey: "k"})
+	mgr.AddCredential(models.CredentialConfig{ID: "typesafe-cred", Provider: "typesafe", APIKey: "k"})
+	return mgr, func() { store.Close() }
+}
+
+// validDecision returns a base model that satisfies all D-rules
+// (D1-D9) so individual subtests can mutate one field at a time.
+func validDecision() models.ModelConfig {
+	return models.ModelConfig{
+		ID:                           "decision-x",
+		Name:                         "Valid Decision",
+		Enabled:                      true,
+		Kind:                         models.KindDecision,
+		Internal:                     true,
+		InternalModel:                "gpt-6-luna",
+		Credentials:                  models.TestRefs("openai-cred"),
+		ExcludeFromUltimateSwitching: true,
+	}
+}
+
+// TestModelsManager_AddModel_KindDecision_Valid covers the
+// positive path with the openai primary credential (the only
+// allowed provider in validProviders at P1 — typesafe lands
+// in P2.1 per the plan §P1.2 / acceptance text).
+func TestModelsManager_AddModel_KindDecision_Valid(t *testing.T) {
+	mgr, cleanup := setupDecisionManager(t)
+	defer cleanup()
+	m := validDecision()
+	if err := mgr.AddModel(m); err != nil {
+		t.Fatalf("AddModel openai-decision: %v", err)
+	}
+}
+
+// TestModelsManager_AddModel_KindDecision_Violations iterates
+// each D-rule individually and confirms ModelsManager.AddModel
+// rejects the broken model. The substring match uses the same
+// canonical phrasing as models.ValidateKindRules so a drift in
+// either site surfaces in tests for both.
+func TestModelsManager_AddModel_KindDecision_Violations(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*models.ModelConfig)
+		wantErrSub string
+	}{
+		{
+			name:       "D1 decision without internal",
+			mutate:     func(m *models.ModelConfig) { m.Internal = false },
+			wantErrSub: "requires internal",
+		},
+		{
+			name:       "D2 decision without internal_model",
+			mutate:     func(m *models.ModelConfig) { m.InternalModel = "" },
+			wantErrSub: "internal_model",
+		},
+		{
+			name:       "D3 decision with empty credentials",
+			mutate:     func(m *models.ModelConfig) { m.Credentials = nil },
+			wantErrSub: "credential",
+		},
+		{
+			name:       "D4 decision with minimax provider (not in openai/typesafe)",
+			mutate:     func(m *models.ModelConfig) { m.Credentials = models.TestRefs("minimax-cred") },
+			wantErrSub: "openai",
+		},
+		{
+			name:       "D5 decision with fallback_chain",
+			mutate:     func(m *models.ModelConfig) { m.FallbackChain = []string{"other"} },
+			wantErrSub: "fallback_chain",
+		},
+		{
+			name:       "D6 decision with secondary_upstream_model",
+			mutate:     func(m *models.ModelConfig) { m.SecondaryUpstreamModel = "x" },
+			wantErrSub: "secondary_upstream_model",
+		},
+		{
+			name:       "D7 decision with peak_hour_enabled",
+			mutate:     func(m *models.ModelConfig) { m.PeakHourEnabled = true },
+			wantErrSub: "peak_hour_enabled",
+		},
+		{
+			name:       "D8 decision with release_stream_chunk_deadline",
+			mutate:     func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
+			wantErrSub: "release_stream_chunk_deadline",
+		},
+		{
+			name:       "D9 decision without exclude_from_ultimate_switching",
+			mutate:     func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
+			wantErrSub: "exclude_from_ultimate_switching",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, cleanup := setupDecisionManager(t)
+			defer cleanup()
+			m := validDecision()
+			tc.mutate(&m)
+			err := mgr.AddModel(m)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErrSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSub)
+			}
+		})
+	}
+}
+
+// TestModelsManager_AddModel_KindDecision_RoundTripAcrossRestart
+// — saves a decision model, closes the store, reopens with a new
+// ModelsManager instance, and confirms Kind == "decision" + the
+// IsDecision() discriminator survive the restart. Mirrors the
+// ImageGen persistence test above (ship-blocker for the
+// /v1/decisions route is identical in shape — if kind is
+// memory-only, decision models would vanish from /v1/decisions
+// after restart).
+func TestModelsManager_AddModel_KindDecision_RoundTripAcrossRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	// Phase 1 — write + verify + close. Uses setupKindManagerAt
+	// (seeds minimax + openai credentials) which is sufficient
+	// for the openai-decision provider gate.
+	mgr, cleanup := setupKindManagerAt(t, dbPath)
+	dec := validDecision()
+	if err := mgr.AddModel(dec); err != nil {
+		cleanup()
+		t.Fatalf("AddModel decision: %v", err)
+	}
+	if got := mgr.GetModel(dec.ID); got == nil || !got.IsDecision() {
+		cleanup()
+		t.Fatalf("pre-restart IsDecision() = false; Kind = %q", got.Kind)
+	}
+	cleanup()
+
+	// Phase 2 — NEW store instance from the same DB file.
+	mgr2, cleanup2 := reopenKindManagerAt(t, dbPath)
+	defer cleanup2()
+
+	loaded := mgr2.GetModel(dec.ID)
+	if loaded == nil {
+		t.Fatalf("decision model lost across restart (id=%s)", dec.ID)
+	}
+	if loaded.Kind != models.KindDecision {
+		t.Fatalf("POST-RESTART Kind = %q, want %q — decision is memory-only (ship-blocker regression)", loaded.Kind, models.KindDecision)
+	}
+	if !loaded.IsDecision() {
+		t.Error("IsDecision() false post-restart — /v1/decisions resolver would reject this model as 'unknown'")
+	}
+	if loaded.IsImageGen() {
+		t.Error("IsImageGen() true post-restart — discriminator collision (decision kind must not flip)")
+	}
+}
