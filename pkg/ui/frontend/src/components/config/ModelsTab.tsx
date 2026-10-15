@@ -145,16 +145,21 @@ export function ModelsTab({
               // C-16 (fe-spec §2.6 / T2.4.5) — chat-tab client-side filter.
               // The BE default GET /fe/api/models (no ?kind=) returns ALL
               // models per BE-D4; this one-line filter is the FE's
-              // belt-and-suspenders so image-gen rows never appear in the
-              // chat Models tab. Degrades to a no-op when kind is absent
-              // from the wire (R1 mitigation: undefined !== 'image-gen').
+              // belt-and-suspenders so image-gen + decision rows never
+              // appear in the chat Models tab. Degrades to a no-op when
+              // kind is absent from the wire (R1 mitigation: undefined
+              // !== 'image-gen').
+              //
+              // Decision Commission 2026-10-15: extended to also exclude
+              // kind === 'decision' (P3.2 / plan §6.5). Same single-line
+              // shape; the surrounding comment block names both filters.
               //
               // Hoisted before the empty-state ternary so a config
-              // containing only image-gen rows still renders the
-              // "No models configured" empty state — otherwise the
-              // ternary would see models.length > 0, skip the empty
+              // containing only image-gen or only decision rows still
+              // renders the "No models configured" empty state — otherwise
+              // the ternary would see models.length > 0, skip the empty
               // branch, and render an invisible (filtered-to-empty) list.
-              const chatModels = models.filter((model) => model.kind !== 'image-gen');
+              const chatModels = models.filter((model) => model.kind !== 'image-gen' && model.kind !== 'decision');
               return chatModels.length === 0 ? (
                 <div class="bg-gray-700/50 rounded-md p-6 border border-gray-700 border-dashed flex flex-col items-center justify-center">
                   <svg class="w-10 h-10 text-gray-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">

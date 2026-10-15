@@ -106,7 +106,7 @@ export interface ConfigUpdateResponse extends AppConfig {
 // Legacy alias for backward compatibility
 export type ProxyConfig = AppConfig;
 
-export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek';
+export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'typesafe';
 
 export interface Model {
   id: string;
@@ -114,11 +114,13 @@ export interface Model {
   enabled: boolean;
   fallback_chain: string[];
   truncate_params?: string[];
-  // Additive kind discriminator (Phase 4 / ImgGen Commission — 2026-10-05).
+  // Additive kind discriminator (Phase 4 / ImgGen Commission — 2026-10-05;
+  // extended with 'decision' in the Decision Commission 2026-10-15).
   // "image-gen" pins the model to the /v1/image_generation route and the
-  // MiniMax-only validator. Absent / "chat" is the legacy default.
+  // MiniMax-only validator. "decision" pins the model to /v1/decisions
+  // and the openai/typesafe validator. Absent / "chat" is the legacy default.
   // Optional so existing chat models keep working without a migration.
-  kind?: 'chat' | 'image-gen';
+  kind?: 'chat' | 'image-gen' | 'decision';
   // Additive internal_provider typing drift fix (R10 from phase2-plan.md).
   // The chat tab already renders this value via ModelsTab.tsx:175 but the
   // FE interface did not declare it. Optional because not every model has
@@ -151,6 +153,12 @@ export interface Model {
 // into the image-gen surface. Server-side filter (?kind=image-gen) is
 // the source of truth; the narrow type is a belt-and-suspenders check.
 export type ImgGenModel = Model & { kind: 'image-gen' };
+
+// Narrowed Model alias for decision rows (Decision Commission — 2026-10-15).
+// Server-side filter (?kind=decision) is the source of truth; the narrow type
+// is a belt-and-suspenders check so a chat row can never leak into the
+// DecisionModelsTab / DecisionModelForm surface.
+export type DecisionModel = Model & { kind: 'decision' };
 
 export interface ApiToken {
   id: string;
