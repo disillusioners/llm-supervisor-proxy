@@ -158,6 +158,22 @@ func ValidateScoreLevelsCount(req *DecisionRequest) (string, bool) {
 // `"false"`). System One's choice criteria are string-keyed
 // (research-web §Q2); the cross-type collision collapses on
 // marshal — reject upstream of the bridge.
+//
+// Mixed string|boolean values within one question are LEGAL per
+// the OpenAI Decisions spec (research-web: choices are typed,
+// 2–255 unique {value: string|boolean, description?}), so this
+// check must fire ONLY on a genuine cross-type collision —
+// never merely because a boolean-valued option exists.
+//
+// Mechanism: the scan keeps two disjoint sets — boolSet for
+// boolean-valued options and genuineStrings for string-valued
+// options. The boolean arm never synthesizes its string form
+// into any string set (the self-synthesized "bridge key" was
+// the root cause of a prior over-rejection: the trailing
+// inverse check then found the function's own key and flagged
+// EVERY boolean-valued option). A single order-independent
+// cross-type check runs once after the loop and subsumes both
+// orderings (bool-before-string and string-before-bool).
 func ValidateBooleanStringCollision(req *DecisionRequest) (string, bool) {
 	for i := range req.Questions {
 		q := &req.Questions[i]
@@ -165,43 +181,25 @@ func ValidateBooleanStringCollision(req *DecisionRequest) (string, bool) {
 			continue
 		}
 		boolSet := make(map[bool]struct{}, 2)
-		stringSet := make(map[string]struct{}, len(q.Choices))
+		genuineStrings := make(map[string]struct{}, len(q.Choices))
 		for j := range q.Choices {
 			switch v := q.Choices[j].Value.(type) {
 			case bool:
-				boolSet[v] = struct{}{}
-				// also synthesize the string form for the
-				// bridge; if the matching string form is
-				// present in another option it collides.
-				stringSet[fmt.Sprintf("%t", v)] = struct{}{}
+				boolSet[v] = struct{}{} // bridge key NEVER enters any string set
 			case string:
-				stringSet[v] = struct{}{}
-				if v == "true" || v == "false" {
-					// a string that looks like the
-					// JSON form of a boolean collides
-					// with the matching bool value
-					// — flag if a bool side exists.
-					if _, present := boolSet[func() bool {
-						if v == "true" {
-							return true
-						}
-						return false
-					}()]; present {
-						return fmt.Sprintf("question %q has both boolean %q and string %q — type-collision across the bridge", q.Name, v, v), true
-					}
+				genuineStrings[v] = struct{}{}
+			}
+		}
+		// Order-independent cross-type check, runs once after
+		// the loop — subsumes both orderings (a shared set with a
+		// bridged marker cannot distinguish a synthesized key from
+		// a genuine string when the string arrives first).
+		for _, b := range []bool{true, false} {
+			if _, hasBool := boolSet[b]; hasBool {
+				key := fmt.Sprintf("%t", b)
+				if _, hasStr := genuineStrings[key]; hasStr {
+					return fmt.Sprintf("question %q has both boolean %s and string %q — type-collision across the bridge", q.Name, key, key), true
 				}
-			}
-		}
-		// Also flag the inverse: a bool option with the
-		// string form present as another option's value.
-		if _, ok := boolSet[true]; ok {
-			if _, ok := stringSet["true"]; ok {
-				return fmt.Sprintf("question %q has both boolean true and string %q — type-collision across the bridge", q.Name, "true"), true
-			}
-		}
-		if _, ok := boolSet[false]; ok {
-			if _, ok := stringSet["false"]; ok {
-				return fmt.Sprintf("question %q has both boolean false and string %q — type-collision across the bridge", q.Name, "false"), true
 			}
 		}
 	}

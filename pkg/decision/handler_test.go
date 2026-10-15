@@ -1756,6 +1756,77 @@ func TestValidator_BooleanStringCollision(t *testing.T) {
 	}
 }
 
+// TestValidator_BooleanStringCollision_MixedTypes — mixed
+// string|boolean choice values are LEGAL per the OpenAI
+// Decisions spec (research-web: choices are typed, 2–255 unique
+// {value: string|boolean, description?}). Only the GENUINE
+// cross-type collision (bool true vs string "true", bool false
+// vs string "false") may fail.
+//
+// Regression guard for the P2 over-rejection: the detector's
+// bool arm used to self-synthesize its string form ("bridge
+// key") into the shared string set, so the trailing inverse
+// check fired for EVERY boolean-valued option — e.g.
+// ["maybe", true] was wrongly rejected. Under the buggy code,
+// the "mixed string+bool is legal" and "all booleans" cases
+// fail loudly.
+func TestValidator_BooleanStringCollision_MixedTypes(t *testing.T) {
+	choiceQ := func(name string, values ...interface{}) *DecisionRequest {
+		opts := make([]ChoiceOption, len(values))
+		for i, v := range values {
+			opts[i] = ChoiceOption{Value: v}
+		}
+		return &DecisionRequest{
+			Questions: []Question{{Type: QuestionTypeChoice, Name: name, Choices: opts}},
+		}
+	}
+	tests := []struct {
+		name      string
+		req       *DecisionRequest
+		wantFail  bool
+		wantInMsg string // substring required in msg when wantFail
+	}{
+		{
+			name:      "genuine collision: bool true vs string true",
+			req:       choiceQ("x", true, "true"),
+			wantFail:  true,
+			wantInMsg: "type-collision",
+		},
+		{
+			name:      "genuine collision: bool false vs string false",
+			req:       choiceQ("x", false, "false"),
+			wantFail:  true,
+			wantInMsg: "type-collision",
+		},
+		{
+			name:     "mixed string+bool is legal (THE case the bug broke)",
+			req:      choiceQ("x", "maybe", true),
+			wantFail: false,
+		},
+		{
+			name:     "all strings incl true/false literals: no booleans, no collision",
+			req:      choiceQ("x", "true", "false", "maybe"),
+			wantFail: false,
+		},
+		{
+			name:     "all booleans: no strings, no collision",
+			req:      choiceQ("x", true, false),
+			wantFail: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, failed := ValidateBooleanStringCollision(tt.req)
+			if failed != tt.wantFail {
+				t.Fatalf("ValidateBooleanStringCollision = (%q, %v), wantFail=%v", msg, failed, tt.wantFail)
+			}
+			if tt.wantFail && !strings.Contains(msg, tt.wantInMsg) {
+				t.Errorf("message = %q, want it to contain %q", msg, tt.wantInMsg)
+			}
+		})
+	}
+}
+
 func TestValidator_DuplicateQuestionNames(t *testing.T) {
 	req := &DecisionRequest{
 		Questions: []Question{
