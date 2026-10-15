@@ -722,37 +722,54 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
-	// Find and update the model
-	found := false
+	// Find the target index first; bail on not-found or
+	// ID-mismatch before doing any allocation. We must NOT
+	// mutate mc.Models[i] yet — the validate-before-mutate
+	// contract (Item-2 fix) requires that a failed Validate
+	// leaves mc.Models byte-identical to its pre-call state.
+	targetIdx := -1
 	for i, m := range mc.Models {
 		if m.ID == modelID {
 			// Ensure the ID doesn't change
 			if model.ID != modelID {
 				return ErrCannotChangeModelID
 			}
-			mc.Models[i] = model
-			found = true
+			targetIdx = i
 			break
 		}
 	}
 
-	if !found {
+	if targetIdx == -1 {
 		return ErrModelNotFound
 	}
 
-	// Validate the updated config. Copy BOTH Models AND
-	// Credentials into the snapshot — without the credentials
-	// mirror, validateModelAgainstCredentials' "credential_id
+	// Validate the PROPOSED post-update state BEFORE mutating
+	// mc.Models. The snapshot is a fresh copy of mc.Models
+	// with the target slot overwritten by the proposed model
+	// — no aliasing with the live slice. If Validate fails
+	// (a per-model rule violation OR a sibling-row violation
+	// the inline handler validation cannot see), the function
+	// returns WITHOUT mutating mc.Models. mc.mu stays held
+	// throughout — no TOCTOU window between Validate and the
+	// commit below.
+	//
+	// Copy BOTH Models AND Credentials into the snapshot —
+	// without the credentials mirror,
+	// validateModelAgainstCredentials' "credential_id
 	// references non-existent credential" check fires on every
-	// internal model with a ref, blocking PUT updates for every
-	// kind (chat / image-gen / decision) equally. AddModel at
-	// line ~706 already does this; the asymmetry is the bug.
+	// internal model with a ref, blocking PUT updates for
+	// every kind (chat / image-gen / decision) equally. The
+	// symmetry with AddModel's pre-add snapshot is the
+	// invariant.
 	proposed := make([]ModelConfig, len(mc.Models))
 	copy(proposed, mc.Models)
+	proposed[targetIdx] = model
 	if err := snapshotForValidation(proposed, mc.Credentials).Validate(); err != nil {
 		return err
 	}
 
+	// Validation passed — commit the mutation in place.
+	mc.Models[targetIdx] = model
 	return nil
 }
 
