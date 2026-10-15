@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/bufferstore"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/decision"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/imggen"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
@@ -250,6 +251,30 @@ func main() {
 		return modelsConfig.ResolveInternalConfigWithAffinity(modelID, modelID)
 	}))
 
+	// Initialize Decision Handler (Decision Models commission /
+	// §3.2 + §3.3 + §10 P1.7). Constructed next to imggenHandler
+	// following the same imggen template (production wiring via
+	// SetModelResolver / SetCredentialResolver so pkg/decision
+	// never imports pkg/proxy or pkg/imggen — the import guard
+	// at P1.8 audits this). The model + credential lookups go
+	// through the SAME modelsConfig + ResolveInternalConfigWithAffinity
+	// seam the chat + imggen paths use (single source of truth
+	// for model resolution).
+	//
+	// P1 ships with an empty provider registry (decision_providerRegistry
+	// in pkg/decision/registry.go is empty by design) — the route
+	// is live but the handler returns 502 at Step 9 until P2
+	// registers openai + typesafe.
+	decisionHandler := decision.NewHandler(configMgr, bus, tokenStore, usageCounter)
+	decisionHandler.SetModelResolver(decision.NewModelResolverFromConfig(func(modelID string) *models.ModelConfig {
+		return modelsConfig.GetModel(modelID)
+	}))
+	decisionHandler.SetCredentialResolver(decision.NewCredentialResolverFromConfig(func(modelID string) (models.ResolvedCredential, bool) {
+		// Stable key (modelID, modelID) per BE-A3 + Amendment 18 —
+		// mirrors imggen above.
+		return modelsConfig.ResolveInternalConfigWithAffinity(modelID, modelID)
+	}))
+
 	// Setup Server
 	mux := http.NewServeMux()
 
@@ -289,6 +314,15 @@ func main() {
 	// handler.go:239-242, NOT Go 1.22 method-pattern mux syntax
 	// used nowhere else in the codebase).
 	mux.HandleFunc("/v1/image_generation", imggenHandler.HandleImageGeneration)
+
+	// Decision Models commission / §3.3 + §10 P1.7: decision
+	// route registered as a sibling of the chat routes. POST-only
+	// is enforced inside HandleDecision (in-handler method
+	// guard; matches the imggen + chat house style — no Go 1.22
+	// method-pattern mux syntax anywhere). At P1 the route is
+	// live but returns 502 at the provider-lookup step until
+	// P2 registers openai + typesafe adapters.
+	mux.HandleFunc("/v1/decisions", decisionHandler.HandleDecision)
 
 	// Health check endpoint
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
