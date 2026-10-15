@@ -535,9 +535,6 @@ func synthesizeAnswer(q *Question, raw json.RawMessage) Answer {
 		// pattern: the System One probabilities map keyed
 		// by label string; OpenAI wants an array with int
 		// key + label.
-		if probe.Choice != nil && probe.Choice.Probabilities != nil && q.Type == QuestionTypeScore {
-			// (legacy dead branch — kept for symmetry)
-		}
 		// Re-extract probabilities from raw for the score case.
 		var scoreRaw struct {
 			Probabilities map[string]json.RawMessage `json:"probabilities"`

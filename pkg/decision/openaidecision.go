@@ -65,11 +65,29 @@ func (p *openaiDecisionProvider) BuildUpstream(cred models.ResolvedCredential, r
 	}
 
 	// upstream URL — Q17 honor cred.BaseURL as-is.
-	upstreamBase := cred.BaseURL
+	//
+	// The chat provider stores cred.BaseURL with a trailing
+	// "/v1" (factory.go:116) when operators use the OpenAI
+	// chat convention; the openai-decision endpoint lives at
+	// /v1/decisions UNDER that base. So we strip a single
+	// "/v1" tail before re-appending "/v1/decisions" — this
+	// handles three shapes identically:
+	//
+	//   - empty (default)        → https://api.openai.com/v1/decisions
+	//   - "https://api.openai.com/v1"   (chat convention) → same
+	//   - "https://api.openai.com/"    (trailing slash)    → same
+	//   - "https://my-proxy.example.com/openai"            → /openai/v1/decisions
+	//
+	// The prior builder produced "https://api.openai.com/v1/v1/decisions"
+	// in BOTH the empty and chat-convention cases (P2 review
+	// finding 1, critical).
+	upstreamBase := strings.TrimSpace(cred.BaseURL)
 	if upstreamBase == "" {
-		upstreamBase = "https://api.openai.com/v1"
+		upstreamBase = "https://api.openai.com"
 	}
-	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + "/v1/decisions"
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/v1")
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/")
+	upstreamURL := upstreamBase + "/v1/decisions"
 
 	// Byte-faithful model rewrite. We replace the literal
 	// `<modelName>` JSON token (the bytes between two double

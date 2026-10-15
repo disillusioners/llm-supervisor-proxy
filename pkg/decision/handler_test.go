@@ -1010,6 +1010,78 @@ func TestHandler_TypeSafe_InputString_Translation(t *testing.T) {
 	}
 }
 
+// TestHandler_TypeSafe_InputArray_Translation — plan §9.1 row
+// (P2 review finding 2, important): typesafe adapter's text-join
+// path. Client wires input as a DecisionInputMessage[] with
+// multiple parts across multiple messages; BuildUpstream's
+// deriveStateText (typesafe.go:201-241) concatenates every
+// input_text part WITHOUT a delimiter, so the upstream must
+// receive `"state": "<joined-text>"` (System One), NOT the
+// original `"input":[...]` shape. This test exercises the
+// text-join path + the 6 liteLLM gotchas that flow through
+// deriveStateText — coverage previously only via code
+// inspection.
+func TestHandler_TypeSafe_InputArray_Translation(t *testing.T) {
+	// Upstream returns a System One shape that matches the
+	// request's question name.
+	body := systemOneSuccessBody(map[string]interface{}{
+		"foo": map[string]interface{}{"noul": 0.83},
+	}, 401, 0)
+	env := newEnvTypesafe(t, fakeScript{status: 200, body: body})
+
+	// Two user messages, three input_text parts total. deriveStateText
+	// concatenates each input_text part with NO separator (typesafe.go
+	// :228-229 sb.WriteString(part.Text) — note: no \n / space / etc).
+	reqJSON := `{
+		"model": "` + env.modelID + `",
+		"input": [
+			{"role":"user","parts":[
+				{"type":"input_text","text":"Customer wrote: I was charged twice."},
+				{"type":"input_text","text":"Order #4411 \u2014 wants refund today."}
+			]},
+			{"role":"user","parts":[
+				{"type":"input_text","text":"Be concise."}
+			]}
+		],
+		"questions": [{"type":"predicate","name":"foo","instructions":"Is foo?"}]
+	}`
+	rec := env.sendRequest(http.MethodPost, reqJSON, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	env.fake.mu.Lock()
+	got := string(env.fake.lastBody)
+	env.fake.mu.Unlock()
+
+	// The deriveStateText join (no delimiter between parts). Assert
+	// the EXACT concatenated string — if a future change adds a
+	// separator, this test catches it.
+	wantState := "Customer wrote: I was charged twice.Order #4411 \u2014 wants refund today.Be concise."
+	if !strings.Contains(got, `"state":"`+wantState+`"`) {
+		t.Errorf("upstream body missing exact joined state translation: got=%s", got)
+	}
+	// Round-trip: OpenAI's "input" array must NOT leak through to
+	// the System One upstream (System One reads "state", not "input").
+	if strings.Contains(got, `"input":[`) {
+		t.Errorf("upstream body leaked OpenAI `input` array (System One reads `state`): got=%s", got)
+	}
+	// model: the InternalModel (jev-1.13.0).
+	if !strings.Contains(got, `"model":"jev-1.13.0"`) {
+		t.Errorf("upstream body missing model translation: got=%s", got)
+	}
+	// questions: keyed by name (System One map shape).
+	if !strings.Contains(got, `"foo"`) {
+		t.Errorf("questions map must be keyed by Name: got=%s", got)
+	}
+	if strings.Contains(got, `"questions":[`) {
+		t.Errorf("questions should be a map (System One), got an array: %s", got)
+	}
+	// typed type tag.
+	if !strings.Contains(got, `"type":"noul"`) {
+		t.Errorf("predicate should translate to noul: got=%s", got)
+	}
+}
+
 // TestHandler_TypeSafe_InputImage_400 — typesafe rejects
 // input_image parts (research-web §Q2). Reject at the
 // validator edge OR at typesafe.BuildUpstream (both return 400
@@ -1390,14 +1462,66 @@ func TestOpenAIDecisionProvider_BuildUpstream_RewritesModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildUpstream: %v", err)
 	}
-	if url != "https://api.openai.com/v1/v1/decisions" {
-		t.Errorf("URL = %q, want https://api.openai.com/v1/v1/decisions (BaseURL has trailing /v1 appended)", url)
+	// chat-convention cred.BaseURL is "https://api.openai.com/v1"
+	// (factory.go:116); the builder strips it before re-appending
+	// "/v1/decisions" — so the final URL has ONE /v1, not two.
+	if url != "https://api.openai.com/v1/decisions" {
+		t.Errorf("URL = %q, want https://api.openai.com/v1/decisions", url)
 	}
 	if !bytes.Contains(body, []byte(`"model":"gpt-6-luna"`)) {
 		t.Errorf("body missing model rewrite: %s", body)
 	}
 	if bytes.Contains(body, []byte(`"decision-router"`)) {
 		t.Errorf("body still has old model: %s", body)
+	}
+}
+
+// TestOpenAIDecisionProvider_BuildUpstream_DefaultURL — P2
+// review finding 1 (critical): the openai-decision URL builder
+// must produce a single "/v1/decisions" tail for ALL three
+// operator input shapes:
+//
+//	(a) cred.BaseURL == ""                                       → default
+//	(b) cred.BaseURL == "https://api.openai.com/"                → trailing slash
+//	(c) cred.BaseURL == "https://api.openai.com/v1"             → chat convention
+//
+// The prior code produced "https://api.openai.com/v1/v1/decisions"
+// for (a) and (c) — a 404 in the default path. The fix strips a
+// single "/v1" tail before re-appending "/v1/decisions", so all
+// three shapes resolve to the same canonical URL.
+func TestOpenAIDecisionProvider_BuildUpstream_DefaultURL(t *testing.T) {
+	p := NewOpenAIDecisionProvider()
+	cases := []struct {
+		name    string
+		baseURL string
+		wantURL string
+	}{
+		{name: "empty_default", baseURL: "", wantURL: "https://api.openai.com/v1/decisions"},
+		{name: "trailing_slash", baseURL: "https://api.openai.com/", wantURL: "https://api.openai.com/v1/decisions"},
+		{name: "chat_convention_v1", baseURL: "https://api.openai.com/v1", wantURL: "https://api.openai.com/v1/decisions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &DecisionRequest{Model: "decision-router"}
+			cred := models.ResolvedCredential{
+				Provider: "openai", InternalModel: "gpt-6-luna",
+				APIKey: "k", BaseURL: tc.baseURL,
+			}
+			raw := []byte(`{"model":"decision-router","input":"x","questions":[{"type":"predicate","name":"foo"}]}`)
+			url, body, err := p.BuildUpstream(cred, req, raw)
+			if err != nil {
+				t.Fatalf("BuildUpstream: %v", err)
+			}
+			if url != tc.wantURL {
+				t.Errorf("URL = %q, want %q", url, tc.wantURL)
+			}
+			if !bytes.Contains(body, []byte(`"model":"gpt-6-luna"`)) {
+				t.Errorf("body missing model rewrite: %s", body)
+			}
+			if bytes.Contains(body, []byte(`"decision-router"`)) {
+				t.Errorf("body still has old model: %s", body)
+			}
+		})
 	}
 }
 
