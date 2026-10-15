@@ -603,3 +603,138 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 		})
 	}
 }
+
+// doDELETE sends DELETE /fe/api/models/{id} and returns the
+// status + body. handleModelDetail's DELETE branch returns
+// 204 NoContent on success and 404 on "model not found" /
+// RemoveModel error. The body is empty on success.
+func doDELETE(t *testing.T, srv *httptest.Server, id string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, srv.URL+"/fe/api/models/"+id, nil)
+	if err != nil {
+		t.Fatalf("build DELETE: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	var out bytes.Buffer
+	_, _ = out.ReadFrom(resp.Body)
+	return resp.StatusCode, out.Bytes()
+}
+
+// TestHandleModelDetail_DELETE_JSONFileBackend_RemainingModel
+// mirrors the UpdateModel probe at the API layer. It seeds TWO
+// models via the JSON-file ModelsConfig — one internal with a
+// credential ref (the row that should REMAIN after the DELETE),
+// and one trivial model (the row to be DELETED). The handler
+// DELETE /fe/api/models/{id} calls RemoveModel, which builds a
+// post-removal testConfig WITHOUT copying mc.Credentials
+// (the same missing-credentials pattern as the UpdateModel fix
+// at pkg/models/config.go:724-728). The spurious Validate guard
+// then fires on the REMAINING model's credential ref.
+//
+// Pre-fix behavior: the handler returns 404 with the exact
+// `credential_id 'X' references non-existent credential`
+// message, even though the model EXISTS and the deletion is
+// semantically valid. After the mirror fix, the DELETE returns
+// 204 NoContent and the remaining model survives intact.
+func TestHandleModelDetail_DELETE_JSONFileBackend_RemainingModel(t *testing.T) {
+	ts := newJSONFilePUTTestServer(t)
+	defer ts.cleanup()
+
+	// Seed the model that should REMAIN after the DELETE — it
+	// carries the credential ref that the post-removal testConfig
+	// Validate() scans.
+	if err := ts.mc.AddModel(models.ModelConfig{
+		ID:            "survivor",
+		Name:          "Survivor",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		Credentials:   models.TestRefs("openai-cred"),
+	}); err != nil {
+		t.Fatalf("seed survivor: %v", err)
+	}
+	// Seed the model to be DELETED — trivial, no credentials, so
+	// it does not directly trip the guard. The remaining
+	// "survivor" row is the one that fails the testConfig
+	// Validate() scan.
+	if err := ts.mc.AddModel(models.ModelConfig{
+		ID:      "to-delete",
+		Name:    "To Delete",
+		Enabled: true,
+		// Internal: false — non-internal, no credentials, no
+		// secondary, no peak hours. This row's only purpose is to
+		// exist long enough to be DELETEd.
+	}); err != nil {
+		t.Fatalf("seed to-delete: %v", err)
+	}
+
+	// Sanity: both rows are present pre-DELETE.
+	if ts.mc.GetModel("survivor") == nil {
+		t.Fatal("seed precondition broken: survivor missing before DELETE")
+	}
+	if ts.mc.GetModel("to-delete") == nil {
+		t.Fatal("seed precondition broken: to-delete missing before DELETE")
+	}
+
+	status, body := doDELETE(t, ts.server, "to-delete")
+	if status != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d (want 204), body=%s", status, string(body))
+	}
+
+	// The survivor must STILL be present — the DELETE only
+	// targets the to-delete id.
+	if got := ts.mc.GetModel("survivor"); got == nil {
+		t.Fatal("survivor was incorrectly removed by DELETE of a different id")
+	}
+	if got := ts.mc.GetModel("to-delete"); got != nil {
+		t.Errorf("to-delete still present after DELETE: %+v", got)
+	}
+}
+
+// TestHandleModelDetail_DELETE_DBBackend_ImmuneProbe is the
+// companion probe: the DB-backed ModelsManager is wired
+// through the real handler chain and the same DELETE scenario
+// runs. The DB path validates against m.GetCredentials() at
+// call time, not against a copied snapshot — so it is IMMUNE
+// to the missing-Credentials pattern that breaks the JSON-file
+// backend. This test must pass at RED state too (i.e. BEFORE
+// the JSON-file fix lands); that is the contract proof that the
+// DB path never needed the same fix.
+func TestHandleModelDetail_DELETE_DBBackend_ImmuneProbe(t *testing.T) {
+	ts := newRealPUTTestServer(t)
+	defer ts.cleanup()
+
+	// Seed the survivor (carries the credential ref) and the
+	// trivial to-delete row.
+	if err := ts.mgr.AddModel(models.ModelConfig{
+		ID:            "survivor-db",
+		Name:          "Survivor",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		Credentials:   models.TestRefs("openai-cred"),
+	}); err != nil {
+		t.Fatalf("seed survivor-db: %v", err)
+	}
+	if err := ts.mgr.AddModel(models.ModelConfig{
+		ID: "to-delete-db", Name: "To Delete", Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed to-delete-db: %v", err)
+	}
+
+	status, body := doDELETE(t, ts.server, "to-delete-db")
+	if status != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d (want 204), body=%s", status, string(body))
+	}
+	if ts.mgr.GetModel("survivor-db") == nil {
+		t.Fatal("survivor-db was incorrectly removed by DELETE of a different id")
+	}
+	if ts.mgr.GetModel("to-delete-db") != nil {
+		t.Error("to-delete-db still present after DELETE")
+	}
+}
