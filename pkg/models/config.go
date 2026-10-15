@@ -83,21 +83,38 @@ func GetConfigPath() string {
 // the JSON column and the engine inputs stay aligned.
 const MaxCredentialRefs = 16
 
-// Kind discriminator values (ImgGen Models commission / BE-D1).
-// Models default to chat (empty/KindChat); image-gen models are served
-// exclusively by /v1/image_generation and excluded from /v1/models and
-// the chat picker surfaces. Unknown values are rejected by Validate.
+// Kind discriminator values (ImgGen Models + Decision Models
+// commissions). Models default to chat (empty/KindChat);
+// image-gen models are served exclusively by /v1/image_generation
+// and excluded from /v1/models and the chat picker surfaces;
+// decision models are served exclusively by /v1/decisions and
+// excluded from /v1/models and the chat picker surfaces. Unknown
+// values are rejected by Validate.
 const (
 	// KindChat is the default; every existing pre-ImgGen model is
 	// implicitly chat. Empty Kind also normalizes to chat.
 	KindChat = "chat"
 
-	// KindImageGen marks models served by /v1/image_generation.
-	// Per BE-D2 these require Internal==true, InternalModel!="",
-	// Credentials non-empty, provider=="minimax", FallbackChain empty,
-	// SecondaryUpstreamModel=="", PeakHourEnabled==false,
+	// KindImageGen marks models served by /v1/image_generation
+	// (ImgGen Models commission / BE-D2). These require
+	// Internal==true, InternalModel!="", Credentials non-empty,
+	// primary credential provider=="minimax", FallbackChain
+	// empty, SecondaryUpstreamModel=="", PeakHourEnabled==false,
 	// ReleaseStreamChunkDeadline==0. Excluded from /v1/models.
 	KindImageGen = "image-gen"
+
+	// KindDecision marks models served by /v1/decisions
+	// (Decision Models commission / §3.1 site 1). These require
+	// Internal==true, InternalModel!="", Credentials non-empty,
+	// primary credential provider∈{"openai","typesafe"}
+	// (recommended identity B — openai reused, typesafe new;
+	// override A uses {"openai-decision","typesafe"}),
+	// FallbackChain empty, SecondaryUpstreamModel=="",
+	// PeakHourEnabled==false, ReleaseStreamChunkDeadline==0,
+	// and EXPLICIT ExcludeFromUltimateSwitching==true (D9 — the
+	// image-gen doc/code drift at config.go:258-259 is NOT
+	// inherited). Excluded from /v1/models.
+	KindDecision = "decision"
 )
 
 // IsImageGen reports whether the model is served by the image
@@ -106,20 +123,29 @@ func (m *ModelConfig) IsImageGen() bool {
 	return m != nil && m.Kind == KindImageGen
 }
 
+// IsDecision reports whether the model is served by the decision
+// endpoint (/v1/decisions; Decision Models commission / §3.1
+// site 2). Empty Kind is treated as chat.
+func (m *ModelConfig) IsDecision() bool {
+	return m != nil && m.Kind == KindDecision
+}
+
 // ValidateKindRules enforces the `kind` discriminator rules
-// (ImgGen Models commission / BE-D2). It is the single source of
-// truth called from BOTH `ModelsConfig.Validate` (JSON-file backend)
-// AND `ModelsManager.validateModelAgainstCredentials` (DB-backed
+// (ImgGen Models + Decision Models commissions / BE-D2 / §3.1
+// sites 3-4). It is the single source of truth called from BOTH
+// `ModelsConfig.Validate` (JSON-file backend) AND
+// `ModelsManager.validateModelAgainstCredentials` (DB-backed
 // production write path) — the Architect Amendment 2 split-brain
 // fix. Returns nil for empty/KindChat (existing chat rules apply
 // unchanged).
 //
 // `internalProvider` is the lowercase provider string of the model's
 // PRIMARY credential (`Credentials[0]`). Pass "" when unknown — the
-// provider check is then skipped and the image-gen row with a
-// non-minimax provider will be caught the moment the credential is
-// persisted (the legacy `validateModelAgainstCredentials` per-ref
-// provider-match invariant still fires).
+// provider check is then skipped and the image-gen or decision
+// row with a non-allowed provider will be caught the moment the
+// credential is persisted (the legacy
+// `validateModelAgainstCredentials` per-ref provider-match
+// invariant still fires).
 //
 // The caller is responsible for the cross-cutting chat-validation
 // rules (InternalModel != "" when Internal, credentials non-empty,
@@ -135,9 +161,18 @@ func (m *ModelConfig) IsImageGen() bool {
 //   - PeakHourEnabled == false
 //   - ReleaseStreamChunkDeadline == 0 (no stream chunks in image resp)
 //
-// Unknown `kind` values are rejected (typo protection — `image_gen`
-// silently meaning chat is exactly the failure mode this guard
-// prevents).
+// The decision rule set (D1-D9; Decision Models / §3.1 sites 3-4,
+// §5.6 validateDecisionRules): Internal == true, InternalModel
+// != "", Credentials non-empty, internalProvider ∈ {"openai",
+// "typesafe"} (recommended identity B), FallbackChain empty,
+// SecondaryUpstreamModel == "", PeakHourEnabled == false,
+// ReleaseStreamChunkDeadline == 0, ExcludeFromUltimateSwitching
+// == true (D9 — explicit enforcement, not the image-gen
+// doc/code drift).
+//
+// Unknown `kind` values are rejected (typo protection —
+// `image_gen` silently meaning chat is exactly the failure mode
+// this guard prevents).
 func ValidateKindRules(m *ModelConfig, internalProvider string) error {
 	if m == nil {
 		return nil
@@ -147,8 +182,10 @@ func ValidateKindRules(m *ModelConfig, internalProvider string) error {
 		return nil
 	case KindImageGen:
 		return validateImageGenRules(m, internalProvider)
+	case KindDecision:
+		return validateDecisionRules(m, internalProvider)
 	default:
-		return fmt.Errorf("model %s: unknown kind %q (expected %q or %q)", m.ID, m.Kind, KindChat, KindImageGen)
+		return fmt.Errorf("model %s: unknown kind %q (expected %q, %q, or %q)", m.ID, m.Kind, KindChat, KindImageGen, KindDecision)
 	}
 }
 
@@ -182,6 +219,69 @@ func validateImageGenRules(m *ModelConfig, internalProvider string) error {
 	}
 	if m.ReleaseStreamChunkDeadline != 0 {
 		return fmt.Errorf("model %s: kind %q does not support release_stream_chunk_deadline (image responses are not streamed)", m.ID, KindImageGen)
+	}
+	return nil
+}
+
+// validateDecisionRules enforces the decision rule set
+// (Decision Models commission / §3.1 site 4 / §5.6 / D1-D9).
+// Pulled out of ValidateKindRules for readability.
+//
+// Justified analog of validateImageGenRules — same posture:
+// internal-only, deny aux features that don't apply,
+// provider-gated (recommended identity B: `openai` reused +
+// `typesafe` new; override A: `openai-decision` + `typesafe`).
+//
+// D9 ExcludeFromUltimateSwitching == true is EXPLICITLY enforced
+// here — the image-gen doc/code drift at config.go:258-259 (the
+// doc claimed enforcement but no code enforced) is NOT inherited.
+// Decision gets belt-and-suspenders write-time enforcement.
+func validateDecisionRules(m *ModelConfig, internalProvider string) error {
+	if !m.Internal {
+		return fmt.Errorf("model %s: kind %q requires internal to be true", m.ID, KindDecision)
+	}
+	if m.InternalModel == "" {
+		return fmt.Errorf("model %s: kind %q requires internal_model to be set", m.ID, KindDecision)
+	}
+	if len(m.Credentials) == 0 {
+		return fmt.Errorf("model %s: kind %q requires at least one credential", m.ID, KindDecision)
+	}
+	// D4 provider gate — recommended identity B ("openai" reused,
+	// "typesafe" new). Override A would swap "openai" → "openai-decision".
+	// Pass "" from callers without a loaded credential (JSON-file
+	// Validate path); the per-ref provider-match invariant in
+	// ModelsManager.validateModelAgainstCredentials catches the
+	// non-allowed provider at DB write time.
+	if internalProvider != "" {
+		switch internalProvider {
+		case "openai", "typesafe":
+			// ok
+		default:
+			return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q or %q (got %q)", m.ID, KindDecision, "openai", "typesafe", internalProvider)
+		}
+	}
+	// D5
+	if len(m.FallbackChain) != 0 {
+		return fmt.Errorf("model %s: kind %q does not support fallback_chain", m.ID, KindDecision)
+	}
+	// D6
+	if m.SecondaryUpstreamModel != "" {
+		return fmt.Errorf("model %s: kind %q does not support secondary_upstream_model", m.ID, KindDecision)
+	}
+	// D7
+	if m.PeakHourEnabled {
+		return fmt.Errorf("model %s: kind %q does not support peak_hour_enabled", m.ID, KindDecision)
+	}
+	// D8
+	if m.ReleaseStreamChunkDeadline != 0 {
+		return fmt.Errorf("model %s: kind %q does not support release_stream_chunk_deadline (decision responses are not streamed)", m.ID, KindDecision)
+	}
+	// D9 — EXPLICIT enforcement. Decision ships with belt-and-suspenders
+	// write-time enforcement of exclude_from_ultimate_switching=true;
+	// unlike image-gen, the doc/code drift at config.go:258-259 is
+	// NOT inherited.
+	if !m.ExcludeFromUltimateSwitching {
+		return fmt.Errorf("model %s: kind %q requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)", m.ID, KindDecision)
 	}
 	return nil
 }
