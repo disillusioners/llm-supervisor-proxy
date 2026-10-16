@@ -589,10 +589,7 @@ func (mc *ModelsConfig) Save() error {
 	mc.mu.RUnlock()
 
 	// Validate before saving
-	tempConfig := &ModelsConfig{
-		Models:      models,
-		Credentials: credentials,
-	}
+	tempConfig := snapshotForValidation(models, credentials)
 	if err := tempConfig.Validate(); err != nil {
 		return err
 	}
@@ -654,6 +651,33 @@ func (mc *ModelsConfig) Save() error {
 	return nil
 }
 
+// snapshotForValidation returns a fresh *ModelsConfig composed
+// of the given Models slice and Credentials pointer, ready to
+// pass to Validate(). The returned struct is fresh, but its
+// Models and Credentials fields alias the caller's arguments —
+// the helper does not copy. The Models slice's backing array is
+// the caller's responsibility: pass a copy if you intend to
+// mutate the underlying data after the snapshot.
+//
+// Locking contract: every writer caller (AddModel / UpdateModel /
+// RemoveModel) holds mc.mu.Lock() for the duration and passes
+// mc.Credentials as the credentials argument. Save() holds
+// mc.mu.RLock() only long enough to capture models + credentials
+// (the captured credentials pointer is identical to mc.Credentials
+// at the RLock instant — RUnlock does not mutate the pointer).
+//
+// The Models slice is the caller's responsibility: each call site
+// builds whatever variant reflects the proposed state to validate
+// (AddModel appends the new model to a copy of mc.Models;
+// UpdateModel / RemoveModel pass a copy of the post-mutate
+// mc.Models; Save passes the captured current set).
+func snapshotForValidation(models []ModelConfig, credentials *CredentialsConfig) *ModelsConfig {
+	return &ModelsConfig{
+		Models:      models,
+		Credentials: credentials,
+	}
+}
+
 // AddModel adds a new model configuration after validation.
 func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 	// Validate the model
@@ -675,13 +699,8 @@ func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 	}
 
 	// Create a copy for validation
-	testConfig := &ModelsConfig{
-		Models:      append([]ModelConfig{}, mc.Models...),
-		Credentials: mc.Credentials,
-	}
-	testConfig.Models = append(testConfig.Models, model)
-
-	if err := testConfig.Validate(); err != nil {
+	proposed := append(append([]ModelConfig{}, mc.Models...), model)
+	if err := snapshotForValidation(proposed, mc.Credentials).Validate(); err != nil {
 		return err
 	}
 
@@ -703,41 +722,54 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
-	// Find and update the model
-	found := false
+	// Find the target index first; bail on not-found or
+	// ID-mismatch before doing any allocation. We must NOT
+	// mutate mc.Models[i] yet — the validate-before-mutate
+	// contract (Item-2 fix) requires that a failed Validate
+	// leaves mc.Models byte-identical to its pre-call state.
+	targetIdx := -1
 	for i, m := range mc.Models {
 		if m.ID == modelID {
 			// Ensure the ID doesn't change
 			if model.ID != modelID {
 				return ErrCannotChangeModelID
 			}
-			mc.Models[i] = model
-			found = true
+			targetIdx = i
 			break
 		}
 	}
 
-	if !found {
+	if targetIdx == -1 {
 		return ErrModelNotFound
 	}
 
-	// Validate the updated config. Copy BOTH Models AND
-	// Credentials into the testConfig — without the credentials
-	// mirror, validateModelAgainstCredentials' "credential_id
+	// Validate the PROPOSED post-update state BEFORE mutating
+	// mc.Models. The snapshot is a fresh copy of mc.Models
+	// with the target slot overwritten by the proposed model
+	// — no aliasing with the live slice. If Validate fails
+	// (a per-model rule violation OR a sibling-row violation
+	// the inline handler validation cannot see), the function
+	// returns WITHOUT mutating mc.Models. mc.mu stays held
+	// throughout — no TOCTOU window between Validate and the
+	// commit below.
+	//
+	// Copy BOTH Models AND Credentials into the snapshot —
+	// without the credentials mirror,
+	// validateModelAgainstCredentials' "credential_id
 	// references non-existent credential" check fires on every
-	// internal model with a ref, blocking PUT updates for every
-	// kind (chat / image-gen / decision) equally. AddModel at
-	// line 678 already does this; the asymmetry is the bug.
-	testConfig := &ModelsConfig{
-		Models:      make([]ModelConfig, len(mc.Models)),
-		Credentials: mc.Credentials,
-	}
-	copy(testConfig.Models, mc.Models)
-
-	if err := testConfig.Validate(); err != nil {
+	// internal model with a ref, blocking PUT updates for
+	// every kind (chat / image-gen / decision) equally. The
+	// symmetry with AddModel's pre-add snapshot is the
+	// invariant.
+	proposed := make([]ModelConfig, len(mc.Models))
+	copy(proposed, mc.Models)
+	proposed[targetIdx] = model
+	if err := snapshotForValidation(proposed, mc.Credentials).Validate(); err != nil {
 		return err
 	}
 
+	// Validation passed — commit the mutation in place.
+	mc.Models[targetIdx] = model
 	return nil
 }
 
@@ -762,18 +794,14 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 
 	// Validate after removal (check for dangling references).
 	// Mirror the UpdateModel fix: copy BOTH Models AND Credentials
-	// into the testConfig — without the credentials mirror, the
+	// into the snapshot — without the credentials mirror, the
 	// surviving internal model with a credential ref trips
 	// validateModelAgainstCredentials' "credential_id
 	// references non-existent credential" guard and the
 	// semantically valid DELETE returns 404 spuriously.
-	testConfig := &ModelsConfig{
-		Models:      make([]ModelConfig, len(mc.Models)),
-		Credentials: mc.Credentials,
-	}
-	copy(testConfig.Models, mc.Models)
-
-	if err := testConfig.Validate(); err != nil {
+	proposed := make([]ModelConfig, len(mc.Models))
+	copy(proposed, mc.Models)
+	if err := snapshotForValidation(proposed, mc.Credentials).Validate(); err != nil {
 		return err
 	}
 

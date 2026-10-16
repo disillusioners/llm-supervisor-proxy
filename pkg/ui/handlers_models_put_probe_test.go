@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -736,5 +737,134 @@ func TestHandleModelDetail_DELETE_DBBackend_ImmuneProbe(t *testing.T) {
 	}
 	if ts.mgr.GetModel("to-delete-db") != nil {
 		t.Error("to-delete-db still present after DELETE")
+	}
+}
+
+// TestHandleModelDetail_PUT_JSONFileBackend_FailedValidationLeavesStateIntact
+// is the Item-2 RED probe. The pre-fix code mutates mc.Models[i]
+// BEFORE calling Validate, so a failed-validation PUT leaves
+// the target's in-memory state drifted to the new (PUT) values
+// — even though the handler returns 400 to the FE. The fix
+// reorders: validate against a snapshot of the proposed state
+// FIRST, mutate only on success.
+//
+// Setup seeds two models: a valid TARGET (the PUT target) and a
+// SIBLING with a pre-existing Validate() violation (a credential
+// ref that doesn't exist in the credentials map). The PUT body
+// itself is clean — the handler's per-PUT inline validation
+// accepts it. The failure lands in UpdateModel's post-mutation
+// testConfig.Validate() scan over the whole Models slice, where
+// the sibling's bad ref is detected.
+//
+// RED proof: after the failed PUT, the target's in-memory state
+// must still hold the ORIGINAL values (not the PUT values).
+// Pre-fix: the in-memory state is drifted to the PUT values
+// (the bug). Post-fix: the in-memory state is the original
+// (the validate-before-mutate contract).
+func TestHandleModelDetail_PUT_JSONFileBackend_FailedValidationLeavesStateIntact(t *testing.T) {
+	ts := newJSONFilePUTTestServer(t)
+	defer ts.cleanup()
+
+	// Seed the TARGET model via AddModel so the seed passes
+	// Validate (a clean chat internal model).
+	if err := ts.mc.AddModel(models.ModelConfig{
+		ID:            "target",
+		Name:          "Target Original",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		Credentials:   models.TestRefs("openai-cred"),
+	}); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+
+	// Seed a SIBLING model with a pre-existing Validate()
+	// violation: an internal model whose primary credential's
+	// ref does not exist in the credentials map. The
+	// handleModelDetail inline validation only inspects the
+	// PUT body, not the sibling — so the handler accepts a
+	// clean PUT payload targeting `target`. The post-mutation
+	// testConfig.Validate() scan over the full Models slice
+	// finds the sibling's bad ref and rejects.
+	//
+	// Bypass AddModel (which would Validate) and inject the
+	// sibling directly into the exported Models slice. The
+	// test is single-threaded (httptest PUTs block until the
+	// handler returns; the read-back is a sequential
+	// GetModel call), so no lock is needed.
+	ts.mc.Models = append(ts.mc.Models, models.ModelConfig{
+		ID:            "broken-sibling",
+		Name:          "Broken Sibling",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		// Refers to a credential that does not exist in the
+		// map — validateModelAgainstCredentials' per-ref
+		// existence check fires on this row in testConfig.
+		// Validate().
+		Credentials: models.TestRefs("does-not-exist"),
+	})
+
+	// Pre-PUT sanity: target is in its known-valid state.
+	pre := ts.mc.GetModel("target")
+	if pre == nil {
+		t.Fatal("seed precondition broken: target missing before PUT")
+	}
+	if pre.Name != "Target Original" {
+		t.Fatalf("seed precondition: Name = %q, want %q", pre.Name, "Target Original")
+	}
+	if pre.InternalModel != "gpt-4o" {
+		t.Fatalf("seed precondition: InternalModel = %q, want %q", pre.InternalModel, "gpt-4o")
+	}
+
+	// PUT a CLEAN payload targeting `target`. The handler's
+	// inline validation accepts it (the PUT body's own
+	// credentials are valid, the kind is chat, the ID matches
+	// the URL). UpdateModel is then called, which (pre-fix)
+	// mutates mc.Models[i] BEFORE Validate. The Validate scan
+	// finds the broken-sibling row and rejects — but the
+	// mutation has already happened.
+	putBody := map[string]interface{}{
+		"id":             "target",
+		"name":           "Target After PUT",
+		"enabled":        true,
+		"internal":       true,
+		"internal_model": "gpt-4o-mini",
+		"credentials": []map[string]interface{}{
+			{"credential_id": "openai-cred", "weight": 1, "position": 0},
+		},
+		"exclude_from_ultimate_switching": false,
+	}
+	status, body := doPUT(t, ts.server, "target", putBody)
+	// Both pre-fix and post-fix return 400 here: the sibling
+	// is genuinely invalid and the testConfig scan must
+	// reject any PUT while the broken-sibling is in the
+	// config. The difference is in the in-memory state, NOT
+	// the HTTP status.
+	if status != http.StatusBadRequest {
+		t.Fatalf("PUT status = %d (want 400 — the broken-sibling must cause the testConfig.Validate() scan to reject), body=%s", status, string(body))
+	}
+	// Sanity: the rejection reason names the sibling, not
+	// the target (the PUT body itself is clean).
+	if !strings.Contains(string(body), "broken-sibling") {
+		t.Fatalf("PUT body did not name the broken-sibling as the rejection cause (the inline handler validation may have rejected the body before UpdateModel was reached), body=%s", string(body))
+	}
+
+	// In-memory state of the target after the failed PUT:
+	// must be UNCHANGED from the pre-PUT snapshot. This is
+	// the Item-2 contract: failed validation = no mutation.
+	// Pre-fix: the mutation runs before Validate, so the
+	// in-memory state is drifted to the PUT values (the bug).
+	// Post-fix: Validate runs before the mutation, so the
+	// in-memory state holds the original values (the fix).
+	post := ts.mc.GetModel("target")
+	if post == nil {
+		t.Fatal("target disappeared after failed PUT")
+	}
+	if post.Name != "Target Original" {
+		t.Errorf("in-memory drift on failed-validation PUT: Name = %q, want %q (UpdateModel must not mutate mc.Models[i] before Validate passes)", post.Name, "Target Original")
+	}
+	if post.InternalModel != "gpt-4o" {
+		t.Errorf("in-memory drift on failed-validation PUT: InternalModel = %q, want %q (UpdateModel must not mutate mc.Models[i] before Validate passes)", post.InternalModel, "gpt-4o")
 	}
 }
