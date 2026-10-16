@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
@@ -1218,7 +1219,7 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → re-entering once",
 		rc.reqID, pick.GroupID, pick.MemberID)
 	if h.bus != nil {
-		h.publishEvent("model_member_failover", map[string]interface{}{
+		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
 			"id":          rc.reqID,
 			"group_id":    pick.GroupID,
 			"member_id":   pick.MemberID,
@@ -1653,12 +1654,18 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}()
 
 				// load-balance-groups / Am25 (Q9): the member usage
-				// row — dedup gate emits it ONLY when a group
-				// actually rewrote the request (the winner's model
-				// differs from the client-requested string). Direct
-				// and day-1 self-shadow requests produce exactly ONE
-				// row, unchanged.
-				if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && h.counter != nil {
+				// row — emitted ONLY when a group actually rewrote
+				// the request (rc.groupPick != nil — set by
+				// applyGroupRewrite on a real pick) AND the winner's
+				// model differs from the client-requested string.
+				// The group predicate is what keeps the
+				// zero-groups==today AC: an ordinary non-group
+				// fallback (B serves after A fails) also leaves
+				// winnerModel != reqLog.Model, and must still
+				// produce exactly ONE row (keyed reqLog.Model).
+				// Direct and day-1 self-shadow requests likewise
+				// produce exactly ONE row, unchanged.
+				if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && rc.groupPick != nil && h.counter != nil {
 					go func() {
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
@@ -1896,9 +1903,12 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		}()
 
 		// load-balance-groups / Am25 (Q9): the member usage row —
-		// same dedup gate as the stream site (rewritten ⇒ 2 rows,
-		// direct ⇒ 1, day-1 ⇒ exactly 1).
-		if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && h.counter != nil {
+		// emitted ONLY when a group actually rewrote the request
+		// (rc.groupPick != nil) AND the winner's model differs from
+		// the client-requested string — same gate as the stream
+		// site (rewritten ⇒ 2 rows, direct ⇒ 1, day-1 ⇒ exactly 1,
+		// non-group fallback ⇒ exactly 1).
+		if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && rc.groupPick != nil && h.counter != nil {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()

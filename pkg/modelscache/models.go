@@ -954,7 +954,6 @@ func (c *CachedModelsConfig) RewriteGroupEntries(modelList []string, conversatio
 }
 
 // ExcludeGroupMember forwards the group-level exclude-and-reselect
-// ExcludeGroupMember forwards the group-level exclude-and-reselect
 // (Am24) to the inner manager's engine.
 func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, bool) {
 	if gr, ok := c.inner.(models.GroupRewriter); ok {
