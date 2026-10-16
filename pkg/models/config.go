@@ -653,11 +653,11 @@ func (mc *ModelsConfig) Save() error {
 
 // snapshotForValidation returns a fresh *ModelsConfig composed
 // of the given Models slice and Credentials pointer, ready to
-// pass to Validate(). The returned struct is fresh (no aliasing
-// with the caller's slice or with mc.Models / mc.Credentials)
-// and the helper is read-only on its inputs — it does not copy,
-// does not allocate beyond the wrapping *ModelsConfig, and does
-// not acquire any locks.
+// pass to Validate(). The returned struct is fresh, but its
+// Models and Credentials fields alias the caller's arguments —
+// the helper does not copy. The Models slice's backing array is
+// the caller's responsibility: pass a copy if you intend to
+// mutate the underlying data after the snapshot.
 //
 // Locking contract: every writer caller (AddModel / UpdateModel /
 // RemoveModel) holds mc.mu.Lock() for the duration and passes
