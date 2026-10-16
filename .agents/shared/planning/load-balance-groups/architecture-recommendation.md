@@ -276,3 +276,108 @@
 ---
 
 *Aggregation: Architect controller from three verified worker reports (instances fbf2178d / 143e8f61 / 336c529e). The three 🔴 findings (Anthropic failover guard+engine, member-key `|` collision, metering plumbing) were independently re-verified by the architect in-source before inclusion. Dedup applied: FE cache-count findings merged with the 9-vs-12 resolution retained; modelscache findings merged with the path correction retained as most specific; metering anchor corrections merged into one amendment (11).*
+
+---
+
+# Round 2 — Membership Pivot (user design challenge)
+
+**Date:** 2026-10-16 (UTC) · **Trigger:** user overrides Round-1 FA2 — members become PROXY MODELS, not (credential, upstream_model) triples · **Plan under challenge:** committed @ c6e0fd5.
+**Method:** 2 analyst workers: `data-flow-design` (siting/failure/interplay, instance 12f72283) · `structural-design` (simplification/validation/effort, instance 4ad9421a), plus two mid-flight user supplements (day-1 rollout context; no-bootstrap clarification). Round 1 above is preserved as committed history; this section supersedes Round 1 ONLY where it says so explicitly.
+**User's architecture (verbatim intent, preserved):** members = proxy model IDs; the group is ONE THIN LAYER BEFORE request distribution — "client → proxy → GROUP 'agentic' (members: models agentic, agentic2, …) → hash-bound weighted pick of ONE member MODEL → that model's EXISTING pipeline runs UNCHANGED (race, retry, credential LB, fallback) → upstream"; sticky target = member model; "quicker, more robust, less change"; two-level hashing cost accepted.
+**Adoption plan (user):** Day 1 = create `coding[coding]` (single-member group claiming its own member's wire ID) — zero client-visible change; later grow membership canary-style. Groups are **purely manual, FE-created** — no auto-creation, no bootstrap migration, no seed groups.
+
+## R2.0 Verdict at a Glance
+
+**VERDICT: SOUND — adopt the pivot.** Conditions (all cheap, all landmines the user already spotted): L1 claims-loop hard rule (Am22), L2 metering dedup (Am25), L3 mask-to-client-string verdict (Am26), plus one ship-gate placement pin (Am23) and a failure-semantics rule (Am24).
+
+| Item | Resolution |
+|---|---|
+| FA2 re-verdict | **Endorse (supersedes Round 1 §2).** Round 1 rejected reference-shape because it dragged in nested resolution + recursion guards. The pivot achieves reference-shape **without nested resolution** — the rewrite is one flat hop at modelList build; the Round-1 "more-for-more" objection dissolves on its own terms. |
+| L1 claims-loop | 🔴 HARD RULE: rewrite resolves members by **direct ID** (`GetModelNative`, claim-bypass) — self-shadow `coding[coding]` otherwise infinite-loops (Am22). |
+| L2 metering double-count | Dedup: emit the member usage row **only when `winner.GetModelID() != reqLog.Model`** — day-1 = exactly one row, unchanged (Am25). |
+| L3 byte-identity vs masking | **Verdict (i): mask to client-requested string uniformly** — matches the Anthropic path's existing behavior; one consciously-documented OpenAI field divergence; day-1 is fully byte-identical precisely when `internal_model == id` (alias-style models); where they differ, the model field changes on day 1 by design (Am26). |
+| Effort delta | ≈ **3,500 LOC / 33 files** vs Round 1's ≈3,900 / 41 (**−10% LOC, −20% files**); complexity decisively lower. |
+
+## R2.1 Siting & What Evaporates (verified in-source)
+
+**Siting (Worker D, verified):** the rewrite is a pure function applied to the **modelList at build time** — OpenAI `handler_functions.go:148-159` (inside `initRequestContext`, `handler.go:399`), Anthropic mirror `handler_anthropic.go:209-219`. For every entry `e` whose **direct-ID** row `IsGroup()`, replace `e` with the sticky-picked member's ID; the member's **own** FallbackChain follows it. `rc.resolvedModel` **stays the group row** through misroute guards (`:456/:474`), conversation-key (`:534-548` ⇒ **group-salted** key), auth (`:555-604`, client string — group-scoped), ultimate (`:626-953`, G7 evaluated on the group row), and race handoff (`:1025` passes the rewritten list). Per-attempt re-fetches (`race_executor.go:121/:178`; Anthropic `:418`) hit the **member row natively**. Worker E's alternative (rewrite at the GetModel/resolver sites) is **rejected**: it would member-salt the conv key and mis-scope ultimate; E's "single ModelsManager helper + parity test" shape is adopted as the implementation of D's siting.
+
+**What evaporates (all verified):**
+1. Resolver kind-branch in `ResolveInternalConfigWithAffinity` + cached variant (Round-1 §3.6.1/P2.4, **Am10**) — DEAD; group rows never reach the resolver.
+2. Anthropic `internal_handler.go:240/:244` group branch (Round-1 **Am1**, the Round-1 🔴) — MOOT; the InternalHandler sees the member row with its own credentials.
+3. `race_coordinator.go:1465` group branch (P2.6) — MOOT; the member's own `credFailoverPlanLocked` runs unchanged.
+4. Member-key `credentialID+"|"+upstreamModel` construction and the `|` credential-ID ban (Round-1 **Am2**, Round-1 🔴) — EVAPORATES; keys are plain model IDs.
+5. Metering resolved-identity plumbing (Round-1 **Am3**, Round-1 🔴) — replaced by a ~5-LOC dedup gate; the winner row **is** the member row (`winner.GetModelID()` = member ID natively).
+6. G5 provider-match divergence (Round-1 form) — MOOT; groups carry **no credentials at all**; `validateModelAgainstCredentials` is bypassed for group rows (placement pinned by Am23).
+7. Q18 N-members-per-target — DISSOLVES; multi-credential fan-out is the member model's own credential LB, inherited natively.
+8. Migration 031 — **zero schema delta** vs Round 1; `members_json` content becomes `[{model_id, weight}]`; same columns, same ~30 mechanical sites, same registry append.
+
+**Still required:** G1 `Internal=true` (verified by both workers — ~11 `.Internal` dispatch predicates fire on the group row BEFORE the rewrite; `handler.go:332/:339` would external-passthrough a `false` group).
+
+## R2.2 Failure Semantics (recommended rule — Am24)
+
+**Rule:** group-level exclude-and-reselect fires **ONLY on terminal member-pipeline failure** — the member's whole pipeline exhausted (its own credential LB incl. `ExcludeAndReselect` cred-failover, its own fallback chain, its race budget), surfacing as `handleRaceFailure` (`handler.go:1086`, the winner==nil branch) on OpenAI and the "all models failed" exit (`handler_anthropic.go:395-412`) on Anthropic. Member-internal 429s absorbed by the member's own cred-LB **never** bubble to the group layer. On terminal failure: `grouplb.ExcludeAndReselect(groupID, convKey, memberID)` (rebind-only-if-bound-to-failed) + **max ONE** re-entry per request (rebuild modelList via rewrite, resume execution) — re-entry does not chain; a second terminal failure is a real failure. **Pre-first-byte only** (the `headersSent` stream lockout at `handler_anthropic.go:332-334` commits streaming to the picked member). ~25–40 LOC/protocol + tests. Sticky-member-removed-at-runtime: `OnGroupChanged(groupID, survivors)` drops removed-member bindings → fresh weighted pick next request (mirrors `credentiallb.OnCredentialDeleted` cross-scan, `engine.go:423-451`).
+
+## R2.3 Interplay Confirmations (verified)
+
+- **Two-level hashing:** coherent. Conv key is **group-salted** (`ComputeConversationKey(groupID, tokenID, msg)`, `key.go:40-43` — modelID param, verbatim reuse); the member's cred-LB then binds `(memberID, group-salted-key)`. Same conversation through the group ⇒ same key ⇒ same cred binding; a member shared by two groups gets distinct group-salted spaces; direct member requests use the member-salted space. All separate, all fine — document (Am31).
+- **Ultimate:** trigger/`ExcludeFromUltimateSwitching` evaluated on `rc.resolvedModel` = the **group row** (`handler.go:696`) ⇒ G7 fully shields group traffic; a member's own ultimate eligibility applies **only on direct member requests**. `X-Force-Ultimate-Model` residual (Round-1 R9) unchanged. Round-1 Am5 (ultimate-stops-while-shadowed) still applies.
+- **Auth:** gates on the client string pre-rewrite — allow-lists stay group-scoped; a token listed on the shadowed ID reaches the group. Unchanged (Round-1 FA1 §6).
+- **Loop detection / normalizers / tool-repair:** all content-keyed, not model-identity-keyed — no group concern.
+- **reqLog:** `reqLog.Model` = client string (group); served member stamped at rewrite (`FallbackUsed[0]` or a new `RouteModel` field) when `memberID != reqLog.Model`; `winner.GetModelID()` = member row.
+- **Direct member request:** no rewrite (member row is not a group) — unchanged, including when the member is claimed by another group (clients hitting that ID get the claiming group; the group whose member it is still executes the real row — see the identity rule below).
+- **Flat rule:** group-as-member forbidden (G-rule); chat→group fallback **native** (the rewrite applies uniformly to every list entry incl. fallback entries — Round-1 Q16 posture preserved with zero resolver contact).
+- **Live membership edits:** in-flight requests hold their rewritten member-native modelList (attempts re-fetch member.ID directly) — unaffected by mid-flight edits; new requests pick from fresh membership; sticky→removed covered by `OnGroupChanged`. Confirmed.
+- **Coherent identity rule (L1):** *"member refs resolve by direct ID (row identity); claims apply to client-facing resolution only."* Under it: self-shadow legal (canonical onboarding); member claimed by a different enabled group — mechanically safe, **allow + document**; group claiming an ID that is another group's member — same rule, no nesting possible.
+
+## R2.4 Day-1 Rollout Posture (Supplements 1+2)
+
+- **(A) Named acceptance criterion — zero-groups ≡ today:** byte-identical with zero groups (claims index empty ⇒ claims-first `GetModel` is a no-op miss; grouplb idle; masking gate never fires; no extra rows). Verified conceptually across every pivot mechanism; nothing observable at zero groups.
+- **(B) Named acceptance criterion — manual `coding[coding]` ≡ today:** routing (winner = the real coding row), response shape (per Am26 — fully byte-identical when `internal_model == id`; exactly the `model` field differs by design when not), metering (exactly ONE usage row, per Am25), latency (n==1 E-3 fast path, `engine.go:241-246` precedent). Four equivalence tests (Am29).
+- **Non-goal (encoded):** no group auto-creation, no bootstrap migration, no seed groups — groups are user-created via FE only. The FE one-click "wrap model X as group [X]" flow is **form pre-fill convenience**, not system auto-creation (Am30).
+- **L1 regression test:** single-member self-shadow group resolves its member to the REAL row in ONE pass, no recursion — run before any other group test (Am22).
+
+## R2.5 What Stays Unchanged (verified against the pivot)
+
+| Item | Status | Note |
+|---|---|---|
+| In-memory sticky + 24h sliding TTL + 5m janitor + restart cold-start log | ✅ | `ComputeConversationKey` reused verbatim with groupID; E-3 n==1 fast path applies |
+| Flat membership (no group-of-groups) | ✅ | G-rule carries; enforced at member-kind check |
+| ID-shadow claim mechanism (`shadow_model_id`, claims-first, `/v1/models` hide, delete→reappear) | ✅ | Round-1 FA1 + Am4 (modelscache claim eviction) + Am5 + Am20 carry verbatim; self-shadow now legal |
+| FE Group tab + 9-site quadruple delete + 4 lock-step arms | ✅ | Round-1 FA8 verdicts stand; editor content simplifies (Am30) |
+| Chat-paths-only; zero client IO change | ✅ | imggen/decision untouched; no routes/fields |
+| Model-field masking | 🟡 | Still needed (multi-member groups still leak varying upstream names); mask **target** = client-requested string (Am26); Round-1 Am6 per-SSE-event buffering carries unchanged |
+| G7/D9 ultimate exclusion | ✅ | Verified on the group row pre-rewrite |
+| Q9 both-rows metering | 🟡 | Refactored by Am25 (dedup); Round-1 Am11 anchor corrections + ultimate-site exclusion carry |
+| Q15 `model_member_selected` event | ✅ | Payload = `{group_id, member model_id, upstream_provider, upstream_model}`; newlyBound-only |
+| OnGroupChanged sticky-removal drop | ✅ | Survivor-filter survives (`engine.go:382-388` pattern) |
+
+## R2.6 Consolidated Amendments (Am21+ — for the planner; supersedes conflicting Round-1 items)
+
+1. 🔴 **Am21 — Rewrite siting (THE core mechanism).** Plan §3.6.1–§3.6.3/P2: replace ALL resolver-seam surgery with a pure-function member rewrite at **modelList build** (OpenAI `handler_functions.go:148-159`; Anthropic `handler_anthropic.go:209-219`); `rc.resolvedModel` stays the group row through guards/auth/conv-key/ultimate; execution list = `[member.ID] + member's own FallbackChain`. Implement as ONE shared manager-level helper called by both protocol sites + a parity test locking them in sync. **Deletes:** Round-1 §3.6.1 kind-branch + cached-variant branch, Am1 (Anthropic internal_handler fix), Am10, P2.6 (race_coordinator group branch). Chat→group fallback becomes native (uniform entry-wise rewrite incl. fallback entries; Round-1 Q16 posture preserved).
+2. 🔴 **Am22 — L1 hard rule: direct-ID member resolution.** New `GetModelNative(modelID)` (strict-twin claim-bypass semantics, non-admin surface); the rewrite MUST use it, never claims-first `GetModel` (self-shadow `coding[coding]` otherwise infinite-loops). Identity rule: "member refs resolve by direct ID; claims apply to client-facing resolution only." Self-shadow LEGAL (canonical onboarding); member claimed by another enabled group: allow + document; group-as-member: forbidden. Regression test: self-shadow resolves the REAL row in one pass — gated before all other group tests.
+3. 🔴 **Am23 — Ship-gate placement pin.** P1.5's "group rows run `validateGroupMembers` INSTEAD OF `validateModelAgainstCredentials`" routing is load-bearing and must bypass **before** the Internal gate — `store.go:1597-1604` rejects `Internal=true, Credentials=[]`, exactly the group-row shape. Pin with a save-path test (a group row must save cleanly through `validateBeforeWrite`).
+4. 🟡 **Am24 — Failure semantics rule.** Group-level exclude-and-reselect fires ONLY on **terminal** member-pipeline failure (`handleRaceFailure` `handler.go:1086` / Anthropic all-models-failed `:395-412`); member-internal 429s never bubble; **max ONE** re-entry per request, pre-first-byte only, no chaining. ~25–40 LOC/protocol.
+5. 🟡 **Am25 — L2 metering dedup.** Stamp served member at rewrite (`FallbackUsed[0]` or new `RouteModel`) when `memberID != reqLog.Model`; emit the member usage row ONLY when `winner.GetModelID() != reqLog.Model`. Day-1 = exactly one row, unchanged; Round-1 Am3 DELETED; Round-1 Am11 anchors + ultimate-site exclusion carry.
+6. 🟡 **Am26 — L3 verdict (option i).** OpenAI response `model` masks to the **client-requested string** uniformly (group ID / claimed ID); one consciously-documented divergence from today's upstream-verbatim echo; matches Anthropic-path behavior (cross-protocol consistency); day-1 fully byte-identical iff `internal_model == id`. Encode as decisions.md Q5 extension or new Q-row. Round-1 Am6 per-SSE-event buffering carries unchanged.
+7. 🟡 **Am27 — Q11 rework.** Block-at-delete moves to **DeleteModel**: refuse while the model ID is a member of any group (error naming the group); the credential-side scan disappears (groups carry no credentials). ~20 LOC + test.
+8. 🟡 **Am28 — Runtime stale-member defense.** At rewrite, re-validate the picked member (exists / chat-kind / not group / enabled); on stale: skip-and-reselect; empty group at runtime → resolve-failure envelope (Round-1 §3.8 posture). Covers member disabled/deleted between write and request.
+9. 🟡 **Am29 — Named acceptance criteria + non-goal.** §9 gains: (A) zero-groups ≡ today (byte-identical); (B) manual `coding[coding]` ≡ today (routing/response-per-Am26/metering-per-Am25/latency via n==1 fast path) — 4 equivalence tests. §1 non-goals gain: **no bootstrap/seed/auto-create machinery** (FE-only creation).
+10. 🟡 **Am30 — FE delta.** `GroupMemberEditor` becomes a chat-kind **model picker** + weight (simpler than Round 1, −80–100 LOC); one-click "wrap model X as group [X]" affordance (form pre-fill, NOT auto-creation; ~40 LOC); shadow-target picker (Round-1 Am9) unchanged.
+11. 🟢 **Am31 — Documentation.** Member-side knob inheritance (a member's own `fallback_chain`/`peak_hours`/`secondary_upstream_model` now execute inside group traffic — feature, document the surprise); two-level hashing spaces (group-salted vs member-salted); cross-claim members allowed; `pkg/grouplb` keeps zero credential/provider imports (anti-pattern guard); `key.go` imported from `credentiallb` rather than forked (planner call, ~−150 LOC); Round-1 Am14 (testhooks 1:1) + Am15 (lazy init) carry.
+
+## R2.7 Effort Delta
+
+**≈3,500 LOC / ~33 files** vs Round-1 ≈3,900 / ~41 (**−10% LOC, −20% files**). LOC is roughly a wash inside `pkg/grouplb` (~750+600 test LOC either way — but with zero credential awareness, no composite keys, no `|` gate); the decisive wins are the **deaths of deep surgery** in `store.go` (resolver), `internal_handler.go`, and `race_coordinator.go`, plus Q18/Q11-credential-scan dissolution and a simpler FE editor. The user's "quicker, more robust, less change" holds for **complexity and risk surface** even where raw LOC ties.
+
+## R2.8 Top Risks of the Pivot
+
+1. 🔴 **L1 claims-loop** — any claims-aware lookup at the rewrite site infinite-loops day-1 self-shadow. Mitigated by Am22 (hard rule + gated regression test).
+2. 🔴 **Ship-gate** — `validateModelAgainstCredentials` (`store.go:1597-1604`) rejects the group-row shape; P1.5's bypass must precede its Internal gate (Am23).
+3. 🟡 **Rewrite-siting drift across the two protocol sites** — mitigated by the single shared helper + parity test (Am21).
+4. 🟡 **Group-level re-entry** is a new responsibility boundary — bounded by the terminal-only + max-ONE rule (Am24).
+5. 🟡 **Member-side knobs silently active inside groups** (fallback chains, peak hours) — documented, not gated (Am31).
+
+---
+
+*Round 2 aggregation: Architect controller from two verified worker reports (instances 12f72283 / 4ad9421a) plus two user supplements folded mid-flight. Conflicts resolved: rewrite siting — Worker D's modelList-build siting adopted over Worker E's resolver-site variant (conv-key salting + ultimate scoping); E's shared-helper + parity-test shape retained. Worker E's validateModelAgainstCredentials blocker re-anchored as Am23 (P1.5 already routes around it; placement pinned). Worker E's day-1 byte-identity claim under L3-(i) corrected: holds iff `internal_model == id`.*
