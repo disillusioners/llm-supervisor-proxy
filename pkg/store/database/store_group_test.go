@@ -369,3 +369,370 @@ func TestGroup_ResolverUntouched(t *testing.T) {
 		t.Error("ResolveInternalConfigWithAffinity(group) should be ok=false (resolver untouched by kind)")
 	}
 }
+
+// ─── P2 carry-forward (b)3 + P2.2/2.4/2.7 manager-level tests ─────────────
+
+// TestGroup_GetModelByName_ClaimBlind — Council note #3 [P2 if
+// TRIVIAL, else P4 — do it]: the name resolver must NOT redirect
+// through the claim index. Claims are ID-space only; a name lookup
+// for the claimed chat row's display name still returns the REAL
+// chat row, never the group. (The rewrite helper at the P2
+// pipeline applies at the modelList level using the resolved
+// model; a claims-aware GetModelByName would fabricate a different
+// virtualization shape for clients that pass names instead of IDs —
+// a silent behavior change for OpenAI/TypeSafe clients.)
+func TestGroup_GetModelByName_ClaimBlind(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+
+	// Add the chat row + the group claiming it.
+	chat := models.ModelConfig{
+		ID: "chat-x", Name: "Chat X", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "x", Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.AddModel(chat); err != nil {
+		t.Fatalf("AddModel(chat): %v", err)
+	}
+	group := validGroup()
+	group.ShadowModelID = "chat-x"
+	if err := mgr.AddModel(group); err != nil {
+		t.Fatalf("AddModel(group): %v", err)
+	}
+
+	// The chat row's NAME must resolve to the REAL chat row
+	// (claim-blind), not to the group.
+	got := mgr.GetModelByName("Chat X")
+	if got == nil {
+		t.Fatal("GetModelByName returned nil")
+	}
+	if got.ID != "chat-x" || got.IsGroup() {
+		t.Errorf("GetModelByName must stay claim-blind; got ID=%q kind=%q (want chat-x/chat)", got.ID, got.Kind)
+	}
+	// And the group's own name resolves to the group (claims don't
+	// apply to the claiming row itself).
+	if got := mgr.GetModelByName("Coding Group"); got == nil || got.ID != "coding-group" || !got.IsGroup() {
+		t.Errorf("group name lookup: got %+v, want the group row", got)
+	}
+}
+
+// TestGroup_EngineLifecycle — grouplb engine constructed in
+// NewModelsManager + stops in Close (P2.2 lifecycle).
+func TestGroup_EngineLifecycle(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	ge := mgr.GroupEngine()
+	if ge == nil {
+		t.Fatal("GroupEngine() returned nil on a live manager")
+	}
+	// No group state seeded yet — Am15 lazy posture.
+	if ge.HasGroup("coding-group") {
+		t.Error("fresh engine must hold no group state")
+	}
+	cleanup() // Close(); idempotent
+	// After Close, Stop is idempotent + post-Stop reads are lazy-only.
+	if _, _, err := ge.GetOrSelect("coding-group", "k"); err == nil {
+		t.Error("post-Close GetOrSelect on a removed group must error")
+	}
+}
+
+// TestGroup_OnGroupChanged_SurvivorFilter — group writes (Add +
+// Update) drive OnGroupChanged: selector rebuild + orphan-binding
+// drop. The "boundAt preserved on surviving bindings" half is
+// covered in pkg/grouplb/binding_test.go (same engine, internal
+// access); here the observable side effect: after a member is
+// removed, a fresh key does not pick that member, and a pick on the
+// surviving member's key still re-picks that member.
+func TestGroup_OnGroupChanged_SurvivorFilter(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	ge := mgr.GroupEngine()
+
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// First pick — locks a binding to a member.
+	pre := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-stays")
+	if pre.FailedGroupID != "" {
+		t.Fatalf("pre: %+v", pre)
+	}
+	preMember := pre.MemberID
+
+	// Drop the OTHER member.
+	otherMember := "coding-alt"
+	if preMember == "coding-alt" {
+		otherMember = "coding"
+	}
+	updated := validGroup()
+	updated.Members = []models.GroupMember{{ModelID: preMember, Weight: 1}}
+	if err := mgr.UpdateModel("coding-group", updated); err != nil {
+		t.Fatalf("UpdateModel: %v", err)
+	}
+
+	// Sticky on the SAME key: must re-pick the SAME surviving member
+	// (the binding for the removed other-member is the one dropped;
+	// the preMember binding survives).
+	post := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-stays")
+	if post.MemberID != preMember {
+		t.Errorf("survivor: pre=%q post=%q (must stick to surviving member)", preMember, post.MemberID)
+	}
+
+	// A NEW key under the now-removed member: must NOT pick that
+	// member. (The selector rebuild drops the orphan; a fresh key
+	// gets a fresh healthy pick from the survivors.)
+	if removedRes := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-newkey"); removedRes.MemberID == otherMember {
+		t.Errorf("removed member %q must not be picked on a fresh key", otherMember)
+	}
+
+	// Remove the group: state dropped (live-edit safety).
+	if err := mgr.RemoveModel("coding-group"); err != nil {
+		t.Fatalf("RemoveModel(group): %v", err)
+	}
+	if ge.HasGroup("coding-group") {
+		t.Error("RemoveModel must drop the group state wholesale")
+	}
+}
+
+// TestGroup_LazySeed_FirstRewriteSeedsEngine — Am15: no boot
+// RebindFromStore walk. The first rewrite after boot seeds the
+// group's engine state.
+func TestGroup_LazySeed_FirstRewriteSeedsEngine(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	ge := mgr.GroupEngine()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Simulate restart: no engine state for the group (Am15).
+	ge.OnGroupChanged("coding-group", nil) // drop the AddModel's seed
+
+	// First rewrite: lazy seed + sticky pick.
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-lazy")
+	if res.FailedGroupID != "" || !res.AnyGroup {
+		t.Fatalf("rewrite: %+v", res)
+	}
+	if !ge.HasGroup("coding-group") {
+		t.Error("first rewrite must lazily seed the engine state")
+	}
+	if res.MemberID != "coding" && res.MemberID != "coding-alt" {
+		t.Errorf("rewrite picked %q, want one of the two members", res.MemberID)
+	}
+}
+
+// TestGroup_RewriteGroupEntries_StickySecondCall — same conv key
+// returns the SAME member both times (binding persists). Different
+// keys distribute independently.
+func TestGroup_RewriteGroupEntries_StickySecondCall(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	res1 := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-sticky")
+	if res1.FailedGroupID != "" {
+		t.Fatalf("first rewrite: %+v", res1)
+	}
+	res2 := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-sticky")
+	if res2.MemberID != res1.MemberID {
+		t.Fatalf("sticky: res1=%q res2=%q (same key must re-pick)", res1.MemberID, res2.MemberID)
+	}
+	if !res1.MemberNewlyBound {
+		t.Error("first pick must be newlyBound=true")
+	}
+	if res2.MemberNewlyBound {
+		t.Error("second pick on the same key must be newlyBound=false (binding reused)")
+	}
+
+	// A DIFFERENT key may pick a different member (statistical
+	// over 2+ keys, not pinned; accept either).
+	for _, k := range []string{"k-x", "k-y", "k-z"} {
+		_ = mgr.RewriteGroupEntries([]string{"coding-group"}, k)
+	}
+}
+
+// TestGroup_RewriteGroupEntries_ChatFallbackToGroup — Q16: a chat
+// row's fallback chain pointing at a group is rewritten natively.
+// The execution list becomes [chat, groupMember + groupMemberChain].
+func TestGroup_RewriteGroupEntries_ChatFallbackToGroup(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	// Add a chat main with a fallback pointing at the group.
+	chatMain := models.ModelConfig{
+		ID: "chat-main", Name: "Main", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "m",
+		Credentials:   models.TestRefs("cred-openai"),
+		FallbackChain: []string{"coding-group"},
+	}
+	if err := mgr.AddModel(chatMain); err != nil {
+		t.Fatalf("AddModel(chat-main): %v", err)
+	}
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("AddModel(group): %v", err)
+	}
+	res := mgr.RewriteGroupEntries([]string{"chat-main", "coding-group"}, "conv-mix")
+	if res.FailedGroupID != "" {
+		t.Fatalf("rewrite: %+v", res)
+	}
+	if len(res.ModelList) == 0 || res.ModelList[0] != "chat-main" {
+		t.Errorf("chat main must be the first entry; got %+v", res.ModelList)
+	}
+	// The second slot (was the group ID) must be a REAL member ID.
+	got := res.ModelList[1]
+	if got != "coding" && got != "coding-alt" {
+		t.Errorf("fallback-reached group entry must be rewritten to a member; got %q (list=%v)", got, res.ModelList)
+	}
+	// No further member-chain entries (members have no fallback chain).
+	if len(res.ModelList) > 2 {
+		t.Errorf("members have no chain; list should be len 2; got %v", res.ModelList)
+	}
+}
+
+// TestGroup_RewriteGroupEntries_Am28StaleMember — a member
+// disabled between group write and request must be skip-and-
+// reselected; an all-stale group yields FailedGroupID.
+func TestGroup_RewriteGroupEntries_Am28StaleMember(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Disable member "coding" between write and request.
+	disabled := models.ModelConfig{
+		ID: "coding", Name: "Coding", Enabled: false, Kind: models.KindChat,
+		Internal: true, InternalModel: "glm-5", Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.UpdateModel("coding", disabled); err != nil {
+		t.Fatalf("disable coding: %v", err)
+	}
+
+	// The rewrite MUST reselect away from the now-stale "coding".
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-stale")
+	if res.FailedGroupID != "" {
+		t.Fatalf("rewrite: %+v", res)
+	}
+	if res.MemberID == "coding" {
+		t.Errorf("Am28 violated: stale member 'coding' was picked (res=%+v)", res)
+	}
+	if res.MemberID != "coding-alt" {
+		t.Errorf("expected coding-alt, got %q", res.MemberID)
+	}
+
+	// Disable the remaining member too — empty-at-runtime group.
+	disabled2 := models.ModelConfig{
+		ID: "coding-alt", Name: "Coding Alt", Enabled: false, Kind: models.KindChat,
+		Internal: true, InternalModel: "kimi", Credentials: models.TestRefs("cred-zhipu"),
+	}
+	if err := mgr.UpdateModel("coding-alt", disabled2); err != nil {
+		t.Fatalf("disable coding-alt: %v", err)
+	}
+	res2 := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-empty")
+	if res2.FailedGroupID != "coding-group" {
+		t.Errorf("empty group must surface FailedGroupID=coding-group; got %+v", res2)
+	}
+}
+
+// TestGroup_ExcludeGroupMember — Am24 contract: terminal exclusion
+// rebinds to the next healthy member; single-member group returns
+// unavailable (ReselectNone ⇒ ok=false).
+func TestGroup_ExcludeGroupMember(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	if !ok {
+		t.Fatal("two-member group must produce a replacement")
+	}
+	if pick != "coding-alt" {
+		t.Errorf("reselect pick = %q, want coding-alt (the only other member)", pick)
+	}
+
+	// Now make the group single-member: ExcludeGroupMember on a
+	// single-member group returns ("" , false) — no alternative.
+	updated := validGroup()
+	updated.Members = []models.GroupMember{{ModelID: "coding", Weight: 1}}
+	if err := mgr.UpdateModel("coding-group", updated); err != nil {
+		t.Fatalf("update to single-member: %v", err)
+	}
+	_, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	if ok2 {
+		t.Error("single-member ExcludeGroupMember must return ok=false (no alternative)")
+	}
+}
+
+// TestGroup_LiveEditSafety_ThreeClauses — the plan's named live-edit
+// safety set (§9.4): (1) in-flight hold — an already-picked member
+// stays bound (sticky hold survives membership edits); (2) new picks
+// see the new membership (removed members are never picked again);
+// (3) sticky-to-removed drops and re-picks (a binding pointing at a
+// removed member is dropped by the survivor filter and the next
+// rewrite picks from the survivors).
+func TestGroup_LiveEditSafety_ThreeClauses(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// (1) In-flight hold: pick under key K, then edit weights — the
+	// SAME key must keep returning the SAME member (the in-flight
+	// conversation's affinity holds).
+	first := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-hold")
+	if first.FailedGroupID != "" {
+		t.Fatalf("first: %+v", first)
+	}
+	weightNudged := validGroup()
+	weightNudged.Members = []models.GroupMember{
+		{ModelID: first.MemberID, Weight: 9},
+		{ModelID: otherOf(first.MemberID), Weight: 1},
+	}
+	if err := mgr.UpdateModel("coding-group", weightNudged); err != nil {
+		t.Fatalf("weight nudge: %v", err)
+	}
+	hold := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-hold")
+	if hold.MemberID != first.MemberID {
+		t.Errorf("(1) in-flight hold violated: first=%q hold=%q", first.MemberID, hold.MemberID)
+	}
+
+	// (3) Sticky-to-removed drops and re-picks: bind key K2 to a
+	// member, then REMOVE that member — the next rewrite on K2 must
+	// pick a survivor (never the removed one).
+	second := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-k2")
+	removed := second.MemberID
+	survivor := otherOf(removed)
+	slimmed := validGroup()
+	slimmed.Members = []models.GroupMember{{ModelID: survivor, Weight: 1}}
+	slimmed.ShadowModelID = "" // coding may be the removed one — drop the claim edge
+	if err := mgr.UpdateModel("coding-group", slimmed); err != nil {
+		t.Fatalf("remove member: %v", err)
+	}
+	re := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-k2")
+	if re.FailedGroupID != "" {
+		t.Fatalf("(3) rewrite after removal failed: %+v", re)
+	}
+	if re.MemberID == removed {
+		t.Errorf("(3) sticky-to-removed must drop and re-pick: got the removed %q", re.MemberID)
+	}
+	if re.MemberID != survivor {
+		t.Errorf("(3) expected the survivor %q, got %q", survivor, re.MemberID)
+	}
+
+	// (2) New picks see the new membership: a fresh key can never
+	// pick the removed member (selector rebuilt over survivors).
+	for _, k := range []string{"n1", "n2", "n3", "n4", "n5"} {
+		res := mgr.RewriteGroupEntries([]string{"coding-group"}, k)
+		if res.FailedGroupID != "" || res.MemberID == removed {
+			t.Errorf("(2) fresh key %s picked removed member: %+v", k, res)
+		}
+	}
+}
+
+// otherOf returns the other member of the canonical two-member
+// fixture.
+func otherOf(memberID string) string {
+	if memberID == "coding" {
+		return "coding-alt"
+	}
+	return "coding"
+}

@@ -307,89 +307,147 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Outer loop: iterate through models (original + fallbacks)
-	for modelIndex, currentModel := range arc.modelList {
-		if modelIndex > 0 {
-			log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
-		}
-
-		if arc.baseCtx.Err() != nil {
-			log.Printf("Client disconnected, failing request")
-			break
-		}
-
-		// Phase 3 / task 3.4 (Anthropic-path sequential fallback loop
-		// guard in live mode — architect resolution per the plan):
-		// once the live translator has emitted ANY byte (arc.headersSent
-		// set at handleAnthropicLiveStreamResponse or the new live
-		// internal-variant entry), no model fallback can happen mid-
-		// stream — the Anthropic client is already committed to this
-		// stream's wire shape. The guard is loop-top (NOT inside
-		// attemptAnthropicModel) so we skip the wasted per-model
-		// setup at :275-299 on iterations that can never switch.
-		// Pre-first-byte (iteration 0, headers not sent) fallback is
-		// unchanged — the guard fires only AFTER the first byte.
-		if arc.headersSent && !arc.bufferMode {
-			break
-		}
-
-		// Save mutable arc state for restoration on failure
-		savedIsAnthropicUpstream := arc.isAnthropicUpstream
-		savedTargetURL := arc.targetURL
-		savedCredentialAPIKey := arc.credentialAPIKey
-		savedRequestBody := make([]byte, len(arc.requestBody))
-		copy(savedRequestBody, arc.requestBody)
-		savedAnthropicReqModel := arc.anthropicReq.Model
-
-		// Update model in request body
-		if arc.isAnthropicUpstream {
-			// For passthrough, unmarshal, update model, re-marshal
-			var reqBody map[string]interface{}
-			if err := json.Unmarshal(arc.requestBody, &reqBody); err != nil {
-				log.Printf("Failed to unmarshal request body for model update: %v", err)
-				continue
-			}
-			reqBody["model"] = currentModel
-			newBody, err := json.Marshal(reqBody)
-			if err != nil {
-				log.Printf("Failed to marshal request body for model update: %v", err)
-				continue
-			}
-			arc.requestBody = newBody
-		} else {
-			// For OpenAI translation path, re-translate with new model
-			arc.anthropicReq.Model = currentModel
-			openaiReq := translator.TranslateRequest(arc.anthropicReq, nil)
-			newBody, err := json.Marshal(openaiReq)
-			if err != nil {
-				log.Printf("Failed to marshal translated request: %v", err)
-				continue
-			}
-			arc.requestBody = newBody
-		}
-
-		success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
-		if success {
-			return
-		}
-
-		// Restore arc state for next fallback iteration
-		arc.isAnthropicUpstream = savedIsAnthropicUpstream
-		arc.targetURL = savedTargetURL
-		arc.credentialAPIKey = savedCredentialAPIKey
-		arc.requestBody = savedRequestBody
-		arc.anthropicReq.Model = savedAnthropicReqModel
-		// W4: a failed attempt (internal or otherwise) may have left partial
-		// accumulation in arc.accumulatedThinking — e.g. a failed internal
-		// attempt captures thinking into its sink mid-stream before the
-		// failure. Persisting that would double-accumulate or pollute the
-		// fallback's persisted thinking, so drop it before the next
-		// attempt: the fallback's persisted thinking must carry ONLY the
-		// fallback's own thinking.
-		arc.accumulatedThinking.Reset()
-
+	// load-balance-groups §3.6.1 (Am21) — THE modelList rewrite,
+	// Anthropic mirror. Calls the SAME shared helper as the OpenAI
+	// site (parity by construction). Runs AFTER the conversation-
+	// key derivation (post-auth tokenID is required for the
+	// group-salted key) and BEFORE the sequential loop at :311+;
+	// per-iteration GetModel at :418 then runs member-native. The
+	// `headersSent` guard at :332-334 already enforces pre-first-
+	// byte — the Am24 re-entry below respects it (no re-entry once
+	// any byte has been emitted).
+	if newList, pick, failGroup := h.applyGroupRewrite(&arc.conf, arc.modelList, arc.conversationKey); failGroup != "" {
+		// Am28 / §3.8: empty-at-runtime group ⇒ the Anthropic
+		// resolve-failure envelope, never a panic.
+		log.Printf("[grouplb] anthropic request %s: %s", arc.reqID, groupFailMessage(failGroup))
 		arc.reqLog.Status = "failed"
-		arc.reqLog.Error = "Model failed"
+		arc.reqLog.Error = groupFailMessage(failGroup)
+		arc.reqLog.EndTime = time.Now()
+		arc.reqLog.Duration = time.Since(arc.startTime).String()
+		h.store.Add(arc.reqLog)
+		h.publishEvent("request_failed", map[string]interface{}{
+			"id":    arc.reqID,
+			"error": arc.reqLog.Error,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"api_error", "group_unservable", groupFailMessage(failGroup)))
+		return
+	} else if pick != nil {
+		arc.modelListOriginal = arc.modelList
+		arc.modelList = newList
+		arc.groupPick = pick
+		// Am25 metering stamp (Anthropic path meters nothing —
+		// Am13; the stamp is recorded for log/FE observability only).
+		if pick.MemberID != arc.reqLog.Model {
+			arc.reqLog.RouteModel = pick.MemberID
+		}
+		log.Printf("[grouplb] anthropic request %s: group=%s → sticky member=%s (newlyBound=%v)",
+			arc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
+	}
+
+	// Outer loop: iterate through models (original + fallbacks).
+	// load-balance-groups / Am24 re-entry: a terminal member-pipeline
+	// failure (all models failed, no byte sent) lets the group
+	// reselect exactly once and continue the loop with the rebuilt
+	// list. The `headersSent` guard at :332-334 still enforces
+	// pre-first-byte — once any byte has been emitted, no member
+	// switch is possible.
+loop:
+	for {
+		for modelIndex, currentModel := range arc.modelList {
+			if modelIndex > 0 {
+				log.Printf("Attempting fallback model: %s (index %d)", currentModel, modelIndex)
+			}
+
+			if arc.baseCtx.Err() != nil {
+				log.Printf("Client disconnected, failing request")
+				break loop
+			}
+
+			// Phase 3 / task 3.4 (Anthropic-path sequential fallback loop
+			// guard in live mode — architect resolution per the plan):
+			// once the live translator has emitted ANY byte (arc.headersSent
+			// set at handleAnthropicLiveStreamResponse or the new live
+			// internal-variant entry), no model fallback can happen mid-
+			// stream — the Anthropic client is already committed to this
+			// stream's wire shape. The guard is loop-top (NOT inside
+			// attemptAnthropicModel) so we skip the wasted per-model
+			// setup at :275-299 on iterations that can never switch.
+			// Pre-first-byte (iteration 0, headers not sent) fallback is
+			// unchanged — the guard fires only AFTER the first byte.
+			if arc.headersSent && !arc.bufferMode {
+				break loop
+			}
+
+			// Save mutable arc state for restoration on failure
+			savedIsAnthropicUpstream := arc.isAnthropicUpstream
+			savedTargetURL := arc.targetURL
+			savedCredentialAPIKey := arc.credentialAPIKey
+			savedRequestBody := make([]byte, len(arc.requestBody))
+			copy(savedRequestBody, arc.requestBody)
+			savedAnthropicReqModel := arc.anthropicReq.Model
+
+			// Update model in request body
+			if arc.isAnthropicUpstream {
+				// For passthrough, unmarshal, update model, re-marshal
+				var reqBody map[string]interface{}
+				if err := json.Unmarshal(arc.requestBody, &reqBody); err != nil {
+					log.Printf("Failed to unmarshal request body for model update: %v", err)
+					continue
+				}
+				reqBody["model"] = currentModel
+				newBody, err := json.Marshal(reqBody)
+				if err != nil {
+					log.Printf("Failed to marshal request body for model update: %v", err)
+					continue
+				}
+				arc.requestBody = newBody
+			} else {
+				// For OpenAI translation path, re-translate with new model
+				arc.anthropicReq.Model = currentModel
+				openaiReq := translator.TranslateRequest(arc.anthropicReq, nil)
+				newBody, err := json.Marshal(openaiReq)
+				if err != nil {
+					log.Printf("Failed to marshal translated request: %v", err)
+					continue
+				}
+				arc.requestBody = newBody
+			}
+
+			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
+			if success {
+				return
+			}
+
+			// Restore arc state for next fallback iteration
+			arc.isAnthropicUpstream = savedIsAnthropicUpstream
+			arc.targetURL = savedTargetURL
+			arc.credentialAPIKey = savedCredentialAPIKey
+			arc.requestBody = savedRequestBody
+			arc.anthropicReq.Model = savedAnthropicReqModel
+			// W4: a failed attempt (internal or otherwise) may have left partial
+			// accumulation in arc.accumulatedThinking — e.g. a failed internal
+			// attempt captures thinking into its sink mid-stream before the
+			// failure. Persisting that would double-accumulate or pollute the
+			// fallback's persisted thinking, so drop it before the next
+			// attempt: the fallback's persisted thinking must carry ONLY the
+			// fallback's own thinking.
+			arc.accumulatedThinking.Reset()
+
+			arc.reqLog.Status = "failed"
+			arc.reqLog.Error = "Model failed"
+		}
+
+		// All models failed (loop body ended without success). Am24
+		// re-entry for group requests: terminal member-pipeline
+		// failure ⇒ ONE reselect + rebuild; second terminal failure
+		// propagates. Non-group traffic: real failure (groupPick nil).
+		if arc.groupPick != nil && !arc.groupReentered && h.tryGroupReentryAnthropic(arc) {
+			continue loop
+		}
+		break
 	}
 
 	// All models failed
@@ -415,7 +473,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 // attemptAnthropicModel attempts a single model request
 func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicRequestContext, modelIndex int, currentModel string) bool {
 	// Check if this model uses internal upstream
-	modelConfig := arc.conf.ModelsConfig.GetModel(currentModel)
+	modelConfig := directGetModel(&arc.conf, currentModel)
 	isInternal := modelConfig != nil && modelConfig.Internal
 
 	if arc.baseCtx.Err() != nil {
@@ -1397,6 +1455,14 @@ type anthropicRequestContext struct {
 	lastStatusCode      int
 	isAnthropicUpstream bool   // true when upstream speaks Anthropic protocol
 	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
+
+	// anthropicRequestContext P2 group fields (Am21/Am24 mirror of
+	// requestContext): original list preserved for the re-entry
+	// rebuild; groupPick for metering-adjacent identity + failure
+	// semantics; groupReentered enforces max-ONE re-entry.
+	modelListOriginal []string
+	groupPick         *groupPickInfo
+	groupReentered    bool
 
 	// bufferMode is the per-request delivery mode (real-streaming-default
 	// plan, Phase 3 / task 3.7): true = buffered (legacy, header opt-in

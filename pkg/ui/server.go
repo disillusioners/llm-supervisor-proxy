@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -855,6 +856,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// load-balance-groups / P1 review 🟡#1 [P2 polish, do it]:
+		// hoist the ID generation ABOVE the group mirror so G8
+		// self-part + the uniqueness-scan self-skip always see a
+		// consistent identifier (empty-safe: a client-supplied ID
+		// stays untouched; only the empty case is filled).
+		if newModel.ID == "" {
+			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
+		}
+
 		// load-balance-groups / P1.6 + §5.2: POST-inline mirror of
 		// models.validateGroupRules + models.ValidateGroupMembers
 		// (G1-G8). Runs BEFORE validateCredentials — its rule (a)
@@ -1311,6 +1321,14 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// load-balance-groups / P1 review 🟡#1 [P2 polish, do it]:
+		// stamp the ROUTE id into the payload BEFORE the group
+		// mirror so G8 self-part + the uniqueness-scan self-skip
+		// always see a consistent identifier (id is the authoritative
+		// identity, not the body-supplied updatedModel.ID which may
+		// be empty on a sparse PUT).
+		updatedModel.ID = id
+
 		// load-balance-groups / P1.6 + §5.2: PUT-inline mirror of
 		// models.validateGroupRules + models.ValidateGroupMembers
 		// (G1-G8) — identical rule set to the POST mirror above and
@@ -1674,8 +1692,21 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if err := s.modelsConfig.RemoveModel(id); err != nil {
+			// Council note #1 [P2 if TRIVIAL, else P4 — do it]: an
+			// Am27 "in-use" deletion (a model referenced by a
+			// group) is semantically a CONFLICT, not a not-found.
+			// Map the distinguishing substring to 409 Conflict; the
+			// ErrModelNotFound path keeps 404; everything else is
+			// 500.
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
+			status := http.StatusInternalServerError
+			switch {
+			case errors.Is(err, models.ErrModelNotFound):
+				status = http.StatusNotFound
+			case strings.Contains(err.Error(), "is a member of group"):
+				status = http.StatusConflict
+			}
+			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}

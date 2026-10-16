@@ -181,6 +181,13 @@ type raceCoordinator struct {
 	// signature is ConfigSnapshot-based. Buffered mode (header present or
 	// isStream=false) is byte-identical to today.
 	liveFirstByteGate bool
+
+	// groupPick (load-balance-groups / Q15) is the request's group
+	// rewrite record, set by handler.go right after construction
+	// (nil for non-group requests). The spawn path copies it onto
+	// the MAIN attempt so the W-1 publish site can fire
+	// model_member_selected newlyBound-only.
+	groupPick *groupPickInfo
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
@@ -339,6 +346,15 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	// Set flag to use secondary upstream model for second requests
 	if mType == modelTypeSecond {
 		req.SetUseSecondaryUpstream(true)
+	}
+
+	// load-balance-groups / Q15: the group pick rides the MAIN (and
+	// second) attempt — models[0] is the sticky-picked member after
+	// the Am21 rewrite. Cred-failover and fallback attempts of the
+	// member's own chain do not carry it (the member event fires
+	// once, on the member's own resolution).
+	if (mType == modelTypeMain || mType == modelTypeSecond) && c.groupPick != nil {
+		req.groupPick = c.groupPick
 	}
 
 	// Phase 3 / Round 3c C3(1) — a credFailover row carries the
@@ -916,6 +932,32 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 			})
 		}
 	}
+
+	// load-balance-groups / Q15: the member-resolution observability
+	// event, published at the SAME W-1 site — newlyBound-ONLY (the
+	// GROUP pick's W-1 signal, mirroring the
+	// model_credential_selected first-binding asymmetry; do not spam
+	// every request). Payload per the plan: {group_id, member
+	// model_id, upstream_provider, upstream_model}. Non-group
+	// traffic keeps model_credential_selected unchanged.
+	var publishMember func(memberID string, cred models.ResolvedCredential)
+	if c.eventBus != nil && c.groupPick != nil {
+		gp := c.groupPick
+		publishMember = func(memberID string, cred models.ResolvedCredential) {
+			c.eventBus.Publish(events.Event{
+				Type:      "model_member_selected",
+				Timestamp: time.Now().Unix(),
+				Data: map[string]interface{}{
+					"group_id":          gp.GroupID,
+					"member_id":         memberID,
+					"upstream_provider": cred.Provider,
+					"upstream_model":    cred.InternalModel,
+					"id":                c.requestID,
+				},
+			})
+		}
+	}
+	req.onMemberSelected = publishMember
 
 	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req, c.interleaved, c.conversationKey, c.engine, publish)
 

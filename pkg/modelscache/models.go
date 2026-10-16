@@ -120,6 +120,13 @@ type CachedModelsConfig struct {
 	healthy       bool
 	staleWarnOnce bool
 
+	// claimsByID is the decorator-side shadow-claim index
+	// (load-balance-groups §3.4): shadowed ID → owning ENABLED
+	// group ID. Rebuilt from modelsByID at every snapshot apply and
+	// every write-through mutation (rebuildClaimsLocked). Guarded
+	// by c.mu.
+	claimsByID map[string]string
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	// scanCancel cancels the in-flight reconciler scan so Stop() can
@@ -217,10 +224,50 @@ func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.Mode
 	c.negByName = map[string]negEntry{}
 	c.modelsSnap = deepCopyModelConfigs(modelsList)
 	c.enabledSnap = deepCopyModelConfigs(enabledList)
+	c.rebuildClaimsLocked()
 	c.lastRefresh = c.now()
 	c.healthy = true
 	c.staleWarnOnce = false
 	c.mu.Unlock()
+}
+
+// rebuildClaimsLocked rebuilds the decorator-side shadow-claim index
+// (load-balance-groups §3.4): shadowed ID → owning ENABLED group ID,
+// derived from the cached rows (byID) — the same source of truth the
+// reconciler refreshes every tick and the write-through mutators swap
+// atomically. Caller holds c.mu (write).
+//
+// WHY a decorator-side index: the decorator's GetModel would
+// otherwise serve a cached chat row (or strict-fill the REAL row —
+// the strict twins are deliberately claim-blind for admin surfaces)
+// for a shadowed ID, bypassing the inner manager's claims-first
+// resolution entirely. The read-time redirect below + this rebuild
+// keep the decorator coherent with the manager's claim semantics:
+// every snapshot/mutation point rebuilds, so no stale redirect can
+// outlive the write that changed it.
+func (c *CachedModelsConfig) rebuildClaimsLocked() {
+	claims := make(map[string]string, len(c.modelsByID))
+	for id, m := range c.modelsByID {
+		if m.IsGroup() && m.Enabled && m.ShadowModelID != "" && m.ShadowModelID != id {
+			claims[m.ShadowModelID] = id
+		}
+	}
+	c.claimsByID = claims
+}
+
+// evictClaimEntriesLocked is the §3.4 claim-eviction hook: drops the
+// positive AND negative cache entries for the given shadow IDs so no
+// subsequent resolve can read a stale entry (a cached chat row or a
+// 60s negative verdict for a now-claimed — or just-unclaimed — ID).
+// Caller holds c.mu (write). Missing entries are ignored.
+func (c *CachedModelsConfig) evictClaimEntriesLocked(shadowIDs ...string) {
+	for _, id := range shadowIDs {
+		if id == "" {
+			continue
+		}
+		delete(c.modelsByID, id)
+		delete(c.negByID, id)
+	}
 }
 
 // now is the single clock read point (correction N6).
@@ -397,7 +444,28 @@ func (c *CachedModelsConfig) lookupCachedModelByName(modelName string) (m *model
 // returned for a definitive not-found (negative-cached 60s) AND for
 // an infra failure (Healthy()==false distinguishes the two — the
 // boundary sites consume exactly that signal).
+//
+// load-balance-groups §3.4 — CLAIMS-FIRST, mirroring the inner
+// manager's GetModel: an ID claimed by an ENABLED group resolves to
+// the GROUP row (the client-facing virtualization seam). The
+// redirect runs BEFORE the hit/negative logic so a claim owns the
+// ID-space even over a cached chat row or a 60s negative verdict
+// (e.g. a shadow target deleted while claimed — the claim keeps
+// redirecting; plan §3.8). The claim index is rebuilt on every
+// snapshot/mutation, so the redirect can never outlive its write.
 func (c *CachedModelsConfig) GetModel(modelID string) *models.ModelConfig {
+	// Claims-first redirect (read-time, in-memory).
+	c.mu.RLock()
+	if groupID, ok := c.claimsByID[modelID]; ok {
+		if g, ok2 := c.modelsByID[groupID]; ok2 && g.Enabled && g.IsGroup() {
+			c.mu.RUnlock()
+			return deepCopyModelConfig(g)
+		}
+		// Owning group missing/disabled (drift): claim inactive —
+		// fall through to the normal path.
+	}
+	c.mu.RUnlock()
+
 	// Fast path: hit under RLock, deep-copy out.
 	m, negFresh := c.lookupCachedModel(modelID)
 	if negFresh {
@@ -413,6 +481,20 @@ func (c *CachedModelsConfig) GetModel(modelID string) *models.ModelConfig {
 	cancel()
 	if err != nil {
 		if errors.Is(err, database.ErrModelNotFound) {
+			// Claim check AFTER the fill too: the strict twins are
+			// deliberately claim-blind (admin surfaces) — without
+			// this, a first-request miss on a claimed ID would
+			// cache + serve the REAL row, bypassing the claim.
+			c.mu.RLock()
+			groupID, claimed := c.claimsByID[modelID]
+			var g *models.ModelConfig
+			if claimed {
+				g = c.modelsByID[groupID]
+			}
+			c.mu.RUnlock()
+			if g != nil && g.Enabled && g.IsGroup() {
+				return deepCopyModelConfig(g)
+			}
 			c.storeNegativeByID(modelID)
 			return nil
 		}
@@ -640,6 +722,13 @@ func (c *CachedModelsConfig) ResolveInternalConfig(modelID string) (provider, ap
 // AddModel delegates to the inner store, then writes the
 // authoritative payload through and clears the negative entries for
 // the model's ID and name.
+//
+// load-balance-groups §3.4 claim-eviction hook: a group write that
+// CLAIMS an ID also drops the positive + negative entries for the
+// claimed ID (the claims-first read redirect takes over from the
+// next resolve), and the decorator claim index is rebuilt in the
+// same locked section — synchronously inside this write, before any
+// subsequent resolve can read a stale entry.
 func (c *CachedModelsConfig) AddModel(model models.ModelConfig) error {
 	if err := c.inner.AddModel(model); err != nil {
 		return err
@@ -651,7 +740,11 @@ func (c *CachedModelsConfig) AddModel(model models.ModelConfig) error {
 	c.modelsByName[cp.Name] = cp.ID
 	delete(c.negByID, cp.ID)
 	delete(c.negByName, cp.Name)
+	if cp.IsGroup() {
+		c.evictClaimEntriesLocked(cp.ShadowModelID)
+	}
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
+	c.rebuildClaimsLocked()
 	c.healthy = true
 	return nil
 }
@@ -669,6 +762,14 @@ func (c *CachedModelsConfig) UpdateModel(modelID string, model models.ModelConfi
 	cp := deepCopyModelConfig(&model)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// load-balance-groups §3.4: the OLD row's shadow claim (if any)
+	// is captured before the entry swap so the eviction below can
+	// drop both the old and the new claimed-ID entries (a claim
+	// move: old shadow reappears, new shadow redirects).
+	oldShadow := ""
+	if old, ok := c.modelsByID[modelID]; ok && old.IsGroup() {
+		oldShadow = old.ShadowModelID
+	}
 	if old, ok := c.modelsByID[modelID]; ok && old.Name != cp.Name {
 		delete(c.modelsByName, old.Name)
 	}
@@ -677,26 +778,43 @@ func (c *CachedModelsConfig) UpdateModel(modelID string, model models.ModelConfi
 	c.modelsByName[cp.Name] = cp.ID
 	delete(c.negByID, cp.ID)
 	delete(c.negByName, cp.Name)
+	if cp.IsGroup() || oldShadow != "" {
+		c.evictClaimEntriesLocked(oldShadow, cp.ShadowModelID)
+	}
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
+	c.rebuildClaimsLocked()
 	c.healthy = true
 	return nil
 }
 
 // RemoveModel delegates to the inner store, then evicts the model
 // from both the ID and the name maps.
+//
+// load-balance-groups §3.4: deleting (or disabling via update) a
+// group drops its claim — the shadowed model's cache entries are
+// evicted (old claim's redirect must not linger) and the claim index
+// rebuilds; the shadowed model reappears on the next resolve.
 func (c *CachedModelsConfig) RemoveModel(modelID string) error {
 	if err := c.inner.RemoveModel(modelID); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	oldShadow := ""
 	if old, ok := c.modelsByID[modelID]; ok {
 		delete(c.modelsByName, old.Name)
 		delete(c.negByName, old.Name)
+		if old.IsGroup() {
+			oldShadow = old.ShadowModelID
+		}
 	}
 	delete(c.modelsByID, modelID)
 	delete(c.negByID, modelID)
+	if oldShadow != "" {
+		c.evictClaimEntriesLocked(oldShadow)
+	}
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
+	c.rebuildClaimsLocked()
 	return nil
 }
 
@@ -819,3 +937,43 @@ func (c *CachedModelsConfig) cacheModel(m *models.ModelConfig) {
 	delete(c.negByName, cp.Name)
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
 }
+
+// ─── load-balance-groups rewrite seam forwarding (§3.6.1 / Am21) ────────────
+
+// RewriteGroupEntries forwards the modelList rewrite to the inner
+// manager (the DB manager owns the grouplb engine). The decorator
+// adds NO caching on this path — the rewrite is per-request,
+// engine-side, and sticky state lives in the engine. Satisfies
+// models.GroupRewriter structurally so the protocol call sites'
+// type assertion succeeds through the cache layer.
+func (c *CachedModelsConfig) RewriteGroupEntries(modelList []string, conversationKey string) models.GroupRewriteResult {
+	if gr, ok := c.inner.(models.GroupRewriter); ok {
+		return gr.RewriteGroupEntries(modelList, conversationKey)
+	}
+	return models.GroupRewriteResult{ModelList: modelList}
+}
+
+// ExcludeGroupMember forwards the group-level exclude-and-reselect
+// ExcludeGroupMember forwards the group-level exclude-and-reselect
+// (Am24) to the inner manager's engine.
+func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, bool) {
+	if gr, ok := c.inner.(models.GroupRewriter); ok {
+		return gr.ExcludeGroupMember(groupID, conversationKey, memberID)
+	}
+	return "", false
+}
+
+// GetModelNative forwards the load-balance-groups Am22 L1 direct-ID
+// lookup to the inner manager (claims BYPASSED). The decorator
+// caches nothing for this path: the per-attempt race/Anthropic
+// call site uses it to obtain the real member row (not the claims-
+// redirected group row) after the Am21 rewrite has picked a member.
+func (c *CachedModelsConfig) GetModelNative(modelID string) *models.ModelConfig {
+	if gr, ok := c.inner.(interface {
+		GetModelNative(string) *models.ModelConfig
+	}); ok {
+		return gr.GetModelNative(modelID)
+	}
+	return nil
+}
+

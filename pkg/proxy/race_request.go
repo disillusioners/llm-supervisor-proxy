@@ -77,6 +77,18 @@ type upstreamRequest struct {
 	engine               *credentiallb.Engine
 	onCredentialSelected func(modelID string, cred models.ResolvedCredential)
 
+	// onMemberSelected (load-balance-groups / Q15) publishes
+	// model_member_selected at the W-1 site when the group pick was
+	// newly bound. Built by the coordinator alongside
+	// onCredentialSelected; nil for non-group attempts.
+	onMemberSelected func(memberID string, cred models.ResolvedCredential)
+
+	// groupPick (load-balance-groups / Q15) is the request's group
+	// rewrite record (nil for non-group attempts). Set at spawn for
+	// the MAIN attempt; the W-1 publish site fires
+	// model_member_selected when NewlyBound is true.
+	groupPick *groupPickInfo
+
 	// reselectedCredentialID (Phase 3 / R3-2/R3-3) — populated only
 	// for modelTypeCredFailover rows from Round-3b ExcludeAndReselect:
 	// the SPECIFIC reselected credential (not a fresh engine call).

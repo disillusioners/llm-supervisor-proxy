@@ -15,6 +15,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/crypto"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -677,6 +678,15 @@ type ModelsManager struct {
 	subCh     chan events.Event // nil when constructed without a bus
 	closeOnce sync.Once
 
+	// groupEngine is the load-balance-groups sticky picker over
+	// member MODEL IDs (pkg/grouplb, plan §3.5). Lifecycle is owned
+	// HERE beside the credential engine (plan §8): constructed in
+	// NewModelsManager with the production defaults, stopped in
+	// Close; cmd/main.go is unchanged. Per-group state is seeded
+	// LAZILY on first rewrite (Am15 — no boot walk) and refreshed
+	// on every group write via OnGroupChanged (survivor filter).
+	groupEngine *grouplb.Engine
+
 	// claims is the ID-space shadow-claim index (§3.4):
 	// shadowed model ID → owning ENABLED group ID. Rebuilt from
 	// the models table at construction and after every successful
@@ -695,6 +705,13 @@ type ModelsManager struct {
 // legacy single-credential resolution when the engine is nil.
 func (m *ModelsManager) Engine() *credentiallb.Engine {
 	return m.engine
+}
+
+// GroupEngine returns the load-balance-groups sticky-picker engine
+// (pkg/grouplb). Non-nil for every ModelsManager built via
+// NewModelsManager; nil-safe no-op methods on a nil receiver.
+func (m *ModelsManager) GroupEngine() *grouplb.Engine {
+	return m.groupEngine
 }
 
 // NewModelsManager creates a new database-backed models manager with
@@ -721,7 +738,20 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 		qb:       NewQueryBuilder(store.Dialect),
 		eventBus: eventBus,
 		engine:   credentiallb.NewEngine(credentiallb.DefaultBindingTTL, credentiallb.DefaultSweepInterval, credentiallb.DefaultCredentialSeed, credentiallb.DefaultCooldown),
+		groupEngine: grouplb.NewEngine(
+			grouplb.DefaultBindingTTL,
+			grouplb.DefaultSweepInterval,
+			grouplb.DefaultMemberSeed,
+			grouplb.DefaultCooldown,
+		),
 	}
+
+	// load-balance-groups / P2.10 — restart cold-start documentation
+	// (plan §3.5, USER-DECIDED in-memory affinity, Q4): sticky
+	// bindings are lost on restart; in-flight conversations re-roll
+	// to a fresh member on their next request. ONE log line — the
+	// behavior is documented, not engineered around.
+	log.Printf("[grouplb] sticky group bindings are in-memory only — a restart clears all conversation affinity; in-flight conversations re-roll to a fresh member on their next request")
 
 	// Startup rebind: seed engine state for every persisted model so
 	// the first request after boot resolves without a cold miss.
@@ -807,7 +837,8 @@ func (m *ModelsManager) Close() {
 		if m.eventBus != nil && m.subCh != nil {
 			m.eventBus.Unsubscribe(m.subCh) // closes subCh → drain loop exits
 		}
-		m.engine.Stop() // nil-safe
+		m.engine.Stop()       // nil-safe
+		m.groupEngine.Stop() // nil-safe (load-balance-groups lifecycle twin)
 	})
 }
 
@@ -1561,12 +1592,46 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	m.engine.OnModelChanged(model.ID, model.Credentials)
 	m.publishCredentialsChanged(model.ID)
 
-	// load-balance-groups §3.4: refresh the claim index after every
-	// successful model write (a group write may add/move/drop a
+	// load-balance-groups §3.4 + §3.5: refresh the claim index after
+	// every successful model write (a group write may add/move/drop a
 	// claim; non-group writes rebuild to the same content — the
-	// targeted query is cheap and idempotent).
+	// targeted query is cheap and idempotent), and refresh the
+	// grouplb engine's per-group state on group writes (P2.2 — ONE
+	// mechanism: the same post-write extension that rebuilds the
+	// claim index feeds the survivor filter, keeping engine selector
+	// + bindings coherent with the committed row).
 	m.rebuildClaimsLocked()
+	m.notifyGroupEngineLocked(model.Kind, model.ID, model.Members)
 	return nil
+}
+
+// notifyGroupEngineLocked feeds the grouplb engine's survivor filter
+// after a successful group write (AddModel / UpdateModel): selector
+// rebuilt over the new member list; bindings whose member was
+// removed are dropped; boundAt of surviving bindings is preserved
+// (E-2 semantics — weight nudges keep affinity). Nil/empty members on
+// a group row deletes the group's engine state. Non-group rows are a
+// no-op. The engine methods are nil-safe, so hand-constructed
+// managers without an engine are fine. Caller holds m.mu (write);
+// the engine takes NO ModelsManager locks (deadlock-free).
+func (m *ModelsManager) notifyGroupEngineLocked(kind, modelID string, members []models.GroupMember) {
+	if kind != models.KindGroup {
+		return
+	}
+	m.groupEngine.OnGroupChanged(modelID, GroupMemberRefs(members))
+}
+
+// GroupMemberRefs converts config member entries to engine refs
+// (positions = slice order).
+func GroupMemberRefs(members []models.GroupMember) []grouplb.MemberRef {
+	if len(members) == 0 {
+		return nil
+	}
+	refs := make([]grouplb.MemberRef, len(members))
+	for i, mm := range members {
+		refs[i] = grouplb.MemberRef{ModelID: mm.ModelID, Weight: mm.Weight, Position: i}
+	}
+	return refs
 }
 
 // UpdateModel updates an existing model configuration.
@@ -1658,8 +1723,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	m.publishCredentialsChanged(model.ID)
 
 	// load-balance-groups §3.4: refresh the claim index (claim
-	// edits take effect immediately — Q12 group-edits semantics).
+	// edits take effect immediately — Q12 group-edits semantics) and
+	// the grouplb engine state (member edits ride the same write
+	// path — live-edit safety: new picks see the new membership).
 	m.rebuildClaimsLocked()
+	m.notifyGroupEngineLocked(model.Kind, model.ID, model.Members)
 	return nil
 }
 
@@ -1692,9 +1760,13 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	if err != nil {
 		return fmt.Errorf("model %s: delete blocked — group member scan failed: %w", modelID, err)
 	}
+	removedKind := ""
 	for _, g := range allModels {
 		if g.Kind != models.KindGroup {
 			continue
+		}
+		if g.ID == modelID {
+			removedKind = g.Kind // the row being deleted is itself a group
 		}
 		for _, member := range g.Members {
 			if member.ModelID == modelID {
@@ -1715,10 +1787,14 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	// past removal. A failed delete above leaves engine state intact.
 	m.engine.OnModelChanged(modelID, nil)
 
-	// load-balance-groups §3.4: a deleted group's claim dies with
-	// the row (the shadowed model reappears); a deleted member row
-	// rebuilds to the same claims.
+	// load-balance-groups: a deleted group's claim dies with the row
+	// (the shadowed model reappears); a deleted member row rebuilds
+	// to the same claims. The grouplb engine state for a deleted
+	// GROUP is dropped wholesale (OnGroupChanged nil).
 	m.rebuildClaimsLocked()
+	if removedKind == models.KindGroup {
+		m.groupEngine.OnGroupChanged(modelID, nil)
+	}
 	return nil
 }
 
