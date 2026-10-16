@@ -94,8 +94,8 @@ func (q *QueryBuilder) InsertModel() string {
 		return `INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
 			internal, credentials_json, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
 			peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
-			secondary_upstream_model, exclude_from_ultimate_switching, kind)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			secondary_upstream_model, exclude_from_ultimate_switching, kind, members_json, shadow_model_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
 				enabled = EXCLUDED.enabled,
@@ -115,13 +115,15 @@ func (q *QueryBuilder) InsertModel() string {
 				secondary_upstream_model = EXCLUDED.secondary_upstream_model,
 				exclude_from_ultimate_switching = EXCLUDED.exclude_from_ultimate_switching,
 				kind = EXCLUDED.kind,
+				members_json = EXCLUDED.members_json,
+				shadow_model_id = EXCLUDED.shadow_model_id,
 				updated_at = NOW()`
 	}
 	return `INSERT OR REPLACE INTO models (id, name, enabled, fallback_chain_json, truncate_params_json,
 		internal, credentials_json, credential_id, internal_base_url, internal_model, release_stream_chunk_deadline,
 		peak_hour_enabled, peak_hour_start, peak_hour_end, peak_hour_timezone, peak_hour_model,
-		secondary_upstream_model, exclude_from_ultimate_switching, kind)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		secondary_upstream_model, exclude_from_ultimate_switching, kind, members_json, shadow_model_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 }
 
 // UpdateModel returns the appropriate UPDATE query for a model.
@@ -151,8 +153,10 @@ func (q *QueryBuilder) UpdateModel() string {
 			secondary_upstream_model = $16,
 			exclude_from_ultimate_switching = $17,
 			kind = $18,
+			members_json = $19,
+			shadow_model_id = $20,
 			updated_at = NOW()
-		WHERE id = $19`
+		WHERE id = $21`
 	}
 	return `UPDATE models SET
 			name = ?,
@@ -173,6 +177,8 @@ func (q *QueryBuilder) UpdateModel() string {
 			secondary_upstream_model = ?,
 			exclude_from_ultimate_switching = ?,
 			kind = ?,
+			members_json = ?,
+			shadow_model_id = ?,
 			updated_at = datetime('now')
 		WHERE id = ?`
 }
@@ -196,7 +202,7 @@ func (q *QueryBuilder) GetModelByID() string {
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 			coalesce(secondary_upstream_model, ''),
 			coalesce(exclude_from_ultimate_switching, false),
-			coalesce(kind, '')
+			coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE id = $1`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -207,7 +213,7 @@ func (q *QueryBuilder) GetModelByID() string {
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 		coalesce(secondary_upstream_model, ''),
 		coalesce(exclude_from_ultimate_switching, 0),
-		coalesce(kind, '')
+		coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 	FROM models WHERE id = ?`
 }
 
@@ -222,7 +228,7 @@ func (q *QueryBuilder) GetModelByName() string {
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 			coalesce(secondary_upstream_model, ''),
 			coalesce(exclude_from_ultimate_switching, false),
-			coalesce(kind, '')
+			coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE name = $1`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -233,7 +239,7 @@ func (q *QueryBuilder) GetModelByName() string {
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 		coalesce(secondary_upstream_model, ''),
 		coalesce(exclude_from_ultimate_switching, 0),
-		coalesce(kind, '')
+		coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 	FROM models WHERE name = ?`
 }
 
@@ -248,7 +254,7 @@ func (q *QueryBuilder) GetAllModels() string {
             coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
             coalesce(secondary_upstream_model, ''),
             coalesce(exclude_from_ultimate_switching, false),
-            coalesce(kind, '')
+            coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
         FROM models ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -259,7 +265,7 @@ func (q *QueryBuilder) GetAllModels() string {
         coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
         coalesce(secondary_upstream_model, ''),
         coalesce(exclude_from_ultimate_switching, 0),
-        coalesce(kind, '')
+        coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
     FROM models ORDER BY name`
 }
 
@@ -274,7 +280,7 @@ func (q *QueryBuilder) GetEnabledModels() string {
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 			coalesce(secondary_upstream_model, ''),
 			coalesce(exclude_from_ultimate_switching, false),
-			coalesce(kind, '')
+			coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE enabled = true ORDER BY name`
 	}
 	return `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
@@ -285,6 +291,6 @@ func (q *QueryBuilder) GetEnabledModels() string {
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
 		coalesce(secondary_upstream_model, ''),
 		coalesce(exclude_from_ultimate_switching, 0),
-		coalesce(kind, '')
+		coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 	FROM models WHERE enabled = 1 ORDER BY name`
 }

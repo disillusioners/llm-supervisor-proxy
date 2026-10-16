@@ -492,6 +492,13 @@ type dbModelRow struct {
 	// NULL, normalized to '' by coalesce(kind, '') in every SELECT),
 	// "image-gen" = image (pkg/models.KindImageGen).
 	Kind string
+	// Group membership + ID-space claim (migration 031,
+	// load-balance-groups): members_json = JSON []GroupMember
+	// (empty for non-group rows); shadow_model_id = the optional
+	// single claim ("" = none). Both normalized by coalesce on
+	// read.
+	MembersJSON   string
+	ShadowModelID string
 }
 
 // dbCredentialRow represents a row from the credentials table
@@ -584,6 +591,39 @@ func parseCredentialsJSON(raw string) []models.CredentialRef {
 // falls back to `'[]'` so AddModel does not surface a JSON error
 // to the caller — pre-Phase-1 models would write empty strings
 // via the legacy field, which is the same effective shape.
+// parseGroupMembersJSON parses the members_json column (migration
+// 031) into a []models.GroupMember. House precedent
+// (parseCredentialsJSON): unparseable / empty input yields nil
+// with no error — the column is app-level, not DB-enforced. nil
+// (not an empty slice) keeps the ModelConfig.Members omitempty
+// wire shape clean for non-group rows.
+func parseGroupMembersJSON(raw string) []models.GroupMember {
+	if raw == "" || raw == "[]" {
+		return nil
+	}
+	var members []models.GroupMember
+	if err := json.Unmarshal([]byte(raw), &members); err != nil {
+		return nil
+	}
+	return members
+}
+
+// marshalGroupMembersJSON serializes []models.GroupMember into the
+// JSON text stored in models.members_json. nil/empty yields '[]'
+// (never NULL — same invariant as credentials_json); marshal
+// failure falls back to '[]' so AddModel does not surface a JSON
+// error to the caller.
+func marshalGroupMembersJSON(members []models.GroupMember) string {
+	if len(members) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(members)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
 func marshalCredentialsJSON(refs []models.CredentialRef) string {
 	if len(refs) == 0 {
 		return "[]"
@@ -636,6 +676,15 @@ type ModelsManager struct {
 	eventBus  *events.Bus
 	subCh     chan events.Event // nil when constructed without a bus
 	closeOnce sync.Once
+
+	// claims is the ID-space shadow-claim index (§3.4):
+	// shadowed model ID → owning ENABLED group ID. Rebuilt from
+	// the models table at construction and after every successful
+	// model write (the DB is the source of truth — the same
+	// rebuild-points posture as the JSON twin). Guarded by m.mu.
+	// Disabled groups contribute NO entries (a disabled group
+	// must not hijack traffic it isn't serving).
+	claims map[string]string
 }
 
 // Engine returns the underlying *credentiallb.Engine. It is non-nil
@@ -679,6 +728,13 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 	for _, mc := range m.GetModels() {
 		m.engine.RebindFromStore(mc.ID, mc.Credentials)
 	}
+
+	// load-balance-groups §3.4: build the ID-space claim index at
+	// startup (the DB twin's "wherever in-memory state is rebuilt"
+	// point). Later rebuilds ride every successful model write.
+	m.mu.Lock()
+	m.rebuildClaimsLocked()
+	m.mu.Unlock()
 
 	if eventBus == nil {
 		log.Printf("[WARN] [credentiallb] ModelsManager constructed without an event bus — engine invalidation limited to direct write-path calls")
@@ -765,6 +821,40 @@ func (m *ModelsManager) Save() error {
 	return nil
 }
 
+// rebuildClaimsLocked rebuilds the ID-space shadow-claim index
+// (§3.4) from the models table: shadowed ID → owning group ID,
+// for ENABLED kind="group" rows with a non-empty shadow_model_id
+// only. Caller must hold m.mu (write). Called at construction and
+// after every successful AddModel / UpdateModel / RemoveModel —
+// the DB is the source of truth, so a rebuild converges to the
+// committed state (idempotent). On query error the index degrades
+// to empty (claim-free resolution — the safe direction: no
+// hijack) with a WARN.
+func (m *ModelsManager) rebuildClaimsLocked() {
+	claims := make(map[string]string)
+	query := `SELECT coalesce(shadow_model_id, ''), id FROM models WHERE kind = 'group' AND enabled = 1`
+	if m.store.Dialect == PostgreSQL {
+		query = `SELECT coalesce(shadow_model_id, ''), id FROM models WHERE kind = 'group' AND enabled = true`
+	}
+	rows, err := m.store.DB.QueryContext(context.Background(), query)
+	if err != nil {
+		log.Printf("[WARN] [models] claim-index rebuild failed (%v) — shadow resolution degraded to claim-free until the next write", err)
+		m.claims = claims
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var shadow, groupID string
+		if err := rows.Scan(&shadow, &groupID); err != nil {
+			continue
+		}
+		if shadow != "" {
+			claims[shadow] = groupID
+		}
+	}
+	m.claims = claims
+}
+
 // scanModels executes a query and scans the results into model configs
 func (m *ModelsManager) scanModels(query string, args ...interface{}) ([]models.ModelConfig, error) {
 	return m.scanModelsContext(context.Background(), query, args...)
@@ -806,6 +896,8 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 			&dbModel.SecondaryUpstreamModel,
 			&dbModel.ExcludeFromUltimateSwitching,
 			&dbModel.Kind,
+			&dbModel.MembersJSON,
+			&dbModel.ShadowModelID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
@@ -828,6 +920,8 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 			SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 			ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 			Kind:                         dbModel.Kind,
+			Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
+			ShadowModelID:                dbModel.ShadowModelID,
 		}
 
 		// Parse fallback chain
@@ -850,17 +944,53 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 	return result, nil
 }
 
-// GetModel returns a single model configuration by ID, including internal fields
+// GetModel returns a single model configuration by ID, including internal fields.
+//
+// load-balance-groups §3.4 — CLAIM-FIRST resolution: if the ID is
+// claimed by an ENABLED group (claims index), the GROUP row is
+// returned — the client-facing virtualization seam every chat-path
+// site funnels through. The claim activates only while the owning
+// group exists and is enabled (a disabled group ⇒ inactive claim ⇒
+// normal lookup). Admin surfaces use the strict twins or
+// GetModelNative; GetModelByName is untouched (claims are
+// ID-space only).
 func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	if groupID, ok := m.claims[modelID]; ok && groupID != "" {
+		if g := m.getModelRowByID(groupID); g != nil && g.Enabled {
+			return g
+		}
+		// Owning group missing/disabled (index drift — e.g. a
+		// hand-edited DB): claim inactive, fall through to the
+		// normal lookup.
+	}
+	return m.getModelRowByID(modelID)
+}
+
+// GetModelNative returns the row for modelID by DIRECT ID lookup,
+// BYPASSING the shadow-claim index (§3.4 / Am22 L1 hard rule:
+// "member refs resolve by direct ID (row identity); claims apply
+// to client-facing resolution only"). This is the lookup the
+// group member machinery (P2 rewrite) must use — a claims-first
+// lookup here would infinite-loop the day-1 self-shadow group
+// (`coding[coding]`).
+func (m *ModelsManager) GetModelNative(modelID string) *models.ModelConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getModelRowByID(modelID)
+}
+
+// getModelRowByID is the direct-ID single-row fetch (the
+// pre-claims GetModel body). Caller holds m.mu (read or write).
+func (m *ModelsManager) getModelRowByID(modelID string) *models.ModelConfig {
 	query := `SELECT id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -869,7 +999,7 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -895,6 +1025,8 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
+		&dbModel.MembersJSON,
+		&dbModel.ShadowModelID,
 	)
 	if err != nil {
 		return nil
@@ -917,6 +1049,8 @@ func (m *ModelsManager) GetModel(modelID string) *models.ModelConfig {
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 		Kind:                         dbModel.Kind,
+		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:                dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -942,7 +1076,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE name = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -951,7 +1085,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 			FROM models WHERE name = $1`
 	}
 
@@ -977,6 +1111,8 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
+		&dbModel.MembersJSON,
+		&dbModel.ShadowModelID,
 	)
 	if err != nil {
 		return nil
@@ -999,6 +1135,8 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 		Kind:                         dbModel.Kind,
+		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:                dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -1087,14 +1225,14 @@ const modelSelectColumnsPG = `id, name, enabled, fallback_chain_json, truncate_p
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, '')`
+			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
 
 const modelSelectColumnsSQLite = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, '')`
+		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
 
 // modelSelectQuery returns the dialect-appropriate single-model
 // SELECT used by the strict reads (same shape the legacy GetModel /
@@ -1127,6 +1265,8 @@ func dbModelRowToConfig(dbModel *dbModelRow) *models.ModelConfig {
 		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
 		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
 		Kind:                         dbModel.Kind,
+		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:                dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -1172,6 +1312,8 @@ func (m *ModelsManager) getModelStrict(ctx context.Context, query, arg string) (
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
+		&dbModel.MembersJSON,
+		&dbModel.ShadowModelID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1254,6 +1396,8 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
+		&dbModel.MembersJSON,
+		&dbModel.ShadowModelID,
 	)
 	if err != nil {
 		return nil
@@ -1303,6 +1447,8 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.SecondaryUpstreamModel,
 		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
+		&dbModel.MembersJSON,
+		&dbModel.ShadowModelID,
 	)
 	if err != nil {
 		return nil
@@ -1359,7 +1505,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
@@ -1372,6 +1518,9 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	// The QueryBuilder writes BOTH columns in the same INSERT.
 	credentialsJSON := marshalCredentialsJSON(model.Credentials)
 	shadowCredentialID := model.PrimaryCredentialID() // "" when no refs
+
+	// load-balance-groups / migration 031: group columns.
+	membersJSON := marshalGroupMembersJSON(model.Members)
 
 	// Convert Duration (nanoseconds) to milliseconds for storage
 	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
@@ -1397,6 +1546,8 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.SecondaryUpstreamModel,
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 		model.Kind,
+		membersJSON,         // members_json (JSON text, migration 031)
+		model.ShadowModelID, // shadow_model_id (ID-space claim, migration 031)
 	)
 	if err != nil {
 		return err // no engine invalidation on write failure (P2-4)
@@ -1409,6 +1560,12 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	// without an engine is fine here.
 	m.engine.OnModelChanged(model.ID, model.Credentials)
 	m.publishCredentialsChanged(model.ID)
+
+	// load-balance-groups §3.4: refresh the claim index after every
+	// successful model write (a group write may add/move/drop a
+	// claim; non-group writes rebuild to the same content — the
+	// targeted query is cheap and idempotent).
+	m.rebuildClaimsLocked()
 	return nil
 }
 
@@ -1446,7 +1603,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -1458,6 +1615,9 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	// derive the credential_id shadow from Credentials[0] in Go.
 	credentialsJSON := marshalCredentialsJSON(model.Credentials)
 	shadowCredentialID := model.PrimaryCredentialID() // "" when no refs
+
+	// load-balance-groups / migration 031: group columns.
+	membersJSON := marshalGroupMembersJSON(model.Members)
 
 	// Convert Duration (nanoseconds) to milliseconds for storage
 	releaseStreamChunkDeadlineMs := int64(time.Duration(model.ReleaseStreamChunkDeadline).Milliseconds())
@@ -1482,6 +1642,8 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.SecondaryUpstreamModel,
 		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 		model.Kind,
+		membersJSON,         // members_json (JSON text, migration 031)
+		model.ShadowModelID, // shadow_model_id (ID-space claim, migration 031)
 		modelID,
 	)
 	if err != nil {
@@ -1494,10 +1656,21 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	// only takes m.mu.RLock (no publish→drain cycle).
 	m.engine.OnModelChanged(model.ID, model.Credentials)
 	m.publishCredentialsChanged(model.ID)
+
+	// load-balance-groups §3.4: refresh the claim index (claim
+	// edits take effect immediately — Q12 group-edits semantics).
+	m.rebuildClaimsLocked()
 	return nil
 }
 
 // RemoveModel removes a model configuration
+//
+// load-balance-groups / Am27: refuses while the model ID is a
+// member of any group (the error names the group) — the operator
+// removes the member from the group first (Q11 block-at-delete
+// recommended default). Groups carry no credentials, so there is
+// no credential-side scan. A failing member-scan blocks the delete
+// (fail-closed: a broken scan must not orphan group members).
 func (m *ModelsManager) RemoveModel(modelID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1506,9 +1679,28 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
+	}
+
+	// Am27 member-scan: refuse while any group references this
+	// model as a member. scanModels is lock-free (locking lives at
+	// the public-method level) so this is safe under the held
+	// write lock.
+	allModels, err := m.scanModels(m.qb.GetAllModels())
+	if err != nil {
+		return fmt.Errorf("model %s: delete blocked — group member scan failed: %w", modelID, err)
+	}
+	for _, g := range allModels {
+		if g.Kind != models.KindGroup {
+			continue
+		}
+		for _, member := range g.Members {
+			if member.ModelID == modelID {
+				return fmt.Errorf("model '%s' is a member of group '%s' — remove it from the group before deleting the model", modelID, g.ID)
+			}
+		}
 	}
 
 	deleteQuery := m.qb.DeleteModel()
@@ -1522,6 +1714,11 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	// (bindings, cooldowns, the e.models entry) so nothing lingers
 	// past removal. A failed delete above leaves engine state intact.
 	m.engine.OnModelChanged(modelID, nil)
+
+	// load-balance-groups §3.4: a deleted group's claim dies with
+	// the row (the shadowed model reappears); a deleted member row
+	// rebuilds to the same claims.
+	m.rebuildClaimsLocked()
 	return nil
 }
 
@@ -1543,6 +1740,20 @@ func (m *ModelsManager) Validate() error {
 	for _, model := range modelList {
 		if model.ID == "" {
 			return models.ErrInvalidModelID
+		}
+
+		// load-balance-groups / Am23: bulk twin of the
+		// validateBeforeWrite routing — group rows run the group
+		// validators INSTEAD of validateModelAgainstCredentials
+		// (whose Internal gate rejects the group-row shape
+		// Internal=true + Credentials=[]). Zero non-test callers
+		// today; routed anyway so a future wiring inherits the
+		// correct semantics.
+		if model.Kind == models.KindGroup {
+			if err := m.validateGroupWrite(model); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if len(model.FallbackChain) > 1 {
@@ -1733,13 +1944,43 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 // store write path enforces the same per-ref rules Validate() does.
 // The cheap guards (empty ID / Name, duplicate / not-found) stay in
 // AddModel / UpdateModel and run before this helper.
+//
+// load-balance-groups / Am23 (🔴 ship-gate pin): kind=="group"
+// rows route to the GROUP validators HERE — BEFORE
+// validateModelAgainstCredentials' Internal gate, which rejects
+// Internal=true + Credentials=[] — exactly the group-row shape.
+// Branching lower (e.g. at the ValidateKindRules call at the
+// bottom of validateModelAgainstCredentials) would leave that gate
+// reachable and make groups unsavable. Both production write sites
+// (AddModel + UpdateModel) funnel through this one chokepoint.
 func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
+	// Am23 kind-routing — the branch precedes the Internal gate.
+	if model.Kind == models.KindGroup {
+		return m.validateGroupWrite(model)
+	}
 	creds := m.GetCredentials() // RLock — OK, no write Lock held yet
 	credentialIDs := make(map[string]bool, len(creds))
 	for _, c := range creds {
 		credentialIDs[c.ID] = true
 	}
 	return m.validateModelAgainstCredentials(model, credentialIDs)
+}
+
+// validateGroupWrite is the group-row counterpart of
+// validateModelAgainstCredentials (Am23 routing target): the
+// field-level G-rules via the shared ValidateKindRules seam plus
+// the collection-aware ValidateGroupMembers (member existence /
+// kind / weight / dup / cap and the G8 cross-group uniqueness
+// scan) against a pre-lock snapshot of the model table. The
+// snapshot matches the validateBeforeWrite credential-snapshot
+// posture (built outside the write lock; the DB uniqueness
+// constraints plus the duplicate-ID guards in AddModel/UpdateModel
+// bound the TOCTOU window).
+func (m *ModelsManager) validateGroupWrite(model models.ModelConfig) error {
+	if err := models.ValidateKindRules(&model, ""); err != nil {
+		return err
+	}
+	return models.ValidateGroupMembers(&model, m.GetModels())
 }
 
 // Credential management methods

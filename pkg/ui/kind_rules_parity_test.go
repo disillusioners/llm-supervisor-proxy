@@ -130,15 +130,15 @@ func validateDecisionRulesCaller(m models.ModelConfig, primaryProvider string) s
 // when nil to mirror the JSON `omitempty` wire shape).
 func marshalBrokenModel(broken models.ModelConfig) string {
 	payload := map[string]interface{}{
-		"id":                            "decision-1",
-		"name":                          broken.Name,
-		"enabled":                       broken.Enabled,
-		"kind":                          broken.Kind,
-		"internal":                      broken.Internal,
-		"internal_model":                broken.InternalModel,
-		"fallback_chain":                broken.FallbackChain,
-		"secondary_upstream_model":      broken.SecondaryUpstreamModel,
-		"peak_hour_enabled":             broken.PeakHourEnabled,
+		"id":                              "decision-1",
+		"name":                            broken.Name,
+		"enabled":                         broken.Enabled,
+		"kind":                            broken.Kind,
+		"internal":                        broken.Internal,
+		"internal_model":                  broken.InternalModel,
+		"fallback_chain":                  broken.FallbackChain,
+		"secondary_upstream_model":        broken.SecondaryUpstreamModel,
+		"peak_hour_enabled":               broken.PeakHourEnabled,
 		"exclude_from_ultimate_switching": broken.ExcludeFromUltimateSwitching,
 	}
 	if len(broken.Credentials) > 0 {
@@ -180,7 +180,7 @@ func releaseDeadlineString(d models.Duration) string {
 // 400 with that phrase.)
 func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 	type ruleCase struct {
-		name  string
+		name   string
 		substr string
 		mutate func(*models.ModelConfig)
 	}
@@ -356,5 +356,367 @@ func TestKindRules_Parity_Positive_ValidDecisionModelAccepted(t *testing.T) {
 	status, errSub := postDecisionModel(t, srv.URL, body)
 	if status != http.StatusCreated {
 		t.Fatalf("valid decision model should be accepted on POST, got status=%d err=%q", status, errSub)
+	}
+}
+
+// ───────────────────────────────────────────────────────────────
+// load-balance-groups / P1.7 — group-kind parity extension.
+// Same three-site drift lock as the decision matrix above,
+// extended to the G1-G8 rule set (plan §5.3): the helper
+// reference (models.ValidateKindRules group arm +
+// models.ValidateGroupMembers) ≡ POST inline mirror ≡ PUT inline
+// mirror. TestKindRules_Parity_AllThreeSitesInSync now covers
+// 4 kinds × 3 sites.
+// ───────────────────────────────────────────────────────────────
+
+// addGroupMembers seeds the member/shadow-target fixture rows the
+// group cases resolve against (the addDecisionCreds analog for
+// member refs): two chat-kind models, one image-gen model (kind
+// rejection cases), and one enabled group claiming "member-a"
+// (the G8 uniqueness scan needs a competing claimer).
+func addGroupMembers(ts *modelTestServer) {
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "member-a", Name: "Member A", Enabled: true, Kind: models.KindChat,
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "member-b", Name: "Member B", Enabled: true, Kind: "",
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "member-img", Name: "Member Img", Enabled: true, Kind: models.KindImageGen,
+		Internal: true, InternalModel: "image-01",
+		Credentials:                  []models.CredentialRef{{CredentialID: "test-cred", Weight: 1, Position: 0}},
+		ExcludeFromUltimateSwitching: true,
+	})
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID: "other-group", Name: "Other Group", Enabled: true, Kind: models.KindGroup,
+		Internal: true, ExcludeFromUltimateSwitching: true,
+		Members:       []models.GroupMember{{ModelID: "member-b", Weight: 1}},
+		ShadowModelID: "member-a",
+	})
+}
+
+// groupBase returns a fully valid group row (2 model-ID members,
+// no claim — the claim cases mutate it on).
+func groupBase() models.ModelConfig {
+	return models.ModelConfig{
+		ID:                           "group-1",
+		Name:                         "Group One",
+		Enabled:                      true,
+		Kind:                         models.KindGroup,
+		Internal:                     true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-b", Weight: 2}},
+	}
+}
+
+// validateGroupRulesCaller is the helper reference for the group
+// matrix (the validateDecisionRulesCaller analog): the shared
+// ValidateKindRules group arm (field rules) plus the exported
+// collection-aware ValidateGroupMembers, validated against the
+// live mock model set. Returns "" on success.
+func validateGroupRulesCaller(m models.ModelConfig, collection []models.ModelConfig) string {
+	if err := models.ValidateKindRules(&m, ""); err != nil {
+		return err.Error()
+	}
+	if err := models.ValidateGroupMembers(&m, collection); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// marshalGroupModel builds the JSON request body for a group
+// payload (the marshalBrokenModel analog — members/shadow_model_id
+// included; zero-value optional fields omitted).
+func marshalGroupModel(m models.ModelConfig) string {
+	payload := map[string]interface{}{
+		"id":                              "group-1",
+		"name":                            m.Name,
+		"enabled":                         m.Enabled,
+		"kind":                            m.Kind,
+		"internal":                        m.Internal,
+		"exclude_from_ultimate_switching": m.ExcludeFromUltimateSwitching,
+	}
+	if len(m.Members) > 0 {
+		members := make([]map[string]interface{}, 0, len(m.Members))
+		for _, mem := range m.Members {
+			members = append(members, map[string]interface{}{"model_id": mem.ModelID, "weight": mem.Weight})
+		}
+		payload["members"] = members
+	} else {
+		payload["members"] = []map[string]interface{}{}
+	}
+	if m.ShadowModelID != "" {
+		payload["shadow_model_id"] = m.ShadowModelID
+	}
+	if len(m.FallbackChain) > 0 {
+		payload["fallback_chain"] = m.FallbackChain
+	}
+	if m.SecondaryUpstreamModel != "" {
+		payload["secondary_upstream_model"] = m.SecondaryUpstreamModel
+	}
+	if m.PeakHourEnabled {
+		payload["peak_hour_enabled"] = true
+	}
+	if m.ReleaseStreamChunkDeadline != 0 {
+		payload["release_stream_chunk_deadline"] = time.Duration(m.ReleaseStreamChunkDeadline).String()
+	}
+	body, _ := json.Marshal(payload)
+	return string(body)
+}
+
+// TestKindRules_Parity_Group_AllThreeSitesInSync — the G1-G8
+// matrix across helper / POST / PUT (same per-mirror independent
+// assertion discipline as the decision matrix).
+func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
+	type ruleCase struct {
+		name   string
+		substr string
+		mutate func(*models.ModelConfig)
+	}
+
+	cases := []ruleCase{
+		{
+			name:   "G1_group_requires_internal",
+			substr: "requires internal to be true",
+			mutate: func(m *models.ModelConfig) { m.Internal = false },
+		},
+		{
+			name:   "G2_group_requires_at_least_one_member",
+			substr: "requires at least one member",
+			mutate: func(m *models.ModelConfig) { m.Members = nil },
+		},
+		{
+			name:   "G2_group_member_cap_16",
+			substr: "exceeds max of 16 entries",
+			mutate: func(m *models.ModelConfig) {
+				members := make([]models.GroupMember, 0, models.MaxGroupMembers+1)
+				for i := 0; i <= models.MaxGroupMembers; i++ {
+					members = append(members, models.GroupMember{ModelID: "member-a", Weight: 1})
+				}
+				m.Members = members
+			},
+		},
+		{
+			name:   "G3_member_must_exist",
+			substr: "does not exist (members must reference existing chat-kind models)",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "ghost", Weight: 1}}
+			},
+		},
+		{
+			name:   "G3_member_weight_positive",
+			substr: "weight must be > 0",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-a", Weight: 0}}
+			},
+		},
+		{
+			name:   "G4_no_duplicate_members",
+			substr: "duplicate member",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-a", Weight: 2}}
+			},
+		},
+		{
+			name:   "G5_group_as_member_forbidden",
+			substr: "group-as-member is forbidden",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "other-group", Weight: 1}}
+			},
+		},
+		{
+			name:   "G3_member_must_be_chat_kind",
+			substr: "must be a chat-kind model",
+			mutate: func(m *models.ModelConfig) {
+				m.Members = []models.GroupMember{{ModelID: "member-img", Weight: 1}}
+			},
+		},
+		{
+			name:   "G6_group_rejects_fallback_chain",
+			substr: "does not support fallback_chain",
+			mutate: func(m *models.ModelConfig) { m.FallbackChain = []string{"member-b"} },
+		},
+		{
+			name:   "G6_group_rejects_secondary_upstream_model",
+			substr: "does not support secondary_upstream_model",
+			mutate: func(m *models.ModelConfig) { m.SecondaryUpstreamModel = "x" },
+		},
+		{
+			name:   "G6_group_rejects_peak_hour_enabled",
+			substr: "does not support peak_hour_enabled",
+			mutate: func(m *models.ModelConfig) { m.PeakHourEnabled = true },
+		},
+		{
+			name:   "G6_group_rejects_release_stream_chunk_deadline",
+			substr: "does not support release_stream_chunk_deadline",
+			mutate: func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
+		},
+		{
+			name:   "G7_group_requires_exclude_from_ultimate_switching",
+			substr: "requires exclude_from_ultimate_switching to be true",
+			mutate: func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
+		},
+		{
+			name:   "G8_group_cannot_shadow_own_id",
+			substr: "cannot be the group's own ID",
+			mutate: func(m *models.ModelConfig) { m.ShadowModelID = "group-1" },
+		},
+		{
+			name:   "G8_shadow_target_must_exist",
+			substr: "does not exist (must reference an existing chat-kind model)",
+			mutate: func(m *models.ModelConfig) { m.ShadowModelID = "ghost" },
+		},
+		{
+			name:   "G8_shadow_target_must_be_chat_kind",
+			substr: "must reference a chat-kind model (got kind",
+			mutate: func(m *models.ModelConfig) { m.ShadowModelID = "member-img" },
+		},
+		{
+			name:   "G8_shadow_target_cannot_be_a_group",
+			substr: "must reference a chat-kind model, not a group",
+			mutate: func(m *models.ModelConfig) { m.ShadowModelID = "other-group" },
+		},
+		{
+			name:   "G8_uniqueness_no_other_enabled_group_claims_same_id",
+			substr: "already claimed by enabled group",
+			mutate: func(m *models.ModelConfig) { m.ShadowModelID = "member-a" },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newModelTestServer()
+			addGroupMembers(ts)
+			srv := ts.serve()
+			defer srv.Close()
+
+			base := groupBase()
+			broken := base
+			tc.mutate(&broken)
+
+			// --- Helper reference (ValidateKindRules group arm +
+			// ValidateGroupMembers against the live mock set) ---
+			helperErr := validateGroupRulesCaller(broken, ts.mockModels.GetModels())
+			if helperErr == "" {
+				t.Fatalf("helper returned nil err for broken group — the rule under test did not fire")
+			}
+			if !strings.Contains(helperErr, tc.substr) {
+				t.Fatalf("helper err %q does not contain expected rule phrase %q — models group validators may have drifted", helperErr, tc.substr)
+			}
+
+			// --- POST inline mirror ---
+			postStatus, postErrSubstr := postDecisionModel(t, srv.URL, marshalGroupModel(broken))
+			if postStatus != http.StatusBadRequest {
+				t.Errorf("POST inline mirror ACCEPTED the broken group (status=%d, err=%q) — server.go POST group arm has drifted for %s; must reject with 400",
+					postStatus, postErrSubstr, tc.name)
+			} else if !strings.Contains(postErrSubstr, tc.substr) {
+				t.Errorf("POST inline err %q does not contain expected rule phrase %q — server.go POST group arm has drifted", postErrSubstr, tc.substr)
+			}
+
+			// --- PUT inline mirror (seed the valid base first) ---
+			if err := ts.mockModels.AddModel(base); err != nil {
+				t.Fatalf("seed base group: %v", err)
+			}
+			putStatus, putErrSubstr := putDecisionModel(t, srv.URL, "group-1", marshalGroupModel(broken))
+			if putStatus != http.StatusBadRequest {
+				t.Errorf("PUT inline mirror ACCEPTED the broken group (status=%d, err=%q) — server.go PUT group arm has drifted for %s; must reject with 400",
+					putStatus, putErrSubstr, tc.name)
+			} else if !strings.Contains(putErrSubstr, tc.substr) {
+				t.Errorf("PUT inline err %q does not contain expected rule phrase %q — server.go PUT group arm has drifted", putErrSubstr, tc.substr)
+			}
+		})
+	}
+}
+
+// TestKindRules_Parity_Positive_ValidGroupModelAccepted — sanity
+// check (mirrors the decision positive test): a valid group —
+// including the SELF-SHADOW claim (shadow = its own member, the
+// day-1 onboarding shape) — POSTs as 201. The member-a claim is
+// free here because addGroupMembers is NOT called (no competing
+// group).
+func TestKindRules_Parity_Positive_ValidGroupModelAccepted(t *testing.T) {
+	ts := newModelTestServer()
+	// Seed ONLY the chat members (no competing group).
+	ts.mockModels.AddModel(models.ModelConfig{ID: "member-a", Name: "Member A", Enabled: true, Kind: models.KindChat})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "member-b", Name: "Member B", Enabled: true, Kind: ""})
+	srv := ts.serve()
+	defer srv.Close()
+
+	valid := groupBase()
+	valid.ShadowModelID = "member-a" // self-shadow of own member — LEGAL
+	if helperErr := validateGroupRulesCaller(valid, ts.mockModels.GetModels()); helperErr != "" {
+		t.Fatalf("helper rejected the valid self-shadow group: %q", helperErr)
+	}
+
+	status, errSub := postDecisionModel(t, srv.URL, marshalGroupModel(valid))
+	if status != http.StatusCreated {
+		t.Fatalf("valid group (self-shadow) should be accepted on POST, got status=%d err=%q", status, errSub)
+	}
+}
+
+// TestHandleModels_GET_KindArms_Group — P1.6 GET-arm evidence
+// (§6.4 lock-step arm 1): ?kind=group returns ONLY groups; the
+// chat arm and the default (unknown-kind) arm EXCLUDE groups.
+func TestHandleModels_GET_KindArms_Group(t *testing.T) {
+	ts := newModelTestServer()
+	addGroupMembers(ts)
+	ts.mockModels.AddModel(models.ModelConfig{ID: "plain-chat", Name: "Plain Chat", Enabled: true, Kind: models.KindChat})
+	srv := ts.serve()
+	defer srv.Close()
+
+	get := func(t *testing.T, url string) map[string]Model {
+		t.Helper()
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var out []Model
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, body)
+		}
+		byID := make(map[string]Model, len(out))
+		for _, m := range out {
+			byID[m.ID] = m
+		}
+		return byID
+	}
+
+	// ?kind=group → only group rows, members + claim surfaced.
+	groups := get(t, srv.URL+"/fe/api/models?kind=group")
+	if len(groups) != 1 {
+		t.Fatalf("?kind=group should return exactly the one group row, got %d: %v", len(groups), groups)
+	}
+	g, ok := groups["other-group"]
+	if !ok {
+		t.Fatalf("?kind=group missing other-group: %v", groups)
+	}
+	if len(g.Members) != 1 || g.Members[0].ModelID != "member-b" || g.ShadowModelID != "member-a" {
+		t.Errorf("group wire shape lost: Members=%v ShadowModelID=%q", g.Members, g.ShadowModelID)
+	}
+
+	// ?kind=chat → groups excluded (chat-arm-leak regression class).
+	chat := get(t, srv.URL+"/fe/api/models?kind=chat")
+	if _, leaked := chat["other-group"]; leaked {
+		t.Error("?kind=chat leaked the group row (chat arm must exclude groups)")
+	}
+	if _, missing := chat["plain-chat"]; !missing {
+		t.Error("?kind=chat lost a plain chat row")
+	}
+
+	// unknown kind → treated as chat (groups still excluded).
+	def := get(t, srv.URL+"/fe/api/models?kind=banana")
+	if _, leaked := def["other-group"]; leaked {
+		t.Error("default arm leaked the group row (must exclude groups)")
+	}
+
+	// no filter → everything (today's behavior).
+	all := get(t, srv.URL+"/fe/api/models")
+	if _, missing := all["other-group"]; !missing {
+		t.Error("no-filter GET lost the group row")
+	}
+	if _, missing := all["plain-chat"]; !missing {
+		t.Error("no-filter GET lost the chat row")
 	}
 }

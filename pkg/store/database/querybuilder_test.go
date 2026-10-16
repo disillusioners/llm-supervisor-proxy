@@ -229,15 +229,17 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		if !contains(got, "ON CONFLICT") {
 			t.Errorf("PostgreSQL InsertModel() should use ON CONFLICT")
 		}
-		// Verify it has 19 placeholders (18 columns + kind — the
-		// kind discriminator persisted via migration 030).
+		// Verify it has 21 placeholders (18 columns + kind + the two
+		// group columns members_json / shadow_model_id persisted via
+		// migration 031 — load-balance-groups / P1.4).
 		// Phase 1 M-1 contract: the INSERT writes BOTH credentials_json AND
 		// credential_id (Go-computed shadow) so the column count grew from 17
 		// to 18 in this statement. See technical-analysis.md §API Contract
 		// store-layer write-path and Round-2 reviewer punch-list #12.
-		// Ship-blocker fix 2026-10-06: kind grew it to 19.
-		if countOccurrences(got, "$") != 19 {
-			t.Errorf("PostgreSQL InsertModel() should have 19 placeholders (18 cols + kind), got: %d", countOccurrences(got, "$"))
+		// Ship-blocker fix 2026-10-06: kind grew it to 19; migration 031
+		// grew it to 21.
+		if countOccurrences(got, "$") != 21 {
+			t.Errorf("PostgreSQL InsertModel() should have 21 placeholders (18 cols + kind + 2 group cols), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
@@ -254,13 +256,13 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "UPDATE models SET") {
 			t.Errorf("SQLite UpdateModel() should use UPDATE models SET")
 		}
-		// Verify it has 19 ? placeholders (18 SET columns incl. kind
-		// + WHERE id = ?). M-1 shadow adds credential_id alongside
-		// credentials_json in the same UPDATE statement; the
-		// ship-blocker fix (2026-10-06) adds kind as the 18th SET
-		// column.
-		if countOccurrences(got, "?") != 19 {
-			t.Errorf("SQLite UpdateModel() should have 19 placeholders (18 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
+		// Verify it has 21 ? placeholders (18 SET columns incl. kind
+		// + the two group columns + WHERE id = ?). M-1 shadow adds
+		// credential_id alongside credentials_json in the same UPDATE
+		// statement; migration 031 (load-balance-groups / P1.4) adds
+		// members_json + shadow_model_id as SET columns 19-20.
+		if countOccurrences(got, "?") != 21 {
+			t.Errorf("SQLite UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
 		}
 	})
 
@@ -271,9 +273,10 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "$1") || !contains(got, "$18") {
 			t.Errorf("PostgreSQL UpdateModel() should use $N placeholders, got: %v", got)
 		}
-		// Verify it has 19 placeholders (18 SET columns incl. kind + WHERE id = $19)
-		if countOccurrences(got, "$") != 19 {
-			t.Errorf("PostgreSQL UpdateModel() should have 19 placeholders (18 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
+		// Verify it has 21 placeholders (20 SET columns incl. kind + the two
+		// group columns + WHERE id = $21 — migration 031, P1.4)
+		if countOccurrences(got, "$") != 21 {
+			t.Errorf("PostgreSQL UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }

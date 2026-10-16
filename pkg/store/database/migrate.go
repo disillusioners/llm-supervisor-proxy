@@ -61,6 +61,12 @@ var migrations = []migration{
 	// directory scanner; without this append the 030 SQL files are
 	// silently inert and image-gen kind stays memory-only.
 	{"030", "030_add_model_kind.up"},
+	// load-balance-groups commission / P1.3 (Amendment-1 trap,
+	// third occurrence): registry append activates the 031 SQL
+	// files (models.members_json + models.shadow_model_id).
+	// Without this append the columns never land and every group
+	// write fails at the storage layer.
+	{"031", "031_add_group_fields.up"},
 }
 
 // RunMigrations executes database schema migrations
