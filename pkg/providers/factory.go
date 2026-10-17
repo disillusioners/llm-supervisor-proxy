@@ -87,6 +87,22 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "https://opencode.ai/inference/openai/v1"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderOpencodeGo:
+		// OpenCode Go (subscription realm) — OpenAI-compatible API,
+		// DISTINCT provider from ProviderOpencode (Zen): different
+		// product, different entitlements, different default base
+		// URL (the Go realm is selected by URL path alone). Beyond
+		// the shared transport, the flavour flag enables the
+		// provider-native x-opencode-session + User-Agent
+		// attribution (see opencodego.go); the headers are stamped
+		// only after the proxy attaches the per-request attribution
+		// (AttachOpenCodeGoAttribution), never at construction.
+		if baseURL == "" {
+			baseURL = OpenCodeGoDefaultBaseURL
+		}
+		p := NewOpenAIProvider(apiKey, baseURL)
+		p.openCodeGo = true
+		return p, nil
 	case ProviderTypesafe:
 		// Decision Models / §5.5 — the chat provider layer does
 		// NOT speak System One (TypeSafe / Jev's wire shape).
@@ -103,7 +119,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderTypesafe:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderOpencodeGo, ProviderTypesafe:
 		return true
 	default:
 		return false
@@ -193,6 +209,18 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "emerald",
 		description: "OpenCode Zen (OpenAI-compatible chat-completions; v2 Console path; override base_url to https://opencode.ai/zen/v1 for stable-docs route)",
 	},
+	ProviderOpencodeGo: {
+		// OpenCode Go — the subscription-billed SIBLING of Zen
+		// (https://opencode.ai/go). DISTINCT provider (not a base_url
+		// override of opencode): different product/entitlements and
+		// its own realm path. Carries provider-native
+		// x-opencode-session + User-Agent attribution on upstream
+		// requests (pkg/providers/opencodego.go).
+		name:        "OpenCode Go",
+		baseURL:     OpenCodeGoDefaultBaseURL,
+		color:       "teal",
+		description: "OpenCode Go (OpenAI-compatible chat-completions; subscription realm; provider-native session + User-Agent attribution)",
+	},
 	ProviderTypesafe: {
 		// Decision Models / §5.1 — the "TypeSafe (Jev)" identity
 		// shows up verbatim in the FE /fe/api/providers dropdown.
@@ -235,6 +263,9 @@ func GetProviderTypes() []ProviderType {
 		ProviderGrok,
 		ProviderDeepSeek,
 		ProviderOpencode,
+		// opencode-go commission — DISTINCT provider (subscription
+		// realm); appears in the GET /fe/api/providers FE dropdown.
+		ProviderOpencodeGo,
 		// Decision Models / §5.2 — typesafe is auto-included via
 		// providerMetadataMap; the inclusion here makes it
 		// appear in the GET /fe/api/providers FE dropdown (used
