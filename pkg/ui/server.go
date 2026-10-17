@@ -1900,6 +1900,14 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// opencode-go attribution (opencode-go commission): the synthetic
+	// test request has no conversation anchor, so it derives from the
+	// degenerate seed (stable per (model, credential) across test
+	// clicks). Kind-checked no-op for every other provider — without
+	// this, the Go gateway 400s (MissingSessionID) and the operator
+	// cannot validate an opencode-go credential from the UI.
+	providers.AttachOpenCodeGoAttribution(providerClient, "", req.InternalModel, req.CredentialID)
+
 	// Create a minimal chat completion request with "hi" message
 	model := req.InternalModel
 	if model == "" {

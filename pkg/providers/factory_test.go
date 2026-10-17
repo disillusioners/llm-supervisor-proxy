@@ -17,6 +17,8 @@ func TestNewProvider(t *testing.T) {
 		{"minimax", "minimax", false},
 		{"grok", "grok", false},
 		{"deepseek", "deepseek", false},
+		{"opencode", "opencode", false},
+		{"opencode-go", "opencode-go", false},
 		{"unknown", "unknown", true},
 	}
 
@@ -40,7 +42,7 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestIsProviderSupported(t *testing.T) {
-	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek"}
+	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go"}
 	for _, p := range supported {
 		if !IsProviderSupported(p) {
 			t.Errorf("expected %s to be supported", p)
@@ -54,14 +56,19 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	// 10 types post-P2 (decision commission / §5.2 added
-	// ProviderTypesafe for /v1/decisions). Chat layer doesn't
-	// speak System One — typesafe returns
-	// "not yet implemented" from NewProvider, but the id
-	// is registered so /fe/api/providers and the FE
-	// DecisionModelForm provider dropdown can see it.
-	if len(types) != 10 {
-		t.Errorf("expected 10 provider types, got %d", len(types))
+	// 12 types post-opencode-go commission (OpenCode Go is a DISTINCT
+	// provider from OpenCode Zen — subscription realm, default base
+	// URL https://opencode.ai/inference/go/openai/v1, provider-native
+	// session/UA attribution; see factory.go:ProviderOpencodeGo and
+	// opencodego.go). OpenCode Zen remains 11-of-12 from the prior
+	// opencode commission. Decision Models / §5.2 also
+	// adds ProviderTypesafe for /v1/decisions — the chat layer
+	// doesn't speak System One, so typesafe returns "not yet
+	// implemented" from NewProvider, but the id is registered so
+	// /fe/api/providers and the FE DecisionModelForm provider
+	// dropdown can see it.
+	if len(types) != 12 {
+		t.Errorf("expected 12 provider types, got %d", len(types))
 	}
 	// Spot-check the typesafe addition.
 	foundTypesafe := false
@@ -73,6 +80,17 @@ func TestGetProviderTypes(t *testing.T) {
 	}
 	if !foundTypesafe {
 		t.Errorf("ProviderTypesafe missing from GetProviderTypes()")
+	}
+	// Spot-check the opencode-go addition (DISTINCT from opencode).
+	foundOpencodeGo := false
+	for _, t := range types {
+		if t == ProviderOpencodeGo {
+			foundOpencodeGo = true
+			break
+		}
+	}
+	if !foundOpencodeGo {
+		t.Errorf("ProviderOpencodeGo missing from GetProviderTypes()")
 	}
 }
 

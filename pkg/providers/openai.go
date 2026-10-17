@@ -40,6 +40,16 @@ type OpenAIProvider struct {
 	requestID     string                         // Optional: request ID for buffer naming
 	repairer      *toolrepair.Repairer           // Optional: for repairing tool call JSON
 	eventCallback toolrepair.RepairEventCallback // Optional: callback for repair events
+
+	// openCodeGo marks the opencode-go flavour (OpenCode Go
+	// subscription realm). Set ONLY by the factory's
+	// ProviderOpencodeGo case; gates session/UA attribution so no
+	// other provider is ever affected (opencode-go commission).
+	openCodeGo bool
+	// attribution carries the opencode-go session + UA headers. Set
+	// via SetSessionAttribution (kind-checked); nil ⇒ no attribution
+	// headers are stamped (provider behaves exactly as before).
+	attribution *SessionAttribution
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
@@ -66,6 +76,22 @@ func (p *OpenAIProvider) SetDebugContext(bufferStore *bufferstore.BufferStore, r
 func (p *OpenAIProvider) SetRepairer(repairer *toolrepair.Repairer, callback toolrepair.RepairEventCallback) {
 	p.repairer = repairer
 	p.eventCallback = callback
+}
+
+// SetSessionAttribution attaches opencode-go attribution headers
+// (x-opencode-session + User-Agent) stamped by setHeaders on every
+// upstream request this provider sends.
+//
+// Kind-checked no-op: only the opencode-go flavour (factory
+// ProviderOpencodeGo case) accepts attribution — plain OpenAI /
+// opencode-Zen instances ignore the call, so callers may attach
+// unconditionally.
+func (p *OpenAIProvider) SetSessionAttribution(a SessionAttribution) {
+	if !p.openCodeGo {
+		return
+	}
+	attribution := a
+	p.attribution = &attribution
 }
 
 // Name returns the provider name
@@ -223,10 +249,22 @@ func (p *OpenAIProvider) IsRetryable(err error) bool {
 	return false
 }
 
-// setHeaders sets common headers for OpenAI requests
+// setHeaders sets common headers for OpenAI requests.
+//
+// opencode-go attribution (opencode-go commission): when attribution is
+// attached (opencode-go providers only — see SetSessionAttribution),
+// the provider-native x-opencode-session + User-Agent headers are
+// stamped on the upstream request. The Go gateway hard-gates chat on
+// x-opencode-session (400 MissingSessionID when absent). All other
+// providers are untouched: no session header, and the User-Agent stays
+// Go's transport default exactly as before this commission.
 func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if p.attribution != nil {
+		req.Header.Set("x-opencode-session", p.attribution.SessionID)
+		req.Header.Set("User-Agent", p.attribution.UserAgent)
+	}
 }
 
 // handleError converts HTTP error response to ProviderError
@@ -313,6 +351,18 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 
 	var lastResponse *ChatCompletionResponse
 
+	// F12 (opencode-go commission, R4): last-wins usage tracker.
+	// Usage may ride the combined finish chunk (Go surface), a
+	// trailing usage-only chunk with choices:[] (OpenAI
+	// stream_options.include_usage — the SOLE carrier there), or
+	// both (Go duplicate, verbatim-identical). Tracking the latest
+	// non-zero usage across ALL parsed chunks makes the done event's
+	// usage count-once-idempotent for every shape: duplicates
+	// overwrite with identical values, and a usage-only chunk is
+	// never blanket-ignored. The raw-SSE twin of this guard lives in
+	// pkg/proxy/race_executor.go:extractUsageFromSSEChunk.
+	lastStreamUsage := Usage{}
+
 	// Accumulate tool calls during streaming (index -> accumulated data)
 	accumulatedToolCalls := make(map[int]*ToolCall)
 	argumentsBuilders := make(map[int]*strings.Builder)
@@ -332,6 +382,13 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 	// sendDoneEvent sends the done event with the final response
 	// This is called when we see [DONE] or when stream ends with a finish_reason
 	sendDoneEvent := func() {
+		// F12: apply the last-wins usage to the final response — a
+		// trailing usage-only chunk (include_usage) or an identical
+		// Go-duplicate must not be lost, and a zero-usage finish
+		// chunk must not mask a later usage carrier.
+		if lastResponse != nil && (lastStreamUsage.PromptTokens > 0 || lastStreamUsage.CompletionTokens > 0 || lastStreamUsage.TotalTokens > 0) {
+			lastResponse.Usage = lastStreamUsage
+		}
 		if lastResponse != nil {
 			// Convert accumulated tool calls to Message.ToolCalls for the final response
 			if len(accumulatedToolCalls) > 0 {
@@ -404,6 +461,21 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				Response:     lastResponse,
 				FinishReason: finishReason,
 			}
+		} else if lastStreamUsage.PromptTokens > 0 || lastStreamUsage.CompletionTokens > 0 || lastStreamUsage.TotalTokens > 0 {
+			// Degenerate completion: no finish chunk was seen, but a
+			// usage carrier arrived (usage-only stream). Emit a
+			// minimal response so downstream metering still sees the
+			// usage exactly once. Synthetic done-response shape:
+			// {Object: "chat.completion", Usage: lastStreamUsage}
+			// with nil Choices — no content/tool-call payload exists
+			// on this path.
+			eventCh <- StreamEvent{
+				Type: "done",
+				Response: &ChatCompletionResponse{
+					Object: "chat.completion",
+					Usage:  lastStreamUsage,
+				},
+			}
 		} else {
 			eventCh <- StreamEvent{
 				Type: "done",
@@ -441,6 +513,15 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 				Error: fmt.Errorf("failed to parse chunk: %w", err),
 			}
 			continue
+		}
+
+		// F12 (opencode-go commission): last-wins usage tracking
+		// across ALL chunks — the Go surface repeats usage on the
+		// trailing usage-only chunk (identical values ⇒ no-op
+		// overwrite) and OpenAI's include_usage convention carries
+		// usage ONLY there (⇒ must not be dropped).
+		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 || chunk.Usage.TotalTokens > 0 {
+			lastStreamUsage = chunk.Usage
 		}
 
 		// Extract content delta
