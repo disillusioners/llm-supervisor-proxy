@@ -61,6 +61,16 @@ type requestContext struct {
 	firstUserMessage string
 	conversationKey  string
 
+	// load-balance-groups (plan §3.6.1 Am21 + §3.6.2 Am24): the
+	// modelList rewrite record. modelListOriginal preserves the
+	// PRE-rewrite list (group IDs intact) for the max-ONE re-entry
+	// rebuild; groupPick carries the sticky-pick identity for
+	// metering (Am25) + the Q15 event; groupReentered enforces the
+	// max-ONE rule (a second terminal failure is a real failure).
+	modelListOriginal []string
+	groupPick         *groupPickInfo
+	groupReentered    bool
+
 	// Accumulated response buffers
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder

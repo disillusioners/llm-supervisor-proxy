@@ -28,10 +28,11 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-// Helper — assert that ALL three cache keys were deleted at least once in
+// Helper — assert that ALL FOUR cache keys were deleted at least once in
 // the spy call log. Used by every mutation test (Decision Commission
-// 2026-10-15 / plan §6.4 / amendment 9d): every useModels mutation MUST
-// delete all three keys to keep the three model lists in lock-step.
+// 2026-10-15 / plan §6.4 / amendment 9d; load-balance-groups 2026-10-16
+// / plan §6.3 quadruple): every useModels mutation MUST delete all four
+// keys to keep the four model lists in lock-step.
 //
 // Uses the loose spy-on-method signature (`ReturnType<typeof vi.fn>`) so
 // the helper accepts both `vi.spyOn(defaultAPICache, 'delete')` (the
@@ -41,6 +42,10 @@ function assertAllThreeKeysDeleted(deleteSpy: { mock: { calls: Array<Array<unkno
   expect(deletedKeys).toContain('models');
   expect(deletedKeys).toContain('imggen-models');
   expect(deletedKeys).toContain('decision-models');
+  // load-balance-groups (plan §6.3 / P3.3): fourth key — the
+  // GroupModelsTab list. Kept in the same helper so every mutation
+  // test pins the full four-key set.
+  expect(deletedKeys).toContain('group-models');
 }
 
 describe('useModels — hook contract (Decision Commission P3.3 amendment 9d)', () => {

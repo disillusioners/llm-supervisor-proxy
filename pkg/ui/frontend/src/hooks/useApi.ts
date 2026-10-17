@@ -292,14 +292,16 @@ export function useModels() {
     });
     // C-07 (symmetric side of useImgGenModels): drop both keys so a chat
     // mutation also refreshes the image-gen tab.
-    // Decision Commission 2026-10-15 (amendment 9b): explicit key list
-    // ['models','imggen-models','decision-models']; never `deleteByPrefix`.
-    // Prefix deletion misses in-flight promise entries and `imggen-models`
-    // / `decision-models` do NOT start with `models` — they would be
-    // dropped on every mutation. Keep as 3 explicit deletes.
+    // Decision Commission 2026-10-15 (amendment 9b): explicit key list;
+    // never `deleteByPrefix`. Prefix deletion misses in-flight promise
+    // entries and `imggen-models` / `decision-models` do NOT start with
+    // `models` — they would be dropped on every mutation.
+    // load-balance-groups (plan §6.3): quadruple — add 'group-models'
+    // so all four model lists stay in lock-step.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -312,9 +314,11 @@ export function useModels() {
     });
     // C-07 (symmetric side of useImgGenModels).
     // Decision Commission 2026-10-15 (amendment 9b): see addModel above.
+    // load-balance-groups (plan §6.3): quadruple — see addModel above.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels, models]);
 
@@ -322,9 +326,11 @@ export function useModels() {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
     // C-07 (symmetric side of useImgGenModels).
     // Decision Commission 2026-10-15 (amendment 9b): see addModel above.
+    // load-balance-groups (plan §6.3): quadruple — see addModel above.
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -348,12 +354,15 @@ export function useModels() {
 //   2. Cache key: 'imggen-models' (distinct from 'models' per R7 in
 //      phase2-plan.md so each hook owns its own staleness window).
 //
-// On every write (POST/PUT/DELETE) BOTH cache keys are dropped (C-07). The
-// reason: a chat tab mounted in the same tree may be reading from the
-// 'models' key, and an image-gen mutation should never leave a chat tab
-// reading stale data after a refetch — the inverse is also true, so the
-// image-gen key gets the same treatment when a chat mutation lands (the
-// existing useModels() also drops 'imggen-models' for symmetry).
+// On every write (POST/PUT/DELETE) ALL FOUR cache keys are dropped
+// (C-07; Decision Commission 2026-10-15 amendment 9b triple;
+// load-balance-groups 2026-10-16 plan §6.3 quadruple). The reason: a
+// chat tab mounted in the same tree may be reading from the 'models'
+// key, and an image-gen mutation should never leave a chat tab
+// reading stale data after a refetch — the inverse is also true, so
+// the image-gen key gets the same treatment when a chat mutation
+// lands (the existing useModels() also drops 'imggen-models' for
+// symmetry), and the decision/group lists join the same lock-step.
 export function useImgGenModels() {
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(true);
@@ -399,9 +408,12 @@ export function useImgGenModels() {
     // Decision Commission 2026-10-15 (amendment 9b): extend to a triple —
     // drop the decision-models key too so a single mutation invalidates
     // all three model lists in lock-step. Explicit key list, no prefix.
+    // load-balance-groups (plan §6.3): quadruple — add 'group-models'
+    // so all four model lists stay in lock-step.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -414,9 +426,11 @@ export function useImgGenModels() {
     });
     // C-07: dual cache invalidation — see addModel comment.
     // Decision Commission 2026-10-15: triple, see addModel comment.
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels, models]);
 
@@ -424,9 +438,11 @@ export function useImgGenModels() {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
     // C-07: dual cache invalidation — see addModel comment.
     // Decision Commission 2026-10-15: triple, see addModel comment.
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
     defaultAPICache.delete('imggen-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -455,12 +471,13 @@ export function useImgGenModels() {
 //      'imggen-models' per the three-list invalidation contract —
 //      amendment 9d — so each hook owns its own staleness window).
 //
-// On every write (POST/PUT/DELETE) ALL THREE keys are dropped (C-07 +
-// Decision Commission 2026-10-15 amendment 9b). Explicit key list,
-// never `deleteByPrefix`: prefix deletion misses in-flight promise
-// entries and `imggen-models` / `decision-models` do NOT start with
-// `models`. Three explicit deletes per mutation keep all three lists
-// in lock-step — that's the strict invariant amendment 9d locks down.
+// On every write (POST/PUT/DELETE) ALL FOUR keys are dropped (C-07 +
+// Decision Commission 2026-10-15 amendment 9b + load-balance-groups
+// plan §6.3 quadruple). Explicit key list, never `deleteByPrefix`:
+// prefix deletion misses in-flight promise entries and `imggen-models`
+// / `decision-models` / `group-models` do NOT start with `models`.
+// Four explicit deletes per mutation keep all four lists in lock-step
+// — that's the strict invariant the mutation tests pin.
 export function useDecisionModels() {
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(true);
@@ -500,9 +517,11 @@ export function useDecisionModels() {
     // Decision Commission 2026-10-15 (amendment 9b): triple-key
     // invalidation. Explicit list — see file-level note. Every model
     // mutation drops the three list keys in lock-step.
+    // load-balance-groups (plan §6.3): quadruple — add 'group-models'.
     defaultAPICache.delete('decision-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -514,18 +533,122 @@ export function useDecisionModels() {
       body: JSON.stringify(merged),
     });
     // Decision Commission 2026-10-15 (amendment 9b): see addModel comment.
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
     defaultAPICache.delete('decision-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('group-models');
     await fetchModels();
   }, [fetchModels, models]);
 
   const deleteModel = useCallback(async (id: string) => {
     await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
     // Decision Commission 2026-10-15 (amendment 9b): see addModel comment.
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
     defaultAPICache.delete('decision-models');
     defaultAPICache.delete('models');
     defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('group-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchModels(controller.signal);
+    return () => controller.abort();
+  }, [fetchModels]);
+
+  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels, error };
+}
+
+// Group Models API — group kind only (virtual load-balancing groups)
+//
+// load-balance-groups commission 2026-10-16 / plan §6.2 (P3.2). Mirror
+// of useDecisionModels with the group-specific cache key + URL; read
+// the useImgGenModels docblock above first for the invalidation
+// rationale shared by all four model-list hooks.
+//
+//   1. Fetch URL: /fe/api/models?kind=group (server-side filter; the
+//      BE is the source of truth, not a client filter on the default
+//      GET list — that arm excludes groups per §6.4 lock-step arm 1).
+//   2. Cache key: 'group-models' (distinct from 'models' /
+//      'imggen-models' / 'decision-models' per the four-list
+//      invalidation contract — plan §6.3 — so each hook owns its own
+//      staleness window).
+//
+// On every write (POST/PUT/DELETE) ALL FOUR keys are dropped (plan
+// §6.3 quadruple). Explicit key list, never `deleteByPrefix`: prefix
+// deletion misses in-flight promise entries and none of the sibling
+// keys start with `models`. Four explicit deletes per mutation keep
+// all four lists in lock-step — the strict invariant the mutation
+// tests pin (useGroupModels.test.ts + the three sibling suites).
+export function useGroupModels() {
+  const [models, setModels] = useState<Model[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Error surfacing — same posture as useImgGenModels /
+  // useDecisionModels (fe-spec §2.7 / A11Y-3): the GroupModelsTab
+  // renders an alert-role banner with a Retry button.
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchModels = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await defaultAPICache.getOrFetch<Model[]>('group-models', async () => {
+        const response = await fetch(`${API_BASE}/models?kind=group`, {
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<Model[]>;
+      }, 15000);
+      setModels(data || []);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      const message = err instanceof Error ? err.message : 'Failed to fetch group models';
+      console.error('Failed to fetch group models:', err);
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const addModel = useCallback(async (model: Omit<Model, 'id'> & { id: string }) => {
+    await apiFetch<Model>('/models', {
+      method: 'POST',
+      body: JSON.stringify(model),
+    });
+    // load-balance-groups (plan §6.3): quadruple-key invalidation —
+    // every model mutation drops all four list keys in lock-step.
+    defaultAPICache.delete('group-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
+    await fetchModels();
+  }, [fetchModels]);
+
+  const updateModel = useCallback(async (id: string, updates: Partial<Model>) => {
+    const current = models.find(m => m.id === id);
+    const merged = { ...current, ...updates, id };
+    await apiFetch<Model>(`/models/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(merged),
+    });
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
+    defaultAPICache.delete('group-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
+    await fetchModels();
+  }, [fetchModels, models]);
+
+  const deleteModel = useCallback(async (id: string) => {
+    await apiFetch<void>(`/models/${id}`, { method: 'DELETE' });
+    // load-balance-groups (plan §6.3): quadruple — see addModel comment.
+    defaultAPICache.delete('group-models');
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
     await fetchModels();
   }, [fetchModels]);
 
@@ -782,10 +905,30 @@ export function useTokens() {
 }
 
 // Credentials API
+//
+// load-balance-groups / P4.5 (P3 carry-forward): credential
+// mutations invalidate the FOUR model-list cache keys
+// ('models', 'imggen-models', 'decision-models', 'group-models')
+// because a deleted or renamed credential can otherwise be served
+// to one of the FE tabs up to its TTL window. Models reference
+// credentials by ID and display the cached credential name; the
+// four explicit deletes are the canonical contract — see the
+// `useApi.ts` quadruple-delete sites (3 sibling hooks x 3 ops =
+// 9 sites) and the package test in useApiCredentials.test.ts.
 export async function getCredentials(): Promise<Credential[]> {
   const res = await fetch('/fe/api/credentials');
   if (!res.ok) throw new Error('Failed to fetch credentials');
   return res.json();
+}
+
+// invalidateModelCaches clears the four model-list caches that
+// depend on credentials. Called after every credential mutation so
+// a deleted/renamed credential is not served to a tab up to its TTL.
+function invalidateModelCaches(): void {
+  defaultAPICache.delete('models');
+  defaultAPICache.delete('imggen-models');
+  defaultAPICache.delete('decision-models');
+  defaultAPICache.delete('group-models');
 }
 
 export async function createCredential(cred: Credential): Promise<Credential> {
@@ -798,6 +941,7 @@ export async function createCredential(cred: Credential): Promise<Credential> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to create credential');
   }
+  invalidateModelCaches();
   return res.json();
 }
 
@@ -811,6 +955,7 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
     const err = await res.json();
     throw new Error(err.error || 'Failed to update credential');
   }
+  invalidateModelCaches();
   return res.json();
 }
 
@@ -820,6 +965,7 @@ export async function deleteCredential(id: string): Promise<void> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to delete credential');
   }
+  invalidateModelCaches();
 }
 
 // Providers API

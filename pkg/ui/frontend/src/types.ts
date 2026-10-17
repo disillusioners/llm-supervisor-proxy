@@ -115,12 +115,15 @@ export interface Model {
   fallback_chain: string[];
   truncate_params?: string[];
   // Additive kind discriminator (Phase 4 / ImgGen Commission — 2026-10-05;
-  // extended with 'decision' in the Decision Commission 2026-10-15).
+  // extended with 'decision' in the Decision Commission 2026-10-15;
+  // extended with 'group' in the load-balance-groups commission 2026-10-16).
   // "image-gen" pins the model to the /v1/image_generation route and the
   // MiniMax-only validator. "decision" pins the model to /v1/decisions
-  // and the openai/typesafe validator. Absent / "chat" is the legacy default.
+  // and the openai/typesafe validator. "group" marks a virtual
+  // load-balancing group (members + optional ID-space claim; plan §6.5).
+  // Absent / "chat" is the legacy default.
   // Optional so existing chat models keep working without a migration.
-  kind?: 'chat' | 'image-gen' | 'decision';
+  kind?: 'chat' | 'image-gen' | 'decision' | 'group';
   // Additive internal_provider typing drift fix (R10 from phase2-plan.md).
   // The chat tab already renders this value via ModelsTab.tsx:175 but the
   // FE interface did not declare it. Optional because not every model has
@@ -146,6 +149,14 @@ export interface Model {
   peak_hour_model?: string;        // Alternative upstream model name
   // Ultimate model exclusion
   exclude_from_ultimate_switching?: boolean;
+  // Group membership + ID-space claim (load-balance-groups commission /
+  // migration 031): kind=='group' rows only, mirroring the Go
+  // Model.Members / ShadowModelID wire tags (both omitempty). Members
+  // are PROXY MODEL IDs of existing chat-kind models (flat — no
+  // group-as-member); shadow_model_id optionally claims one existing
+  // chat model's ID so requests for it route to the group (plan §3.4).
+  members?: GroupMember[];
+  shadow_model_id?: string;
 }
 
 // Narrowed Model alias for image-gen rows. The FE consumes this in
@@ -159,6 +170,23 @@ export type ImgGenModel = Model & { kind: 'image-gen' };
 // is a belt-and-suspenders check so a chat row can never leak into the
 // DecisionModelsTab / DecisionModelForm surface.
 export type DecisionModel = Model & { kind: 'decision' };
+
+// GroupMember — one (model, weight) entry of a group's flat member list
+// (load-balance-groups / Round-2 membership pivot). JSON tags mirror the
+// Go GroupMember struct verbatim: `model_id` references models.id of an
+// EXISTING chat-kind model (app-level FK, G3; groups carry no
+// credentials); `weight` is a positive float driving the sticky weighted
+// picker (higher = picked more often; G3: weight > 0).
+export interface GroupMember {
+  model_id: string;
+  weight: number;
+}
+
+// Narrowed Model alias for group rows (load-balance-groups — 2026-10-16 /
+// plan §6.5). Server-side filter (?kind=group) is the source of truth; the
+// narrow type is a belt-and-suspenders check so a chat row can never leak
+// into the GroupModelsTab / GroupModelForm surface.
+export type GroupModel = Model & { kind: 'group' };
 
 export interface ApiToken {
   id: string;

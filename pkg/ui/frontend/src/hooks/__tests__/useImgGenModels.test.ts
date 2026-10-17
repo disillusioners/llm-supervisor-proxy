@@ -107,6 +107,9 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
       expect(deletedKeys).toContain('decision-models');
+      // load-balance-groups (plan §6.3 / P3.3): fourth key — the
+      // GroupModelsTab list joins the lock-step set.
+      expect(deletedKeys).toContain('group-models');
 
       deleteSpy.mockRestore();
     });
@@ -138,6 +141,9 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
       expect(deletedKeys).toContain('decision-models');
+      // load-balance-groups (plan §6.3 / P3.3): fourth key — the
+      // GroupModelsTab list joins the lock-step set.
+      expect(deletedKeys).toContain('group-models');
 
       deleteSpy.mockRestore();
     });
@@ -167,6 +173,9 @@ describe('useImgGenModels — hook contract (fe-spec §2.3)', () => {
       expect(deletedKeys).toContain('imggen-models');
       expect(deletedKeys).toContain('models');
       expect(deletedKeys).toContain('decision-models');
+      // load-balance-groups (plan §6.3 / P3.3): fourth key — the
+      // GroupModelsTab list joins the lock-step set.
+      expect(deletedKeys).toContain('group-models');
 
       deleteSpy.mockRestore();
     });

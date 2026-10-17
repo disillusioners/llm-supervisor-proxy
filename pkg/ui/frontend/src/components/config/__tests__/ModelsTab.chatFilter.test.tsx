@@ -67,6 +67,53 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
     expect(container.textContent).not.toContain('Image C');
   });
 
+  it('load-balance-groups P3.7 — group rows are filtered out of the chat tab (§6.4 arm 2 of 4)', () => {
+    // Locked-by-test (load-balance-groups 2026-10-16 / plan §6.4):
+    // a model with kind: 'group' must be filtered OUT of `chatModels`
+    // alongside image-gen + decision rows — virtual groups get their
+    // own Group Models tab; the chat tab stays pure. The chat hook
+    // fetches UNFILTERED (bare /fe/api/models), so this client filter
+    // is load-bearing.
+    const chat = makeModel({ id: 'chat', name: 'Chat A' });
+    const group = makeModel({ id: 'grp', name: 'Group B', kind: 'group' });
+    const { container } = render(
+      <ModelsTab
+        models={[chat, group]}
+        onAddModel={vi.fn()}
+        onUpdateModel={vi.fn()}
+        onDeleteModel={vi.fn()}
+        onToggleModel={vi.fn()}
+        status={null}
+        setStatus={vi.fn()}
+      />,
+    );
+    // Chat row is rendered.
+    expect(container.textContent).toContain('Chat A');
+    // Group row is filtered out (§6.4 arm 2).
+    expect(container.textContent).not.toContain('Group B');
+  });
+
+  it('load-balance-groups P3.7 — a config with ONLY group rows renders the "No models configured" empty state', () => {
+    // Same hoisted-filter regression class as the image-gen-only
+    // config below: the filter runs BEFORE the empty-state ternary, so
+    // a group-only config surfaces the chat empty state instead of an
+    // invisible filtered-to-empty list.
+    const groupOnly = makeModel({ id: 'grp', name: 'Group B', kind: 'group' });
+    const { container } = render(
+      <ModelsTab
+        models={[groupOnly]}
+        onAddModel={vi.fn()}
+        onUpdateModel={vi.fn()}
+        onDeleteModel={vi.fn()}
+        onToggleModel={vi.fn()}
+        status={null}
+        setStatus={vi.fn()}
+      />,
+    );
+    expect(container.textContent).not.toContain('Group B');
+    expect(container.textContent).toContain('No models configured');
+  });
+
   it('FE-15 (optional) — rows without a kind field are NOT filtered (degraded behavior)', () => {
     // Per spec §2.6 "R1 mitigation": if kind is undefined, the filter
     // returns true for the row (undefined !== 'image-gen' is true). This

@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -71,6 +72,11 @@ type Model struct {
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
 	// Ultimate model exclusion
 	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
+	// Group membership + ID-space claim (load-balance-groups /
+	// migration 031): kind=="group" rows only. Members is the flat
+	// [{model_id, weight}] list; ShadowModelID the optional claim.
+	Members       []models.GroupMember `json:"members,omitempty"`
+	ShadowModelID string               `json:"shadow_model_id,omitempty"`
 }
 
 // Credential represents a credential for API authentication (with masked API key)
@@ -248,28 +254,28 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 //     show payload weights and the operator can spot outlier requests
 //     before opening them.
 type RequestSummary struct {
-	ID                string                 `json:"id"`
-	Status            string                 `json:"status"`
-	Model             string                 `json:"model"`
-	StartTime         time.Time              `json:"startTime"`
-	EndTime           time.Time              `json:"endTime"`
-	Duration          string                 `json:"duration"`
-	Retries           int                    `json:"retries"`
-	Error             string                 `json:"error,omitempty"`
-	Usage             *store.Usage           `json:"usage,omitempty"`
-	TokenID           string                 `json:"token_id,omitempty"`
-	TokenName         string                 `json:"token_name,omitempty"`
-	OriginalModel     string                 `json:"original_model,omitempty"`
-	FallbackUsed      []string               `json:"fallback_used,omitempty"`
-	CurrentFallback   string                 `json:"current_fallback,omitempty"`
-	UltimateModelUsed bool                   `json:"ultimate_model_used"`
-	UltimateModelID   string                 `json:"ultimate_model_id,omitempty"`
-	IsStream          bool                   `json:"is_stream"`
-	AppTag            string                 `json:"app_tag,omitempty"`
+	ID                string                      `json:"id"`
+	Status            string                      `json:"status"`
+	Model             string                      `json:"model"`
+	StartTime         time.Time                   `json:"startTime"`
+	EndTime           time.Time                   `json:"endTime"`
+	Duration          string                      `json:"duration"`
+	Retries           int                         `json:"retries"`
+	Error             string                      `json:"error,omitempty"`
+	Usage             *store.Usage                `json:"usage,omitempty"`
+	TokenID           string                      `json:"token_id,omitempty"`
+	TokenName         string                      `json:"token_name,omitempty"`
+	OriginalModel     string                      `json:"original_model,omitempty"`
+	FallbackUsed      []string                    `json:"fallback_used,omitempty"`
+	CurrentFallback   string                      `json:"current_fallback,omitempty"`
+	UltimateModelUsed bool                        `json:"ultimate_model_used"`
+	UltimateModelID   string                      `json:"ultimate_model_id,omitempty"`
+	IsStream          bool                        `json:"is_stream"`
+	AppTag            string                      `json:"app_tag,omitempty"`
 	UpstreamRequests  store.UpstreamRequestStatus `json:"upstream_requests,omitempty"`
 	// P0-1 summary projection additions:
-	MessageCount    int   `json:"message_count"`
-	TotalSizeBytes  int64 `json:"total_size_bytes"`
+	MessageCount   int   `json:"message_count"`
+	TotalSizeBytes int64 `json:"total_size_bytes"`
 }
 
 // summaryFromRequest builds a RequestSummary from a stored *store.RequestLog.
@@ -771,21 +777,29 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			// consumer (finding 1, the highest-severity review
 			// finding).
 			kindFilter = func(m *models.ModelConfig) bool { return m.IsDecision() }
+		case models.KindGroup:
+			// load-balance-groups / P1.6: only group-kind rows (the
+			// FE Group Models tab feed).
+			kindFilter = func(m *models.ModelConfig) bool { return m.IsGroup() }
 		case models.KindChat:
 			// Decision Models / §3.1 site 7 — chat arm EXTENDED.
 			// Without `&& !m.IsDecision()`, decision models leak
 			// into `?kind=chat` (the FE ModelsTab.filter mitigates
 			// the in-UI path but direct API consumers do not see
 			// the in-UI filter; the leak was the Review Round 1
-			// chat-arm-leak finding).
-			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() }
+			// chat-arm-leak finding). load-balance-groups: the same
+			// leak class applies to groups — `&& !m.IsGroup()` keeps
+			// the chat tab pure (groups get their own tab; §6.4
+			// lock-step arm 1 of 4).
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() && !m.IsGroup() }
 		default:
-			// Decision Models commission — default-arm warning
-			// wording updated for 3 kinds (chat / image-gen /
-			// decision).
-			log.Printf("[models] GET /fe/api/models unknown kind=%q, treating as chat (server-log warning; accepted kinds: %q, %q, %q)",
-				kindParam, models.KindChat, models.KindImageGen, models.KindDecision)
-			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() }
+			// load-balance-groups — default-arm warning wording
+			// updated for 4 kinds (chat / image-gen / decision /
+			// group). Unknown value keeps the chat-arm treatment
+			// (groups excluded, like image-gen/decision).
+			log.Printf("[models] GET /fe/api/models unknown kind=%q, treating as chat (server-log warning; accepted kinds: %q, %q, %q, %q)",
+				kindParam, models.KindChat, models.KindImageGen, models.KindDecision, models.KindGroup)
+			kindFilter = func(m *models.ModelConfig) bool { return !m.IsImageGen() && !m.IsDecision() && !m.IsGroup() }
 		}
 
 		modelConfigs := s.modelsConfig.GetModels()
@@ -814,6 +828,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				PeakHourModel:                mc.PeakHourModel,
 				SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
 				ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
+				Members:                      mc.Members,
+				ShadowModelID:                mc.ShadowModelID,
 			})
 		}
 
@@ -838,6 +854,146 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "model name is required"})
 			return
+		}
+
+		// load-balance-groups / P1 review 🟡#1 [P2 polish, do it]:
+		// hoist the ID generation ABOVE the group mirror so G8
+		// self-part + the uniqueness-scan self-skip always see a
+		// consistent identifier (empty-safe: a client-supplied ID
+		// stays untouched; only the empty case is filled).
+		if newModel.ID == "" {
+			newModel.ID = fmt.Sprintf("model-%d", time.Now().UnixNano())
+		}
+
+		// load-balance-groups / P1.6 + §5.2: POST-inline mirror of
+		// models.validateGroupRules + models.ValidateGroupMembers
+		// (G1-G8). Runs BEFORE validateCredentials — its rule (a)
+		// ("internal ⇒ credentials non-empty") rejects exactly the
+		// group-row shape (Internal=true, Credentials=[]), the Am23
+		// hazard at the wire layer — and BEFORE the generic
+		// peak-hour/secondary checks so G-rule phrasing wins. The
+		// mirror is intentionally inline-duplicated (PUT carries an
+		// identical copy) per the T1.2.3 design; the parity test
+		// (kind_rules_parity_test.go) is the drift lock.
+		if newModel.Kind == models.KindGroup {
+			groupReject := func(errMsg string) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+			}
+			// G1
+			if !newModel.Internal {
+				groupReject(`kind "group" requires internal to be true`)
+				return
+			}
+			// G2
+			if len(newModel.Members) == 0 {
+				groupReject(`kind "group" requires at least one member`)
+				return
+			}
+			if len(newModel.Members) > models.MaxGroupMembers {
+				groupReject(fmt.Sprintf(`kind "group" members list exceeds max of %d entries (got %d)`, models.MaxGroupMembers, len(newModel.Members)))
+				return
+			}
+			// G6
+			if len(newModel.FallbackChain) != 0 {
+				groupReject(`kind "group" does not support fallback_chain`)
+				return
+			}
+			if newModel.SecondaryUpstreamModel != "" {
+				groupReject(`kind "group" does not support secondary_upstream_model`)
+				return
+			}
+			if newModel.PeakHourEnabled {
+				groupReject(`kind "group" does not support peak_hour_enabled`)
+				return
+			}
+			if newModel.ReleaseStreamChunkDeadline != 0 {
+				groupReject(`kind "group" does not support release_stream_chunk_deadline`)
+				return
+			}
+			// G7 — explicit write-gate stamp (D9 posture).
+			if !newModel.ExcludeFromUltimateSwitching {
+				groupReject(`kind "group" requires exclude_from_ultimate_switching to be true (G7 explicit enforcement)`)
+				return
+			}
+			// G8 self-part (an empty newModel.ID is re-checked with
+			// the generated ID by the DB-layer validator).
+			if newModel.ShadowModelID != "" && newModel.ShadowModelID == newModel.ID {
+				groupReject(`kind "group" shadow_model_id cannot be the group's own ID`)
+				return
+			}
+			// Collection-aware half (G3/G4/G5 + G8 target and
+			// uniqueness scan) against the live model set.
+			existingModels := s.modelsConfig.GetModels()
+			seenMembers := make(map[string]bool, len(newModel.Members))
+			for idx, member := range newModel.Members {
+				if member.ModelID == "" {
+					groupReject(fmt.Sprintf(`kind "group" members[%d].model_id is empty`, idx))
+					return
+				}
+				if member.Weight <= 0 {
+					groupReject(fmt.Sprintf(`kind "group" members[%d] (model_id=%q): weight must be > 0, got %v`, idx, member.ModelID, member.Weight))
+					return
+				}
+				if seenMembers[member.ModelID] {
+					groupReject(fmt.Sprintf(`kind "group" duplicate member model_id %q in members list`, member.ModelID))
+					return
+				}
+				seenMembers[member.ModelID] = true
+				var target *models.ModelConfig
+				for i := range existingModels {
+					if existingModels[i].ID == member.ModelID {
+						target = &existingModels[i]
+						break
+					}
+				}
+				if target == nil {
+					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (members must reference existing chat-kind models)`, member.ModelID))
+					return
+				}
+				if target.Kind == models.KindGroup {
+					groupReject(fmt.Sprintf(`kind "group" member %q is itself a group (flat membership only — group-as-member is forbidden)`, member.ModelID))
+					return
+				}
+				if target.Kind != "" && target.Kind != models.KindChat {
+					groupReject(fmt.Sprintf(`kind "group" member %q must be a chat-kind model (got kind %q)`, member.ModelID, target.Kind))
+					return
+				}
+			}
+			if newModel.ShadowModelID != "" {
+				var shadowTarget *models.ModelConfig
+				for i := range existingModels {
+					if existingModels[i].ID == newModel.ShadowModelID {
+						shadowTarget = &existingModels[i]
+						break
+					}
+				}
+				if shadowTarget == nil {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing chat-kind model)`, newModel.ShadowModelID))
+					return
+				}
+				if shadowTarget.Kind == models.KindGroup {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model, not a group`, newModel.ShadowModelID))
+					return
+				}
+				if shadowTarget.Kind != "" && shadowTarget.Kind != models.KindChat {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model (got kind %q)`, newModel.ShadowModelID, shadowTarget.Kind))
+					return
+				}
+				// G8 uniqueness scan — no OTHER enabled group claims
+				// the same ID.
+				for i := range existingModels {
+					other := &existingModels[i]
+					if other.ID == newModel.ID || other.Kind != models.KindGroup {
+						continue
+					}
+					if other.Enabled && other.ShadowModelID == newModel.ShadowModelID {
+						groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q is already claimed by enabled group %q`, newModel.ShadowModelID, other.ID))
+						return
+					}
+				}
+			}
 		}
 
 		// Validate peak hour requires internal upstream
@@ -869,13 +1025,21 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		// collapse them to a single 400 by joining with "; " so the
 		// API contract keeps the {error: "..."} shape (no array
 		// support in POST/PUT response per house style).
-		if credErrs := validateCredentials(newModel.Credentials, newModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "invalid credentials: " + strings.Join(credErrs, "; "),
-			})
-			return
+		//
+		// load-balance-groups / Am23 wire twin: group rows bypass
+		// the credential validation ENTIRELY (same posture as the
+		// DB write path's validateBeforeWrite routing) — rule (a)
+		// ("internal ⇒ credentials non-empty") rejects exactly the
+		// group-row shape; groups carry no credentials by design.
+		if newModel.Kind != models.KindGroup {
+			if credErrs := validateCredentials(newModel.Credentials, newModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "invalid credentials: " + strings.Join(credErrs, "; "),
+				})
+				return
+			}
 		}
 
 		// ImgGen Models commission / T1.2.3: inline image-gen
@@ -886,11 +1050,12 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		// house pattern of server.go:792-798). Unknown kind value
 		// ⇒ 400. Decision Models / §3.1 site 7 + §5.6 mirror:
 		// "decision" added to the whitelist; 3-kind error wording.
-		if newModel.Kind != "" && newModel.Kind != models.KindChat && newModel.Kind != models.KindImageGen && newModel.Kind != models.KindDecision {
+		// load-balance-groups / P1.6: "group" added; 4-kind wording.
+		if newModel.Kind != "" && newModel.Kind != models.KindChat && newModel.Kind != models.KindImageGen && newModel.Kind != models.KindDecision && newModel.Kind != models.KindGroup {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{
-				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, or %q)", newModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision),
+				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, %q, or %q)", newModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision, models.KindGroup),
 			})
 			return
 		}
@@ -1092,6 +1257,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			PeakHourModel:                newModel.PeakHourModel,
 			SecondaryUpstreamModel:       newModel.SecondaryUpstreamModel,
 			ExcludeFromUltimateSwitching: newModel.ExcludeFromUltimateSwitching,
+			Members:                      newModel.Members,
+			ShadowModelID:                newModel.ShadowModelID,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -1154,6 +1321,145 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// load-balance-groups / P1 review 🟡#1 [P2 polish, do it]:
+		// stamp the ROUTE id into the payload BEFORE the group
+		// mirror so G8 self-part + the uniqueness-scan self-skip
+		// always see a consistent identifier (id is the authoritative
+		// identity, not the body-supplied updatedModel.ID which may
+		// be empty on a sparse PUT).
+		updatedModel.ID = id
+
+		// load-balance-groups / P1.6 + §5.2: PUT-inline mirror of
+		// models.validateGroupRules + models.ValidateGroupMembers
+		// (G1-G8) — identical rule set to the POST mirror above and
+		// to the helpers; the parity test enforces all three stay
+		// in sync. Runs BEFORE validateCredentials (rule (a)
+		// rejects the group-row shape — the Am23 hazard) and before
+		// the generic checks. The G8 self-skip keys on the ROUTE id
+		// (the authoritative identity; updatedModel.ID is stamped
+		// further below).
+		if updatedModel.Kind == models.KindGroup {
+			groupReject := func(errMsg string) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+			}
+			// G1
+			if !updatedModel.Internal {
+				groupReject(`kind "group" requires internal to be true`)
+				return
+			}
+			// G2
+			if len(updatedModel.Members) == 0 {
+				groupReject(`kind "group" requires at least one member`)
+				return
+			}
+			if len(updatedModel.Members) > models.MaxGroupMembers {
+				groupReject(fmt.Sprintf(`kind "group" members list exceeds max of %d entries (got %d)`, models.MaxGroupMembers, len(updatedModel.Members)))
+				return
+			}
+			// G6
+			if len(updatedModel.FallbackChain) != 0 {
+				groupReject(`kind "group" does not support fallback_chain`)
+				return
+			}
+			if updatedModel.SecondaryUpstreamModel != "" {
+				groupReject(`kind "group" does not support secondary_upstream_model`)
+				return
+			}
+			if updatedModel.PeakHourEnabled {
+				groupReject(`kind "group" does not support peak_hour_enabled`)
+				return
+			}
+			if updatedModel.ReleaseStreamChunkDeadline != 0 {
+				groupReject(`kind "group" does not support release_stream_chunk_deadline`)
+				return
+			}
+			// G7 — explicit write-gate stamp (D9 posture).
+			if !updatedModel.ExcludeFromUltimateSwitching {
+				groupReject(`kind "group" requires exclude_from_ultimate_switching to be true (G7 explicit enforcement)`)
+				return
+			}
+			// G8 self-part — the group cannot claim its own ID (the
+			// route id is the row identity).
+			if updatedModel.ShadowModelID != "" && updatedModel.ShadowModelID == id {
+				groupReject(`kind "group" shadow_model_id cannot be the group's own ID`)
+				return
+			}
+			// Collection-aware half (G3/G4/G5 + G8 target and
+			// uniqueness scan) against the live model set; the OLD
+			// row of this group is skipped by route id.
+			existingModels := s.modelsConfig.GetModels()
+			seenMembers := make(map[string]bool, len(updatedModel.Members))
+			for idx, member := range updatedModel.Members {
+				if member.ModelID == "" {
+					groupReject(fmt.Sprintf(`kind "group" members[%d].model_id is empty`, idx))
+					return
+				}
+				if member.Weight <= 0 {
+					groupReject(fmt.Sprintf(`kind "group" members[%d] (model_id=%q): weight must be > 0, got %v`, idx, member.ModelID, member.Weight))
+					return
+				}
+				if seenMembers[member.ModelID] {
+					groupReject(fmt.Sprintf(`kind "group" duplicate member model_id %q in members list`, member.ModelID))
+					return
+				}
+				seenMembers[member.ModelID] = true
+				var target *models.ModelConfig
+				for i := range existingModels {
+					if existingModels[i].ID == member.ModelID {
+						target = &existingModels[i]
+						break
+					}
+				}
+				if target == nil {
+					groupReject(fmt.Sprintf(`kind "group" member %q does not exist (members must reference existing chat-kind models)`, member.ModelID))
+					return
+				}
+				if target.Kind == models.KindGroup {
+					groupReject(fmt.Sprintf(`kind "group" member %q is itself a group (flat membership only — group-as-member is forbidden)`, member.ModelID))
+					return
+				}
+				if target.Kind != "" && target.Kind != models.KindChat {
+					groupReject(fmt.Sprintf(`kind "group" member %q must be a chat-kind model (got kind %q)`, member.ModelID, target.Kind))
+					return
+				}
+			}
+			if updatedModel.ShadowModelID != "" {
+				var shadowTarget *models.ModelConfig
+				for i := range existingModels {
+					if existingModels[i].ID == updatedModel.ShadowModelID {
+						shadowTarget = &existingModels[i]
+						break
+					}
+				}
+				if shadowTarget == nil {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing chat-kind model)`, updatedModel.ShadowModelID))
+					return
+				}
+				if shadowTarget.Kind == models.KindGroup {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model, not a group`, updatedModel.ShadowModelID))
+					return
+				}
+				if shadowTarget.Kind != "" && shadowTarget.Kind != models.KindChat {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model (got kind %q)`, updatedModel.ShadowModelID, shadowTarget.Kind))
+					return
+				}
+				// G8 uniqueness scan — no OTHER enabled group claims
+				// the same ID.
+				for i := range existingModels {
+					other := &existingModels[i]
+					if other.ID == id || other.Kind != models.KindGroup {
+						continue
+					}
+					if other.Enabled && other.ShadowModelID == updatedModel.ShadowModelID {
+						groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q is already claimed by enabled group %q`, updatedModel.ShadowModelID, other.ID))
+						return
+					}
+				}
+			}
+		}
+
 		// Validate peak hour requires internal upstream
 		if updatedModel.PeakHourEnabled && !updatedModel.Internal {
 			w.Header().Set("Content-Type", "application/json")
@@ -1178,13 +1484,18 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// (see validateCredentials above). Positions are stamped
 		// into the slice on acceptance so persistence is
 		// deterministic.
-		if credErrs := validateCredentials(updatedModel.Credentials, updatedModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "invalid credentials: " + strings.Join(credErrs, "; "),
-			})
-			return
+		//
+		// load-balance-groups / Am23 wire twin: group rows bypass
+		// the credential validation entirely (POST-twin posture).
+		if updatedModel.Kind != models.KindGroup {
+			if credErrs := validateCredentials(updatedModel.Credentials, updatedModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "invalid credentials: " + strings.Join(credErrs, "; "),
+				})
+				return
+			}
 		}
 
 		// ImgGen Models commission / T1.2.3: PUT mirrors the POST
@@ -1195,11 +1506,12 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// §5.6: PUT-inline mirror of models.validateDecisionRules
 		// (D1-D9). Same rule set as POST — the P1.9 parity test
 		// asserts POST ≡ PUT ≡ ValidateKindRules.
-		if updatedModel.Kind != "" && updatedModel.Kind != models.KindChat && updatedModel.Kind != models.KindImageGen && updatedModel.Kind != models.KindDecision {
+		// load-balance-groups / P1.6: "group" added; 4-kind wording.
+		if updatedModel.Kind != "" && updatedModel.Kind != models.KindChat && updatedModel.Kind != models.KindImageGen && updatedModel.Kind != models.KindDecision && updatedModel.Kind != models.KindGroup {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{
-				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision),
+				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, %q, or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision, models.KindGroup),
 			})
 			return
 		}
@@ -1356,6 +1668,8 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			PeakHourModel:                updatedModel.PeakHourModel,
 			SecondaryUpstreamModel:       updatedModel.SecondaryUpstreamModel,
 			ExcludeFromUltimateSwitching: updatedModel.ExcludeFromUltimateSwitching,
+			Members:                      updatedModel.Members,
+			ShadowModelID:                updatedModel.ShadowModelID,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
@@ -1378,8 +1692,21 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if err := s.modelsConfig.RemoveModel(id); err != nil {
+			// Council note #1 [P2 if TRIVIAL, else P4 — do it]: an
+			// Am27 "in-use" deletion (a model referenced by a
+			// group) is semantically a CONFLICT, not a not-found.
+			// Map the distinguishing substring to 409 Conflict; the
+			// ErrModelNotFound path keeps 404; everything else is
+			// 500.
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
+			status := http.StatusInternalServerError
+			switch {
+			case errors.Is(err, models.ErrModelNotFound):
+				status = http.StatusNotFound
+			case strings.Contains(err.Error(), "is a member of group"):
+				status = http.StatusConflict
+			}
+			w.WriteHeader(status)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}

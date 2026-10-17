@@ -118,26 +118,37 @@ func executeRequest(
 	// Check if this model uses internal upstream
 	// Note: ModelsConfig may be nil in tests, so check first
 	if cfg.ModelsConfig != nil {
-		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		modelConfig := directGetModel(cfg, req.modelID)
 
 		if modelConfig != nil && modelConfig.Internal {
 			err := executeInternalRequest(ctx, cfg, rawBody, req, interleaved)
-
-			// Phase 3 / Task 6 — single-source-of-truth publish site for
-			// model_credential_selected. Fires ONLY when:
+			// Phase 3 / Task 6 — single-source-of-truth publish
+			// site for model_credential_selected. Fires ONLY when:
 			//   1. the resolver returned ok (req.resolvedOK), AND
-			//   2. the engine returned newlyBound=true (W-1: a binding
-			//      was stored on this call).
-			// Per C2: empty-key fresh picks return NewlyBound=false ⇒
-			// no event (no binding stored). Per W-1: pinned-existing
-			// reuses return NewlyBound=false ⇒ no event.
+			//   2. the engine returned newlyBound=true (W-1).
+			// Per C2: empty-key fresh picks return NewlyBound=false
+			// ⇒ no event. Per W-1: pinned-existing reuses return
+			// NewlyBound=false ⇒ no event.
+			//
+			// load-balance-groups / Q15: the SAME publish site
+			// fires model_member_selected when the GROUP pick was
+			// newly bound (independent of the credential binding's
+			// NewlyBound). Members with a chat-kind Internal=true
+			// go through this branch.
 			publishCredentialSelected(req)
 			return err
 		}
 	}
 
-	// External upstream: use the configured upstream URL
-	return executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
+	// External upstream: use the configured upstream URL. The
+	// load-balance-groups / Q15 event still fires here for the
+	// GROUP pick (when the picked member is external) — the
+	// publish site owns BOTH paths so the event coverage is
+	// complete (mirror of model_credential_selected's
+	// W-1/newlyBound-only asymmetry for the member axis).
+	err := executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
+	publishCredentialSelected(req)
+	return err
 }
 
 // publishCredentialSelected (Phase 3 / Task 6) fires the
@@ -146,17 +157,36 @@ func executeRequest(
 // means the race-internal path owns event publication; the ultimate
 // paths do NOT publish — and an empty conversationKey (W-2 + C2) is
 // naturally absorbed because empty-key picks return NewlyBound=false.
+//
+// load-balance-groups / Q15: the SAME site fires model_member_selected
+// when the GROUP pick was newly bound (the group binding's W-1 signal
+// — independent of the credential binding's NewlyBound; the n==1
+// single-member fast path never fires it, mirroring the credential
+// engine's fast-path no-event behavior).
 func publishCredentialSelected(req *upstreamRequest) {
-	if req == nil || !req.resolvedOK {
+	if req == nil {
 		return
 	}
-	if !req.resolved.NewlyBound {
+	// load-balance-groups / Q15: the member event fires regardless
+	// of the credential resolution outcome — an EXTERNAL member
+	// never resolves a credential (resolvedOK=false) but its group
+	// pick may still be newlyBound. The payload's
+	// upstream_provider/upstream_model carry the resolved values
+	// when available (empty for external members — they have no
+	// internal resolution by construction).
+	if req.groupPick != nil && req.groupPick.NewlyBound && req.onMemberSelected != nil {
+		cred := req.resolved
+		if !req.resolvedOK {
+			cred = models.ResolvedCredential{}
+		}
+		req.onMemberSelected(req.groupPick.MemberID, cred)
+	}
+	if !req.resolvedOK {
 		return
 	}
-	if req.onCredentialSelected == nil {
-		return
+	if req.resolved.NewlyBound && req.onCredentialSelected != nil {
+		req.onCredentialSelected(req.modelID, req.resolved)
 	}
-	req.onCredentialSelected(req.modelID, req.resolved)
 }
 
 // resolveSpecificInternalCredential (Phase 3 / Task 18 — Round 3b B3)
@@ -174,7 +204,7 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	if cfg == nil || cfg.ModelsConfig == nil {
 		return models.ResolvedCredential{}, false
 	}
-	modelConfig := cfg.ModelsConfig.GetModel(modelID)
+	modelConfig := directGetModel(cfg, modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return models.ResolvedCredential{}, false
 	}
@@ -272,7 +302,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// affinity seam. The secondary path inherits the primary credential
 	// (do NOT call the engine a second time per the contract).
 	if !resolvedOK && useSecondary && cfg.ModelsConfig != nil {
-		modelConfig := cfg.ModelsConfig.GetModel(req.modelID)
+		modelConfig := directGetModel(cfg, req.modelID)
 		if modelConfig != nil && modelConfig.SecondaryUpstreamModel != "" && modelConfig.InternalModel != "" {
 			// Resolve credential/provider from primary config, but use secondary model name
 			resolved, resolvedOK = cfg.ModelsConfig.ResolveInternalConfigWithAffinity(req.modelID, req.conversationKey)

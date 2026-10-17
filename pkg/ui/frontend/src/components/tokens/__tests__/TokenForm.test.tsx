@@ -19,7 +19,7 @@ import { TokenForm } from '../TokenForm';
 interface ModelFixture {
   id: string;
   name: string;
-  kind?: 'chat' | 'image-gen' | 'decision';
+  kind?: 'chat' | 'image-gen' | 'decision' | 'group';
 }
 
 function makeModel(overrides: Partial<ModelFixture> = {}): ModelFixture {
@@ -46,8 +46,11 @@ describe('TokenForm — kind filter for both pickers (Decision Commission 2026-1
       const chatNoKind = makeModel({ id: 'chat-2', name: 'Chat Two (no kind)' });
       const imgGen = makeModel({ id: 'img-1', name: 'Image Gen One', kind: 'image-gen' });
       const decision = makeModel({ id: 'dec-1', name: 'Decision One', kind: 'decision' });
+      // load-balance-groups (plan §6.4 arm 4 of 4 / P3.7): groups join
+      // the exclusion set in BOTH pickers.
+      const group = makeModel({ id: 'grp-1', name: 'Group One', kind: 'group' });
 
-      const models: ModelFixture[] = [chat, chatNoKind, imgGen, decision];
+      const models: ModelFixture[] = [chat, chatNoKind, imgGen, decision, group];
 
       const { container } = render(
         <TokenForm
@@ -80,6 +83,7 @@ describe('TokenForm — kind filter for both pickers (Decision Commission 2026-1
       expect(container.textContent).toContain('Chat Two (no kind)');
       expect(container.textContent).not.toContain('Image Gen One');
       expect(container.textContent).not.toContain('Decision One');
+      expect(container.textContent).not.toContain('Group One');
     });
   });
 
@@ -91,8 +95,9 @@ describe('TokenForm — kind filter for both pickers (Decision Commission 2026-1
       const chat = makeModel({ id: 'chat-1', name: 'Chat One' });
       const imgGen = makeModel({ id: 'img-1', name: 'Image Gen One', kind: 'image-gen' });
       const decision = makeModel({ id: 'dec-1', name: 'Decision One', kind: 'decision' });
+      const group = makeModel({ id: 'grp-1', name: 'Group One', kind: 'group' });
 
-      const models: ModelFixture[] = [chat, imgGen, decision];
+      const models: ModelFixture[] = [chat, imgGen, decision, group];
 
       const { container } = render(
         <TokenForm
@@ -143,6 +148,10 @@ describe('TokenForm — kind filter for both pickers (Decision Commission 2026-1
       expect(optionTexts.some((t) => t.includes('Image Gen One'))).toBe(false);
       // Decision row is NOT present.
       expect(optionTexts.some((t) => t.includes('Decision One'))).toBe(false);
+      // load-balance-groups (plan §6.4 arm 4 / P3.7): group row is NOT
+      // present — groups are ultimate-excluded by G7; the picker says
+      // so explicitly (defense-in-depth).
+      expect(optionTexts.some((t) => t.includes('Group One'))).toBe(false);
     });
   });
 });

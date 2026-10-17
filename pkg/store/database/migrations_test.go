@@ -708,3 +708,49 @@ func TestMigration030_ForwardFreshDB(t *testing.T) {
 		t.Fatalf("select kind from (empty) models: %v", err)
 	}
 }
+
+// TestMigration031_ForwardFreshDB asserts that migration 031
+// (load-balance-groups / P1.3 — models.members_json +
+// models.shadow_model_id) lands in the registry (Amendment-1 trap,
+// third occurrence — the migrations slice is an ordered list, NOT
+// a directory scanner; the SQL files alone are silently inert) AND
+// both columns are present on models after a fresh RunMigrations.
+// Same shape as TestMigration030_ForwardFreshDB.
+func TestMigration031_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	// schema_migrations must contain row 031.
+	versions, err := store.GetAppliedMigrations(context.Background())
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "031" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 031 (registry append missing) — applied versions: %v", versions)
+	}
+
+	// Both group columns must be present on models.
+	if !columnExists(t, store.DB, "models", "members_json") {
+		t.Error("members_json column missing from models (031 SQL not applied)")
+	}
+	if !columnExists(t, store.DB, "models", "shadow_model_id") {
+		t.Error("shadow_model_id column missing from models (031 SQL not applied)")
+	}
+}

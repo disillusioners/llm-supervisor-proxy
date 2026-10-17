@@ -115,6 +115,24 @@ const (
 	// image-gen doc/code drift at config.go:258-259 is NOT
 	// inherited). Excluded from /v1/models.
 	KindDecision = "decision"
+
+	// KindGroup marks VIRTUAL load-balancing group models
+	// (load-balance-groups commission / §3.2, Round-2 membership
+	// pivot — members are PROXY MODEL IDs, not credential
+	// triples). A group row carries a flat Members list
+	// ([]GroupMember{ModelID, Weight}, 1..16 entries, each an
+	// existing text/chat-kind model ID) and an optional single
+	// ID-space claim (ShadowModelID). Groups are served by the
+	// normal chat pipeline: one thin layer rewrites the request's
+	// modelList to the sticky-picked member, after which the
+	// member's existing pipeline runs unchanged. Groups carry no
+	// credentials, no fallback_chain, no secondary_upstream_model,
+	// no peak_hour_*, no release_stream_chunk_deadline (G6), and
+	// REQUIRE ExcludeFromUltimateSwitching==true (G7). Listed in
+	// /v1/models; a claimed model's ID resolves to the group
+	// (claim-first GetModel) while the claimed row stays editable
+	// via the strict twins.
+	KindGroup = "group"
 )
 
 // IsImageGen reports whether the model is served by the image
@@ -128,6 +146,16 @@ func (m *ModelConfig) IsImageGen() bool {
 // site 2). Empty Kind is treated as chat.
 func (m *ModelConfig) IsDecision() bool {
 	return m != nil && m.Kind == KindDecision
+}
+
+// IsGroup reports whether the model is a virtual load-balancing
+// group (load-balance-groups commission / §3.2). Empty Kind is
+// treated as chat. Groups are chat-servable (they stay listed in
+// /v1/models) but are excluded from the FE chat tab and token
+// pickers; they are neither IsImageGen nor IsDecision, so the
+// misroute guards pass them through to the normal chat paths.
+func (m *ModelConfig) IsGroup() bool {
+	return m != nil && m.Kind == KindGroup
 }
 
 // ValidateKindRules enforces the `kind` discriminator rules
@@ -170,6 +198,17 @@ func (m *ModelConfig) IsDecision() bool {
 // == true (D9 — explicit enforcement, not the image-gen
 // doc/code drift).
 //
+// The group rule set (G1-G8 field-level subset; load-balance-groups
+// commission / §5.1, §5.2): Internal == true (G1), FallbackChain
+// empty, SecondaryUpstreamModel == "", PeakHourEnabled == false,
+// ReleaseStreamChunkDeadline == 0 (G6), ExcludeFromUltimateSwitching
+// == true (G7 — D9 posture), and ShadowModelID != the group's own
+// ID (G8 self-part). The collection-aware half of the G-rules
+// (member existence/kind/weight/dup/cap, shadow-target checks and
+// the G8 cross-group uniqueness scan) lives in ValidateGroupMembers
+// (pkg/models/group.go) — it needs the model collection and is run
+// by the write paths, not by this helper.
+//
 // Unknown `kind` values are rejected (typo protection —
 // `image_gen` silently meaning chat is exactly the failure mode
 // this guard prevents).
@@ -184,8 +223,10 @@ func ValidateKindRules(m *ModelConfig, internalProvider string) error {
 		return validateImageGenRules(m, internalProvider)
 	case KindDecision:
 		return validateDecisionRules(m, internalProvider)
+	case KindGroup:
+		return validateGroupRules(m, internalProvider)
 	default:
-		return fmt.Errorf("model %s: unknown kind %q (expected %q, %q, or %q)", m.ID, m.Kind, KindChat, KindImageGen, KindDecision)
+		return fmt.Errorf("model %s: unknown kind %q (expected %q, %q, %q, or %q)", m.ID, m.Kind, KindChat, KindImageGen, KindDecision, KindGroup)
 	}
 }
 
@@ -362,6 +403,29 @@ type ModelConfig struct {
 	// `release_stream_chunk_deadline` are rejected on image-gen
 	// rows (BE-D2 + the FE-5 hidden-field posture).
 	Kind string `json:"kind,omitempty"`
+
+	// Members is the flat member list of a kind=="group" row
+	// (load-balance-groups commission / §3.2, Round-2 membership
+	// pivot). Each entry references an EXISTING text (chat-kind)
+	// model by its proxy model ID plus a positive weight; the
+	// group is one thin layer that rewrites the request's model
+	// list to the sticky-picked member, after which the member's
+	// own pipeline (race, retry, credential LB, fallback) runs
+	// unchanged. 1..16 entries (G2); no group-as-member (G5 —
+	// flat membership only, USER-DECIDED); validated by
+	// ValidateGroupMembers at every write path.
+	Members []GroupMember `json:"members,omitempty"`
+
+	// ShadowModelID is the optional single ID-space claim of a
+	// kind=="group" row (§3.4 — THE design center): when set (and
+	// the group is enabled), requests for that model ID resolve to
+	// the GROUP row via claim-first GetModel, and the claimed row
+	// is hidden from /v1/models. The target must be an existing
+	// chat-kind model (G8); claiming one of the group's own
+	// members is LEGAL (self-shadow — the canonical day-1
+	// `coding[coding]` onboarding); claiming the group's own ID is
+	// not. Strict twins and GetModelNative bypass claims.
+	ShadowModelID string `json:"shadow_model_id,omitempty"`
 }
 
 // GetReleaseStreamChunkDeadline returns the configured deadline duration.
@@ -451,6 +515,18 @@ type ModelsConfig struct {
 	Models      []ModelConfig      `json:"models"`
 	Credentials *CredentialsConfig `json:"-"` // Credentials are managed separately
 	filePath    string
+
+	// claims is the ID-space shadow-claim index (§3.4):
+	// shadowed model ID → owning ENABLED group ID. nil-safe: a
+	// zero-value ModelsConfig (or a snapshot built by
+	// snapshotForValidation, which never consults claims) behaves
+	// as claim-free. Rebuilt from the Models slice wherever the
+	// in-memory state is rebuilt (Load, AddModel, UpdateModel,
+	// RemoveModel) — same rebuild points as the DB twin's
+	// post-write rebuild. Disabled groups contribute NO entries
+	// (a disabled group must not hijack traffic it isn't
+	// serving).
+	claims map[string]string
 }
 
 // NewModelsConfig creates a new empty ModelsConfig.
@@ -483,13 +559,54 @@ func (mc *ModelsConfig) GetTruncateParams(modelID string) []string {
 
 // GetModel returns the model configuration for a given model ID.
 // Returns nil if the model is not found.
+//
+// load-balance-groups §3.4 — CLAIM-FIRST resolution: if the ID is
+// claimed by an ENABLED group, the GROUP row is returned (the
+// client-facing virtualization seam). Admin surfaces use
+// GetModelByName / GetModelNative (claims are ID-space only and
+// bypassable by direct ID).
 func (mc *ModelsConfig) GetModel(modelID string) *ModelConfig {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	// Claim-first: claims hit + owning group exists + enabled →
+	// the group row (a disabled group's claim is inactive — its
+	// entry is absent from the index; the Enabled re-check is
+	// defense against any drift).
+	if groupID, ok := mc.claims[modelID]; ok && groupID != "" {
+		for _, model := range mc.Models {
+			if model.ID == groupID {
+				if model.Enabled {
+					copy := model
+					return &copy
+				}
+				break // disabled owner — claim inactive, fall through
+			}
+		}
+	}
+
+	for _, model := range mc.Models {
+		if model.ID == modelID {
+			// Return a copy to avoid mutations
+			copy := model
+			return &copy
+		}
+	}
+	return nil
+}
+
+// GetModelNative returns the row for modelID by DIRECT ID lookup,
+// BYPASSING the shadow-claim index (§3.4 / Am22 L1 hard rule:
+// member refs resolve by row identity; claims are client-facing
+// resolution only). This is the lookup the group member machinery
+// must use — a claims-first lookup here would infinite-loop the
+// day-1 self-shadow group (`coding[coding]`).
+func (mc *ModelsConfig) GetModelNative(modelID string) *ModelConfig {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 
 	for _, model := range mc.Models {
 		if model.ID == modelID {
-			// Return a copy to avoid mutations
 			copy := model
 			return &copy
 		}
@@ -576,7 +693,24 @@ func (mc *ModelsConfig) Load(filePath string) error {
 	mc.Credentials.SetCredentials(config.Credentials)
 	mc.filePath = filePath
 
+	mc.rebuildClaimsLocked()
+
 	return nil
+}
+
+// rebuildClaimsLocked rebuilds the shadow-claim index from the
+// Models slice (§3.4). Caller must hold mc.mu (write). Only
+// ENABLED groups with a non-empty ShadowModelID contribute
+// entries; a stale/nil index degrades to claim-free resolution
+// (safe direction: no hijack).
+func (mc *ModelsConfig) rebuildClaimsLocked() {
+	claims := make(map[string]string)
+	for _, model := range mc.Models {
+		if model.Kind == KindGroup && model.Enabled && model.ShadowModelID != "" {
+			claims[model.ShadowModelID] = model.ID
+		}
+	}
+	mc.claims = claims
 }
 
 // Save atomically saves the models configuration to a JSON file.
@@ -706,6 +840,7 @@ func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 
 	// Add the model
 	mc.Models = append(mc.Models, model)
+	mc.rebuildClaimsLocked()
 	return nil
 }
 
@@ -770,13 +905,31 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 
 	// Validation passed — commit the mutation in place.
 	mc.Models[targetIdx] = model
+	mc.rebuildClaimsLocked()
 	return nil
 }
 
 // RemoveModel removes a model configuration by ID.
+//
+// load-balance-groups / Am27: refuses while the model ID is a
+// member of any group (the error names the group) — the operator
+// removes the member from the group first. Groups carry no
+// credentials, so there is no credential-side scan.
 func (mc *ModelsConfig) RemoveModel(modelID string) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// Am27 member-scan: block-at-delete (Q11 recommended default).
+	for _, m := range mc.Models {
+		if m.Kind != KindGroup {
+			continue
+		}
+		for _, member := range m.Members {
+			if member.ModelID == modelID {
+				return fmt.Errorf("model '%s' is a member of group '%s' — remove it from the group before deleting the model", modelID, m.ID)
+			}
+		}
+	}
 
 	// Find and remove the model
 	found := false
@@ -805,6 +958,8 @@ func (mc *ModelsConfig) RemoveModel(modelID string) error {
 		return err
 	}
 
+	mc.rebuildClaimsLocked()
+
 	return nil
 }
 
@@ -832,6 +987,22 @@ func (mc *ModelsConfig) Validate() error {
 	for _, model := range mc.Models {
 		if model.ID == "" {
 			return ErrInvalidModelID
+		}
+
+		// load-balance-groups / Am23 routing (JSON twin): group
+		// rows run the GROUP validators INSTEAD of the generic
+		// internal/credential block below — that block's
+		// "credential_id is required when internal is true" gate
+		// rejects exactly the group-row shape (Internal=true,
+		// Credentials=[]). The branch must precede it.
+		if model.Kind == KindGroup {
+			if err := ValidateKindRules(&model, ""); err != nil {
+				return err
+			}
+			if err := ValidateGroupMembers(&model, mc.Models); err != nil {
+				return err
+			}
+			continue
 		}
 
 		// Enforce max 1 fallback model
