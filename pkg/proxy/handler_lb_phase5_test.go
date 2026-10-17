@@ -381,9 +381,9 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 
 // sendChatRequest drives a non-stream chat completions request through
 // the handler and returns the recorder. The body uses the given model
-// name and first-user-message (used for affinity key derivation). Pass
+// name and leading user-message run (used for affinity key derivation). Pass
 // model="" to use the env-provided model field.
-func sendChatRequest(t *testing.T, h *Handler, token string, modelName, firstUserMessage string) *httptest.ResponseRecorder {
+func sendChatRequest(t *testing.T, h *Handler, token string, modelName, leadingUserRun string) *httptest.ResponseRecorder {
 	t.Helper()
 	body := map[string]interface{}{
 		"model":  modelName,
@@ -391,7 +391,7 @@ func sendChatRequest(t *testing.T, h *Handler, token string, modelName, firstUse
 		"messages": []interface{}{
 			map[string]interface{}{
 				"role":    "user",
-				"content": firstUserMessage,
+				"content": leadingUserRun,
 			},
 		},
 	}

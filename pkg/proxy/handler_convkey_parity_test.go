@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
@@ -113,5 +114,58 @@ func TestConversationKey_OpenAIAnthropicExtractionParity(t *testing.T) {
 				t.Fatalf("key parity violated: openai=%s anthropic=%s", ka, kb)
 			}
 		})
+	}
+}
+
+// TestConversationKey_AnthropicTopLevelSystemExcluded — parity-gap
+// case: the Anthropic wire carries the system prompt in a TOP-LEVEL
+// `system` field, not as a message. Round-trip an
+// AnthropicRequest{System: …, Messages: …} through JSON (the shape
+// HandleMessages actually parses) and pin that the top-level system
+// NEVER enters the leading user run or the key — symmetric in effect
+// with the OpenAI system-message SKIP exercised above.
+func TestConversationKey_AnthropicTopLevelSystemExcluded(t *testing.T) {
+	req := translator.AnthropicRequest{
+		System: "you are terse",
+		Messages: []translator.AnthropicMessage{
+			{Role: "user", Content: "task one"},
+			{Role: "user", Content: "task two"},
+		},
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal anthropic request: %v", err)
+	}
+	var parsed translator.AnthropicRequest
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal anthropic request: %v", err)
+	}
+	if parsed.System == nil {
+		t.Fatalf("round-trip lost the top-level system field; case would pass vacuously")
+	}
+
+	// OpenAI wire-equivalent: the same logical conversation with the
+	// system prompt as inline system messages (SKIPped by the walk).
+	openAI := []interface{}{
+		map[string]interface{}{"role": "system", "content": "you are terse"},
+		map[string]interface{}{"role": "user", "content": "task one"},
+		map[string]interface{}{"role": "user", "content": "task two"},
+	}
+	wantRun := `["task one","task two"]`
+
+	gotOpenAI := credentiallb.ExtractLeadingUserRun(openAI)
+	gotAnthropic := credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(parsed.Messages))
+
+	if gotOpenAI != wantRun || gotAnthropic != wantRun {
+		t.Fatalf("run mismatch: openai=%q anthropic=%q want %q", gotOpenAI, gotAnthropic, wantRun)
+	}
+	if gotOpenAI != gotAnthropic {
+		t.Fatalf("parity violated: openai=%q anthropic=%q", gotOpenAI, gotAnthropic)
+	}
+
+	ka := credentiallb.ComputeConversationKey("m1", "tok1", gotOpenAI)
+	kb := credentiallb.ComputeConversationKey("m1", "tok1", gotAnthropic)
+	if ka != kb {
+		t.Fatalf("key parity violated: openai=%s anthropic=%s", ka, kb)
 	}
 }
