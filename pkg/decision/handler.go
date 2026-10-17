@@ -398,9 +398,14 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 	upstreamReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 	// Strip client auth headers + hop-by-hop headers (proxy's
 	// sk- token must never reach the decision upstream —
-	// parallel of imggen BE-A2).
+	// parallel of imggen BE-A2). Also strip the client
+	// Content-Type: the app-owned application/json above is
+	// authoritative; Add-ing the client's CT would produce a
+	// DUPLICATED Content-Type upstream (OpenAI /v1/decisions
+	// rejects it with "Invalid decision request JSON").
 	for key, values := range r.Header {
-		if isHopByHopHeader(key) || isClientAuthHeader(key) {
+		if isHopByHopHeader(key) || isClientAuthHeader(key) ||
+			strings.EqualFold(key, "Content-Type") {
 			continue
 		}
 		for _, value := range values {
