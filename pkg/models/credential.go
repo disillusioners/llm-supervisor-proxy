@@ -21,6 +21,11 @@ var validProviders = map[string]bool{
 	"minimax":   true,
 	"grok":      true,
 	"deepseek":  true,
+	// OpenCode Zen (https://opencode.ai/zen) — OpenAI-compatible
+	// chat-completions provider. Approved 2026-10-17; default base
+	// URL https://opencode.ai/inference/openai/v1 (override to
+	// https://opencode.ai/zen/v1 for the stable-docs route).
+	"opencode": true,
 	// Decision Models / §5.2 — "typesafe" is the new identity
 	// for /v1/decisions upstream. The D4 provider-gate
 	// (validateDecisionRules) only accepts {"openai","typesafe"}
