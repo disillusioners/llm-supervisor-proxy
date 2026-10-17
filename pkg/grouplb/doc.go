@@ -16,10 +16,13 @@
 //     concern).
 //   - key.go is NOT forked: ComputeConversationKey is IMPORTED from
 //     pkg/credentiallb (Am31). The caller passes
-//     ComputeConversationKey(groupID, tokenID, firstUserMessage) —
-//     the group ID salts the key, so the pick space is per-group
-//     (two groups sharing a member keep distinct binding spaces, and
-//     direct member requests use the member-salted space).
+//     ComputeConversationKey(groupID, tokenID, leadingUserRun) — the
+//     canonical JSON array of the LEADING CONTIGUOUS user-message run
+//     (ExtractLeadingUserRun; superseded the first-user-message-only
+//     extraction 2026-10-17) — and the group ID salts the key, so the
+//     pick space is per-group (two groups sharing a member keep
+//     distinct binding spaces, and direct member requests use the
+//     member-salted space).
 //
 // Affinity is IN-MEMORY ONLY (USER-DECIDED, plan Q4): bindings are
 // lost on restart (cold start — a single startup log line documents
