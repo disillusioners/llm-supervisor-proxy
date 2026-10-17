@@ -54,6 +54,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,6 +119,15 @@ func newAm29Counter(t *testing.T) *usage.Counter {
 // upstream + a real usage.Counter + the proxy handler. The seed
 // upstream returns a body whose "model" field is "stub-model" — so
 // the Am26 mask can be detected by inspecting the response body.
+//
+// P5 wire-recording: every upstream call is appended to h.captures
+// (method + path + header clone + verbatim body bytes) under
+// h.capturesMu. The capture wrapper sits between httptest and the
+// fixed stub — the stub is byte-identical, only the capture
+// plumbing is new. Used by case (b) to assert the GROUP path's
+// upstream wire is parity-equivalent to a direct path's wire
+// (same model field, same Authorization header presence, body
+// field-for-field after dropping request-id noise).
 type am29Harness struct {
 	mgr     *database.ModelsManager
 	h       *Handler
@@ -125,6 +135,24 @@ type am29Harness struct {
 	bus     *events.Bus
 	counter *usage.Counter
 	clean   func()
+
+	// captures is the FIFO list of every request the stub saw, in
+	// arrival order. capturesMu guards append. Read sites are the
+	// case (b) parity asserts only — single-goroutine read after the
+	// request returns.
+	capturesMu sync.Mutex
+	captures   []am29UpstreamCapture
+}
+
+// am29UpstreamCapture records ONE upstream wire (method, path,
+// header clone, verbatim body bytes). Appended by the recording
+// wrapper around the fixed stub; consumed by case (b) parity
+// asserts.
+type am29UpstreamCapture struct {
+	Method string
+	Path   string
+	Header http.Header
+	Body   []byte
 }
 
 func newAm29Harness(t *testing.T) *am29Harness {
@@ -141,7 +169,22 @@ func newAm29Harness(t *testing.T) *am29Harness {
 		store1.Close()
 		t.Fatalf("InitializeManagers: %v", err)
 	}
+	hh := &am29Harness{}
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// load-balance-groups / P5 — wire-capture wrapper. Read the
+		// body verbatim, append the captured wire under hh.capturesMu
+		// (FIFO), then forward to the fixed stub. The stub reply is
+		// unchanged; the capture is purely observational. io.ReadAll is
+		// safe here because httptest always provides a finite body.
+		body, _ := io.ReadAll(r.Body)
+		hh.capturesMu.Lock()
+		hh.captures = append(hh.captures, am29UpstreamCapture{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Header: r.Header.Clone(),
+			Body:   append([]byte(nil), body...),
+		})
+		hh.capturesMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(stubUpstreamBody("stub-model", "hi")))
@@ -156,7 +199,23 @@ func newAm29Harness(t *testing.T) *am29Harness {
 		store1.Close()
 		_ = os.RemoveAll(tmp)
 	}
-	return &am29Harness{mgr: mgr, h: h, up: up, bus: bus, counter: counter, clean: clean}
+	hh.mgr = mgr
+	hh.h = h
+	hh.up = up
+	hh.bus = bus
+	hh.counter = counter
+	hh.clean = clean
+	return hh
+}
+
+// am29Recorded returns the captures recorded so far, in arrival
+// order. Read-only convenience for case (b) parity asserts.
+func (h *am29Harness) am29Recorded() []am29UpstreamCapture {
+	h.capturesMu.Lock()
+	defer h.capturesMu.Unlock()
+	cp := make([]am29UpstreamCapture, len(h.captures))
+	copy(cp, h.captures)
+	return cp
 }
 
 func (h *am29Harness) close() { h.clean() }
@@ -191,6 +250,196 @@ func am29AddCodingCoding(t *testing.T, h *am29Harness) {
 		ShadowModelID:                "coding",
 	}); err != nil {
 		t.Fatalf("AddModel(coding[coding]): %v", err)
+	}
+}
+
+// am29AddWrapperGroup adds a SECOND group ("wrapper[coding-actual]")
+// whose member has internal_model != id. The day-1 coding[coding]
+// group has member ID == client string (both "coding"), so the
+// day-1 byte-equality path cannot exercise the Am26 mask target
+// plumbing on a NON-day-1 client string. The wrapper group has
+// member ID "coding-actual" while the client requests
+// "wrapper[coding-actual]" — a regression in the mask plumbing
+// (wrong target string, missing-field rename, off-by-one on the
+// resolved-model check) would surface here as response.model
+// != "wrapper[coding-actual]".
+//
+// Shadow_claim note: this group has ShadowModelID="" (no claim) so
+// that the claims index does NOT hijack the "coding-actual"
+// lookup. A claim on "coding-actual" would force the claims-aware
+// ResolveInternalConfigWithAffinity to return the group row (no
+// credentials) and short-circuit the internal resolution — that
+// would block the internal-path execution this test exercises.
+// The "wrapper[coding-actual]" ID is still the GROUP identity and
+// the day-1 internal-model-rewrite path is still exercised
+// through Internal:true + InternalModel:"actual-upstream".
+//
+// Order of AddModel calls matters (validateBeforeWrite →
+// validateGroupWrite runs ValidateGroupMembers which requires
+// the member row already exist + the credential row already
+// exist for Internal:true members).
+func am29AddWrapperGroup(t *testing.T, h *am29Harness) {
+	t.Helper()
+	if err := h.mgr.AddCredential(models.CredentialConfig{
+		ID: "cred-wrapper", Provider: "openai", APIKey: "key-wrapper", BaseURL: h.up.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential(cred-wrapper): %v", err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "coding-actual", Name: "Coding Actual", Enabled: true,
+		Kind: models.KindChat, Internal: true, InternalModel: "actual-upstream",
+		Credentials: []models.CredentialRef{
+			{CredentialID: "cred-wrapper", Weight: 1, Position: 0},
+		},
+	}); err != nil {
+		t.Fatalf("AddModel(coding-actual): %v", err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "wrapper[coding-actual]", Name: "Wrapper Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "coding-actual", Weight: 1}},
+		// ShadowModelID deliberately empty — see shadow_claim
+		// note above (avoids the claims-index hijack on the
+		// internal member ID).
+	}); err != nil {
+		t.Fatalf("AddModel(wrapper[coding-actual]): %v", err)
+	}
+}
+
+// am29AssertBootLazyPin asserts the load-balance-groups Am15
+// boot-lazy invariant: manager construction / boot performs NO
+// rehydration walk over the persisted config table (no
+// RebindFromStore equivalent for the grouplb engine). The per-group
+// SELECTOR (member refs + cumulative prefix weights) IS seeded
+// eagerly by every AddModel/UpdateModel write via
+// notifyGroupEngineLocked → OnGroupChanged (P2.2 — load-bearing
+// for the Am28 survivor filter on member edits; verified and
+// approved at P2 review). The boot-lazy invariant is specifically:
+// a freshly NewModelsManager'd grouplb.Engine has zero entries
+// even when the persisted config table has group rows.
+//
+// Implementation (FORM-1 — the manager-visible form):
+//
+//	1. Spin up a fresh file-backed SQLite (the d329a56
+//	   discipline — file DSN, never :memory:, so the
+//	   reconstruction below actually re-reads the persisted
+//	   state).
+//	2. First boot: AddModel the chat member + the group row
+//	   (this seeds manager1's engine as a side effect via the
+//	   P2.2 write-path notification — proves the eager-seed
+//	   fires in practice).
+//	3. Close manager1 + store1; the grouplb engine instance
+//	   is discarded.
+//	4. Second boot: NewModelsManager over the SAME file DSN.
+//	   Migrations are idempotent, so re-Initialize is a clean
+//	   reopen.
+//	5. BOOT-LAZY ASSERTION: manager2.GroupEngine().HasGroup(...)
+//	   MUST return false. A RebindFromStore equivalent
+//	   (config-table → engine rehydration at boot) would
+//	   surface here.
+//	6. LAZY-FLIP: drive one RewriteGroupEntries through the
+//	   manager — the request path picks a member via
+//	   pickServableGroupMember, which seeds the engine on
+//	   demand when !HasGroup. After the call, HasGroup MUST
+//	   return true. Proves the lazy-on-demand seed path is
+//	   still intact (not just disabled).
+//
+// This is the FORM-1 pin; FORM-2 (affinity state — bindings
+// count) would require cross-package access to grouplb's
+// bindingsCountForTest, which is grouplb-internal (the
+// ModelsManager does not expose per-group binding counts).
+// FORM-1 is sufficient for the Am15 invariant.
+func am29AssertBootLazyPin(t *testing.T, groupID string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "boot-lazy.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	ctx := context.Background()
+
+	// ── First boot ──
+	store1, err := database.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize (1st boot): %v", err)
+	}
+	_, mgr1, err := database.InitializeManagers(store1, events.NewBus())
+	if err != nil {
+		store1.Close()
+		t.Fatalf("InitializeManagers (1st boot): %v", err)
+	}
+
+	// Seed the chat member + the group row. AddModel calls
+	// notifyGroupEngineLocked → OnGroupChanged, which seeds
+	// manager1's engine as a side effect — proves the eager
+	// seed fires in practice (sanity baseline: after AddModel
+	// HasGroup returns true on this same manager).
+	if err := mgr1.AddModel(models.ModelConfig{
+		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: false,
+	}); err != nil {
+		mgr1.Close()
+		store1.Close()
+		t.Fatalf("AddModel(coding): %v", err)
+	}
+	if err := mgr1.AddModel(models.ModelConfig{
+		ID: groupID, Name: "Coding Self-Shadow", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID:                "coding",
+	}); err != nil {
+		mgr1.Close()
+		store1.Close()
+		t.Fatalf("AddModel(%s): %v", groupID, err)
+	}
+
+	// Sanity baseline: manager1's engine HAS the entry (the
+	// eager seed fired). If this fails, the test framework
+	// itself is broken (the eager-seed path is not what we
+	// thought) — surface it loudly before the boot-lazy
+	// pin below.
+	if !mgr1.GroupEngine().HasGroup(groupID) {
+		mgr1.Close()
+		store1.Close()
+		t.Fatalf("sanity baseline broken: manager1's engine has no entry for %q after AddModel (eager-seed did NOT fire as expected; investigate P2.2 notifyGroupEngineLocked wiring before trusting the boot-lazy pin)", groupID)
+	}
+
+	// Close manager1 — engine instance is discarded.
+	mgr1.Close()
+	store1.Close()
+
+	// ── Second boot ──
+	store2, err := database.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize (2nd boot, same DSN): %v", err)
+	}
+	defer store2.Close()
+	_, mgr2, err := database.InitializeManagers(store2, events.NewBus())
+	if err != nil {
+		t.Fatalf("InitializeManagers (2nd boot, same DSN): %v", err)
+	}
+	defer mgr2.Close()
+
+	// BOOT-LAZY ASSERTION: the fresh manager's engine MUST NOT
+	// carry entries seeded from the persisted config table.
+	// HasGroup returning true here means NewModelsManager (or a
+	// helper called from it) walked the persisted groups and
+	// rehydrated the engine — the Am15 invariant violation we
+	// want to catch.
+	if mgr2.GroupEngine().HasGroup(groupID) {
+		t.Fatalf("boot pre-seed regression: manager construction rehydrated engine from config table (RebindFromStore equivalent?) for groupID=%q — NewModelsManager must NOT walk persisted groups into the engine", groupID)
+	}
+
+	// LAZY-FLIP: drive ONE request-path pick through the
+	// manager. RewriteGroupEntries → pickServableGroupMember
+	// checks !HasGroup and calls OnGroupChanged on first
+	// rewrite after boot (store_group_rewrite.go:91-94). After
+	// this call, HasGroup MUST return true — proves the
+	// lazy-on-demand seed path is still wired.
+	res := mgr2.RewriteGroupEntries([]string{groupID}, "boot-lazy-pin-conv")
+	if res.FailedGroupID != "" || res.MemberID == "" {
+		t.Fatalf("boot-lazy-pin lazy-flip failed: RewriteGroupEntries result=%+v (group unresolvable; the engine's lazy-on-demand seed path is broken or the member row is missing)", res)
+	}
+	if !mgr2.GroupEngine().HasGroup(groupID) {
+		t.Fatalf("boot-lazy-pin lazy-flip failed: engine has no entry for %q AFTER RewriteGroupEntries — the request-path !HasGroup → OnGroupChanged seed in pickServableGroupMember did not fire", groupID)
 	}
 }
 
@@ -341,6 +590,102 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		if content, _ := msg["content"].(string); content != "hi" {
 			t.Errorf("coding[coding] routing: choices[0].message.content=%q, want %q", content, "hi")
 		}
+
+		// load-balance-groups / P5 — wire-equivalence pin. The
+		// fixed stub returns a constant body, so a rewrite
+		// regression (wrong model forwarded upstream, dropped
+		// Authorization header, mutated body) would pass the
+		// response-shape asserts above silently. Capture the
+		// GROUP path's upstream wire and assert parity with the
+		// DIRECT path (same chat model "coding", no group) on:
+		//   - body "model" field == "coding" (the resolved member
+		//     ID, not the client group ID)
+		//   - Authorization header presence parity (both must
+		//     have or both not have)
+		//   - body field-for-field equivalence after dropping the
+		//     request-id noise
+		groupCaps := h.am29Recorded()
+		if len(groupCaps) < 1 {
+			t.Fatalf("coding[coding] routing: recording wrapper saw zero upstream calls; want >=1 (harness mis-wired?)")
+		}
+		groupWire := groupCaps[0]
+
+		// Direct control: same chat model, no group. Same wire
+		// path through the proxy (external passthrough).
+		h2 := newAm29Harness(t)
+		defer h2.close()
+		if err := h2.mgr.AddModel(models.ModelConfig{
+			ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: false,
+		}); err != nil {
+			t.Fatalf("AddModel(coding direct): %v", err)
+		}
+		rec2 := httptest.NewRecorder()
+		h2.h.HandleChatCompletions(rec2, makeChatRequest(t, map[string]interface{}{
+			"model":    "coding",
+			"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+		}))
+		if rec2.Code != http.StatusOK {
+			t.Fatalf("coding direct: status=%d body=%s", rec2.Code, rec2.Body.String())
+		}
+		directCaps := h2.am29Recorded()
+		if len(directCaps) < 1 {
+			t.Fatalf("coding direct: recording wrapper saw zero upstream calls; want >=1")
+		}
+		directWire := directCaps[0]
+
+		// Same path the proxy routes to — both wires hit
+		// /v1/chat/completions on the upstream. If the group
+		// rewrite had slipped in a different endpoint (e.g.
+		// /v1/decisions or a stale fallthrough), the path would
+		// differ here.
+		if groupWire.Path != directWire.Path {
+			t.Errorf("coding[coding] wire path parity: group=%q direct=%q", groupWire.Path, directWire.Path)
+		}
+		if groupWire.Method != directWire.Method {
+			t.Errorf("coding[coding] wire method parity: group=%q direct=%q", groupWire.Method, directWire.Method)
+		}
+
+		// Body equivalence: same upstream "model" field (both
+		// resolve to the chat ID "coding" — NOT the client group
+		// ID "coding[coding]"). Decoded shape parity after
+		// dropping per-request noise.
+		var groupBody, directBody map[string]interface{}
+		if err := json.Unmarshal(groupWire.Body, &groupBody); err != nil {
+			t.Fatalf("group wire body unmarshal: %v (raw=%s)", err, groupWire.Body)
+		}
+		if err := json.Unmarshal(directWire.Body, &directBody); err != nil {
+			t.Fatalf("direct wire body unmarshal: %v (raw=%s)", err, directWire.Body)
+		}
+		if gm, _ := groupBody["model"].(string); gm != "coding" {
+			t.Errorf("coding[coding] wire body.model=%q, want %q (group rewrite must forward the resolved member ID, not the client group ID)", gm, "coding")
+		}
+		if dm, _ := directBody["model"].(string); dm != "coding" {
+			t.Errorf("direct wire body.model=%q, want %q", dm, "coding")
+		}
+		// Authorization header presence parity. The harness uses
+		// no UpstreamCredentialID, so neither side sets one —
+		// both absent is the expected parity. A regression
+		// that injects an Authorization on the group path only
+		// (or strips it on the direct path only) would surface
+		// here.
+		groupAuth := groupWire.Header.Get("Authorization")
+		directAuth := directWire.Header.Get("Authorization")
+		if (groupAuth != "") != (directAuth != "") {
+			t.Errorf("coding[coding] wire Authorization parity: group=%q direct=%q (presence must match)", groupAuth, directAuth)
+		}
+		// Field-set parity on the wire bodies. Both decoded
+		// bodies should be the same shape (same keys, same
+		// scalar values) — a regression that dropped a header,
+		// mutated the message, or reordered the body would
+		// surface here.
+		if len(groupBody) != len(directBody) {
+			t.Errorf("coding[coding] wire body key-count parity: group=%d direct=%d (keys=%v vs %v)", len(groupBody), len(directBody), am29KeysOf(groupBody), am29KeysOf(directBody))
+		}
+		for k, v := range directBody {
+			if !jsonEqualish(groupBody[k], v) {
+				t.Errorf("coding[coding] wire body key %q parity: group=%v direct=%v", k, groupBody[k], v)
+			}
+		}
 	})
 
 	// (c) CodingCoding_ResponseShape: the Am26 masking rewrites
@@ -413,6 +758,61 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 				t.Errorf("mask envelope: key %q differs (control=%v, group=%v)", k, v, groupBody[k])
 			}
 		}
+
+		// load-balance-groups / P5 — non-day-1 mask path. The
+		// day-1 wrapper above has member ID == client string
+		// (both "coding"), so a regression that dropped the
+		// Am26 mask (left the top-level "model" field as
+		// "stub-model") would still be caught by the
+		// `controlBody["model"] != groupBody["model"]` diff
+		// above, but a regression that masked to the WRONG
+		// client value (e.g. the resolved member ID instead of
+		// the request log string) would surface here as
+		// "coding" (the member) leaking into a case where the
+		// client-requested string should be the mask target.
+		//
+		// The wrapper group "wrapper[coding-actual]" has
+		// shadow=coding-actual and member=coding-actual with
+		// internal_model="actual-upstream" — internal_model !=
+		// id. The mask target must be the CLIENT-REQUESTED
+		// string ("wrapper[coding-actual]"), NOT the member's
+		// upstream echo ("coding-actual" or, on the internal
+		// path, "actual-upstream"). Any drift surfaces here.
+		hw := newAm29Harness(t)
+		defer hw.close()
+		am29AddWrapperGroup(t, hw)
+
+		recW := httptest.NewRecorder()
+		hw.h.HandleChatCompletions(recW, makeChatRequest(t, map[string]interface{}{
+			"model":    "wrapper[coding-actual]",
+			"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+		}))
+		if recW.Code != http.StatusOK {
+			t.Fatalf("wrapper[coding-actual] response shape: status=%d body=%s", recW.Code, recW.Body.String())
+		}
+		var wrapperBody map[string]interface{}
+		if err := json.Unmarshal(recW.Body.Bytes(), &wrapperBody); err != nil {
+			t.Fatalf("wrapper[coding-actual] body unmarshal: %v (raw=%s)", err, recW.Body.String())
+		}
+		if m, _ := wrapperBody["model"].(string); m != "wrapper[coding-actual]" {
+			t.Errorf("wrapper[coding-actual] response shape: model=%q, want %q (Am26 mask target MUST be the CLIENT-REQUESTED string on a non-day-1 path; day-1 byte-identity cannot exercise this)", m, "wrapper[coding-actual]")
+		}
+		// The other response keys stay byte-identical to the
+		// stub — the day-1 envelope (drop "model" + compare
+		// field-for-field) covers the same property here.
+		expectedStub := stubUpstreamBody("stub-model", "hi")
+		var expectedBody map[string]interface{}
+		_ = json.Unmarshal([]byte(expectedStub), &expectedBody)
+		delete(expectedBody, "model")
+		delete(wrapperBody, "model")
+		if len(expectedBody) != len(wrapperBody) {
+			t.Errorf("wrapper[coding-actual] mask envelope: non-model key count differs (stub=%d, wrapper=%d)", len(expectedBody), len(wrapperBody))
+		}
+		for k, v := range expectedBody {
+			if !jsonEqualish(wrapperBody[k], v) {
+				t.Errorf("wrapper[coding-actual] mask envelope: key %q differs (stub=%v, wrapper=%v)", k, v, wrapperBody[k])
+			}
+		}
 	})
 
 	// (d) CodingCoding_Metering: model_hourly_usage row shape —
@@ -449,6 +849,24 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 	// exactly once per process lifetime per group ID; E-3 writes
 	// nothing).
 	t.Run("CodingCoding_Latency", func(t *testing.T) {
+		// load-balance-groups / P5 — boot-lazy pin (FORM-1).
+		// The original literal "HasGroup(coding[coding]) before
+		// any request" assertion was a false premise against the
+		// as-built P2.2 design (per-group SELECTOR is registered
+		// by every AddModel write via notifyGroupEngineLocked →
+		// OnGroupChanged — load-bearing for the Am28 survivor
+		// filter on member edits; verified and approved at P2
+		// review). The REAL Am15 invariant is "NewModelsManager
+		// performs NO rehydration walk", which is the
+		// reconstruction pin below — a fresh manager over the
+		// SAME file-backed SQLite DSN MUST NOT carry engine
+		// state seeded from the persisted config table.
+		//
+		// The reconstruction runs BEFORE the timed warmup section
+		// so the latency loop stays clean (no DB churn in the
+		// hot path).
+		am29AssertBootLazyPin(t, "coding[coding]")
+
 		h := newAm29Harness(t)
 		defer h.close()
 		am29AddCodingCoding(t, h)
@@ -474,8 +892,6 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		// modelList rewrite + the Am26 masking).
 		const N = 20
 		groupTimes := am29MeasureN(t, h, "coding", N)
-		soloTimes := am29MeasureN(t, h, "coding-direct-fallback", N)
-		_ = soloTimes
 
 		// The direct path here is the same harness serving "coding"
 		// with no group configured — but our harness groups
@@ -551,6 +967,18 @@ func median(ds []time.Duration) time.Duration {
 	copy(cp, ds)
 	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
 	return cp[len(cp)/2]
+}
+
+// am29KeysOf returns the sorted key set of a decoded-JSON map —
+// used in the case (b) parity error messages to surface which
+// keys drifted between the group wire and the direct wire.
+func am29KeysOf(m map[string]interface{}) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────

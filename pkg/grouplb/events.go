@@ -25,6 +25,15 @@ const (
 	// EventMemberFailover is the group-level failover observability
 	// event, published by the CALLER after a group-level
 	// ExcludeAndReselect rebind succeeds (Am24 re-entry). Payload:
-	// {group_id, from_member_id, to_member_id}.
+	// {id, group_id, member_id, replacement}.
+	//
+	// Mirrored at the OpenAI emission site (pkg/proxy/handler.go
+	// tryGroupReentry, ~:1221) and the Anthropic emission site
+	// (pkg/proxy/handler_groups.go tryGroupReentryAnthropic, ~:387);
+	// the keys above are the actual map keys both call sites
+	// publish — earlier revisions of this doc referenced a stale
+	// {group_id, from_member_id, to_member_id} shape that never
+	// matched the wired code. Kept verbatim so FE EventLog + downstream
+	// failover dashboards can match the real payload.
 	EventMemberFailover = "model_member_failover"
 )

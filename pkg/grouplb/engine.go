@@ -50,10 +50,29 @@ type MemberRef struct {
 //	e := NewEngine(ttl, sweepInterval, rngSeed, defaultCooldown)
 //	defer e.Stop()
 //
-// Per-group state is LAZILY instantiated: there is deliberately NO
-// RebindFromStore boot walk (Am15). The owning ModelsManager seeds a
-// group's state via OnGroupChanged on the first rewrite (HasGroup
-// gates the seed) and refreshes it on every group write.
+// Per-group state has TWO axes — both non-lazy at boot, but only
+// one is non-lazy at write-time:
+//
+//   1. PER-GROUP SELECTOR (cumulative prefix weights + member
+//      refs): NOT lazy at boot. Every group Add/Update on the
+//      owning ModelsManager calls notifyGroupEngineLocked →
+//      OnGroupChanged immediately (P2.2 design — load-bearing
+//      for the Am28 survivor filter on member edits; verified and
+//      approved at P2 review). HasGroup returns true for any
+//      group that has been AddModel'd, even before any request
+//      has been served.
+//
+//   2. PER-CONVERSATION BINDINGS (sticky affinity): LAZY. Created
+//      on the first GetOrSelect call per (groupID, conversationKey)
+//      (W-1 / W-2) and TTL-evicted by the janitor. Empty-key
+//      requests return NewlyBound=false and store NO binding
+//      (C2 — Q15 model_member_selected surfaces newlyBound-only).
+//
+// Manager construction/boot performs NO rehydration walk — a
+// freshly NewModelsManager'd grouplb.Engine has zero entries.
+// The Am15 invariant is "no boot rebind", not "no eager seed":
+// the per-group SELECTOR is eager at write-time (P2.2), the
+// per-conversation BINDINGS are lazy at request-time (W-1).
 type Engine struct {
 	mu     sync.RWMutex // outer lock: guards the groups map
 	groups map[string]*groupState
@@ -189,11 +208,28 @@ func (e *Engine) getSweepHook() func() {
 	return e.sweepHook
 }
 
-// HasGroup reports whether the engine currently holds state for
-// groupID. It is the lazy-seed gate (Am15): the owning ModelsManager
-// seeds a group's state via OnGroupChanged exactly once per process
-// lifetime (first rewrite after boot); later membership changes ride
-// the manager's write path, which calls OnGroupChanged directly.
+// HasGroup reports whether the engine currently holds per-group
+// SELECTOR state for groupID. The two-axis state model
+// distinguishes:
+//
+//   - HAS-GROUP (= true) means the per-group SELECTOR (cumulative
+//     prefix weights + member refs) is registered. This is seeded
+//     by every group Add/Update write via notifyGroupEngineLocked →
+//     OnGroupChanged (P2.2) and is NOT lazy at boot — HasGroup
+//     returns true for any group that has been AddModel'd.
+//
+//   - BINDINGS COUNT (= 0 means none yet) is the per-conversation
+//     sticky-affinity state, lazily created on first GetOrSelect.
+//     See bindingsCountForTest for the reader.
+//
+// The Am15 boot-lazy invariant is specifically: NewModelsManager
+// performs NO rehydration walk — HasGroup returns false for every
+// persisted group row until a write-path notification (or the
+// request-path lazy seed in pickServableGroupMember) registers it.
+// load-balance-groups / P5 / am29 case-(e) boot-lazy pin asserts
+// exactly this invariant: after a fresh NewModelsManager over a
+// file DSN that holds persisted group rows, HasGroup returns false
+// for the persisted group IDs.
 func (e *Engine) HasGroup(groupID string) bool {
 	if e == nil {
 		return false
