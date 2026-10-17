@@ -263,6 +263,7 @@ The proxy supports multiple LLM providers out of the box:
 | **MiniMax** | `https://api.minimax.io/v1` | OpenAI | OpenAI-compatible |
 | **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI | OpenAI-compatible |
 | **OpenCode Zen** | `https://opencode.ai/inference/openai/v1` | OpenAI | OpenAI-compatible (override base_url to `https://opencode.ai/zen/v1` for the stable-docs route) |
+| **OpenCode Go** | `https://opencode.ai/inference/go/openai/v1` | OpenAI | OpenAI-compatible, subscription realm — DISTINCT provider from Zen; carries provider-native `x-opencode-session` (conversation-derived) + official-format User-Agent (override via `OPENCODE_GO_USER_AGENT`) |
 
 Configure per-model credentials and base URLs via the Web UI or database.
 

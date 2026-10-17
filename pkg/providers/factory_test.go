@@ -18,6 +18,7 @@ func TestNewProvider(t *testing.T) {
 		{"grok", "grok", false},
 		{"deepseek", "deepseek", false},
 		{"opencode", "opencode", false},
+		{"opencode-go", "opencode-go", false},
 		{"unknown", "unknown", true},
 	}
 
@@ -41,7 +42,7 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestIsProviderSupported(t *testing.T) {
-	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode"}
+	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go"}
 	for _, p := range supported {
 		if !IsProviderSupported(p) {
 			t.Errorf("expected %s to be supported", p)
@@ -55,17 +56,19 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	// 11 types post-opencode commission (OpenCode Zen is an
-	// OpenAI-compatible chat-completions provider, default base
-	// URL https://opencode.ai/inference/openai/v1; see
-	// factory.go:ProviderOpencode). Decision Models / §5.2 also
+	// 12 types post-opencode-go commission (OpenCode Go is a DISTINCT
+	// provider from OpenCode Zen — subscription realm, default base
+	// URL https://opencode.ai/inference/go/openai/v1, provider-native
+	// session/UA attribution; see factory.go:ProviderOpencodeGo and
+	// opencodego.go). OpenCode Zen remains 11-of-12 from the prior
+	// opencode commission. Decision Models / §5.2 also
 	// adds ProviderTypesafe for /v1/decisions — the chat layer
 	// doesn't speak System One, so typesafe returns "not yet
 	// implemented" from NewProvider, but the id is registered so
 	// /fe/api/providers and the FE DecisionModelForm provider
 	// dropdown can see it.
-	if len(types) != 11 {
-		t.Errorf("expected 11 provider types, got %d", len(types))
+	if len(types) != 12 {
+		t.Errorf("expected 12 provider types, got %d", len(types))
 	}
 	// Spot-check the typesafe addition.
 	foundTypesafe := false
@@ -77,6 +80,17 @@ func TestGetProviderTypes(t *testing.T) {
 	}
 	if !foundTypesafe {
 		t.Errorf("ProviderTypesafe missing from GetProviderTypes()")
+	}
+	// Spot-check the opencode-go addition (DISTINCT from opencode).
+	foundOpencodeGo := false
+	for _, t := range types {
+		if t == ProviderOpencodeGo {
+			foundOpencodeGo = true
+			break
+		}
+	}
+	if !foundOpencodeGo {
+		t.Errorf("ProviderOpencodeGo missing from GetProviderTypes()")
 	}
 }
 

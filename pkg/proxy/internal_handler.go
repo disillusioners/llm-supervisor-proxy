@@ -218,7 +218,7 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 		return fmt.Errorf("failed to resolve internal config for model %s", h.config.ID)
 	}
 
-	err := h.executeWithResolved(ctx, requestBody, w, isStream, resolved)
+	err := h.executeWithResolved(ctx, requestBody, w, isStream, resolved, conversationKey)
 	if err == nil || h.credEngine == nil {
 		return err
 	}
@@ -317,7 +317,7 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	}
 
 	// Single retry through the SAME execution path.
-	return h.executeWithResolved(ctx, requestBody, w, isStream, retryResolved)
+	return h.executeWithResolved(ctx, requestBody, w, isStream, retryResolved, conversationKey)
 }
 
 // executeWithResolved (Phase 3 / Task 22 refactor) runs the internal
@@ -325,7 +325,13 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 // HandleRequest so the failover hook can retry with the reselected
 // credential through the identical provider-construction + dispatch
 // path (no duplicated logic).
-func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool, resolved models.ResolvedCredential) error {
+//
+// conversationKey (opencode-go commission) is the per-request affinity
+// key threaded from HandleRequest's parameter — the SAME value the
+// resolver consumed. It feeds the opencode-go session derivation so the
+// failover retry (which constructs a fresh provider below) re-derives
+// the SAME x-opencode-session id as attempt #1 (retry-stability).
+func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody map[string]interface{}, w http.ResponseWriter, isStream bool, resolved models.ResolvedCredential, conversationKey string) error {
 	provider := resolved.Provider
 	apiKey := resolved.APIKey
 	baseURL := resolved.BaseURL
@@ -336,6 +342,13 @@ func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody m
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
+
+	// opencode-go attribution (opencode-go commission): attach the
+	// provider-native x-opencode-session + User-Agent headers. Kind-
+	// checked no-op for every other provider. h.config.ID is the
+	// client-facing model id (the same id the conversationKey was
+	// computed over at handler_anthropic.go).
+	providers.AttachOpenCodeGoAttribution(providerClient, conversationKey, h.config.ID, resolved.CredentialID)
 
 	// Set debug context on provider if available (for OpenAIProvider)
 	if h.bufferStore != nil && h.requestID != "" {

@@ -69,7 +69,7 @@ func (h *Handler) executeInternal(
 		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
 
-	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, opt)
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, conversationKey, opt)
 }
 
 // executeInternalWithResolved (Phase 3 / Task 21 refactor) runs the
@@ -80,6 +80,11 @@ func (h *Handler) executeInternal(
 // translation + dispatch path — no duplicated translation logic (the
 // prior partial implementation re-implemented the MiniMax twin-B
 // translation inline and drifted from it).
+//
+// conversationKey (opencode-go commission) is the per-request affinity
+// key threaded from executeInternal / the failover wrapper — it feeds
+// the opencode-go session derivation so the failover retry re-derives
+// the SAME x-opencode-session id as attempt #1 (retry-stability).
 func (h *Handler) executeInternalWithResolved(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -89,6 +94,7 @@ func (h *Handler) executeInternalWithResolved(
 	isStream bool,
 	interleaved bool,
 	resolved models.ResolvedCredential,
+	conversationKey string,
 	opts ...ExecuteOptions,
 ) (*ExecuteResult, error) {
 	opt := resolveExecuteOptions(opts)
@@ -102,6 +108,13 @@ func (h *Handler) executeInternalWithResolved(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
+
+	// opencode-go attribution (opencode-go commission): attach the
+	// provider-native x-opencode-session + User-Agent headers. Kind-
+	// checked no-op for every other provider. modelCfg.ID is the
+	// client-facing model id (the same id the conversationKey was
+	// computed over at the handler entry site).
+	providers.AttachOpenCodeGoAttribution(providerClient, conversationKey, modelCfg.ID, resolved.CredentialID)
 
 	// Convert request
 	req, err := h.convertRequest(requestBody)
@@ -244,7 +257,7 @@ func (h *Handler) executeInternalWithRateLimitFailover(
 	if !ok {
 		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
 	}
-	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, opt)
+	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, conversationKey, opt)
 	if err == nil || h.credEngine == nil {
 		return result, err
 	}
@@ -327,7 +340,7 @@ func (h *Handler) executeInternalWithRateLimitFailover(
 	// Single retry through the SAME execution path (provider
 	// construction + MiniMax twin-B translation + dispatch) — no
 	// duplicated translation logic.
-	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved, opt)
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved, conversationKey, opt)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers

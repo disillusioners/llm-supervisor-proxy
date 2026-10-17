@@ -38,6 +38,7 @@ func TestIsValidProvider(t *testing.T) {
 		{"minimax valid", "minimax", true},
 		{"grok valid", "grok", true},
 		{"opencode valid", "opencode", true},
+		{"opencode-go valid", "opencode-go", true},
 
 		// Case sensitivity - should be lowercase
 		{"OpenAI uppercase", "OpenAI", false},

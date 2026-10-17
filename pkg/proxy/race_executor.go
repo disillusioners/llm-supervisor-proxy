@@ -369,6 +369,15 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
 
+	// opencode-go attribution (opencode-go commission): attach the
+	// provider-native x-opencode-session + User-Agent headers. Kind-
+	// checked no-op for every other provider. The session id derives
+	// from the request's conversationKey (threaded handler →
+	// coordinator → executeRequest → req) — a pure function of it, so
+	// every race attempt / credential-failover re-drive of THIS request
+	// re-derives the SAME session id (retry-stable ses_ contract).
+	providers.AttachOpenCodeGoAttribution(providerClient, req.conversationKey, req.modelID, resolved.CredentialID)
+
 	log.Printf("[DEBUG] Race attempt %d calling internal provider: %s (model=%s, baseURL=%s, credential_id=%s)", req.id, provider, internalModel, baseURL, resolved.CredentialID)
 
 	// Parse request body
@@ -1280,6 +1289,26 @@ func intValue(v interface{}) int {
 
 // extractUsageFromSSEChunk extracts usage data from an SSE chunk if present
 // The chunk is expected to be in the format: "data: {...json...}\n"
+//
+// F12 dedupe guard (opencode-go commission, R4 live capture): the OpenCode
+// Go surface emits usage TWICE per stream — on the combined finish chunk
+// AND verbatim in a trailing usage-only chunk (choices:[]) — while OpenAI's
+// own stream_options.include_usage convention delivers usage ONLY in such
+// a trailing chunk. So usage-bearing chunks are never blanket-ignored;
+// instead the metering slot is COUNT-ONCE-IDEMPOTENT with LAST-WINS
+// semantics (documented in the design note): an identical repeat of the
+// already-stored (prompt, completion, total) triple is absorbed as a
+// duplicate emission (no state change), and a genuinely NEW triple (e.g.
+// running estimate → final totals) updates the slot. Either way the
+// meter reads exactly ONE final value per stream ⇒ exactly ONE meter
+// increment, for every provider and every usage shape.
+//
+// Framing note (review): this raw-seam guard is DEFENSIVE-ONLY —
+// reachable only from the executeExternalRequest env-upstream path
+// (env-chosen provider ⇒ never opencode-go). The LOAD-BEARING F12 fix
+// is the typed seam (lastStreamUsage, pkg/providers/openai.go); and
+// SetUsage here is a single-slot overwrite read once per completion
+// (race_request.go), never an accumulator.
 func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
 	// Check if this is a data line
 	const dataPrefix = "data: "
@@ -1317,6 +1346,16 @@ func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
 
 	// Only set if we have meaningful usage data
 	if promptTokens > 0 || completionTokens > 0 || totalTokens > 0 {
+		// F12 dedupe guard: absorb an identical repeat of the
+		// already-stored triple (Go-surface trailing usage-only chunk
+		// duplicates the finish chunk verbatim). Last-wins for new
+		// values is preserved — only exact repeats are absorbed.
+		if cur := req.GetUsage(); cur != nil &&
+			cur.PromptTokens == promptTokens &&
+			cur.CompletionTokens == completionTokens &&
+			cur.TotalTokens == totalTokens {
+			return
+		}
 		req.SetUsage(&TokenUsage{
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
