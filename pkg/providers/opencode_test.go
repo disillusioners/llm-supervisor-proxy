@@ -30,12 +30,12 @@ import (
 
 const opencodeLockedDefaultBaseURL = "https://opencode.ai/inference/openai/v1"
 
-// TestNewProvider_Opencode_BaseURL_Override verifies that
+// TestNewProvider_Opencode_AcceptsOverrideURL verifies that
 // NewProvider("opencode", ...) honors a user-provided base URL when
 // one is supplied (override preservation). The locked default is
 // itself pinned by TestOpencode_ProviderMetadata_DefaultBaseURLConstant
-// and set at factory.go:87.
-func TestNewProvider_Opencode_BaseURL_Override(t *testing.T) {
+// and set at the factory.go ProviderOpencode case.
+func TestNewProvider_Opencode_AcceptsOverrideURL(t *testing.T) {
 	p, err := NewProvider("opencode", "test-key", "https://opencode.ai/zen/v1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -214,7 +214,10 @@ func TestOpencode_StreamChatCompletion(t *testing.T) {
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Errorf("response writer does not support Flusher")
+			// Fatal, not Errorf: Goexit-ing the handler goroutine
+			// aborts the connection so the client call returns an
+			// error instead of hanging the SSE test.
+			t.Fatalf("response writer does not support Flusher")
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -281,8 +284,10 @@ func TestOpencode_StreamChatCompletion(t *testing.T) {
 		t.Errorf("concatenated content: got %q, want %q", gotText, "Hello from Zen")
 	}
 	if len(events) < 4 {
-		// 3 content chunks + 1 done event minimum.
-		t.Errorf("expected at least 4 events, got %d", len(events))
+		// 3 content chunks + 1 done event minimum. Fatal, not Errorf:
+		// events[0] is indexed below — a short stream must fail clean
+		// instead of panicking on the index.
+		t.Fatalf("expected at least 4 events, got %d", len(events))
 	}
 	if events[0].Type != "content" || events[0].Content != "Hello" {
 		t.Errorf("first event: got type=%q content=%q, want content=\"Hello\"", events[0].Type, events[0].Content)
@@ -294,10 +299,6 @@ func TestOpencode_StreamChatCompletion(t *testing.T) {
 // commission's locked decision has been silently drifted — fix
 // factory.go:ProviderOpencode before merging.
 func TestOpencode_ProviderMetadata_DefaultBaseURLConstant(t *testing.T) {
-	if opencodeLockedDefaultBaseURL != "https://opencode.ai/inference/openai/v1" {
-		t.Fatalf("locked default base URL drifted: got %q", opencodeLockedDefaultBaseURL)
-	}
-
 	found := false
 	for _, info := range GetProviders() {
 		if info.Type == string(ProviderOpencode) {
