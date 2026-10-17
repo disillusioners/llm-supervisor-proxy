@@ -262,6 +262,7 @@ The proxy supports multiple LLM providers out of the box:
 | **Zhipu/GLM** | `https://open.bigmodel.cn/api/paas/v4` | OpenAI | OpenAI-compatible |
 | **MiniMax** | `https://api.minimax.io/v1` | OpenAI | OpenAI-compatible |
 | **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI | OpenAI-compatible |
+| **OpenCode Zen** | `https://opencode.ai/inference/openai/v1` | OpenAI | OpenAI-compatible (override base_url to `https://opencode.ai/zen/v1` for the stable-docs route) |
 
 Configure per-model credentials and base URLs via the Web UI or database.
 
