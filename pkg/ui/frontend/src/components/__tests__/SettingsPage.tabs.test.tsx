@@ -32,6 +32,7 @@ function makeProps(overrides: Partial<{
   models: Model[];
   imgGenModels: ImgGenModel[];
   decisionModels: Model[];
+  groupModels: Model[];
   config: AppConfig | null;
 }> = {}) {
   const baseConfig: AppConfig = {
@@ -90,6 +91,12 @@ function makeProps(overrides: Partial<{
     onAddDecisionModel: vi.fn(),
     onUpdateDecisionModel: vi.fn(),
     onDeleteDecisionModel: vi.fn(),
+    // load-balance-groups (plan §6.1 / P3.6) — group tab props, same
+    // shape as the decision trio.
+    groupModels: [] as Model[],
+    onAddGroupModel: vi.fn(),
+    onUpdateGroupModel: vi.fn(),
+    onDeleteGroupModel: vi.fn(),
     tokens: [] as ApiToken[],
     onCreateToken: vi.fn(),
     onDeleteToken: vi.fn(),
@@ -254,5 +261,72 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decisi
     tabs.forEach((tab) => {
       expect((tab as HTMLButtonElement).type, 'tab button should be type="button"').toBe('button');
     });
+  });
+
+  it('load-balance-groups P3.6 — renders the 🔀 Group Models button as the 11th (last) tab', () => {
+    // Plan §6.1 / Q10: label "Group Models", glyph 🔀, data-tab-id
+    // "group_models". Positioned as the 11th tab (last, after MCP
+    // Servers) so the Decision commission's pinned Decision→Credentials
+    // adjacency test (above) is preserved.
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    const groupTab = container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement;
+    expect(groupTab).not.toBeNull();
+    expect(groupTab.textContent).toContain('🔀');
+    expect(groupTab.textContent).toContain('Group Models');
+    expect(groupTab.getAttribute('aria-label')).toBe('Group Models');
+
+    // Position: 11th of 11 — the button immediately preceding it is
+    // MCP Servers; nothing follows it.
+    const tabs = Array.from(
+      container.querySelectorAll('div.flex.overflow-x-auto > button'),
+    ) as HTMLButtonElement[];
+    expect(tabs.length).toBe(11);
+    const groupIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'group_models');
+    expect(groupIdx).toBe(10);
+    expect(tabs[groupIdx - 1].textContent).toContain('MCP Servers');
+    // The Decision→Credentials adjacency survives (P3.6 constraint).
+    const decisionIdx = tabs.findIndex((b) => b.getAttribute('data-tab-id') === 'decision_models');
+    expect(tabs[decisionIdx + 1].textContent).toContain('Credentials');
+  });
+
+  it('load-balance-groups P3.6 — clicking the 🔀 Group Models tab mounts the GroupModelsTab empty state', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    // Default active tab is 'proxy' — the GroupModelsTab content
+    // markers are absent until the tab is clicked.
+    expect(container.textContent).not.toContain('No group models configured');
+
+    fireEvent.click(container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('No group models configured');
+    });
+    // The "Add Group Model" button is the binding CTA label.
+    expect(container.textContent).toContain('Add Group Model');
+  });
+
+  it('load-balance-groups P3.6 — clicking back to Models tab hides the GroupModelsTab content', async () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+
+    fireEvent.click(container.querySelector('[data-tab-id="group_models"]') as HTMLButtonElement);
+    await waitFor(() => expect(container.textContent).toContain('No group models configured'));
+
+    const modelsTab = Array.from(container.querySelectorAll('div.flex.overflow-x-auto > button'))
+      .find((b) => b.textContent && b.textContent.trim() === 'Models') as HTMLButtonElement;
+    expect(modelsTab).toBeDefined();
+    fireEvent.click(modelsTab);
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Available Models');
+      expect(container.textContent).not.toContain('No group models configured');
+    });
+  });
+
+  it('load-balance-groups P3.6 — A11Y: the 🔀 emoji span carries aria-hidden="true"', () => {
+    const { container } = render(<SettingsPage {...makeProps()} />);
+    const groupEmoji = container.querySelector('[data-tab-id="group_models"] span[aria-hidden="true"]');
+    expect(groupEmoji).not.toBeNull();
+    expect((groupEmoji as HTMLElement).textContent).toBe('🔀');
   });
 });

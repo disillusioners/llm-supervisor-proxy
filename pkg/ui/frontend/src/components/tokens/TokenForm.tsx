@@ -3,7 +3,11 @@ import { ModelMultiSelect } from './ModelMultiSelect';
 import type { ApiToken } from '../../types';
 
 interface TokenFormProps {
-  models: { name: string; id: string; kind?: 'chat' | 'image-gen' | 'decision' }[];
+  // kind flows through from SettingsPage's models.map so the chat-kind
+  // filter below actually fires (load-balance-groups found the Decision
+  // commission's amendment-7 filter was dead code from this wiring —
+  // the mapped object dropped `kind`, so every row passed `!m.kind`).
+  models: { name: string; id: string; kind?: 'chat' | 'image-gen' | 'decision' | 'group' }[];
   token?: ApiToken;  // For editing existing tokens
   onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[], ultimateModel?: string) => Promise<void>;
   onCancel: () => void;
@@ -28,8 +32,13 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
   // Decision Commission 2026-10-15 (plan §6.7.a / P3.8 / amendment 7):
   // Both pickers here list chat-only models. The filter shape
   // `!m.kind || m.kind === 'chat'` matches the chat-kind baseline (no
-  // kind / kind === 'chat') and excludes both image-gen + decision.
+  // kind / kind === 'chat') and excludes image-gen + decision.
   // Same pattern as C-16 (`ModelsTab.tsx:157`).
+  // load-balance-groups 2026-10-16 (plan §6.4 arm 4 of 4 — P3.7): the
+  // same positive filter shape also excludes kind === 'group' — groups
+  // are ultimate-excluded by G7 anyway, but the pickers say so
+  // explicitly (defense-in-depth + operator clarity, per Q10's
+  // rejection of the skip-exclusion override).
   const chatModels = models.filter((m) => !m.kind || m.kind === 'chat');
 
   const handleSubmit = async () => {
@@ -167,12 +176,14 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
               {/* Decision Commission 2026-10-15 (plan §6.7.a / P3.8 /
                   amendment 7): filter the per-token ultimate-model
                   options to chat-only models. The filter shape
-                  (!m.kind || m.kind === 'chat') excludes image-gen
-                  and decision kinds. Same pattern as
-                  ModelsTab.tsx:157 / C-16. The global ultimate
-                  model_id (free-text, SettingsPage:104) is NOT
-                  kind-gated — see plan §6.7.a ultimate-target note
-                  (Q16 scope-defer). */}
+                  (!m.kind || m.kind === 'chat') excludes image-gen,
+                  decision, and group kinds. Same pattern as
+                  ModelsTab.tsx:157 / C-16. load-balance-groups:
+                  groups are ultimate-excluded by G7, but the picker
+                  says so explicitly. The global ultimate model_id
+                  (free-text, SettingsPage:104) is NOT kind-gated —
+                  see plan §6.7.a ultimate-target note (Q16
+                  scope-defer). */}
               {[...chatModels]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((model) => (

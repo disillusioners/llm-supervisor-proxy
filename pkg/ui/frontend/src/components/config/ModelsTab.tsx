@@ -12,6 +12,10 @@ interface ModelsTabProps {
   status: { type: 'success' | 'error'; message: string } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
   onNavigateToCredentials?: () => void;
+  // One-click wrap (load-balance-groups / Am30): opens the Group tab's
+  // add-form pre-filled for the chat model (single member + shadow
+  // claim). Optional so existing call sites/tests stay unchanged.
+  onWrapAsGroup?: (model: Model) => void;
 }
 
 export function ModelsTab({
@@ -23,6 +27,7 @@ export function ModelsTab({
   status,
   setStatus,
   onNavigateToCredentials,
+  onWrapAsGroup,
 }: ModelsTabProps) {
   const [showModelForm, setShowModelForm] = useState(false);
   const [modelFormMode, setModelFormMode] = useState<'add' | 'edit'>('add');
@@ -154,12 +159,20 @@ export function ModelsTab({
               // kind === 'decision' (P3.2 / plan §6.5). Same single-line
               // shape; the surrounding comment block names both filters.
               //
+              // load-balance-groups 2026-10-16 (plan §6.4 arm 2 of 4 —
+              // P3.7): extended to also exclude kind === 'group' so
+              // virtual groups never appear in the chat tab (they get
+              // their own Group Models tab). The chat hook fetches
+              // UNFILTERED (bare /fe/api/models — the BE chat arm :781
+              // is the server-side twin), so this client filter is
+              // load-bearing, not decorative.
+              //
               // Hoisted before the empty-state ternary so a config
               // containing only image-gen or only decision rows still
               // renders the "No models configured" empty state — otherwise
               // the ternary would see models.length > 0, skip the empty
               // branch, and render an invisible (filtered-to-empty) list.
-              const chatModels = models.filter((model) => model.kind !== 'image-gen' && model.kind !== 'decision');
+              const chatModels = models.filter((model) => model.kind !== 'image-gen' && model.kind !== 'decision' && model.kind !== 'group');
               return chatModels.length === 0 ? (
                 <div class="bg-gray-700/50 rounded-md p-6 border border-gray-700 border-dashed flex flex-col items-center justify-center">
                   <svg class="w-10 h-10 text-gray-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -246,6 +259,23 @@ export function ModelsTab({
                     </div>
                   </div>
                   <div class="flex items-center gap-1 flex-shrink-0 ml-4">
+                    {/* One-click wrap (Am30 / plan §6.2): pre-fills a new
+                        group form for this chat model (single member +
+                        shadow claim). Form pre-fill convenience ONLY —
+                        nothing is created until the operator submits. */}
+                    {onWrapAsGroup && (
+                      <button
+                        onClick={() => onWrapAsGroup(model)}
+                        class="text-gray-400 hover:text-purple-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
+                        title={`Wrap ${model.name} as a group`}
+                        aria-label={`Wrap ${model.name} as a group`}
+                        data-testid="wrap-as-group-button"
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                        </svg>
+                      </button>
+                    )}
                     <button
                       onClick={() => handleOpenEditModel(model)}
                       class="text-gray-400 hover:text-blue-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
