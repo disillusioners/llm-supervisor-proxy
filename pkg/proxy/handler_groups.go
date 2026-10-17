@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
@@ -377,6 +378,19 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	}
 	log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
 		arc.reqID, pick.GroupID, pick.MemberID)
+	// load-balance-groups / P4.5 (P2 deferred #1) — publish the
+	// EventMemberFailover event for the Anthropic path; the OpenAI
+	// path emits the same event at handler.go:1221. Symmetry
+	// closes the observability gap (FE EventLog + downstream
+	// failover dashboards).
+	if h.bus != nil {
+		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
+			"id":          arc.reqID,
+			"group_id":    pick.GroupID,
+			"member_id":   pick.MemberID,
+			"replacement": replacement,
+		})
+	}
 	return true
 }
 

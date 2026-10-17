@@ -51,6 +51,12 @@ type groupHarness struct {
 func newGroupHarness(t *testing.T) *groupHarness {
 	t.Helper()
 	tmp := t.TempDir()
+	// load-balance-groups / P4.5 (P2 deferred #2) — race retry
+	// enabled at the HARNESS level so the 429 / member-cred-LB
+	// tests' expectation is real, not environment-dependent. The
+	// production default is race-retry ON; the env name matches
+	// the cmd/main.go and config.NewManager boot path.
+	t.Setenv("RACE_RETRY_ENABLED", "true")
 	t.Setenv("DATABASE_URL", "sqlite:"+filepath.Join(tmp, "test.db"))
 	store1, err := database.Initialize(context.Background())
 	if err != nil {
@@ -395,7 +401,16 @@ func TestHandlerGroups_Am26_NonGroup_ByteIdentity(t *testing.T) {
 
 // ─── P2.9 — Am25 metering + Q15 event ───────────────────────────────────
 
-func TestHandlerGroups_Am25_Metering_Shape(t *testing.T) {
+// TestHandlerGroups_Am25_Metering_Shape_NilCounter — Am25 shape
+// smoke (counter=nil harness, status-only verification). The
+// COUNTER-WIRED row-shape pin lives in
+// `handler_groups_metering_test.go::TestHandlerGroups_Am25_Metering_RowShapes`
+// (note: ROWSHAPES plural — that file uses a real usage.Counter).
+// The two suites were near-identically named under the original
+// `*_Shape` reading and the P3 reviewer flagged the confusion.
+// Renaming to `Shape_NilCounter` vs `RowShapes` keeps the
+// counter-anchored vs smoke distinction visible in test output.
+func TestHandlerGroups_Am25_Metering_Shape_NilCounter(t *testing.T) {
 	t.Run("Direct", func(t *testing.T) {
 		h := newGroupHarness(t)
 		defer h.close()
@@ -515,9 +530,9 @@ func makeAnthropicRequestExternal(t *testing.T, body map[string]interface{}) *ht
 // therefore proves cred-side absorption (the winner is the same
 // member on its reselected credential).
 func TestHandlerGroups_Am24_Member429_AbsorbedByCredLB(t *testing.T) {
-	// The coordinator's credFailover spawn path requires race retry
-	// enabled (production default via env/config).
-	t.Setenv("RACE_RETRY_ENABLED", "true")
+	// load-balance-groups / P4.5 (P2 deferred #2) — the
+	// RACE_RETRY_ENABLED env is now set in newGroupHarness so the
+	// test's expectation is harness-driven, not test-local.
 	h := newGroupHarness(t)
 	defer h.close()
 

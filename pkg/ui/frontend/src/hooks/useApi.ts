@@ -905,10 +905,30 @@ export function useTokens() {
 }
 
 // Credentials API
+//
+// load-balance-groups / P4.5 (P3 carry-forward): credential
+// mutations invalidate the FOUR model-list cache keys
+// ('models', 'imggen-models', 'decision-models', 'group-models')
+// because a deleted or renamed credential can otherwise be served
+// to one of the FE tabs up to its TTL window. Models reference
+// credentials by ID and display the cached credential name; the
+// four explicit deletes are the canonical contract — see the
+// `useApi.ts` quadruple-delete sites (3 sibling hooks x 3 ops =
+// 9 sites) and the package test in useApiCredentials.test.ts.
 export async function getCredentials(): Promise<Credential[]> {
   const res = await fetch('/fe/api/credentials');
   if (!res.ok) throw new Error('Failed to fetch credentials');
   return res.json();
+}
+
+// invalidateModelCaches clears the four model-list caches that
+// depend on credentials. Called after every credential mutation so
+// a deleted/renamed credential is not served to a tab up to its TTL.
+function invalidateModelCaches(): void {
+  defaultAPICache.delete('models');
+  defaultAPICache.delete('imggen-models');
+  defaultAPICache.delete('decision-models');
+  defaultAPICache.delete('group-models');
 }
 
 export async function createCredential(cred: Credential): Promise<Credential> {
@@ -921,6 +941,7 @@ export async function createCredential(cred: Credential): Promise<Credential> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to create credential');
   }
+  invalidateModelCaches();
   return res.json();
 }
 
@@ -934,6 +955,7 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
     const err = await res.json();
     throw new Error(err.error || 'Failed to update credential');
   }
+  invalidateModelCaches();
   return res.json();
 }
 
@@ -943,6 +965,7 @@ export async function deleteCredential(id: string): Promise<void> {
     const err = await res.json();
     throw new Error(err.error || 'Failed to delete credential');
   }
+  invalidateModelCaches();
 }
 
 // Providers API
