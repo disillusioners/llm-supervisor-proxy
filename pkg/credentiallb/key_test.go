@@ -224,11 +224,12 @@ func TestKey_EmptyUserSkippedMidRun(t *testing.T) {
 		userMsg(nil),             // null content
 		userMsg("b"),
 	}
-	if got := ExtractLeadingUserRun(msgs); got != `["a","b"]` {
-		t.Fatalf("mid-run empties: got %s want [\"a\",\"b\"]", got)
+	run := ExtractLeadingUserRun(msgs)
+	if run != `["a","b"]` {
+		t.Fatalf("mid-run empties: got %s want [\"a\",\"b\"]", run)
 	}
 	// Identical to the run with the empties absent.
-	if got := ExtractLeadingUserRun(msgs); got != ExtractLeadingUserRun([]interface{}{userMsg("a"), userMsg("b")}) {
+	if run != ExtractLeadingUserRun([]interface{}{userMsg("a"), userMsg("b")}) {
 		t.Fatal("mid-run empty user messages changed the key")
 	}
 }

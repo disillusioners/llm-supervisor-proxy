@@ -33,10 +33,10 @@ var ErrNoCredentials = errors.New("credentiallb: model has no credentials")
 // whitespace), so the key is computed over that canonical form here.
 //
 // RUN-JOIN COLLISION SAFETY: the run is hashed as one canonical JSON
-// array, not a "|" concatenation — array elements are separated by the
-// escaped `","` sequence inside the brackets, so a message containing
-// a literal "|" can never alias into a different grouping (["a|b"] and
-// ["a","b"] render differently).
+// array, not a "|" concatenation — each element is JSON-escaped inside
+// the brackets, so a raw "," (or "|") inside an element cannot split
+// or alias an element boundary (["a|b"] and ["a","b"] render
+// differently, and ["a,b"] cannot split into ["a","b"]).
 //
 // W-2: if leadingUserRun == "", the caller MUST skip the engine
 // entirely and use weighted-random-without-affinity for that request
@@ -57,8 +57,8 @@ func ComputeConversationKey(modelID, tokenID, leadingUserRun string) string {
 // upstream inserts task context as MULTIPLE CONSECUTIVE user
 // messages, so hashing only the first one lost most of the signal).
 //
-// Collection walk over the message list, from index 0 (first match
-// wins per entry):
+// Collection walk over the message list, from index 0 (each entry
+// dispatches exactly once on its role):
 //   - role == "system"  → SKIP (not collected; walk continues)
 //   - role == "user"    → usable content COLLECTED (predicate below);
 //     unusable content skipped — the walk continues either way
@@ -127,7 +127,9 @@ walk:
 		return ""
 	}
 	// Hash the run as ONE canonical JSON array (collision-safe join —
-	// see ComputeConversationKey). canonicalJSON renders object keys
+	// elements are individually JSON-escaped so the "," inside an
+	// element cannot split an element boundary; see
+	// ComputeConversationKey). canonicalJSON renders object keys
 	// and array elements sorted, so the run is content-order-invariant.
 	return canonicalJSON(collected)
 }
