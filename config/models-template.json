@@ -39,6 +39,18 @@
       "credential_id": "typesafe-default",
       "internal_model": "jev-latest",
       "exclude_from_ultimate_switching": true
+    },
+    {
+      "id": "coding[coding]",
+      "name": "Coding (Self-Shadow Group — day-1 onboarding example)",
+      "enabled": true,
+      "kind": "group",
+      "internal": true,
+      "members": [
+        { "model_id": "coding", "weight": 1 }
+      ],
+      "shadow_model_id": "coding",
+      "exclude_from_ultimate_switching": true
     }
   ]
 }

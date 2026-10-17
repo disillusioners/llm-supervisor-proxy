@@ -17,6 +17,9 @@ test_output.txt
 /pkg/ui/frontend/node_modules/
 /pkg/ui/frontend/dist/
 
+# load-balance-groups P4.3 — tsc baseline freeze; tracked.
+!pkg/ui/frontend/tsc-baseline.txt
+
 cmd/__debug_bin*
 proxy.log
 proxy.pid

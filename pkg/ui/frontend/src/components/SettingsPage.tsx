@@ -6,6 +6,7 @@ import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { ImgGenModelsTab } from './config/ImgGenModelsTab';
 import { DecisionModelsTab } from './config/DecisionModelsTab';
+import { GroupModelsTab } from './config/GroupModelsTab';
 import { CredentialsTab } from './config/CredentialsTab';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
@@ -42,6 +43,16 @@ interface SettingsPageProps {
   onDeleteDecisionModel: (id: string) => Promise<void>;
   decisionError?: string | null;
   onRetryDecisionModels?: () => void;
+  // load-balance-groups (plan §6.1 / P3.6). Pre-filtered server-side
+  // to kind: 'group' via /fe/api/models?kind=group. Mirrors the ImgGen/
+  // Decision model props exactly — same shape, same server-side source
+  // of truth, same error-surfacing plumbing for the alert-role banner.
+  groupModels: Model[];
+  onAddGroupModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
+  onUpdateGroupModel: (id: string, updates: Partial<Model>) => Promise<void>;
+  onDeleteGroupModel: (id: string) => Promise<void>;
+  groupError?: string | null;
+  onRetryGroupModels?: () => void;
   tokens: ApiToken[];
   onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
@@ -49,7 +60,7 @@ interface SettingsPageProps {
   onRefetchTokens: () => void;
 }
 
-type TabType = 'proxy' | 'models' | 'imggen_models' | 'decision_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
+type TabType = 'proxy' | 'models' | 'imggen_models' | 'decision_models' | 'group_models' | 'credentials' | 'loop_detection' | 'tool_repair' | 'tokens' | 'usage' | 'mcp_servers';
 
 // Helper to generate unique toast IDs
 const generateToastId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -73,6 +84,12 @@ export function SettingsPage({
   onDeleteDecisionModel,
   decisionError,
   onRetryDecisionModels,
+  groupModels,
+  onAddGroupModel,
+  onUpdateGroupModel,
+  onDeleteGroupModel,
+  groupError,
+  onRetryGroupModels,
   tokens,
   onCreateToken,
   onDeleteToken,
@@ -81,6 +98,11 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [activeTab, setActiveTab] = useState<TabType>('proxy');
   const [toasts, setToasts] = useState<ToastData[]>([]);
+
+  // One-click wrap pre-fill (Am30): the chat model being wrapped. Set
+  // from a ModelsTab row, consumed by the GroupModelsTab once it has
+  // opened the pre-filled add-form.
+  const [wrapTarget, setWrapTarget] = useState<Model | null>(null);
 
   // Helper to add a toast
   const addToast = (type: ToastData['type'], message: string, restartRequired?: boolean) => {
@@ -256,6 +278,34 @@ export function SettingsPage({
       addToast('error', e instanceof Error ? e.message : 'Failed to toggle decision model');
     }
   };
+
+  // Group model handlers (load-balance-groups 2026-10-16 / plan §6.1).
+  // Mirror the decision toggle path; the underlying mutation hooks in
+  // useGroupModels drop ALL FOUR cache keys ('models' + 'imggen-models'
+  // + 'decision-models' + 'group-models') on every mutation per plan
+  // §6.3, so cross-tab refetch stays consistent across all four lists.
+  const handleToggleGroupModel = async (model: Model) => {
+    try {
+      await onUpdateGroupModel(model.id, { enabled: !model.enabled });
+      addToast('success', 'Group model toggled successfully');
+    } catch (e) {
+      addToast('error', e instanceof Error ? e.message : 'Failed to toggle group model');
+    }
+  };
+
+  // One-click wrap (Am30): switch to the Group tab with the chat model
+  // pre-loaded into the add-form (form pre-fill convenience ONLY).
+  const handleWrapAsGroup = (model: Model) => {
+    setWrapTarget(model);
+    setActiveTab('group_models');
+  };
+
+  // Chat-kind models (client filter over the unfiltered useModels
+  // list — the same C-16 predicate as ModelsTab) for the Group tab's
+  // member + shadow pickers and the GroupModelForm's G8 checks.
+  const chatKindModels = models.filter(
+    (m) => m.kind !== 'image-gen' && m.kind !== 'decision' && m.kind !== 'group',
+  );
 
   // Loop Detection handler
   const handleApplyLoopDetection = async (loopConfig: LoopDetectionConfig) => {
@@ -461,6 +511,25 @@ export function SettingsPage({
           >
             🔌 MCP Servers
           </button>
+          {/* load-balance-groups 2026-10-16 (plan §6.1 / Q10) — 11th
+              tab. 🔀 prefix glyph (shuffle = load balancing; mirrors
+              🖼️/🎯); aria-hidden on the emoji so SRs only announce the
+              binding literal "Group Models". Positioned last (slot 11
+              of 11) so the pinned Decision→Credentials adjacency from
+              the Decision commission's tab tests is preserved. */}
+          <button
+            type="button"
+            class={`px-6 py-3 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${activeTab === 'group_models'
+              ? 'text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+              }`}
+            onClick={() => setActiveTab('group_models')}
+            data-tab-id="group_models"
+            aria-label="Group Models"
+          >
+            <span aria-hidden="true">🔀</span>
+            Group Models
+          </button>
         </div>
       </div>
 
@@ -520,6 +589,7 @@ export function SettingsPage({
               onToggleModel={handleToggleModel}
               setStatus={setStatusWrapper}
               onNavigateToCredentials={() => setActiveTab('credentials')}
+              onWrapAsGroup={handleWrapAsGroup}
             />
           )}
 
@@ -566,6 +636,33 @@ export function SettingsPage({
             />
           )}
 
+          {/* load-balance-groups (plan §6.1 / §6.5) — group list.
+              Same posture as the sibling tabs: parent receives
+              groupModels pre-filtered server-side via
+              /fe/api/models?kind=group. The form inside stamps
+              kind: 'group' + internal: true +
+              exclude_from_ultimate_switching: true (G1/G7) so a chat
+              row can never round-trip into this surface. chatModels
+              feeds the member + shadow pickers (chat-kind only);
+              wrapPreloadModel carries the one-click-wrap pre-fill
+              (Am30). fetchError + onRetry plumb the hook's error
+              state for the alert-role banner (A11Y-3). */}
+          {activeTab === 'group_models' && (
+            <GroupModelsTab
+              models={groupModels}
+              chatModels={chatKindModels}
+              onAddModel={onAddGroupModel}
+              onUpdateModel={onUpdateGroupModel}
+              onDeleteModel={onDeleteGroupModel}
+              onToggleModel={handleToggleGroupModel}
+              setStatus={setStatusWrapper}
+              fetchError={groupError}
+              onRetry={onRetryGroupModels}
+              wrapPreloadModel={wrapTarget}
+              onWrapConsumed={() => setWrapTarget(null)}
+            />
+          )}
+
           {activeTab === 'credentials' && (
             <CredentialsTab
               setStatus={setStatusWrapper}
@@ -594,7 +691,7 @@ export function SettingsPage({
               {!showTokenForm ? (
                 <TokenList
                   tokens={tokens}
-                  models={models.map(m => ({ name: m.name, id: m.id }))}
+                  models={models.map(m => ({ name: m.name, id: m.id, kind: m.kind }))}
                   onRevoke={handleRevokeToken}
                   onStatus={setStatusWrapper}
                   onCreateToken={() => setShowTokenForm(true)}
@@ -603,7 +700,7 @@ export function SettingsPage({
                 />
               ) : (
                 <TokenForm
-                  models={models.map(m => ({ name: m.name, id: m.id }))}
+                  models={models.map(m => ({ name: m.name, id: m.id, kind: m.kind }))}
                   onSubmit={handleCreateToken}
                   onCancel={() => setShowTokenForm(false)}
                   onStatus={setStatusWrapper}

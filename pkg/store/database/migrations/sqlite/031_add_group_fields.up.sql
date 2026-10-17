@@ -1,0 +1,40 @@
+-- Migration 031: Add group columns to `models` (load-balance-groups
+-- commission / §7.1, Round-2 membership pivot — ZERO schema delta
+-- vs Round 1: same two columns, `members_json` content becomes
+-- [{model_id, weight}]).
+--
+-- Two purely additive nullable TEXT columns on `models`:
+--
+--   members_json     the kind=="group" member list, JSON-encoded
+--                    []GroupMember{{ModelID, Weight}} (house
+--                    style: credentials_json, migration 028).
+--                    NULL/'' for every legacy row — chat,
+--                    image-gen and decision rows are member-free;
+--                    no backfill statement is needed. The load
+--                    mappings normalize NULL → nil Members via
+--                    coalesce(members_json, '[]').
+--
+--   shadow_model_id  the optional single ID-space claim (§3.4):
+--                    when a kind=="group" row carries a non-empty
+--                    value and is enabled, requests for that model
+--                    ID resolve to the GROUP row (claim-first
+--                    GetModel) and the claimed row hides from
+--                    /v1/models. NULL/'' = no claim. Go-computed
+--                    on write (bound from ModelConfig.ShadowModelID),
+--                    the credentials_json Go-evaluated-shadow
+--                    precedent — no DB-side derivation.
+--
+-- No UNIQUE constraint is added: claim uniqueness is the G8
+-- application-level scan (SQLite/Postgres partial-unique-index
+-- alternatives were rejected as schema divergence for no gain at
+-- v1 member volumes).
+--
+-- Registry note (Amendment-1 trap, third occurrence): this
+-- registry is an ordered slice, NOT a directory scanner; without
+-- the append in migrate.go the 031 SQL files are silently inert
+-- (two prior near-misses: 029, 030 — see the trap comments there).
+--
+-- Down form (separate file): plain DROP COLUMN per column.
+
+ALTER TABLE models ADD COLUMN members_json TEXT;
+ALTER TABLE models ADD COLUMN shadow_model_id TEXT;

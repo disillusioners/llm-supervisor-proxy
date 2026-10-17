@@ -37,13 +37,14 @@ func (r *RequestLog) Size() int64 {
 	// Fields we charge an overhead for (must match the actual struct
 	// fields + the per-field `n += len(...)` calls below):
 	//   ID, Status, Model, Duration, Error, TokenID, TokenName,
-	//   OriginalModel, AppTag, UltimateModelID, CurrentFallback (11 strings;
-	//   the slice of strings FallbackUsed is charged per-element below).
+	//   OriginalModel, AppTag, UltimateModelID, CurrentFallback,
+	//   RouteModel (12 strings; the slice of strings FallbackUsed is
+	//   charged per-element below).
 	//   Plus the Usage object (1 wrapper overhead) and the UpstreamRequests
 	//   struct (1 wrapper overhead).
-	// Total charged overheads = 13. Keep this list in sync with the per-
+	// Total charged overheads = 14. Keep this list in sync with the per-
 	// field n += len(...) lines below — if you add a field, bump this count.
-	const fieldsCharged = 13
+	const fieldsCharged = 14
 	n := int64(perFieldOverhead) * fieldsCharged
 
 	n += int64(len(r.ID))
@@ -57,6 +58,7 @@ func (r *RequestLog) Size() int64 {
 	n += int64(len(r.AppTag))
 	n += int64(len(r.UltimateModelID))
 	n += int64(len(r.CurrentFallback))
+	n += int64(len(r.RouteModel))
 
 	for _, fb := range r.FallbackUsed {
 		n += int64(len(fb)) + perFieldOverhead
@@ -138,6 +140,14 @@ type RequestLog struct {
 	OriginalModel   string   `json:"original_model,omitempty"`   // First requested model
 	FallbackUsed    []string `json:"fallback_used,omitempty"`    // List of fallback models that were attempted
 	CurrentFallback string   `json:"current_fallback,omitempty"` // Currently active fallback model (if any)
+
+	// RouteModel (load-balance-groups / Am25): the group-served
+	// MEMBER model ID when a group rewrote the request and the
+	// member differs from the client-requested string; empty for
+	// direct (non-rewritten) and day-1 self-shadow requests. Deliberately
+	// a SEPARATE field from FallbackUsed (whose semantics — failed
+	// fallback attempts — are metered per-element below).
+	RouteModel string `json:"route_model,omitempty"`
 
 	// Ultimate model tracking
 	UltimateModelUsed bool   `json:"ultimate_model_used"`         // Whether ultimate model was triggered for this request

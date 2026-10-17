@@ -17,6 +17,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
@@ -250,6 +251,22 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	cfg := h.config.Clone()
 	enabledModels := cfg.ModelsConfig.GetEnabledModels()
 
+	// load-balance-groups / §3.4 (P2.5): second-pass shadow-hide.
+	// Build the set of IDs claimed by ENABLED groups from the same
+	// enabled listing (an interface-constrained scan — no per-row
+	// model-kind branching in the listing loop below, no manager
+	// type assertion). Groups themselves STAY listed (they are
+	// chat-servable — clients must discover them); their claimed
+	// models are hidden while the claim is active. A disabled group
+	// is absent from GetEnabledModels ⇒ contributes no claim ⇒ the
+	// claimed model reappears automatically.
+	claimedIDs := make(map[string]bool, len(enabledModels))
+	for _, m := range enabledModels {
+		if m.IsGroup() && m.Enabled && m.ShadowModelID != "" {
+			claimedIDs[m.ShadowModelID] = true
+		}
+	}
+
 	// Build OpenAI-compatible response. Exclude image-gen and
 	// decision models: they are served by /v1/image_generation
 	// and /v1/decisions respectively and must never appear in the
@@ -258,6 +275,9 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range enabledModels {
 		if m.IsImageGen() || m.IsDecision() {
 			continue
+		}
+		if claimedIDs[m.ID] {
+			continue // shadowed by an enabled group — hidden
 		}
 		models = append(models, map[string]interface{}{
 			"id":       m.ID,
@@ -551,14 +571,67 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// load-balance-groups §3.6.1 (Am21) — THE modelList rewrite,
+	// OpenAI site. Runs AFTER the conversation-key derivation (the
+	// sticky pick keys on the group-salted conversation key, which
+	// needs the post-auth tokenID — the plan's §3.6.1 :149-159 build
+	// site prepares the list; the substitution happens here, before
+	// every modelList consumer: misroute guards above ran on the
+	// GROUP row, and the race handoff below receives the rewritten
+	// list; per-attempt re-fetches then run member-native). The
+	// Anthropic mirror calls the SAME shared helper (parity by
+	// construction; the parity test pins both sites).
+	if rc.resolvedModel != nil {
+		if newList, pick, failGroup := h.applyGroupRewrite(&rc.conf, rc.modelList, rc.conversationKey); failGroup != "" {
+			// Am28 / §3.8: empty-at-runtime group ⇒ the normal
+			// resolve-failure envelope — never a panic, never a
+			// silent passthrough.
+			log.Printf("[grouplb] request %s: %s", rc.reqID, groupFailMessage(failGroup))
+			rc.reqLog.Status = "failed"
+			rc.reqLog.Error = groupFailMessage(failGroup)
+			rc.reqLog.EndTime = time.Now()
+			rc.reqLog.Duration = time.Since(rc.startTime).String()
+			h.store.Add(rc.reqLog)
+			h.publishEvent("request_failed", map[string]interface{}{
+				"id":    rc.reqID,
+				"error": rc.reqLog.Error,
+			})
+			h.sendError(w, http.StatusBadGateway, rc.reqLog.Error, models.ErrorTypeServerError, "group_unservable")
+			return
+		} else if pick != nil {
+			rc.modelListOriginal = rc.modelList
+			rc.modelList = newList
+			rc.groupPick = pick
+			// Am25 metering stamp: record the served member when it
+			// differs from the client-requested string (day-1
+			// self-shadow keeps RouteModel empty — exactly one usage
+			// row, unchanged).
+			if pick.MemberID != rc.reqLog.Model {
+				rc.reqLog.RouteModel = pick.MemberID
+			}
+			log.Printf("[grouplb] request %s: group=%s → sticky member=%s (newlyBound=%v)",
+				rc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
+		}
+	}
+
 	// === MODEL ACCESS CHECK ===
 	// Check if the requested model is allowed for this token
 	// This check happens AFTER authentication for internal models
 	// For external models: only check if token has restrictions (fail-closed)
+	//
+	// load-balance-groups §3.4 (Q1 tail): the allow-list evaluates the
+	// CLIENT-REQUESTED ID STRING — for a claimed ID (claims-first
+	// GetModel returned the GROUP row) the client string is the
+	// claimed model's ID, so a token listing the shadowed ID reaches
+	// the group through that alias exactly as today; a token listing
+	// only the group's own ID reaches it only via the group ID;
+	// unlisted requests are denied fail-closed. (Pre-claims, the
+	// resolved ID and the client string were always identical — this
+	// only changes behavior for claimed requests, per plan.)
 	if authToken != nil {
 		var modelID string
 		if rc.resolvedModel != nil {
-			modelID = rc.resolvedModel.ID
+			modelID = rc.reqLog.Model // the client-requested ID string
 		}
 		if modelID != "" {
 			// Model exists in our DB - check if allowed by token
@@ -931,7 +1004,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						}
 						hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
 						go func() {
-							if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+							// load-balance-groups / Q9 (Am11): 5s
+							// detached-context timeout (decision
+							// pattern) — r.Context() cancellation
+							// must not drop billing. Ultimate branch
+							// stays group-name-row-ONLY (the ultimate
+							// target was served, not a member).
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							defer cancel()
+							if err := h.counter.IncrementModelUsage(ctx, rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
 								log.Printf("failed to increment model usage counter: %v", err)
 							}
 						}()
@@ -1022,62 +1103,130 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// verbatim (M3 amendment, regression-pinned by
 	// TestLiveRelay_NonStreamUnaffected).
 	liveFirstByteGate := !rc.bufferMode && rc.isStream
-	coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate)
-	coordinator.Start()
 
-	winner := coordinator.WaitForWinner()
+	// load-balance-groups / Am24: the race-handoff block runs in a
+	// bounded loop so a group request whose member pipeline fails
+	// TERMINALLY (winner==nil, all attempts failed — NOT a context
+	// cancellation) can re-enter EXACTLY ONCE with a reselected
+	// member. Pre-first-byte is inherent on this path: the relay
+	// writes data bytes only after a winner exists (the SSE
+	// ": connected" comment is not a model byte), and once the
+	// winner streams its first byte the flow never returns here
+	// (N9 winner lock). Non-group requests take the loop exactly
+	// once (groupPick == nil) — byte-identical behavior.
+	for {
+		coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate)
+		// Q15 (plan §3.7): the coordinator carries the group pick so
+		// the W-1 publish site (race_executor) can fire
+		// model_member_selected newlyBound-only.
+		coordinator.groupPick = rc.groupPick
+		coordinator.Start()
 
-	// Capture upstream request statuses for UI display
-	statuses := coordinator.GetRequestStatuses()
-	rc.reqLog.UpstreamRequests = store.UpstreamRequestStatus{
-		Main:     statuses["main"],
-		Second:   statuses["second"],
-		Fallback: statuses["fallback"],
-	}
+		winner := coordinator.WaitForWinner()
 
-	if winner != nil {
-		defer func() {
-			if winner.cancel != nil {
-				winner.cancel()
-			}
-		}()
-
-		if rc.isStream {
-			// Stream the final result from the winner's buffer
-			if err := h.streamResult(w, rc, winner); err != nil {
-				// Client write failed (e.g., Cloudflare/proxy dropped connection).
-				// Not a race failure: the attempt counter for the hash was
-				// already recorded at the early-exit gate, so a client retry
-				// still progresses through the trigger schedule.
-				log.Printf("[STREAM] Client write failed for request %s: %v", rc.reqID, err)
-
-				// Cancel all other parallel requests to stop wasted upstream work.
-				// The winner's cancel is handled by the defer below.
-				coordinator.cancelAllExcept(winner)
-
-				// Don't send error response - connection is already broken
-				return
-			}
-		} else {
-			// Send a single JSON response from the winner's buffer
-			h.handleNonStreamResult(w, rc, winner)
+		// Capture upstream request statuses for UI display
+		statuses := coordinator.GetRequestStatuses()
+		rc.reqLog.UpstreamRequests = store.UpstreamRequestStatus{
+			Main:     statuses["main"],
+			Second:   statuses["second"],
+			Fallback: statuses["fallback"],
 		}
-		return
-	}
 
-	// If winner is nil, it means either context cancelled or all models failed
-	select {
-	case <-rc.baseCtx.Done():
-		// Context cancelled (timeout, client disconnect, etc.) - treat as failure
-		log.Printf("Request %s context cancelled (timeout or client disconnect)", rc.reqID)
-		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "context_cancelled")
-		return
-	default:
-		// All attempts failed with errors
-		log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
-		h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")
-		return
+		if winner != nil {
+			defer func() {
+				if winner.cancel != nil {
+					winner.cancel()
+				}
+			}()
+
+			if rc.isStream {
+				// Stream the final result from the winner's buffer
+				if err := h.streamResult(w, rc, winner); err != nil {
+					// Client write failed (e.g., Cloudflare/proxy dropped connection).
+					// Not a race failure: the attempt counter for the hash was
+					// already recorded at the early-exit gate, so a client retry
+					// still progresses through the trigger schedule.
+					log.Printf("[STREAM] Client write failed for request %s: %v", rc.reqID, err)
+
+					// Cancel all other parallel requests to stop wasted upstream work.
+					// The winner's cancel is handled by the defer below.
+					coordinator.cancelAllExcept(winner)
+
+					// Don't send error response - connection is already broken
+					return
+				}
+			} else {
+				// Send a single JSON response from the winner's buffer
+				h.handleNonStreamResult(w, rc, winner)
+			}
+			return
+		}
+
+		// If winner is nil, it means either context cancelled or all models failed
+		select {
+		case <-rc.baseCtx.Done():
+			// Context cancelled (timeout, client disconnect, etc.) - treat as failure
+			log.Printf("Request %s context cancelled (timeout or client disconnect)", rc.reqID)
+			h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "context_cancelled")
+			return
+		default:
+			// All attempts failed with errors. Group-level Am24
+			// re-entry: terminal member-pipeline failure ⇒ ONE
+			// ExcludeAndReselect + rebuild + resume; a second
+			// terminal failure (or any non-group request) falls
+			// through to the real failure path.
+			if rc.groupPick != nil && !rc.groupReentered && h.tryGroupReentry(rc) {
+				continue
+			}
+			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
+			h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")
+			return
+		}
 	}
+}
+
+// tryGroupReentry performs the Am24 group-level reselect + rebuild.
+// Member-internal 429s never reach here (absorbed by the member's own
+// credential LB inside the race); this fires ONLY on the terminal
+// all-attempts-failed exit. Returns true when the request should
+// resume execution with the rebuilt list (exactly once per request —
+// the caller's groupReentered flag is set here).
+func (h *Handler) tryGroupReentry(rc *requestContext) bool {
+	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
+	if !ok {
+		return false
+	}
+	replacement, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID)
+	if !avail || replacement == "" {
+		return false // single-member group / all members exhausted — real failure
+	}
+	rc.groupReentered = true // max ONE re-entry; no chaining
+
+	// Rebuild the modelList via the SAME rewrite helper (the engine
+	// binding now points at the replacement member — sticky).
+	newList, pick, failGroup := h.applyGroupRewrite(&rc.conf, rc.modelListOriginal, rc.conversationKey)
+	if failGroup != "" || pick == nil {
+		log.Printf("[grouplb] request %s: re-entry rebuild failed for group %s — treating as real failure", rc.reqID, rc.groupPick.GroupID)
+		return false
+	}
+	rc.modelList = newList
+	rc.groupPick = pick
+	if pick.MemberID != rc.reqLog.Model {
+		rc.reqLog.RouteModel = pick.MemberID
+	} else {
+		rc.reqLog.RouteModel = ""
+	}
+	log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+		rc.reqID, pick.GroupID, pick.MemberID)
+	if h.bus != nil {
+		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
+			"id":          rc.reqID,
+			"group_id":    pick.GroupID,
+			"member_id":   pick.MemberID,
+			"replacement": replacement,
+		})
+	}
+	return true
 }
 
 // handleRaceFailure handles the common failure case for race retry.
@@ -1168,11 +1317,22 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 
 	flusher, _ := w.(http.Flusher)
 
+	// load-balance-groups / Am26 (Q5): group responses mask the
+	// top-level "model" field of each complete SSE event to the
+	// CLIENT-REQUESTED string. Buffered PER COMPLETE EVENT (Am6) —
+	// never per raw chunk: a JSON object can straddle chunk
+	// boundaries and a per-chunk patch would fail open on straddled
+	// events (intermittent upstream-name leak). Non-group requests
+	// get a nil masker — process() returns the chunk unchanged
+	// (zero copies, zero risk for existing traffic). Content
+	// extraction below keeps consuming the ORIGINAL chunk bytes.
+	sseMasker := newSSEModelMasker(groupMaskTarget(rc))
+
 	// Stream existing chunks first (with mutex to sync with heartbeat writes)
 	chunks, _ := buffer.GetChunksFrom(readIndex)
 	rc.writeMu.Lock()
 	for _, chunk := range chunks {
-		if _, err := w.Write(chunk); err != nil {
+		if _, err := w.Write(sseMasker.process(chunk)); err != nil {
 			rc.writeMu.Unlock()
 			return fmt.Errorf("client write failed: %w", err)
 		}
@@ -1230,7 +1390,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			rc.writeMu.Lock()
 			for _, chunk := range chunks {
-				if _, err := w.Write(chunk); err != nil {
+				if _, err := w.Write(sseMasker.process(chunk)); err != nil {
 					rc.writeMu.Unlock()
 					return fmt.Errorf("client write failed: %w", err)
 				}
@@ -1260,7 +1420,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			chunks, _ = buffer.GetChunksFrom(readIndex)
 			rc.writeMu.Lock()
 			for _, chunk := range chunks {
-				if _, err := w.Write(chunk); err != nil {
+				if _, err := w.Write(sseMasker.process(chunk)); err != nil {
 					rc.writeMu.Unlock()
 					return fmt.Errorf("client write failed: %w", err)
 				}
@@ -1280,6 +1440,21 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				flusher.Flush()
 			}
 			rc.writeMu.Unlock()
+
+			// Am26: flush any masked-stream tail bytes (an
+			// incomplete final event) verbatim — fail-open, never
+			// dropped.
+			if tail := sseMasker.flush(); len(tail) > 0 {
+				rc.writeMu.Lock()
+				if _, err := w.Write(tail); err != nil {
+					rc.writeMu.Unlock()
+					return fmt.Errorf("client write failed: %w", err)
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				rc.writeMu.Unlock()
+			}
 
 			// If stream failed, send error event to client
 			if err := buffer.Err(); err != nil {
@@ -1469,10 +1644,36 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				}
 				hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
 				go func() {
-					if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+					// load-balance-groups / Q9: 5s detached-context
+					// timeout (decision pattern).
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := h.counter.IncrementModelUsage(ctx, rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
 						log.Printf("failed to increment model usage counter: %v", err)
 					}
 				}()
+
+				// load-balance-groups / Am25 (Q9): the member usage
+				// row — emitted ONLY when a group actually rewrote
+				// the request (rc.groupPick != nil — set by
+				// applyGroupRewrite on a real pick) AND the winner's
+				// model differs from the client-requested string.
+				// The group predicate is what keeps the
+				// zero-groups==today AC: an ordinary non-group
+				// fallback (B serves after A fails) also leaves
+				// winnerModel != reqLog.Model, and must still
+				// produce exactly ONE row (keyed reqLog.Model).
+				// Direct and day-1 self-shadow requests likewise
+				// produce exactly ONE row, unchanged.
+				if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && rc.groupPick != nil && h.counter != nil {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := h.counter.IncrementModelUsage(ctx, winnerModel, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+							log.Printf("failed to increment member usage counter: %v", err)
+						}
+					}()
+				}
 			}
 
 			h.publishEvent("request_completed", map[string]interface{}{
@@ -1490,7 +1691,7 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			if len(chunks) > 0 {
 				rc.writeMu.Lock()
 				for _, chunk := range chunks {
-					if _, err := w.Write(chunk); err != nil {
+					if _, err := w.Write(sseMasker.process(chunk)); err != nil {
 						rc.writeMu.Unlock()
 						return fmt.Errorf("client write failed: %w", err)
 					}
@@ -1584,6 +1785,19 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	// Set headers
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+
+	// load-balance-groups / Am26 (Q5): group responses mask the
+	// top-level "model" field to the CLIENT-REQUESTED string
+	// (byte-preserving patch; fail-open to verbatim on any parse
+	// surprise — the response is never dropped). Non-group requests:
+	// byte-identical to upstream. Error envelopes never reach here
+	// (they carry no top-level model and return above).
+	if maskTarget := groupMaskTarget(rc); maskTarget != "" {
+		patched := patchTopLevelModelField(finalBody, maskTarget)
+		if len(patched) != len(finalBody) || !bytes.Equal(patched, finalBody) {
+			finalBody = patched
+		}
+	}
 	w.Write(finalBody)
 
 	// Extract content AND thinking for logging. The helper handles
@@ -1679,10 +1893,30 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		}
 		hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
 		go func() {
-			if err := h.counter.IncrementModelUsage(context.Background(), rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+			// load-balance-groups / Q9: 5s detached-context timeout
+			// (decision pattern).
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.counter.IncrementModelUsage(ctx, rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
 				log.Printf("failed to increment model usage counter: %v", err)
 			}
 		}()
+
+		// load-balance-groups / Am25 (Q9): the member usage row —
+		// emitted ONLY when a group actually rewrote the request
+		// (rc.groupPick != nil) AND the winner's model differs from
+		// the client-requested string — same gate as the stream
+		// site (rewritten ⇒ 2 rows, direct ⇒ 1, day-1 ⇒ exactly 1,
+		// non-group fallback ⇒ exactly 1).
+		if winnerModel := winner.GetModelID(); winnerModel != "" && winnerModel != rc.reqLog.Model && rc.groupPick != nil && h.counter != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := h.counter.IncrementModelUsage(ctx, winnerModel, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
+					log.Printf("failed to increment member usage counter: %v", err)
+				}
+			}()
+		}
 	}
 
 	h.publishEvent("request_completed", map[string]interface{}{

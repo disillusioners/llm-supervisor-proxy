@@ -3,7 +3,7 @@ import { Router } from 'preact-router';
 import { lazy, Suspense } from 'preact/compat';
 import { Header, RequestList, RequestDetail, EventLog, ErrorBoundary } from './components';
 import { LoadingFallback } from './components/LoadingFallback';
-import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useDecisionModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
+import { useRequests, useRequestDetail, useConfig, useModels, useImgGenModels, useDecisionModels, useGroupModels, useEvents, useEventRefresh, useTokens, useAppTags } from './hooks';
 import type { RequestListItem } from './types';
 
 const SettingsPage = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -35,6 +35,12 @@ export function App() {
   // The `error` field is plumbed through to the DecisionModelsTab for the
   // alert-role error banner (plan §6.7 / A11Y-3).
   const { models: decisionModels, addModel: addDecisionModel, updateModel: updateDecisionModel, deleteModel: deleteDecisionModel, refetch: refetchDecisionModels, error: decisionError } = useDecisionModels();
+  // useGroupModels — load-balance-groups 2026-10-16 (plan §6.3 / P3.2).
+  // Returns only kind: 'group' models. Mutation hooks invalidate ALL
+  // FOUR model caches (quadruple-key per plan §6.3), so all four tabs
+  // stay in lock-step. The `error` field is plumbed through to the
+  // GroupModelsTab for the alert-role error banner (A11Y-3).
+  const { models: groupModels, addModel: addGroupModel, updateModel: updateGroupModel, deleteModel: deleteGroupModel, refetch: refetchGroupModels, error: groupError } = useGroupModels();
   const { tokens, createToken, updateTokenPermission, deleteToken, refetch: refetchTokens } = useTokens();
  
  const { appTags, refetch: refetchAppTags } = useAppTags();
@@ -61,6 +67,12 @@ export function App() {
         onDeleteDecisionModel={deleteDecisionModel}
         decisionError={decisionError}
         onRetryDecisionModels={refetchDecisionModels}
+        groupModels={groupModels}
+        onAddGroupModel={addGroupModel}
+        onUpdateGroupModel={updateGroupModel}
+        onDeleteGroupModel={deleteGroupModel}
+        groupError={groupError}
+        onRetryGroupModels={refetchGroupModels}
         tokens={tokens}
         onCreateToken={createToken}
         onDeleteToken={deleteToken}
@@ -212,6 +224,12 @@ function SettingsRoute({
     onDeleteDecisionModel,
     decisionError,
     onRetryDecisionModels,
+    groupModels,
+    onAddGroupModel,
+    onUpdateGroupModel,
+    onDeleteGroupModel,
+    groupError,
+    onRetryGroupModels,
     tokens,
     onCreateToken,
     onDeleteToken,
@@ -246,6 +264,17 @@ function SettingsRoute({
     onDeleteDecisionModel: (id: string) => Promise<void>;
     decisionError?: string | null;
     onRetryDecisionModels?: () => void;
+    // Group (load-balance-groups 2026-10-16 / plan §6.1). Pre-filtered
+    // server-side to kind: 'group' via /fe/api/models?kind=group. The
+    // form's submit handler stamps kind: 'group' + internal: true +
+    // exclude_from_ultimate_switching: true (G1/G7) on the payload; we
+    // never pass chat rows through these callbacks.
+    groupModels: any[];
+    onAddGroupModel: (model: any) => Promise<void>;
+    onUpdateGroupModel: (id: string, updates: any) => Promise<void>;
+    onDeleteGroupModel: (id: string) => Promise<void>;
+    groupError?: string | null;
+    onRetryGroupModels?: () => void;
     tokens: any[];
     onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
@@ -274,6 +303,12 @@ function SettingsRoute({
             onDeleteDecisionModel={onDeleteDecisionModel}
             decisionError={decisionError}
             onRetryDecisionModels={onRetryDecisionModels}
+            groupModels={groupModels}
+            onAddGroupModel={onAddGroupModel}
+            onUpdateGroupModel={onUpdateGroupModel}
+            onDeleteGroupModel={onDeleteGroupModel}
+            groupError={groupError}
+            onRetryGroupModels={onRetryGroupModels}
             tokens={tokens}
             onCreateToken={onCreateToken}
             onDeleteToken={onDeleteToken}
