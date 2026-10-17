@@ -465,7 +465,10 @@ func (p *OpenAIProvider) processStream(reader io.Reader, eventCh chan<- StreamEv
 			// Degenerate completion: no finish chunk was seen, but a
 			// usage carrier arrived (usage-only stream). Emit a
 			// minimal response so downstream metering still sees the
-			// usage exactly once.
+			// usage exactly once. Synthetic done-response shape:
+			// {Object: "chat.completion", Usage: lastStreamUsage}
+			// with nil Choices — no content/tool-call payload exists
+			// on this path.
 			eventCh <- StreamEvent{
 				Type: "done",
 				Response: &ChatCompletionResponse{

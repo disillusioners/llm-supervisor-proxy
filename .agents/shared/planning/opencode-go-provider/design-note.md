@@ -24,7 +24,7 @@
 seed   = conversationKey                                        (normal case)
        | credentiallb.ComputeConversationKey(modelID, credID, "")  (degenerate fallback)
 H      = SHA256("opencode-go-session/v1|" + seed)
-hexSlot = lowercase hex(H[0:6])                                  → 12 chars
+hexSlot = lowercase hex(H[0:6])  (6 raw bytes hex-encoded)       → 12 chars
 b62Slot = base62(BigEndian(H[6:16])) left-padded '0' to 14       → 14 chars
 id     = "ses_" + hexSlot + b62Slot                              → 30 chars wire
 ```
@@ -32,7 +32,7 @@ id     = "ses_" + hexSlot + b62Slot                              → 30 chars wi
 - **Reuse, not fork:** the seed is the proxy's own `credentiallb.ComputeConversationKey(modelID, tokenID, firstUserMessage)` product (pkg/credentiallb/key.go — the sha256 conversation key from the load-balance work; `pkg/grouplb` imports it, does not fork it). It is threaded handler → coordinator → executor → provider construction, and re-derived identically on every race attempt / credential-failover re-drive of one request — which is exactly the retry-stability the ses_ contract wants (same conversation ⇒ identical id; pure function of the conversation).
 - **Shape compliance:** `ses_` + 12 hex + 14 base62 `[0-9A-Za-z]` = the vendor client's format (session-id.ts + identifier.ts). Base62 ordering (digits, upper, lower) is ours; the format contract cares about the set. **Correction to the research report:** its "Total length 29" line is an arithmetic slip — `ses_` (4) + 26 = **30**. The 12+14 slot split is the load-bearing fact and is implemented as such (test pins length 30).
 - **Timestamp-slot semantics deliberately dropped:** the client's hex slot encodes `timestamp_ms*0x1000+counter` bit-inverted (newest-sorts-first). The gateway does not validate the semantics (foreign clients' native session ids accepted, research §c/§i), and content-derived ids have no time order — we fill the slot from the hash verbatim (shape-compliant, maximally compatible per the report).
-- **Degenerate fallback (no user-role message ⇒ conversationKey == "", the W-2 case):** deterministic re-key over `(modelID, credentialID)` — stable across retries, distinct per (model, credential). Distinct degenerate conversations of one credential intentionally share one id: that population is system-only traffic, and a shared stable id is strictly better citizenship than no id (gateway 400) or per-attempt ids (breaks retry stability).
+- **Degenerate fallback (no user-role message ⇒ conversationKey == "", the W-2 case):** deterministic re-key over `(modelID, credentialID)` — stable across same-credential retries; credential failover intentionally re-keys (the degenerate seed includes credentialID). Distinct per (model, credential). Distinct degenerate conversations of one credential intentionally share one id: that population is system-only traffic, and a shared stable id is strictly better citizenship than no id (gateway 400) or per-attempt ids (breaks retry stability).
 - **Documented nuance:** the conversation key includes modelID, so a mid-conversation model switch derives a new session id. This matches upstream routing/cache reality (different model = different cache domain) and the proxy's own affinity semantics.
 - Domain-separation tag `opencode-go-session/v1` prevents correlation between session ids and the credential-affinity bindings that use the raw key.
 
@@ -49,11 +49,11 @@ Models stay **manual** (operator configures Go-catalog model ids in the proxy co
 ## 5. Attribution mechanics (deliverable 1)
 
 - `OpenAIProvider` gains an unexported `openCodeGo` flag (factory-set) + `attribution *SessionAttribution`; `setHeaders` stamps `x-opencode-session` + `User-Agent` only when attribution is attached. No other provider is touched — no session header, UA unchanged (Go transport default), structurally guaranteed.
-- `providers.AttachOpenCodeGoAttribution(provider, conversationKey, conversationID, credentialID)` is invoked UNCONDITIONALLY at the four provider-construction sites that have conversation context; it is a kind-checked no-op otherwise:
+- `providers.AttachOpenCodeGoAttribution(provider, conversationKey, modelID, credentialID)` is invoked UNCONDITIONALLY at the four provider-construction sites that have conversation context; it is a kind-checked no-op otherwise:
   1. `pkg/proxy/race_executor.go` — race-internal (the /v1/chat/completions internal path; covers race attempts + credential-failover re-drives);
   2. `pkg/proxy/internal_handler.go` — /v1/messages internal (conversationKey threaded through `executeWithResolved`; covers the failover retry);
   3. `pkg/ultimatemodel/handler_internal.go` — ultimate internal (conversationKey threaded through `executeInternalWithResolved`);
-  4. `pkg/ui/server.go` TestModel — the UI test-connection button (synthetic request; degenerate seed keeps the id stable across test clicks — without it the operator could not validate an opencode-go credential, as the gateway 400s).
+  4. `pkg/ui/server.go` TestModel — the UI test-connection button (synthetic request; degenerate seed keeps the id stable across test clicks — same-credential stability only: the degenerate seed includes credentialID, so credential failover intentionally re-keys; without the seed the operator could not validate an opencode-go credential, as the gateway 400s).
 - NOT wired (deliberately): race-external env-upstream path (provider comes from env, never a credential → cannot be opencode-go); `/v1/decisions` (D4 gate accepts only `openai`/`typesafe`); imggen (image-gen kind requires provider `minimax`). Generic per-credential static headers (F1 idea) are SUPERSEDED by this provider-native design for opencode-go and are NOT implemented.
 
 ## 6. F11 — reasoning_content is a STRING on this surface (R4 scope addition)
@@ -71,7 +71,7 @@ The Go surface emits reasoning as a flat `reasoning_content` string (non-stream 
 
 **Design call: LAST-WINS-COUNTED-ONCE** (not first-wins, not blanket-ignoring usage-only chunks):
 - Two seams carry the guard:
-  1. **Raw-SSE metering extractor** (`pkg/proxy/race_executor.go:extractUsageFromSSEChunk`): after parsing a usage triple, an exact repeat of the already-stored triple is absorbed (no state change); a genuinely new triple updates the slot (running estimate → final totals works).
+  1. **Raw-SSE metering extractor** (`pkg/proxy/race_executor.go:extractUsageFromSSEChunk`): after parsing a usage triple, an exact repeat of the already-stored triple is absorbed (no state change); a genuinely new triple updates the slot (running estimate → final totals works). **Framing correction (review): this seam is DEFENSIVE-ONLY** — reachable only from the `executeExternalRequest` env-upstream path (env-chosen provider ⇒ never opencode-go). The LOAD-BEARING F12 fix is seam 2 below (the typed `lastStreamUsage` parser); `SetUsage` is a single-slot overwrite read once per completion (`pkg/proxy/race_request.go:319-328`), so the meter cannot accumulate on either seam.
   2. **Typed stream parser** (`pkg/providers/openai.go:processStream`): new `lastStreamUsage` last-wins tracker feeds the done event; a usage-only chunk (previously dropped with its `choices:[]` guard) now contributes — fixing a REAL gap where OpenAI `include_usage`-shaped streams (usage ONLY in the trailing chunk) would have missed metering entirely and fallen back to tokenizer estimates.
 - **Why last-wins:** matches the pre-existing `SetUsage` overwrite semantics and the client-facing reverse-scan extraction (handler.go takes the LAST usage-bearing chunk); trailing chunks are the authoritative final usage under the include_usage convention.
 - **Non-regression:** single-usage streams are provably unaffected — first stamp lands (slot nil → no skip); finish-chunk-usage streams land identically (the Go duplicate is a no-op overwrite either way); include_usage trailing-only shape now meters where it previously fell back to estimation (covered by dedicated tests on both seams, plus the pre-existing extractor table suite still passing).

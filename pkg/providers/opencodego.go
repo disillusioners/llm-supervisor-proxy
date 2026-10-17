@@ -83,6 +83,10 @@ const (
 	// length 30. NOTE: the research report's "Total length 29" line is
 	// an arithmetic slip (4 + 26 = 30); the 12+14 slot split is the
 	// load-bearing fact and is self-consistent throughout the report.
+	// Why these widths: the hex slot is 12 chars because the vendor
+	// packs a 48-bit timestamp*0x1000+counter value into it; the
+	// base62 slot is 14 chars because it carries an 80-bit random
+	// value (capacity 14·log2(62) ≈ 83.4 bits ≥ 80).
 	openCodeGoSessionPrefix = "ses_"
 	openCodeGoHexLen        = 12 // hex slot: 48 bits = 6 bytes
 	openCodeGoBase62Len     = 14 // base62 slot: 80 bits = 10 bytes (80 < 14*log2(62) ≈ 83.4)
@@ -149,7 +153,7 @@ func ResolveOpenCodeGoUserAgent() string {
 //     which is exactly the retry-stability the ses_ contract wants.
 //   - conversationKey == "" (degenerate: no user-role message in the
 //     request — W-2 in the credentiallb contract): a deterministic
-//     fallback key is derived from (conversationID, credentialID) so the
+//     fallback key is derived from (modelID, credentialID) so the
 //     session stays stable across retries even without a conversation
 //     anchor. Distinct degenerate conversations of the same
 //     (model, credential) intentionally share one session id — the
@@ -157,11 +161,11 @@ func ResolveOpenCodeGoUserAgent() string {
 //     and a shared id is strictly better citizenship there than no id
 //     (which the gateway 400s) or per-attempt ids (which break retry
 //     stability).
-func OpenCodeGoSessionSeed(conversationKey, conversationID, credentialID string) string {
+func OpenCodeGoSessionSeed(conversationKey, modelID, credentialID string) string {
 	if conversationKey != "" {
 		return conversationKey
 	}
-	return credentiallb.ComputeConversationKey(conversationID, credentialID, "")
+	return credentiallb.ComputeConversationKey(modelID, credentialID, "")
 }
 
 // DeriveOpenCodeGoSessionID maps a conversation seed to an
@@ -229,13 +233,13 @@ func encodeBase62Padded(n *big.Int, width int) string {
 // per-request conversation identity already threaded by the proxy, and
 // DeriveOpenCodeGoSessionID is a pure function of it, so every attempt /
 // failover re-derivation within one request lands on the SAME session id.
-func AttachOpenCodeGoAttribution(providerClient Provider, conversationKey, conversationID, credentialID string) {
+func AttachOpenCodeGoAttribution(providerClient Provider, conversationKey, modelID, credentialID string) {
 	op, ok := providerClient.(*OpenAIProvider)
 	if !ok || !op.openCodeGo {
 		return
 	}
 	op.SetSessionAttribution(SessionAttribution{
-		SessionID: DeriveOpenCodeGoSessionID(OpenCodeGoSessionSeed(conversationKey, conversationID, credentialID)),
+		SessionID: DeriveOpenCodeGoSessionID(OpenCodeGoSessionSeed(conversationKey, modelID, credentialID)),
 		UserAgent: ResolveOpenCodeGoUserAgent(),
 	})
 }

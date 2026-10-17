@@ -496,6 +496,8 @@ func TestOpencodeGo_F11_F12_Stream_VerbatimSignature(t *testing.T) {
 	}
 
 	// F12 — ONE done event, usage counted ONCE (66, not 132).
+	// Raw-SSE seam twin: pkg/proxy/opencodego_stream_metering_test.go
+	// (the extractUsageFromSSEChunk guard suite).
 	if doneCount != 1 {
 		t.Fatalf("F12: expected exactly one done event, got %d", doneCount)
 	}

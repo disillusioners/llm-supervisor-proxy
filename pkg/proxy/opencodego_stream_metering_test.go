@@ -17,6 +17,11 @@ import (
 // new triples update the slot; usage-only chunks are never blanket-ignored.
 // The meter reads exactly ONE final value per stream ⇒ ONE increment.
 //
+// Cross-ref: the typed-seam twin of this suite is the end-to-end
+// verbatim-signature F12 test in pkg/providers/opencodego_test.go
+// (TestOpencodeGo_F11_F12_Stream_VerbatimSignature — TotalTokens==66,
+// not 132).
+//
 // Wire shapes below are quoted from .agents/tester/RESULTS/
 // 2026-10-17-opencode-e2e-r4.md (chunks 15/16 verbatim). No live calls.
 // =============================================================================

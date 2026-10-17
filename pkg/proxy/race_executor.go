@@ -1302,6 +1302,13 @@ func intValue(v interface{}) int {
 // running estimate → final totals) updates the slot. Either way the
 // meter reads exactly ONE final value per stream ⇒ exactly ONE meter
 // increment, for every provider and every usage shape.
+//
+// Framing note (review): this raw-seam guard is DEFENSIVE-ONLY —
+// reachable only from the executeExternalRequest env-upstream path
+// (env-chosen provider ⇒ never opencode-go). The LOAD-BEARING F12 fix
+// is the typed seam (lastStreamUsage, pkg/providers/openai.go); and
+// SetUsage here is a single-slot overwrite read once per completion
+// (race_request.go), never an accumulator.
 func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
 	// Check if this is a data line
 	const dataPrefix = "data: "
