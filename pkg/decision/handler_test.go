@@ -121,7 +121,10 @@ type fakeUpstream struct {
 	hitCount  atomic.Int64
 	lastBody  []byte
 	lastAuthH string
-	script    fakeScript
+	// lastCT records the raw upstream Content-Type header
+	// slice (all values) — duplicate-CT assertions read it.
+	lastCT  []string
+	script  fakeScript
 }
 
 type fakeScript struct {
@@ -142,6 +145,7 @@ func newFakeUpstream(t *testing.T, script fakeScript) (*httptest.Server, *fakeUp
 		f.mu.Lock()
 		f.lastBody = body
 		f.lastAuthH = r.Header.Get("Authorization")
+		f.lastCT = r.Header.Values("Content-Type")
 		f.mu.Unlock()
 		f.hitCount.Add(1)
 		if script.delay > 0 {
@@ -951,6 +955,56 @@ func TestHandler_OpenAI_PathFidelity_BytePassThrough(t *testing.T) {
 	// And the model field was rewritten.
 	if !strings.Contains(got, `"gpt-6-luna"`) {
 		t.Errorf("upstream body did not contain the rewritten model: got=%s", got)
+	}
+}
+
+// TestHandler_Upstream_SingleContentTypeHeader — duplicate-CT
+// regression: the step-12 forwarding loop previously Add-ed the
+// client's Content-Type on top of the app-owned
+// Set("Content-Type", "application/json"), producing a
+// DUPLICATED Content-Type upstream that OpenAI /v1/decisions
+// rejects with "Invalid decision request JSON" (relayed as 502).
+// The upstream must see EXACTLY ONE Content-Type and it must
+// be application/json — regardless of what CT the client sent.
+func TestHandler_Upstream_SingleContentTypeHeader(t *testing.T) {
+	cases := []struct {
+		name     string
+		clientCT string
+	}{
+		{name: "client_sends_application_json", clientCT: "application/json"},
+		{name: "client_sends_text_plain", clientCT: "text/plain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := openAIDecisionSuccessBody(10, 0)
+			env := newEnvOpenAI(t, fakeScript{status: 200, body: body})
+			// Manual request construction (mirrors
+			// env.sendRequest, which force-sets the client CT
+			// to application/json and would mask the text/plain
+			// case).
+			r := httptest.NewRequest(http.MethodPost, "/v1/decisions",
+				strings.NewReader(standardRequestBody(env.modelID)))
+			r.Header.Set("Authorization", "Bearer sk-test-token")
+			r.Header.Set("Content-Type", tc.clientCT)
+			w := httptest.NewRecorder()
+			env.handler.HandleDecision(w, r)
+			rec := w
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if env.fake.hitCount.Load() != 1 {
+				t.Errorf("upstream hit count = %d, want 1", env.fake.hitCount.Load())
+			}
+			env.fake.mu.Lock()
+			gotCT := append([]string(nil), env.fake.lastCT...)
+			env.fake.mu.Unlock()
+			if len(gotCT) != 1 {
+				t.Fatalf("upstream Content-Type values = %q (count=%d), want exactly 1", gotCT, len(gotCT))
+			}
+			if !strings.EqualFold(gotCT[0], "application/json") {
+				t.Errorf("upstream Content-Type = %q, want application/json", gotCT[0])
+			}
+		})
 	}
 }
 
