@@ -38,8 +38,8 @@ var newProviderClient = providers.NewProvider
 // remains pure (W6).
 //
 // conversationKey (Phase 3 / Task 8): the per-request affinity key wired
-// at handler.go:401+ (post-auth). Threaded to the resolution seam via
-// ResolveInternalConfigWithAffinity. MAY be empty (no first-user-message)
+// at the handler.go post-auth site. Threaded to the resolution seam via
+// ResolveInternalConfigWithAffinity. MAY be empty (no leading user run)
 // — see W-2 + C-2 in the plan for empty-key semantics. Used by the
 // rate-limit failover hook below (Task 21) to compute the per-request
 // cooldown-injection exclusion set when a 429 hits.
@@ -232,8 +232,9 @@ func (h *Handler) executeInternalWithResolved(
 // empty-key fresh pick would re-roll and could re-select the cooling
 // credential).
 //
-// conversationKey is the per-request affinity key wired at handler.go:401+
-// (chat path). MAY be empty (no first-user-message extracted) — W-2
+// conversationKey is the per-request affinity key wired at handler.go's
+// post-auth site (chat path). MAY be empty (no leading user run
+// extracted) — W-2
 // semantics: ExcludeAndReselect performs a fresh non-cooling weighted
 // pick with no binding write for empty keys (ReselectHealthy per C2).
 //

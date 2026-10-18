@@ -165,14 +165,17 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		conf.ModelID = originalModel
 	}
 
-	// Phase 3 / Task 2 — cache the first-user-message extraction here so
-	// the post-auth wiring site at handler.go:401+ can hash it with
-	// tokenID. The token-salted conversationKey is NOT computed here —
-	// tokenID is unset at this line; see A-1 + A-1-wiring in the plan.
-	// Multimodal content ([]interface{}) is canonical-JSON hashed per A-2.
-	var firstUserMessage string
+	// Phase 3 / Task 2 (superseded 2026-10-17: leading-user-run) —
+	// cache the leading-user-run extraction here so the post-auth
+	// wiring site at handler.go can hash it with tokenID. The
+	// token-salted conversationKey is NOT computed here — tokenID is
+	// unset at this line; see A-1 + A-1-wiring in the plan. The run is
+	// the canonical JSON array of the LEADING CONTIGUOUS user-message
+	// contents (ExtractLeadingUserRun); multimodal content
+	// ([]interface{}) is canonical-JSON hashed per A-2.
+	var leadingUserRun string
 	if resolvedModel != nil && resolvedModel.Internal {
-		firstUserMessage = credentiallb.ExtractFirstUserMessage(originalMessages)
+		leadingUserRun = credentiallb.ExtractLeadingUserRun(originalMessages)
 	}
 
 	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
@@ -204,7 +207,7 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		originalMessages: originalMessages,
 		bypassInternal:   bypassInternal,
 		bufferMode:       bufferMode,
-		firstUserMessage: firstUserMessage,
+		leadingUserRun:   leadingUserRun,
 	}, nil
 }
 

@@ -48,18 +48,20 @@ type requestContext struct {
 	// Original messages (immutable snapshot for retry reconstruction)
 	originalMessages []interface{}
 
-	// Phase 3 — R1 / A-1 conversation affinity plumbing:
+	// Phase 3 — R1 / A-1 conversation affinity plumbing (extraction
+	// superseded 2026-10-17: leading contiguous user-message run):
 	//
-	//   firstUserMessage is cached in initRequestContext (cheap canonical-JSON
-	//   walk over the first user-role message content). POST-AUTH (at the
-	//   handler.go:401+ wiring site AFTER auth populates tokenID), the
-	//   conversationKey is computed as
-	//   sha256(modelID + "|" + tokenID + "|" + firstUserMessage).
+	//   leadingUserRun is cached in initRequestContext (cheap canonical
+	//   walk over the LEADING CONTIGUOUS user-message contents — the
+	//   canonical JSON array form). POST-AUTH (at the handler.go wiring
+	//   site AFTER auth populates tokenID), the conversationKey is
+	//   computed as
+	//   sha256(modelID + "|" + tokenID + "|" + leadingUserRun).
 	//
 	// For external / non-internal models both fields stay "" and the engine
 	// path is skipped at every call site.
-	firstUserMessage string
-	conversationKey  string
+	leadingUserRun  string
+	conversationKey string
 
 	// load-balance-groups (plan §3.6.1 Am21 + §3.6.2 Am24): the
 	// modelList rewrite record. modelListOriginal preserves the
@@ -186,12 +188,12 @@ func (rc *requestContext) reset() {
 	// from a prior request lifecycle.
 	rc.interleavedThinking = false
 	// Phase 3 (Task 1): clear the per-request affinity fields so pool
-	// reuse cannot leak firstUserMessage / conversationKey from a
+	// reuse cannot leak leadingUserRun / conversationKey from a
 	// previous request lifecycle. The credFailover budget lives on the
 	// coordinator (`raceCoordinator.triedCredIDs` / `.failoverAttempts`),
 	// NOT here — it is constructed fresh per race and dies with the
 	// coordinator.
-	rc.firstUserMessage = ""
+	rc.leadingUserRun = ""
 	rc.conversationKey = ""
 }
 

@@ -28,7 +28,8 @@ import (
 //       - x-opencode-session — a conversation-stable session id, derived
 //         deterministically from the proxy's conversation key (the same
 //         credentiallb.ComputeConversationKey product that drives
-//         credential affinity). The Go gateway hard-gates chat on this
+//         credential affinity; hashed over the leading contiguous
+//         user-message run). The Go gateway hard-gates chat on this
 //         header (400 {"error":{"type":"MissingSessionID"}} when absent —
 //         live-verified 2026-10-17, see .agents/shared/planning/
 //         opencode-go-surface-research/report.md §c).
@@ -230,20 +231,22 @@ func ResolveOpenCodeUserAgent() string {
 //
 //   - conversationKey non-empty (the normal case): the proxy's own
 //     conversation key — credentiallb.ComputeConversationKey(modelID,
-//     tokenID, firstUserMessage) — is used verbatim. It is threaded
-//     through handler.go / handler_anthropic.go post-auth and is stable
-//     across race attempts and credential failovers within a request,
-//     which is exactly the retry-stability the ses_ contract wants.
-//   - conversationKey == "" (degenerate: no user-role message in the
+//     tokenID, leadingUserRun), hashed over the canonical JSON array
+//     of the leading contiguous user-message run — is used verbatim.
+//     It is threaded through handler.go / handler_anthropic.go
+//     post-auth and is stable across race attempts and credential
+//     failovers within a request, which is exactly the retry-stability
+//     the ses_ contract wants.
+//   - conversationKey == "" (degenerate: no leading user run in the
 //     request — W-2 in the credentiallb contract): a deterministic
 //     fallback key is derived from (modelID, credentialID) so the
 //     session stays stable across retries even without a conversation
 //     anchor. Distinct degenerate conversations of the same
 //     (model, credential) intentionally share one session id — the
-//     degenerate population is system-only traffic (no user message),
-//     and a shared id is strictly better citizenship there than no id
-//     (which the gateway 400s) or per-attempt ids (which break retry
-//     stability).
+//     degenerate population is traffic without a leading user run
+//     (system-only / assistant-first), and a shared id is strictly
+//     better citizenship there than no id (which the gateway 400s) or
+//     per-attempt ids (which break retry stability).
 func OpenCodeGoSessionSeed(conversationKey, modelID, credentialID string) string {
 	if conversationKey != "" {
 		return conversationKey
