@@ -95,7 +95,7 @@ func mockUltimateExternalEmptyResponse() string {
 	return string(b)
 }
 
-// bootstrapToolCallUltimateTest wires up an external ultimate
+// bootstrapToolCallUltimateTest wires up an INTERNAL ultimate
 // model pointing at `upstreamURL`. Returns the httptest-driven
 // recorder after invoking HandleChatCompletions with the
 // X-Force-Ultimate-Model header — saves the persistence-target
@@ -142,11 +142,12 @@ func bootstrapToolCallUltimateTest(t *testing.T, upstreamURL, wantBody string, s
 		t.Fatalf("AddCredential: %v", err)
 	}
 	if err := modelsConfig.AddModel(models.ModelConfig{
-		ID:           "ultimate-model",
-		Name:         "Ultimate Model",
-		Enabled:      true,
-		Internal:     false, // EXTERNAL — executes through executeExternal
-		Credentials: models.TestRefs("test-credential"),
+		ID:            "ultimate-model",
+		Name:          "Ultimate Model",
+		Enabled:       true,
+		Internal:      true, // INTERNAL — the external ultimate arm is gone
+		InternalModel: "internal-model",
+		Credentials:   models.TestRefs("test-credential"),
 	}); err != nil {
 		t.Fatalf("AddModel (ultimate): %v", err)
 	}
@@ -229,7 +230,7 @@ func findUltimateAssistantMessage(t *testing.T, reqStore *store.RequestStore) *s
 // `message.tool_calls` directly when present, so populating the
 // ToolCalls field also restores UI observability of WHAT the
 // assistant decided to invoke.
-func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *testing.T) {
+func TestUltimateModel_PersistsAssistantToolCallsOnly_NonStream(t *testing.T) {
 	wantToolCalls := []map[string]interface{}{
 		{
 			"id":   "call_w7_1",
@@ -279,7 +280,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *test
 // has the assembled tool_calls, and the client bytes contain the
 // raw tool_calls (byte-identity proof — capture must not strip,
 // reorder, or reframe).
-func TestUltimateModel_PersistsAssistantToolCallsOnly_External_Stream(t *testing.T) {
+func TestUltimateModel_PersistsAssistantToolCallsOnly_Stream(t *testing.T) {
 	upstreamBody := "" +
 		// Single streaming chunk with the entire tool call —
 		// simpler than an incremental multi-chunk case but

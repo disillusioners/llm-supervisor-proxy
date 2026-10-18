@@ -878,7 +878,6 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 	t.Cleanup(func() { internalSrv.Close(); externalSrv.Close() })
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", externalSrv.URL)
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -899,11 +898,32 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 		Name:          "Internal Primary",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-openai-cred"),
+		Credentials:   models.TestRefs("test-openai-cred"),
 		InternalModel: "gpt-4o-internal",
-		FallbackChain: []string{"external-fallback"},
+		FallbackChain: []string{"internal-fallback"},
 	}); err != nil {
 		t.Fatalf("add model: %v", err)
+	}
+	// remove-external-upstream P5: the fallback is a real INTERNAL model
+	// now (the external arm that used to serve a raw fallback name is
+	// gone), so it carries its own credential pointed at externalSrv.
+	if err := modelsCfg.AddCredential(models.CredentialConfig{
+		ID:       "test-fallback-cred",
+		Provider: "openai",
+		APIKey:   "sk-test",
+		BaseURL:  externalSrv.URL,
+	}); err != nil {
+		t.Fatalf("add fallback credential: %v", err)
+	}
+	if err := modelsCfg.AddModel(models.ModelConfig{
+		ID:            "internal-fallback",
+		Name:          "Internal Fallback",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs("test-fallback-cred"),
+		InternalModel: "gpt-4o-fallback",
+	}); err != nil {
+		t.Fatalf("add fallback model: %v", err)
 	}
 
 	cfg := &Config{
@@ -1009,8 +1029,14 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), fallbackContent) {
 		t.Errorf("expected fallback content on the wire; body=%q", rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "thinking") {
-		t.Errorf("expected fallback thinking on the wire (fallback is external; its reasoning is translated normally); body=%q", rr.Body.String())
+	// remove-external-upstream P5: the fallback is now an INTERNAL model
+	// served through the buffered recorder path, where thinking is
+	// capture-only by contract (never emitted as raw OpenAI chunks on
+	// the wire). The W4 invariant that matters is checked below on the
+	// persisted message; here we pin that the failed internal attempt's
+	// PARTIAL thinking never reaches the wire.
+	if strings.Contains(rr.Body.String(), internalPartialThinking) {
+		t.Errorf("internal partial thinking must never reach the wire; body=%q", rr.Body.String())
 	}
 
 	// Core W4 assertion: the persisted assistant message must carry ONLY the

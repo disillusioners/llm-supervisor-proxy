@@ -3,9 +3,13 @@ package proxy
 // handler_functions_boundary_test.go — db-cache-layer 1D boundary
 // contract tests (OpenAI path). The gate at the initRequestContext
 // resolution site must:
-//   - nil + healthy            → today's legit external passthrough
-//   - nil + !healthy           → 503 config_store_unavailable
-//   - nil + no health capability → today's behavior (legacy safe)
+//   - nil + healthy              → 404 model_not_found (remove-external-
+//     upstream P1: the external passthrough that used to serve an
+//     unresolved model is GONE; a healthy store answering nil is a
+//     definitive unknown model and must NOT forward upstream)
+//   - nil + !healthy             → 503 config_store_unavailable
+//   - nil + no health capability → 404 model_not_found (same gate; the
+//     health capability only decides 503-vs-404, never a passthrough)
 
 import (
 	"net/http"
@@ -40,7 +44,7 @@ func upstreamCountingHandler(hits *atomic.Int64) http.HandlerFunc {
 	}
 }
 
-func TestOpenAIBoundary_HealthyNilReturnsExternalPassthrough(t *testing.T) {
+func TestOpenAIBoundary_HealthyUnknownReturns404(t *testing.T) {
 	var hits atomic.Int64
 	mc := &healthStubModels{ModelsConfig: models.NewModelsConfig(), healthy: true}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
@@ -48,11 +52,16 @@ func TestOpenAIBoundary_HealthyNilReturnsExternalPassthrough(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.HandleChatCompletions(w, makeRequest(t, simpleBody("not-configured-model", false)))
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("nil + healthy must be today's external passthrough, got %d: %s", w.Code, w.Body.String())
+	// remove-external-upstream P1: an unresolved model 404s at the
+	// boundary — the deleted external passthrough is never reached.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("healthy + unresolved model must 404, got %d: %s", w.Code, w.Body.String())
 	}
-	if hits.Load() == 0 {
-		t.Error("external passthrough must reach the upstream")
+	if !containsAll(w.Body.String(), `"code":"model_not_found"`, "not-configured-model") {
+		t.Errorf("404 payload must carry code=model_not_found and the model name: %s", w.Body.String())
+	}
+	if hits.Load() != 0 {
+		t.Error("unknown model must NEVER reach the upstream (the anti-bypass guarantee)")
 	}
 }
 
@@ -97,7 +106,7 @@ func TestOpenAIBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	}
 }
 
-func TestOpenAIBoundary_NoHealthCapabilityLegacySafe(t *testing.T) {
+func TestOpenAIBoundary_NoHealthCapabilityUnknownReturns404(t *testing.T) {
 	var hits atomic.Int64
 	mc := &plainModels{ModelsConfig: models.NewModelsConfig()}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
@@ -105,11 +114,14 @@ func TestOpenAIBoundary_NoHealthCapabilityLegacySafe(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.HandleChatCompletions(w, makeRequest(t, simpleBody("legacy-external-model", false)))
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("no-health-capability must keep today's behavior (passthrough), got %d: %s", w.Code, w.Body.String())
+	// remove-external-upstream P1: the no-health-capability seam still
+	// 404s an unresolved model — the health capability only decides
+	// 503-vs-404, never an upstream passthrough.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("no-health-capability + unresolved model must 404, got %d: %s", w.Code, w.Body.String())
 	}
-	if hits.Load() == 0 {
-		t.Error("legacy path must still reach the upstream")
+	if hits.Load() != 0 {
+		t.Error("unknown model must NEVER reach the upstream")
 	}
 }
 
