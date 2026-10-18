@@ -7,6 +7,8 @@ import { MultiCredentialEditor } from './MultiCredentialEditor';
 // handler, single source of truth"). These are NEVER form state — they are
 // constants stamped on the submit payload. If BE-D2 ever adds another
 // required field for image-gen, it goes here, not in the JSX.
+// `internal: true` is now the only mode repo-wide — the
+// remove-external-upstream commission retired the external tick.
 const HARDCODED_KIND = 'image-gen' as const;
 const HARDCODED_INTERNAL = true as const;
 const HARDCODED_INTERNAL_PROVIDER = 'minimax' as const;
