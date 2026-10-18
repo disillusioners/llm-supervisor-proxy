@@ -1071,13 +1071,15 @@ func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────
 
 func TestHandler_EnvCredential_Unchanged_Positive(t *testing.T) {
-	// Two upstreams:
-	//   - envUpstream : bound to cfg.UpstreamURL; carries the env
-	//                   credential in Authorization (race-external path)
+	// Two upstreams (HISTORICAL — remove-external-upstream P1 retired
+	// the global env upstream; kept for phase5 re-seed context):
+	//   - envUpstream : was bound to the retired global upstream URL;
+	//                   carried the env credential in Authorization
+	//                   (deleted race-external path)
 	//   - internalUpstream : the upstream for an internal multi-credential
 	//                   model so the engine is live (the engine still gets
 	//                   built and is exposed via Handler.credEngine, but
-	//                   the EXTERNAL request must never touch it).
+	//                   the request must never touch it).
 	envUpstream := newRecordingUpstream()
 	envSrv := httptest.NewServer(envUpstream)
 	defer envSrv.Close()
@@ -1144,9 +1146,9 @@ func TestHandler_EnvCredential_Unchanged_Positive(t *testing.T) {
 
 	// Drive N=3 requests for a model unknown to ModelsConfig. PRE-P1
 	// this exercised the external forward (env upstream via the retired
-	// cfg.UpstreamURL + cfg.UpstreamCredentialID pair); POST-P1 the
-	// boundary gate 404s such models. The assertions below are the
-	// phase5 re-seed's delete-vs-convert territory (R12).
+	// global upstream-URL/credential pair — fields deleted in P1);
+	// POST-P1 the boundary gate 404s such models. The assertions below
+	// are the phase5 re-seed's delete-vs-convert territory (R12).
 	const N = 3
 	for i := 0; i < N; i++ {
 		rec := sendChatRequest(t, h, plaintextToken, "external-model-not-in-db", "phase5-test env-cred")
