@@ -381,9 +381,10 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 
 // sendChatRequest drives a non-stream chat completions request through
 // the handler and returns the recorder. The body uses the given model
-// name and first-user-message (used for affinity key derivation). Pass
-// model="" to use the env-provided model field.
-func sendChatRequest(t *testing.T, h *Handler, token string, modelName, firstUserMessage string) *httptest.ResponseRecorder {
+// name and a single user message with the given content string (the
+// handler derives the leading user-message run from it; pass model=""
+// to use the env-provided model field).
+func sendChatRequest(t *testing.T, h *Handler, token string, modelName, userContent string) *httptest.ResponseRecorder {
 	t.Helper()
 	body := map[string]interface{}{
 		"model":  modelName,
@@ -391,7 +392,7 @@ func sendChatRequest(t *testing.T, h *Handler, token string, modelName, firstUse
 		"messages": []interface{}{
 			map[string]interface{}{
 				"role":    "user",
-				"content": firstUserMessage,
+				"content": userContent,
 			},
 		},
 	}
@@ -1017,7 +1018,7 @@ func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
 	// W2 (Phase-5 review): the InjectPreconditionStateForTest call that
 	// used to live here was a silent no-op — its hardcoded placeholder
 	// key ("phase5-conv-key-3") can never equal the real
-	// sha256(modelID|tokenID|firstUserMessage) conversation key computed
+	// sha256(modelID|tokenID|leadingUserRun) conversation key computed
 	// at request time, so it biased nothing. Deleted. The test is robust
 	// to EITHER first pick: fail500 hits whichever credential the
 	// engine chooses (seed-7 driven — see buildHandlerStack), the
@@ -1270,7 +1271,7 @@ func runB1StructureWithFallback(t *testing.T) {
 	env := buildHandlerStack(t, mock, []string{"m1", "m2"})
 	// W2 (Phase-5 review): deleted the InjectPreconditionStateForTest
 	// call — its placeholder key ("phase5-conv-key-5a") never matched
-	// the request-time sha256(modelID|tokenID|firstUserMessage)
+	// the request-time sha256(modelID|tokenID|leadingUserRun)
 	// conversation key, so the "bias first pick" never took effect.
 	// First pick is seed-7 driven (see buildHandlerStack); every
 	// assertion below is pick-agnostic (pool membership + distinct
@@ -1481,7 +1482,7 @@ func TestHandler_TwoModelFallback429_WrongModelRegression(t *testing.T) {
 	// W2 (Phase-5 review): deleted both no-op
 	// InjectPreconditionStateForTest calls — their placeholder key
 	// ("phase5-conv-key-6") never matched the request-time
-	// sha256(modelID|tokenID|firstUserMessage) conversation keys, so
+	// sha256(modelID|tokenID|leadingUserRun) conversation keys, so
 	// neither bias ever took effect. First picks are seed-7 driven
 	// (see buildHandlerStack) and this test is robust to EITHER pick:
 	// m1 burns exactly len(m1.Creds)-1 = 2 credFailover reselects from
@@ -1833,7 +1834,7 @@ func TestHandler_Case1ModelIDPopulation_ManageLoopGuard(t *testing.T) {
 	env := buildHandlerStack(t, mock, []string{"m1", "m2"})
 	// NOTE: we deliberately do NOT bias m2's first pick via
 	// InjectPreconditionStateForTest here. The conversation key is
-	// computed from (modelID, tokenID, firstUserMessage) — the actual
+	// computed from (modelID, tokenID, leadingUserRun) — the actual
 	// value is request-scoped and unknown at test setup time. We want
 	// the test to remain robust to EITHER ordering of m2-cred-1 ↔
 	// m2-cred-2 first picks (both exercise the guarded line

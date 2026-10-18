@@ -402,10 +402,19 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 	// Content-Type: the app-owned application/json above is
 	// authoritative; Add-ing the client's CT would produce a
 	// DUPLICATED Content-Type upstream (OpenAI /v1/decisions
-	// rejects it with "Invalid decision request JSON").
+	// rejects it with "Invalid decision request JSON"). Also
+	// strip the client Accept-Encoding: Go's http.Transport
+	// only transparently decompresses a gzip response when IT
+	// added Accept-Encoding itself; a copied header (cloudflared
+	// injects "Accept-Encoding: gzip" toward origin) disables
+	// auto-decompression and a gzipped body reaches the JSON
+	// parser ⇒ 502. Excluding the header lets the transport own
+	// encoding negotiation (it adds its own "gzip" and
+	// decompresses transparently).
 	for key, values := range r.Header {
 		if isHopByHopHeader(key) || isClientAuthHeader(key) ||
-			strings.EqualFold(key, "Content-Type") {
+			strings.EqualFold(key, "Content-Type") ||
+			strings.EqualFold(key, "Accept-Encoding") {
 			continue
 		}
 		for _, value := range values {

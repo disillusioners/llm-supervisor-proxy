@@ -34,6 +34,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
@@ -229,6 +231,139 @@ func TestGzipMiddleware_ExternalRawPassthrough_NoContentEncodingOnWire(t *testin
 		if got := upstreamHeaders.Get("Content-Length"); got != strconv.Itoa(len(payload)) {
 			t.Errorf("upstream Content-Length = %q, want %d", got, len(payload))
 		}
+	}
+}
+
+// TestExecuteExternal_UpstreamHeaderHygiene_GzipRoundTrip —
+// header-hygiene + gzip-negotiation regression for the THIRD
+// sibling: the ultimate-model external raw passthrough copy loop
+// (handler_external.go ~:137-156) previously forwarded the client's
+// Content-Type AND Accept-Encoding verbatim, exactly like the
+// decision/imggen bugs fixed in 7163291.
+//
+// This upstream NEGOTIATES gzip (opt-in fixture behavior, mirrors
+// the siblings' fakeScript.gzipNegotiate): when the received
+// Accept-Encoding includes gzip it responds 200 with
+// Content-Encoding: gzip + a gzipped valid chat-completions body.
+//
+// With the leak: the handler's transport (which did not add
+// Accept-Encoding itself) does NOT transparently decompress, so the
+// handler relays gzip bytes to the client alongside the COPIED
+// Content-Encoding: gzip response header (:172-176), and the
+// server-side consumers of the body degrade silently —
+// extractUsageFromResponse returns nil (fallback tokenizer
+// metering) and captureFromNonStreamResponse yields empty
+// Content/Thinking/ToolCalls. Note the CLIENT-visible status alone
+// is NOT a discriminator on this path (the client gunzips the
+// relayed body itself) — hence the explicit header + body-plaintext
+// + usage assertions below. Fixed: the transport adds its own
+// "Accept-Encoding: gzip", decompresses transparently, and strips
+// Content-Encoding from the relayed response headers.
+func TestExecuteExternal_UpstreamHeaderHygiene_GzipRoundTrip(t *testing.T) {
+	plainUpstream := []byte(`{"id":"ult-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
+	var mu sync.Mutex
+	var lastCT []string
+	var lastAE []string
+	sawGzip := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		ae := r.Header.Get("Accept-Encoding")
+		mu.Lock()
+		lastCT = r.Header.Values("Content-Type")
+		lastAE = r.Header.Values("Accept-Encoding")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		payload := plainUpstream
+		if strings.Contains(strings.ToLower(ae), "gzip") {
+			mu.Lock()
+			sawGzip = true
+			mu.Unlock()
+			payload = gzipBytesUlt(t, plainUpstream)
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	cfg := newMockConfigManager()
+	cfg.cfg.UpstreamURL = upstream.URL
+	modelsCfg := newMockModelsConfig()
+	// Non-internal model → Handler.Execute routes to
+	// executeExternal (handler.go:851 reference; mirrors the
+	// TestGzipMiddleware_ExternalRawPassthrough_* setup above).
+	modelsCfg.AddModel(models.ModelConfig{
+		ID: "ultimate-model", Name: "ultimate-model",
+		Enabled: true, Internal: false,
+	})
+	h := NewHandler(cfg, modelsCfg, nil, nil)
+
+	plain := []byte(`{"model":"ultimate-model","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	var body map[string]interface{}
+	_ = json.Unmarshal(plain, &body)
+	headersSent := false
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(plain))
+	// Client headers that must NOT leak upstream: a client CT that
+	// would duplicate the app-owned Set, and an AE carrying the
+	// "br" marker (Go's transport never sends br).
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	rr := httptest.NewRecorder()
+	res, err := h.Execute(context.Background(), rr, req, body,
+		"ultimate-model", "test-hash", &headersSent, nil, "",
+	)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200; body=%q", rr.Code, rr.Body.String())
+	}
+	mu.Lock()
+	gotCT := append([]string(nil), lastCT...)
+	gotAE := append([]string(nil), lastAE...)
+	gzipServed := sawGzip
+	mu.Unlock()
+	if !gzipServed {
+		t.Fatalf("upstream did not observe Accept-Encoding incl. gzip — negotiation fixture broken")
+	}
+	// (a) exactly ONE Content-Type — the app-owned application/json.
+	if len(gotCT) != 1 {
+		t.Fatalf("upstream Content-Type values = %q (count=%d), want exactly 1", gotCT, len(gotCT))
+	}
+	if !strings.EqualFold(gotCT[0], "application/json") {
+		t.Errorf("upstream Content-Type = %q, want application/json", gotCT[0])
+	}
+	// (b) NO client-supplied Accept-Encoding — the transport adds
+	// exactly "gzip"; the client's "br" marker must never appear.
+	if len(gotAE) != 1 || gotAE[0] != "gzip" {
+		t.Errorf("upstream Accept-Encoding = %q, want exactly [\"gzip\"] (transport-added; no client \"br\")", gotAE)
+	}
+	// (c) response-level: with the leak the proxy relays the raw
+	// gzip bytes AND the copied Content-Encoding: gzip header; the
+	// client-visible body must instead be the PLAINTEXT upstream
+	// JSON (transport decoded it) with no Content-Encoding header.
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("client response carries Content-Encoding: %q (proxy relayed undecoded upstream gzip)", got)
+	}
+	var parsed struct {
+		ID     string `json:"id"`
+		Choice []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("client body is not plaintext JSON (upstream gzip leaked through?): %v; body=%q", err, rr.Body.String())
+	}
+	if parsed.ID != "ult-1" || len(parsed.Choice) != 1 || parsed.Choice[0].Message.Content != "ok" {
+		t.Errorf("client body schema mismatch: %+v", parsed)
+	}
+	// (d) passive capture must see the DECODED body: usage parsed
+	// from the plaintext upstream JSON, not the fallback path.
+	if res == nil || res.Usage == nil || res.Usage.TotalTokens != 5 {
+		t.Errorf("ExecuteResult.Usage = %+v, want total_tokens=5 parsed from the decoded body", res)
 	}
 }
 

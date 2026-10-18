@@ -252,14 +252,14 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
 	//
-	// Cache firstUserMessage here (cheap canonical walk over the
-	// Anthropic-shape messages: role=="user" → first content-bearing
-	// message). The Anthropic wire-shape content is string OR
-	// []ContentPart (multimodal); ExtractFirstUserMessage expects the
-	// OpenAI-shape messages (role/user/content map) — for Anthropic, the
-	// helper still works because the role + content fields line up after
-	// our pre-processing. For multimodals we canonicalize the JSON
-	// like the OpenAI path does.
+	// Cache leadingUserRun here (cheap canonical walk over the
+	// Anthropic-shape messages: the LEADING CONTIGUOUS run of
+	// user-role messages). The Anthropic wire-shape content is string
+	// OR []ContentPart (multimodal); ExtractLeadingUserRun expects the
+	// OpenAI-shape messages (role/user/content map) — for Anthropic,
+	// the helper still works because the role + content fields line up
+	// after our pre-processing (arcMessagesAsInterfaces below). For
+	// multimodals we canonicalize the JSON like the OpenAI path does.
 	//
 	// Resolve auth (mirrors handler.go:411-437 — the OpenAI path's
 	// POST-AUTH wiring site). h.authenticate returns (nil, true) when
@@ -275,7 +275,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if resolvedModel != nil && resolvedModel.Internal {
-		arc.firstUserMessage = credentiallb.ExtractFirstUserMessage(arcMessagesAsInterfaces(anthropicReq.Messages))
+		arc.leadingUserRun = credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(anthropicReq.Messages))
 		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
 		// authenticated token's ID for salted conversation keys (the
 		// OPENAI-path parity fix landed in W3 at handler.go:431-474).
@@ -283,26 +283,26 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		// keep arcTokenID == "" → unsalted key — accepted residual
 		// risk per A-1.
 		//
-		// W-2 + C2 (mirrors the chat-completions post-auth site): when no
-		// first user message was extracted the key stays "" — the engine
-		// picks FRESH per request and stores NO binding; the
+		// W-2 + C2 (mirrors the chat-completions post-auth site): when
+		// no leading user run was extracted the key stays "" — the
+		// engine picks FRESH per request and stores NO binding; the
 		// ""-as-own-bucket reading is REMOVED per W-2. The caller owns
 		// this gate (ComputeConversationKey never returns "" by itself).
-		if arc.firstUserMessage == "" {
+		if arc.leadingUserRun == "" {
 			arc.conversationKey = ""
 			log.Printf("[LB] (anthropic) empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
 				resolvedModel.ID)
 		} else {
-			arc.conversationKey = credentiallb.ComputeConversationKey(resolvedModel.ID, arcTokenID, arc.firstUserMessage)
+			arc.conversationKey = credentiallb.ComputeConversationKey(resolvedModel.ID, arcTokenID, arc.leadingUserRun)
 			tokDisp := arcTokenID
 			if tokDisp == "" {
 				tokDisp = "<empty>"
 			}
-			log.Printf("[LB] (anthropic) computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
+			log.Printf("[LB] (anthropic) computed conversationKey hash=%s modelID=%s tokenID=%s len(leadingUserRun)=%d",
 				arc.conversationKey[:8],
 				resolvedModel.ID,
 				tokDisp,
-				len(arc.firstUserMessage),
+				len(arc.leadingUserRun),
 			)
 		}
 	}
@@ -1476,11 +1476,13 @@ type anthropicRequestContext struct {
 
 	// Phase 3 / Task 16 — Anthropic-path affinity plumbing.
 	//
-	// firstUserMessage is cached at attempt-anthropic-model time (cheap
-	// walk over Anthropic-shape messages). conversationKey is computed
-	// POST-AUTH on the Anthropic path equivalent of handler.go:401+
-	// (HandleAnthropicMessages after auth populates authToken / tokenID),
-	// then threaded through NewInternalHandler.HandleRequest so
+	// leadingUserRun is cached at attempt-anthropic-model time (cheap
+	// walk over the LEADING CONTIGUOUS user-message run in the
+	// Anthropic-shape messages). conversationKey is computed
+	// POST-AUTH on the Anthropic path equivalent of handler.go's
+	// post-auth wiring site (HandleAnthropicMessages after auth
+	// populates authToken / tokenID), then threaded through
+	// NewInternalHandler.HandleRequest so
 	// /v1/messages internal resolution uses ResolveInternalConfigWithAffinity.
 	//
 	// Retry-After (Round 3c — W1): the anthropic-passthrough branch
@@ -1488,9 +1490,9 @@ type anthropicRequestContext struct {
 	// resp.Header. captured at the existing arc.lastStatusCode set-site
 	// (handler_anthropic.go:423-424) so the Task 22 W1 classifier +
 	// ExcludeAndReselect retry can read it.
-	firstUserMessage string
-	conversationKey  string
-	retryAfter       time.Duration
+	leadingUserRun  string
+	conversationKey string
+	retryAfter      time.Duration
 
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
@@ -1935,7 +1937,7 @@ func (h *Handler) publishAnthropicCredentialFailover(modelID, fromID, toID strin
 
 // arcMessagesAsInterfaces (Phase 3 / Task 16) converts Anthropic-shape
 // messages to the OpenAI-shape []interface{} that
-// credentiallb.ExtractFirstUserMessage walks. The conversion is
+// credentiallb.ExtractLeadingUserRun walks. The conversion is
 // minimal: each Anthropic message becomes a {"role": "...", "content": ...}
 // map. String content is preserved; []ContentBlock / multimodal
 // content is wrapped as []interface{} for the canonical-JSON path.

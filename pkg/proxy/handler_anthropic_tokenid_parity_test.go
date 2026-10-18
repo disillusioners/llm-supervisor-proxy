@@ -178,17 +178,23 @@ func TestAnthropic_ConversationKeyPerTokenSalting(t *testing.T) {
 
 	// (2) Anonymous request MUST produce the UNSALTED baseline key
 	// (A-1 graceful degradation), equal to
-	// ComputeConversationKey(modelID, "", firstUserMessage).
-	wantAnon := credentiallb.ComputeConversationKey("anthropic-test-model", "", firstUserMsg)
+	// ComputeConversationKey(modelID, "", leadingUserRun) — where
+	// leadingUserRun is the canonical JSON array of the leading
+	// contiguous user-message run (2026-10-17 derivation), derived
+	// here exactly the way the OpenAI path derives it.
+	wantRun := credentiallb.ExtractLeadingUserRun([]interface{}{
+		map[string]interface{}{"role": "user", "content": firstUserMsg},
+	})
+	wantAnon := credentiallb.ComputeConversationKey("anthropic-test-model", "", wantRun)
 	if keyAnon != wantAnon {
 		t.Fatalf("anonymous conversationKey = %q, want unsalted baseline %q", keyAnon, wantAnon)
 	}
 
 	// (3) Token A and token B salted keys MUST equal
-	// ComputeConversationKey(modelID, tokenID, firstUserMessage) with
+	// ComputeConversationKey(modelID, tokenID, leadingUserRun) with
 	// their respective IDs — closes the loop on the wiring.
-	wantA := credentiallb.ComputeConversationKey("anthropic-test-model", "token-A-uuid", firstUserMsg)
-	wantB := credentiallb.ComputeConversationKey("anthropic-test-model", "token-B-uuid", firstUserMsg)
+	wantA := credentiallb.ComputeConversationKey("anthropic-test-model", "token-A-uuid", wantRun)
+	wantB := credentiallb.ComputeConversationKey("anthropic-test-model", "token-B-uuid", wantRun)
 	if keyA != wantA {
 		t.Fatalf("token-A conversationKey = %q, want %q", keyA, wantA)
 	}

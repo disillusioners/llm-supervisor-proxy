@@ -12,6 +12,7 @@ package decision
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -123,8 +124,13 @@ type fakeUpstream struct {
 	lastAuthH string
 	// lastCT records the raw upstream Content-Type header
 	// slice (all values) — duplicate-CT assertions read it.
-	lastCT  []string
-	script  fakeScript
+	// lastAE records the raw upstream Accept-Encoding header
+	// slice (all values) — gzip-negotiation-leak assertions
+	// read it (a client AE must never be forwarded; the
+	// transport must own encoding negotiation).
+	lastCT []string
+	lastAE []string
+	script fakeScript
 }
 
 type fakeScript struct {
@@ -132,6 +138,13 @@ type fakeScript struct {
 	body        []byte
 	contentType string
 	delay       time.Duration
+	// gzipNegotiate turns the fake into a real gzip-negotiating
+	// upstream: when the incoming Accept-Encoding includes gzip,
+	// the response body is gzipped + Content-Encoding: gzip is
+	// set. Opt-in (default off) so existing tests keep identity
+	// responses — the negotiation round-trip discriminator test
+	// is the only consumer.
+	gzipNegotiate bool
 }
 
 func newFakeUpstream(t *testing.T, script fakeScript) (*httptest.Server, *fakeUpstream) {
@@ -146,6 +159,7 @@ func newFakeUpstream(t *testing.T, script fakeScript) (*httptest.Server, *fakeUp
 		f.lastBody = body
 		f.lastAuthH = r.Header.Get("Authorization")
 		f.lastCT = r.Header.Values("Content-Type")
+		f.lastAE = r.Header.Values("Accept-Encoding")
 		f.mu.Unlock()
 		f.hitCount.Add(1)
 		if script.delay > 0 {
@@ -155,9 +169,22 @@ func newFakeUpstream(t *testing.T, script fakeScript) (*httptest.Server, *fakeUp
 				return
 			}
 		}
+		// Opt-in gzip negotiation (see fakeScript.gzipNegotiate):
+		// respond with a gzipped body + Content-Encoding: gzip
+		// exactly when the incoming request's Accept-Encoding
+		// includes gzip — a real negotiating upstream.
+		payload := script.body
+		if script.gzipNegotiate && strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			_, _ = zw.Write(script.body)
+			_ = zw.Close()
+			payload = buf.Bytes()
+			w.Header().Set("Content-Encoding", "gzip")
+		}
 		w.Header().Set("Content-Type", script.contentType)
 		w.WriteHeader(script.status)
-		_, _ = w.Write(script.body)
+		_, _ = w.Write(payload)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, f
@@ -1005,6 +1032,137 @@ func TestHandler_Upstream_SingleContentTypeHeader(t *testing.T) {
 				t.Errorf("upstream Content-Type = %q, want application/json", gotCT[0])
 			}
 		})
+	}
+}
+
+// TestHandler_Upstream_NoClientAcceptEncoding — gzip-negotiation
+// regression: the step-12 forwarding loop previously copied the
+// client's Accept-Encoding onto the upstream request. Go's
+// http.Transport only transparently decompresses a gzip response
+// when IT added Accept-Encoding itself; with the client's header
+// already present it skips both the auto-add AND the transparent
+// decompress, so a gzip-negotiating upstream (cloudflared injects
+// "Accept-Encoding: gzip" toward origin) hands back a gzipped
+// body that the handler feeds raw to the JSON parser ⇒ 502. The
+// upstream must NEVER see a client-supplied Accept-Encoding: the
+// transport must own encoding negotiation (it then adds "gzip"
+// itself and decompresses transparently). The "br" token is the
+// marker — Go's transport never sends it.
+func TestHandler_Upstream_NoClientAcceptEncoding(t *testing.T) {
+	// Note on gzip_only: the client value "gzip" happens to EQUAL
+	// what Go's transport adds itself, so the assertions below
+	// pass on UNFIXED code too — this subtest is a
+	// NON-discriminating header-shape check (it guards against a
+	// client-echo duplication like ["gzip", "gzip"] and pins the
+	// transport-owned value). The real leak discriminators are
+	// the "br"-bearing subtests here and
+	// TestHandler_Upstream_GzipNegotiationRoundTrip below.
+	cases := []struct {
+		name     string
+		clientAE string
+	}{
+		{name: "cloudflared_realistic_gzip_br", clientAE: "gzip, br"},
+		{name: "gzip_only_non_discriminating", clientAE: "gzip"},
+		{name: "br_only", clientAE: "br"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := openAIDecisionSuccessBody(10, 0)
+			env := newEnvOpenAI(t, fakeScript{status: 200, body: body})
+			// Manual request construction (mirrors
+			// TestHandler_Upstream_SingleContentTypeHeader;
+			// sendRequest never sets Accept-Encoding).
+			r := httptest.NewRequest(http.MethodPost, "/v1/decisions",
+				strings.NewReader(standardRequestBody(env.modelID)))
+			r.Header.Set("Authorization", "Bearer sk-test-token")
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Accept-Encoding", tc.clientAE)
+			w := httptest.NewRecorder()
+			env.handler.HandleDecision(w, r)
+			rec := w
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if env.fake.hitCount.Load() != 1 {
+				t.Errorf("upstream hit count = %d, want 1", env.fake.hitCount.Load())
+			}
+			env.fake.mu.Lock()
+			gotAE := append([]string(nil), env.fake.lastAE...)
+			gotCT := append([]string(nil), env.fake.lastCT...)
+			env.fake.mu.Unlock()
+			// (a) exactly ONE Content-Type — application/json
+			// (the app-owned Set must remain the only CT even
+			// while the loop is being hygiene-checked).
+			if len(gotCT) != 1 {
+				t.Fatalf("upstream Content-Type values = %q (count=%d), want exactly 1", gotCT, len(gotCT))
+			}
+			if !strings.EqualFold(gotCT[0], "application/json") {
+				t.Errorf("upstream Content-Type = %q, want application/json", gotCT[0])
+			}
+			// (b) NO client-supplied Accept-Encoding. The
+			// transport may add exactly "gzip" (its
+			// auto-decompress contract); any other value —
+			// especially the client's "br" marker — is a leak.
+			if len(gotAE) == 0 {
+				t.Logf("upstream saw no Accept-Encoding at all (transport may omit on pooled conns) — acceptable")
+				return
+			}
+			for _, v := range gotAE {
+				if strings.Contains(v, "br") {
+					t.Errorf("upstream Accept-Encoding %q contains the client marker (client sent %q)", v, tc.clientAE)
+				}
+				if v != "gzip" {
+					t.Errorf("upstream Accept-Encoding = %q, want exactly [\"gzip\"] (transport-added); client sent %q", gotAE, tc.clientAE)
+				}
+			}
+		})
+	}
+}
+
+// TestHandler_Upstream_GzipNegotiationRoundTrip — REAL-symptom
+// discriminator (the header-assertion tests above only inspect the
+// upstream REQUEST): the fake upstream here actually NEGOTIATES
+// gzip. With the AE leak, the handler's transport (which did not
+// add Accept-Encoding itself) does NOT transparently decompress,
+// so the gzipped upstream body reaches InspectResponse raw and
+// fails JSON parsing ⇒ 502 "inspect error". Fixed, the transport
+// adds its own "Accept-Encoding: gzip", decompresses
+// transparently, and the client relay is 200 with the plaintext
+// decision schema.
+func TestHandler_Upstream_GzipNegotiationRoundTrip(t *testing.T) {
+	plainBody := openAIDecisionSuccessBody(10, 0)
+	env := newEnvOpenAI(t, fakeScript{status: 200, body: plainBody, gzipNegotiate: true})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/decisions",
+		strings.NewReader(standardRequestBody(env.modelID)))
+	r.Header.Set("Authorization", "Bearer sk-test-token")
+	r.Header.Set("Content-Type", "application/json")
+	// cloudflared-realistic client: plain "gzip".
+	r.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	env.handler.HandleDecision(w, r)
+	rec := w
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (negotiated upstream gzip must be transparently decoded); body=%s", rec.Code, rec.Body.String())
+	}
+	var parsed struct {
+		Answers []struct {
+			Type        string  `json:"type"`
+			Name        string  `json:"name"`
+			Probability float64 `json:"probability"`
+		} `json:"answers"`
+		Usage struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("response body is not plaintext decision JSON (upstream gzip leaked through?): %v; body=%q", err, rec.Body.String())
+	}
+	if len(parsed.Answers) != 1 || parsed.Answers[0].Name != "is_x" || parsed.Answers[0].Probability != 0.97 {
+		t.Errorf("answers mismatch: %+v", parsed.Answers)
+	}
+	if parsed.Usage.TotalTokens != 10 {
+		t.Errorf("usage.total_tokens = %d, want 10", parsed.Usage.TotalTokens)
 	}
 }
 

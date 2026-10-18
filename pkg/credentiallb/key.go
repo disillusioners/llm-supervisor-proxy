@@ -16,69 +16,122 @@ import (
 var ErrNoCredentials = errors.New("credentiallb: model has no credentials")
 
 // ComputeConversationKey returns a 64-char hex SHA256 of
-// (modelID + "|" + tokenID + "|" + firstUserMessage).
+// (modelID + "|" + tokenID + "|" + leadingUserRun) where
+// leadingUserRun is the canonical JSON ARRAY of the leading contiguous
+// run of user-message contents (ExtractLeadingUserRun).
 //
 // A-1: the tokenID salt is mandatory in production wiring (post-auth
 // source: rc.tokenID); it prevents templated-agent-fleet skew where
-// many agents under DIFFERENT principals share a byte-identical first
-// message. tokenID == "" (anonymous requests) degrades to the unsalted
-// form — accepted residual risk (within-principal templated skew is
-// documented for operators).
+// many agents under DIFFERENT principals share a byte-identical
+// leading run. tokenID == "" (anonymous requests) degrades to the
+// unsalted form — accepted residual risk (within-principal templated
+// skew is documented for operators).
 //
-// A-2: when the first user message's content is multimodal
-// ([]interface{}), ExtractFirstUserMessage returns the canonical JSON
-// of the content (sorted keys, no whitespace), so the key is computed
-// over that canonical form here.
+// A-2: when a user message's content is multimodal ([]interface{}),
+// ExtractLeadingUserRun collects it and canonicalJSON renders the
+// whole run canonically (sorted keys, sorted array elements, no
+// whitespace), so the key is computed over that canonical form here.
 //
-// W-2: if firstUserMessage == "", the caller MUST skip the engine
+// RUN-JOIN COLLISION SAFETY: the run is hashed as one canonical JSON
+// array, not a "|" concatenation — each element is JSON-escaped inside
+// the brackets, so a raw "," (or "|") inside an element cannot split
+// or alias an element boundary (["a|b"] and ["a","b"] render
+// differently, and ["a,b"] cannot split into ["a","b"]).
+//
+// W-2: if leadingUserRun == "", the caller MUST skip the engine
 // entirely and use weighted-random-without-affinity for that request
 // (the engine itself also enforces this: GetOrSelect(..., "") returns
 // a fresh pick with no binding stored).
 //
 // Full 64 hex chars, no truncation (birthday-paradox bound; same
 // policy as ultimatemodel.HashMessages).
-func ComputeConversationKey(modelID, tokenID, firstUserMessage string) string {
-	sum := sha256.Sum256([]byte(modelID + "|" + tokenID + "|" + firstUserMessage))
+func ComputeConversationKey(modelID, tokenID, leadingUserRun string) string {
+	sum := sha256.Sum256([]byte(modelID + "|" + tokenID + "|" + leadingUserRun))
 	return hex.EncodeToString(sum[:])
 }
 
-// ExtractFirstUserMessage returns the canonical content of the first
-// message with role=="user":
-//   - string content → returned as-is
-//   - []interface{} content (multimodal) → canonical JSON of the array
-//     (sorted keys, no whitespace; per A-2 — the multimodal-as-""
-//     fallback is REMOVED, all requests get affinity)
-//   - user messages with missing/empty/null content are skipped in
-//     favor of the NEXT user message; if no user message carries
-//     usable content, or no user-role message exists → ""
+// ExtractLeadingUserRun returns the canonical JSON ARRAY of the
+// contents of the LEADING CONTIGUOUS RUN of user messages — the
+// conversation-affinity input that superseded the retired
+// first-user-message-only extraction (2026-10-17: the ensemble
+// upstream inserts task context as MULTIPLE CONSECUTIVE user
+// messages, so hashing only the first one lost most of the signal).
+//
+// Collection walk over the message list, from index 0 (each entry
+// dispatches exactly once on its role):
+//   - role == "system"  → SKIP (not collected; walk continues)
+//   - role == "user"    → usable content COLLECTED (predicate below);
+//     unusable content skipped — the walk continues either way
+//   - role == "assistant" → STOP (run ends)
+//   - any OTHER role (tool / function / developer / a non-map entry
+//     with no role) → STOP (run ends)
+//   - messages exhausted → STOP
+//
+// Per-message usable-content predicate (identical to the retired
+// ExtractFirstUserMessage):
+//   - string content, non-empty → collected as-is
+//   - []interface{} (multimodal), non-empty → collected; canonicalized
+//     by the outer canonicalJSON below (per A-2)
+//   - missing / null / empty content → skipped, NOT terminating
+//
+// Returns:
+//   - non-empty run → canonical JSON array text of the collected
+//     contents: "[" + e0 + "," + e1 + ... + "]" — sorted object keys
+//     AND sorted array-element order (the A-2 canonicalization, so a
+//     reordered run hashes equal; pinned in key_test.go)
+//   - empty run (no messages, system-only, assistant-first, tool
+//     entry mid-run, ...) → "" → the caller's W-2 gate: fresh
+//     weighted pick, no binding stored. NOTE this is a deliberate
+//     semantic change vs the retired extractor, which searched for
+//     the first user message ANYWHERE (past assistant/tool entries);
+//     the leading run stops at the first non-system/non-user entry.
 //
 // messages is the snapshot from rc.originalMessages
 // ([]interface{} of map[string]interface{}).
-func ExtractFirstUserMessage(messages []interface{}) string {
+func ExtractLeadingUserRun(messages []interface{}) string {
+	collected := make([]interface{}, 0, 8)
+walk:
 	for _, m := range messages {
 		msg, ok := m.(map[string]interface{})
 		if !ok {
-			continue
+			// Non-map entry: no role to dispatch on → the "any OTHER
+			// role" rule terminates the run (malformed wire entry).
+			break walk
 		}
-		if role, _ := msg["role"].(string); role != "user" {
-			continue
-		}
-		switch content := msg["content"].(type) {
-		case string:
-			if content != "" {
-				return content
+		switch role, _ := msg["role"].(string); role {
+		case "system":
+			// Context preamble may be interleaved with the opening
+			// user messages; it neither joins the run nor ends it.
+		case "user":
+			switch content := msg["content"].(type) {
+			case string:
+				if content != "" {
+					collected = append(collected, content)
+				}
+				// Empty string: degenerate entry — skipped, walk
+				// continues (retired-extractor predicate, unchanged).
+			case []interface{}:
+				if len(content) > 0 {
+					collected = append(collected, content)
+				}
+				// Empty array: same degenerate skip.
 			}
-			// Empty string content: degenerate entry — skip in favor
-			// of the next user message (plan Task 1 test).
-		case []interface{}:
-			if len(content) > 0 {
-				return canonicalJSON(content)
-			}
-			// Empty array: same degenerate skip.
+			// Missing / null content: skipped, walk continues.
+		default:
+			// assistant / tool / function / developer / empty role:
+			// the leading run ends here.
+			break walk
 		}
-		// Missing / null content: skip to the next user message.
 	}
-	return ""
+	if len(collected) == 0 {
+		return ""
+	}
+	// Hash the run as ONE canonical JSON array (collision-safe join —
+	// elements are individually JSON-escaped so the "," inside an
+	// element cannot split an element boundary; see
+	// ComputeConversationKey). canonicalJSON renders object keys
+	// and array elements sorted, so the run is content-order-invariant.
+	return canonicalJSON(collected)
 }
 
 // canonicalJSON renders v as deterministic JSON text: object keys

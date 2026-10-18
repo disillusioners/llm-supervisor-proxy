@@ -545,14 +545,15 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// rc.conversationKey == "" and the engine path is skipped at every
 	// call site.
 	//
-	// W-2 + C2: when no first user message was extracted, the key
-	// stays "" — the engine then picks FRESH per request and stores
-	// NO binding (the ""-as-own-bucket reading is REMOVED per W-2;
-	// ComputeConversationKey never returns "" by itself, so the
-	// caller owns this gate). The DEBUG log below is the canonical
+	// W-2 + C2: when no leading user run was extracted (assistant-first
+	// conversation, system-only, tool entry before any user message,
+	// …), the key stays "" — the engine then picks FRESH per request
+	// and stores NO binding (the ""-as-own-bucket reading is REMOVED
+	// per W-2; ComputeConversationKey never returns "" by itself, so
+	// the caller owns this gate). The DEBUG log below is the canonical
 	// C2 observability mechanism.
 	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
-		if rc.firstUserMessage == "" {
+		if rc.leadingUserRun == "" {
 			rc.conversationKey = ""
 			log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
 				rc.resolvedModel.ID)
@@ -560,13 +561,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			rc.conversationKey = credentiallb.ComputeConversationKey(
 				rc.resolvedModel.ID,
 				rc.tokenID, // "" for anonymous — unsalted key
-				rc.firstUserMessage,
+				rc.leadingUserRun,
 			)
-			log.Printf("[LB] computed conversationKey hash=%s modelID=%s tokenID=%s len(firstUserMessage)=%d",
+			log.Printf("[LB] computed conversationKey hash=%s modelID=%s tokenID=%s len(leadingUserRun)=%d",
 				rc.conversationKey[:8],
 				rc.resolvedModel.ID,
 				rc.tokenIDDisplay(),
-				len(rc.firstUserMessage),
+				len(rc.leadingUserRun),
 			)
 		}
 	}
