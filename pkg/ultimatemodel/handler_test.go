@@ -1157,8 +1157,8 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 	modelsCfg := newMockModelsConfig()
 	// Add both the global model and the per-token override model
 	// Note: TokenForm.tsx stores model.name as value, not model.id
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
-	modelsCfg.AddModel(models.ModelConfig{ID: "token-override-model", Name: "token-override", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
+	modelsCfg.AddInternalModel("token-override-model", "openai", "test-key", server.URL, "token-override-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1219,8 +1219,8 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
-	modelsCfg.AddModel(models.ModelConfig{ID: "token-stream-override", Name: "token-stream", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
+	modelsCfg.AddInternalModel("token-stream-override", "openai", "test-key", server.URL, "token-stream-override")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1285,7 +1285,7 @@ func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1351,7 +1351,7 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1387,7 +1387,7 @@ func TestExecute_PerTokenOverride_NonexistentModel(t *testing.T) {
 
 	modelsCfg := newMockModelsConfig()
 	// Only add the global model, NOT the per-token override model
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1424,7 +1424,7 @@ func TestExecute_PerTokenOverride_NonexistentModel_Streaming(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1488,13 +1488,10 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 
 	modelsCfg := newMockModelsConfig()
 	// Add model with ID that matches global config, but different NAME
-	// Global config should find it by ID (GetModel)
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "global-model-id",
-		Name:     "totally-different-name", // Different from ID
-		Enabled:  true,
-		Internal: false,
-	})
+	// Global config should find it by ID (GetModel). remove-external-
+	// upstream P5: the row must carry a resolvable internal config too.
+	modelsCfg.AddInternalModel("global-model-id", "openai", "test-key", server.URL, "global-model-id")
+	modelsCfg.models["global-model-id"].Name = "totally-different-name" // Different from ID
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1561,14 +1558,10 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 	// Add model with UUID-like ID for per-token override
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "550e8400-e29b-41d4-a716-446655440000", // UUID-like ID
-		Name:     "per-token-model",                      // Human-readable name
-		Enabled:  true,
-		Internal: false,
-	})
+	modelsCfg.AddInternalModel("550e8400-e29b-41d4-a716-446655440000", "openai", "test-key", server.URL, "550e8400-e29b-41d4-a716-446655440000")
+	modelsCfg.models["550e8400-e29b-41d4-a716-446655440000"].Name = "per-token-model" // Human-readable name
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1603,7 +1596,7 @@ func TestExecute_PerTokenOverride_WithID_Nonexistent(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1665,19 +1658,12 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 	cfg := newMockConfigManager()
 
 	modelsCfg := newMockModelsConfig()
-	// Add models with different ID and NAME
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "global-model-id",
-		Name:     "Global Model",
-		Enabled:  true,
-		Internal: false,
-	})
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "per-token-model-id",
-		Name:     "Per Token Model",
-		Enabled:  true,
-		Internal: false,
-	})
+	// Add models with different ID and NAME. remove-external-upstream P5:
+	// each row also carries a resolvable internal config.
+	modelsCfg.AddInternalModel("global-model-id", "openai", "test-key", server.URL, "global-model-id")
+	modelsCfg.models["global-model-id"].Name = "Global Model"
+	modelsCfg.AddInternalModel("per-token-model-id", "openai", "test-key", server.URL, "per-token-model-id")
+	modelsCfg.models["per-token-model-id"].Name = "Per Token Model"
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
