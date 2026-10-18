@@ -106,7 +106,7 @@ export interface ConfigUpdateResponse extends AppConfig {
 // Legacy alias for backward compatibility
 export type ProxyConfig = AppConfig;
 
-export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe';
+export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe' | 'lightllm';
 
 export interface Model {
   id: string;

@@ -29,6 +29,15 @@ const (
 	// not speak System One; the decision handler builds its own
 	// upstream HTTP client mirroring how imggen handles minimax).
 	ProviderTypesafe ProviderType = "typesafe"
+	// ProviderLightLLM is the identity for a self-hosted LightLLM
+	// gateway (LiteLLM proxy) — a REGULAR OpenAI-compatible chat
+	// provider (remove-external-upstream phase 2, 2026-10-18). No
+	// migration / DB schema change required; the provider layer
+	// routes OpenAIProvider at the inherited default base URL
+	// http://localhost:4001 (the retired external-upstream default,
+	// config.go UpstreamURL), overridable via credential.base_url.
+	// SCOPE: chat only.
+	ProviderLightLLM ProviderType = "lightllm"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -111,6 +120,16 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 		p := NewOpenAIProvider(apiKey, baseURL)
 		p.openCodeGo = true
 		return p, nil
+	case ProviderLightLLM:
+		// LightLLM gateway uses the OpenAI-compatible API. Default
+		// base URL is inherited from the removed external-upstream
+		// default (config.go UpstreamURL — localhost:4001, LiteLLM's
+		// canonical port); override via credential.base_url for
+		// remote hosts.
+		if baseURL == "" {
+			baseURL = "http://localhost:4001"
+		}
+		return NewOpenAIProvider(apiKey, baseURL), nil
 	case ProviderTypesafe:
 		// Decision Models / §5.5 — the chat provider layer does
 		// NOT speak System One (TypeSafe / Jev's wire shape).
@@ -127,7 +146,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderOpencodeGo, ProviderTypesafe:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderOpencodeGo, ProviderLightLLM, ProviderTypesafe:
 		return true
 	default:
 		return false
@@ -229,6 +248,16 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "teal",
 		description: "OpenCode Go (OpenAI-compatible chat-completions; subscription realm; provider-native session + User-Agent attribution)",
 	},
+	ProviderLightLLM: {
+		// LightLLM — self-hosted LiteLLM gateway, a regular
+		// OpenAI-compatible chat provider. Default expects a local
+		// LiteLLM proxy on :4001 (the retired external-upstream
+		// default); override via credential.base_url for remote hosts.
+		name:        "LightLLM",
+		baseURL:     "http://localhost:4001",
+		color:       "sky",
+		description: "LightLLM (self-hosted LiteLLM gateway — OpenAI-compatible, chat-only; default expects a local LiteLLM proxy on :4001, override base_url for remote hosts)",
+	},
 	ProviderTypesafe: {
 		// Decision Models / §5.1 — the "TypeSafe (Jev)" identity
 		// shows up verbatim in the FE /fe/api/providers dropdown.
@@ -274,6 +303,10 @@ func GetProviderTypes() []ProviderType {
 		// opencode-go commission — DISTINCT provider (subscription
 		// realm); appears in the GET /fe/api/providers FE dropdown.
 		ProviderOpencodeGo,
+		// lightllm (remove-external-upstream phase 2) — a regular
+		// OpenAI-compatible chat provider; appears in the
+		// GET /fe/api/providers FE dropdown.
+		ProviderLightLLM,
 		// Decision Models / §5.2 — typesafe is auto-included via
 		// providerMetadataMap; the inclusion here makes it
 		// appear in the GET /fe/api/providers FE dropdown (used

@@ -36,6 +36,14 @@ var validProviders = map[string]bool{
 	// provider-native x-opencode-session + User-Agent attribution
 	// (pkg/providers/opencodego.go).
 	"opencode-go": true,
+	// LightLLM — self-hosted LiteLLM gateway, spoken as a REGULAR
+	// OpenAI-compatible provider (remove-external-upstream phase 2,
+	// 2026-10-18). Chat-kind only: the decision gate ({"openai",
+	// "typesafe"}) and the imggen gate ("minimax") exclude it with
+	// zero edits. Default base URL http://localhost:4001 — inherited
+	// from the retired external-upstream default (config.go
+	// UpstreamURL); override via credential.base_url for remote hosts.
+	"lightllm": true,
 	// Decision Models / §5.2 — "typesafe" is the new identity
 	// for /v1/decisions upstream. The D4 provider-gate
 	// (validateDecisionRules) only accepts {"openai","typesafe"}
