@@ -127,26 +127,30 @@ func TestDetectProvider(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "nil config returns external",
+			name:     "nil config returns unknown",
 			cfg:      nil,
 			modelID:  "some-model",
-			expected: "external",
+			expected: "unknown",
 		},
 		{
-			name:     "model not found returns external",
+			name:     "model not found returns unknown",
 			cfg:      newMockModelsConfig(),
 			modelID:  "unknown-model",
-			expected: "external",
+			expected: "unknown",
 		},
 		{
-			name: "external model returns external",
+			// remove-external-upstream P1 (A19): the "external" provider
+			// label is gone — a configured-but-legacy non-internal model
+			// with no resolvable credentials normalizes under "unknown"
+			// (normalization context only, never a routing decision).
+			name: "legacy non-internal model returns unknown",
 			cfg: func() models.ModelsConfigInterface {
 				m := newMockModelsConfig()
 				m.AddModelForTest("gpt-4", false)
 				return m
 			}(),
 			modelID:  "gpt-4",
-			expected: "external",
+			expected: "unknown",
 		},
 	}
 
