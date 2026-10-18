@@ -4,8 +4,8 @@ package translator
 // reasoning_details mutation funnels through the translator module.
 //
 // This test walks the AST of every wiring file that calls into the
-// translator on the four request/response paths (race-external,
-// race-internal, ultimate-internal, ultimate-external). If any of those
+// translator on the three surviving paths (race-internal,
+// ultimate-internal, and the shared internal executor). If any of those
 // files contains a `translator.ReasoningDetail{...}` (or
 // `&translator.ReasoningDetail{...}`) composite literal, the test
 // fails — inline field mutation outside the translator module is the
@@ -16,7 +16,7 @@ package translator
 //     declarations, function params, range loops, or field types).
 //   - Type must resolve to `translator.ReasoningDetail` (the named
 //     composite type defined in this package).
-//   - Files outside `pkg/proxy/translator/` (the four call sites).
+//   - Files outside `pkg/proxy/translator/` (the three surviving call sites).
 //
 // Pure Go test, no subprocess, no git dependency — deterministic and
 // CI-portable per H10.

@@ -676,7 +676,7 @@ func (c *CachedModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversa
 // cache (task 1.B.5, mandatory override (b) / W1): without it,
 // normalizers.DetectProvider (called on every request at
 // race_executor.go:393/:559) would hit the DB-bound legacy path and
-// return "external" during an outage for known internal models —
+// return "unknown" during an outage for known internal models —
 // partially re-arming the misroute bug class.
 //
 // Semantics mirror the store's single-credential fall-through:

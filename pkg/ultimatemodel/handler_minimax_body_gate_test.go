@@ -1,17 +1,15 @@
 package ultimatemodel
 
 // fix/minimax-reasoning-translation-gate unit matrix for the
-// ultimate sites (twin B + 3 external gate sites).
+// surviving ultimate site (twin B — the request gate). The three
+// former ultimate-EXTERNAL gate sites are gone with the external
+// arm (remove-external-upstream P1).
 //
 // The race-internal twin A unit matrix is in
 // pkg/proxy/race_minimax_body_gate_test.go. This file pins the
-// same widening at the four ultim sites:
+// same widening at the ultimate site:
 //
 //   1. ultimate-INTERNAL request gate (handler_internal.go:137 — twin B)
-//   2. ultimate-EXTERNAL request gate (handler_external.go:111-112)
-//   3. ultimate-EXTERNAL non-stream RESPONSE gate (handler_external.go:184)
-//   4. ultimate-EXTERNAL stream RESPONSE gate (handler_external.go:342,
-//      inside streamResponse)
 //
 // Hard rules from the bugfix spec:
 //   - Both halves of each pair (request ↔ typed setter / request ↔
@@ -296,9 +294,8 @@ func TestExecuteInternal_BodyGate_NativeReasoningDetails_NoHeader_MiniMax_NoDoub
 // reasoning-less body (no `reasoning_content` anywhere), MiniMax
 // credential ⇒ gate OFF. No `reasoning_split` is stamped on the
 // typed request and no `reasoning_details` are synthesized on any
-// captured message. Internal-gate counterpart of
-// TestExecuteExternal_BodyGate_NoHeader_NoReasoning_MiniMax_NotTranslated
-// (matrix case 3 on the external side).
+// captured message (the external-side counterpart was removed with
+// the external arm).
 func TestExecuteInternal_BodyGate_NoHeader_NoReasoning_MiniMax_NotTranslated(t *testing.T) {
 	origNewProvider := newProviderClient
 	defer func() { newProviderClient = origNewProvider }()

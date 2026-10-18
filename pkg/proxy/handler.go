@@ -626,7 +626,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// === MODEL ACCESS CHECK ===
 	// Check if the requested model is allowed for this token
 	// This check happens AFTER authentication for internal models
-	// For external models: only check if token has restrictions (fail-closed)
+	// For unknown models: only check if token has restrictions (fail-closed)
 	//
 	// load-balance-groups §3.4 (Q1 tail): the allow-list evaluates the
 	// CLIENT-REQUESTED ID STRING — for a claimed ID (claims-first
@@ -682,7 +682,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.sendModelNotAllowedError(w, rc.reqLog.Model)
 			return
 		}
-		// else: model not in DB and no restrictions → allow (external/open models)
+		// else: model not in DB and no restrictions → allow
 	}
 	// === END MODEL ACCESS CHECK ===
 

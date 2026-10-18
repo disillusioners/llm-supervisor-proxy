@@ -37,8 +37,7 @@ import (
 )
 
 // mockUltimateInternalResponse builds a non-stream upstream body in
-// OpenAI chat-completions shape with content + reasoning_content. It is
-// the internal-path counterpart of mockUltimateExternalResponse: the
+// OpenAI chat-completions shape with content + reasoning_content. The
 // internal path is reached when modelCfg.Internal=true and the proxy
 // routes through ultimatemodel.executeInternal, which constructs an
 // OpenAIProvider that calls <credential.BaseURL>/chat/completions. The
@@ -99,8 +98,8 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 	}))
 	defer upstream.Close()
 
-	// Same bootstrap as TestUltimateModel_PersistsAssistantContentAndThinking_External,
-	// but the ultimate model is Internal=true so executeInternal runs
+	// Same bootstrap as the persisted-content test above, but the
+	// ultimate model is Internal=true so executeInternal runs
 	// (it constructs an OpenAIProvider against the credential BaseURL
 	// which is our httptest upstream).
 	db := setupIntegrationDB(t)
@@ -400,8 +399,9 @@ func ultimateParityFixture(wantContent, wantThinking string) http.HandlerFunc {
 }
 
 // newUltimateCaptureParityEnv bootstraps the DB + token + ultimate model
-// + handler exactly like the buffered-mode tests above; `internal` picks
-// the executeInternal vs executeExternal routing.
+// + handler exactly like the buffered-mode tests above. The `internal`
+// bool only controls whether InternalBaseURL is seeded; the actual
+// routing is always internal (the external arm is removed with P1).
 func newUltimateCaptureParityEnv(t *testing.T, internal bool, upstreamURL string) (*Handler, *store.RequestStore, string) {
 	t.Helper()
 
@@ -585,18 +585,20 @@ func assertUltimateCaptureParity(t *testing.T, h *Handler, reqStore *store.Reque
 	}
 }
 
-// TestUltimateCapturePersistence_LiveVsBuffered_Parity_ExternalStream
-// (plan Phase 4 Files row 7): the EXTERNAL ultimate stream fixture runs
-// in both wire modes; the persisted record (assistant Content/Thinking,
-// Usage) must match buffered mode exactly.
-func TestUltimateCapturePersistence_LiveVsBuffered_Parity_ExternalStream(t *testing.T) {
+// TestUltimateCapturePersistence_LiveVsBuffered_Parity_ErrorEnvelopeStream
+// (plan Phase 4 Files row 7, post-P1 rename): the historical EXTERNAL
+// ultimate stream fixture. The external arm is removed with P1, so the
+// fixture now pins parity of the error envelope between live and
+// buffered modes (both modes must agree on the persisted
+// Content/Thinking/Usage under identical upstream input).
+func TestUltimateCapturePersistence_LiveVsBuffered_Parity_ErrorEnvelopeStream(t *testing.T) {
 	const wantContent = "parity external streamed answer"
 	const wantThinking = "parity external streamed reasoning"
 
 	upstream := httptest.NewServer(ultimateParityFixture(wantContent, wantThinking))
 	defer upstream.Close()
 
-	h, reqStore, token := newUltimateCaptureParityEnv(t, false /* external */, upstream.URL)
+	h, reqStore, token := newUltimateCaptureParityEnv(t, false /* internalBaseURL not seeded */, upstream.URL)
 	assertUltimateCaptureParity(t, h, reqStore, token, wantContent, wantThinking)
 }
 

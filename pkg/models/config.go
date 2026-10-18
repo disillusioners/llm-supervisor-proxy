@@ -443,12 +443,11 @@ func (m *ModelConfig) GetReleaseStreamChunkDeadline() time.Duration {
 // the model has no credentials configured.
 //
 // This is the single-credential fast path used by every existing
-// call site (race-internal, ultimate-internal, ultimate-external's
-// D3 provider probe) until the Phase 2 LB engine (pkg/credentiallb)
-// wires the affinity-aware variant. Behavior is byte-identical to
-// the pre-Phase-1 m.CredentialID reads when the model has exactly
-// one credential; it returns "" for external models with empty
-// Credentials (same as the old default string value).
+// call site (race-internal, ultimate-internal) until the Phase 2 LB
+// engine (pkg/credentiallb) wires the affinity-aware variant. Behavior
+// is byte-identical to the pre-Phase-1 m.CredentialID reads when the
+// model has exactly one credential; it returns "" for legacy rows with
+// empty Credentials (same as the old default string value).
 func (m *ModelConfig) PrimaryCredentialID() string {
 	if len(m.Credentials) == 0 {
 		return ""
@@ -1098,11 +1097,10 @@ func (mc *ModelsConfig) Validate() error {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
 		}
-		// Note: non-internal models MAY carry Credentials — the
-		// ultimate-external D3 provider probe reads Credentials[0] to
-		// classify the upstream provider without injecting credentials.
-		// (See ModelsConfig.Validate comment for the rationale on the
-		// plan's "non-internal with creds ⇒ reject" rule deviation.)
+		// Note: non-internal/legacy rows MAY carry Credentials. The
+		// plan's "non-internal with creds ⇒ reject" rule was NOT
+		// adopted — legacy rows (internal = 0) keep their Credentials
+		// and load cleanly rather than being force-rejected on load.
 
 		// Validate secondary upstream model
 		if model.SecondaryUpstreamModel != "" {

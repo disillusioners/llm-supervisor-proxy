@@ -20,16 +20,14 @@
 //	(3) Anthropic→OpenAI-wire internal translation
 //	    (doAnthropicInternalRequest at handler_anthropic.go:600-685)
 //	(4) /v1/chat/completions OpenAI race path (handler.go race-coord+relay)
-//	(5) Ultimate external stream — COVERED by
-//	    pkg/ultimatemodel/handler_external_test.go TestUltimate_HeaderDispatch
-//	    (ExecuteOptions-level caveat: those tests pin the buffered vs.
-//	    live wire bytes inside ultimatemodel.Handler; the proxy-package
-//	    boundary can't reach the private streamResponse /
-//	    handleInternalStream methods directly)
+//	(5) Ultimate external stream — REMOVED with the external arm
+//	    (remove-external-upstream P1); no surviving path.
 //	(6) Ultimate internal stream — COVERED by
-//	    pkg/ultimatemodel/handler_internal_test.go TestUltimate_HeaderDispatch
-//	    (same reason as path 5; TestUltimateCapture_LiveMode_IdenticalToBuffered
-//	    pins the C1 estimator parity)
+//	    pkg/ultimatemodel/handler_internal_test.go
+//	    TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion +
+//	    TestUltimateCapture_LiveMode_IdenticalToBuffered_Internal
+//	    (the proxy-package boundary can't reach the private
+//	    handleInternalStream method directly)
 //
 // Variant matrix (plan task 5.2 acceptance): each of paths 1-4 is
 // exercised against the canonical fixtures in fixtureSet():
@@ -38,9 +36,9 @@
 // role_only (role-only first chunk, provider-shaped), usage_first
 // (usage-only first chunk, provider-shaped), and comment_first (the
 // SSE `: connected\n\n` preamble + first data — locks in the live-mode
-// preamble-write timing invariant for path 1). Paths 5-6 are pinned
+// preamble-write timing invariant for path 1). Path 6 is pinned
 // by ultimatemodel-package tests (the fixtureSet() lives in proxy
-// and is not used by ultimate paths).
+// and is not used by the ultimate path).
 //
 // Determinism rules (plan Phase 5):
 //   - Strip volatile fields (timestamps, request IDs) BEFORE byte
@@ -573,25 +571,24 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 	// (5)+(6) Ultimate external/internal stream — DEFERRED to existing
 	// pkg/ultimatemodel tests. The ultimate Handler's streamResponse +
 	// handleInternalStream methods are package-private (lowercase), so a
-	// direct parity call from pkg/proxy is impossible. The existing
-	// TestUltimate_HeaderDispatch tests (in handler_external_test.go +
-	// handler_internal_test.go) already assert buffered == live wire
-	// bytes (transitively pinning buffered == pre-feature). The
-	// TestUltimateCapture_LiveMode_IdenticalToBuffered test pins C1
-	// estimator parity for both ultimate paths. These two subtests
-	// document the deferral accurately (skip comments previously
-	// claimed "re-verify" semantics they did not implement — finding
-	// #5 cleanup).
+	// direct parity call from pkg/proxy is impossible. The surviving
+	// internal pinnners (TestUltimateInternal_LiveStream_
+	// ForwardBytesBeforeCompletion + TestUltimateCapture_LiveMode_
+	// IdenticalToBuffered_Internal in handler_internal_test.go) already
+	// assert buffered == live wire bytes (transitively pinning buffered
+	// == pre-feature). These two subtests document the deferral
+	// accurately (skip comments previously claimed "re-verify"
+	// semantics they did not implement — finding #5 cleanup).
 	t.Run("5_UltimateExternal_HeaderPresent", func(t *testing.T) {
 		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
 		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
-		t.Skip("path 5 pinned by existing pkg/ultimatemodel TestUltimate_HeaderDispatch; the proxy-package boundary cannot reach the private streamResponse method directly")
+		t.Skip("path 5 (Ultimate external) removed with the external arm — no surviving path to pin")
 	})
 
 	t.Run("6_UltimateInternal_HeaderPresent", func(t *testing.T) {
 		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
 		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
-		t.Skip("path 6 pinned by existing pkg/ultimatemodel TestUltimate_HeaderDispatch; the proxy-package boundary cannot reach the private handleInternalStream method directly")
+		t.Skip("path 6 pinned by pkg/ultimatemodel TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion; the proxy-package boundary cannot reach the private handleInternalStream method directly")
 	})
 }
 
@@ -747,15 +744,15 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 	})
 
 	t.Run("Ultimate_External_Path_Stub", func(t *testing.T) {
-		// Path 5 (Ultimate external) rollback is pinned by the
-		// existing TestUltimate_HeaderDispatch in
-		// pkg/ultimatemodel/handler_external_test.go — direct
-		// ultimatemodel.Handler calls are package-private. We
-		// confirm here that the header dispatch lands in buffered
-		// mode for the proxy lanes (paths 1-4); ultimate-path
-		// dispatch is structurally identical (same ExecuteOptions
-		// shape) and is covered by the ultimatemodel test battery.
-		t.Skip("path 5 rollback pinned by existing pkg/ultimatemodel TestUltimate_HeaderDispatch")
+		// Path 5 (Ultimate external) was REMOVED with the external
+		// arm (remove-external-upstream P1) — no surviving path to
+		// pin. We confirm here that the header dispatch lands in
+		// buffered mode for the proxy lanes (paths 1-4); the
+		// surviving ultimate-internal dispatch is structurally
+		// identical (same ExecuteOptions shape) and is covered by
+		// the ultimatemodel test battery
+		// (TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion).
+		t.Skip("path 5 (Ultimate external) removed with the external arm — no surviving path to pin")
 	})
 }
 

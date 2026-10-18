@@ -2313,7 +2313,7 @@ func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
 }
 
 // TestUltimateModelPermission_NoAuth_DefaultsFalse tests that when no authentication
-// is required (external model), ultimate model is not triggered because rc.ultimateModelEnabled
+// is required (no token present), ultimate model is not triggered because rc.ultimateModelEnabled
 // defaults to false.
 func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 	// remove-external-upstream P1/P5: the model must be internal-
@@ -2339,7 +2339,7 @@ func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 	// Send request without authentication
 	body := bodyWithPrompt("external-model", true, "test prompt no auth")
 	req := makeRequest(t, body)
-	// No Authorization header - simulates external model request
+	// No Authorization header — the no-token path
 
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)

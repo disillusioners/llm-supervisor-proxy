@@ -12,9 +12,8 @@ import (
 
 // P2-10: per-site response-side negative-case byte-identical tests
 // for the ultimate paths. With flag=true + non-MiniMax provider, the
-// response translator (byte-path on external, openai.go typed
-// path on internal) must NOT inject reasoning fields and the
-// response body must be unchanged.
+// response translator (openai.go typed path on internal) must NOT
+// inject reasoning fields and the response body must be unchanged.
 //
 // The corresponding race-side tests live in
 // pkg/proxy/race_response_interleaved_test.go.

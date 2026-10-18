@@ -28,7 +28,7 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C-N1-S2: ultimate-external response, flag absent + MiniMax cred ⇒ byte-identical
+// C-N1-S2: ultimate-internal response, flag absent + MiniMax cred ⇒ byte-identical
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentical

@@ -507,7 +507,6 @@ func (h *Handler) Execute(
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	// Route to internal or external handler
 	// remove-external-upstream P1 (task 9): the internal/external
 	// dispatch is GONE — executeExternal (pkg/ultimatemodel/
 	// handler_external.go) is deleted and the guard above guarantees

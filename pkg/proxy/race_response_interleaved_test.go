@@ -16,13 +16,12 @@ import (
 )
 
 // P2-10: per-site response-side negative-case byte-identical tests.
-// For each of the 4 sites (race-ext non-stream + stream, race-int
-// non-stream + stream) with flag=true + non-MiniMax provider, the
-// response translator (byte-path on external, openai.go on internal)
-// must NOT inject reasoning fields and the response body must be
-// unchanged.
+// For the 2 surviving race sites (race-internal non-stream + stream)
+// with flag=true + non-MiniMax provider, the response translator
+// (openai.go on internal) must NOT inject reasoning fields and the
+// response body must be unchanged.
 //
-// The corresponding ultimate-ext + ultimate-int sites are tested in
+// The corresponding ultimate sites are tested in
 // pkg/ultimatemodel/handler_response_interleaved_test.go.
 
 func TestRaceInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {

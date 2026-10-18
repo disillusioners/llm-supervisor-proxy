@@ -151,14 +151,12 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// pkg/proxy source sites this feature touched: this gate in
 	// handler_functions.go, the sentinel→503/event conversion in
 	// handler.go, and the Anthropic mirror in handler_anthropic.go).
-	// A nil resolution is
-	// LEGITIMATE (an external/unknown model → passthrough, a real
-	// feature) ONLY when the config store can actually answer. When
-	// the store is unhealthy (DB outage, cache exhausted) nil means
-	// "cannot know" — silently passing such a request through to the
-	// external upstream is exactly the 2026-08-27 misroute class. The
-	// caller (HandleChatCompletions) converts the sentinel into a 503
-	// config_store_unavailable.
+	// A nil resolution means "cannot know" when the store is
+	// unhealthy (DB outage, cache exhausted) — silently passing such
+	// a request through is exactly the 2026-08-27 misroute class, so
+	// the caller (HandleChatCompletions) converts the sentinel into a
+	// 503 config_store_unavailable. Post-P1 a HEALTHY store that
+	// answers nil 404s at the gate below instead.
 	if resolvedModel == nil && conf.ModelsConfig != nil {
 		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
 			return nil, &configUnavailableError{reqID: reqID, model: originalModel}
@@ -217,11 +215,11 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		modelList = append(modelList, resolvedModel.ID)
 		modelList = append(modelList, resolvedModel.FallbackChain...)
 	} else {
-		// External/unknown model — no fallback chain, just use raw name
+		// Unknown model — no fallback chain, just use raw name
 		modelList = []string{originalModel}
 	}
 
-	// Set ModelID to the resolved ID (or raw name for external models)
+	// Set ModelID to the resolved ID (or raw name for unknown models)
 	if resolvedModel != nil {
 		conf.ModelID = resolvedModel.ID
 	} else {

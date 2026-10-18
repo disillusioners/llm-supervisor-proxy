@@ -4,8 +4,7 @@ package ultimatemodel
 //
 // Verifies that the passive capture in pkg/ultimatemodel:
 //  1. Correctly accumulates assistant Content + Thinking from
-//     every wire path (non-stream external, stream external,
-//     non-stream internal, stream internal).
+//     every wire path (non-stream internal, stream internal).
 //  2. Persists those via store.Message from the outer handler
 //     (proxy-level test below in TestExecute_PersistsAssistantMessage).
 //  3. DOES NOT change what the client receives — bytes are
@@ -13,7 +12,7 @@ package ultimatemodel
 //
 // The byte-identity tests use the exact "golden upstream bytes"
 // pattern established by
-// TestExecuteExternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentical
+// TestExecuteInternal_NegativeCase_FlagAbsent_MiniMaxCred_ResponseByteIdentical
 // (handler_interleaved_matrix_test.go). The capture path is
 // compared against the same upstream-passthrough that the existing
 // byte-identity tests already prove is identical to upstream. If
@@ -115,7 +114,7 @@ func TestCapture_InternalNonStream_ReturnsContentAndThinking(t *testing.T) {
 // every content and reasoning delta AFTER the capture loop ran
 // alongside the write loop — a presence check, not an ordering or
 // byte-identity proof (full stream byte-identity is covered by the
-// external-path golden tests in this file).
+// internal-path golden tests in this file).
 func TestCapture_InternalStream_ReturnsContentAndThinking(t *testing.T) {
 	cfg := newMockConfigManager()
 	modelsCfg := newMockModelsConfig()

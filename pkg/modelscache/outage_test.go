@@ -259,7 +259,7 @@ func TestOutageSimulation_NoMisroutes_OneHourSimulated(t *testing.T) {
 	st := newOutageStack(t)
 
 	// Create tokens through the cache (write-through) and warm the
-	// resolutions + external verdicts BEFORE the outage.
+	// resolutions + configured-model lookups BEFORE the outage.
 	tokPlain, tok, err := st.tokens.CreateToken(context.Background(), "svc", nil, "test", false, "", nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
@@ -275,7 +275,7 @@ func TestOutageSimulation_NoMisroutes_OneHourSimulated(t *testing.T) {
 			t.Fatal("warmup legacy resolution failed")
 		}
 		if m := st.models.GetModel("ext-configured"); m == nil {
-			t.Fatal("warmup external model lookup failed")
+			t.Fatal("warmup configured model lookup failed")
 		}
 		if _, err := st.tokens.ValidateToken(context.Background(), tokPlain); err != nil {
 			t.Fatalf("warmup token: %v", err)
@@ -304,12 +304,12 @@ func TestOutageSimulation_NoMisroutes_OneHourSimulated(t *testing.T) {
 
 	// 100 requests across the four classes (a)–(d) per W7.
 	for i := 0; i < 25; i++ {
-		// (a) configured external model — passthrough class: the cached
-		// entry keeps the boundary on the configured path; nothing
-		// silently falls back to the raw-default upstream.
+		// (a) configured internal model — the cached entry keeps the
+		// boundary on the configured path; nothing silently falls
+		// back to the raw-default upstream.
 		if m := st.models.GetModel("ext-configured"); m == nil {
 			zeroMisroutes = false
-			t.Errorf("iter %d: configured external model vanished during outage", i)
+			t.Errorf("iter %d: configured internal model vanished during outage", i)
 		}
 
 		// (b) internal single-credential: both resolver surfaces stay

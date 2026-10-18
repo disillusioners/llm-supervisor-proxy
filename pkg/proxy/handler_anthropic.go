@@ -244,11 +244,11 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		modelList = append(modelList, resolvedModel.ID)
 		modelList = append(modelList, resolvedModel.FallbackChain...)
 	} else {
-		// External/unknown model — no fallback chain, just use raw name
+		// Unknown model — no fallback chain, just use raw name
 		modelList = []string{originalModel}
 	}
 
-	// Set ModelID to the resolved ID (or raw name for external models)
+	// Set ModelID to the resolved ID (or raw name for unknown models)
 	if resolvedModel != nil {
 		conf.ModelID = resolvedModel.ID
 	} else {
@@ -1133,11 +1133,9 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 	debugLog("Request ID: %s", arc.reqID)
 	debugLog("Model: %s", arc.originalModel)
 
-	// Construct the per-request translator. The arc.liveTranslator
-	// field is unused here (the external variant drives via raw SSE
-	// lines from the scanner) but we still install it for symmetry
-	// with the internal variant's wiring and for tests that inspect
-	// it.
+	// Construct the per-request translator. Installed lazily so tests
+	// can pre-inspect/inject it; the scanner-driven loop below feeds
+	// it raw SSE lines via ProcessChunk.
 	if arc.liveTranslator == nil {
 		arc.liveTranslator = translator.NewIncrementalStreamTranslator(arc.originalModel)
 	}
@@ -1567,10 +1565,10 @@ type anthropicRequestContext struct {
 	accumulatedToolCalls []store.ToolCall
 
 	// liveTranslator is set ONLY in live mode (bufferMode==false) by
-	// doAnthropicInternalRequest. The internal-variant handler drives
-	// it from the typed-event entry (ProcessEvent); the external
-	// variant drives it from the upstream scanner via
-	// handleAnthropicLiveStreamResponse. nil in buffered mode.
+	// doAnthropicInternalRequest. The internal typed-event path drives
+	// it via ProcessEvent; the scanner-driven live handler
+	// (handleAnthropicLiveStreamResponse) feeds it raw SSE lines via
+	// ProcessChunk. nil in buffered mode.
 	liveTranslator *translator.IncrementalStreamTranslator
 }
 

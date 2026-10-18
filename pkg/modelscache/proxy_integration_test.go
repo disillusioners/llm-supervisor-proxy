@@ -108,7 +108,7 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	// The external upstream records hits — a hit during the outage
+	// The stub upstream records hits — a hit during the outage
 	// scenario for an UNKNOWN model would be the misroute class.
 	var upstreamHits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -170,7 +170,7 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 		t.Errorf("body must carry config_store_unavailable: %s", w.Body.String())
 	}
 	if upstreamHits.Load() != 0 {
-		t.Fatalf("MISROUTE: unknown-model request reached the external upstream during the outage")
+		t.Fatalf("MISROUTE: unknown-model request reached the upstream during the outage")
 	}
 
 	// A KNOWN (cached) model still serves end-to-end while the DB is
@@ -193,7 +193,7 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 	}
 	src.down = false
 	if m := cached.GetModel("ext-configured"); m == nil {
-		t.Fatalf("cache must learn the configured external model while up")
+		t.Fatalf("cache must learn the configured internal model while up")
 	}
 	// Warm the credential into the decorator's credsByID too — the
 	// internal arm's resolution needs BOTH the model entry and the
@@ -209,6 +209,6 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 		t.Fatalf("known configured model must serve during the outage, got %d: %s", w2.Code, w2.Body.String())
 	}
 	if upstreamHits.Load() != 1 {
-		t.Errorf("known external model should hit the upstream exactly once, got %d", upstreamHits.Load())
+		t.Errorf("known internal model should hit the upstream exactly once, got %d", upstreamHits.Load())
 	}
 }

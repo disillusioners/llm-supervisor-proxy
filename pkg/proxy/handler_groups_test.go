@@ -7,12 +7,13 @@ package proxy
 //
 // Harness: a real *database.ModelsManager with an in-process SQLite
 // store + a stub upstream HTTP server that mimics the OpenAI
-// chat-completions wire. Members are EXTERNAL (Internal=false) so
-// the race executes the external path against the stub — zero
-// credential plumbing. Groups are Internal=true (G1) so they flow
-// through the dispatch predicates pre-rewrite; the rewrite
-// replaces the entry with the member, and per-attempt re-fetches
-// run member-native (external path → stub).
+// chat-completions wire. Members are Internal=true with a fixture
+// credential pointed at the stub (the P5 write-stamp makes chat
+// rows internal, so the race takes the internal path to the stub).
+// Groups are Internal=true (G1) so they flow through the dispatch
+// predicates pre-rewrite; the rewrite replaces the entry with the
+// member, and per-attempt re-fetches run member-native (internal
+// path → stub).
 //
 // Parity: the same group fixture + conv key produces the same sticky
 // member on both the OpenAI and Anthropic paths (Am21 — the rewrite

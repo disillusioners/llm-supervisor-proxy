@@ -455,10 +455,11 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}
 	})
 
-	// (5) Ultimate external — pinned by existing
-	// TestUltimateExternal_LiveStream_ForwardBytesBeforeCompletion.
+	// (5) Ultimate external — REMOVED with the external arm
+	// (remove-external-upstream P1); the surviving first-byte pin is
+	// the internal test TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion.
 	t.Run("5_UltimateExternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 5 pinned by existing pkg/ultimatemodel TestUltimateExternal_LiveStream_ForwardBytesBeforeCompletion")
+		t.Skip("path 5 (Ultimate external) removed with the external arm; first-byte pinned by pkg/ultimatemodel TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion")
 	})
 
 	// (6) Ultimate internal — pinned by existing

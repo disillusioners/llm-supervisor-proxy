@@ -335,8 +335,8 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 		t.Fatalf("CreateToken: %v", err)
 	}
 
-	// Config manager with env overrides (UPSTREAM_URL, etc.) so the
-	// race-external path is reachable in Test 4.
+	// Config manager with env overrides (APPLY_ENV_OVERRIDES) so the
+	// internal race path is reachable in Test 4.
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
 	t.Setenv("RACE_RETRY_ENABLED", "false") // simplifies assertions
 	t.Setenv("RACE_PARALLEL_ON_IDLE", "true")

@@ -20,9 +20,9 @@ package proxy
 //       [{coding, weight=1}]), a request for "coding" reaches the
 //       stub upstream — same wire path as a direct request for
 //       "coding". The group never coerces the model field seen by
-//       the upstream (members are external; the upstream sees the
-//       override applied by the per-attempt re-fetch — code path
-//       unchanged from P0).
+//       the upstream (members are internal and credentialed; the
+//       upstream sees the override applied by the per-attempt
+//       re-fetch — code path unchanged from P0).
 //
 //   (c) CodingCoding_ResponseShape
 //       The Am26 masking rewrites the top-level "model" field of
@@ -227,7 +227,7 @@ func (h *am29Harness) am29Recorded() []am29UpstreamCapture {
 
 func (h *am29Harness) close() { h.clean() }
 
-// am29AddSoloChat adds a single external chat model used by
+// am29AddSoloChat adds a single internal chat model used by
 // case (a) — the zero-groups baseline.
 func am29AddSoloChat(t *testing.T, h *am29Harness) {
 	t.Helper()
@@ -568,8 +568,8 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 	// a request for "coding" serves identically to a direct
 	// request for "coding" in observable behavior — same upstream
 	// status, same mask pattern (no group-engine-upstream
-	// recursion because the member is external and external
-	// passthrough is unchanged from P0).
+	// recursion because the member is internal and the internal
+	// path is unchanged from P0).
 	t.Run("CodingCoding_Routing", func(t *testing.T) {
 		h := newAm29Harness(t)
 		defer h.close()
@@ -629,7 +629,7 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		groupWire := groupCaps[0]
 
 		// Direct control: same chat model, no group. Same wire
-		// path through the proxy (external passthrough).
+		// path through the proxy (internal path).
 		h2 := newAm29Harness(t)
 		defer h2.close()
 		if err := h2.mgr.AddModel(models.ModelConfig{
@@ -684,12 +684,11 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		if dm, _ := directBody["model"].(string); dm != "stub-model" {
 			t.Errorf("direct wire body.model=%q, want %q", dm, "stub-model")
 		}
-		// Authorization header presence parity. The harness uses
-		// no UpstreamCredentialID, so neither side sets one —
-		// both absent is the expected parity. A regression
-		// that injects an Authorization on the group path only
-		// (or strips it on the direct path only) would surface
-		// here.
+		// Authorization header presence parity. Both sides now
+		// authenticate with the same fixture credential, so a
+		// regression that injects an Authorization on the group
+		// path only (or strips it on the direct path only) would
+		// surface here.
 		groupAuth := groupWire.Header.Get("Authorization")
 		directAuth := directWire.Header.Get("Authorization")
 		if (groupAuth != "") != (directAuth != "") {
