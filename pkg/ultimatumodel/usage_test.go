@@ -1,5 +1,0 @@
-package ultimatemodel
-
-import (
-
-)

@@ -240,8 +240,13 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	bufferMode := bufferModeFor(r)
 
 	return &requestContext{
-		conf:             conf,
-		targetURL:        targetURL,
+		conf: conf,
+		// remove-external-upstream P1 (task 8, A1): targetURL is an
+		// EMPTY placeholder — no request context carries a global-
+		// upstream target anymore (the internal arms build their own
+		// targets from the resolved credential; mirrors the Anthropic
+		// twin's post-A13 placeholder).
+		targetURL:        "",
 		reqID:            reqID,
 		startTime:        startTime,
 		reqLog:           reqLog,

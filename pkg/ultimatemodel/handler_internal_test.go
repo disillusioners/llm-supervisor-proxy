@@ -20,6 +20,20 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
+
+// normalizeSSEIDs replaces nondeterministic chunk identifiers (the
+// UnixNano-stamped chatcmpl IDs and created timestamps — the toolcall
+// buffer and the internal chunk synthesizer stamp them per RUN) so
+// buffered/live wire bytes can be compared structurally.
+//
+// (remove-external-upstream P1: helper restored from the deleted
+// handler_external_test.go — the surviving internal buffered/live
+// parity assertions still consume it.)
+func normalizeSSEIDs(s string) string {
+	s = regexp.MustCompile(`"id":"chatcmpl-\d+"`).ReplaceAllString(s, `"id":"chatcmpl-X"`)
+	return regexp.MustCompile(`"created":\d+`).ReplaceAllString(s, `"created":X`)
+}
+
 // --- Tests for handleInternalNonStream ---
 
 func TestHandleInternalNonStream_Success(t *testing.T) {
@@ -1202,19 +1216,6 @@ func TestUltimateCapture_LiveMode_IdenticalToBuffered_Internal(t *testing.T) {
 	}
 	if normalizeSSEIDs(bufferedBody) != normalizeSSEIDs(liveBody) {
 		t.Errorf("wire bytes diverged between modes (IDs normalized):\n buffered=%q\n live=%q",
-// normalizeSSEIDs replaces nondeterministic chunk identifiers (the
-// UnixNano-stamped chatcmpl IDs and created timestamps — the toolcall
-// buffer and the internal chunk synthesizer stamp them per RUN) so
-// buffered/live wire bytes can be compared structurally.
-//
-// (remove-external-upstream P1: helper restored from the deleted
-// handler_external_test.go — the surviving internal buffered/live
-// parity assertions still consume it.)
-func normalizeSSEIDs(s string) string {
-	s = regexp.MustCompile(`"id":"chatcmpl-\d+"`).ReplaceAllString(s, `"id":"chatcmpl-X"`)
-	return regexp.MustCompile(`"created":\d+`).ReplaceAllString(s, `"created":X`)
-}
-
 			normalizeSSEIDs(bufferedBody), normalizeSSEIDs(liveBody))
 	}
 }

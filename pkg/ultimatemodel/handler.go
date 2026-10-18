@@ -185,34 +185,6 @@ func (h *Handler) SetToolCallBufferConfig(maxSize int64, disabled bool, repairCo
 	h.toolRepairConfig = repairConfig
 }
 
-// getEffectivePrimaryCredentialID (Phase 3 / Task 7) returns the legacy
-// single-credential view of the model's credential list: the first ref's
-// CredentialID, or "" if the model has no credentials configured. This
-// is the single-credential fast path used by the ultimate-external D3
-// provider probe (Execute) — the post-Phase-1 modelCfg.CredentialID
-// shadow is GONE; Credentials[0].CredentialID is the primary.
-//
-// Behavior:
-//   - nil modelCfg ⇒ "" (defensive; the probe is gated on modelCfg
-//     being non-nil in the caller, but the shim keeps the contract
-//     safe).
-//   - len(modelCfg.Credentials) == 0 ⇒ "".
-//   - len(modelCfg.Credentials) >= 1 ⇒ Credentials[0].CredentialID.
-//
-// modelCfg.PrimaryCredentialID() (defined on models.ModelConfig) is the
-// equivalent inline helper — this shim is the standalone replacement
-// for the post-Phase-1 ultimatemodel/handler.go:625-635 site that
-// previously read modelCfg.CredentialID directly.
-func getEffectivePrimaryCredentialID(modelCfg *models.ModelConfig) string {
-	if modelCfg == nil {
-		return ""
-	}
-	if len(modelCfg.Credentials) == 0 {
-		return ""
-	}
-	return modelCfg.Credentials[0].CredentialID
-}
-
 // OnConfigChange handles config change events.
 // When ultimate_model.model_id changes, reset the hash cache.
 func (h *Handler) OnConfigChange(event events.Event) {
@@ -264,288 +236,6 @@ type ExecuteResult struct {
 func coerceContentString(v interface{}) string {
 	s, _ := v.(string)
 	return s
-}
-
-// captureFromSSEChunk parses a single SSE `data: <json>` payload
-// (WITHOUT the `data: ` prefix) and appends any delta.content /
-// delta.reasoning_content it finds into the provided builders.
-//
-// Returns true if the chunk was a JSON data chunk that could be
-// parsed (even if it had no content/thinking fields). Lines that
-// are not data chunks, are [DONE], or fail to parse are silently
-// ignored — capture is best-effort and must never break the wire
-// path.
-//
-// This is the shared parser used by both streamResponse
-// (handler_external.go) and handleInternalStream
-// (handler_internal.go). Centralising here keeps the extraction
-// logic in one place and matches the Web UI's expectation that
-// Content is the aggregated assistant text and Thinking is the
-// aggregated reasoning_content string.
-func captureFromSSEChunk(data []byte, content, thinking *strings.Builder) {
-	if len(data) == 0 {
-		return
-	}
-	// Skip SSE terminator and stray whitespace-only payloads.
-	if bytes.Equal(data, []byte("[DONE]")) || bytes.HasPrefix(data, []byte("\n")) {
-		return
-	}
-	var chunk map[string]interface{}
-	if err := json.Unmarshal(data, &chunk); err != nil {
-		return
-	}
-	choices, ok := chunk["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return
-	}
-	c, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return
-	}
-	delta, ok := c["delta"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	if s := coerceContentString(delta["content"]); s != "" {
-		content.WriteString(s)
-	}
-	if s := coerceContentString(delta["reasoning_content"]); s != "" {
-		thinking.WriteString(s)
-	}
-}
-
-// captureFromSSEChunkBytes parses a chunk written on the wire and
-// appends any delta.content / delta.reasoning_content it finds into
-// the provided builders. It is a pure reader: it never mutates the
-// chunk bytes and has zero effect on what the client receives.
-//
-// SSE FRAMING COUPLING (W6): this helper assumes OpenAI SSE framing
-// (`data: {...}\n\n`). Historically it hard-stripped a `data: `
-// prefix; a chunk not starting with that prefix was treated as a
-// non-data line and silently captured NOTHING — meaning that if an
-// upstream ever changes its framing convention, capture would
-// silently yield empty content/thinking. That silent degradation is
-// ACCEPTED by design: capture is best-effort and observational, so
-// it must never log per-chunk noise on the hot path, never error,
-// and above all never mutate or re-frame the wire bytes to make
-// parsing easier. A missing capture is a UI observability gap, not
-// a protocol failure.
-//
-// The coupling is softened capture-side only: if the chunk does NOT
-// start with `data: `, the bytes are attempted as bare JSON (some
-// upstreams emit unframed JSON lines). If that parse also fails,
-// the chunk is silently ignored (no error, no capture) — identical
-// to the pre-fallback behavior for garbage input. This fallback is
-// parse-only: it reads the bytes and cannot affect them, so wire
-// byte-identity is preserved by construction.
-func captureFromSSEChunkBytes(line []byte, content, thinking *strings.Builder) {
-	payload := line
-	if bytes.HasPrefix(payload, []byte("data: ")) {
-		payload = bytes.TrimPrefix(payload, []byte("data: "))
-		// Trim trailing newline if present (lines include the trailing \n
-		// because reader.ReadString('\n') keeps it).
-		payload = bytes.TrimRight(payload, "\r\n")
-	} else {
-		// Bare-JSON fallback (W6): attempt the raw bytes directly as
-		// JSON. captureFromSSEChunk already ignores anything that is
-		// not a parseable chat-completion chunk ([DONE], event lines,
-		// whitespace, garbage) — so delegating with the unstripped
-		// bytes gives us "capture if parseable, silent otherwise"
-		// with no framing knowledge required on this branch.
-		payload = bytes.TrimRight(payload, "\r\n")
-	}
-	captureFromSSEChunk(payload, content, thinking)
-}
-
-// captureFromNonStreamResponse parses the post-write non-stream
-// response body (bodyBytes, including any translator mutations
-// applied before write) and returns the aggregated content and
-// reasoning_content. Returns "", "" if the body is not a valid
-// JSON chat completion.
-//
-// The body is read-only — bytes that the proxy writes to the
-// client are unchanged.
-func captureFromNonStreamResponse(bodyBytes []byte) (content, thinking string) {
-	if len(bodyBytes) == 0 {
-		return "", ""
-	}
-	var resp map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
-		return "", ""
-	}
-	choices, ok := resp["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return "", ""
-	}
-	c, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return "", ""
-	}
-	msg, ok := c["message"].(map[string]interface{})
-	if !ok {
-		return "", ""
-	}
-	content = coerceContentString(msg["content"])
-	thinking = coerceContentString(msg["reasoning_content"])
-	return content, thinking
-}
-
-// captureToolCallsFromNonStreamResponse parses the post-write
-// non-stream response body (bodyBytes, including any translator
-// mutations applied before write) and returns the assembled
-// choices[0].message.tool_calls as []store.ToolCall — or nil if
-// none are present or the body is not a chat-completion JSON.
-//
-// The body is read-only — bytes that the proxy writes to the
-// client are unchanged. W7: this is the capture-side hook that
-// lets outer handler.go persist a store.Message when the
-// assistant turn is purely a tool call (empty Content + empty
-// Thinking), which previously left the UI with nothing to show.
-func captureToolCallsFromNonStreamResponse(bodyBytes []byte) []store.ToolCall {
-	if len(bodyBytes) == 0 {
-		return nil
-	}
-	var resp map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
-		return nil
-	}
-	choices, ok := resp["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return nil
-	}
-	c, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	msg, ok := c["message"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	rawCalls, ok := msg["tool_calls"].([]interface{})
-	if !ok || len(rawCalls) == 0 {
-		return nil
-	}
-	out := make([]store.ToolCall, 0, len(rawCalls))
-	for _, raw := range rawCalls {
-		tcMap, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		var tc store.ToolCall
-		if id, ok := tcMap["id"].(string); ok {
-			tc.ID = id
-		}
-		if typ, ok := tcMap["type"].(string); ok {
-			tc.Type = typ
-		}
-		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-			if name, ok := fn["name"].(string); ok {
-				tc.Function.Name = name
-			}
-			if args, ok := fn["arguments"].(string); ok {
-				tc.Function.Arguments = args
-			}
-		}
-		out = append(out, tc)
-	}
-	return out
-}
-
-// captureToolCallsFromSSEChunk extracts delta.tool_calls from a
-// single SSE payload (the SAME parsed JSON content+thinking were
-// observed from in captureFromSSEChunkBytes — see that helper for
-// the byte-identity contract this shares) and merges them into
-// the provided accumulator and per-index arguments builder.
-//
-// W7 mirror of pkg/proxy/handler_helpers.go's
-// extractStreamChunkContent tool-call accumulation: across OpenAI
-// streaming events, the first delta for a given index carries
-// ID/Type/Name and subsequent deltas carry additional arguments
-// fragments that are concatenated into the per-index builder. The
-// caller is responsible for collapsing the argument builders
-// into store.ToolCall.Function.Arguments once streaming ends.
-//
-// The chunk is read-only — bytes are never mutated. Chunks that
-// are not data lines, [DONE], or have parse failures are silently
-// ignored, matching captureFromSSEChunkBytes's best-effort
-// posture.
-func captureToolCallsFromSSEChunk(data []byte, accum *[]store.ToolCall, argBuilders *[]*strings.Builder) {
-	if len(data) == 0 || accum == nil || argBuilders == nil {
-		return
-	}
-	// W7: mirror the framing-coupling of captureFromSSEChunkBytes
-	// — strip the leading `data: ` SSE prefix and trailing newlines
-	// before parsing. Some upstreams emit unframed JSON lines (the
-	// bare-JSON fallback at W6); for tool-call chunks in
-	// practice these are always `data: ` framed (OpenAI SSE)
-	// because the encoding is hard-wired into the tool-buffer's
-	// emitToolCall output. Try the framed path first; if that
-	// fails, retry against the un-stripped bytes so capture is
-	// best-effort across both shapes.
-	payload := data
-	if bytes.HasPrefix(payload, []byte("data: ")) {
-		payload = bytes.TrimPrefix(payload, []byte("data: "))
-		payload = bytes.TrimRight(payload, "\r\n")
-	} else {
-		payload = bytes.TrimRight(payload, "\r\n")
-	}
-	var chunk map[string]interface{}
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		return
-	}
-	choices, ok := chunk["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return
-	}
-	choice, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return
-	}
-	delta, ok := choice["delta"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	rawCalls, ok := delta["tool_calls"].([]interface{})
-	if !ok || len(rawCalls) == 0 {
-		return
-	}
-	for _, raw := range rawCalls {
-		tcMap, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		// Get index (fallback to 0 if missing per OpenAI
-		// streaming convention).
-		index := 0
-		if idx, ok := tcMap["index"].(float64); ok {
-			index = int(idx)
-		}
-		if index < 0 {
-			index = 0
-		}
-		// Ensure accumulator has enough capacity for this index.
-		for len(*accum) <= index {
-			*accum = append(*accum, store.ToolCall{})
-			b := &strings.Builder{}
-			b.Grow(1024)
-			*argBuilders = append(*argBuilders, b)
-		}
-		tc := &(*accum)[index]
-		if id, ok := tcMap["id"].(string); ok && id != "" {
-			tc.ID = id
-		}
-		if typ, ok := tcMap["type"].(string); ok && typ != "" {
-			tc.Type = typ
-		}
-		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-			if name, ok := fn["name"].(string); ok && name != "" {
-				tc.Function.Name = name
-			}
-			if args, ok := fn["arguments"].(string); ok {
-				(*argBuilders)[index].WriteString(args)
-			}
-		}
-	}
 }
 
 // finalizeAccumulatedToolCalls collapses the per-index
@@ -758,12 +448,17 @@ func (h *Handler) Execute(
 		modelCfg = h.modelsMgr.GetModel(modelID)
 	}
 
-	if modelCfg == nil {
-		// Model not found - this is a config error, clear everything
+	// remove-external-upstream P1 (task 9, R6): the target guard now
+	// also rejects NON-INTERNAL targets — there is no external arm to
+	// fall through to, so a non-internal ultimate target gets the same
+	// clean "not found" config error instead of dispatching to the
+	// deleted executeExternal branch.
+	if modelCfg == nil || !modelCfg.Internal {
+		// Model not found (or non-internal / legacy) - this is a config
+		// error, clear everything
 		h.hashCache.Remove(hash) // Also clears attempt counter
 		return nil, &ultimateModelError{
-			message:  "ultimate model not found in database",
-			internal: false,
+			message: "ultimate model not found in database or not internal-configured",
 		}
 	}
 
@@ -785,23 +480,9 @@ func (h *Handler) Execute(
 	// rechecks via providerIsMiniMax).
 	interleaved := proxyheader.ParseInterleavedThinkingHeaderValue(r.Header.Get(proxyheader.InterleavedThinkingHeader))
 
-	// D3: derive upstream provider from credential when available so the
-	// executeExternal gate can short-circuit non-MiniMax paths without
-	// touching the request body (H5 invariant). Primary credential ID
-	// empty ⇒ upstreamProvider="" ⇒ gate=false (caller of executeExternal
-	// treats empty as not-MiniMax).
-	var upstreamProvider string
-	// Phase 3 / Task 7 — single source of truth for the legacy
-	// single-credential view. Post-Phase-1 modelCfg.CredentialID is
-	// GONE; Credentials[0].CredentialID is the primary. The shim
-	// preserves the len(Credentials) == 0 ⇒ "" semantics.
-	primaryCredentialID := getEffectivePrimaryCredentialID(modelCfg)
-	if primaryCredentialID != "" {
-		cred := h.modelsMgr.GetCredential(primaryCredentialID)
-		if cred != nil {
-			upstreamProvider = strings.ToLower(cred.Provider)
-		}
-	}
+	// remove-external-upstream P1 (task 9, R6/I4): the upstreamProvider
+	// probe block is GONE — it fed only the deleted executeExternal
+	// MiniMax gate.
 
 	// Start heartbeat for streaming requests - runs until request ends
 	// Heartbeat is started here (after headers are set) to keep connection alive.
@@ -827,30 +508,23 @@ func (h *Handler) Execute(
 	}
 
 	// Route to internal or external handler
+	// remove-external-upstream P1 (task 9): the internal/external
+	// dispatch is GONE — executeExternal (pkg/ultimatemodel/
+	// handler_external.go) is deleted and the guard above guarantees
+	// modelCfg.Internal, so the internal arm IS the only path.
 	var result *ExecuteResult
-	if modelCfg.Internal {
-		// Phase 3 / Task 21 — route through the rate-limit-failover
-		// wrapper (Round 3b review #4 guard fix: initial-call
-		// *ProviderError assertion, NOT headersSent). The wrapper owns
-		// the SINGLE affinity resolution (Tasks 8+9): attempt #1's
-		// credential is exactly what executeInternalWithResolved
-		// consumes, and the retry resolves the SPECIFIC reselected
-		// credential — no double resolution, no fresh re-roll.
-		result, err = h.executeInternalWithRateLimitFailover(
-			ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved,
-			conversationKey, opt,
-		)
-		// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): ultimate-EXTERNAL
-		// passthrough is UNCHANGED by credential load-balancing — provider
-		// detection only (getEffectivePrimaryCredentialID shim, Task 7);
-		// client auth passes through; no credential switching, no
-		// ExcludeAndReselect, no rate-limit failover hook on this branch.
-		// The failover family is the four LB'd INTERNAL paths only
-		// (race-internal, ultimate-internal, /v1/messages internal,
-		// anthropic-passthrough internal branch).
-	} else {
-		result, err = h.executeExternal(ctx, w, r, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, upstreamProvider, opt)
-	}
+	// Phase 3 / Task 21 — route through the rate-limit-failover
+	// wrapper (Round 3b review #4 guard fix: initial-call
+	// *ProviderError assertion, NOT headersSent). The wrapper owns
+	// the SINGLE affinity resolution (Tasks 8+9): attempt #1's
+	// credential is exactly what executeInternalWithResolved
+	// consumes, and the retry resolves the SPECIFIC reselected
+	// credential — no double resolution, no fresh re-roll.
+	result, err = h.executeInternalWithRateLimitFailover(
+		ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved,
+		conversationKey, opt,
+	)
+
 	// Stop heartbeat
 	heartbeatCancel()
 
@@ -868,10 +542,12 @@ func (h *Handler) Execute(
 	return result, nil
 }
 
-// ultimateModelError is an error type for ultimate model errors
+// ultimateModelError is an error type for ultimate model errors.
+// remove-external-upstream P1 (task 9, R6/I4): the write-only
+// `internal` path-selector field is GONE (assigned only at the deleted
+// external dispatch; zero readers).
 type ultimateModelError struct {
-	message  string
-	internal bool
+	message string
 }
 
 func (e *ultimateModelError) Error() string {
