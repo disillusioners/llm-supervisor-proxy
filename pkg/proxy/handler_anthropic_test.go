@@ -218,17 +218,22 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 	t.Helper()
 	upstream := httptest.NewServer(upstreamHandler)
 
-	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", upstream.URL)
-
+	// remove-external-upstream P5: the UPSTREAM_URL env pair is gone.
+	// Seed an internal model (ID = the model the Anthropic tests
+	// request) whose credential points at the mock upstream, so the
+	// boundary 404 gate resolves the request and the internal
+	// Anthropic→OpenAI translation path runs.
 	mgr, err := config.NewManager()
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
 
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
+
 	cfg := &Config{
 		ConfigMgr:    mgr,
-		ModelsConfig: models.NewModelsConfig(),
+		ModelsConfig: modelsCfg,
 	}
 
 	bus := events.NewBus()

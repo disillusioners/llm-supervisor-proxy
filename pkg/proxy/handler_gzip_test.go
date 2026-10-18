@@ -68,7 +68,7 @@ func TestGzipMiddleware_OpenAI_ParityWithUncompressed(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true})
+	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
@@ -77,7 +77,7 @@ func TestGzipMiddleware_OpenAI_ParityWithUncompressed(t *testing.T) {
 	wrappedChat := gzipmw.DecompressRequest(http.HandlerFunc(h.HandleChatCompletions))
 
 	payload := map[string]interface{}{
-		"model":  "mock-model",
+		"model":  "test-model",
 		"stream": false,
 		"messages": []interface{}{
 			map[string]interface{}{"role": "user", "content": "hello"},
@@ -177,13 +177,13 @@ func TestGzipMiddleware_OpenAI_NoEncoding_Unchanged(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true})
+	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
 	wrappedChat := gzipmw.DecompressRequest(http.HandlerFunc(h.HandleChatCompletions))
 
-	plain := []byte(`{"model":"mock-model","messages":[]}`)
+	plain := []byte(`{"model":"test-model","messages":[]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(plain))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestGzipMiddleware_OpenAI_CorruptGzip_Returns400(t *testing.T) {
 	var handlerInvoked bool
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true})
+	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
 	h, _ := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerInvoked = true
 		w.WriteHeader(http.StatusOK)
@@ -275,14 +275,14 @@ func TestGzipMiddleware_OpenAI_StreamingResponse(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true})
+	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
 	wrappedChat := gzipmw.DecompressRequest(http.HandlerFunc(h.HandleChatCompletions))
 
 	payload, _ := json.Marshal(map[string]interface{}{
-		"model":    "mock-model",
+		"model":    "test-model",
 		"stream":   true,
 		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
 	})

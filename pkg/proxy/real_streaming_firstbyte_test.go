@@ -351,7 +351,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		reqDone := make(chan struct{})
 		go func() {
 			defer close(reqDone)
-			req := makeRequest(t, simpleBody("mock-model", true))
+			req := makeRequest(t, simpleBody("test-model", true))
 			req.Header.Del("X-LLMProxy-Buffer-Response") // live mode
 			rec := newFirstDataRecorder()
 			h.HandleChatCompletions(rec, req)
@@ -468,7 +468,7 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		// The proxy's upstream IS newTestHandler's server (single
 		// server — reviewer's wasted-fixture cleanup).
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
@@ -481,7 +481,7 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		probe := &upstreamProbe{}
 		thinkFirst := mockCreateReasoningChunk("thinking now")
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
@@ -494,7 +494,7 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		probe := &upstreamProbe{}
 		usageFirst := mockCreateUsageChunk(1, 1)
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
@@ -525,7 +525,7 @@ func TestRealStreaming_FirstByteTiming_NonStreamUnaffected(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))
 	}), models.NewModelsConfig())
-	req := makeRequest(t, simpleBody("mock-model", false)) // stream=false
+	req := makeRequest(t, simpleBody("test-model", false)) // stream=false
 	req.Header.Del("X-LLMProxy-Buffer-Response")
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, req)

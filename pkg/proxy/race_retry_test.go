@@ -70,6 +70,7 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Allow enough time for request to complete
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -131,6 +132,7 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 		IdleTimeout:        100 * time.Millisecond, // Fast idle timeout to trigger second spawn
 		StreamDeadline:     5 * time.Second,        // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second,        // Allow enough time for retry
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -179,6 +181,7 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -236,6 +239,7 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond, // Fast idle timeout
 		StreamDeadline:     5 * time.Second,       // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second,       // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -279,6 +283,7 @@ func TestRaceScenario_AllFail(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -331,6 +336,7 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Absolute hard timeout
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -395,6 +401,7 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
@@ -507,6 +514,7 @@ func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second,
 		MaxGenerationTime:  5 * time.Second,
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 

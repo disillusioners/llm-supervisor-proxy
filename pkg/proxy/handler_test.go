@@ -69,7 +69,7 @@ func mockNonStreamResponse(content string) string {
 		"id":      "chatcmpl-123",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
-		"model":   "mock-model",
+		"model":   "test-model",
 		"choices": []map[string]interface{}{
 			{
 				"index": 0,
@@ -199,8 +199,11 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request)
 func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*config.Config)) *config.Manager {
 	t.Helper()
 
+	// remove-external-upstream P1/P5: the UPSTREAM_URL env pair is gone
+	// (the config field was deleted). The mock upstream now flows through
+	// the seeded internal fixture (see seedInternalFixture).
+	_ = upstreamURL
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
-	t.Setenv("UPSTREAM_URL", upstreamURL)
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 
 	mgr, err := config.NewManager()
@@ -237,6 +240,13 @@ func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig
 	upstream := httptest.NewServer(upstreamHandler)
 
 	mgr := newTestManagerWithConfig(t, upstream.URL, configOpts...)
+
+	// remove-external-upstream P5: every handler needs a resolvable
+	// internal model or the boundary 404 gate rejects the request.
+	if modelsConfig == nil {
+		modelsConfig = models.NewModelsConfig()
+	}
+	seedInternalFixture(t, modelsConfig, upstream.URL)
 
 	cfg := &Config{
 		ConfigMgr:    mgr,
@@ -372,7 +382,7 @@ func TestMockLLM_NormalStreaming(t *testing.T) {
 		name:       "MockLLM_NormalStreaming",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -413,7 +423,7 @@ func TestMockLLM_NonStreaming(t *testing.T) {
 		name:       "MockLLM_NonStreaming",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", false)
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -457,7 +467,7 @@ func TestMockLLM_ThinkingStream(t *testing.T) {
 		name:       "MockLLM_ThinkingStream",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-think please")
+			body := bodyWithPrompt("test-model", true, "mock-think please")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -499,7 +509,7 @@ func TestMockLLM_ToolCall(t *testing.T) {
 		name:       "MockLLM_ToolCall",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-tool call")
+			body := bodyWithPrompt("test-model", true, "mock-tool call")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -529,7 +539,7 @@ func TestMockLLM_LongStream(t *testing.T) {
 		name:       "MockLLM_LongStream",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-long content")
+			body := bodyWithPrompt("test-model", true, "mock-long content")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -571,7 +581,7 @@ func TestMockLLM_500Error(t *testing.T) {
 		name:       "MockLLM_500Error",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-500 trigger")
+			body := bodyWithPrompt("test-model", true, "mock-500 trigger")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -612,7 +622,7 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 			mc := models.NewModelsConfig()
 			// Set up fallback chain so race retry has multiple models to try
 			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
+			mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
 			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
 			return mc
 		}(),
@@ -637,7 +647,7 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -740,7 +750,7 @@ func TestMockLLM_HeadersForwarded(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", false)
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			req.Header.Set("Authorization", "Bearer mock-test-token")
 			rr := httptest.NewRecorder()
@@ -764,7 +774,7 @@ func TestMockLLM_MultipleMessages(t *testing.T) {
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
 			body := map[string]interface{}{
-				"model":  "mock-model",
+				"model":  "test-model",
 				"stream": false,
 				"messages": []interface{}{
 					map[string]interface{}{"role": "system", "content": "You are a helpful assistant"},
@@ -808,7 +818,7 @@ func TestMockLLM_StreamSSEFormat(t *testing.T) {
 		name:       "MockLLM_StreamSSEFormat",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -1106,7 +1116,7 @@ func TestLoopDetection_ExactMatch(t *testing.T) {
 	// Within each stream, only 1 message is added to the detector window.
 	// After 2+ identical messages in the window, exact match should trigger.
 	for i := 0; i < 3; i++ {
-		body := simpleBody("mock-model", true)
+		body := simpleBody("test-model", true)
 		req := makeRequest(t, body)
 		rr := httptest.NewRecorder()
 		h.HandleChatCompletions(rr, req)
@@ -1139,7 +1149,7 @@ func TestLoopDetection_NormalNoTrigger(t *testing.T) {
 	// Send different types of requests — each is a separate request with its own detector
 	prompts := []string{"Hello there", "mock-think please", "mock-tool call"}
 	for _, prompt := range prompts {
-		body := bodyWithPrompt("mock-model", true, prompt)
+		body := bodyWithPrompt("test-model", true, prompt)
 		req := makeRequest(t, body)
 		rr := httptest.NewRecorder()
 		h.HandleChatCompletions(rr, req)
@@ -1209,7 +1219,7 @@ func TestLoopDetection_ToolCallExtraction(t *testing.T) {
 	h, upstream := newTestHandler(t, toolCallHandler, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1364,7 +1374,7 @@ func TestTTFB_HeadersSentImmediately(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1414,7 +1424,7 @@ func TestClientDisconnectDuringBuffering(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 
 	// Create a cancelable context
@@ -1471,7 +1481,7 @@ func TestBufferedStreaming_BodyBufferedUntilDone(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1858,7 +1868,7 @@ func TestIdleTermination_Triggered(t *testing.T) {
 	cfg := mgr.Get()
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -1921,7 +1931,7 @@ func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
 	cfg := mgr.Get()
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1983,7 +1993,7 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	cfg := mgr.Get()
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -2081,6 +2091,13 @@ func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc
 	upstream := httptest.NewServer(upstreamHandler)
 
 	mgr := newTestManagerWithConfig(t, upstream.URL, configOpts...)
+
+	// remove-external-upstream P5: every handler needs a resolvable
+	// internal model or the boundary 404 gate rejects the request.
+	if modelsConfig == nil {
+		modelsConfig = models.NewModelsConfig()
+	}
+	seedInternalFixture(t, modelsConfig, upstream.URL)
 
 	cfg := &Config{
 		ConfigMgr:    mgr,

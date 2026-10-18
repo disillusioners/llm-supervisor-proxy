@@ -74,6 +74,11 @@ import (
 // StreamDeadline is intentionally small where tests need to exercise the
 // deadline path; otherwise generous to avoid accidental firings.
 func liveTestCfg(upstreamURL string, streamDeadline time.Duration) *ConfigSnapshot {
+	// remove-external-upstream P5: the live tests drive the internal
+	// resolution path, so the snapshot carries a seeded internal model
+	// (test-model) whose credential base_url is the mock upstream.
+	mc := models.NewModelsConfig()
+	_ = seedInternalFixtureErr(mc, upstreamURL, p5FixtureModelID)
 	return &ConfigSnapshot{
 		RaceRetryEnabled:   true,
 		RaceMaxParallel:    1,
@@ -81,6 +86,7 @@ func liveTestCfg(upstreamURL string, streamDeadline time.Duration) *ConfigSnapsh
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     streamDeadline,
 		MaxGenerationTime:  10 * time.Second,
+		ModelsConfig:       mc,
 		ModelID:            "test-model",
 	}
 }
@@ -752,7 +758,7 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}, nil)
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+		reqHTTP := makeRequest(t, simpleBody("test-model", true))
 		// NO X-LLMProxy-Buffer-Response header ⇒ live mode (default).
 		rec := newFirstDataRecorder()
 		start := time.Now()
@@ -783,7 +789,7 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}, nil)
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+		reqHTTP := makeRequest(t, simpleBody("test-model", true))
 		reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true") // ⇒ buffered gate
 		rec := newFirstDataRecorder()
 		start := time.Now()
@@ -1205,7 +1211,7 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 			c.RaceRetryEnabled = false
 		})
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+		reqHTTP := makeRequest(t, simpleBody("test-model", true))
 		rec := httptest.NewRecorder()
 		h.HandleChatCompletions(rec, reqHTTP)
 
@@ -1368,7 +1374,7 @@ func TestLiveRelay_FirstByteThenImmediateErr(t *testing.T) {
 		c.RaceRetryEnabled = false
 	})
 
-	reqHTTP := makeRequest(t, simpleBody("mock-model", true)) // no header ⇒ live
+	reqHTTP := makeRequest(t, simpleBody("test-model", true)) // no header ⇒ live
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, reqHTTP)
 
@@ -1407,7 +1413,7 @@ func TestLiveRelay_PreFirstByteError(t *testing.T) {
 		c.RaceRetryEnabled = false
 	})
 
-	reqHTTP := makeRequest(t, simpleBody("mock-model", true)) // no header ⇒ live
+	reqHTTP := makeRequest(t, simpleBody("test-model", true)) // no header ⇒ live
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, reqHTTP)
 
@@ -1500,7 +1506,7 @@ func TestLiveRelay_R2_EstimatorUnderPrunePressure(t *testing.T) {
 			writeStream(w)
 		}, nil, bufStore)
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true)) // live
+		reqHTTP := makeRequest(t, simpleBody("test-model", true)) // live
 		rec := httptest.NewRecorder()
 		h.HandleChatCompletions(rec, reqHTTP)
 
@@ -1534,7 +1540,7 @@ func TestLiveRelay_R2_EstimatorUnderPrunePressure(t *testing.T) {
 			writeStream(w)
 		}, nil, mustBufferStore(t))
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+		reqHTTP := makeRequest(t, simpleBody("test-model", true))
 		reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true") // buffered
 		rec := httptest.NewRecorder()
 		h.HandleChatCompletions(rec, reqHTTP)
@@ -1583,7 +1589,7 @@ func TestLiveRelay_ClientDisconnectDuringMidStreamCancel(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+	reqHTTP := makeRequest(t, simpleBody("test-model", true))
 	reqHTTP = reqHTTP.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -1654,7 +1660,7 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}, nil, bufStore)
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true)) // live
+		reqHTTP := makeRequest(t, simpleBody("test-model", true)) // live
 		rec := httptest.NewRecorder()
 		h.HandleChatCompletions(rec, reqHTTP)
 
@@ -1695,7 +1701,7 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 			w.(http.Flusher).Flush()
 		}, nil, mustBufferStore(t))
 
-		reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+		reqHTTP := makeRequest(t, simpleBody("test-model", true))
 		reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true") // buffered
 		rec := httptest.NewRecorder()
 		h.HandleChatCompletions(rec, reqHTTP)

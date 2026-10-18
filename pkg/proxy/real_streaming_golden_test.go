@@ -191,7 +191,7 @@ func genOpenAIRace(t *testing.T, variant string) (string, string) {
 	fixture := fixtureSet()[variant]
 	h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
 
-	reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+	reqHTTP := makeRequest(t, simpleBody("test-model", true))
 	reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, reqHTTP)
@@ -375,7 +375,7 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		// Rebuild handler with fresh bus + store.
 		h2, _ := newTestHandler(t, fixtureSet()["text"].handler(), models.NewModelsConfig())
 		rec := newEventRecorder(h2.bus)
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		if bufMode {
 			req.Header.Set("X-LLMProxy-Buffer-Response", "true")
 		} else {

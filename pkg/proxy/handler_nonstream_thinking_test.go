@@ -30,7 +30,7 @@ import (
 // single trailing newline and nothing else, so any interior mutation
 // (e.g. a stray "\n" injected mid-body) trips the golden.
 func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
-	upstreamResponse := `{"id":"chatcmpl-x","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"the answer","reasoning_content":"my chain of thought"},"finish_reason":"stop"}]}`
+	upstreamResponse := `{"id":"chatcmpl-x","object":"chat.completion","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"the answer","reasoning_content":"my chain of thought"},"finish_reason":"stop"}]}`
 
 	// Exact golden: upstream body + the single trailing '\n' that
 	// handleNonStreamResult always appends via the buffer-chunked
@@ -63,7 +63,7 @@ func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 	mc := models.NewModelsConfig()
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 
-	body := simpleBody("mock-model", false)
+	body := simpleBody("test-model", false)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -105,7 +105,7 @@ func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 // stored assistant message with the legacy semantics: Content extracted,
 // Thinking empty (matches pre-fix behavior exactly for back-compat).
 func TestHandleNonStreamResult_NoReasoningPreservesLegacy(t *testing.T) {
-	upstreamResponse := `{"id":"chatcmpl-y","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer only"},"finish_reason":"stop"}]}`
+	upstreamResponse := `{"id":"chatcmpl-y","object":"chat.completion","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer only"},"finish_reason":"stop"}]}`
 
 	upstreamHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -116,7 +116,7 @@ func TestHandleNonStreamResult_NoReasoningPreservesLegacy(t *testing.T) {
 	mc := models.NewModelsConfig()
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 
-	body := simpleBody("mock-model", false)
+	body := simpleBody("test-model", false)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)

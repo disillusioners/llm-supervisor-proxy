@@ -132,6 +132,7 @@ func TestToolRepair_StreamingIntegration(t *testing.T) {
 				IdleTimeout:        30 * time.Second,
 				StreamDeadline:     10 * time.Second,
 				MaxGenerationTime:  15 * time.Second,
+				ModelsConfig:       seededModelsConfig(t, server.URL),
 				ModelID:            "test-model",
 				ToolRepair:         tt.config,
 			}
@@ -300,6 +301,7 @@ func TestToolRepair_NonStreamingIntegration(t *testing.T) {
 				IdleTimeout:        30 * time.Second,
 				StreamDeadline:     10 * time.Second,
 				MaxGenerationTime:  15 * time.Second,
+				ModelsConfig:       seededModelsConfig(t, server.URL),
 				ModelID:            "test-model",
 				ToolRepair:         tt.config,
 			}

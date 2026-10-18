@@ -560,7 +560,7 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 			fixture := fixtures[variant]
 			h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
 
-			reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+			reqHTTP := makeRequest(t, simpleBody("test-model", true))
 			reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
 			rec := httptest.NewRecorder()
 			h.HandleChatCompletions(rec, reqHTTP)
@@ -670,7 +670,7 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 		h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
 
 		// Buffered run.
-		reqBuf := makeRequest(t, simpleBody("mock-model", true))
+		reqBuf := makeRequest(t, simpleBody("test-model", true))
 		reqBuf.Header.Set("X-LLMProxy-Buffer-Response", "true")
 		recBuf := httptest.NewRecorder()
 		h.HandleChatCompletions(recBuf, reqBuf)
@@ -680,7 +680,7 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 		// Live run — first-byte timing is asserted in
 		// real_streaming_firstbyte_test.go (event-based). Here we
 		// only assert the response is well-formed.
-		reqLive := makeRequest(t, simpleBody("mock-model", true))
+		reqLive := makeRequest(t, simpleBody("test-model", true))
 		reqLive.Header.Del("X-LLMProxy-Buffer-Response")
 		recLive := httptest.NewRecorder()
 		h.HandleChatCompletions(recLive, reqLive)
