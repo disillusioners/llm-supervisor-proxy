@@ -34,6 +34,12 @@ type fakeMiniMax struct {
 	hitCount  atomic.Int64
 	lastBody  []byte
 	lastAuthH string
+	// lastCT / lastAE record the raw upstream Content-Type /
+	// Accept-Encoding header slices (all values) — duplicate-CT
+	// and gzip-negotiation-leak assertions read them (the
+	// client's CT AND AE must never be forwarded).
+	lastCT    []string
+	lastAE    []string
 	script    fakeScript
 	startedCh chan struct{} // closed on first request, optional
 }
@@ -56,6 +62,8 @@ func newFakeMiniMax(t *testing.T, script fakeScript) (*httptest.Server, *fakeMin
 		body, _ := io.ReadAll(r.Body)
 		f.lastBody = body
 		f.lastAuthH = r.Header.Get("Authorization")
+		f.lastCT = r.Header.Values("Content-Type")
+		f.lastAE = r.Header.Values("Accept-Encoding")
 		f.mu.Unlock()
 		f.hitCount.Add(1)
 		if script.delay > 0 {
@@ -450,6 +458,62 @@ func TestHandler_ClientAuthStripped(t *testing.T) {
 	}
 	if env.fake.lastAuthH != "Bearer sk-cred-secret" {
 		t.Errorf("upstream Authorization = %q, want credential bearer", env.fake.lastAuthH)
+	}
+}
+
+// TestHandler_Upstream_SingleContentTypeNoClientAcceptEncoding —
+// header-hygiene regression (parallel of the decision package's
+// duplicate-CT fix): the forward loop previously Add-ed the
+// client's Content-Type on top of the app-owned
+// Set("Content-Type", "application/json") (DUPLICATED CT
+// upstream) AND copied the client's Accept-Encoding verbatim.
+// With AE present Go's http.Transport skips both its auto-add of
+// "Accept-Encoding: gzip" AND the transparent gzip decompress, so
+// a gzip-negotiating upstream (cloudflared injects
+// "Accept-Encoding: gzip" toward origin) returns a gzipped body
+// that reaches the JSON parser raw ⇒ 502. The upstream must see
+// EXACTLY ONE Content-Type (application/json) and NO
+// client-supplied Accept-Encoding — the transport must own
+// encoding negotiation ("br" is the client marker; Go's
+// transport never sends it).
+func TestHandler_Upstream_SingleContentTypeNoClientAcceptEncoding(t *testing.T) {
+	body := successBody(1, 0)
+	env := newEnv(t, fakeScript{status: 200, body: body})
+
+	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"a cat"}`, map[string]string{
+		"Content-Type":    "text/plain", // client CT must NOT leak (would duplicate the app-owned Set)
+		"Accept-Encoding": "gzip, br",   // client AE must NOT leak ("br" is the client marker)
+	})
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if env.fake.hitCount.Load() != 1 {
+		t.Errorf("upstream hit count = %d, want 1", env.fake.hitCount.Load())
+	}
+	env.fake.mu.Lock()
+	gotCT := append([]string(nil), env.fake.lastCT...)
+	gotAE := append([]string(nil), env.fake.lastAE...)
+	env.fake.mu.Unlock()
+	// (a) exactly ONE Content-Type — application/json.
+	if len(gotCT) != 1 {
+		t.Fatalf("upstream Content-Type values = %q (count=%d), want exactly 1", gotCT, len(gotCT))
+	}
+	if !strings.EqualFold(gotCT[0], "application/json") {
+		t.Errorf("upstream Content-Type = %q, want application/json", gotCT[0])
+	}
+	// (b) NO client-supplied Accept-Encoding — the transport may
+	// add exactly "gzip"; anything else is a leak.
+	if len(gotAE) == 0 {
+		t.Logf("upstream saw no Accept-Encoding at all (transport may omit on pooled conns) — acceptable")
+		return
+	}
+	for _, v := range gotAE {
+		if strings.Contains(v, "br") {
+			t.Errorf("upstream Accept-Encoding %q contains the client marker (client sent \"gzip, br\")", v)
+		}
+		if v != "gzip" {
+			t.Errorf("upstream Accept-Encoding = %q, want exactly [\"gzip\"] (transport-added)", gotAE)
+		}
 	}
 }
 
