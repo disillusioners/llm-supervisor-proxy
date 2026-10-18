@@ -46,9 +46,20 @@ type OpenAIProvider struct {
 	// ProviderOpencodeGo case; gates session/UA attribution so no
 	// other provider is ever affected (opencode-go commission).
 	openCodeGo bool
-	// attribution carries the opencode-go session + UA headers. Set
-	// via SetSessionAttribution (kind-checked); nil ⇒ no attribution
-	// headers are stamped (provider behaves exactly as before).
+	// openCodeZen marks the "opencode" (OpenCode Zen) flavour. Set
+	// ONLY by the factory's ProviderOpencode case; gates the Zen
+	// provider-native UA attribution (UA-only — no session header).
+	// Like openCodeGo it is set at construction and read only by the
+	// kind-checked attribution seam, so every other provider is
+	// structurally untouched (Zen UA commission).
+	openCodeZen bool
+	// attribution carries the provider-native OpenCode attribution
+	// headers (session and/or UA). Set via SetSessionAttribution
+	// (kind-checked); nil ⇒ no attribution headers are stamped
+	// (provider behaves exactly as before). Each field is stamped
+	// independently: opencode-go sets SessionID + UserAgent;
+	// opencode (Zen) sets UserAgent only (empty SessionID ⇒ no
+	// x-opencode-session header).
 	attribution *SessionAttribution
 }
 
@@ -78,16 +89,20 @@ func (p *OpenAIProvider) SetRepairer(repairer *toolrepair.Repairer, callback too
 	p.eventCallback = callback
 }
 
-// SetSessionAttribution attaches opencode-go attribution headers
-// (x-opencode-session + User-Agent) stamped by setHeaders on every
-// upstream request this provider sends.
+// SetSessionAttribution attaches provider-native attribution headers
+// stamped by setHeaders on every upstream request this provider sends.
 //
-// Kind-checked no-op: only the opencode-go flavour (factory
-// ProviderOpencodeGo case) accepts attribution — plain OpenAI /
-// opencode-Zen instances ignore the call, so callers may attach
-// unconditionally.
+// The carrier struct is shared across the OpenCode provider family:
+// opencode-go passes SessionID + UserAgent (the Go gateway hard-gates
+// chat on x-opencode-session); opencode (Zen) passes UserAgent only
+// (empty SessionID ⇒ setHeaders emits no session header).
+//
+// Kind-checked no-op: only the two OpenCode flavours — opencode-go
+// (factory ProviderOpencodeGo case) and opencode/Zen (ProviderOpencode
+// case) — accept attribution. Plain OpenAI and every other provider
+// ignore the call, so callers may attach unconditionally.
 func (p *OpenAIProvider) SetSessionAttribution(a SessionAttribution) {
-	if !p.openCodeGo {
+	if !p.openCodeGo && !p.openCodeZen {
 		return
 	}
 	attribution := a
@@ -251,19 +266,35 @@ func (p *OpenAIProvider) IsRetryable(err error) bool {
 
 // setHeaders sets common headers for OpenAI requests.
 //
-// opencode-go attribution (opencode-go commission): when attribution is
-// attached (opencode-go providers only — see SetSessionAttribution),
-// the provider-native x-opencode-session + User-Agent headers are
-// stamped on the upstream request. The Go gateway hard-gates chat on
-// x-opencode-session (400 MissingSessionID when absent). All other
-// providers are untouched: no session header, and the User-Agent stays
-// Go's transport default exactly as before this commission.
+// OpenCode provider-native attribution (opencode-go + Zen commissions):
+// when attribution is attached (OpenCode-flavoured providers only — see
+// SetSessionAttribution), the provider-native headers are stamped on the
+// upstream request, each independently when non-empty:
+//
+//   - x-opencode-session — opencode-go only, and doubly gated: the
+//     SessionID must be non-empty AND the provider must carry the
+//     opencode-go flavour flag. A Zen-flagged instance NEVER emits a
+//     session header, even if handed a non-empty SessionID (the Zen
+//     design note forbids that surface — session emission is a
+//     Go-realm contract only; the flavour gate is defense-in-depth at
+//     the single stamping site). opencode (Zen) carries no session
+//     header.
+//   - User-Agent — both flavours. The provider-native client UA
+//     default, env-overridable per provider.
+//
+// All other providers are untouched: no session header, no attribution
+// UA, and the User-Agent stays Go's transport default exactly as before
+// these commissions.
 func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	if p.attribution != nil {
-		req.Header.Set("x-opencode-session", p.attribution.SessionID)
-		req.Header.Set("User-Agent", p.attribution.UserAgent)
+		if p.openCodeGo && p.attribution.SessionID != "" {
+			req.Header.Set("x-opencode-session", p.attribution.SessionID)
+		}
+		if p.attribution.UserAgent != "" {
+			req.Header.Set("User-Agent", p.attribution.UserAgent)
+		}
 	}
 }
 
