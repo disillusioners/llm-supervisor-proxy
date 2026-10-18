@@ -163,6 +163,17 @@ func TestSanitizeReasonDetail_RedactsSecrets(t *testing.T) {
 			marker: "",
 			keep:   []string{"basic authentication failed"},
 		},
+		{
+			// Over-redaction guard (length floor): short digit-bearing
+			// prose after "basic " must survive INTACT — the ≥8-char
+			// credential-alphabet floor rejects it even though it
+			// carries a digit, preserving triage detail.
+			name:   "short basic prose with digits survives",
+			in:     `basic v2 rejected; basic 401 challenge issued`,
+			secret: "",
+			marker: "",
+			keep:   []string{"basic v2 rejected; basic 401 challenge issued"},
+		},
 	}
 
 	for _, tc := range cases {

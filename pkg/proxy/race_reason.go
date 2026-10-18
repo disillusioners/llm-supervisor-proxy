@@ -93,6 +93,15 @@ const (
 // every emission path — no caller can leak an unbounded line.
 const maxReasonDetailRunes = 160
 
+// basicCredentialMinRun is the length floor for the Basic-auth
+// credential run: a real base64 credential ("user:pass" encoded) is
+// never shorter than 8 alphabet chars, while digit-bearing prose
+// fragments ("basic v2", "basic 401 challenge") always are. Enforced
+// on the captured run in sanitizeReasonDetail (RE2 cannot express
+// "≥8 chars AND contains a digit" in one pattern without an
+// enumeration of the digit position).
+const basicCredentialMinRun = 8
+
 // failureReason is the classified reason for one race/fallback step.
 // Status is 0 when no HTTP status is attributable (timeouts,
 // connection errors, proxy-side failures). Detail is already
@@ -386,10 +395,16 @@ var (
 	// key prefix if the shape is not a full key.
 	reasonSecretGoogle = regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`)
 	// HTTP Basic credentials echoed in Authorization headers:
-	// "Basic <base64>". Requires at least one digit or base64 symbol
-	// (+ / =) so ordinary vocabulary after the word "Basic" (e.g.
-	// "basic authentication", "basic auth", "basic TLS") is NOT eaten.
-	reasonSecretBasic = regexp.MustCompile(`(?i:\bbasic)\s+[A-Za-z0-9+/=]*[0-9+/=][A-Za-z0-9+/=]*`)
+	// "Basic <base64>". Two guards keep prose out: (a) the credential
+	// run must span ≥8 credential-alphabet chars (real base64 creds
+	// are never shorter) — enforced at replace time via the capture
+	// group + basicCredentialMinRun, because RE2 has no lookahead;
+	// (b) the run must carry at least one digit or base64 symbol
+	// (+ / =), so ordinary vocabulary after the word "Basic" (e.g.
+	// "basic authentication") is NOT eaten. Together they also keep
+	// short digit-bearing fragments ("basic v2", "basic 401
+	// challenge") intact.
+	reasonSecretBasic = regexp.MustCompile(`(?i:\bbasic)\s+([A-Za-z0-9+/=]*[0-9+/=][A-Za-z0-9+/=]*)`)
 )
 
 // sanitizeReasonDetail makes an upstream error string safe for the
@@ -414,7 +429,16 @@ func sanitizeReasonDetail(s string) string {
 	s = reasonSecretAssign.ReplaceAllString(s, `api_key=***`)
 	s = reasonSecretGitHub.ReplaceAllString(s, `gh_***`)
 	s = reasonSecretGoogle.ReplaceAllString(s, `AIza***`)
-	s = reasonSecretBasic.ReplaceAllString(s, `Basic ***`)
+	// Basic: the digit/symbol guard alone still half-matches short
+	// digit-bearing prose ("basic v2"), so the captured credential run
+	// must ALSO clear basicCredentialMinRun before it is redacted;
+	// runs below the floor survive untouched.
+	s = reasonSecretBasic.ReplaceAllStringFunc(s, func(m string) string {
+		if sub := reasonSecretBasic.FindStringSubmatch(m); len(sub[1]) >= basicCredentialMinRun {
+			return `Basic ***`
+		}
+		return m
+	})
 
 	return truncateReasonRunes(s, maxReasonDetailRunes)
 }
