@@ -14,8 +14,8 @@
 --
 -- The only provably-safe inverse arm — re-hide rows that were un-hidden
 -- by nothing — is included as a comment-only signal of intent. Do NOT
--- uncomment the blanket `UPDATE models SET enabled = 1;` (would silently
--- re-enable every row 032 disabled, including any genuine-disabled
--- rows the operator had pre-existing):
+-- broaden this narrow arm into a blanket `UPDATE models SET enabled = 1;`
+-- — which rows were disabled by 032 vs pre-existing is not recoverable
+-- without the pre-flight dump:
 --   UPDATE models SET enabled = 0 WHERE internal = 0;
 SELECT 1; -- no-op placeholder; see operator note above

@@ -937,6 +937,21 @@ func TestMigration032_ForwardFreshDB(t *testing.T) {
 		t.Errorf("B3 verification failed — %d enabled non-group rows lack credentials or internal_model", invalidEnabled)
 	}
 
+	// Commission deliverable-4 operator-safety twin: zero ENABLED non-group
+	// rows may remain non-internal after 032. Distinct from the B3 check
+	// above — B3 does not flag an enabled backfill-eligible row left at
+	// internal=0; this twin does (defense-in-depth for a partial/missed
+	// disable arm).
+	var enabledNonInternal int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM models WHERE enabled != 0 AND internal = 0 AND kind != 'group'`,
+	).Scan(&enabledNonInternal); err != nil {
+		t.Fatalf("operator-safety twin count: %v", err)
+	}
+	if enabledNonInternal != 0 {
+		t.Errorf("operator-safety twin failed — %d enabled non-group rows remain non-internal after 032", enabledNonInternal)
+	}
+
 	// (ii) Convergence informational check — the "simpler"
 	// `WHERE (internal IS NULL OR internal = 0)` query: returns the
 	// disabled-by-032 count (glm-4.5-air + glm-5 = 2), which is
