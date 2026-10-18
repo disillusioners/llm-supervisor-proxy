@@ -1,0 +1,1055 @@
+package ultimatemodel
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
+)
+
+// newProviderClient is a package-level variable that creates a provider.
+// Tests can override it to inject a mock provider; production callers use
+// providers.NewProvider.
+var newProviderClient = providers.NewProvider
+
+// executeInternal handles requests to internal providers (bypassing upstream)
+// This is a RAW PROXY - no retry, no fallback, no buffering, no loop detection
+//
+// interleaved is the X-Proxy-Interleaved-Thinking flag re-parsed by
+// Execute (B3). When true AND the credential provider is MiniMax, the
+// caller sets the typed ReasoningSplit *bool = ptr(true) on the hydrated
+// *ChatCompletionRequest after convertRequest returns, and convertRequest
+// populates ChatMessage.ReasoningDetails from the input map. The gate
+// (provider + flag) belongs to the caller, not here — this function
+// remains pure (W6).
+//
+// conversationKey (Phase 3 / Task 8): the per-request affinity key wired
+// at the handler.go post-auth site. Threaded to the resolution seam via
+// ResolveInternalConfigWithAffinity. MAY be empty (no leading user run)
+// — see W-2 + C-2 in the plan for empty-key semantics. Used by the
+// rate-limit failover hook below (Task 21) to compute the per-request
+// cooldown-injection exclusion set when a 429 hits.
+//
+// opts (Phase 4 / task 4.3) selects the stream wire mode: absent/zero =
+// live streaming (per-event write+flush); ExecuteOptions{BufferMode:
+// true} = buffered. No-op for non-stream requests.
+func (h *Handler) executeInternal(
+	ctx context.Context,
+	w http.ResponseWriter,
+	requestBody map[string]interface{},
+	requestBodyBytes []byte,
+	modelCfg *models.ModelConfig,
+	isStream bool,
+	interleaved bool,
+	conversationKey string,
+	opts ...ExecuteOptions,
+) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+	// Resolve internal config via the affinity seam (Phase 3 / Tasks 8 +
+	// 9 — #3 struct form: ResolvedCredential + trailing ok). Discard
+	// NewlyBound — the ultimate path does NOT publish model_credential_selected
+	// itself (single source of truth in pkg/proxy/race_executor.go:executeRequest,
+	// reachable only from the race coordinator).
+	resolved, ok := h.modelsMgr.ResolveInternalConfigWithAffinity(modelCfg.ID, conversationKey)
+	if !ok {
+		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
+	}
+
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, conversationKey, opt)
+}
+
+// executeInternalWithResolved (Phase 3 / Task 21 refactor) runs the
+// internal execution against an ALREADY-RESOLVED credential. Split out
+// of executeInternal so the rate-limit-failover wrapper can (a) know
+// exactly which credential attempt #1 used, and (b) retry with the
+// reselected credential through the SAME provider-construction +
+// translation + dispatch path — no duplicated translation logic (the
+// prior partial implementation re-implemented the MiniMax twin-B
+// translation inline and drifted from it).
+//
+// conversationKey (opencode-go commission) is the per-request affinity
+// key threaded from executeInternal / the failover wrapper — it feeds
+// the opencode-go session derivation so the failover retry re-derives
+// the SAME x-opencode-session id as attempt #1 (retry-stability).
+func (h *Handler) executeInternalWithResolved(
+	ctx context.Context,
+	w http.ResponseWriter,
+	requestBody map[string]interface{},
+	requestBodyBytes []byte,
+	modelCfg *models.ModelConfig,
+	isStream bool,
+	interleaved bool,
+	resolved models.ResolvedCredential,
+	conversationKey string,
+	opts ...ExecuteOptions,
+) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+	provider := resolved.Provider
+	apiKey := resolved.APIKey
+	baseURL := resolved.BaseURL
+	internalModel := resolved.InternalModel
+
+	// Create provider
+	providerClient, err := newProviderClient(provider, apiKey, baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	// opencode-go attribution (opencode-go commission): attach the
+	// provider-native x-opencode-session + User-Agent headers. Kind-
+	// checked no-op for every other provider. modelCfg.ID is the
+	// client-facing model id (the same id the conversationKey was
+	// computed over at the handler entry site).
+	providers.AttachOpenCodeGoAttribution(providerClient, conversationKey, modelCfg.ID, resolved.CredentialID)
+
+	// Convert request
+	req, err := h.convertRequest(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert request: %w", err)
+	}
+
+	// P1-8(d) gate widening (fix/minimax-reasoning-translation-gate):
+	// widen the MiniMax gate beyond the X-Proxy-Interleaved-Thinking
+	// client header to also fire when the body echoes non-empty
+	// reasoning_content. On a fallback the proxy chose MiniMax, so
+	// a client that never heard of the header still needs its
+	// reasoning_content translated to reasoning_details +
+	// ReasoningSplit=true. Computed once before the gate from the
+	// already-parsed requestBody map — cheap read-only scan, no
+	// re-parse. Symmetric with race_executor.go twin A.
+	hasReasoning := translator.HasReasoningContent(requestBody)
+
+	// P1-8(d) / W5: twin B — typed-field setter AND
+	// message-level reasoning_content→reasoning_details
+	// translation. When the gate fires (flag AND credential is
+	// MiniMax), the typed openai.go marshaler emits the wire
+	// field AND each per-message `reasoning_content` is
+	// translated to a `reasoning_details` array. The
+	// reasoning_content→reasoning_details translation is the
+	// W5 mirror of the race-internal twin A behavior — without
+	// it, the typed path carried reasoning_content on the
+	// wire (the SDK does not auto-translate), which leaked
+	// OpenAI semantics to MiniMax and produced the
+	// reasoning_content silent drop reported in
+	// c3a4b35/83814b0. The translation is done on the typed
+	// struct directly (not via translator.TranslateRequestBytes)
+	// because the input is already a typed request after
+	// convertRequest; using the bytes wrapper would require a
+	// parse→mutate→re-marshal round-trip we already paid
+	// once. The result is the same: each
+	// ChatMessage.ReasoningContent that is non-empty becomes
+	// a one-entry ChatMessage.ReasoningDetails array, and
+	// ReasoningContent is cleared (strip-and-replace).
+	// Provider compare is case-insensitive per
+	// handler_anthropic.go:297 precedent. The provider string
+	// comes from ResolveInternalConfig (already a normalized
+	// canonical value from the credential).
+	if (interleaved || hasReasoning) && strings.ToLower(provider) == strings.ToLower(string(providers.ProviderMiniMax)) {
+		t := true
+		req.ReasoningSplit = &t
+		// W5 — mirror the race-internal twin A
+		// translation on the typed struct.
+		//
+		// The id counter is MONOTONIC over reasoning-carrying
+		// messages only (starting at 1), matching the
+		// translator's canonical TranslateMessagesReasoning
+		// (pkg/proxy/translator/minimax.go): messages with
+		// empty reasoning_content are skipped and consume NO
+		// counter slot. Using the message index here (the
+		// pre-fix scheme) made [user, assistant w/ rc, user]
+		// emit reasoning-text-2 on this path while every other
+		// path emitted reasoning-text-1 — the S3 cross-path
+		// divergence caught by test/e2e_minimax_reasoning.
+		n := 0
+		for i := range req.Messages {
+			msg := &req.Messages[i]
+			if msg.ReasoningContent == "" {
+				continue
+			}
+			n++
+			// Strip-and-replace: build the new
+			// details entry from the existing content,
+			// then clear the content string. The
+			// wire-literal identifiers
+			// (translator.ReasoningTextType /
+			// .ReasoningTextFormat /
+			// .ReasoningTextIDPrefix) are imported
+			// here for the constant-not-literal
+			// invariant — single source of truth
+			// for the MiniMax wire vocabulary
+			// lives in pkg/proxy/translator
+			// (R3 carve-out — providers/ultimatemodel
+			// may import these constants; see
+			// ExtractEntryText for the established
+			// helper-only precedent).
+			msg.ReasoningDetails = []providers.ReasoningDetailEntry{{
+				Type:   translator.ReasoningTextType,
+				ID:     fmt.Sprintf("%s%d", translator.ReasoningTextIDPrefix, n),
+				Format: translator.ReasoningTextFormat,
+				Index:  0,
+				Text:   msg.ReasoningContent,
+			}}
+			msg.ReasoningContent = ""
+		}
+	}
+
+	// Override model with internal model name
+	req.Model = internalModel
+
+	if isStream {
+		return h.handleInternalStream(ctx, providerClient, req, w, internalModel, requestBodyBytes, opt)
+	}
+	return h.handleInternalNonStream(ctx, providerClient, req, w, internalModel, requestBodyBytes)
+}
+
+// executeInternalWithRateLimitFailover (Phase 3 / Task 21 — Round 3b
+// review #4 guard fix) wraps the internal execution so an initial-call
+// *ProviderError classified as rate-limit retries ONCE with the
+// reselected credential (ExcludeAndReselect mode-aware per B3/C2). The
+// guard is the *ProviderError type assertion — NOT headersSent, which
+// Execute() pre-sets before executeInternal runs and is therefore
+// unusable as a first-byte marker here (initial-call errors return
+// before any content write — handler_internal.go non-stream ~155 /
+// stream ~253; mid-stream failures surface as SSE error events).
+//
+// Resolution happens ONCE here (attempt #1's credential is exactly what
+// executeInternalWithResolved consumes); the retry resolves the
+// SPECIFIC reselected credential (not a fresh GetOrSelect — an
+// empty-key fresh pick would re-roll and could re-select the cooling
+// credential).
+//
+// conversationKey is the per-request affinity key wired at handler.go's
+// post-auth site (chat path). MAY be empty (no leading user run
+// extracted) — W-2
+// semantics: ExcludeAndReselect performs a fresh non-cooling weighted
+// pick with no binding write for empty keys (ReselectHealthy per C2).
+//
+// Budget (R3-5): this hook retries at most ONCE; combined with the
+// len(Credentials) > 1 precondition the per-request failover count is
+// structurally bounded by 1 ≤ len(credentials)−1 — no loops possible.
+func (h *Handler) executeInternalWithRateLimitFailover(
+	ctx context.Context,
+	w http.ResponseWriter,
+	requestBody map[string]interface{},
+	requestBodyBytes []byte,
+	modelCfg *models.ModelConfig,
+	isStream bool,
+	interleaved bool,
+	conversationKey string,
+	opts ...ExecuteOptions,
+) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+	// Attempt #1 — resolve via the affinity seam, then execute.
+	resolved, ok := h.modelsMgr.ResolveInternalConfigWithAffinity(modelCfg.ID, conversationKey)
+	if !ok {
+		return nil, fmt.Errorf("failed to resolve internal config for model %s", modelCfg.ID)
+	}
+	result, err := h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, resolved, conversationKey, opt)
+	if err == nil || h.credEngine == nil {
+		return result, err
+	}
+
+	// ── Task 21 hook guards ──
+	// (1) initial-call *ProviderError (the pre-first-byte guard — errors
+	//     from the initial provider call return before any content write);
+	// (2) rate-limit classification (Task 17 vocabulary);
+	// (3) multi-credential model (single-cred ⇒ ReselectNone anyway).
+	var providerErr *providers.ProviderError
+	if !errors.As(err, &providerErr) {
+		return result, err
+	}
+	if !providers.IsRateLimitError(providerErr) {
+		return result, err
+	}
+	if len(modelCfg.Credentials) <= 1 {
+		return result, err
+	}
+
+	reselected, mode := h.credEngine.ExcludeAndReselect(
+		modelCfg.ID,
+		conversationKey,
+		resolved.CredentialID,
+		providerErr.RetryAfter,
+	)
+
+	switch mode {
+	case credentiallb.ReselectNone:
+		// C2 narrowing: no credential available (single-cred model or 0
+		// valid credentials). Propagate the existing failure shape.
+		log.Printf("[LB-FAILOVER] ultimate-internal: model=%s no reselectable credential (mode=%v); propagating failure", modelCfg.ID, mode)
+		return result, err
+	case credentiallb.ReselectSoonestExpiry:
+		// 0-of-N healthy: single attempt with the soonest-expiring
+		// credential, then propagate (F.4 — no second ExcludeAndReselect).
+		log.Printf("[WARN] [LB-FAILOVER] ultimate-internal: model=%s all credentials cooling; single attempt with soonest-expiring cred=%s", modelCfg.ID, reselected)
+	default:
+		// ReselectHealthy (incl. B2 no-op + empty-key fresh pick per C2).
+		log.Printf("[LB-FAILOVER] ultimate-internal: model=%s rate-limited on cred=%s; failing over to cred=%s", modelCfg.ID, resolved.CredentialID, reselected)
+	}
+
+	if reselected == "" || reselected == resolved.CredentialID {
+		// Nothing new to try — propagate (idempotent no-op guard).
+		return result, err
+	}
+
+	// Resolve the SPECIFIC reselected credential (Task 21 retry): same
+	// field derivation as store.resolveWithCredential (provider from the
+	// credential; baseURL = model override > credential default;
+	// internal model with peak-hour substitution). NewlyBound=false: the
+	// rebind side effect already happened inside ExcludeAndReselect and
+	// this path never publishes model_credential_selected.
+	newCred := h.modelsMgr.GetCredential(reselected)
+	if newCred == nil {
+		// Deleted mid-flight — propagate (the engine's S6 hygiene will
+		// have cleared its state via the store's defensive heal).
+		return result, err
+	}
+	newBaseURL := modelCfg.InternalBaseURL
+	if newBaseURL == "" {
+		newBaseURL = newCred.BaseURL
+	}
+	newInternalModel := modelCfg.InternalModel
+	if peakModel := modelCfg.ResolvePeakHourModel(time.Now()); peakModel != "" {
+		newInternalModel = peakModel
+	}
+	retryResolved := models.ResolvedCredential{
+		Provider:      newCred.Provider,
+		APIKey:        newCred.APIKey,
+		BaseURL:       newBaseURL,
+		InternalModel: newInternalModel,
+		CredentialID:  reselected,
+		NewlyBound:    false, // reselection ≠ first binding (W-1)
+	}
+
+	// Task 20 observability: event + logs on the successful failover.
+	h.publishCredentialFailoverEvent(modelCfg.ID, resolved.CredentialID, reselected, providerErr.RetryAfter)
+
+	// Single retry through the SAME execution path (provider
+	// construction + MiniMax twin-B translation + dispatch) — no
+	// duplicated translation logic.
+	return h.executeInternalWithResolved(ctx, w, requestBody, requestBodyBytes, modelCfg, isStream, interleaved, retryResolved, conversationKey, opt)
+}
+
+// handleInternalNonStream handles non-streaming requests for internal providers
+func (h *Handler) handleInternalNonStream(
+	ctx context.Context,
+	provider providers.Provider,
+	req *providers.ChatCompletionRequest,
+	w http.ResponseWriter,
+	internalModel string,
+	requestBodyBytes []byte,
+) (*ExecuteResult, error) {
+	resp, err := provider.ChatCompletion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		return nil, err
+	}
+
+	// Extract usage from response
+	usage := &store.Usage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+
+	// Fallback token counting if usage is nil/zero
+	if usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
+		if token.FallbackEnabled() {
+			tokenizer := token.GetTokenizer()
+			promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, internalModel)
+			if err != nil {
+				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, internalModel)
+			}
+			respBytes, _ := json.Marshal(resp)
+			completionText := token.ExtractCompletionTextFromJSON(respBytes)
+			completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+			if err != nil {
+				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, internalModel)
+			}
+			usage = &store.Usage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			}
+			log.Printf("[DEBUG][fallback-token-count] ultimate-internal: model=%s prompt=%d completion=%d total=%d",
+				internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+		}
+	}
+
+	// Passive capture: pull content + reasoning_content + tool_calls
+	// from the typed response. The wire bytes have ALREADY been
+	// written above (json.NewEncoder(w).Encode(resp)) — this is pure
+	// read-only access to the in-memory response struct, so the
+	// client output is unchanged.
+	//
+	// ChatMessage.Content is typed as interface{} in the provider
+	// because it can be a string OR []ContentPart (multimodal);
+	// the shared coerceContentString helper (S1) yields "" for the
+	// non-string forms, which is safe here because the upstream
+	// non-stream OpenAI response is always string-typed for text
+	// completions (the []ContentPart form is request-only).
+	//
+	// W7: tool calls come back fully assembled on the typed
+	// non-stream response (no streaming-accumulation needed). The
+	// providers.ToolCall carries an extra "index" field compared
+	// to store.ToolCall; we copy the persistence-relevant fields
+	// (id, type, function name + arguments) explicitly so the
+	// store.Message.ToolCalls shape is exactly what the Web UI
+	// reads (pkg/ui/frontend/src/components/RequestDetail.tsx).
+	var capturedContent, capturedThinking string
+	var capturedToolCalls []store.ToolCall
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		capturedContent = coerceContentString(resp.Choices[0].Message.Content)
+		capturedThinking = resp.Choices[0].Message.ReasoningContent
+		if len(resp.Choices[0].Message.ToolCalls) > 0 {
+			capturedToolCalls = make([]store.ToolCall, len(resp.Choices[0].Message.ToolCalls))
+			for i, tc := range resp.Choices[0].Message.ToolCalls {
+				capturedToolCalls[i] = store.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: store.Function{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
+	}
+
+	return &ExecuteResult{
+		Usage:     usage,
+		Content:   capturedContent,
+		Thinking:  capturedThinking,
+		ToolCalls: capturedToolCalls,
+	}, nil
+}
+
+// sseDataFrame frames a JSON payload as one SSE data event: the
+// `data: ` prefix, the payload bytes, and a trailing blank line.
+// Used by handleInternalStream (Phase 4) to build the same wire shape
+// in both wire modes — the buffered path accumulates the same bytes
+// via buf.WriteString("data: ");buf.Write(data);buf.WriteString("\n\n").
+func sseDataFrame(data []byte) []byte {
+	frame := make([]byte, 0, len(data)+8)
+	frame = append(frame, "data: "...)
+	frame = append(frame, data...)
+	frame = append(frame, '\n', '\n')
+	return frame
+}
+
+// sseDoneFrame returns the `data: [DONE]\n\n` SSE terminator.
+func sseDoneFrame() []byte {
+	return []byte("data: [DONE]\n\n")
+}
+
+// handleInternalStream handles streaming requests for internal providers.
+//
+// opts (Phase 4 / task 4.3) selects the wire mode. LIVE (default,
+// BufferMode=false): every `case "content"` event and every emitted
+// tool-call chunk goes through ExecuteOptions.writeChunk (per-event
+// writeMu-guarded write+flush); every `case "thinking"` likewise;
+// `case "done"` and `case "error"` still emit their terminator lines
+// with a writeMu-guarded write+flush (no drain of buf). The capture-
+// side accumulator (buf) receives the SAME bytes as the wire writes
+// in the SAME loop iteration (C1 estimator parity, by construction).
+// BUFFERED (BufferMode=true): today's behavior byte-for-byte — buf
+// accumulates everything, single end-of-stream write+flush.
+func (h *Handler) handleInternalStream(
+	ctx context.Context,
+	provider providers.Provider,
+	req *providers.ChatCompletionRequest,
+	w http.ResponseWriter,
+	internalModel string,
+	requestBodyBytes []byte,
+	opts ...ExecuteOptions,
+) (*ExecuteResult, error) {
+	opt := resolveExecuteOptions(opts)
+	eventCh, err := provider.StreamChatCompletion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return nil, fmt.Errorf("streaming not supported")
+	}
+
+	// Create tool call buffer with integrated repair
+	var toolCallBuffer *toolcall.ToolCallBuffer
+	if !h.toolCallBufferDisabled && h.toolRepairConfig != nil && h.toolRepairConfig.Enabled {
+		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			"ultimate",
+			h.toolRepairConfig,
+		)
+	} else if !h.toolCallBufferDisabled {
+		toolCallBuffer = toolcall.NewToolCallBuffer(
+			h.toolCallBufferMaxSize,
+			internalModel,
+			"ultimate",
+		)
+	}
+
+	// Track state for proper streaming format
+	firstChunk := true
+	nextToolCallIndex := 0
+	seenToolCallIDs := make(map[string]int)
+
+	// Track usage from done event
+	var extractedUsage *store.Usage
+
+	// Capture-side only: accumulate Content + Thinking +
+	// ToolCalls from typed provider events as we write them out.
+	// Builders stay local; nothing here is sent to the client. The
+	// string-builder pattern avoids the += memory trap across
+	// many stream chunks.
+	var capturedContent strings.Builder
+	var capturedThinking strings.Builder
+
+	// W7: tool calls arrive incrementally across "tool_call"
+	// events as partial providers.ToolCall deltas (index, ID,
+	// type, function name appear once; arguments fragments
+	// concatenate). Accumulate by index using the same
+	// shape-pattern as pkg/proxy/handler_helpers.go's
+	// extractStreamChunkContent — by-index Builder slice for
+	// arguments, parallel store.ToolCall slice for fixed fields
+	// (ID/Type/Name). finalise collapses arg builders into
+	// Function.Arguments at end-of-stream.
+	var capturedToolCalls []store.ToolCall
+	var capturedToolCallArgBuilders []*strings.Builder
+
+	// Phase 4 dual role (C1): in BUFFERED mode this buf is the wire
+	// accumulation written in one end-of-stream flush; in LIVE mode it
+	// is the capture-side accumulator ONLY — each per-event wire write
+	// appends the same bytes here so the fallback estimator sees the
+	// full completion text (byte-parity of Usage between modes).
+	// (Phase 4 / task 4.3 — NB7 dead-accumulator disposition: the
+	// pre-Phase-4 `var rawChunks bytes.Buffer` + its writes at the done
+	// + error arms had zero readers outside this file; removed.)
+	var buf bytes.Buffer
+
+	for event := range eventCh {
+		switch event.Type {
+		case "content":
+			// Write SSE data event
+			var data []byte
+			if firstChunk {
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"role":    "assistant",
+								"content": event.Content,
+							},
+						},
+					},
+				}
+				data, _ = json.Marshal(chunk)
+			} else {
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"content": event.Content,
+							},
+						},
+					},
+				}
+				data, _ = json.Marshal(chunk)
+			}
+			firstChunk = false
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+			} else {
+				// LIVE (Phase 4 / task 4.3): per-event writeMu-guarded
+				// write+flush; same bytes appended to the capture-side
+				// accumulator for C1 estimator parity.
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
+			// Capture-side only: accumulate content delta. The
+			// typed event.Content field is the same string the
+			// proxy just wrote into the chunk above, so
+			// capturing here is exactly equivalent to parsing
+			// the wire bytes — without an extra JSON pass.
+			if event.Content != "" {
+				capturedContent.WriteString(event.Content)
+			}
+
+		case "tool_call":
+			if len(event.ToolCalls) > 0 {
+				toolCalls := make([]map[string]interface{}, len(event.ToolCalls))
+				for i, tc := range event.ToolCalls {
+					var index int
+					if tc.ID != "" {
+						if idx, seen := seenToolCallIDs[tc.ID]; seen {
+							index = idx
+						} else {
+							index = nextToolCallIndex
+							seenToolCallIDs[tc.ID] = index
+							nextToolCallIndex++
+						}
+					} else {
+						index = i
+					}
+					toolCalls[i] = map[string]interface{}{
+						"index": index,
+						"id":    tc.ID,
+						"type":  tc.Type,
+						"function": map[string]interface{}{
+							"name":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+						},
+					}
+
+					// W7: capture-side only. Mirror the same
+					// per-index accumulation pattern that
+					// pkg/proxy/handler_helpers.go's
+					// extractStreamChunkContent uses so the
+					// outer persistence layer sees the
+					// fully-assembled ToolCalls. The typed
+					// event.ToolCalls slice is the SAME data
+					// the proxy just wrote into `toolCalls`
+					// above (delta fields), so capturing here
+					// is observationally equivalent to parsing
+					// the wire bytes — without an extra JSON
+					// pass. The `index` here is the
+					// proxy-internal reassigned index (seenToolCallIDs)
+					// that the wire observer will see.
+					for len(capturedToolCalls) <= index {
+						capturedToolCalls = append(capturedToolCalls, store.ToolCall{})
+						b := &strings.Builder{}
+						b.Grow(1024)
+						capturedToolCallArgBuilders = append(capturedToolCallArgBuilders, b)
+					}
+					ctc := &capturedToolCalls[index]
+					if tc.ID != "" {
+						ctc.ID = tc.ID
+					}
+					if tc.Type != "" {
+						ctc.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
+						ctc.Function.Name = tc.Function.Name
+					}
+					if tc.Function.Arguments != "" {
+						capturedToolCallArgBuilders[index].WriteString(tc.Function.Arguments)
+					}
+				}
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   internalModel,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"tool_calls": toolCalls,
+							},
+						},
+					},
+				}
+				data, _ := json.Marshal(chunk)
+				line := "data: " + string(data) + "\n\n"
+
+				var chunksToEmit [][]byte
+				if toolCallBuffer != nil {
+					chunksToEmit = toolCallBuffer.ProcessChunk([]byte(line))
+				} else {
+					chunksToEmit = [][]byte{[]byte(line)}
+				}
+
+				for _, chunk := range chunksToEmit {
+					if opt.BufferMode {
+						buf.Write(chunk)
+					} else {
+						// LIVE (Phase 4 / task 4.3): per-tool
+						// writeMu-guarded write+flush; the toolcall
+						// buffer's per-call hold (emit only when the
+						// arguments JSON is complete) is unchanged —
+						// multiple chunks per event stays the current
+						// behavior.
+						opt.writeChunk(w, flusher, chunk, &buf)
+					}
+				}
+			}
+
+		case "thinking":
+			chunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"delta": map[string]interface{}{
+							"reasoning_content": event.ReasoningContent,
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+			} else {
+				// LIVE (Phase 4 / task 4.3): thinking deltas go to the
+				// wire per-event too — with done/error no longer
+				// draining buf, a buffered-only accumulation would
+				// silently DROP thinking from the live wire.
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
+			// Capture-side only: accumulate thinking delta. The
+			// typed event.ReasoningContent field is the same
+			// string the proxy just wrote into the chunk above
+			// (mirroring the d7300cb internal-path reasoning
+			// emission).
+			if event.ReasoningContent != "" {
+				capturedThinking.WriteString(event.ReasoningContent)
+			}
+
+		case "done":
+			// Flush remaining tool calls
+			if toolCallBuffer != nil {
+				flushChunks := toolCallBuffer.Flush()
+				for _, chunk := range flushChunks {
+					if opt.BufferMode {
+						buf.Write(chunk)
+					} else {
+						opt.writeChunk(w, flusher, chunk, &buf)
+					}
+				}
+				stats := toolCallBuffer.GetRepairStats()
+				if stats.Attempted > 0 {
+					log.Printf("[TOOL-BUFFER] UltimateModel Internal: Repair stats: attempted=%d, success=%d, failed=%d",
+						stats.Attempted, stats.Successful, stats.Failed)
+				}
+			}
+
+			// Extract usage
+			if event.Response != nil {
+				extractedUsage = &store.Usage{
+					PromptTokens:     event.Response.Usage.PromptTokens,
+					CompletionTokens: event.Response.Usage.CompletionTokens,
+					TotalTokens:      event.Response.Usage.TotalTokens,
+				}
+			}
+
+			// Write finish chunk
+			finishReason := event.FinishReason
+			if finishReason == "" {
+				finishReason = "stop"
+			}
+			finalChunk := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   internalModel,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]interface{}{},
+						"finish_reason": finishReason,
+					},
+				},
+			}
+			finalData, _ := json.Marshal(finalChunk)
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(finalData)
+				buf.WriteString("\n\n")
+				buf.WriteString("data: [DONE]\n\n")
+			} else {
+				// LIVE (Phase 4): terminator lines still emitted with a
+				// writeMu-guarded write+flush — but buf is NOT drained
+				// (the content already went out per-event).
+				opt.writeChunk(w, flusher, sseDataFrame(finalData), &buf)
+				opt.writeChunk(w, flusher, sseDoneFrame(), &buf)
+			}
+
+			// Fallback token counting
+			// C1 (Phase 4): buf.Bytes() is the estimator input in BOTH
+			// modes — buffered accumulated the wire bytes here; live
+			// appended them in lockstep with each per-event wire write.
+			// Parity of Usage.CompletionTokens between modes is
+			// required, not best-effort.
+			if extractedUsage == nil || (extractedUsage.PromptTokens == 0 && extractedUsage.CompletionTokens == 0 && extractedUsage.TotalTokens == 0) {
+				if token.FallbackEnabled() {
+					tokenizer := token.GetTokenizer()
+					promptTokens, err := tokenizer.CountPromptTokens(requestBodyBytes, internalModel)
+					if err != nil {
+						log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v", err)
+					}
+					completionText := token.ExtractCompletionTextFromChunks(buf.Bytes())
+					completionTokens, err := tokenizer.CountCompletionTokens(completionText, internalModel)
+					if err != nil {
+						log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v", err)
+					}
+					extractedUsage = &store.Usage{
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						TotalTokens:      promptTokens + completionTokens,
+					}
+					log.Printf("[DEBUG][fallback-token-count] ultimate-internal: model=%s prompt=%d completion=%d total=%d",
+						internalModel, promptTokens, completionTokens, promptTokens+completionTokens)
+				}
+			}
+
+			// Buffered mode only: flush everything to the client in one
+			// write (writeMu-guarded — serialized against the heartbeat
+			// goroutine). In live mode the bytes already went out
+			// per-event and this is a no-op.
+			if opt.BufferMode {
+				opt.writeAll(w, flusher, buf.Bytes())
+			}
+
+			return &ExecuteResult{
+				Usage:     extractedUsage,
+				Content:   capturedContent.String(),
+				Thinking:  capturedThinking.String(),
+				ToolCalls: finalizeAccumulatedToolCalls(capturedToolCalls, capturedToolCallArgBuilders),
+			}, nil
+
+		case "error":
+			errMsg := ""
+			if event.Error != nil {
+				errMsg = event.Error.Error()
+			}
+			errResp := models.NewOpenAIError(models.ErrorTypeServerError, "", errMsg)
+			data, _ := json.Marshal(errResp)
+			if opt.BufferMode {
+				buf.WriteString("data: ")
+				buf.Write(data)
+				buf.WriteString("\n\n")
+				// Flush everything to client in one write
+				opt.writeAll(w, flusher, buf.Bytes())
+			} else {
+				// LIVE (Phase 4): error envelope emitted immediately with
+				// a writeMu-guarded write+flush; no drain of buf (the
+				// partial content already went out per-event).
+				opt.writeChunk(w, flusher, sseDataFrame(data), &buf)
+			}
+			return nil, fmt.Errorf("provider error: %s", errMsg)
+		}
+	}
+
+	return nil, fmt.Errorf("event channel closed unexpectedly")
+}
+
+// convertRequest converts map[string]interface{} to providers.ChatCompletionRequest
+func (h *Handler) convertRequest(body map[string]interface{}) (*providers.ChatCompletionRequest, error) {
+	req := &providers.ChatCompletionRequest{}
+
+	if model, ok := body["model"].(string); ok {
+		req.Model = model
+	}
+
+	if messages, ok := body["messages"].([]interface{}); ok {
+		for msgIdx, m := range messages {
+			if msg, ok := m.(map[string]interface{}); ok {
+				chatMsg := providers.ChatMessage{}
+				if role, ok := msg["role"].(string); ok {
+					chatMsg.Role = role
+				}
+				if content, ok := msg["content"]; ok {
+					switch c := content.(type) {
+					case string:
+						chatMsg.Content = content
+					case []interface{}:
+						// Multimodal content - handle each part
+						contentParts := make([]providers.ContentPart, len(c))
+						for i, part := range c {
+							if partMap, ok := part.(map[string]interface{}); ok {
+								cp := providers.ContentPart{}
+								if partType, ok := partMap["type"].(string); ok {
+									cp.Type = partType
+								}
+								if text, ok := partMap["text"].(string); ok {
+									cp.Text = text
+								}
+								if imageURL, ok := partMap["image_url"].(map[string]interface{}); ok {
+									if url, ok := imageURL["url"].(string); ok {
+										cp.ImageURL = &providers.ImageURL{
+											URL: url,
+										}
+									}
+								}
+								contentParts[i] = cp
+							}
+						}
+						chatMsg.Content = contentParts
+					}
+				}
+				if toolCalls, ok := msg["tool_calls"].([]interface{}); ok {
+					chatMsg.ToolCalls = make([]providers.ToolCall, len(toolCalls))
+					for i, tc := range toolCalls {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							toolCall := providers.ToolCall{}
+							if id, ok := tcMap["id"].(string); ok {
+								toolCall.ID = id
+							}
+							if tcType, ok := tcMap["type"].(string); ok {
+								toolCall.Type = tcType
+							}
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								toolCall.Function = providers.ToolCallFunction{}
+								if name, ok := fn["name"].(string); ok {
+									toolCall.Function.Name = name
+								}
+								if args, ok := fn["arguments"].(string); ok {
+									toolCall.Function.Arguments = args
+								}
+							}
+							chatMsg.ToolCalls[i] = toolCall
+						}
+					}
+				}
+				// Handle tool_call_id for tool role messages (required by MiniMax and other providers)
+				if toolCallID, ok := msg["tool_call_id"].(string); ok {
+					chatMsg.ToolCallID = toolCallID
+				}
+				// Handle reasoning_content for DeepSeek R1-style thinking models
+				if reasoningContent, ok := msg["reasoning_content"].(string); ok {
+					chatMsg.ReasoningContent = reasoningContent
+				}
+				// D1 carry: hydrate MiniMax per-message reasoning_details into
+				// ChatMessage.ReasoningDetails. The field exists so the typed
+				// openai.go marshaler emits reasoning_details on the wire
+				// (P1-8 d). R3 — pkg/providers does not import pkg/proxy/translator;
+				// the translator's ReasoningDetail is kept separate from this
+				// local ReasoningDetailEntry shape. convertRequest delegates to
+				// providers.HydrateReasoningDetails (M4 dedup — twin with the
+				// race-internal hydration in pkg/proxy/race_executor.go).
+				chatMsg.ReasoningDetails = providers.HydrateReasoningDetails(msg)
+				// Debug log for tool role messages to diagnose MiniMax compatibility issues
+				if chatMsg.Role == "tool" {
+					if chatMsg.ToolCallID == "" {
+						log.Printf("[WARN] UltimateModel: Message[%d] has role='tool' but missing tool_call_id - this may cause MiniMax API error", msgIdx)
+					}
+				}
+				req.Messages = append(req.Messages, chatMsg)
+			}
+		}
+	}
+
+	if temperature, ok := body["temperature"].(float64); ok {
+		req.Temperature = &temperature
+	}
+
+	if maxTokens, ok := body["max_tokens"].(float64); ok {
+		maxTokensInt := int(maxTokens)
+		req.MaxTokens = &maxTokensInt
+	}
+
+	if stream, ok := body["stream"].(bool); ok {
+		req.Stream = stream
+	}
+
+	if tools, ok := body["tools"].([]interface{}); ok {
+		req.Tools = make([]providers.Tool, len(tools))
+		for i, t := range tools {
+			if tMap, ok := t.(map[string]interface{}); ok {
+				tool := providers.Tool{}
+				if toolType, ok := tMap["type"].(string); ok {
+					tool.Type = toolType
+				}
+				if fn, ok := tMap["function"].(map[string]interface{}); ok {
+					tool.Function = providers.ToolFunction{}
+					if name, ok := fn["name"].(string); ok {
+						tool.Function.Name = name
+					}
+					if desc, ok := fn["description"].(string); ok {
+						tool.Function.Description = desc
+					}
+					if params, ok := fn["parameters"].(map[string]interface{}); ok {
+						tool.Function.Parameters = params
+					}
+				}
+				req.Tools[i] = tool
+			}
+		}
+	}
+
+	if toolChoice, exists := body["tool_choice"]; exists {
+		req.ToolChoice = toolChoice
+	}
+
+	if extra, ok := body["extra"].(map[string]interface{}); ok {
+		req.Extra = extra
+	}
+
+	return req, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 / Task 21 — ultimate-internal rate-limit failover helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// publishCredentialFailoverEvent (Phase 3 / Task 20 / R3-8) emits the
+// model_credential_failover event with the canonical payload shape
+// {model_id, from_credential_id, to_credential_id, reason,
+// retry_after_ms, cooldown_ms, attempt_index}. cooldown_ms mirrors the
+// engine's effective seed (retryAfter when the upstream supplied it,
+// else credentiallb.DefaultCooldown). attempt_index is 1 on this hook
+// (the ultimate-internal hook retries exactly once per request).
+func (h *Handler) publishCredentialFailoverEvent(modelID, fromID, toID string, retryAfter time.Duration) {
+	if h.eventBus == nil {
+		return
+	}
+	cooldown := credentiallb.DefaultCooldown
+	if retryAfter > 0 {
+		cooldown = retryAfter
+	}
+	h.eventBus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialFailover,
+		Timestamp: time.Now().Unix(),
+		Data: map[string]interface{}{
+			"model_id":           modelID,
+			"from_credential_id": fromID,
+			"to_credential_id":   toID,
+			"reason":             "rate_limit",
+			"retry_after_ms":     retryAfter.Milliseconds(),
+			"cooldown_ms":        cooldown.Milliseconds(),
+			"attempt_index":      1,
+		},
+	})
+}
