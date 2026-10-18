@@ -64,7 +64,6 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceMaxParallel:    2,
 		RaceMaxBufferBytes: 1000,
@@ -125,7 +124,6 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    2,
@@ -174,7 +172,6 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -232,7 +229,6 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -276,7 +272,6 @@ func TestRaceScenario_AllFail(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -329,7 +324,6 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -394,7 +388,6 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -507,7 +500,6 @@ func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,

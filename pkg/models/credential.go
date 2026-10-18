@@ -42,7 +42,7 @@ var validProviders = map[string]bool{
 	// "typesafe"}) and the imggen gate ("minimax") exclude it with
 	// zero edits. Default base URL http://localhost:4001 — inherited
 	// from the retired external-upstream default (config.go
-	// UpstreamURL); override via credential.base_url for remote hosts.
+	// the retired global upstream default); override via credential.base_url for remote hosts.
 	"lightllm": true,
 	// Decision Models / §5.2 — "typesafe" is the new identity
 	// for /v1/decisions upstream. The D4 provider-gate

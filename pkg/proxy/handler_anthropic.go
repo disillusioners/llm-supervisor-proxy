@@ -81,7 +81,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	conf := h.config.Clone()
 
 	// remove-external-upstream P1 (task 4, A13): the external-default
-	// target URL (built from the retired global UpstreamURL) is GONE.
+	// target URL (built from the retired global upstream setting) is GONE.
 	// There is no external upstream anymore: the translated-OpenAI body
 	// below is consumed by the INTERNAL arms — the OpenAI-protocol
 	// internal handler (doAnthropicInternalRequest) builds its own
@@ -564,7 +564,7 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 			}
 			if passthroughURL == "" {
 				// remove-external-upstream P1 (task 4, A16): the
-				// UpstreamURL fallback is GONE. An anthropic-provider
+				// global-upstream fallback is GONE. An anthropic-provider
 				// credential/model with no base URL anywhere is a
 				// configuration error — fail the ATTEMPT (well-formed,
 				// mirroring the deleted pkg/ultimatemodel
@@ -709,7 +709,8 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 
 	// Resolve credential and set auth header
 	// remove-external-upstream P1 (task 4, A17): the
-	// UpstreamCredentialID env-credential arm is GONE with the external
+	// env-credential (retired upstream-credential setting) arm is GONE
+	// with the external
 	// path; the passthrough branch authenticates with the model's OWN
 	// resolved credential (arc.credentialAPIKey).
 	if arc.credentialAPIKey != "" {

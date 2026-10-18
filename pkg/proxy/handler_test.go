@@ -1811,7 +1811,6 @@ func TestIdleTermination_Triggered(t *testing.T) {
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
 	body := simpleBody("mock-model", true)
@@ -1875,7 +1874,6 @@ func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
 	body := simpleBody("mock-model", true)
@@ -1938,7 +1936,6 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
 	body := simpleBody("mock-model", true)

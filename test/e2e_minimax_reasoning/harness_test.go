@@ -157,10 +157,10 @@ type testEnv struct {
 
 // envOptions customizes setupTestEnv per test.
 type envOptions struct {
-	// upstreamProvider replaces "minimax" on the EXTERNAL (UpstreamCredentialID)
+	// upstreamProvider replaces "minimax" on the EXTERNAL (bound upstream credential)
 	// credential. Empty means "minimax".
 	upstreamProvider string
-	// noUpstreamCred leaves UpstreamCredentialID unset for the external path
+	// noUpstreamCred leaves the upstream credential unset for the external path
 	// (S10: no credential resolvable ⇒ feature inert on race-external).
 	noUpstreamCred bool
 	// ultimateModelID overrides ULTIMATE_MODEL_ID. Empty uses ultIntModel.
@@ -175,7 +175,7 @@ type envOptions struct {
 //   - ultExtModel      Internal:false + minimax cred (ultimate target, external)
 //   - ultIntModel      Internal:true  + minimax cred (ultimate target, internal)
 //
-// The external upstream credential (config.UpstreamCredentialID) is MiniMax
+// The external upstream credential (the retired upstream-credential config) is MiniMax
 // unless overridden via envOptions — race-external gate = flag && that
 // credential is MiniMax.
 func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOptions) *testEnv {

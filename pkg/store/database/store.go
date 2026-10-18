@@ -87,14 +87,9 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	result := existing // Start with existing config
 
 	// Proxy settings: update if incoming has non-zero values
-	// UpstreamURL is required, empty string means not sent
-	if incoming.UpstreamURL != "" {
-		result.UpstreamURL = incoming.UpstreamURL
-	}
-	// UpstreamCredentialID: empty string means not sent
-	if incoming.UpstreamCredentialID != "" {
-		result.UpstreamCredentialID = incoming.UpstreamCredentialID
-	}
+	// (remove-external-upstream P1 task 8 / approver B3: the
+	// retired upstream-URL / upstream-credential merge rows are GONE with the
+	// retired config fields.)
 	// Port: 0 means not sent (0 is invalid anyway)
 	if incoming.Port != 0 {
 		result.Port = incoming.Port
@@ -235,13 +230,6 @@ func (m *ConfigManager) Get() config.Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg
-}
-
-// GetUpstreamURL returns the upstream URL
-func (m *ConfigManager) GetUpstreamURL() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.UpstreamURL
 }
 
 // GetPort returns the port
@@ -837,7 +825,7 @@ func (m *ModelsManager) Close() {
 		if m.eventBus != nil && m.subCh != nil {
 			m.eventBus.Unsubscribe(m.subCh) // closes subCh → drain loop exits
 		}
-		m.engine.Stop()       // nil-safe
+		m.engine.Stop()      // nil-safe
 		m.groupEngine.Stop() // nil-safe (load-balance-groups lifecycle twin)
 	})
 }

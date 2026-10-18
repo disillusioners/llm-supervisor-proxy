@@ -145,7 +145,7 @@ func TestS3_RequestTranslation_InternalPaths(t *testing.T) {
 	})
 
 	t.Run("non_minimax_upstream_credential_inert_race_ext", func(t *testing.T) {
-		// race-external with UpstreamCredentialID bound to the openai cred.
+		// race-external with the upstream credential bound to the openai cred.
 		env := setupTestEnv(t, okNonStreamHandler(), envOptions{upstreamProvider: "openai"})
 		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
 		if rr.Code != http.StatusOK {
@@ -705,7 +705,7 @@ func TestS10_CredentialGate_Inert(t *testing.T) {
 	// (rejects a dangling CredentialID), so this subtest instead drives
 	// a model unknown to ModelsConfig with NO upstream credential
 	// configured — PRE-P1 that exercised the external forward (gate off
-	// per D3: empty UpstreamCredentialID ⇒ raceExtProviderIsMiniMax
+	// per D3: empty upstream-credential binding ⇒ the external gate off
 	// false); POST-P1 the boundary gate 404s it. Pending the phase5
 	// re-seed (delete-vs-convert per R12).
 	t.Run("race_ext_no_upstream_credential_inert", func(t *testing.T) {

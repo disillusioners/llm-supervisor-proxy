@@ -39,8 +39,6 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		UpstreamURL:            cfg.UpstreamURL,
-		UpstreamCredentialID:   cfg.UpstreamCredentialID,
 		IdleTimeout:            cfg.IdleTimeout.Duration(),
 		StreamDeadline:         cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
@@ -64,8 +62,6 @@ func (c *Config) Clone() ConfigSnapshot {
 }
 
 type ConfigSnapshot struct {
-	UpstreamURL          string
-	UpstreamCredentialID string
 	IdleTimeout          time.Duration
 	StreamDeadline       time.Duration // Time limit before picking best buffer and continuing streaming
 	MaxGenerationTime    time.Duration // Absolute hard timeout for entire request lifecycle
@@ -450,9 +446,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.sendError(w, http.StatusNotFound, fmt.Sprintf("model '%s' not found", evtModel), "invalid_request_error", "model_not_found")
 			return
 		}
-		if errors.Is(err, ErrInvalidUpstreamURL) {
-			http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
-		} else if errors.Is(err, ErrReadBodyFailed) {
+		if errors.Is(err, ErrReadBodyFailed) {
 			http.Error(w, "Failed to read body", http.StatusInternalServerError)
 		} else if errors.Is(err, ErrInvalidJSON) {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)

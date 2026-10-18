@@ -5,12 +5,9 @@ package modelscache
 // resolvers, dead-default WARN, LRU).
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1226,46 +1223,6 @@ func TestCachedModelsConfig_DetectProvider_UnderDBDown(t *testing.T) {
 // markUnhealthyForTest forces the unhealthy flag (test-only helper;
 // production flips it via the reconciler).
 func (c *CachedModelsConfig) markUnhealthyForTest() { c.markUnhealthy() }
-
-// ─── dead-default WARN ───────────────────────────────────────────────────────
-
-func TestCachedModelsConfig_Warn_DeadDefault(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(log.LstdFlags)
-	}()
-
-	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
-	c, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "http://localhost:4001"})
-	if err != nil {
-		t.Fatalf("NewCachedModelsConfig: %v", err)
-	}
-	defer c.Stop()
-
-	out := buf.String()
-	if !strings.Contains(out, "development default http://localhost:4001") {
-		t.Errorf("expected dead-default WARN at boot, log: %q", out)
-	}
-	if !strings.Contains(out, "for model m-alpha") {
-		t.Errorf("WARN must name the model, log: %q", out)
-	}
-
-	// Non-default upstream → no WARN.
-	buf.Reset()
-	c2, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "https://litellm.example.com"})
-	if err != nil {
-		t.Fatalf("NewCachedModelsConfig: %v", err)
-	}
-	defer c2.Stop()
-	if strings.Contains(buf.String(), "localhost:4001") {
-		t.Errorf("no WARN expected for configured upstream, log: %q", buf.String())
-	}
-}
-
-// ─── LRU (1.B.4 acceptance) ──────────────────────────────────────────────────
 
 func TestLRU_EvictsOldestBeyondCap(t *testing.T) {
 	l := newLRU(3)

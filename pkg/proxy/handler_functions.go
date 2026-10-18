@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -70,10 +69,6 @@ func (e *modelNotFoundError) Unwrap() error { return ErrModelNotFound }
 // 6). The message strings are the historical wire contract — they
 // must stay byte-identical (they were string-compared before).
 var (
-	// ErrInvalidUpstreamURL — the configured upstream URL could not
-	// be joined into a request target URL.
-	ErrInvalidUpstreamURL = errors.New("invalid_upstream_url")
-
 	// ErrReadBodyFailed — the request body could not be read.
 	ErrReadBodyFailed = errors.New("read_body_failed")
 
@@ -85,11 +80,11 @@ var (
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	conf := h.config.Clone()
-	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
-	if err != nil {
-		return nil, ErrInvalidUpstreamURL
-	}
 
+	// remove-external-upstream P1 (task 8, A1): the external targetURL
+	// build is GONE — no request context carries a global-upstream
+	// target anymore (the internal arms build their own targets from
+	// the resolved credential).
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		return nil, ErrReadBodyFailed

@@ -44,9 +44,6 @@ type Options struct {
 	StrictFillTimeout time.Duration
 	LRUCap            int
 	ReconcileInterval time.Duration
-	// UpstreamURL is the global proxy upstream used ONLY by the
-	// boot-time dead-default WARN tripwire (warn.go). Optional.
-	UpstreamURL string
 	// Clock overrides time.Now for tests. Optional.
 	Clock func() time.Time
 }
@@ -165,9 +162,9 @@ func NewCachedModelsConfig(inner strictSource, opts Options) (*CachedModelsConfi
 
 	c.applySnapshot(modelsList, enabledList, creds)
 
-	// Boot-only observability: dead-default tripwire (1.B.10 / K) and
-	// the one-time decorator-meta line (1.E.2).
-	warnDeadDefaultUpstream(o.UpstreamURL, c.enabledSnap)
+	// Boot-only observability: the one-time decorator-meta line (1.E.2).
+	// (remove-external-upstream P1 task 8 / R3: the dead-default
+	// upstream WARN tripwire is GONE with the retired config field.)
 	log.Printf("[cache] models decorator enabled (modelsNeg=%s staleCap=%s, %d models, %d credentials)",
 		o.ModelsNegTTL, o.StaleCap, len(c.modelsSnap), len(c.credsByID))
 

@@ -127,7 +127,6 @@ func TestToolRepair_StreamingIntegration(t *testing.T) {
 			defer server.Close()
 
 			cfg := &ConfigSnapshot{
-				UpstreamURL:        server.URL,
 				RaceRetryEnabled:   false,
 				RaceMaxBufferBytes: 1024 * 1024,
 				IdleTimeout:        30 * time.Second,
@@ -296,7 +295,6 @@ func TestToolRepair_NonStreamingIntegration(t *testing.T) {
 			defer server.Close()
 
 			cfg := &ConfigSnapshot{
-				UpstreamURL:        server.URL,
 				RaceRetryEnabled:   false,
 				RaceMaxBufferBytes: 1024 * 1024,
 				IdleTimeout:        30 * time.Second,

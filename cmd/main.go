@@ -137,12 +137,10 @@ func main() {
 		// Options: only genuinely runtime-specific values — every
 		// default (TTLs, caps, fill timeout) is owned by
 		// Options.withDefaults (tidy finding 7), never duplicated at
-		// the call site. Options.UpstreamURL feeds only the boot-time
-		// dead-default (localhost:4001) WARN tripwire; read the config
-		// snapshot locally (cfg is materialized further below).
-		wrappedModels, err = modelscache.NewCachedModelsConfig(modelsMgr, modelscache.Options{
-			UpstreamURL: configMgr.Get().UpstreamURL,
-		})
+		// the call site. (remove-external-upstream P1 task 8 / R3: the
+		// Options upstream-URL dead-default WARN tripwire input is GONE
+		// with the retired config field.)
+		wrappedModels, err = modelscache.NewCachedModelsConfig(modelsMgr, modelscache.Options{})
 		if err != nil {
 			log.Fatalf("Failed to prime models cache: %v", err)
 		}

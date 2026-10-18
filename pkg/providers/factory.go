@@ -35,7 +35,7 @@ const (
 	// migration / DB schema change required; the provider layer
 	// routes OpenAIProvider at the inherited default base URL
 	// http://localhost:4001 (the retired external-upstream default,
-	// config.go UpstreamURL), overridable via credential.base_url.
+	// the retired global upstream default), overridable via credential.base_url.
 	// SCOPE: chat only.
 	ProviderLightLLM ProviderType = "lightllm"
 )
@@ -123,7 +123,8 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 	case ProviderLightLLM:
 		// LightLLM gateway uses the OpenAI-compatible API. Default
 		// base URL is inherited from the removed external-upstream
-		// default (config.go UpstreamURL — localhost:4001, LiteLLM's
+		// default (the retired global upstream default — localhost:4001,
+		// LiteLLM's
 		// canonical port); override via credential.base_url for
 		// remote hosts.
 		if baseURL == "" {

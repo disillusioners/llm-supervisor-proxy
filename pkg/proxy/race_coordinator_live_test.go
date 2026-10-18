@@ -75,7 +75,6 @@ import (
 // deadline path; otherwise generous to avoid accidental firings.
 func liveTestCfg(upstreamURL string, streamDeadline time.Duration) *ConfigSnapshot {
 	return &ConfigSnapshot{
-		UpstreamURL:        upstreamURL,
 		RaceRetryEnabled:   true,
 		RaceMaxParallel:    1,
 		RaceMaxBufferBytes: 4096,
