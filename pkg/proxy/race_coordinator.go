@@ -1450,7 +1450,11 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 		return false
 	}
 	modelCfg := c.cfg.ModelsConfig.GetModel(latest.modelID)
-	if modelCfg == nil || !modelCfg.Internal || len(modelCfg.Credentials) <= 1 {
+	// remove-external-upstream P1 (A20): the `!modelCfg.Internal`
+	// conjunct is GONE — every resolvable model is internal by
+	// construction (the boundary 404 gate rejects the rest), so
+	// credential failover eligibility keys on credential count only.
+	if modelCfg == nil || len(modelCfg.Credentials) <= 1 {
 		return false
 	}
 	// W3: once the single SoonestExpiry attempt is spent, the next 429

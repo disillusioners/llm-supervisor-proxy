@@ -1934,14 +1934,16 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 			return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 		}
 	}
-	// Note: non-internal models MAY carry Credentials — the
-	// ultimate-external D3 provider probe reads Credentials[0] to
-	// classify the upstream provider without injecting credentials.
-	// Rejecting non-internal-with-creds would break the D3 path.
-	// The plan's Task 6 validation rule "non-internal with
-	// non-empty Credentials ⇒ reject" was an oversight vs. the
-	// existing D3-probe call site; preserving the existing
-	// behavior is the contract-correct call.
+	// DEAD-POST-P1 (remove-external-upstream): the non-internal
+	// credentials carve-out below existed ONLY for the
+	// ultimate-external D3 provider probe, whose sole reader
+	// (pkg/ultimatemodel/handler_external.go) was deleted with the
+	// external upstream path. With every write stamping internal=true
+	// (P1 task 7) and legacy internal=0 rows disabled by migration 032,
+	// no non-internal model can carry credentials through this
+	// validator anymore. The tolerate-credentials-when-not-internal
+	// behavior is kept verbatim (it is now vacuous) — removing it is a
+	// schema-adjacent behavior change this commission does not bundle.
 
 	// Validate secondary upstream model
 	if model.SecondaryUpstreamModel != "" {

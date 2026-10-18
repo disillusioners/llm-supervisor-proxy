@@ -308,7 +308,11 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arcTokenID = authToken.ID
 		}
 	}
-	if resolvedModel != nil && resolvedModel.Internal {
+	// remove-external-upstream P1 (A11 anthropic twin, R11): the
+	// `.Internal` conjunct is GONE — the boundary 404 gate above already
+	// rejected unknown/non-internal models, so every surviving
+	// resolvedModel is internal. The nil check stays (defensive).
+	if resolvedModel != nil {
 		arc.leadingUserRun = credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(anthropicReq.Messages))
 		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
 		// authenticated token's ID for salted conversation keys (the

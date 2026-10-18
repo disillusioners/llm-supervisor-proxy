@@ -227,7 +227,11 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// contents (ExtractLeadingUserRun); multimodal content
 	// ([]interface{}) is canonical-JSON hashed per A-2.
 	var leadingUserRun string
-	if resolvedModel != nil && resolvedModel.Internal {
+	// remove-external-upstream P1 (A12): the `.Internal` conjunct is
+	// GONE — the boundary 404 gate already rejected unknown/non-internal
+	// models above, so every surviving resolvedModel is internal. The
+	// nil check stays (defensive; the gate guarantees non-nil).
+	if resolvedModel != nil {
 		leadingUserRun = credentiallb.ExtractLeadingUserRun(originalMessages)
 	}
 

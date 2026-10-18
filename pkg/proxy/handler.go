@@ -340,28 +340,16 @@ func (h *Handler) authenticate(r *http.Request) (*auth.AuthToken, bool) {
 	return token, true
 }
 
-// requiresInternalAuth checks if any model in the request chain uses internal upstream
-// and therefore requires client API key validation
+// requiresInternalAuth checks whether the request requires client API key
+// validation. remove-external-upstream P1 (A10): every resolvable model is
+// internal by construction (the boundary 404 gate rejects unknown and
+// non-internal models before this point), so the old modelList walk for
+// internal-ness is provably always-true and collapses to the tokenStore
+// check. Auth semantics preserved: when a tokenStore is present every
+// request authenticates exactly as known-internal models did before.
 func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 	// If tokenStore is nil, auth is disabled
-	if h.tokenStore == nil {
-		return false
-	}
-
-	// Check if resolved model (primary) is internal
-	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
-		return true
-	}
-
-	// Check all models in the chain (IDs for resolved models, raw names for external)
-	for _, modelID := range rc.modelList {
-		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
-		if modelConfig != nil && modelConfig.Internal {
-			return true
-		}
-	}
-
-	return false
+	return h.tokenStore != nil
 }
 
 // sendAuthError sends a 401 Unauthorized JSON error response
@@ -562,10 +550,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// key — they receive the unsalted key because rc.tokenID is the
 	// zero value "" (the requestContext defaults it to empty). The
 	// key is NEVER computed in initRequestContext (tokenID is unset
-	// there at handler.go:352). The key is only meaningful for
-	// INTERNAL models — external / unknown models leave
-	// rc.conversationKey == "" and the engine path is skipped at every
-	// call site.
+	// there at handler.go:352).
+	//
+	// remove-external-upstream P1 (A11): the `resolvedModel.Internal`
+	// conjunct is GONE — every model that reaches this point is
+	// internal by construction (the boundary 404 gate rejects
+	// unknown/non-internal models). The nil check stays (the gate
+	// guarantees non-nil, but the compiler cannot see it).
 	//
 	// W-2 + C2: when no leading user run was extracted (assistant-first
 	// conversation, system-only, tool entry before any user message,
@@ -574,7 +565,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// per W-2; ComputeConversationKey never returns "" by itself, so
 	// the caller owns this gate). The DEBUG log below is the canonical
 	// C2 observability mechanism.
-	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+	if rc.resolvedModel != nil {
 		if rc.leadingUserRun == "" {
 			rc.conversationKey = ""
 			log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
