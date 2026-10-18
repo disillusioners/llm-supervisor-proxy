@@ -172,6 +172,18 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// with a legacy `internal = 0` row — now 404s instead of bypass-
 	// forwarding to the retired global upstream.
 	//
+	// P1 fixup (leader ruling 2026-10-18): the force-ultimate
+	// interception is hoisted ABOVE this gate — a request carrying
+	// X-Force-Ultimate-Model from an ultimate-entitled token must NOT
+	// 404 on body-model resolvability (the ultimate raw-passthrough is
+	// an internal-model route the commission kept; option (c) was
+	// rejected as a silent behavior break of a commissioned feature).
+	// Auth has not run yet at this point, so header presence is the
+	// only pre-auth signal available: the gate is DEFERRED (not
+	// skipped) for header-bearing requests and HandleChatCompletions
+	// re-fires it post-auth when the request does not qualify for the
+	// ultimate path.
+	//
 	// The `!Internal` conjunct is LOAD-BEARING, not belt-and-braces:
 	// GetModel never filters `enabled` for non-group rows, and migration
 	// 032's disable arm leaves `internal = 0` on legacy rows PERMANENTLY
@@ -184,7 +196,10 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// Status "failed" + Error/EndTime/Duration, re-Add (overwrite-by-ID).
 	// The requestContext is nil on this path, so reqID/model ride on the
 	// sentinel (modelNotFoundError) for the caller's event publication.
-	if resolvedModel == nil || !resolvedModel.Internal {
+	forceUltimateRequested := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
+	modelUnresolvable := resolvedModel == nil || !resolvedModel.Internal
+	deferredModelNotFound := modelUnresolvable && forceUltimateRequested
+	if modelUnresolvable && !deferredModelNotFound {
 		notFoundMsg := fmt.Sprintf("model '%s' not found", originalModel)
 		reqLog.Status = "failed"
 		reqLog.Error = notFoundMsg
@@ -252,6 +267,11 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		reqLog:           reqLog,
 		modelList:        modelList,
 		resolvedModel:    resolvedModel,
+		// P1 fixup (leader ruling 2026-10-18): non-zero only when the
+		// boundary 404 gate was deferred for a force-ultimate request —
+		// see the gate comment above and the post-auth re-fire site in
+		// HandleChatCompletions.
+		modelNotFoundDeferred: deferredModelNotFound,
 		requestBody:      requestBody,
 		rawBody:          bodyBytes, // Save original body bytes
 		isStream:         isStream,

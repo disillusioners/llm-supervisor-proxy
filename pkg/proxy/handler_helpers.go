@@ -32,6 +32,16 @@ type requestContext struct {
 	// Resolved model config at the boundary (nil for external/unknown models)
 	resolvedModel *models.ModelConfig
 
+	// remove-external-upstream P1 fixup (leader ruling 2026-10-18): set by
+	// initRequestContext when the boundary unknown/non-internal 404 gate is
+	// DEFERRED because the request carries X-Force-Ultimate-Model — the
+	// force-ultimate interception outranks the gate, and auth has not run
+	// at init time so entitlement cannot be checked there. HandleChat
+	// Completions fires the deferred 404 post-auth iff the request does
+	// NOT qualify for the ultimate path (no ultimate handler, no token, or
+	// a token without ultimate_model_enabled).
+	modelNotFoundDeferred bool
+
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 

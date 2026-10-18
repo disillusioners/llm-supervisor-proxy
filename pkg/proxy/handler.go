@@ -697,6 +697,36 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
 	}
 
+	// remove-external-upstream P1 fixup — DEFERRED boundary 404 (leader
+	// ruling 2026-10-18): initRequestContext deferred the
+	// unknown/non-internal 404 gate for this request because it carries
+	// X-Force-Ultimate-Model (auth had not run at the gate, so ultimate
+	// entitlement could not be checked there). The interception above is
+	// the hoist: an ultimate-entitled token takes the raw-passthrough
+	// path regardless of body-model resolvability (pre-P1 semantics;
+	// option (c) rejected). Any other header-bearing request — no
+	// ultimate handler wired, unauthenticated, or a token without
+	// ultimate_model_enabled — is a normal request and keeps the full
+	// 404 gate, fired here with the boundary site's exact envelope and
+	// event payload. rc.modelNotFoundDeferred implies the header was
+	// present at init, so the forceUltimate conjunct is belt-and-braces.
+	if rc.modelNotFoundDeferred && !(h.ultimateHandler != nil && forceUltimate && rc.ultimateModelEnabled) {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", rc.reqLog.Model)
+		rc.reqLog.Status = "failed"
+		rc.reqLog.Error = notFoundMsg
+		rc.reqLog.EndTime = time.Now()
+		rc.reqLog.Duration = time.Since(rc.startTime).String()
+		h.store.Add(rc.reqLog)
+		h.publishEvent("model_not_found", map[string]interface{}{
+			"id":              rc.reqID,
+			"model":           rc.reqLog.Model,
+			"outcome":         "model_not_found",
+			"upstream_status": 0,
+		})
+		h.sendError(w, http.StatusNotFound, notFoundMsg, "invalid_request_error", "model_not_found")
+		return
+	}
+
 	// Header-driven flag for MiniMax reasoning_details split-mode translation.
 	// Mirrors the X-Force-Ultimate-Model value-list semantics (R8/Q3):
 	// accepted values are case-sensitive lowercase "true" or "1" only.
