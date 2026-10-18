@@ -6,7 +6,8 @@ package proxy
 // Coverage map:
 //   - sanitizeReasonDetail: deterministic bounding, single-line
 //     flattening, secret redaction (sk- keys, bearer tokens,
-//     api_key/x-api-key assignment shapes).
+//     api_key/x-api-key assignment shapes, GitHub gh*_ tokens,
+//     Google AIza… keys, HTTP Basic credentials).
 //   - classifyAttemptFailure: the classification table (status
 //     families, auth, rate limit incl. wrap-transparency and
 //     vocabulary precedence, conflict, timeout, connection,
@@ -85,41 +86,98 @@ func TestSanitizeReasonDetail_RedactsSecrets(t *testing.T) {
 		in     string
 		secret string
 		marker string
+		// keep is a slice of surrounding fragments that MUST survive —
+		// guards against over-redaction (the fix must not eat useful
+		// error detail). Empty = no survival assertion for that case.
+		keep []string
 	}{
 		{
 			name:   "sk key",
 			in:     `auth failed for key sk-test-SECRETVALUE123456 at gateway`,
 			secret: "sk-test-SECRETVALUE123456",
 			marker: "sk-***",
+			keep:   []string{"auth failed for key", "at gateway"},
 		},
 		{
 			name:   "bearer token",
 			in:     `Authorization: Bearer eyJhbGciOi.SUPER.SECRET rejected`,
 			secret: "eyJhbGciOi.SUPER.SECRET",
 			marker: "Bearer ***",
+			keep:   []string{"Authorization:", "rejected"},
 		},
 		{
 			name:   "api_key assignment",
 			in:     `{"api_key":"supersecretkeyvalue1","code":401}`,
 			secret: "supersecretkeyvalue1",
 			marker: "api_key=***",
+			keep:   []string{`"code":401`},
 		},
 		{
+			// reasonSecretAssign deliberately consumes the header label
+			// AND the separator as part of the secret span: "x-api-key:
+			// anothersecretvalue99" → "api_key=***". The marker + the
+			// post-secret "missing" context are the post-redaction
+			// survival signals; the header label itself is the
+			// defensible over-redaction (operators expect to see a
+			// fixed sentinel, not the raw label that triggered it).
 			name:   "x-api-key header",
 			in:     `x-api-key: anothersecretvalue99 missing`,
 			secret: "anothersecretvalue99",
 			marker: "api_key=***",
+			keep:   []string{"missing"},
+		},
+		{
+			// GitHub PAT: ghp_ + 36 base62. Must be redacted AND the
+			// surrounding status/reason text must survive.
+			name:   "github PAT token",
+			in:     `upstream 401 token ghp_ABCdefGHIjklMNOpqrSTUvwxYZ0123456789 rejected, retry later`,
+			secret: "ghp_ABCdefGHIjklMNOpqrSTUvwxYZ0123456789",
+			marker: "gh_***",
+			keep:   []string{"upstream 401 token", "rejected, retry later"},
+		},
+		{
+			// Google API key: AIza + exactly 35 key chars.
+			name:   "google api key",
+			in:     `{"error":{"message":"API key AIzaSyA1234567890abcdefghijklmnopqrstuv is not valid"}}`,
+			secret: "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+			marker: "AIza***",
+			keep:   []string{"API key", "is not valid"},
+		},
+		{
+			// HTTP Basic credential echoed by an upstream. The b64 run
+			// carries digits + padding so it is unambiguously a secret,
+			// and "denied by upstream" must NOT be over-redacted.
+			name:   "basic auth credential",
+			in:     `Authorization: Basic dXNlcjpwYXNzd29yZA== denied by upstream`,
+			secret: "dXNlcjpwYXNzd29yZA==",
+			marker: "Basic ***",
+			keep:   []string{"Authorization:", "denied by upstream"},
+		},
+		{
+			// Over-redaction guard: the plain-English phrase "basic
+			// authentication" (no digit / base64 symbol) must be left
+			// intact by the Basic pattern.
+			name:   "basic prose is not over-redacted",
+			in:     `basic authentication failed`,
+			secret: "",
+			marker: "",
+			keep:   []string{"basic authentication failed"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := sanitizeReasonDetail(tc.in)
-			if strings.Contains(got, tc.secret) {
+			if tc.secret != "" && strings.Contains(got, tc.secret) {
 				t.Fatalf("secret %q leaked into detail: %q", tc.secret, got)
 			}
-			if !strings.Contains(got, tc.marker) {
+			if tc.marker != "" && !strings.Contains(got, tc.marker) {
 				t.Fatalf("redaction marker %q missing from detail: %q", tc.marker, got)
+			}
+			for _, frag := range tc.keep {
+				if !strings.Contains(got, frag) {
+					t.Fatalf("surrounding detail over-redacted: fragment %q missing from %q", frag, got)
+				}
 			}
 		})
 	}
@@ -135,6 +193,31 @@ type fakeNetTimeoutErr struct{}
 func (fakeNetTimeoutErr) Error() string   { return "i/o timeout while reading upstream" }
 func (fakeNetTimeoutErr) Timeout() bool   { return true }
 func (fakeNetTimeoutErr) Temporary() bool { return false }
+
+// raceExternalBuildError drives the REAL external-request builder
+// (executeExternalRequest, race_executor.go) so the table rows below
+// assert on the producer's ACTUAL output. If a producer literal drifts,
+// the row's calculated error drifts with it and the classification
+// assertion fails — instead of silently passing on a hand-typed copy
+// (which is exactly how the case-sensitivity defect survived).
+//
+//   - upstreamURL = "http://[::1" → url.Parse fails at
+//     race_executor.go:478, returning "invalid upstream URL: …".
+//   - ctx = nil → http.NewRequestWithContext fails at
+//     race_executor.go:511, returning "failed to create upstream request: …".
+func raceExternalBuildError(t *testing.T, upstreamURL string, ctx context.Context) error {
+	t.Helper()
+	cfg := newTestConfigSnapshot("m1")
+	cfg.UpstreamURL = upstreamURL
+	rawBody := []byte(`{"model":"m1"}`)
+	origReq := httptest.NewRequest("POST", "http://placeholder/v1/chat/completions", nil)
+	upReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "m1", 1024*1024)
+	err := executeExternalRequest(ctx, cfg, origReq, rawBody, upReq, false)
+	if err == nil {
+		t.Fatalf("executeExternalRequest(upstreamURL=%q, ctx=%v) unexpectedly returned nil", upstreamURL, ctx)
+	}
+	return err
+}
 
 func TestClassifyAttemptFailure_Table(t *testing.T) {
 	tests := []struct {
@@ -268,6 +351,27 @@ func TestClassifyAttemptFailure_Table(t *testing.T) {
 		{
 			name:       "provider build failure → proxy_internal",
 			err:        fmt.Errorf("failed to create provider: %w", errors.New("unknown provider type")),
+			wantClass:  reasonClassProxyInternal,
+			wantStatus: 0,
+		},
+		{
+			// Driven from the REAL producer at race_executor.go:478 via
+			// raceExternalBuildError. The producer emits the MIXED-CASE
+			// "invalid upstream URL"; the classifier must lowercase
+			// before matching (a case-sensitive compare yields unknown).
+			name:       "invalid upstream URL (real producer race_executor.go:478) → proxy_internal",
+			err:        raceExternalBuildError(t, "http://[::1", context.Background()),
+			wantClass:  reasonClassProxyInternal,
+			wantStatus: 0,
+		},
+		{
+			// Driven from the REAL producer at race_executor.go:511 via
+			// raceExternalBuildError (nil ctx ⇒ NewRequestWithContext
+			// error). The producer literal is "failed to create upstream
+			// request" — the old marker's "failed to build upstream
+			// request" had no producer in pkg/proxy and never matched.
+			name:       "failed to create upstream request (real producer race_executor.go:511) → proxy_internal",
+			err:        raceExternalBuildError(t, "http://example.invalid/v1", nil),
 			wantClass:  reasonClassProxyInternal,
 			wantStatus: 0,
 		},

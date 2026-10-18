@@ -20,11 +20,11 @@ package proxy
 //     config for model …", "buffer limit exceeded: …") for the
 //     external-path errors that never materialize as ProviderError.
 //
-//   - sanitizeReasonDetail — redaction (API-key / bearer-token shapes)
-//     + single-line flattening + rune-safe truncation at
-//     maxReasonDetailRunes. Every free-text fragment that reaches an
-//     event payload or a [RACE] log line goes through it, so no
-//     upstream body can ever flood the log.
+//   - sanitizeReasonDetail — single-line flattening + rune-safe
+//     truncation at maxReasonDetailRunes + best-effort secret
+//     redaction. Every free-text fragment that reaches an event
+//     payload or a [RACE] log line goes through it, so no upstream
+//     body can ever flood the log.
 //
 // Design constraints honored here:
 //
@@ -33,7 +33,23 @@ package proxy
 //     / `reason_status`; existing keys keep their meaning
 //     (`trigger_reason` now carries the same bounded detail it always
 //     carried, just never unbounded).
-//   - Never emits credential material: see redactReasonSecrets.
+//
+//   - Redaction is BEST-EFFORT defense-in-depth, NOT a guarantee. The
+//     reasonSecret* patterns strip a FIXED set of high-confidence
+//     credential shapes only: sk- API keys, Bearer / Basic
+//     Authorization values, api_key / api-key / x-api-key /
+//     access_token / refresh_token assignments, GitHub
+//     ghp_/gho_/ghu_/ghs_/ghr_ tokens, and Google AIza… keys. It
+//     covers the `detail` / `error` fragments routed through
+//     sanitizeReasonDetail and NOTHING ELSE — unrecognized key shapes
+//     pass through, and the raw error-text emissions on the wider
+//     request path (e.g. handler.go:890/898/906/910,
+//     handler_anthropic.go:788-818,
+//     race_coordinator.go:1094/1242/1355/1437, race_executor.go:1013)
+//     are out of scope for this file. Broadening the assignment
+//     alternation to bare \bkey\b / \btoken\b is deliberately deferred
+//     (over-redaction would eat useful error detail) — see the defect
+//     ledger note at the redaction pattern block below.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import (
@@ -258,7 +274,22 @@ func classifyIsTimeout(err error) bool {
 // classifyIsConnection reports whether the error is a transport-level
 // connection failure: dial/DNS failures, refused/reset connections,
 // premature upstream close, mid-stream read errors.
+//
+// Deferral rule: when the message matches a proxy-internal marker,
+// defer to the proxy-internal cascade. Material for the
+// race_executor.go:478 `url.Parse(cfg.UpstreamURL)` failure wrapped as
+// "invalid upstream URL: %w" — a CONFIG defect (proxy-internal), not a
+// transport fault. Without this deferral, the *url.Error / *net.OpError
+// type checks would misroute every config-malformed URL to
+// `connection` and the proxy-internal marker fix couldn't take effect.
 func classifyIsConnection(err error) bool {
+	// Top-of-function deferral: a proxy-internal-shaped error is by
+	// definition NOT a transport fault — short-circuit before the
+	// type-based checks so the cascade in classifyAttemptFailure can
+	// route it correctly.
+	if classifyIsProxyInternal(err.Error()) {
+		return false
+	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		// url.Error.Timeout()/Temporary cover the timeout half; anything
@@ -297,20 +328,28 @@ func classifyIsConnection(err error) bool {
 // classifyIsProxyInternal reports whether the error string is one of
 // the executor/coordinator's own proxy-side failure shapes (config
 // resolution, credential absence, provider construction, buffer cap).
+//
+// Matching is case-INSENSITIVE: the haystack is lowercased first,
+// mirroring classifyIsTimeout / classifyIsConnection. The producers
+// emit MIXED-CASE literals — "invalid upstream URL"
+// (race_executor.go:478) and "failed to create upstream request"
+// (:511) — so the previous case-sensitive compare never matched them
+// and those failures degraded to reasonClassUnknown.
 func classifyIsProxyInternal(errStr string) bool {
+	s := strings.ToLower(errStr)
 	for _, marker := range []string{
 		"failed to resolve internal config", // model missing or no usable credentials
 		"failed to create provider",         // provider factory failure
 		"failed to parse request body",      // client body (proxy-side handling)
 		"failed to convert request",         // internal translation failure
-		"failed to build upstream request",  // external request construction
-		"invalid upstream url",              // upstream URL configuration
+		"failed to create upstream request", // external request construction (race_executor.go:511)
+		"invalid upstream url",              // upstream URL configuration (race_executor.go:478)
 		"failed to marshal response",        // proxy-side marshaling
 		"buffer limit exceeded",             // RaceMaxBufferBytes cap
 		"streaming not supported",           // provider capability gap
 		"credential not found",              // dangling credential reference
 	} {
-		if strings.Contains(errStr, marker) {
+		if strings.Contains(s, marker) {
 			return true
 		}
 	}
@@ -320,6 +359,15 @@ func classifyIsProxyInternal(errStr string) bool {
 // Precompiled redaction patterns. Applied in order; each replaces the
 // secret-bearing span with a fixed *** marker so no key/token value
 // can ever reach the event log.
+//
+// SCOPE / residual risk: this is a fixed high-confidence shape list,
+// not a general secret detector. Broadening the assignment
+// alternation to bare `\bkey\b` / `\btoken\b` was deliberately DEFERRED
+// (2026-10-18): it would swallow ordinary error vocabulary such as
+// "token budget exhausted" / "key not found", destroying the triage
+// value of the detail this file exists to preserve. Unrecognized key
+// shapes therefore survive, and raw error text emitted OUTSIDE
+// sanitizeReasonDetail (see the file header) is not covered at all.
 var (
 	// sk- prefixed API keys (OpenAI-style; covers sk-proj-… etc).
 	reasonSecretSK = regexp.MustCompile(`sk-[A-Za-z0-9][A-Za-z0-9_-]{4,}`)
@@ -328,12 +376,29 @@ var (
 	// api_key / api-key / apikey / x-api-key / token assignment shapes
 	// in bodies and echoed headers.
 	reasonSecretAssign = regexp.MustCompile(`(?i:"?[x-]?api[_-]?key"?|"?access[_-]?token"?|"?refresh[_-]?token"?)["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{6,}`)
+	// GitHub tokens: ghp_ (PAT), gho_ (OAuth), ghu_ (user-to-server),
+	// ghs_ (server-to-server), ghr_ (refresh) followed by ≥20 base62
+	// chars. Genuine tokens carry 36+; the floor keeps prose fragments
+	// from half-matching.
+	reasonSecretGitHub = regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}`)
+	// Google API keys: the literal "AIza" prefix + exactly 35 key chars
+	// (39 total). The trailing \b avoids emitting a partially-redacted
+	// key prefix if the shape is not a full key.
+	reasonSecretGoogle = regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`)
+	// HTTP Basic credentials echoed in Authorization headers:
+	// "Basic <base64>". Requires at least one digit or base64 symbol
+	// (+ / =) so ordinary vocabulary after the word "Basic" (e.g.
+	// "basic authentication", "basic auth", "basic TLS") is NOT eaten.
+	reasonSecretBasic = regexp.MustCompile(`(?i:\bbasic)\s+[A-Za-z0-9+/=]*[0-9+/=][A-Za-z0-9+/=]*`)
 )
 
 // sanitizeReasonDetail makes an upstream error string safe for the
 // event log: flattens it to a single line, redacts credential-shaped
 // material, and truncates to maxReasonDetailRunes (rune-safe, fixed
 // "…" suffix). Deterministic: same input ⇒ same output, always.
+//
+// Redaction is best-effort (see the pattern block above for the exact
+// covered shapes and the deferred broad-match note).
 func sanitizeReasonDetail(s string) string {
 	if s == "" {
 		return ""
@@ -347,6 +412,9 @@ func sanitizeReasonDetail(s string) string {
 	s = reasonSecretSK.ReplaceAllString(s, `sk-***`)
 	s = reasonSecretBearer.ReplaceAllString(s, `Bearer ***`)
 	s = reasonSecretAssign.ReplaceAllString(s, `api_key=***`)
+	s = reasonSecretGitHub.ReplaceAllString(s, `gh_***`)
+	s = reasonSecretGoogle.ReplaceAllString(s, `AIza***`)
+	s = reasonSecretBasic.ReplaceAllString(s, `Basic ***`)
 
 	return truncateReasonRunes(s, maxReasonDetailRunes)
 }
