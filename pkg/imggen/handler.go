@@ -353,11 +353,22 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// client headers EXCEPT hop-by-hop (Host, Content-Length,
 	// Transfer-Encoding) AND EXCEPT client auth headers
 	// (Authorization, X-API-Key, x-api-key) — the proxy's sk-
-	// token must never reach MiniMax (BE-A2).
+	// token must never reach MiniMax (BE-A2). Also EXCEPT the
+	// client Content-Type (the app-owned application/json above
+	// is authoritative — Add-ing the client's CT duplicates the
+	// header upstream) AND the client Accept-Encoding: Go's
+	// http.Transport only transparently decompresses a gzip
+	// response when IT added Accept-Encoding itself; a copied
+	// header (cloudflared injects "Accept-Encoding: gzip" toward
+	// origin) disables auto-decompression and a gzipped body
+	// reaches the JSON parser ⇒ 502. Excluding both lets the
+	// transport own encoding negotiation.
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 	for key, values := range r.Header {
-		if isHopByHopHeader(key) || isClientAuthHeader(key) {
+		if isHopByHopHeader(key) || isClientAuthHeader(key) ||
+			strings.EqualFold(key, "Content-Type") ||
+			strings.EqualFold(key, "Accept-Encoding") {
 			continue
 		}
 		for _, value := range values {

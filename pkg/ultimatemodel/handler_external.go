@@ -134,11 +134,33 @@ func (h *Handler) executeExternal(
 		return nil, fmt.Errorf("failed to create upstream request: %w", err)
 	}
 
-	// Copy headers from original request
+	// Copy headers from original request. The app-owned
+	// application/json below is authoritative: excluding the
+	// client Content-Type prevents a DUPLICATED CT upstream
+	// (mirror of the decision/imggen header hygiene, 7163291).
+	// Excluding the client Accept-Encoding makes Go's
+	// http.Transport own encoding negotiation — it only
+	// transparently decompresses a gzip response when IT added
+	// Accept-Encoding itself; a copied header (cloudflared
+	// injects "Accept-Encoding: gzip" toward origin) would
+	// disable auto-decompression and leave gzip garbage for usage
+	// extraction, passive capture, and the client relay.
+	// NOTE (deliberate, reviewer-flagged follow-up): the client
+	// Authorization IS still forwarded by this loop — on this raw
+	// passthrough the client bearer is the upstream key — and the
+	// Host / Content-Length / Transfer-Encoding compares below
+	// stay exactly as-is.
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	for key, values := range r.Header {
 		// Skip hop-by-hop headers
 		if key == "Host" || key == "Content-Length" || key == "Transfer-Encoding" {
+			continue
+		}
+		// Header hygiene (mirror of 7163291): never forward the
+		// client CT (duplicates the app-owned Set above) or the
+		// client Accept-Encoding (defeats transport
+		// auto-decompression).
+		if strings.EqualFold(key, "Content-Type") || strings.EqualFold(key, "Accept-Encoding") {
 			continue
 		}
 		// D4: NARROW strip of exactly x-proxy-interleaved-thinking on
