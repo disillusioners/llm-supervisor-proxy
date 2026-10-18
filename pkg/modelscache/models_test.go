@@ -559,6 +559,13 @@ func TestCachedModelsConfig_WriteThrough_ModelMutators(t *testing.T) {
 	if m := c.GetModel("m-new"); m == nil {
 		t.Fatal("AddModel write-through must make the model immediately visible")
 	}
+	// remove-external-upstream P1 (task 7 / R1): the fixture omits
+	// Internal (false) — the DECORATOR-layer stamp must surface on the
+	// immediate read-back (the pre-stamp decorator cached the caller's
+	// unstamped copy, false-404ing fresh writes for ≤60s).
+	if m := c.GetModel("m-new"); m == nil || !m.Internal {
+		t.Errorf("AddModel layered stamp: GetModel().Internal = %v, want true (decorator read-back)", m)
+	}
 
 	// UpdateModel replaces the authoritative payload.
 	if err := c.UpdateModel("m-new", models.ModelConfig{ID: "m-new", Name: "new2", Enabled: true, InternalModel: "replaced"}); err != nil {
@@ -566,6 +573,10 @@ func TestCachedModelsConfig_WriteThrough_ModelMutators(t *testing.T) {
 	}
 	if m := c.GetModel("m-new"); m == nil || m.InternalModel != "replaced" {
 		t.Errorf("UpdateModel write-through: %+v", m)
+	}
+	// task 7 / R1: UpdateModel stamps too — read-back must stay true.
+	if m := c.GetModel("m-new"); m == nil || !m.Internal {
+		t.Errorf("UpdateModel layered stamp: GetModel().Internal = %v, want true (decorator read-back)", m)
 	}
 	if m := c.GetModelByName("new2"); m == nil {
 		t.Error("rename must update the name index (new2)")
