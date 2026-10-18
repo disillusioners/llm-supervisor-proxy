@@ -117,7 +117,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     name: string;
     fallback_chain: string;
     truncate_params: string;
-    internal: boolean;
     credentials: CredentialRef[];
     internal_api_key: string;
     internal_base_url: string;
@@ -135,7 +134,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     name: '',
     fallback_chain: '',
     truncate_params: '',
-    internal: true,
     credentials: [],
     internal_api_key: '',
     internal_base_url: '',
@@ -211,7 +209,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         name: initialData.name,
         fallback_chain: (initialData.fallback_chain ?? []).join(', '),
         truncate_params: truncateParams,
-        internal: initialData.internal ?? true,
         credentials: hydCreds,
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
@@ -232,7 +229,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         name: '',
         fallback_chain: '',
         truncate_params: '',
-        internal: true,
         credentials: [],
         internal_api_key: '',
         internal_base_url: '',
