@@ -883,35 +883,80 @@ func TestUpstream4xxNoPassthrough_RetriesExhausted(t *testing.T) {
 // a winner is selected, an HTTP error is returned (not SSE error after headers sent)
 
 func TestEmptyMessages(t *testing.T) {
-	runBothVersions(t, testCase{
-		name:       "EmptyMessages",
-		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
-		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := map[string]interface{}{
-				"model":    "test-model",
-				"stream":   false,
-				"messages": []interface{}{},
-			}
-			req := makeRequest(t, body)
-			rr := httptest.NewRecorder()
-			handle(rr, req)
+	// P1 fixup (review blocker 1): the former fixture ran the
+	// empty-messages edge case through the EXTERNAL passthrough (nil
+	// ModelsConfig, unresolved "test-model") — an arm P1 deleted, which
+	// left the request 404ing at the boundary gate and the assertions
+	// below indexing an empty Messages slice: the non-fatal length
+	// assert at the old :907 was followed by Messages[0] and PANICKED,
+	// aborting the entire pkg/proxy test binary. Converted to the
+	// internal rewrite pattern (smallest correct change): the model now
+	// resolves internal with a credential at the mock upstream, the
+	// assertions are unchanged, and the length check below is a
+	// t.Fatalf BEFORE the index — a regression can never again panic
+	// the binary.
+	upstream := httptest.NewServer(mockLLMHandler(t))
+	t.Cleanup(upstream.Close)
 
-			if rr.Code != http.StatusOK {
-				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
-			}
+	modelsConfig := models.NewModelsConfig()
+	if err := modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := modelsConfig.AddModel(models.ModelConfig{
+		ID:            "test-model",
+		Name:          "test-model",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs("test-credential"),
+		InternalModel: "test-model",
+	}); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
 
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if len(reqs[0].Messages) != 1 {
-				t.Errorf("expected 1 message (assistant response), got %d", len(reqs[0].Messages))
-			}
-			if reqs[0].Messages[0].Role != "assistant" {
-				t.Errorf("expected message role 'assistant', got '%s'", reqs[0].Messages[0].Role)
-			}
-		},
-	})
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsConfig}, bus, reqStore, bufStore, nil, nil, nil)
+
+	body := map[string]interface{}{
+		"model":    "test-model",
+		"stream":   false,
+		"messages": []interface{}{},
+	}
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d (body: %s)", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	// Length guard BEFORE the index — the load-bearing panic fix.
+	if len(reqs[0].Messages) != 1 {
+		t.Fatalf("expected 1 message (assistant response), got %d", len(reqs[0].Messages))
+	}
+	if reqs[0].Messages[0].Role != "assistant" {
+		t.Errorf("expected message role 'assistant', got '%s'", reqs[0].Messages[0].Role)
+	}
 }
 
 // TestProviderSpecificThinking removed - this test needs the handler to extract
