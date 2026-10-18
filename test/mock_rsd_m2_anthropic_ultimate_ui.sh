@@ -424,7 +424,7 @@ fi
 echo "${YELLOW}[5/9] Starting proxy on $PROXY_PORT (HOME=$HOME)...${NC}"
 export PORT="$PROXY_PORT"
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://127.0.0.1:$MOCK_PORT/v1"   # dummy; internal model overrides
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export LOOP_DETECTION_ENABLED="false"

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# [HISTORICAL — remove-external-upstream P1 retired the external race path]
+# This script drives the proxy via the deleted external/UPSTREAM_URL route
+# (env-pinned or the default global upstream). It CANNOT pass as-is on the
+# post-P1 tree; retained as a historical artifact of the pre-P1 architecture.
+# Reviving it means redesigning its fixtures around internal models +
+# credentials (internal-path pattern: test/test_mock_openai_internal.sh).
 # Mock Test M1 — real-streaming-default: OpenAI path live-binary TTFB smoke (merge gate)
 #
 # Branch: feature/real-streaming-default @ 22e76d6

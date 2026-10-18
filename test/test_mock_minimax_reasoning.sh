@@ -120,7 +120,7 @@ echo -e "${GREEN}Mock started (PID $MOCK_PID)${NC}"
 # ============================================================================
 echo -e "\n${YELLOW}[3/6] Starting proxy (port $PROXY_PORT)...${NC}"
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:$MOCK_PORT"
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"

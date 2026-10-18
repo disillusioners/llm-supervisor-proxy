@@ -5,7 +5,7 @@
 # Maximum runtime: 30 seconds
 #
 # This test uses an "internal" model configuration that bypasses the external
-# UPSTREAM_URL and calls the mock server directly via internal_base_url.
+# (the retired global UPSTREAM_URL) and calls the mock server directly via
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -98,7 +98,7 @@ echo -e "  MAX_GENERATION_TIME=15s (absolute hard timeout)"
 
 # Export config overrides for testing (these override config file)
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:4001"  # Dummy URL - won't be used for internal models
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export IDLE_TIMEOUT="1s"
 export STREAM_DEADLINE="6s"
@@ -214,7 +214,7 @@ test_streaming() {
     start_time=$(date +%s)
     
     # Request goes to proxy which uses internal model configuration
-    # The model "mock-internal-model" has internal=true, so it bypasses UPSTREAM_URL
+    # The model "mock-internal-model" has internal=true, so it routes via its credential
     # and calls the mock server directly via internal_base_url
     curl -N -s --max-time "$max_time" "http://localhost:$PROXY_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
@@ -419,7 +419,7 @@ echo -e ""
 echo -e "${GREEN}If you see these log messages, the features are working correctly!${NC}"
 echo -e ""
 echo -e "${BLUE}Key Difference from External Path:${NC}"
-echo -e "  External path: Uses UPSTREAM_URL (LiteLLM proxy)"
+echo -e "  External path (RETIRED remove-external-upstream): was UPSTREAM_URL (LiteLLM proxy)"
 echo -e "  Internal path: Uses model's internal_base_url (direct provider call)"
 echo -e ""
 

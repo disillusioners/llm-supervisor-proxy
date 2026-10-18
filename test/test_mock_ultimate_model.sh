@@ -4,8 +4,9 @@
 # Tests duplicate detection and ultimate model triggering with full OpenAI spec support
 # Maximum runtime: 75 seconds
 #
-# This test uses an "internal" model configuration that bypasses the external
-# UPSTREAM_URL and calls the mock server directly via internal_base_url.
+# This test uses an "internal" model configuration (no global upstream —
+# remove-external-upstream retired UPSTREAM_URL) that calls the mock server
+# directly via internal_base_url.
 #
 # IMPORTANT: Hash is only created when a request FAILS.
 # Successful requests do NOT create hashes, so simple messages like "hi", "hello"
@@ -122,7 +123,7 @@ echo -e "  LOOP_DETECTION_ENABLED=false"
 
 # Export config overrides for testing
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:4001"  # Dummy URL - won't be used for internal models
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"

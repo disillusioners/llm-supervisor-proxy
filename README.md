@@ -281,10 +281,9 @@ The proxy handles protocol translation automatically:
 
 | Context | Protocol | Behavior |
 |---------|----------|----------|
-| External upstream | OpenAI (`/v1/chat/completions`) | Always uses OpenAI protocol (LiteLLM-compatible) |
 | Internal (with Anthropic credential) | Anthropic (`/v1/messages`) | Passthrough — requests forwarded as-is |
 
-When using internal credentials with `credential.Provider == 'anthropic'`, the proxy auto-detects Anthropic protocol for passthrough mode. For all other cases, it uses OpenAI protocol.
+When using internal credentials with `credential.Provider == 'anthropic'`, the proxy auto-detects Anthropic protocol for passthrough mode. For all other internal credentials, it uses OpenAI protocol.
 
 ### Claude Code Setup
 
@@ -436,11 +435,10 @@ pick its own affinity; there is no cross-pod stickiness. Redis-backed
 or sticky-load-balancer affinity is **future work (v2)** — for now,
 plan capacity per replica, not per cluster.
 
-**Env path bypasses load balancing.** Requests served through the
-external race path using the `UPSTREAM_CREDENTIAL_ID` env credential
-bypass credential load balancing entirely — there is no `credentials[]`
-on that path. To load-balance, configure `credentials[]` on an
-**internal** model.
+**Every request load-balances.** remove-external-upstream removed the
+external race path (and its `UPSTREAM_CREDENTIAL_ID` env bypass): all
+requests route through the `credentials[]` of an internal model, so
+credential load balancing applies uniformly.
 
 **`modelTypeSecond` re-key on 429 (counterintuitive but correct).**
 When a secondary-model attempt is rate-limited (HTTP 429), credential

@@ -113,7 +113,7 @@ echo -e "  SSE_HEARTBEAT_ENABLED=true"
 echo -e "  STREAM_DEADLINE=60s (longer than test to see heartbeats)"
 
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:$MOCK_PORT"
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export SSE_HEARTBEAT_ENABLED="true"
 export STREAM_DEADLINE="60s"

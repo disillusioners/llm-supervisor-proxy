@@ -95,7 +95,7 @@ echo -e "  MAX_GENERATION_TIME=15s (absolute hard timeout)"
 
 # Export config overrides for testing (these override config file)
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:$MOCK_PORT"
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export IDLE_TIMEOUT="1s"
 export STREAM_DEADLINE="6s"
@@ -209,7 +209,7 @@ test_streaming() {
     
     start_time=$(date +%s)
     
-    # Request goes to proxy which routes to UPSTREAM_URL (mock server)
+    # Request goes to proxy which routes via the model credential (mock server)
     curl -N -s --max-time "$max_time" "http://localhost:$PROXY_PORT/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
