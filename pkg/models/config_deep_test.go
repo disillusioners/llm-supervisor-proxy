@@ -356,8 +356,16 @@ func TestModelsConfig_AddModel(t *testing.T) {
 		errType error
 	}{
 		{
-			name:    "valid model",
-			model:   ModelConfig{ID: "new-model", Name: "New Model", Enabled: true},
+			// remove-external-upstream P1 task 7: every write stamps
+			// Internal=true BEFORE validation, so a "valid model" now
+			// must carry a valid credential ref (the stamped credential
+			// gate). The credential ref is the fixture's re-seed; the
+			// assertion (no error) is unchanged.
+			name: "valid model",
+			model: ModelConfig{ID: "new-model", Name: "New Model", Enabled: true,
+				InternalModel: "upstream-x",
+				Credentials:   TestRefs("cred-1"),
+			},
 			wantErr: false,
 		},
 		{
@@ -388,6 +396,10 @@ func TestModelsConfig_AddModel(t *testing.T) {
 				},
 				Credentials: NewCredentialsConfig(),
 			}
+			// remove-external-upstream P1 task 7 fixture re-seed: the
+			// stamped "valid model" case needs its credential ref to
+			// resolve (harmless for the error-path cases).
+			_ = cfg.Credentials.AddCredential(CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "k"})
 
 			err := cfg.AddModel(tt.model)
 			if (err != nil) != tt.wantErr {
@@ -409,9 +421,16 @@ func TestModelsConfig_UpdateModel(t *testing.T) {
 		errContain string
 	}{
 		{
+			// remove-external-upstream P1 task 7: the update payload is
+			// stamped Internal=true before validation, so the "valid
+			// update" case must carry a valid credential ref (fixture
+			// re-seed; assertion unchanged).
 			name:    "valid update",
 			modelID: "model-1",
-			model:   ModelConfig{ID: "model-1", Name: "Updated Model", Enabled: true},
+			model: ModelConfig{ID: "model-1", Name: "Updated Model", Enabled: true,
+				InternalModel: "upstream-x",
+				Credentials:   TestRefs("cred-1"),
+			},
 			wantErr: false,
 		},
 		{
@@ -452,6 +471,10 @@ func TestModelsConfig_UpdateModel(t *testing.T) {
 				},
 				Credentials: NewCredentialsConfig(),
 			}
+			// remove-external-upstream P1 task 7 fixture re-seed: the
+			// stamped "valid update" case needs its credential ref to
+			// resolve (harmless for the error-path cases).
+			_ = cfg.Credentials.AddCredential(CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "k"})
 
 			err := cfg.UpdateModel(tt.modelID, tt.model)
 			if (err != nil) != tt.wantErr {
@@ -745,7 +768,13 @@ func TestModelsConfig_Save(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	cfg.Models = append(cfg.Models, ModelConfig{ID: "model-1", Name: "Model 1", Enabled: true})
+	// remove-external-upstream P1 task 7: the Save loop stamps
+	// Internal=true before validation, so the raw-seeded row must carry
+	// a valid credential ref to survive the stamped validation pass.
+	cfg.Models = append(cfg.Models, ModelConfig{ID: "model-1", Name: "Model 1", Enabled: true,
+		InternalModel: "upstream-x",
+		Credentials:   TestRefs("cred-1"),
+	})
 
 	// Add a credential to avoid validation issues
 	cred := CredentialConfig{ID: "cred-1", Provider: "openai", APIKey: "test-key"}

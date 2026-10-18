@@ -716,11 +716,22 @@ func (mc *ModelsConfig) rebuildClaimsLocked() {
 // Save atomically saves the models configuration to a JSON file.
 // It writes to a temporary file first, then renames to the target file.
 func (mc *ModelsConfig) Save() error {
-	mc.mu.RLock()
+	// remove-external-upstream P1 (task 7, layer iii/iii): Save takes no
+	// parameter, so the Internal=true stamp runs as a LOOP over the
+	// in-memory models — every row leaving through the JSON backend is
+	// internal, converging any legacy unstamped rows on the next save.
+	// Stamped under the WRITE lock (the slice header below shares the
+	// backing array with mc.Models — a read lock must not cover a
+	// mutation). (The DB backend's Save is a NO-OP by design — store.go
+	// — and is deliberately NOT mirrored there.)
+	mc.mu.Lock()
+	for i := range mc.Models {
+		mc.Models[i].Internal = true
+	}
 	filePath := mc.filePath
 	models := mc.Models
 	credentials := mc.Credentials
-	mc.mu.RUnlock()
+	mc.mu.Unlock()
 
 	// Validate before saving
 	tempConfig := snapshotForValidation(models, credentials)
@@ -822,6 +833,12 @@ func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 		return ErrInvalidModelName
 	}
 
+	// remove-external-upstream P1 (task 7, layer iii/iii): the
+	// Internal=true WRITE-STAMP on the JSON backend, BEFORE validation
+	// (ordering mandate — the snapshot validation below must see the
+	// stamped value so the credential gates enforce on it).
+	model.Internal = true
+
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -853,6 +870,11 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 	if model.Name == "" {
 		return ErrInvalidModelName
 	}
+
+	// remove-external-upstream P1 (task 7, layer iii/iii): the
+	// Internal=true WRITE-STAMP on the JSON backend, BEFORE validation
+	// (ordering mandate — same as AddModel above).
+	model.Internal = true
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()

@@ -1522,6 +1522,15 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		return models.ErrInvalidModelName
 	}
 
+	// remove-external-upstream P1 (task 7, layer ii/iii): the
+	// Internal=true WRITE-STAMP. Order is a MANDATE (approver NB7):
+	// stamp BEFORE validateBeforeWrite so the credential gates run on
+	// the stamped value — an AddModel without credentials for a
+	// stamped-internal row is REJECTED here, not silently stored
+	// non-internal. Never place this inside validateBeforeWrite: it
+	// takes the model by value, so a stamp there cannot propagate.
+	model.Internal = true
+
 	// Phase-1 W4 hardening — validate before write (cheap guards
 	// above already passed; per-ref rules + secondary + peak-hour
 	// rules live in validateBeforeWrite → validateModelAgainstCredentials).
@@ -1655,6 +1664,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	if model.ID != modelID {
 		return models.ErrCannotChangeModelID
 	}
+
+	// remove-external-upstream P1 (task 7, layer ii/iii): the
+	// Internal=true WRITE-STAMP, BEFORE validate (ordering mandate,
+	// same rationale as AddModel above).
+	model.Internal = true
 
 	// Phase-1 W4 hardening — validate before write.
 	if err := m.validateBeforeWrite(model); err != nil {

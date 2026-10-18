@@ -203,8 +203,15 @@ func newOutageStack(t *testing.T) *outageStack {
 		}
 	}
 	seed := []models.ModelConfig{
-		// (a) configured EXTERNAL model — passthrough class.
-		{ID: "ext-configured", Name: "ext-configured", Enabled: true},
+		// (a) remove-external-upstream P1: the former "configured
+		// EXTERNAL model — passthrough class" is now a regular INTERNAL
+		// model (every write stamps internal=true; the credential gate
+		// requires the ref). The outage invariants it probes (cached
+		// visibility, zero misroutes, zero silent failures for known
+		// entities) are unchanged — a known model keeps serving from
+		// the cache while the DB is down.
+		{ID: "ext-configured", Name: "ext-configured", Enabled: true, InternalModel: "ext-x",
+			Credentials: []models.CredentialRef{{CredentialID: "cred-a", Weight: 1, Position: 0}}},
 		// (b) internal single-credential model.
 		{ID: "int-single", Name: "int-single", Enabled: true, Internal: true, InternalModel: "single-x",
 			Credentials: []models.CredentialRef{{CredentialID: "cred-a", Weight: 1, Position: 0}}},

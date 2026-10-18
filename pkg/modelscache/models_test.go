@@ -1199,7 +1199,8 @@ func TestCachedModelsConfig_ResolveInternalConfig_LegacyHotPathZeroDB(t *testing
 // TestCachedModelsConfig_DetectProvider_UnderDBDown (W1): the
 // decorator's cache-served legacy ResolveInternalConfig keeps
 // normalizers.DetectProvider returning the real provider during a DB
-// outage instead of the "external" fallback.
+// outage instead of the "unknown" fallback (the remove-external-upstream
+// P1 rename of the retired "external" literal).
 func TestCachedModelsConfig_DetectProvider_UnderDBDown(t *testing.T) {
 	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
 	c := mustWrap(t, inner, Options{})
@@ -1215,8 +1216,10 @@ func TestCachedModelsConfig_DetectProvider_UnderDBDown(t *testing.T) {
 	if got := normalizers.DetectProvider(c, "m-alpha"); got != "openai" {
 		t.Errorf("DetectProvider under DB-down must return cached provider, got %q", got)
 	}
-	if got := normalizers.DetectProvider(c, "unknown-model"); got != "external" {
-		t.Errorf("unknown model stays external, got %q", got)
+	// remove-external-upstream P1 (A19): "external" is retired —
+	// unknown models normalize under "unknown".
+	if got := normalizers.DetectProvider(c, "unknown-model"); got != "unknown" {
+		t.Errorf("unknown model normalizes to \"unknown\", got %q", got)
 	}
 }
 
