@@ -1169,8 +1169,7 @@ func TestExecuteInternal_NonStreaming(t *testing.T) {
 
 func TestUltimateModelError(t *testing.T) {
 	err := &ultimateModelError{
-		message:  "test error",
-		internal: true,
+		message: "test error",
 	}
 
 	if err.Error() != "test error" {
