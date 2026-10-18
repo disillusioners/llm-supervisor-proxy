@@ -129,7 +129,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 			Name:          model.name,
 			Enabled:       true,
 			Internal:      true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:   models.TestRefs("test-cred"),
 			InternalModel: model.internalModel,
 		}); err != nil {
 			t.Fatalf("Failed to add model %s: %v", model.id, err)
@@ -161,7 +161,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 // makeHandlerRequest creates a request for the proxy handler
 func makeHandlerRequest(model, plaintextToken string) *http.Request {
 	body := map[string]interface{}{
-		"model": model,
+		"model":  model,
 		"stream": false,
 		"messages": []interface{}{
 			map[string]interface{}{
@@ -346,7 +346,7 @@ func TestListTokens_ReturnsAllowedModels(t *testing.T) {
 		{"token-empty", []string{}},
 	}
 
-		for _, tc := range testCases {
+	for _, tc := range testCases {
 		_, _, err := env.tokenStore.CreateToken(ctx, tc.name, nil, "test", false, "", tc.allowedModels)
 		if err != nil {
 			t.Fatalf("CreateToken(%s) failed: %v", tc.name, err)
@@ -392,7 +392,7 @@ func TestListTokens_ReturnsAllowedModels(t *testing.T) {
 func TestIsModelAllowed_NilAllowedModels(t *testing.T) {
 	token := &auth.AuthToken{AllowedModels: nil}
 	tests := []struct {
-		model  string
+		model   string
 		allowed bool
 	}{
 		{"gpt-4", true},
@@ -412,7 +412,7 @@ func TestIsModelAllowed_EmptyAllowedModels(t *testing.T) {
 	// Empty slice [] means "all models allowed" (same as nil)
 	token := &auth.AuthToken{AllowedModels: []string{}}
 	tests := []struct {
-		model  string
+		model   string
 		allowed bool
 	}{
 		{"gpt-4", true},
@@ -430,14 +430,14 @@ func TestIsModelAllowed_EmptyAllowedModels(t *testing.T) {
 func TestIsModelAllowed_WithModels(t *testing.T) {
 	token := &auth.AuthToken{AllowedModels: []string{"gpt-4", "claude-3"}}
 	tests := []struct {
-		model  string
+		model   string
 		allowed bool
 	}{
 		{"gpt-4", true},
 		{"claude-3", true},
 		{"gpt-3.5", false},
-		{"gpt-4o", false},  // Case-sensitive: different from gpt-4
-		{"GPT-4", false},   // Case-sensitive: uppercase different
+		{"gpt-4o", false}, // Case-sensitive: different from gpt-4
+		{"GPT-4", false},  // Case-sensitive: uppercase different
 		{"", false},
 	}
 
@@ -451,7 +451,7 @@ func TestIsModelAllowed_WithModels(t *testing.T) {
 func TestIsModelAllowed_CaseSensitive(t *testing.T) {
 	token := &auth.AuthToken{AllowedModels: []string{"GPT-4", "Claude-3"}}
 	tests := []struct {
-		model  string
+		model   string
 		allowed bool
 	}{
 		{"GPT-4", true},
@@ -484,8 +484,8 @@ func TestScanAllowedModels(t *testing.T) {
 		{"empty array", "[]", []string{}},
 		{"single model", `["gpt-4"]`, []string{"gpt-4"}},
 		{"multiple models", `["gpt-4","claude-3"]`, []string{"gpt-4", "claude-3"}},
-		{"string input", "gpt-4", []string{}},      // Malformed JSON -> fail closed
-		{"invalid json", "not-json", []string{}},   // Malformed JSON -> fail closed
+		{"string input", "gpt-4", []string{}},    // Malformed JSON -> fail closed
+		{"invalid json", "not-json", []string{}}, // Malformed JSON -> fail closed
 	}
 
 	for _, tt := range tests {
@@ -629,13 +629,16 @@ func TestHandler_CaseSensitivity_ExactMatch(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Test: different case "GPT-4" should be DENIED (case-sensitive matching)
+	// Test: different case "GPT-4" must be DENIED (case-sensitive matching).
+	// remove-external-upstream P1/P5: exact boundary resolution runs
+	// BEFORE auth, so the case mismatch is a clean 404 (fail-closed) —
+	// the deleted external arm is what used to forward it unresolved.
 	req := makeHandlerRequest("GPT-4", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 for 'GPT-4' when 'gpt-4' is allowed (case mismatch), got %d", rr.Code)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for 'GPT-4' when 'gpt-4' is allowed (case mismatch, fail-closed), got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// Test: exact match "gpt-4" should be ALLOWED

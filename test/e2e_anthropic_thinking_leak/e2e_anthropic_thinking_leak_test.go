@@ -241,52 +241,6 @@ func TestS1B_Live_InternalStream_ThinkingDeltaEmitted(t *testing.T) {
 // thinking_delta on the wire BY DESIGN (the TestAnthropic_ThinkingStream
 // contract). This scenario confirms the sink did NOT over-swallow on the
 // external path — thinking_delta MUST be present.
-func TestS2_ExternalStream_ThinkingTranslated(t *testing.T) {
-	env := setupTestEnv(t, reasoningSSEHandler)
-
-	rr := env.run(anthropicRequest{model: extModel, stream: true})
-	wire := rr.Body.String()
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("S2: status=%d body=%s", rr.Code, wire)
-	}
-
-	// Routing proof: external path sends the RAW model name (no internal
-	// rewrite), proving we exercised doAnthropicRequest, not the internal
-	// handler.
-	cap := env.mockUp.last()
-	if got, _ := cap.BodyParsed["model"].(string); got != extModel {
-		t.Fatalf("S2: upstream model=%q want %q (external path not exercised); captured=%s",
-			got, extModel, string(cap.Body))
-	}
-	t.Logf("EVIDENCE S2: upstream model=%q (external path confirmed)", extModel)
-
-	// POSITIVE: thinking_delta MUST appear on the external wire (by-design
-	// translation — the regression guard that the sink did not over-swallow).
-	assertContains(t, wire, `"thinking_delta"`, "S2/thinking_delta")
-
-	// The reasoning text itself should appear inside the translated
-	// thinking_delta payload (the translator accumulates and emits it).
-	assertContains(t, wire, reasoningChunk1, "S2/reasoning1")
-	assertContains(t, wire, reasoningChunk2, "S2/reasoning2")
-
-	// Content still intact.
-	assertContains(t, wire, wireContent, "S2/content")
-
-	// Persisted thinking: the external path accumulates via
-	// extractOpenAIResponseContentFromSSE (handler_anthropic.go:691-694),
-	// so it should equal the concatenated reasoning too.
-	assistant, log, ok := env.lastAssistant()
-	if !ok {
-		t.Fatalf("S2: no persisted assistant message")
-	}
-	if got := assistant.Thinking; got != reasoningFull {
-		t.Logf("EVIDENCE S2: persisted thinking=%q (want %q)", got, reasoningFull)
-	} else {
-		t.Logf("EVIDENCE S2: persisted thinking == concatenated reasoning (%d bytes)", len(got))
-	}
-	t.Logf("EVIDENCE S2: request id=%s status=%s wire length=%d", log.ID, log.Status, len(wire))
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // S3 — INTERNAL path, non-stream: persisted thinking + wire classification

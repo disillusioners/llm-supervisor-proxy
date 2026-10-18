@@ -68,45 +68,6 @@ func TestS1_RequestTranslation_RaceExternal(t *testing.T) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S2 — Request translation, ultimate-external
-// ═════════════════════════════════════════════════════════════════════════════
-
-// TestS2_RequestTranslation_UltimateExternal drives X-Force-Ultimate-Model
-// with ULTIMATE_MODEL_ID=ultExtModel (Internal:false ⇒ ultimate-external
-// byte path via translator.TranslateRequestBytes).
-func TestS2_RequestTranslation_UltimateExternal(t *testing.T) {
-	env := setupTestEnv(t, okNonStreamHandler(), envOptions{ultimateModelID: ultExtModel})
-	tok := env.ultimateToken
-
-	t.Run("translated_via_force_header", func(t *testing.T) {
-		rr := env.run(chatRequest{model: raceIntModel, token: tok, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		cap := env.mockUp.last()
-		assertTranslatedUpstreamRequest(t, cap.BodyParsed, reasoningMessages, "S2/single")
-		// ultimate-external rewrites the model field to the ultimate model id
-		if got, _ := cap.BodyParsed["model"].(string); got != ultExtModel {
-			t.Errorf("S2: upstream model=%q want %q (ultimate override)", got, ultExtModel)
-		}
-	})
-
-	t.Run("multi_message_monotonic_ids", func(t *testing.T) {
-		rr := env.run(chatRequest{model: raceIntModel, token: tok, flag: true, forceUlt: true, messages: twoReasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		cap := env.mockUp.last()
-		assertTranslatedUpstreamRequest(t, cap.BodyParsed, twoReasoningMessages, "S2/monotonic")
-		upMsgs := msg(t, cap.BodyParsed, "S2/monotonic")
-		d0 := upMsgs[0].(map[string]interface{})["reasoning_details"].([]interface{})
-		d1 := upMsgs[1].(map[string]interface{})["reasoning_details"].([]interface{})
-		assertDetailsEntry(t, d0[0], "reasoning-text-1", "think-1", "S2/monotonic msg0")
-		assertDetailsEntry(t, d1[0], "reasoning-text-2", "think-2", "S2/monotonic msg1")
-	})
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
 // S3 — Request translation, internal paths (+ non-MiniMax negative)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -143,16 +104,6 @@ func TestS3_RequestTranslation_InternalPaths(t *testing.T) {
 		}
 		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S3/non-minimax/race-int")
 	})
-
-	t.Run("non_minimax_upstream_credential_inert_race_ext", func(t *testing.T) {
-		// race-external with the upstream credential bound to the openai cred.
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{upstreamProvider: "openai"})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S3/non-minimax/race-ext")
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -188,94 +139,6 @@ func assertDetailsTranslatedResponse(t *testing.T, rrBody map[string]interface{}
 			t.Errorf("%s: client body leaks %q (must be stripped) — %s", where, stripped, mustJSON(message))
 		}
 	}
-}
-
-// TestS4_NonStreamResponse_External covers both external byte paths.
-func TestS4_NonStreamResponse_External(t *testing.T) {
-	usage := map[string]interface{}{"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
-
-	t.Run("race_ext_details_only_mode", func(t *testing.T) {
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, usage), envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		body := parseJSONBody(t, rr, "S4/race-ext/details-only")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S4/race-ext/details-only")
-		t.Logf("EVIDENCE S4 client-body (translated response): %s", rr.Body.String())
-	})
-
-	t.Run("race_ext_details_plus_same_text_single_winner", func(t *testing.T) {
-		// BOTH fields present upstream with identical text: details WIN and
-		// the text appears exactly once (not duplicated).
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, map[string]interface{}{"reasoning_content": "think-A"}, usage), envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d", rr.Code)
-		}
-		body := parseJSONBody(t, rr, "S4/race-ext/both")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S4/race-ext/both")
-		message := body["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
-		if got := message["reasoning_content"].(string); strings.Count(got, "think-A") != 1 {
-			t.Errorf("S4/race-ext/both: reasoning_content=%q — think-A appears %d times, want exactly 1 (single winner)", got, strings.Count(got, "think-A"))
-		}
-	})
-
-	t.Run("race_ext_audio_name_stripped", func(t *testing.T) {
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, map[string]interface{}{"audio_content": "x", "name": "bob"}, usage), envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d", rr.Code)
-		}
-		body := parseJSONBody(t, rr, "S4/race-ext/strip")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S4/race-ext/strip", "audio_content", "name")
-	})
-
-	t.Run("ult_ext_details_only_mode", func(t *testing.T) {
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, usage), envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		body := parseJSONBody(t, rr, "S4/ult-ext/details-only")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S4/ult-ext/details-only")
-	})
-
-	t.Run("ult_ext_both_modes_single_winner", func(t *testing.T) {
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, map[string]interface{}{"reasoning_content": "think-A"}, usage), envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d", rr.Code)
-		}
-		body := parseJSONBody(t, rr, "S4/ult-ext/both")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S4/ult-ext/both")
-		message := body["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
-		if got := message["reasoning_content"].(string); strings.Count(got, "think-A") != 1 {
-			t.Errorf("S4/ult-ext/both: think-A appears %d times, want exactly 1 — %q", strings.Count(got, "think-A"), got)
-		}
-	})
-
-	t.Run("usage_preserved_on_translated_path", func(t *testing.T) {
-		// S12 folded here on the same harness instance: usage object equality.
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, usage), envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d", rr.Code)
-		}
-		body := parseJSONBody(t, rr, "S12/usage")
-		gotUsage, ok := body["usage"].(map[string]interface{})
-		if !ok {
-			t.Fatalf("S12: no usage object in client body — %s", mustJSON(body))
-		}
-		for k, want := range map[string]float64{"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18} {
-			if got, _ := gotUsage[k].(float64); got != want {
-				t.Errorf("S12: usage.%s=%v want %v — usage=%s", k, gotUsage[k], want, mustJSON(gotUsage))
-			}
-		}
-		if len(gotUsage) < 3 {
-			t.Errorf("S12: usage object suspiciously small: %s", mustJSON(gotUsage))
-		}
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -577,14 +440,6 @@ func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 			t.Errorf("S8: details synthesized on flag-absent path — %s", mustJSON(message))
 		}
 	}
-
-	t.Run("race_external_flag_absent", func(t *testing.T) {
-		env := setupTestEnv(t, reasoningOnlyResp, envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, messages: reasoningMessages})
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/race-ext/request")
-		assertResponsePassthrough(t, captureResponse(t, rr))
-	})
-
 	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
 	t.Run("race_internal_flag_absent", func(t *testing.T) {
 		env := setupTestEnv(t, reasoningOnlyResp, envOptions{})
@@ -592,15 +447,6 @@ func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/race-int/request")
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
-
-	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
-	t.Run("ultimate_external_flag_absent", func(t *testing.T) {
-		env := setupTestEnv(t, reasoningOnlyResp, envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, forceUlt: true, messages: reasoningMessages})
-		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-ext/request")
-		assertResponsePassthrough(t, captureResponse(t, rr))
-	})
-
 	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
 	t.Run("ultimate_internal_flag_absent", func(t *testing.T) {
 		env := setupTestEnv(t, reasoningOnlyResp, envOptions{ultimateModelID: ultIntModel})
@@ -625,27 +471,6 @@ func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 //     extraction (data-driven, provider-agnostic); plain reasoning_content
 //     still handled by the pre-existing fallback.
 func TestS9_NonMiniMax_FlagOn(t *testing.T) {
-	detailsRespBody := `{"id":"r","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"final","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"think-1"}]},"finish_reason":"stop"}]}`
-
-	t.Run("race_external_request_untranslated_response_byte_identical", func(t *testing.T) {
-		env := setupTestEnv(t, rawStringHandler(http.StatusOK, detailsRespBody, "application/json"), envOptions{upstreamProvider: "openai"})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		// request side: untouched
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S9/race-ext/request")
-		// response side: client sees the upstream reasoning_details array
-		// byte-identically (legacy passthrough — NOT stripped).
-		client := parseJSONBody(t, rr, "S9/race-ext/response")
-		message := client["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
-		details, ok := message["reasoning_details"].([]interface{})
-		if !ok || len(details) != 1 {
-			t.Fatalf("S9/race-ext/response: expected reasoning_details passthrough array, got=%v — %s", message["reasoning_details"], mustJSON(message))
-		}
-		assertDetailsEntry(t, details[0], "reasoning-text-1", "think-1", "S9/race-ext/passthrough")
-	})
-
 	t.Run("race_internal_request_untranslated", func(t *testing.T) {
 		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, nil), envOptions{})
 		rr := env.run(chatRequest{model: raceIntModelOpenAI, token: env.plainToken, flag: true, messages: reasoningMessages})
@@ -658,27 +483,6 @@ func TestS9_NonMiniMax_FlagOn(t *testing.T) {
 		body := parseJSONBody(t, rr, "S9/race-int/response")
 		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S9/race-int/response")
 	})
-
-	t.Run("ultimate_external_request_untranslated_response_passthrough", func(t *testing.T) {
-		// Ultimate paths gate on the MODEL's Credentials[0] (handler.go:625-635
-		// resolves upstreamProvider from modelCfg.PrimaryCredentialID() — the
-		// legacy single-credential view via the back-compat shim after the
-		// Phase-1 CredentialID field removal). Point ULTIMATE_MODEL_ID at the
-		// ultimate-external model bound to the openai credential ⇒ gate off
-		// ⇒ legacy byte passthrough.
-		env := setupTestEnv(t, rawStringHandler(http.StatusOK, detailsRespBody, "application/json"), envOptions{ultimateModelID: ultExtModelOpenAI})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S9/ult-ext/request")
-		client := parseJSONBody(t, rr, "S9/ult-ext/response")
-		message := client["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
-		if _, ok := message["reasoning_details"].([]interface{}); !ok {
-			t.Errorf("S9/ult-ext/response: expected reasoning_details passthrough, got=%s", mustJSON(message))
-		}
-	})
-
 	t.Run("ultimate_internal_request_untranslated", func(t *testing.T) {
 		// ultimate-internal model with a non-MiniMax credential: typed
 		// setter gate off; plain reasoning_content is still preserved on
@@ -700,23 +504,6 @@ func TestS9_NonMiniMax_FlagOn(t *testing.T) {
 // upstream credential (ULTIMATE_MODEL_ID points at a model whose
 // CredentialID does not exist ⇒ upstreamProvider="" ⇒ gate=false).
 func TestS10_CredentialGate_Inert(t *testing.T) {
-	// Register a dangling-credential ultimate model via a fresh env, then
-	// point ULTIMATE_MODEL_ID at it. AddModel validates credential refs
-	// (rejects a dangling CredentialID), so this subtest instead drives
-	// a model unknown to ModelsConfig with NO upstream credential
-	// configured — PRE-P1 that exercised the external forward (gate off
-	// per D3: empty upstream-credential binding ⇒ the external gate off
-	// false); POST-P1 the boundary gate 404s it. Pending the phase5
-	// re-seed (delete-vs-convert per R12).
-	t.Run("race_ext_no_upstream_credential_inert", func(t *testing.T) {
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{noUpstreamCred: true})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S10/no-cred/request")
-	})
-
 	t.Run("ultimate_external_dangling_credential_inert", func(t *testing.T) {
 		// ULTIMATE_MODEL_ID set to a NONEXISTENT model id: Execute fails to
 		// resolve the model and the handler surfaces an error before any
@@ -808,33 +595,6 @@ func TestS13_DriftCounter(t *testing.T) {
 // the upstream, while a deliberate marker header proves the capture
 // mechanism sees forwarded headers.
 func TestS14_HeaderHygiene(t *testing.T) {
-	t.Run("race_external_flag_header_stripped_marker_forwarded", func(t *testing.T) {
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{})
-		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages, marker: "keepme"})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		cap := env.mockUp.last()
-		assertHeaderAbsentFolded(t, cap.Headers, "X-Proxy-Interleaved-Thinking", "S14/race-ext")
-		if got := cap.Headers.Get("X-Test-Marker"); got != "keepme" {
-			t.Errorf("S14/race-ext: positive control failed — X-Test-Marker=%q, want keepme (capture mechanism sanity); headers=%v", got, cap.Headers)
-		}
-		t.Logf("EVIDENCE S14 captured-upstream headers (race-external): %v", cap.Headers)
-	})
-
-	t.Run("ultimate_external_flag_header_stripped_marker_forwarded", func(t *testing.T) {
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages, marker: "keepme"})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		cap := env.mockUp.last()
-		assertHeaderAbsentFolded(t, cap.Headers, "X-Proxy-Interleaved-Thinking", "S14/ult-ext")
-		if got := cap.Headers.Get("X-Test-Marker"); got != "keepme" {
-			t.Errorf("S14/ult-ext: positive control failed — X-Test-Marker=%q, want keepme; headers=%v", got, cap.Headers)
-		}
-	})
-
 	t.Run("internal_path_flag_header_never_reaches_provider", func(t *testing.T) {
 		// The internal path builds a typed provider request; the client's
 		// HTTP headers (including X-Proxy-Interleaved-Thinking) are never

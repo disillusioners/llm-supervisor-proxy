@@ -221,23 +221,26 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		}
 	}
 
+	// GLM model (the original closure-gate scenario's model). remove-
+	// external-upstream P5: it is now an ordinary INTERNAL registration —
+	// the env-credential external dispatch it used to ride is deleted.
+	addModel(models.ModelConfig{
+		ID:            glmModel,
+		Name:          "Matrix GLM Internal",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs(externalCredID),
+		InternalModel: "matrix-glm-upstream",
+	})
+
 	// Race-internal model (openai credential ⇒ internal OpenAI handler).
 	addModel(models.ModelConfig{
 		ID:            raceIntModel,
 		Name:          "Matrix Race Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-race-internal-upstream",
-	})
-
-	// Ultimate-external model (Internal:false ⇒ executeExternal).
-	addModel(models.ModelConfig{
-		ID:           ultExtModel,
-		Name:         "Matrix Ultimate External",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(externalCredID),
 	})
 
 	// Ultimate-internal model (Internal:true ⇒ executeInternal).
@@ -246,19 +249,8 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Ultimate Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-ult-internal-upstream",
-	})
-
-	// Ultimate-external model bound to the MiniMax credential — the M2
-	// translation-gate row. The ultimate-external gate resolves
-	// upstreamProvider from THIS model's CredentialID.
-	addModel(models.ModelConfig{
-		ID:           ultExtModelMiniMax,
-		Name:         "Matrix Ultimate External MiniMax",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(minimaxCredID),
 	})
 
 	// Anthropic-client internal model (openai provider ⇒ translation mode,
@@ -268,7 +260,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Anthropic Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-anthropic-internal-upstream",
 	})
 
@@ -350,8 +342,8 @@ type chatRequest struct {
 	model    string
 	stream   *bool // nil ⇒ omit the "stream" field entirely (original bug shape)
 	messages []map[string]interface{}
-	flag     bool   // send X-Proxy-Interleaved-Thinking: true
-	forceUlt bool   // send X-Force-Ultimate-Model: true
+	flag     bool // send X-Proxy-Interleaved-Thinking: true
+	forceUlt bool // send X-Force-Ultimate-Model: true
 	token    string
 }
 
