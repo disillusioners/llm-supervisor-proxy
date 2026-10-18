@@ -620,10 +620,9 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 		name: "MockLLM_500WithRetryThenSuccess",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Set up fallback chain so race retry has multiple models to try
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
+			// Post-P1 write-stamp: an internal row needs a credential.
+			seedInternalTestModel(mc, "test-model", "test-upstream-model", "fallback-mock")
+			seedInternalTestModel(mc, "fallback-mock", "fallback-upstream-model")
 			return mc
 		}(),
 		configOpts: []func(*config.Config){
@@ -683,9 +682,8 @@ func TestMockLLM_FallbackAfter500(t *testing.T) {
 		name: "MockLLM_FallbackAfter500",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "primary-mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
+			seedInternalTestModel(mc, "primary-mock", "primary-upstream-model", "fallback-mock")
+			seedInternalTestModel(mc, "fallback-mock", "fallback-upstream-model")
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -739,10 +737,13 @@ func TestMockLLM_HeadersForwarded(t *testing.T) {
 		name: "MockLLM_HeadersForwarded",
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
-				// Verify Authorization header was forwarded
+				// remove-external-upstream P1/P5: the client Authorization
+				// is NOT forwarded on the internal arm — the proxy
+				// authenticates to the provider with the resolved
+				// credential's API key (fixture: "test-key").
 				auth := r.Header.Get("Authorization")
-				if auth != "Bearer mock-test-token" {
-					t.Errorf("expected Authorization 'Bearer mock-test-token', got '%s'", auth)
+				if auth != "Bearer test-key" {
+					t.Errorf("expected internal-arm credential Authorization 'Bearer test-key', got '%s'", auth)
 				}
 
 				// Run the mock handler
@@ -979,9 +980,8 @@ func TestFallback4xxTriggered(t *testing.T) {
 		name: "Fallback4xxTriggered",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "primary", Name: "primary", Enabled: true, FallbackChain: []string{"secondary"}})
-			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "secondary", Enabled: true})
+			seedInternalTestModel(mc, "primary", "primary-upstream-model", "secondary")
+			seedInternalTestModel(mc, "secondary", "secondary-upstream-model")
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1863,6 +1863,7 @@ func TestIdleTermination_Triggered(t *testing.T) {
 	// Create mock upstream that hangs after a few chunks
 	upstream := httptest.NewServer(mockIdleHangHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
@@ -1926,6 +1927,7 @@ func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
 	// Use normal mock handler (completes successfully)
 	upstream := httptest.NewServer(mockLLMHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
@@ -1988,6 +1990,7 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	// Use mock that sends continuously (50ms between chunks)
 	upstream := httptest.NewServer(mockContinuousStreamHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
@@ -2120,14 +2123,11 @@ func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc
 // the ultimate model gate does not block the request and allows normal flow to proceed.
 // This test verifies the permission gate allows through authorized requests.
 func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true, // This triggers authentication
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Set up ultimate model config
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
@@ -2189,14 +2189,11 @@ func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
 // TestUltimateModelPermissionDenied_SkipsUltimateModel tests that when permission is denied,
 // the ultimate model check is skipped entirely and requests fall through to normal proxy.
 func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true, // This triggers authentication
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Set up ultimate model config
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
@@ -2253,14 +2250,11 @@ func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
 // TestUltimateModelPermissionDenied_HashInCache_Skips tests that even if a hash exists in
 // the ultimate model cache, the permission gate prevents ultimate model triggering.
 func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true,
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Create mock token store with permission DENIED
 	tokenStore := newMockTokenStore()
@@ -2322,14 +2316,12 @@ func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
 // is required (external model), ultimate model is not triggered because rc.ultimateModelEnabled
 // defaults to false.
 func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
-	// Create external model config (does NOT trigger auth)
+	// remove-external-upstream P1/P5: the model must be internal-
+	// resolvable (the deleted external arm no longer serves a
+	// passthrough); the test only cares that the ultimate gate is
+	// skipped without a token.
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:      "external-model",
-		Name:    "External Model",
-		Enabled: true,
-		// Internal: false (default) - no auth required
-	})
+	seedInternalTestModel(mc, "external-model", "external-model-upstream")
 
 	// Create handler WITHOUT token store (auth disabled)
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, nil, func(c *config.Config) {
@@ -2454,7 +2446,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "claude-3",
 	})
 	if err != nil {
@@ -2467,7 +2459,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2563,7 +2555,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2650,7 +2642,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "any-model",
 	})
 	if err != nil {

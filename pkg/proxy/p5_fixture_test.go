@@ -32,19 +32,27 @@ const (
 )
 
 // seedInternalFixtureErr registers the fixture pair on mc and returns
-// any seeding error. No-op (nil error) when mc is nil.
+// any seeding error. No-op (nil error) when mc is nil. The credential's
+// base_url is UPSERTED to upstreamURL (a test may have declared the
+// fixture credential earlier with a placeholder URL so its model rows
+// pass write-time validation).
 func seedInternalFixtureErr(mc models.ModelsConfigInterface, upstreamURL, modelID string) error {
 	if mc == nil {
 		return nil
 	}
-	if mc.GetCredential(p5FixtureCredID) == nil {
-		if err := mc.AddCredential(models.CredentialConfig{
-			ID:       p5FixtureCredID,
-			Provider: "openai",
-			APIKey:   "test-key",
-			BaseURL:  upstreamURL,
-		}); err != nil {
+	cred := models.CredentialConfig{
+		ID:       p5FixtureCredID,
+		Provider: "openai",
+		APIKey:   "test-key",
+		BaseURL:  upstreamURL,
+	}
+	if existing := mc.GetCredential(p5FixtureCredID); existing == nil {
+		if err := mc.AddCredential(cred); err != nil {
 			return fmt.Errorf("seedInternalFixture: AddCredential: %w", err)
+		}
+	} else if existing.BaseURL != upstreamURL {
+		if err := mc.UpdateCredential(p5FixtureCredID, cred); err != nil {
+			return fmt.Errorf("seedInternalFixture: UpdateCredential: %w", err)
 		}
 	}
 	if mc.GetModel(modelID) == nil {
@@ -60,6 +68,35 @@ func seedInternalFixtureErr(mc models.ModelsConfigInterface, upstreamURL, modelI
 		}
 	}
 	return nil
+}
+
+// seedInternalTestModel adds an internal chat model row referencing the
+// fixture credential — for testCase literals that declare their own
+// model table (fallback chains). Post-P1 the write-stamp forces
+// Internal=true, so a credential-less row fails AddModel validation;
+// this helper declares the fixture credential (placeholder base_url —
+// newTestHandler re-points it at the httptest upstream) then the row.
+func seedInternalTestModel(mc models.ModelsConfigInterface, id, internalModel string, fallback ...string) {
+	if mc == nil {
+		return
+	}
+	if mc.GetCredential(p5FixtureCredID) == nil {
+		_ = mc.AddCredential(models.CredentialConfig{
+			ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key",
+		})
+	}
+	if mc.GetModel(id) != nil {
+		return
+	}
+	_ = mc.AddModel(models.ModelConfig{
+		ID:            id,
+		Name:          id,
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: internalModel,
+		FallbackChain: fallback,
+		Credentials:   models.TestRefs(p5FixtureCredID),
+	})
 }
 
 // seedInternalFixture registers the canonical internal fixture pair
