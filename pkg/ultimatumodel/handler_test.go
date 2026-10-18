@@ -29,7 +29,6 @@ func newMockConfigManager() *mockConfigManager {
 	return &mockConfigManager{
 		cfg: config.Config{
 			Version:           "test",
-			UpstreamURL:       "http://localhost:4001",
 			Port:              4321,
 			IdleTimeout:       config.Duration(60 * time.Second),
 			StreamDeadline:    config.Duration(110 * time.Second),
@@ -44,10 +43,6 @@ func newMockConfigManager() *mockConfigManager {
 
 func (m *mockConfigManager) Get() config.Config {
 	return m.cfg
-}
-
-func (m *mockConfigManager) GetUpstreamURL() string {
-	return m.cfg.UpstreamURL
 }
 
 func (m *mockConfigManager) GetPort() int {
@@ -778,7 +773,6 @@ func TestSendRetryExhaustedError_EmptyHash(t *testing.T) {
 
 func TestExecute_ModelNotFound(t *testing.T) {
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = "http://localhost:9999" // Won't be used
 	modelsCfg := newMockModelsConfig()
 	// Don't add the model
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -837,7 +831,6 @@ func TestExecute_ExternalNonStreaming(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL // Use mock server
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -911,7 +904,6 @@ func TestExecute_ExternalStreaming(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -946,7 +938,6 @@ func TestExecute_UpstreamError(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -981,7 +972,6 @@ func TestExecute_ContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 	cfg.cfg.MaxGenerationTime = config.Duration(50 * time.Millisecond) // Short timeout
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
@@ -1327,7 +1317,6 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model" // Global config model
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	// Add both the global model and the per-token override model
@@ -1392,7 +1381,6 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
@@ -1459,7 +1447,6 @@ func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
@@ -1526,7 +1513,6 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
@@ -1663,7 +1649,6 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-model-id" // Global config uses ID
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	// Add model with ID that matches global config, but different NAME
@@ -1738,7 +1723,6 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
@@ -1843,7 +1827,6 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	// Add models with different ID and NAME
