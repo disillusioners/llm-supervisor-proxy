@@ -57,8 +57,9 @@ type GroupRewriter interface {
 	// Am28 stale-member re-validation). conversationKey is the
 	// request's key — for a direct-named group it is the
 	// GROUP-salted key (ComputeConversationKey(groupID, tokenID,
-	// firstUserMessage)); empty key ⇒ fresh weighted pick, no
-	// binding.
+	// leadingUserRun) — leadingUserRun being the canonical JSON
+	// array of the leading contiguous user-message run); empty key
+	// ⇒ fresh weighted pick, no binding.
 	RewriteGroupEntries(modelList []string, conversationKey string) GroupRewriteResult
 
 	// ExcludeGroupMember marks the member as cooling for the group

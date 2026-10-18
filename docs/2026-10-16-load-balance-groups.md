@@ -97,8 +97,9 @@ The first request of a conversation weighted-randomly picks ONE
 member (3/2/1 ⇒ ~50%/~33%/~17%). Subsequent requests pin to that
 member for up to **24 hours of inactivity** (sliding-idle TTL).
 Pinning key is the SHA-256 group-salted conversation hash (group
-ID + tokenID + firstUserMessage); different tokens and different
-conversations get independent picks.
+ID + tokenID + canonical JSON array of the leading contiguous
+user-message run); different tokens and different conversations
+get independent picks.
 
 If the pinned member fails with a terminal upstream failure
 (5xx, terminal connection error, etc. — NOT a credential 429
