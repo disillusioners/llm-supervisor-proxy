@@ -931,6 +931,18 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, w, arc.isStream, arc.conversationKey)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
+		// remove-external-upstream P5: a NON-STREAM provider error is
+		// raised before any wire write (handleNonStream returns the
+		// provider error without writing — internal_handler.go:424-427),
+		// so nothing has reached the client. Surface it through the
+		// standard error-envelope path (lastError/lastStatusCode → the
+		// caller's `!headersSent` branch) instead of returning true,
+		// which would leave the client with an empty 200.
+		if !arc.isStream {
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
 		// Mid-stream error path (NB2): the InternalHandler's
 		// case "error" arm has already run translator.Finalize()
 		// + emitted a well-formed Anthropic error event on the wire
