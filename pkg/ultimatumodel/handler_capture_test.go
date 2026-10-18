@@ -22,10 +22,8 @@ package ultimatemodel
 // the no-mutation invariant.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
