@@ -2,6 +2,7 @@ package imggen
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -49,6 +50,13 @@ type fakeScript struct {
 	body        []byte
 	contentType string
 	delay       time.Duration
+	// gzipNegotiate turns the fake into a real gzip-negotiating
+	// upstream: when the incoming Accept-Encoding includes gzip,
+	// the response body is gzipped + Content-Encoding: gzip is
+	// set. Opt-in (default off) so existing tests keep identity
+	// responses — the negotiation round-trip discriminator test
+	// is the only consumer.
+	gzipNegotiate bool
 }
 
 func newFakeMiniMax(t *testing.T, script fakeScript) (*httptest.Server, *fakeMiniMax) {
@@ -73,9 +81,22 @@ func newFakeMiniMax(t *testing.T, script fakeScript) (*httptest.Server, *fakeMin
 				return
 			}
 		}
+		// Opt-in gzip negotiation (see fakeScript.gzipNegotiate):
+		// respond with a gzipped body + Content-Encoding: gzip
+		// exactly when the incoming request's Accept-Encoding
+		// includes gzip — a real negotiating upstream.
+		payload := script.body
+		if script.gzipNegotiate && strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			_, _ = zw.Write(script.body)
+			_ = zw.Close()
+			payload = buf.Bytes()
+			w.Header().Set("Content-Encoding", "gzip")
+		}
 		w.Header().Set("Content-Type", script.contentType)
 		w.WriteHeader(script.status)
-		_, _ = w.Write(script.body)
+		_, _ = w.Write(payload)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, f
@@ -514,6 +535,30 @@ func TestHandler_Upstream_SingleContentTypeNoClientAcceptEncoding(t *testing.T) 
 		if v != "gzip" {
 			t.Errorf("upstream Accept-Encoding = %q, want exactly [\"gzip\"] (transport-added)", gotAE)
 		}
+	}
+}
+
+// TestHandler_Upstream_GzipNegotiationRoundTrip — REAL-symptom
+// discriminator (the test above only inspects the upstream
+// REQUEST): this fake upstream actually NEGOTIATES gzip. With the
+// AE leak the handler's transport (which did not add
+// Accept-Encoding itself) does NOT transparently decompress, so
+// the gzipped upstream body reaches the JSON classifier raw ⇒ 502
+// "unparseable JSON". Fixed, the transport adds its own
+// "Accept-Encoding: gzip", decompresses transparently, and the
+// client relay is 200 with the byte-identical plaintext body.
+func TestHandler_Upstream_GzipNegotiationRoundTrip(t *testing.T) {
+	plainBody := successBody(1, 0)
+	env := newEnv(t, fakeScript{status: 200, body: plainBody, gzipNegotiate: true})
+
+	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"a cat"}`, map[string]string{
+		"Accept-Encoding": "gzip", // cloudflared-realistic client
+	})
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (negotiated upstream gzip must be transparently decoded); body=%q", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), plainBody) {
+		t.Errorf("client body is not the plaintext upstream JSON (gzip leak?): got=%q want=%q", rec.Body.String(), string(plainBody))
 	}
 }
 
