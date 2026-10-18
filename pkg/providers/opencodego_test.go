@@ -344,16 +344,16 @@ func TestOpencodeGo_UserAgent_DefaultAndOverride(t *testing.T) {
 	}
 }
 
-// TestOpencode_NonRegression_NoSessionNoUA (gate e) — the existing
-// "opencode" (Zen) provider carries NO x-opencode-session and NO
-// custom User-Agent, and even a blind attach call is a no-op.
-func TestOpencode_NonRegression_NoSessionNoUA(t *testing.T) {
+// TestOpencode_Zen_UAOnly_NoSession (gate e, updated by the Zen UA
+// commission) — the "opencode" (Zen) provider carries the provider-native
+// User-Agent but NO x-opencode-session header. The attach call is still
+// the single seam; it now stamps UA-only for Zen.
+func TestOpencode_Zen_UAOnly_NoSession(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
 	defer server.Close()
 
 	zen, _ := NewProvider("opencode", "test-key", server.URL)
-	// Blind attach — must be a kind-checked no-op on Zen.
 	AttachOpenCodeGoAttribution(zen, "conv-key", "model", "cred")
 	if _, err := zen.ChatCompletion(context.Background(), &ChatCompletionRequest{Model: "kimi-k3", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}); err != nil {
 		t.Fatalf("zen call: %v", err)
@@ -361,11 +361,13 @@ func TestOpencode_NonRegression_NoSessionNoUA(t *testing.T) {
 	if got := captures[0]["session"]; got != "" {
 		t.Errorf("gate (e): opencode (Zen) must NOT carry x-opencode-session, got %q", got)
 	}
-	if strings.HasPrefix(captures[0]["user_agent"], "opencode/") {
-		t.Errorf("gate (e): opencode (Zen) UA must be untouched, got %q", captures[0]["user_agent"])
+	// Zen now carries the provider-native UA (Zen UA commission).
+	if got, want := captures[0]["user_agent"], DefaultOpenCodeUserAgent(); got != want {
+		t.Errorf("gate (e): opencode (Zen) UA: got %q, want %q", got, want)
 	}
 
-	// Plain OpenAI provider: same no-op guarantee.
+	// Plain OpenAI provider: still fully untouched — no session header
+	// and NO attribution UA (Go transport default).
 	plain := NewOpenAIProvider("test-key", server.URL)
 	AttachOpenCodeGoAttribution(plain, "conv-key", "model", "cred")
 	if _, err := plain.ChatCompletion(context.Background(), &ChatCompletionRequest{Model: "gpt-4o", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}); err != nil {
@@ -373,6 +375,9 @@ func TestOpencode_NonRegression_NoSessionNoUA(t *testing.T) {
 	}
 	if got := captures[1]["session"]; got != "" {
 		t.Errorf("plain OpenAI provider must NOT carry x-opencode-session, got %q", got)
+	}
+	if strings.HasPrefix(captures[1]["user_agent"], "opencode/") {
+		t.Errorf("plain OpenAI provider must NOT carry an attribution UA, got %q", captures[1]["user_agent"])
 	}
 }
 

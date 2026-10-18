@@ -83,10 +83,18 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 		// stable-docs alternative https://opencode.ai/zen/v1 is
 		// equally live with the same catalog — users can override
 		// via credential.base_url.
+		//
+		// Zen carries provider-native UA attribution (UA-only; no
+		// session header) — see opencodego.go and the Zen UA design
+		// note. The flavour flag gates the kind-checked attribution
+		// seam; the UA is stamped only after the proxy attaches it
+		// (AttachOpenCodeGoAttribution), never at construction.
 		if baseURL == "" {
 			baseURL = "https://opencode.ai/inference/openai/v1"
 		}
-		return NewOpenAIProvider(apiKey, baseURL), nil
+		p := NewOpenAIProvider(apiKey, baseURL)
+		p.openCodeZen = true
+		return p, nil
 	case ProviderOpencodeGo:
 		// OpenCode Go (subscription realm) — OpenAI-compatible API,
 		// DISTINCT provider from ProviderOpencode (Zen): different

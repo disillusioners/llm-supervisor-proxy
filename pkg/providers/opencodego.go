@@ -11,34 +11,54 @@ import (
 )
 
 // =============================================================================
-// opencode-go — OpenCode Go (subscription) distinct provider.
+// OpenCode provider family — provider-native upstream attribution.
 //
-// opencode-go is a DISTINCT provider identity from "opencode" (Zen,
-// pay-per-use): same OpenAI-compatible wire, different upstream realm,
-// different entitlements. Beyond the shared OpenAIProvider transport it
-// carries provider-native ATTRIBUTION on every upstream request:
+// Two DISTINCT provider identities share the OpenCode OpenAI-compatible
+// wire: "opencode-go" (OpenCode Go, subscription) and "opencode"
+// (OpenCode Zen, pay-per-use). Same wire, different upstream realms,
+// different entitlements — and different provider-native attribution
+// needs:
 //
-//   1. x-opencode-session — a conversation-stable session id, derived
-//      deterministically from the proxy's conversation key (the same
-//      credentiallb.ComputeConversationKey product that drives
-//      credential affinity). The Go gateway hard-gates chat on this
-//      header (400 {"error":{"type":"MissingSessionID"}} when absent —
-//      live-verified 2026-10-17, see .agents/shared/planning/
-//      opencode-go-surface-research/report.md §c).
-//   2. User-Agent — provider-default official-client format
-//      opencode/{channel}/{version}/{name} (≈ opencode/stable/2.0.32/cli),
-//      overridable via OPENCODE_GO_USER_AGENT (see ResolveOpenCodeGoUserAgent
-//      for the honesty-tension rationale).
+//  1. opencode-go (OpenCode Go) — full attribution:
+//       - x-opencode-session — a conversation-stable session id, derived
+//         deterministically from the proxy's conversation key (the same
+//         credentiallb.ComputeConversationKey product that drives
+//         credential affinity). The Go gateway hard-gates chat on this
+//         header (400 {"error":{"type":"MissingSessionID"}} when absent —
+//         live-verified 2026-10-17, see .agents/shared/planning/
+//         opencode-go-surface-research/report.md §c).
+//       - User-Agent — provider-default official-client format
+//         opencode/{channel}/{version}/{name} (≈ opencode/stable/2.0.32/cli),
+//         overridable via OPENCODE_GO_USER_AGENT (see
+//         ResolveOpenCodeGoUserAgent for the honesty-tension rationale).
+//
+//  2. opencode (OpenCode Zen) — UA-ONLY attribution:
+//       - User-Agent — the same official-client format default
+//         (opencode/stable/2.0.32/cli; the vendor's App.useragent is
+//         provider-independent, so both surfaces send the same shape),
+//         overridable via OPENCODE_USER_AGENT (see
+//         ResolveOpenCodeUserAgent).
+//       - NO x-opencode-session: Zen has no known session-header gate
+//         (the free-tier "client-lock" is UA-shaped; research
+//         report §c/§e + the 2026-10-17 Zen research note). Adding an
+//         unproven session header would be speculative wire surface, so
+//         it is deliberately omitted. See the Zen UA design note
+//         (.agents/shared/planning/opencode-zen-ua/design-note.md) for
+//         the open question on gate depth.
 //
 // Attribution is attached by the proxy call sites via
-// AttachOpenCodeGoAttribution and stamped in OpenAIProvider.setHeaders.
-// Nothing else changes for any other provider: the attribution flag is
-// set ONLY by the factory's ProviderOpencodeGo case, and every attach
-// helper is a kind-checked no-op otherwise. The existing "opencode"
-// (Zen) provider never sets the flag and never carries the headers
-// (non-regression test: opencodego_test.go).
+// AttachOpenCodeGoAttribution (invoked unconditionally at every provider
+// construction site; kind-checked internally) and stamped in
+// OpenAIProvider.setHeaders — the single header-stamping site, so the
+// real internal path, the ultimate-model internal path, and the UI
+// test-connection path all inherit it with no per-path wiring.
 //
-// Design note: .agents/shared/planning/opencode-go-provider/design-note.md
+// Nothing else changes for any other provider: the flavour flags are set
+// ONLY by the factory's ProviderOpencodeGo / ProviderOpencode cases, and
+// the attach helper is a kind-checked no-op otherwise.
+//
+// Design notes: .agents/shared/planning/opencode-go-provider/design-note.md
+// (Go), .agents/shared/planning/opencode-zen-ua/design-note.md (Zen UA).
 // =============================================================================
 
 const (
@@ -59,10 +79,17 @@ const (
 	// report §b).
 	OpenCodeGoDefaultBaseURL = "https://opencode.ai/inference/go/openai/v1"
 
-	// EnvOpenCodeGoUserAgent is the provider-level User-Agent override.
-	// When set to a non-empty value it replaces the official-client
-	// default for opencode-go upstream requests.
+	// EnvOpenCodeGoUserAgent is the provider-level User-Agent override
+	// for opencode-go. When set to a non-empty value it replaces the
+	// official-client default for opencode-go upstream requests.
 	EnvOpenCodeGoUserAgent = "OPENCODE_GO_USER_AGENT"
+
+	// EnvOpenCodeUserAgent is the provider-level User-Agent override
+	// for "opencode" (Zen). When set to a non-empty value it replaces
+	// the official-client default for opencode (Zen) upstream
+	// requests. Scoped to Zen ONLY — it never affects opencode-go or
+	// any other provider (each flavour reads its own env var).
+	EnvOpenCodeUserAgent = "OPENCODE_USER_AGENT"
 
 	// openCodeGoSessionDomain domain-separates session derivation from
 	// every other hash use of the conversation key (the raw key also
@@ -72,9 +99,12 @@ const (
 
 	// Official-client UA format constants (research report §c:
 	// packages/core/src/app.ts:24-26 — opencode/{channel}/{version}/{name}).
-	openCodeGoUAChannel = "stable"
-	openCodeGoUAVersion = "2.0.32"
-	openCodeGoUAName    = "cli"
+	// The vendor's App.useragent is provider-INDEPENDENT: the same UA
+	// rides every surface (Zen and Go alike), so these constants are
+	// shared by both providers' defaults.
+	openCodeUAChannel = "stable"
+	openCodeUAVersion = "2.0.32"
+	openCodeUAName    = "cli"
 
 	// Session-id shape constants. The vendor client's session id is
 	// "ses_" + 26 chars: 12 hex chars (a 48-bit timestamp*0x1000+counter
@@ -100,17 +130,21 @@ const (
 )
 
 // SessionAttribution carries the provider-native attribution headers
-// stamped on opencode-go upstream requests.
+// stamped on OpenCode-family upstream requests. Each field is stamped
+// independently by setHeaders when non-empty.
 type SessionAttribution struct {
 	// SessionID is the x-opencode-session value: an opencode-shaped,
 	// conversation-stable session id (ses_ + 12 hex + 14 base62).
+	// Set by opencode-go only; empty for opencode (Zen) ⇒ no session
+	// header is emitted.
 	SessionID string
-	// UserAgent is the User-Agent value.
+	// UserAgent is the User-Agent value (both OpenCode flavours).
 	UserAgent string
 }
 
-// DefaultOpenCodeGoUserAgent returns the provider-default User-Agent in
-// the official client format: opencode/{channel}/{version}/{name}.
+// DefaultOpenCodeGoUserAgent returns the opencode-go provider-default
+// User-Agent in the official client format:
+// opencode/{channel}/{version}/{name}.
 //
 // UA policy note (design decision, user-directed): the research report's
 // good-citizen guidance says docs only require an HONEST self-identifying
@@ -120,7 +154,7 @@ type SessionAttribution struct {
 // llm-supervisor-proxy/<ver> form. Both are documented as acceptable by
 // the upstream docs; see design-note.md "UA policy".
 func DefaultOpenCodeGoUserAgent() string {
-	return "opencode/" + openCodeGoUAChannel + "/" + openCodeGoUAVersion + "/" + openCodeGoUAName
+	return "opencode/" + openCodeUAChannel + "/" + openCodeUAVersion + "/" + openCodeUAName
 }
 
 // ResolveOpenCodeGoUserAgent resolves the User-Agent for opencode-go
@@ -140,6 +174,43 @@ func ResolveOpenCodeGoUserAgent() string {
 		return v
 	}
 	return DefaultOpenCodeGoUserAgent()
+}
+
+// DefaultOpenCodeUserAgent returns the "opencode" (Zen) provider-default
+// User-Agent in the official client format
+// (opencode/{channel}/{version}/{name}).
+//
+// It is deliberately the SAME string as DefaultOpenCodeGoUserAgent: the
+// vendor client's UA (App.useragent) is provider-independent, so a
+// faithful client posture sends one value across both surfaces. The two
+// functions are kept separate so each provider's policy and its
+// env-override scope read explicitly at the call site (and may diverge
+// if a surface ever needs a different client name).
+func DefaultOpenCodeUserAgent() string {
+	return "opencode/" + openCodeUAChannel + "/" + openCodeUAVersion + "/" + openCodeUAName
+}
+
+// ResolveOpenCodeUserAgent resolves the User-Agent for "opencode" (Zen)
+// upstream requests: OPENCODE_USER_AGENT (trimmed, non-empty) wins,
+// otherwise DefaultOpenCodeUserAgent.
+//
+// Scoping contract: this reads ONLY EnvOpenCodeUserAgent, and only Zen
+// providers ever consume the result (via AttachOpenCodeGoAttribution's
+// openCodeZen arm). It never influences opencode-go or any other
+// provider — the two override knobs are fully independent.
+//
+// Why Zen carries a native UA at all: Zen's free tier is client-locked
+// (third-party clients are refused — the 2026-10-17 Zen research note;
+// "free models still require Bearer key from third-party clients"), so
+// presenting the provider-native client UA is the compatibility posture.
+// Whether the gate keys on UA alone or on a deeper signal is unproven
+// today (see the Zen UA design note's open question); this knob is the
+// honest lever to test it.
+func ResolveOpenCodeUserAgent() string {
+	if v := strings.TrimSpace(os.Getenv(EnvOpenCodeUserAgent)); v != "" {
+		return v
+	}
+	return DefaultOpenCodeUserAgent()
 }
 
 // OpenCodeGoSessionSeed returns the session-derivation seed for an
@@ -219,27 +290,48 @@ func encodeBase62Padded(n *big.Int, width int) string {
 	return string(out)
 }
 
-// AttachOpenCodeGoAttribution derives and attaches the opencode-go
-// session + UA attribution onto providerClient.
+// AttachOpenCodeGoAttribution derives and attaches provider-native
+// attribution onto providerClient for the OpenCode provider family.
 //
 // Call-shape contract: invoke UNCONDITIONALLY at every provider
 // construction site that has the conversation context in scope. It is a
-// no-op unless providerClient is the opencode-go-flavoured
-// OpenAIProvider (kind-checked via the factory-set flag), so non-
-// opencode-go providers are never touched — "session header injection
-// for opencode-go upstream requests ONLY".
+// kind-checked no-op unless providerClient is an OpenCode-flavoured
+// OpenAIProvider (factory-set flag), so all other providers are never
+// touched — OpenCode attribution is stamped "for OpenCode upstream
+// requests ONLY".
 //
-// The id is derived at request time (no storage): the seed tuple is the
-// per-request conversation identity already threaded by the proxy, and
-// DeriveOpenCodeGoSessionID is a pure function of it, so every attempt /
-// failover re-derivation within one request lands on the SAME session id.
+// Flavour dispatch:
+//
+//   - opencode-go: session + UA. The id is derived at request time (no
+//     storage): the seed tuple is the per-request conversation identity
+//     already threaded by the proxy, and DeriveOpenCodeGoSessionID is a
+//     pure function of it, so every attempt / failover re-derivation
+//     within one request lands on the SAME session id.
+//   - opencode (Zen): UA only (empty SessionID ⇒ no x-opencode-session
+//     header; see the family banner for why). The UA is read from
+//     OPENCODE_USER_AGENT at attach time, mirroring the Go variant's
+//     timing.
+//
+// The function name retains its original "Go" spelling for call-site
+// stability (the four construction sites invoke it by this name); it now
+// covers the whole OpenCode family.
 func AttachOpenCodeGoAttribution(providerClient Provider, conversationKey, modelID, credentialID string) {
 	op, ok := providerClient.(*OpenAIProvider)
-	if !ok || !op.openCodeGo {
+	if !ok {
 		return
 	}
-	op.SetSessionAttribution(SessionAttribution{
-		SessionID: DeriveOpenCodeGoSessionID(OpenCodeGoSessionSeed(conversationKey, modelID, credentialID)),
-		UserAgent: ResolveOpenCodeGoUserAgent(),
-	})
+	switch {
+	case op.openCodeGo:
+		op.SetSessionAttribution(SessionAttribution{
+			SessionID: DeriveOpenCodeGoSessionID(OpenCodeGoSessionSeed(conversationKey, modelID, credentialID)),
+			UserAgent: ResolveOpenCodeGoUserAgent(),
+		})
+	case op.openCodeZen:
+		// Zen: UA-only. conversationKey / modelID / credentialID are
+		// intentionally unused (no session derivation) — the provider
+		// UA is conversation-independent.
+		op.SetSessionAttribution(SessionAttribution{
+			UserAgent: ResolveOpenCodeUserAgent(),
+		})
+	}
 }
