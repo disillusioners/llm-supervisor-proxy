@@ -440,6 +440,28 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			})
 			return
 		}
+		if errors.Is(err, ErrModelNotFound) {
+			// remove-external-upstream P1 — unknown/non-internal model.
+			// Real-API 404 semantics (R7): invalid_request_error + code
+			// model_not_found — NOT the decision/imggen server-error
+			// shape. rc is nil on this path, so the event fields ride on
+			// the sentinel (modelNotFoundError) — parity with the
+			// config_store_unavailable site above. The request log was
+			// already finalized at the gate (initRequestContext).
+			evtID, evtModel := "", ""
+			var mnfe *modelNotFoundError
+			if errors.As(err, &mnfe) {
+				evtID, evtModel = mnfe.reqID, mnfe.model
+			}
+			h.publishEvent("model_not_found", map[string]interface{}{
+				"id":              evtID,
+				"model":           evtModel,
+				"outcome":         "model_not_found",
+				"upstream_status": 0,
+			})
+			h.sendError(w, http.StatusNotFound, fmt.Sprintf("model '%s' not found", evtModel), "invalid_request_error", "model_not_found")
+			return
+		}
 		if errors.Is(err, ErrInvalidUpstreamURL) {
 			http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
 		} else if errors.Is(err, ErrReadBodyFailed) {

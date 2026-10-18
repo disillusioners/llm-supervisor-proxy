@@ -41,6 +41,30 @@ func (e *configUnavailableError) Error() string {
 
 func (e *configUnavailableError) Unwrap() error { return modelscache.ErrConfigUnavailable }
 
+// ErrModelNotFound — the unknown/non-internal model sentinel returned by
+// initRequestContext (remove-external-upstream P1). Every model must
+// resolve through internal credentials; an unknown OR legacy
+// non-internal model 404s at the boundary with ZERO upstream requests.
+var ErrModelNotFound = errors.New("model_not_found")
+
+// modelNotFoundError is the sentinel returned by initRequestContext
+// when the unknown/non-internal 404 gate trips. It wraps
+// ErrModelNotFound (so errors.Is keeps matching at the caller) and
+// carries the request-scoped context (reqID, model) the caller needs
+// to publish the model_not_found event — the requestContext is nil on
+// this path, so the event fields ride on the error (exact
+// configUnavailableError pattern above).
+type modelNotFoundError struct {
+	reqID string
+	model string
+}
+
+func (e *modelNotFoundError) Error() string {
+	return fmt.Sprintf("%s: unknown or non-internal model %q", ErrModelNotFound, e.model)
+}
+
+func (e *modelNotFoundError) Unwrap() error { return ErrModelNotFound }
+
 // Request-parse sentinels returned by initRequestContext and matched
 // with errors.Is at the HandleChatCompletions dispatch (tidy finding
 // 6). The message strings are the historical wire contract — they
@@ -144,6 +168,35 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
 			return nil, &configUnavailableError{reqID: reqID, model: originalModel}
 		}
+	}
+
+	// remove-external-upstream P1 — unknown/non-internal 404 gate.
+	// Runs AFTER the resolve and AFTER the cache-unhealthy 503 check
+	// above: an unhealthy store still wins with config_store_unavailable
+	// ("cannot know"), but a HEALTHY store that answers nil — or answers
+	// with a legacy `internal = 0` row — now 404s instead of bypass-
+	// forwarding to the retired global upstream.
+	//
+	// The `!Internal` conjunct is LOAD-BEARING, not belt-and-braces:
+	// GetModel never filters `enabled` for non-group rows, and migration
+	// 032's disable arm leaves `internal = 0` on legacy rows PERMANENTLY
+	// (it never flips internal) — so for the permanent legacy rows the
+	// conjunct is the SOLE 404 mechanism. Do not simplify it away.
+	//
+	// reqLog finalization (review I8): the log row was added with
+	// Status "running" above; the pre-existing cache-503 path leaves
+	// that row stuck ("running" ghost). This gate finalizes it —
+	// Status "failed" + Error/EndTime/Duration, re-Add (overwrite-by-ID).
+	// The requestContext is nil on this path, so reqID/model ride on the
+	// sentinel (modelNotFoundError) for the caller's event publication.
+	if resolvedModel == nil || !resolvedModel.Internal {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", originalModel)
+		reqLog.Status = "failed"
+		reqLog.Error = notFoundMsg
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = reqLog.EndTime.Sub(startTime).String()
+		h.store.Add(reqLog)
+		return nil, &modelNotFoundError{reqID: reqID, model: originalModel}
 	}
 
 	// Build model list using resolved config

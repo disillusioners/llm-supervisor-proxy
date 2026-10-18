@@ -175,6 +175,38 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// remove-external-upstream P1 — unknown/non-internal 404 gate,
+	// Anthropic twin (task 2). INLINE mirror of the OpenAI gate in
+	// initRequestContext (handler_functions.go) — a SEPARATE gate site,
+	// not a shared helper (the two inits are parallel by design).
+	// Same condition, same load-bearing `!Internal` conjunct (the SOLE
+	// 404 mechanism for the permanent legacy rows: GetModel never
+	// filters `enabled` for non-group rows and migration 032 never
+	// flips internal). Envelope is the ROUTE'S family (Anthropic):
+	// not_found_error + code model_not_found — NOT the misroute guard's
+	// 400-class invalid_request_error literal (R7). reqLog finalized
+	// here (Status failed + Error/EndTime/Duration, re-Add
+	// overwrite-by-ID) — the log row was added "running" above.
+	if resolvedModel == nil || !resolvedModel.Internal {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", originalModel)
+		reqLog.Status = "failed"
+		reqLog.Error = notFoundMsg
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = reqLog.EndTime.Sub(startTime).String()
+		h.store.Add(reqLog)
+		h.publishEvent("model_not_found", map[string]interface{}{
+			"id":              reqID,
+			"model":           originalModel,
+			"outcome":         "model_not_found",
+			"upstream_status": 0,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"not_found_error", "model_not_found", notFoundMsg))
+		return
+	}
+
 	// Decision Models commission / §3.1 site 8 — NEW post-resolve
 	// guard on the /v1/messages (Anthropic) route. The route had
 	// ZERO misroute checks today (a verified gap); a decision
