@@ -780,8 +780,7 @@ func TestExecuteExternal_NonStreamResponse_Gate_NoReasoning_NonMiniMax_ByteIdent
 func TestStreamResponse_Gate_ReasoningContent_MiniMax_StripsDetails(t *testing.T) {
 	const upstreamStream = "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"id\":\"reasoning-text-1\",\"format\":\"MiniMax-response-v1\",\"index\":0,\"text\":\"think\"}]}}]}\n\n" +
 		"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: [DONE]\n\n"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte(upstreamStream))
 	}))
@@ -841,8 +840,7 @@ func TestStreamResponse_Gate_ReasoningContent_MiniMax_StripsDetails(t *testing.T
 func TestStreamResponse_Gate_NoReasoning_NoMiniMax_ByteIdentical(t *testing.T) {
 	const upstreamStream = "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: [DONE]\n\n"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte(upstreamStream))
 	}))
