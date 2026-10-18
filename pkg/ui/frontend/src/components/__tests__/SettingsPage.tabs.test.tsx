@@ -37,7 +37,6 @@ function makeProps(overrides: Partial<{
 }> = {}) {
   const baseConfig: AppConfig = {
     version: '0.0.0',
-    upstream_url: '',
     port: 8089,
     idle_timeout: '',
     stream_deadline: '',
