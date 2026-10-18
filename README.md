@@ -76,8 +76,6 @@ The proxy uses a three-tier configuration system with the following precedence:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
-| `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
 | `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming. |
