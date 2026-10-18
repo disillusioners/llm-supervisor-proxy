@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/preact';
 import { EventLog } from '../EventLog';
-import type { Event } from '../../types';
+import type { Event, EventData } from '../../types';
 
 afterEach(() => cleanup());
 
@@ -20,8 +20,12 @@ function renderEvents(events: Event[]): Element {
   return container;
 }
 
-function evt(type: Event['type'], data: Record<string, unknown>): Event {
-  return { type, timestamp: 0, data } as unknown as Event;
+// All EventData fields are optional, so a Partial<EventData> payload
+// assigns to Event.data directly — no double-cast needed, and the
+// fixtures are type-checked against the real shape (incl. the additive
+// race-reason keys reason/reason_class/reason_status).
+function evt(type: Event['type'], data: Partial<EventData>): Event {
+  return { type, timestamp: 0, data };
 }
 
 describe('EventLog race reason classification (additive renderers)', () => {

@@ -22,17 +22,19 @@ package proxy
 //
 //   - sanitizeReasonDetail — single-line flattening + rune-safe
 //     truncation at maxReasonDetailRunes + best-effort secret
-//     redaction. Every free-text fragment that reaches an event
-//     payload or a [RACE] log line goes through it, so no upstream
-//     body can ever flood the log.
+//     redaction. Every free-text fragment classified BY THIS FILE
+//     goes through it (see the scope note below) — raw err.Error()
+//     emissions elsewhere on the request path are out of scope, so
+//     this is a scoped guarantee for this file's output, not a
+//     log-wide one.
 //
 // Design constraints honored here:
 //
 //   - Event names and the observable event shape are UNCHANGED. The
 //     enrichment is additive: payloads GAIN `reason` / `reason_class`
 //     / `reason_status`; existing keys keep their meaning
-//     (`trigger_reason` now carries the same bounded detail it always
-//     carried, just never unbounded).
+//     (`trigger_reason` carries the same detail it always carried,
+//     now bounded + redacted).
 //
 //   - Redaction is BEST-EFFORT defense-in-depth, NOT a guarantee. The
 //     reasonSecret* patterns strip a FIXED set of high-confidence
@@ -60,6 +62,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -135,6 +138,26 @@ func (f failureReason) String() string {
 	return b.String()
 }
 
+// appendReasonFields adds the ADDITIVE classified-reason payload
+// fields to an event/row map. The key sequence is the fixed
+// convention shared by every classified emission site (race_spawn,
+// race_all_failed per-row, race_request_failed) and mirrors
+// failureReason.String()'s segment order:
+//
+//	reason → reason_class → reason_status (ONLY when Status > 0)
+//
+// The order is source-level (Go maps are unordered on the wire) but
+// it is greppable and MUST NOT drift — this helper is now the single
+// place that defines it. Callers keep their own gating (e.g. the
+// race_spawn site publishes nothing extra for idle-timeout spawns).
+func appendReasonFields(m map[string]interface{}, fr failureReason) {
+	m["reason"] = fr.String()
+	m["reason_class"] = fr.Class
+	if fr.Status > 0 {
+		m["reason_status"] = fr.Status
+	}
+}
+
 // classifyAttemptFailure classifies one failed attempt from its error
 // and the HTTP status stored on the attempt (0 when none). Pure
 // function — safe from any goroutine.
@@ -187,6 +210,8 @@ func classifyAttemptFailure(err error, storedStatus int) failureReason {
 		return fr
 	}
 
+	// 3. HTTP status family — dispatch on the status resolved above
+	// (stored attempt status → ProviderError → executor string shape).
 	if status > 0 {
 		switch {
 		case status == http.StatusTooManyRequests:
@@ -248,6 +273,9 @@ func parseUpstreamReturnedStatus(errStr string) int {
 	if i < 0 {
 		return 0
 	}
+	// strconv.Atoi requires the ENTIRE string to be numeric, so the
+	// leading digit run is extracted first (the shape carries a
+	// trailing reason phrase: "502 Bad Gateway").
 	rest := errStr[i+len(prefix):]
 	end := 0
 	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
@@ -256,8 +284,10 @@ func parseUpstreamReturnedStatus(errStr string) int {
 	if end == 0 {
 		return 0
 	}
-	var code int
-	if _, err := fmt.Sscanf(rest[:end], "%d", &code); err != nil {
+	// Parse failure (e.g. overflow) degrades to 0 = "no attributable
+	// status".
+	code, err := strconv.Atoi(rest[:end])
+	if err != nil {
 		return 0
 	}
 	return code
@@ -267,6 +297,9 @@ func parseUpstreamReturnedStatus(errStr string) int {
 // shaped. Covers context deadlines, net.Error timeouts, and the
 // proxy's own idle-timeout / stream-deadline strings.
 func classifyIsTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -292,6 +325,9 @@ func classifyIsTimeout(err error) bool {
 // type checks would misroute every config-malformed URL to
 // `connection` and the proxy-internal marker fix couldn't take effect.
 func classifyIsConnection(err error) bool {
+	if err == nil {
+		return false
+	}
 	// Top-of-function deferral: a proxy-internal-shaped error is by
 	// definition NOT a transport fault — short-circuit before the
 	// type-based checks so the cascade in classifyAttemptFailure can
@@ -445,17 +481,14 @@ func sanitizeReasonDetail(s string) string {
 
 // truncateReasonRunes cuts s to at most max runes, appending "…" when
 // truncated. Rune-safe (never splits a multi-byte character).
+//
+// Contract: a non-positive max is a NO-OP (s returned unchanged, no
+// suffix). The sole call site (sanitizeReasonDetail) passes the
+// maxReasonDetailRunes constant (160), so the branch is defensive.
 func truncateReasonRunes(s string, max int) string {
 	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
 	}
 	runes := []rune(s)
 	return string(runes[:max]) + "…"
-}
-
-// boundErrorString is the one-liner used for existing raw `error`
-// payload keys: the original error text, flattened, redacted, and
-// bounded — never the unbounded upstream body it could carry before.
-func boundErrorString(s string) string {
-	return sanitizeReasonDetail(s)
 }

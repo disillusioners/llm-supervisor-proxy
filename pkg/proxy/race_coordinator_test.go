@@ -942,12 +942,10 @@ func TestGetStatsWithSpawnTriggers(t *testing.T) {
 	coord.mu.Lock()
 	coord.spawnTriggers = append(coord.spawnTriggers, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 	coord.spawnTriggers = append(coord.spawnTriggers, spawnTriggerInfo{
 		trigger:       triggerMainError,
-		errorMessage:  "upstream error",
 		failedRequest: 0,
 	})
 	coord.mu.Unlock()
@@ -981,7 +979,6 @@ func TestRaceCoordinator_SecondaryFlagSetOnSecondRequest(t *testing.T) {
 	// Manually spawn a second request (simulating what manage() does on idle)
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
@@ -1011,7 +1008,6 @@ func TestRaceCoordinator_MainRequestHasSecondaryFlagFalse(t *testing.T) {
 	// Manually spawn a main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
@@ -1041,7 +1037,6 @@ func TestRaceCoordinator_FallbackRequestHasSecondaryFlagFalse(t *testing.T) {
 	// Manually spawn a fallback request
 	coord.spawn(modelTypeFallback, spawnTriggerInfo{
 		trigger:       triggerMainError,
-		errorMessage:  "upstream error",
 		failedRequest: 0,
 	})
 
@@ -1071,21 +1066,18 @@ func TestRaceCoordinator_AllRequestTypes(t *testing.T) {
 	// Spawn main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
 	// Spawn second request
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
 	// Spawn fallback request
 	coord.spawn(modelTypeFallback, spawnTriggerInfo{
 		trigger:       triggerMainError,
-		errorMessage:  "upstream error",
 		failedRequest: 0,
 	})
 
@@ -1166,7 +1158,7 @@ func newMockModelsConfig() *models.ModelsConfig {
 			Name:                   "Test Model",
 			Enabled:                true,
 			Internal:               true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:            models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 		},
@@ -1202,7 +1194,7 @@ func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
 			Name:                   "Peak Hour Test Model",
 			Enabled:                true,
 			Internal:               true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:            models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary model
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary model (cheaper/faster)
 			PeakHourEnabled:        true,
@@ -1228,14 +1220,12 @@ func TestRaceCoordinator_PeakHourWithSecondaryModel(t *testing.T) {
 	// Spawn main request (should get peak hour model via ResolveInternalConfig)
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
 	// Spawn second request (should get secondary model, NOT peak model)
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
@@ -1289,7 +1279,7 @@ func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
 			Name:             "Peak Only Model",
 			Enabled:          true,
 			Internal:         true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:      models.TestRefs("test-cred"),
 			InternalModel:    "glm-5.0",
 			PeakHourEnabled:  true,
 			PeakHourStart:    "00:00", // Peak all day
@@ -1315,14 +1305,12 @@ func TestRaceCoordinator_PeakHourModelOnly_NoSecondary(t *testing.T) {
 	// Spawn main request
 	coord.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
 	// Spawn second request
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
@@ -1359,7 +1347,7 @@ func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
 			Name:                   "Combo Model",
 			Enabled:                true,
 			Internal:               true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:            models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",     // Primary
 			SecondaryUpstreamModel: "glm-4-flash", // Secondary
 			PeakHourEnabled:        true,
@@ -1383,8 +1371,8 @@ func TestRaceCoordinator_SecondaryOverridesPeakHour(t *testing.T) {
 	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"combo-model", "fallback-model"}, false)
 
 	// Spawn both main and second requests
-	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", errorMessage: "", failedRequest: -1})
-	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, errorMessage: "", failedRequest: -1})
+	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", failedRequest: -1})
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, failedRequest: -1})
 
 	if len(coord.requests) != 2 {
 		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))
@@ -1434,7 +1422,7 @@ func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
 			Name:                   "No Peak Model",
 			Enabled:                true,
 			Internal:               true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:            models.TestRefs("test-cred"),
 			InternalModel:          "glm-5.0",
 			SecondaryUpstreamModel: "glm-4-flash",
 			PeakHourEnabled:        false, // Peak hours DISABLED
@@ -1455,10 +1443,10 @@ func TestRaceCoordinator_NoPeakHour_UsesInternalModel(t *testing.T) {
 	coord := newRaceCoordinator(ctx, cfg, newTestRequest(), []byte("{}"), []string{"no-peak-model", "fallback-model"}, false)
 
 	// Spawn main request
-	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", errorMessage: "", failedRequest: -1})
+	coord.spawn(modelTypeMain, spawnTriggerInfo{trigger: "", failedRequest: -1})
 
 	// Spawn second request
-	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, errorMessage: "", failedRequest: -1})
+	coord.spawn(modelTypeSecond, spawnTriggerInfo{trigger: triggerIdleTimeout, failedRequest: -1})
 
 	if len(coord.requests) != 2 {
 		t.Fatalf("Expected 2 requests, got %d", len(coord.requests))

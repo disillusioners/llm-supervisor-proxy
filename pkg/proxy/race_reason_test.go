@@ -577,9 +577,12 @@ func TestRaceFailureReason_FailingUpstreamEndToEnd(t *testing.T) {
 	}
 	t.Logf("race_all_failed row=%v", row)
 
-	// 3. The fallback-transition path (spawnTriggerInfo wiring): the
-	// classification the manage loop would attach to a main_error spawn
-	// is the same failureReason — assert its greppable line form.
+	// 3. The fallback-transition classification, RE-DERIVED LOCALLY:
+	// this assertion does not exercise the manage-loop spawnTriggerInfo
+	// wiring — it only checks that the failureReason the loop would
+	// attach to a main_error spawn renders its greppable line form.
+	// The real spawnTriggerInfo → race_spawn wiring is pinned in
+	// TestRaceSpawnEvent_ReasonAdditiveOnly.
 	line := classifyAttemptFailure(errors.New("upstream returned error: 429 Too Many Requests"), 0)
 	if !strings.HasPrefix(line.String(), "reason=rate_limit status=429 detail=\"upstream returned error: 429") {
 		t.Errorf("spawn-transition reason line malformed: %q", line.String())
@@ -603,7 +606,6 @@ func TestRaceSpawnEvent_ReasonAdditiveOnly(t *testing.T) {
 	// Idle-timeout spawn (no error to classify — W4).
 	coord.spawn(modelTypeSecond, spawnTriggerInfo{
 		trigger:       triggerIdleTimeout,
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 	idleEvt := waitEvent(t, evCh, "race_spawn", 2*time.Second)
@@ -622,7 +624,6 @@ func TestRaceSpawnEvent_ReasonAdditiveOnly(t *testing.T) {
 	fr := classifyAttemptFailure(errors.New("upstream returned error: 502 Bad Gateway"), 502)
 	coord.spawn(modelTypeFallback, spawnTriggerInfo{
 		trigger:       triggerMainError,
-		errorMessage:  fr.Detail,
 		failedRequest: 0,
 		reason:        fr,
 	})

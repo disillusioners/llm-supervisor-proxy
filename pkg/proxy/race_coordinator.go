@@ -52,6 +52,17 @@ package proxy
 //     the orchestration loop. If you are adding a per-upstream-call
 //     behavior, you are in the wrong file — race_coordinator owns the
 //     RACE; race_executor owns each ATTEMPT.
+//
+// Size rationale: this file sits in the 1000-3000 line band because
+// the race lifecycle — Case-1 rate-limit classification, credential
+// failover, idle-parallel spawning, fallback bookkeeping, and the
+// all-failed teardown — is ONE interleaved manage() state machine.
+// The lock discipline (c.mu hold/release points threaded through the
+// spawn paths) is the load-bearing invariant; splitting by concern
+// would scatter those hold/release boundaries across files and make
+// the deadlock reasoning much weaker than the line count saves.
+// TRIPWIRE: split the event-emission helpers out FIRST if this file
+// passes ~2500 lines.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import (
@@ -87,8 +98,7 @@ const (
 // spawnTriggerInfo contains detailed information about why a spawn was triggered
 type spawnTriggerInfo struct {
 	trigger       spawnTrigger
-	errorMessage  string // Only populated when trigger is main_error
-	failedRequest int    // Index of the failed request, -1 if not applicable
+	failedRequest int // Index of the failed request, -1 if not applicable
 
 	// credentialID (Phase 3 / Round 3c C3(1)) is populated ONLY for
 	// triggerRateLimit spawns: the reselected credential handed back by
@@ -168,9 +178,9 @@ type raceCoordinator struct {
 	// stateless about retries; the coordinator is the single owner of
 	// the per-race budget and is constructed fresh per race). Mutated
 	// only from manage() under c.mu.
-	triedCredIDs                      map[string]bool // mutated only from manage() under c.mu — race-free by construction
-	failoverAttempts                  int            // mutated only from manage() under c.mu — race-free by construction
-	credFailoverSoonestExpiryAttempted bool           // mutated only from manage() under c.mu — race-free by construction
+	triedCredIDs                       map[string]bool // mutated only from manage() under c.mu — race-free by construction
+	failoverAttempts                   int             // mutated only from manage() under c.mu — race-free by construction
+	credFailoverSoonestExpiryAttempted bool            // mutated only from manage() under c.mu — race-free by construction
 
 	// Event publishing
 	eventBus  *events.Bus
@@ -286,7 +296,6 @@ func (c *raceCoordinator) Start() {
 	// 1. Spawn main request (no trigger - it's the initial request)
 	c.spawn(modelTypeMain, spawnTriggerInfo{
 		trigger:       "",
-		errorMessage:  "",
 		failedRequest: -1,
 	})
 
@@ -409,12 +418,10 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	// structured class/status fields. Event name, existing keys, and
 	// key semantics are unchanged; idle_timeout spawns (no error to
 	// classify) publish nothing extra, byte-identical to before.
+	// appendReasonFields fixes the additive key sequence (reason →
+	// reason_class → conditional reason_status) in one place.
 	if triggerInfo.trigger != "" && triggerInfo.reason.Class != "" {
-		eventData["reason"] = triggerInfo.reason.String()
-		eventData["reason_class"] = triggerInfo.reason.Class
-		if triggerInfo.reason.Status > 0 {
-			eventData["reason_status"] = triggerInfo.reason.Status
-		}
+		appendReasonFields(eventData, triggerInfo.reason)
 	}
 
 	// Publish race_spawn event
@@ -602,7 +609,6 @@ func (c *raceCoordinator) manage() {
 							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan.retryAfter)
 							c.spawn(modelTypeCredFailover, spawnTriggerInfo{
 								trigger:       triggerRateLimit,
-								errorMessage:  failReason.Detail,
 								failedRequest: latestReq.id,
 								credentialID:  plan.credentialID,
 								// Phase 3 / Round 3j C1 critical fix —
@@ -638,7 +644,6 @@ func (c *raceCoordinator) manage() {
 							shouldSpawn = true
 							triggerInfo = spawnTriggerInfo{
 								trigger:       triggerMainError,
-								errorMessage:  failReason.Detail,
 								failedRequest: latestReq.id,
 								reason:        failReason,
 							}
@@ -668,7 +673,6 @@ func (c *raceCoordinator) manage() {
 								shouldSpawn = true
 								triggerInfo = spawnTriggerInfo{
 									trigger:       triggerIdleTimeout,
-									errorMessage:  "",
 									failedRequest: -1,
 								}
 							}
@@ -678,7 +682,6 @@ func (c *raceCoordinator) manage() {
 							shouldSpawn = true
 							triggerInfo = spawnTriggerInfo{
 								trigger:       triggerIdleTimeout,
-								errorMessage:  "",
 								failedRequest: -1,
 							}
 						}
@@ -741,12 +744,8 @@ func (c *raceCoordinator) manage() {
 								"model":         r.modelID,
 								"type":          string(r.modelType),
 								"error":         rReason.Detail,
-								"reason":        rReason.String(),
-								"reason_class":  rReason.Class,
 							}
-							if rReason.Status > 0 {
-								row["reason_status"] = rReason.Status
-							}
+							appendReasonFields(row, rReason)
 							errors = append(errors, row)
 						}
 					}
@@ -974,10 +973,10 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 				Type:      "model_credential_selected",
 				Timestamp: time.Now().Unix(),
 				Data: map[string]interface{}{
-					"model_id":                 modelID,
-					"credential_id":            cred.CredentialID,
+					"model_id":                modelID,
+					"credential_id":           cred.CredentialID,
 					"conversation_key_prefix": keyPrefix,
-					"id":                       c.requestID,
+					"id":                      c.requestID,
 				},
 			})
 		}
@@ -1024,18 +1023,14 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 		// Publish race_request_failed event with detailed error info.
 		// Existing keys unchanged (`error` is the same error text, now
 		// bounded + redacted); reason/reason_class/reason_status are
-		// additive.
+		// additive (appendReasonFields fixes their key sequence).
 		failEventData := map[string]interface{}{
 			"request_index": req.id,
 			"model":         req.modelID,
 			"type":          string(req.modelType),
 			"error":         failReason.Detail,
-			"reason":        failReason.String(),
-			"reason_class":  failReason.Class,
 		}
-		if failReason.Status > 0 {
-			failEventData["reason_status"] = failReason.Status
-		}
+		appendReasonFields(failEventData, failReason)
 		c.publishEvent("race_request_failed", failEventData)
 	} else {
 		req.MarkCompleted()
@@ -1459,7 +1454,6 @@ func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 
 	return commonStatus
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3 / Task 18 (Round 3b B1/B3 + Round 3c C1/C3/W3) — coordinator
