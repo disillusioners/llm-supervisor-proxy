@@ -192,6 +192,13 @@ func newAm29Harness(t *testing.T) *am29Harness {
 	mgrCfg := newTestManagerWithConfig(t, up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	counter := newAm29Counter(t)
+	// remove-external-upstream P5: member chat rows need a credential
+	// (write-stamp forces Internal=true).
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: up.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential(%s): %v", p5FixtureCredID, err)
+	}
 	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine())
 	clean := func() {
 		up.Close()
@@ -225,7 +232,8 @@ func (h *am29Harness) close() { h.clean() }
 func am29AddSoloChat(t *testing.T, h *am29Harness) {
 	t.Helper()
 	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(solo): %v", err)
 	}
@@ -238,7 +246,8 @@ func am29AddSoloChat(t *testing.T, h *am29Harness) {
 func am29AddCodingCoding(t *testing.T, h *am29Harness) {
 	t.Helper()
 	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(coding): %v", err)
 	}
@@ -321,29 +330,29 @@ func am29AddWrapperGroup(t *testing.T, h *am29Harness) {
 //
 // Implementation (FORM-1 — the manager-visible form):
 //
-//	1. Spin up a fresh file-backed SQLite (the d329a56
-//	   discipline — file DSN, never :memory:, so the
-//	   reconstruction below actually re-reads the persisted
-//	   state).
-//	2. First boot: AddModel the chat member + the group row
-//	   (this seeds manager1's engine as a side effect via the
-//	   P2.2 write-path notification — proves the eager-seed
-//	   fires in practice).
-//	3. Close manager1 + store1; the grouplb engine instance
-//	   is discarded.
-//	4. Second boot: NewModelsManager over the SAME file DSN.
-//	   Migrations are idempotent, so re-Initialize is a clean
-//	   reopen.
-//	5. BOOT-LAZY ASSERTION: manager2.GroupEngine().HasGroup(...)
-//	   MUST return false. A RebindFromStore equivalent
-//	   (config-table → engine rehydration at boot) would
-//	   surface here.
-//	6. LAZY-FLIP: drive one RewriteGroupEntries through the
-//	   manager — the request path picks a member via
-//	   pickServableGroupMember, which seeds the engine on
-//	   demand when !HasGroup. After the call, HasGroup MUST
-//	   return true. Proves the lazy-on-demand seed path is
-//	   still intact (not just disabled).
+//  1. Spin up a fresh file-backed SQLite (the d329a56
+//     discipline — file DSN, never :memory:, so the
+//     reconstruction below actually re-reads the persisted
+//     state).
+//  2. First boot: AddModel the chat member + the group row
+//     (this seeds manager1's engine as a side effect via the
+//     P2.2 write-path notification — proves the eager-seed
+//     fires in practice).
+//  3. Close manager1 + store1; the grouplb engine instance
+//     is discarded.
+//  4. Second boot: NewModelsManager over the SAME file DSN.
+//     Migrations are idempotent, so re-Initialize is a clean
+//     reopen.
+//  5. BOOT-LAZY ASSERTION: manager2.GroupEngine().HasGroup(...)
+//     MUST return false. A RebindFromStore equivalent
+//     (config-table → engine rehydration at boot) would
+//     surface here.
+//  6. LAZY-FLIP: drive one RewriteGroupEntries through the
+//     manager — the request path picks a member via
+//     pickServableGroupMember, which seeds the engine on
+//     demand when !HasGroup. After the call, HasGroup MUST
+//     return true. Proves the lazy-on-demand seed path is
+//     still intact (not just disabled).
 //
 // This is the FORM-1 pin; FORM-2 (affinity state — bindings
 // count) would require cross-package access to grouplb's
@@ -366,6 +375,14 @@ func am29AssertBootLazyPin(t *testing.T, groupID string) {
 		store1.Close()
 		t.Fatalf("InitializeManagers (1st boot): %v", err)
 	}
+	// remove-external-upstream P5: the "coding" member chat row is
+	// stamped Internal=true on write and needs a credential.
+	if err := mgr1.AddCredential(models.CredentialConfig{
+		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: "http://127.0.0.1:0",
+	}); err != nil {
+		store1.Close()
+		t.Fatalf("AddCredential (1st boot): %v", err)
+	}
 
 	// Seed the chat member + the group row. AddModel calls
 	// notifyGroupEngineLocked → OnGroupChanged, which seeds
@@ -373,7 +390,8 @@ func am29AssertBootLazyPin(t *testing.T, groupID string) {
 	// seed fires in practice (sanity baseline: after AddModel
 	// HasGroup returns true on this same manager).
 	if err := mgr1.AddModel(models.ModelConfig{
-		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		mgr1.Close()
 		store1.Close()
@@ -615,7 +633,8 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		h2 := newAm29Harness(t)
 		defer h2.close()
 		if err := h2.mgr.AddModel(models.ModelConfig{
-			ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: false,
+			ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model",
+			Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("AddModel(coding direct): %v", err)
 		}
@@ -656,11 +675,14 @@ func TestAm29_Equivalence_AllFiveCases(t *testing.T) {
 		if err := json.Unmarshal(directWire.Body, &directBody); err != nil {
 			t.Fatalf("direct wire body unmarshal: %v (raw=%s)", err, directWire.Body)
 		}
-		if gm, _ := groupBody["model"].(string); gm != "coding" {
-			t.Errorf("coding[coding] wire body.model=%q, want %q (group rewrite must forward the resolved member ID, not the client group ID)", gm, "coding")
+		if gm, _ := groupBody["model"].(string); gm != "stub-model" {
+			t.Errorf("coding[coding] wire body.model=%q, want %q (post-P1 the member is internal, so the internal path forwards the resolved member's InternalModel — never the client group ID)", gm, "stub-model")
 		}
-		if dm, _ := directBody["model"].(string); dm != "coding" {
-			t.Errorf("direct wire body.model=%q, want %q", dm, "coding")
+		if gm, _ := groupBody["model"].(string); gm == "coding[coding]" {
+			t.Errorf("coding[coding] wire body.model leaked the client group ID %q", gm)
+		}
+		if dm, _ := directBody["model"].(string); dm != "stub-model" {
+			t.Errorf("direct wire body.model=%q, want %q", dm, "stub-model")
 		}
 		// Authorization header presence parity. The harness uses
 		// no UpstreamCredentialID, so neither side sets one —

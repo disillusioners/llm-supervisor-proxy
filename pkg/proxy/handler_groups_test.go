@@ -76,6 +76,14 @@ func newGroupHarness(t *testing.T) *groupHarness {
 	mgrCfg := newTestManagerWithConfig(t, up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, nil, mgr.Engine())
+	// remove-external-upstream P5: member chat rows are stamped
+	// Internal=true on write, so they need a credential; point it at
+	// the stub upstream so the internal path reaches it.
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: up.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential(%s): %v", p5FixtureCredID, err)
+	}
 	clean := func() {
 		up.Close()
 		mgr.Close()
@@ -91,6 +99,14 @@ func (h *groupHarness) close() { h.clean() }
 // per-test failure-injection swaps the stub.
 func (h *groupHarness) rebuildHandler(t *testing.T) {
 	t.Helper()
+	// remove-external-upstream P5: the upstream URL lives in the fixture
+	// credential now (the old global UpstreamURL is gone), so re-point it
+	// at the (possibly swapped) server before rebuilding the handler.
+	if err := h.mgr.UpdateCredential(p5FixtureCredID, models.CredentialConfig{
+		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: h.up.URL,
+	}); err != nil {
+		t.Fatalf("rebuildHandler: UpdateCredential(%s): %v", p5FixtureCredID, err)
+	}
 	mgrCfg := newTestManagerWithConfig(t, h.up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	*h.h = *NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: h.mgr}, h.bus, reqStore, nil, nil, nil, h.mgr.Engine())
@@ -116,7 +132,11 @@ func seedSelfShadowGroup(t *testing.T, h *groupHarness) {
 	t.Helper()
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindChat,
-		Internal: false, // EXTERNAL → upstream path
+		// remove-external-upstream P5: the write-stamp forces
+		// Internal=true, so a member chat row needs a credential
+		// pointed at the stub upstream.
+		Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(coding): %v", err)
 	}
@@ -138,7 +158,8 @@ func seedGroupWithFallbacks(t *testing.T, h *groupHarness) {
 	for _, id := range []string{"m-a", "m-b", "m-c"} {
 		if err := h.mgr.AddModel(models.ModelConfig{
 			ID: id, Name: id, Enabled: true, Kind: models.KindChat,
-			Internal: false,
+			Internal: true, InternalModel: "stub-model",
+			Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("AddModel %s: %v", id, err)
 		}
@@ -304,7 +325,9 @@ func TestHandlerGroups_Am28_StaleMember_SkipAndReselect(t *testing.T) {
 	defer h.close()
 	seedGroupWithFallbacks(t, h)
 	if err := h.mgr.UpdateModel("m-a", models.ModelConfig{
-		ID: "m-a", Name: "m-a", Enabled: false, Kind: models.KindChat, Internal: false,
+		ID: "m-a", Name: "m-a", Enabled: false, Kind: models.KindChat,
+		Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("disable m-a: %v", err)
 	}
@@ -327,7 +350,9 @@ func TestHandlerGroups_Am28_AllStale_FailsClean(t *testing.T) {
 	seedGroupWithFallbacks(t, h)
 	for _, id := range []string{"m-a", "m-b", "m-c"} {
 		if err := h.mgr.UpdateModel(id, models.ModelConfig{
-			ID: id, Name: id, Enabled: false, Kind: models.KindChat, Internal: false,
+			ID: id, Name: id, Enabled: false, Kind: models.KindChat,
+			Internal: true, InternalModel: "stub-model",
+			Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("disable %s: %v", id, err)
 		}
@@ -377,7 +402,9 @@ func TestHandlerGroups_Am26_NonGroup_ByteIdentity(t *testing.T) {
 	h := newGroupHarness(t)
 	defer h.close()
 	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "stub-model",
+		Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(solo): %v", err)
 	}
@@ -415,7 +442,9 @@ func TestHandlerGroups_Am25_Metering_Shape_NilCounter(t *testing.T) {
 		h := newGroupHarness(t)
 		defer h.close()
 		if err := h.mgr.AddModel(models.ModelConfig{
-			ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: false,
+			ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat,
+			Internal: true, InternalModel: "stub-model",
+			Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("AddModel: %v", err)
 		}

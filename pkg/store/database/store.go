@@ -2489,7 +2489,21 @@ type ResolvedCredential = models.ResolvedCredential
 // picks is phase3's responsibility (handler-side) — this layer stays
 // silent for them.
 func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool) {
-	modelConfig := m.GetModel(modelID)
+	// remove-external-upstream P5 — resolve by ROW IDENTITY (claims
+	// bypassed), NOT the client-facing claim-first GetModel. This seam
+	// is an EXECUTION-resolution step: every caller already holds the
+	// concrete member row (directGetModel / NewInternalHandler's
+	// modelConfig), and the group member machinery is documented to
+	// resolve by row identity (GetModelNative / §3.4 Am22-L1 — a
+	// claims-first lookup here infinite-loops the day-1 self-shadow
+	// group coding[coding]). The JSON backend's twin and the
+	// modelscache decorator are ALREADY claim-blind (the decorator's
+	// lookupCachedModel is the claim-blind fast path); this aligns the
+	// raw DB manager with both. Pre-P1 the difference was invisible
+	// (group members were external and never resolved); post-P1 every
+	// member is internal, so the self-shadow member must resolve its
+	// OWN credentials.
+	modelConfig := m.GetModelNative(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return ResolvedCredential{}, false
 	}

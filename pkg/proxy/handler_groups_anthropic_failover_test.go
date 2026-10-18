@@ -35,12 +35,12 @@ func TestHandlerGroups_AnthropicReentry_PublishesEventMemberFailover(t *testing.
 	defer h.close()
 	// 2-member group so a reselect has somewhere to land.
 	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "m-a", Name: "m-a", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "m-a", Name: "m-a", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(m-a): %v", err)
 	}
 	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "m-b", Name: "m-b", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "m-b", Name: "m-b", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(m-b): %v", err)
 	}
