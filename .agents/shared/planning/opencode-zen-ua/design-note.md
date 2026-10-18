@@ -3,7 +3,7 @@
 **Commission:** provider-native UA injection for the `opencode` (OpenCode Zen)
 provider, env-overridable, inside the existing attribution machinery
 (2026-10-18), on branch `fix/test-connection-provider-headers` (base latest
-@ 14c040f). Backend-only; LOCAL ONLY — no push, no merge.
+@ 14c040f). Backend-only; LOCAL ONLY — no push, no merge (see commit 320bc59).
 
 **Inputs:** (.agents/shared/planning/opencode-go-surface-research/report.md
 §c/§e — the header/UA contract) + the 2026-10-17 Zen research note
@@ -48,7 +48,15 @@ seam is a kind-checked no-op otherwise). Pinned by
 
 - **Fully independent:** each flavour reads its own env var only. `OPENCODE_USER_AGENT`
   never leaks to `opencode-go` (or any other provider), and vice-versa — pinned by
-  `TestOpenCodeEnvOverrides_ScopedToTheirProvider`.
+  `TestOpencode_EnvOverrides_ScopedToTheirProvider`.
+- **Env-name DECISION (recorded 2026-10-18):** `OPENCODE_USER_AGENT` is KEPT;
+  `OPENCODE_ZEN_USER_AGENT` was considered and REJECTED. Provider-scoped naming
+  wins: the env var must match the registry entry (`opencode`) — "Zen" is absent
+  from the provider vocabulary — and it mirrors the sibling
+  `OPENCODE_GO_USER_AGENT` exactly (one knob per provider identity, same shape).
+  The zero-breakage window for renaming closed at merge (320bc59 shipped the
+  name); any later rename would break deployed operator env config for zero
+  functional gain.
 - **When read:** in `AttachOpenCodeGoAttribution`, at attach time — the same
   timing as the Go variant (`read per-request at attach time`). Whitespace-only
   values fall back to the default.
@@ -152,11 +160,16 @@ backend-only, attribution-scoped change. Do NOT fold that refactor in here.
   default), `OPENCODE_USER_AGENT` override/whitespace, real-path seam
   (UA-only + no session), conversation-independence (real-path/test-path UA
   parity anchor), env scoping (no cross-provider leak), `opencode-go`
-  byte-identical, all-other-providers control, and a setHeaders-seam pin.
-- `pkg/ui/handlers_models_test_model_test.go` — test-path twin: `handleTestModel`
+  byte-identical, all-other-providers control (derived from
+  `pkg/models.ValidProviderNames()` minus the OpenCode entries), a
+  setHeaders-seam pin, and a setHeaders flavour-gate negative pin (a
+  Zen-flagged instance handed a SessionID never emits a session header).
+- `pkg/ui/handlers_models_test_connection_test.go` — test-path twin: `handleTestModel`
   carries the SAME exported default UA as the real path for Zen; `opencode-go`
   carries UA + a deterministic degenerate-seed `ses_` session; `openai` control
-  unchanged.
+  unchanged; plus a cross-path parity test driving the real path and
+  `handleTestModel` against the same mock upstream and asserting the captured
+  UA (and, for opencode-go, the session) are EQUAL.
 - Updated `pkg/providers/opencodego_test.go`: the former Zen "no UA" gate is
   superseded by `TestOpencode_Zen_UAOnly_NoSession` (Zen now carries the native
   UA; still no session header).

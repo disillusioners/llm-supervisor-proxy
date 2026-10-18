@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -182,5 +183,87 @@ func TestHandleTestModel_Zen_EnvOverride(t *testing.T) {
 	}
 	if got := captures[0]["user_agent"]; got != "my-coding-agent/1.0" {
 		t.Errorf("Zen test-path override not applied: got %q, want my-coding-agent/1.0", got)
+	}
+}
+
+// TestHandleTestModel_CrossPathParity_RealVsTestButton — cross-path parity
+// (reviewer warning #1): drive BOTH provider paths against the SAME mock
+// upstream and assert the captured headers are EQUAL, not merely
+// default-shaped:
+//
+//   - real internal path: factory NewProvider + AttachOpenCodeGoAttribution
+//     + ChatCompletion — exactly the sequence the real internal path
+//     performs (race_executor.go:367-379; the degenerate empty
+//     conversation key matches handleTestModel's synthetic request).
+//   - test path: handleTestModel (the UI Test-Model button seam,
+//     pkg/ui/server.go:1903-1909).
+//
+// A future divergence in the test path (a skipped attach, a different UA
+// resolution) would previously keep BOTH existing suites green — each only
+// compared against the exported default. This test compares the two paths
+// AGAINST EACH OTHER: UA parity for both OpenCode flavours, session parity
+// for opencode-go (same degenerate seed ⇒ same ses_ id), no session on
+// either path for Zen.
+func TestHandleTestModel_CrossPathParity_RealVsTestButton(t *testing.T) {
+	cases := []struct {
+		name         string
+		provider     string
+		model        string
+		credentialID string
+	}{
+		{"zen", "opencode", "kimi-k3", "cred-zen"},
+		{"opencode-go", "opencode-go", "deepseek-v4.1-flash", "cred-go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captures []map[string]string
+			upstream := testModelUpstream(t, &captures)
+			defer upstream.Close()
+
+			// Real internal path (capture 0): empty conversation key —
+			// the same degenerate seed the test button's synthetic
+			// request produces, so opencode-go session ids are
+			// comparable.
+			p, err := providers.NewProvider(tc.provider, "test-key", upstream.URL)
+			if err != nil {
+				t.Fatalf("provider: %v", err)
+			}
+			providers.AttachOpenCodeGoAttribution(p, "", tc.model, tc.credentialID)
+			if _, err := p.ChatCompletion(context.Background(), &providers.ChatCompletionRequest{
+				Model:    tc.model,
+				Messages: []providers.ChatMessage{{Role: "user", Content: "hi"}},
+			}); err != nil {
+				t.Fatalf("real path call: %v", err)
+			}
+
+			// Test path (capture 1): the button, against the same upstream
+			// (the credential's base_url is the mock).
+			s := newTestModelServer(t, upstream.URL)
+			resp := postTestModel(t, s, tc.credentialID, tc.model)
+			if !resp.Success {
+				t.Fatalf("test path failed: %+v", resp)
+			}
+
+			if len(captures) != 2 {
+				t.Fatalf("expected 2 upstream calls (real + test), got %d", len(captures))
+			}
+			real, test := captures[0], captures[1]
+			if real["user_agent"] != test["user_agent"] {
+				t.Errorf("UA parity: real path %q != test path %q", real["user_agent"], test["user_agent"])
+			}
+			if real["session"] != test["session"] {
+				t.Errorf("session parity: real path %q != test path %q", real["session"], test["session"])
+			}
+			switch tc.name {
+			case "opencode-go":
+				if !strings.HasPrefix(test["session"], "ses_") {
+					t.Errorf("opencode-go parity session must be ses_-prefixed, got %q", test["session"])
+				}
+			default: // zen
+				if test["session"] != "" {
+					t.Errorf("Zen must carry no session header on EITHER path, test path got %q", test["session"])
+				}
+			}
+		})
 	}
 }

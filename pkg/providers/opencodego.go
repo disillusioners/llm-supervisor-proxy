@@ -1,5 +1,10 @@
 package providers
 
+// FILENAME NOTE: opencodego.go predates the Zen flavour — this file now
+// hosts the WHOLE OpenCode provider family (opencode-go + opencode/Zen).
+// Rename to opencode.go is DEFERRED to the post-merge window (conflict
+// risk vs fix/upstream-header-forwarding); do not rename casually.
+
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -142,6 +147,13 @@ type SessionAttribution struct {
 	UserAgent string
 }
 
+// defaultOpenCodeUA is the shared official-client User-Agent default for
+// the whole OpenCode family (the vendor's App.useragent is
+// provider-independent, so one builder serves both flavours).
+func defaultOpenCodeUA() string {
+	return "opencode/" + openCodeUAChannel + "/" + openCodeUAVersion + "/" + openCodeUAName
+}
+
 // DefaultOpenCodeGoUserAgent returns the opencode-go provider-default
 // User-Agent in the official client format:
 // opencode/{channel}/{version}/{name}.
@@ -154,7 +166,7 @@ type SessionAttribution struct {
 // llm-supervisor-proxy/<ver> form. Both are documented as acceptable by
 // the upstream docs; see design-note.md "UA policy".
 func DefaultOpenCodeGoUserAgent() string {
-	return "opencode/" + openCodeUAChannel + "/" + openCodeUAVersion + "/" + openCodeUAName
+	return defaultOpenCodeUA()
 }
 
 // ResolveOpenCodeGoUserAgent resolves the User-Agent for opencode-go
@@ -187,7 +199,7 @@ func ResolveOpenCodeGoUserAgent() string {
 // env-override scope read explicitly at the call site (and may diverge
 // if a surface ever needs a different client name).
 func DefaultOpenCodeUserAgent() string {
-	return "opencode/" + openCodeUAChannel + "/" + openCodeUAVersion + "/" + openCodeUAName
+	return defaultOpenCodeUA()
 }
 
 // ResolveOpenCodeUserAgent resolves the User-Agent for "opencode" (Zen)

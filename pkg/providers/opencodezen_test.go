@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
 // =============================================================================
@@ -23,30 +25,31 @@ import (
 // internal path (factory + attach, exactly what race_executor.go:367-379
 // performs), the ultimate-model internal path, and the UI test-connection
 // path all inherit it with no per-path wiring. The pkg/ui suite
-// (handlers_models_test_model_test.go) pins the test-path twin against the
+// (handlers_models_test_connection_test.go) pins the test-path twin against the
 // SAME exported default, establishing real-path/test-path parity.
 //
 // No live network calls: the upstream is an httptest server capturing
 // inbound headers (jsonCompletionServer, opencodego_test.go).
 // =============================================================================
 
-// TestOpencodeUserAgent_DefaultShape pins the Zen UA default: the
+// TestOpencodeZen_UA_DefaultShape pins the Zen UA default: the
 // official-client format, and byte-equal to the Go default (the vendor's
 // App.useragent is provider-independent).
-func TestOpencodeUserAgent_DefaultShape(t *testing.T) {
+func TestOpencodeZen_UA_DefaultShape(t *testing.T) {
 	got := DefaultOpenCodeUserAgent()
 	if got != "opencode/stable/2.0.32/cli" {
 		t.Errorf("default UA: got %q, want opencode/stable/2.0.32/cli", got)
 	}
-	if got != DefaultOpenCodeGoUserAgent() {
-		t.Errorf("Zen default UA %q must equal the Go default %q (provider-independent client UA)", got, DefaultOpenCodeGoUserAgent())
+	goUA := DefaultOpenCodeGoUserAgent() // evaluated once — one literal pin + one parity assert, no doubled expression
+	if got != goUA {
+		t.Errorf("Zen default UA %q must equal the Go default %q (provider-independent client UA)", got, goUA)
 	}
 }
 
-// TestResolveOpenCodeUserAgent_OverrideAndWhitespace pins the
+// TestOpencodeZen_UA_OverrideAndWhitespace pins the
 // OPENCODE_USER_AGENT resolution contract: trimmed non-empty wins,
 // whitespace-only falls back to the default.
-func TestResolveOpenCodeUserAgent_OverrideAndWhitespace(t *testing.T) {
+func TestOpencodeZen_UA_OverrideAndWhitespace(t *testing.T) {
 	// Unset ⇒ default.
 	prev, had := os.LookupEnv(EnvOpenCodeUserAgent)
 	if err := os.Unsetenv(EnvOpenCodeUserAgent); err != nil {
@@ -77,20 +80,20 @@ func TestResolveOpenCodeUserAgent_OverrideAndWhitespace(t *testing.T) {
 	}
 }
 
-// TestResolveOpenCodeGoUserAgent_WhitespaceFallback completes gate (d) for
+// TestOpencodeGo_UA_WhitespaceFallback completes gate (d) for
 // the Go knob: whitespace-only must fall back to the default.
-func TestResolveOpenCodeGoUserAgent_WhitespaceFallback(t *testing.T) {
+func TestOpencodeGo_UA_WhitespaceFallback(t *testing.T) {
 	t.Setenv(EnvOpenCodeGoUserAgent, "   ")
 	if got := ResolveOpenCodeGoUserAgent(); got != DefaultOpenCodeGoUserAgent() {
 		t.Errorf("whitespace: got %q, want default %q", got, DefaultOpenCodeGoUserAgent())
 	}
 }
 
-// TestOpencode_Zen_RealPath_UAOnly exercises the real-path seam
+// TestOpencodeZen_RealPath_UAOnly exercises the real-path seam
 // (factory ProviderOpencode → AttachOpenCodeGoAttribution → ChatCompletion,
 // exactly race_executor.go:367-379's sequence): Zen carries the
 // provider-native UA and NO session header.
-func TestOpencode_Zen_RealPath_UAOnly(t *testing.T) {
+func TestOpencodeZen_RealPath_UAOnly(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
 	defer server.Close()
@@ -120,12 +123,12 @@ func TestOpencode_Zen_RealPath_UAOnly(t *testing.T) {
 	}
 }
 
-// TestOpencode_Zen_UA_ConversationIndependent — the UA is identical whether
+// TestOpencodeZen_UA_ConversationIndependent — the UA is identical whether
 // the request carries a real conversation key (real path) or the degenerate
 // empty key (UI test-connection path). This IS the real-path/test-path UA
 // parity anchor for Zen; the pkg/ui suite asserts the same exported default
 // on the test path.
-func TestOpencode_Zen_UA_ConversationIndependent(t *testing.T) {
+func TestOpencodeZen_UA_ConversationIndependent(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
 	defer server.Close()
@@ -155,9 +158,9 @@ func TestOpencode_Zen_UA_ConversationIndependent(t *testing.T) {
 	}
 }
 
-// TestOpencode_Zen_EnvOverride_AppliedToWire — the OPENCODE_USER_AGENT
+// TestOpencodeZen_EnvOverride_AppliedToWire — the OPENCODE_USER_AGENT
 // override reaches the wire for Zen.
-func TestOpencode_Zen_EnvOverride_AppliedToWire(t *testing.T) {
+func TestOpencodeZen_EnvOverride_AppliedToWire(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
 	defer server.Close()
@@ -173,10 +176,10 @@ func TestOpencode_Zen_EnvOverride_AppliedToWire(t *testing.T) {
 	}
 }
 
-// TestOpenCodeEnvOverrides_ScopedToTheirProvider — the two override knobs
+// TestOpencode_EnvOverrides_ScopedToTheirProvider — the two override knobs
 // are fully independent: OPENCODE_USER_AGENT must NOT leak to opencode-go,
 // and OPENCODE_GO_USER_AGENT must NOT leak to Zen.
-func TestOpenCodeEnvOverrides_ScopedToTheirProvider(t *testing.T) {
+func TestOpencode_EnvOverrides_ScopedToTheirProvider(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
 	defer server.Close()
@@ -235,8 +238,13 @@ func TestOpencodeGo_ByteIdentical(t *testing.T) {
 // TestOtherProviders_NoAttributionUA_Unchanged — the control across the
 // rest of the factory: no provider other than the two OpenCode flavours
 // carries an attribution UA or a session header, even with both override
-// env vars set and a blind attach call. (anthropic/gemini/typesafe are
-// unimplemented in the factory and excluded.)
+// env vars set and a blind attach call.
+//
+// The control list is DERIVED, not hardcoded: pkg/models.ValidProviderNames()
+// minus the two OpenCode entries. Identities the factory cannot construct
+// yet (anthropic/gemini/typesafe — NewProvider errors) are skipped, so a
+// newly added provider that IS constructible is automatically driven by
+// this guard and cannot silently escape it.
 func TestOtherProviders_NoAttributionUA_Unchanged(t *testing.T) {
 	var captures []map[string]string
 	server := jsonCompletionServer(t, &captures)
@@ -245,23 +253,43 @@ func TestOtherProviders_NoAttributionUA_Unchanged(t *testing.T) {
 	t.Setenv(EnvOpenCodeUserAgent, "should-not-leak/1.0")
 	t.Setenv(EnvOpenCodeGoUserAgent, "should-not-leak-either/1.0")
 
-	others := []string{"openai", "zhipu", "zai", "minimax", "azure", "grok", "deepseek"}
+	excluded := map[string]bool{
+		string(ProviderOpencode):   true,
+		string(ProviderOpencodeGo): true,
+	}
+	var others []string
+	for _, name := range models.ValidProviderNames() {
+		if !excluded[name] {
+			others = append(others, name)
+		}
+	}
+	for _, name := range others {
+		if excluded[name] {
+			t.Fatalf("control list must exclude the OpenCode flavours, got %q", name)
+		}
+	}
+
+	var driven []string
 	for _, pt := range others {
 		p, err := NewProvider(pt, "test-key", server.URL)
 		if err != nil {
-			t.Fatalf("%s: %v", pt, err)
+			// Not constructible yet (e.g. anthropic/gemini/typesafe):
+			// no wire surface to guard until the factory implements it.
+			t.Logf("%s: not constructible by the factory, skipped (%v)", pt, err)
+			continue
 		}
 		AttachOpenCodeGoAttribution(p, "conv", "m", "cred") // blind attach — kind-checked no-op
 		if _, err := p.ChatCompletion(context.Background(), &ChatCompletionRequest{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}); err != nil {
 			t.Fatalf("%s call: %v", pt, err)
 		}
+		driven = append(driven, pt)
 	}
 
-	if len(captures) != len(others) {
-		t.Fatalf("expected %d calls, got %d", len(others), len(captures))
+	if len(captures) != len(driven) {
+		t.Fatalf("expected %d calls, got %d", len(driven), len(captures))
 	}
 	for i, cap := range captures {
-		pt := others[i]
+		pt := driven[i]
 		if cap["session"] != "" {
 			t.Errorf("%s must NOT carry x-opencode-session, got %q", pt, cap["session"])
 		}
@@ -301,5 +329,37 @@ func TestOpencodeZen_NoSessionHeader_AtSeamLevel(t *testing.T) {
 	}
 	if got, want := req.Header.Get("User-Agent"), DefaultOpenCodeUserAgent(); got != want {
 		t.Errorf("Zen setHeaders UA: got %q, want %q", got, want)
+	}
+}
+
+// TestOpencodeZen_SessionHeader_FlavorGuard — negative pin for the
+// setHeaders flavour gate (reviewer info #1): a Zen-flagged instance
+// handed a NON-EMPTY SessionID directly (bypassing
+// AttachOpenCodeGoAttribution via the exported SetSessionAttribution)
+// must STILL never emit x-opencode-session. Session emission is a
+// Go-realm contract only; the Zen design note forbids that surface, so
+// the gate is p.openCodeGo && SessionID != "" — defence-in-depth at the
+// single stamping site, not just an empty-field convention.
+func TestOpencodeZen_SessionHeader_FlavorGuard(t *testing.T) {
+	p, _ := NewProvider("opencode", "test-key", "https://example.invalid/v1")
+	op := p.(*OpenAIProvider)
+	if op.openCodeGo || !op.openCodeZen {
+		t.Fatal("expected the factory's Zen-only flavour flags (openCodeZen=true, openCodeGo=false)")
+	}
+	op.SetSessionAttribution(SessionAttribution{
+		SessionID: DeriveOpenCodeGoSessionID("flavor-guard-seed"), // handed a session id ON PURPOSE
+		UserAgent: DefaultOpenCodeUserAgent(),
+	})
+	if op.attribution == nil || op.attribution.SessionID == "" {
+		t.Fatal("precondition: Zen provider must accept attribution carrying a non-empty SessionID (the gate lives in setHeaders)")
+	}
+
+	req, _ := http.NewRequest("POST", "https://example.invalid/v1/chat/completions", nil)
+	op.setHeaders(req)
+	if got := req.Header.Get("x-opencode-session"); got != "" {
+		t.Errorf("Zen-flagged provider emitted x-opencode-session despite the flavour gate: %q", got)
+	}
+	if got, want := req.Header.Get("User-Agent"), DefaultOpenCodeUserAgent(); got != want {
+		t.Errorf("Zen UA must still be stamped with the session gate in place: got %q, want %q", got, want)
 	}
 }

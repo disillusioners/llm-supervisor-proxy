@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -45,6 +46,21 @@ var validProviders = map[string]bool{
 // isValidProvider checks if the provider is in the allowed list
 func isValidProvider(provider string) bool {
 	return validProviders[provider]
+}
+
+// ValidProviderNames returns the supported provider identities (the
+// validProviders keys) as a sorted snapshot. Read-only accessor for
+// callers that must enumerate the provider vocabulary — e.g. the
+// providers package's no-attribution-leak guard derives its control
+// list from this instead of a drifted hardcoded copy, so a newly added
+// provider cannot silently escape the guard.
+func ValidProviderNames() []string {
+	names := make([]string, 0, len(validProviders))
+	for name := range validProviders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CredentialConfig represents a reusable credential for internal upstream models.

@@ -271,9 +271,14 @@ func (p *OpenAIProvider) IsRetryable(err error) bool {
 // SetSessionAttribution), the provider-native headers are stamped on the
 // upstream request, each independently when non-empty:
 //
-//   - x-opencode-session — opencode-go only. The Go gateway hard-gates
-//     chat on it (400 MissingSessionID when absent). opencode (Zen)
-//     carries no session header (empty SessionID).
+//   - x-opencode-session — opencode-go only, and doubly gated: the
+//     SessionID must be non-empty AND the provider must carry the
+//     opencode-go flavour flag. A Zen-flagged instance NEVER emits a
+//     session header, even if handed a non-empty SessionID (the Zen
+//     design note forbids that surface — session emission is a
+//     Go-realm contract only; the flavour gate is defense-in-depth at
+//     the single stamping site). opencode (Zen) carries no session
+//     header.
 //   - User-Agent — both flavours. The provider-native client UA
 //     default, env-overridable per provider.
 //
@@ -284,7 +289,7 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	if p.attribution != nil {
-		if p.attribution.SessionID != "" {
+		if p.openCodeGo && p.attribution.SessionID != "" {
 			req.Header.Set("x-opencode-session", p.attribution.SessionID)
 		}
 		if p.attribution.UserAgent != "" {
