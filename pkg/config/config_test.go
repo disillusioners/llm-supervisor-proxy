@@ -244,36 +244,11 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantError: false,
 		},
-		{
-			name: "missing upstream_url",
-			cfg: Config{
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url is required",
-		},
-		{
-			name: "invalid upstream_url - no http prefix",
-			cfg: Config{
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url must use http or https scheme",
-		},
-		{
-			name: "invalid upstream_url - bad protocol",
-			cfg: Config{
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url must use http or https scheme",
-		},
+		// remove-external-upstream P1 (task 8): the three upstream_url
+		// validation subtests (missing / no-http-prefix / bad-protocol)
+		// are RETIRED with the field and its Validate() block — a config
+		// with no upstream URL is now VALID (the concept is gone; legacy
+		// config.json keys are silently ignored by json.Unmarshal).
 		{
 			name: "port too low",
 			cfg: Config{
@@ -811,15 +786,19 @@ func TestManager_Save_ValidatesBeforeWriting(t *testing.T) {
 	}
 
 	// Try to save invalid config
+	// remove-external-upstream P1 (task 8): the retired upstream_url
+	// validation no longer fires — this fixture's remaining violation is
+	// the idle_timeout floor.
 	invalidCfg := Config{
 		Port:        8089,
+		IdleTimeout: 0,
 	}
 
 	_, err := m.Save(invalidCfg)
 	if err == nil {
 		t.Error("Expected error when saving invalid config")
 	}
-	if err.Error() != "validation failed: upstream_url is required" {
+	if err.Error() != "validation failed: idle_timeout must be at least 1s" {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }

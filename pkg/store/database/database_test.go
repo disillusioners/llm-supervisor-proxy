@@ -208,11 +208,27 @@ func TestModelsManager(t *testing.T) {
 		t.Errorf("Expected empty models list, got: %d", len(modelList))
 	}
 
+	// Add a test credential (remove-external-upstream P1 task 7: the
+	// Internal=true write-stamp makes every AddModel an internal write,
+	// so the CRUD fixture needs the canonical internal shape —
+	// credential + internal_model — to pass the write-path gates).
+	testCred := models.CredentialConfig{
+		ID:       "crud-test-cred",
+		Provider: "openai",
+		APIKey:   "test-api-key-for-crud",
+	}
+	if err := modelsMgr.AddCredential(testCred); err != nil {
+		t.Fatalf("Failed to add credential: %v", err)
+	}
+
 	// Test AddModel
 	testModel := models.ModelConfig{
 		ID:             "test-model",
 		Name:           "Test Model",
 		Enabled:        true,
+		Internal:       true,
+		InternalModel:  "upstream-test-model",
+		Credentials:    models.TestRefs("crud-test-cred"),
 		FallbackChain:  []string{"fallback-model"},
 		TruncateParams: []string{"max_tokens"},
 	}
@@ -1736,14 +1752,17 @@ func TestModelsManager_ResolveInternalConfig_PeakHourNonInternal(t *testing.T) {
 	// invalid for non-internal). The test is about ResolveInternalConfig's
 	// non-internal short-circuit, not about peak-hour resolution on
 	// non-internal models.
-	testModel := models.ModelConfig{
-		ID:      "non-internal-peak-test",
-		Name:    "Non Internal Peak Test",
-		Enabled: true,
-		Internal: false, // Not internal — short-circuits in ResolveInternalConfig
-	}
-	if err := modelsMgr.AddModel(testModel); err != nil {
-		t.Fatalf("Failed to add model: %v", err)
+	//
+	// remove-external-upstream P1 (task 7): the layered Internal=true
+	// write-stamp makes mgr.AddModel REJECT a zero-credential row, so the
+	// PERMANENT legacy-row shape (internal=0) is seeded via direct SQL —
+	// mirroring migration 032's disable arm, which never flips internal.
+	if _, err := modelsMgr.store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, internal, credentials_json, credential_id, internal_model, created_at, updated_at)
+		 VALUES (?, ?, 1, 0, '[]', '', '', ?, ?)`,
+		"non-internal-peak-test", "Non Internal Peak Test",
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed legacy non-internal model: %v", err)
 	}
 
 	// Non-internal models return ok=false regardless of any other fields.
@@ -2001,18 +2020,22 @@ func TestModelsManager_AddModel_SecondaryWithNonInternal(t *testing.T) {
 		Internal:               false,
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
-	// Phase-1 W4: AddModel now REJECTS this shape — the rule
-	// "secondary_upstream_model requires internal to be true" is
-	// enforced at write time, not only at Validate time.
+	// remove-external-upstream P1 (task 7): AddModel still REJECTS this
+	// shape, but through the STAMPED-INTERNAL credential gate — the
+	// Internal=true write-stamp supersedes the "secondary_upstream_model
+	// requires internal to be true" rule on the write path (every write
+	// is internal now; secondary-on-internal is legal, so the zero-
+	// credential gate is what fires). The rule remains alive for direct
+	// Validate() callers — see TestModelsManager_Validate_SecondaryWithNonInternal.
 	err := modelsMgr.AddModel(testModel)
 	if err == nil {
-		t.Errorf("AddModel should reject non-internal model with secondary_upstream_model, got nil error")
+		t.Errorf("AddModel should reject zero-credential stamped-internal model, got nil error")
 		// cleanup if it accidentally succeeded
 		_ = modelsMgr.RemoveModel("invalid-secondary-external")
 		return
 	}
-	if !strings.Contains(err.Error(), "secondary_upstream_model requires internal to be true") {
-		t.Errorf("AddModel error = %q, want substring %q", err.Error(), "secondary_upstream_model requires internal to be true")
+	if !strings.Contains(err.Error(), "credential_id is required when internal is true") {
+		t.Errorf("AddModel error = %q, want substring %q", err.Error(), "credential_id is required when internal is true")
 	}
 }
 

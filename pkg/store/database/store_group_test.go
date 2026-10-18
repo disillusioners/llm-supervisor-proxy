@@ -149,7 +149,11 @@ func TestGroup_AddModel_GViolations(t *testing.T) {
 		mutate     func(m *models.ModelConfig)
 		wantErrSub string
 	}{
-		{"G1_internal_required", func(m *models.ModelConfig) { m.Internal = false }, "requires internal to be true"},
+		// remove-external-upstream P1 (task 7): G1_internal_required is
+		// RETIRED from this table — the layered Internal=true write-stamp
+		// makes every group write internal, so the "requires internal to
+		// be true" violation is unproducible through AddModel/UpdateModel
+		// (it remains a Validate()-time rule for direct callers).
 		{"G2_member_required", func(m *models.ModelConfig) { m.Members = nil }, "requires at least one member"},
 		{"G2_cap_16", func(m *models.ModelConfig) {
 			ms := make([]models.GroupMember, 0, models.MaxGroupMembers+1)
@@ -202,13 +206,10 @@ func TestGroup_UpdateModel_GViolation_And_Success(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	broken := validGroup()
-	broken.Internal = false // G1
-	if err := mgr.UpdateModel("coding-group", broken); err == nil {
-		t.Fatal("UpdateModel accepted G1 violation (internal=false)")
-	} else if !strings.Contains(err.Error(), "requires internal to be true") {
-		t.Errorf("UpdateModel G1 error = %q", err.Error())
-	}
+	// remove-external-upstream P1 (task 7): the G1 (internal=false)
+	// UpdateModel rejection block is RETIRED — the write-stamp forces
+	// internal=true before validation, so the violation is unproducible
+	// through the write path.
 
 	// Valid update with a G8 self-shadow (member claim) passes.
 	ok := validGroup()

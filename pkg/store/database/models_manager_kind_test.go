@@ -75,13 +75,9 @@ func TestModelsManager_AddModel_KindImageGen_Violations(t *testing.T) {
 		mutate     func(*models.ModelConfig)
 		wantErrSub string
 	}{
-		{
-			name: "image-gen without internal",
-			mutate: func(m *models.ModelConfig) {
-				m.Internal = false
-			},
-			wantErrSub: "requires internal",
-		},
+		// remove-external-upstream P1 (task 7): "image-gen without
+		// internal" is RETIRED — the Internal=true write-stamp makes the
+		// violation unproducible through AddModel/UpdateModel.
 		{
 			name: "image-gen without internal_model",
 			mutate: func(m *models.ModelConfig) {
@@ -350,10 +346,15 @@ func TestModelsManager_KindPersistsAcrossRestart_UpdatePath(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	mgr, cleanup := setupKindManagerAt(t, dbPath)
+	// remove-external-upstream P1 (task 7): stamped-internal write —
+	// the chat seed carries the canonical internal shape.
 	chat := models.ModelConfig{
-		ID:      "flip-model",
-		Name:    "Flip Model",
-		Enabled: true,
+		ID:            "flip-model",
+		Name:          "Flip Model",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "flip-upstream",
+		Credentials:   models.TestRefs("openai-cred"),
 	}
 	if err := mgr.AddModel(chat); err != nil {
 		cleanup()
@@ -404,10 +405,15 @@ func TestModelsManager_KindPersistsAcrossRestart_ChatUnchanged(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	mgr, cleanup := setupKindManagerAt(t, dbPath)
+	// remove-external-upstream P1 (task 7): stamped-internal write —
+	// the chat seed carries the canonical internal shape.
 	if err := mgr.AddModel(models.ModelConfig{
-		ID:      "chat-stable",
-		Name:    "Chat Stable",
-		Enabled: true,
+		ID:            "chat-stable",
+		Name:          "Chat Stable",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "chat-stable-upstream",
+		Credentials:   models.TestRefs("openai-cred"),
 	}); err != nil {
 		cleanup()
 		t.Fatalf("AddModel chat: %v", err)
@@ -566,11 +572,9 @@ func TestModelsManager_AddModel_KindDecision_Violations(t *testing.T) {
 		mutate     func(*models.ModelConfig)
 		wantErrSub string
 	}{
-		{
-			name:       "D1 decision without internal",
-			mutate:     func(m *models.ModelConfig) { m.Internal = false },
-			wantErrSub: "requires internal",
-		},
+		// remove-external-upstream P1 (task 7): "D1 decision without
+		// internal" is RETIRED — the Internal=true write-stamp makes the
+		// violation unproducible through AddModel/UpdateModel.
 		{
 			name:       "D2 decision without internal_model",
 			mutate:     func(m *models.ModelConfig) { m.InternalModel = "" },
