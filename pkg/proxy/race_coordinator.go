@@ -127,7 +127,8 @@ type raceCoordinator struct {
 
 	// interleaved is the X-Proxy-Interleaved-Thinking flag parsed from the
 	// incoming request header (handler.go entry). Threaded down through
-	// executeRequest → executeInternalRequest / executeExternalRequest so
+	// executeRequest → executeInternalRequest (the sole arm since the
+	// remove-external-upstream commission deleted the external arm) so
 	// race-internal sites have the flag without needing *requestContext
 	// (which never crosses into race_executor). See B3 (architecture §4.1).
 	interleaved bool

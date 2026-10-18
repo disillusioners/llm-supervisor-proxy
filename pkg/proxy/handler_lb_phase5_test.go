@@ -1142,11 +1142,11 @@ func TestHandler_EnvCredential_Unchanged_Positive(t *testing.T) {
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: resolver}
 	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine)
 
-	// Drive N=3 external requests. The model name "external-model-not-in-db"
-	// is unknown to ModelsConfig → handler treats it as external →
-	// executeExternalRequest → uses cfg.UpstreamURL (envSrv) +
-	// cfg.UpstreamCredentialID (env-cred). The internal engine is
-	// never consulted.
+	// Drive N=3 requests for a model unknown to ModelsConfig. PRE-P1
+	// this exercised the external forward (env upstream via the retired
+	// cfg.UpstreamURL + cfg.UpstreamCredentialID pair); POST-P1 the
+	// boundary gate 404s such models. The assertions below are the
+	// phase5 re-seed's delete-vs-convert territory (R12).
 	const N = 3
 	for i := 0; i < N; i++ {
 		rec := sendChatRequest(t, h, plaintextToken, "external-model-not-in-db", "phase5-test env-cred")

@@ -80,20 +80,18 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// Get config snapshot
 	conf := h.config.Clone()
 
-	// For external upstream (default): always OpenAI protocol (LiteLLM)
-	// For internal upstream: detection happens inside attemptAnthropicModel via credential.Provider
+	// remove-external-upstream P1 (task 4, A13): the external-default
+	// target URL (built from the retired global UpstreamURL) is GONE.
+	// There is no external upstream anymore: the translated-OpenAI body
+	// below is consumed by the INTERNAL arms — the OpenAI-protocol
+	// internal handler (doAnthropicInternalRequest) builds its own
+	// upstream target from the resolved credential, and the
+	// anthropic-provider passthrough branch rebuilds arc.targetURL from
+	// the credential's base URL before every doAnthropicRequest. The
+	// initial arc.targetURL is therefore an empty placeholder that is
+	// always overwritten before use (attemptAnthropicModel sets it on
+	// the passthrough path; the OpenAI-internal path never reads it).
 	isAnthropicUpstream := false
-
-	// Build target URL — strip trailing /v1 from upstream to avoid double path
-	cleanURL := strings.TrimSuffix(conf.UpstreamURL, "/v1")
-	cleanURL = strings.TrimSuffix(cleanURL, "/")
-
-	var targetURL string
-	if isAnthropicUpstream {
-		targetURL = cleanURL + "/v1/messages"
-	} else {
-		targetURL = cleanURL + "/v1/chat/completions"
-	}
 
 	// Build request body
 	var requestBody []byte
@@ -259,8 +257,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	// Create anthropic request context
 	arc := &anthropicRequestContext{
-		conf:                conf,
-		targetURL:           targetURL,
+		conf: conf,
+		// targetURL: empty placeholder — the retired external-default
+		// build is gone (task 4/A13); the passthrough arm rebuilds it
+		// from the credential before every doAnthropicRequest, and the
+		// OpenAI-internal arm never reads it.
+		targetURL:           "",
 		reqID:               reqID,
 		startTime:           startTime,
 		reqLog:              reqLog,
@@ -505,8 +507,15 @@ loop:
 // attemptAnthropicModel attempts a single model request
 func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicRequestContext, modelIndex int, currentModel string) bool {
 	// Check if this model uses internal upstream
+	// remove-external-upstream P1 (task 4, A15): every resolved model is
+	// internal by construction (the boundary 404 gate rejects
+	// unknown/non-internal models before the loop), so the internal test
+	// collapses to model-config presence. modelConfig can still be nil
+	// for a DANGLING fallback-chain name (legacy chains hold e.g.
+	// 'MiniMax-M2.5') — that case falls to the well-formed attempt
+	// failure below.
 	modelConfig := directGetModel(&arc.conf, currentModel)
-	isInternal := modelConfig != nil && modelConfig.Internal
+	isInternal := modelConfig != nil
 
 	if arc.baseCtx.Err() != nil {
 		return true // Client disconnected
@@ -550,7 +559,19 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				credAPIKey = cred.ResolveAPIKey()
 			}
 			if passthroughURL == "" {
-				passthroughURL = arc.conf.UpstreamURL
+				// remove-external-upstream P1 (task 4, A16): the
+				// UpstreamURL fallback is GONE. An anthropic-provider
+				// credential/model with no base URL anywhere is a
+				// configuration error — fail the ATTEMPT (well-formed,
+				// mirroring the deleted pkg/ultimatemodel
+				// handler_external.go "upstream URL not configured"
+				// shape) and let the model fallback loop / all-models
+				// 502 envelope carry it. Never forward to a retired
+				// global upstream.
+				log.Printf("Anthropic passthrough attempt for model %s failed: no upstream URL configured (credential base_url and internal_base_url both empty)", modelConfig.ID)
+				arc.lastError = []byte("upstream URL not configured for anthropic passthrough")
+				arc.lastStatusCode = http.StatusBadGateway
+				return false
 			}
 			cleanURL := strings.TrimSuffix(passthroughURL, "/v1")
 			cleanURL = strings.TrimSuffix(cleanURL, "/")
@@ -650,7 +671,17 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
 		}
 	} else {
-		success = h.doAnthropicRequest(w, arc)
+		// remove-external-upstream P1 (task 4): the external dispatch
+		// arm is GONE. This branch is still REACHABLE — a dangling
+		// fallback-chain name resolves to nil modelConfig (R5; legacy
+		// chains hold e.g. 'MiniMax-M2.5'). Fail the ATTEMPT with a
+		// well-formed error so the model fallback loop / all-models
+		// 502 envelope carries it — never a panic, never a silent
+		// forward to a retired global upstream.
+		log.Printf("Anthropic attempt for model %q failed: no internal model config (dangling reference; external upstream path removed)", currentModel)
+		arc.lastError = []byte(fmt.Sprintf("model %q has no internal model config", currentModel))
+		arc.lastStatusCode = http.StatusBadGateway
+		return false
 	}
 
 	return success
@@ -673,24 +704,11 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	}
 
 	// Resolve credential and set auth header
-	if arc.conf.UpstreamCredentialID != "" {
-		req.Header.Del("Authorization")
-		req.Header.Del("X-API-Key")
-		req.Header.Del("x-api-key")
-		req.Header.Del("api-key")
-
-		cred := arc.conf.ModelsConfig.GetCredential(arc.conf.UpstreamCredentialID)
-		if cred != nil {
-			apiKey := cred.ResolveAPIKey()
-			if apiKey != "" {
-				if arc.isAnthropicUpstream {
-					req.Header.Set("x-api-key", apiKey)
-				} else {
-					req.Header.Set("Authorization", "Bearer "+apiKey)
-				}
-			}
-		}
-	} else if arc.credentialAPIKey != "" {
+	// remove-external-upstream P1 (task 4, A17): the
+	// UpstreamCredentialID env-credential arm is GONE with the external
+	// path; the passthrough branch authenticates with the model's OWN
+	// resolved credential (arc.credentialAPIKey).
+	if arc.credentialAPIKey != "" {
 		// Internal model passthrough: use credential's API key
 		req.Header.Del("Authorization")
 		req.Header.Del("X-API-Key")

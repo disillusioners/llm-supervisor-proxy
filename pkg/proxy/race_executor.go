@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -140,13 +139,22 @@ func executeRequest(
 		}
 	}
 
-	// External upstream: use the configured upstream URL. The
-	// load-balance-groups / Q15 event still fires here for the
-	// GROUP pick (when the picked member is external) — the
-	// publish site owns BOTH paths so the event coverage is
-	// complete (mirror of model_credential_selected's
-	// W-1/newlyBound-only asymmetry for the member axis).
-	err := executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
+	// remove-external-upstream P1 (task 3) — the external arm is GONE.
+	// This branch is still REACHABLE (R5): the pre-032 group-member
+	// window plus dangling fallback-chain names (legacy rows' own chains
+	// hold e.g. 'MiniMax-M2.5') can land a non-internal / unresolved
+	// modelID here — isServableGroupMember does NOT check Internal
+	// (real in code, unreachable-in-prod per the inventory; both facts
+	// stated). Return a WELL-FORMED attempt error so the per-attempt
+	// path flows into the standard failure machinery (502 envelope via
+	// GetFinalErrorInfo) — never a panic, never an unreachable assert.
+	//
+	// The load-balance-groups / Q15 member event still fires here for
+	// the GROUP pick (when the picked member fails this check) — the
+	// publish site owns the member axis (mirror of the deleted
+	// external arm's publish-then-return shape; an unresolved member
+	// carries the zero ResolvedCredential via resolvedOK=false).
+	err := fmt.Errorf("model %q has no internal credential resolution; the external upstream path has been removed", req.modelID)
 	publishCredentialSelected(req)
 	return err
 }
@@ -450,168 +458,6 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline, rawBody)
 	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
-}
-
-// executeExternalRequest handles requests to external upstream (LiteLLM, etc.).
-//
-// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): this env-only path is
-// UNCHANGED by credential load-balancing and rate-limit credential
-// failover. The cfg.UpstreamCredentialID resolution below uses the
-// deployment's single env credential — it is NOT model-owned, so a 429
-// here follows the existing model-racing behavior (no
-// ExcludeAndReselect, no cooldown, no modelTypeCredFailover spawn).
-// grep-guard: zero hits of ExcludeAndReselect / IsRateLimitError /
-// modelTypeCredFailover within this function.
-//
-// interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
-// entry, threaded via executeRequest). Drives the MiniMax
-// reasoning_details split-mode gate for race-external; when gated on, the
-// translator mutates bodyMap before re-marshalling.
-func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
-	// 1. Prepare upstream request
-	// Check for test upstream header (for testing with mock servers)
-	upstreamURL := cfg.UpstreamURL
-
-	// Set the target URL to upstream
-	u, err := url.Parse(upstreamURL)
-	if err != nil {
-		return fmt.Errorf("invalid upstream URL: %w", err)
-	}
-	u.Path, _ = url.JoinPath(u.Path, "/v1/chat/completions")
-
-	// 1.5 Modify body to use current model ID
-	var bodyMap map[string]interface{}
-	finalBody := rawBody
-	if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
-		bodyMap["model"] = req.modelID
-
-		// P1-8(b): 5th wiring site — race-external body-map mutation.
-		// Gate = interleaved && upstream credential is MiniMax. Empty
-		// UpstreamCredentialID ⇒ providerIsMiniMax=false (D3).
-		//
-		// The pre-existing model-override unmarshal (above) and marshal
-		// (below) run unconditionally regardless of the gate — the model
-		// field is always overwritten. The NEW translator call is the
-		// only mutation gated on interleaved && raceExtProviderIsMiniMax(cfg);
-		// gated-off means the translator is not invoked, so no new body
-		// change occurs beyond the pre-existing model-override behavior.
-		if interleaved && raceExtProviderIsMiniMax(cfg) {
-			if err := translator.TranslateRequestBody(bodyMap); err != nil {
-				return fmt.Errorf("race-external translator: %w", err)
-			}
-		}
-
-		if b, err := json.Marshal(bodyMap); err == nil {
-			finalBody = b
-		}
-	}
-	// Create fresh request with context and body
-	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(finalBody))
-	if err != nil {
-		return fmt.Errorf("failed to create upstream request: %w", err)
-	}
-
-	// Copy headers from original request
-	for k, v := range originalReq.Header {
-		// Skip standard proxy-unsafe headers
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Host") || strings.HasPrefix(strings.ToLower(k), "x-llmproxy-") {
-			continue
-		}
-		// D4: NARROW strip of exactly x-proxy-interleaved-thinking on the
-		// race-external path. Case-insensitive via strings.EqualFold. The
-		// general x-proxy-* strip is REJECTED (would change flag-absent
-		// forwarding behavior — old clients never send this header, so
-		// the narrow strip preserves the flag-absent invariant). Mirrors
-		// the same strip in pkg/ultimatemodel/handler_external.go:79-87.
-		if strings.EqualFold(k, "x-proxy-interleaved-thinking") {
-			continue
-		}
-		upstreamReq.Header[k] = v
-	}
-	upstreamReq.Host = u.Host
-
-	// If UpstreamCredentialID is configured, resolve the credential and set auth header
-	// This allows the proxy to authenticate with external upstream providers
-	// using a different token than what the client provided
-	if cfg.UpstreamCredentialID != "" && cfg.ModelsConfig != nil {
-		// Remove all auth headers first to avoid conflicts
-		upstreamReq.Header.Del("Authorization")
-		upstreamReq.Header.Del("X-API-Key")
-		upstreamReq.Header.Del("x-api-key")
-		upstreamReq.Header.Del("api-key")
-
-		// Resolve credential
-		cred := cfg.ModelsConfig.GetCredential(cfg.UpstreamCredentialID)
-		if cred != nil {
-			apiKey := cred.ResolveAPIKey()
-			if apiKey != "" {
-				upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
-				log.Printf("[DEBUG] Race attempt %d: using upstream credential %s for authentication", req.id, cfg.UpstreamCredentialID)
-			}
-		} else {
-			log.Printf("[WARN] Race attempt %d: upstream credential %s not found", req.id, cfg.UpstreamCredentialID)
-		}
-	}
-
-	log.Printf("[DEBUG] Race attempt %d calling: %s (Host: %s)", req.id, upstreamReq.URL.String(), upstreamReq.Host)
-
-	client := &http.Client{
-		Timeout: 0, // Timeout is handled by context
-	}
-
-	// 2. Perform request
-	resp, err := client.Do(upstreamReq)
-	if err != nil {
-		return fmt.Errorf("upstream request failed: %w", err)
-	}
-
-	// Deferred function to close response body only if req.resp hasn't been
-	// cleared by cleanup() (which happens when Cancel() is called).
-	// This prevents double-close when both Cancel() and this defer execute.
-	defer func() {
-		req.mu.Lock()
-		if req.resp != nil && req.resp.Body != nil {
-			req.resp.Body.Close()
-			req.resp = nil
-		}
-		req.mu.Unlock()
-	}()
-
-	req.SetResp(resp)
-
-	// Track HTTP status code for error type detection
-	req.SetHTTPStatus(resp.StatusCode)
-
-	// 3. Check for immediate error
-	if resp.StatusCode >= 400 {
-		// Read response body for error details
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		bodyStr := string(bodyBytes)
-
-		// Check if the response body contains context overflow patterns
-		if models.IsContextOverflowError(fmt.Errorf("%s", bodyStr)) {
-			return fmt.Errorf("upstream returned error: %s - %s", resp.Status, bodyStr)
-		}
-
-		return fmt.Errorf("upstream returned error: %s", resp.Status)
-	}
-
-	// 4. Check if this is a streaming or non-streaming response
-	contentType := resp.Header.Get("Content-Type")
-	isStreaming := strings.Contains(contentType, "text/event-stream")
-
-	if !isStreaming {
-		// Non-streaming response: read entire body as single chunk
-		// (interleaved is threaded through P2-4 so the response
-		// translator's MiniMax gate is visible at the call site).
-		return handleNonStreamingResponse(ctx, cfg, resp, req, finalBody, interleaved)
-	}
-
-	// Streaming response
-	req.MarkStreaming()
-	// Detect provider for normalization
-	provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
-	return handleStreamingResponse(ctx, cfg, resp, req, provider, finalBody, interleaved)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers

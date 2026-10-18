@@ -703,10 +703,11 @@ func TestS10_CredentialGate_Inert(t *testing.T) {
 	// Register a dangling-credential ultimate model via a fresh env, then
 	// point ULTIMATE_MODEL_ID at it. AddModel validates credential refs
 	// (rejects a dangling CredentialID), so this subtest instead drives
-	// race-external with NO upstream credential configured
-	// (opts.noUpstreamCred): raceExtProviderIsMiniMax=false (D3 — empty
-	// UpstreamCredentialID ⇒ gate off), which is the same inert wire
-	// contract as an unresolvable credential.
+	// a model unknown to ModelsConfig with NO upstream credential
+	// configured — PRE-P1 that exercised the external forward (gate off
+	// per D3: empty UpstreamCredentialID ⇒ raceExtProviderIsMiniMax
+	// false); POST-P1 the boundary gate 404s it. Pending the phase5
+	// re-seed (delete-vs-convert per R12).
 	t.Run("race_ext_no_upstream_credential_inert", func(t *testing.T) {
 		env := setupTestEnv(t, okNonStreamHandler(), envOptions{noUpstreamCred: true})
 		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
