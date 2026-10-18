@@ -1,4 +1,4 @@
 {
-  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"first-data-after-preamble\"}}]}\n\ndata: [DONE]\n",
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"first-data-after-preamble\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\"}\n\n",
   "content_type": "text/event-stream"
 }

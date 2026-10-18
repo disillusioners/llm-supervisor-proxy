@@ -68,7 +68,7 @@ func TestGzipMiddleware_OpenAI_ParityWithUncompressed(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
+	seedInternalTestModel(mc, "test-model", "test-upstream-model")
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
@@ -138,15 +138,18 @@ func TestGzipMiddleware_OpenAI_ParityWithUncompressed(t *testing.T) {
 			treatmentHeaders.Get("Content-Encoding"))
 	}
 
-	// 4. Upstream Content-Length must equal the decompressed size
-	//    (the proxy recomputes it).
+	// 4. Upstream Content-Length must equal the forwarded body length
+	//    (the proxy recomputes it). remove-external-upstream P5: the
+	//    internal arm re-marshals the request (trailing model rewrite +
+	//    canonical key order), so the reference is the CAPTURED upstream
+	//    body, not the client's plain bytes.
 	if got := treatmentHeaders.Get("Content-Length"); got != "" && got != "0" {
 		// http.Client may not set Content-Length when it
 		// rewrites the request internally; if it does, it must
-		// match the decompressed length.
-		if got != strconv.FormatInt(int64(len(plainBytes)), 10) {
+		// match the forwarded length.
+		if got != strconv.Itoa(len(treatmentUpstream)) {
 			t.Errorf("upstream Content-Length = %q, want %d",
-				got, len(plainBytes))
+				got, len(treatmentUpstream))
 		}
 	}
 
@@ -177,13 +180,13 @@ func TestGzipMiddleware_OpenAI_NoEncoding_Unchanged(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
+	seedInternalTestModel(mc, "test-model", "test-upstream-model")
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
 	wrappedChat := gzipmw.DecompressRequest(http.HandlerFunc(h.HandleChatCompletions))
 
-	plain := []byte(`{"model":"test-model","messages":[]}`)
+	plain := []byte(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(plain))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -202,11 +205,18 @@ func TestGzipMiddleware_OpenAI_NoEncoding_Unchanged(t *testing.T) {
 	if err := json.Unmarshal(seenUpstream, &seen); err != nil {
 		t.Fatalf("upstream did not receive JSON: err=%v body=%q", err, seenUpstream)
 	}
-	if seen["model"] != sent["model"] {
-		t.Errorf("upstream model = %v, want %v", seen["model"], sent["model"])
+	// remove-external-upstream P5: the internal arm rewrites the
+	// forwarded model to the resolved member's InternalModel, so the
+	// middleware-parity check is on the MESSAGES payload (unchanged),
+	// not the model string.
+	if seen["model"] != "test-upstream-model" {
+		t.Errorf("upstream model = %v, want the resolved internal model %q", seen["model"], "test-upstream-model")
 	}
 	if seen["messages"] == nil {
 		t.Errorf("upstream lost messages field")
+	}
+	if !strings.Contains(string(seenUpstream), `"hello"`) {
+		t.Errorf("upstream lost the user message content: %q", seenUpstream)
 	}
 }
 
@@ -217,7 +227,7 @@ func TestGzipMiddleware_OpenAI_CorruptGzip_Returns400(t *testing.T) {
 	var handlerInvoked bool
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
+	seedInternalTestModel(mc, "test-model", "test-upstream-model")
 	h, _ := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerInvoked = true
 		w.WriteHeader(http.StatusOK)
@@ -275,7 +285,7 @@ func TestGzipMiddleware_OpenAI_StreamingResponse(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "test-model", Name: "test-model", Enabled: true})
+	seedInternalTestModel(mc, "test-model", "test-upstream-model")
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 
@@ -331,7 +341,7 @@ func TestGzipMiddleware_Anthropic_ParityWithUncompressed(t *testing.T) {
 	defer upstream.Close()
 
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{ID: "mock-anthropic", Name: "mock-anthropic", Enabled: true})
+	seedInternalTestModel(mc, "mock-anthropic", "mock-anthropic-upstream")
 	h, _ := newTestHandler(t, upstreamHandler, mc)
 	defer upstream.Close()
 

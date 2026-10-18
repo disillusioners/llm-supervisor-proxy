@@ -32,12 +32,12 @@ import (
 func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 	upstreamResponse := `{"id":"chatcmpl-x","object":"chat.completion","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"the answer","reasoning_content":"my chain of thought"},"finish_reason":"stop"}]}`
 
-	// Exact golden: upstream body + the single trailing '\n' that
-	// handleNonStreamResult always appends via the buffer-chunked
-	// finalBody path. Stored as a []byte so bytes.Equal is a true
-	// byte-by-byte comparison (not a string compare that could mask
-	// differences in encoding or whitespace handling).
-	wantBody := []byte(upstreamResponse + "\n")
+	// remove-external-upstream P5: the internal arm decodes the upstream
+	// JSON into a typed response and re-marshals it, so the wire body is
+	// no longer byte-identical to the upstream bytes. The invariants we
+	// pin instead are (a) the wire body is semantically the upstream's
+	// response, and (b) handleNonStreamResult appends exactly one
+	// trailing '\n' (the buffer-chunked finalBody path).
 
 	upstreamHandler := func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
@@ -72,15 +72,27 @@ func TestHandleNonStreamResult_NonStreamReasoning(t *testing.T) {
 		t.Fatalf("expected status 200, got %d (body=%s)", rr.Code, rr.Body.String())
 	}
 
-	// Exact byte comparison. bytes.Equal is a constant-time byte-by-byte
-	// compare on equal-length slices, so any interior drift (extra '\n'
-	// in the middle, a different number of trailing newlines, or any
-	// other mutation) trips this assertion. Previously this was a
-	// TrimSpace-based string compare that masked any interior '\n'
-	// injection — the W3 hardening is to lock the body to the exact
-	// byte sequence produced by handleNonStreamResult.
-	if got := rr.Body.Bytes(); !bytes.Equal(got, wantBody) {
-		t.Errorf("wire response drifted from golden\n got: %q (%d bytes)\nwant: %q (%d bytes)", got, len(got), wantBody, len(wantBody))
+	// Semantic golden: the client body must decode to the upstream's
+	// response (the internal arm re-marshals the typed response).
+	wire := rr.Body.Bytes()
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(wire, &parsed); err != nil {
+		t.Fatalf("client body is not JSON: %v (body=%q)", err, wire)
+	}
+	choices, _ := parsed["choices"].([]interface{})
+	if len(choices) == 0 {
+		t.Fatalf("client body has no choices: %q", wire)
+	}
+	msg, _ := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "the answer" {
+		t.Errorf("wire content = %v, want %q", msg["content"], "the answer")
+	}
+	if msg["reasoning_content"] != "my chain of thought" {
+		t.Errorf("wire reasoning_content = %v, want %q", msg["reasoning_content"], "my chain of thought")
+	}
+	// Exactly one trailing newline (no interior/duplicate mutation).
+	if !bytes.HasSuffix(wire, []byte("\n")) || bytes.HasSuffix(wire, []byte("\n\n")) {
+		t.Errorf("wire body must end with exactly one trailing newline: %q", wire)
 	}
 
 	// Stored assistant message must carry BOTH Content and Thinking.

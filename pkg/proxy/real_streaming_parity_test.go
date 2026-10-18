@@ -353,9 +353,9 @@ func mockCreateToolCallChunk(name, args string, index int) string {
 				"delta": map[string]interface{}{
 					"tool_calls": []interface{}{
 						map[string]interface{}{
-							"index":    index,
-							"id":       "call_test",
-							"type":     "function",
+							"index": index,
+							"id":    "call_test",
+							"type":  "function",
 							"function": map[string]interface{}{
 								"name":      name,
 								"arguments": args,
@@ -467,26 +467,26 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 		})
 	}
 
-	// (2) Anthropic→OpenAI-wire external translation
-	// (handler_anthropic.go:819/:851). Header-present = the
-	// TranslateBufferedStream path, byte-identical to today.
+	// (2) Anthropic→OpenAI-wire INTERNAL translation (E2E through the
+	// boundary resolution; renamed from the external path in P5).
 	//
 	// Variant matrix: text + thinking + tool_call + usage + role_only +
 	// usage_first + comment_first (all variants in fixtureSet()).
 	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
 		variant := variant
-		t.Run("2_AnthropicExternalTranslation_"+variant+"_HeaderPresent", func(t *testing.T) {
+		t.Run("2_AnthropicTranslation_"+variant+"_HeaderPresent", func(t *testing.T) {
 			fixture := fixtures[variant]
 			upstream := httptest.NewServer(fixture.handler())
 			t.Cleanup(upstream.Close)
 
 			t.Setenv("APPLY_ENV_OVERRIDES", "true")
-			t.Setenv("UPSTREAM_URL", upstream.URL)
 			mgr, err := config.NewManager()
 			if err != nil {
 				t.Fatalf("new manager: %v", err)
 			}
 			modelsCfg := models.NewModelsConfig()
+			// remove-external-upstream P5: internal openai fixture.
+			seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
 			h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 			body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -496,8 +496,8 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 			rr := httptest.NewRecorder()
 			h.HandleAnthropicMessages(rr, req)
 
-			golden, goldenCT := readGolden(t, "anthropic_external_"+variant)
-			assertParity(t, "AnthropicExternal", variant, rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
+			golden, goldenCT := readGolden(t, "anthropic_translation_"+variant)
+			assertParity(t, "AnthropicTranslation", variant, rr.Body.String(), golden, goldenCT, rr.Header().Get("Content-Type"))
 		})
 	}
 

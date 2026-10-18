@@ -1066,149 +1066,6 @@ func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Test 4 — Task 43 (env-credential-unchanged POSITIVE: external path uses
-// env credential byte-identically N times; engine never fires)
-// ─────────────────────────────────────────────────────────────────────────
-
-func TestHandler_EnvCredential_Unchanged_Positive(t *testing.T) {
-	// Two upstreams (HISTORICAL — remove-external-upstream P1 retired
-	// the global env upstream; kept for phase5 re-seed context):
-	//   - envUpstream : was bound to the retired global upstream URL;
-	//                   carried the env credential in Authorization
-	//                   (deleted race-external path)
-	//   - internalUpstream : the upstream for an internal multi-credential
-	//                   model so the engine is live (the engine still gets
-	//                   built and is exposed via Handler.credEngine, but
-	//                   the request must never touch it).
-	envUpstream := newRecordingUpstream()
-	envSrv := httptest.NewServer(envUpstream)
-	defer envSrv.Close()
-
-	internalUpstream := newRecordingUpstream()
-	internalSrv := httptest.NewServer(internalUpstream)
-	defer internalSrv.Close()
-
-	mock := &mockModelsConfig{}
-
-	// Env credential (NOT owned by any model).
-	mock.AddCredential(models.CredentialConfig{
-		ID: "env-cred", Provider: "openai", APIKey: "env-key", BaseURL: envSrv.URL,
-	})
-	// Multi-credential internal model — its credentials go to the
-	// internalUpstream (the engine is LIVE for this model; we will
-	// assert the engine state for it is empty after the external req).
-	mock.AddCredential(models.CredentialConfig{
-		ID: "cred-A", Provider: "openai", APIKey: "key-A", BaseURL: internalSrv.URL,
-	})
-	mock.AddCredential(models.CredentialConfig{
-		ID: "cred-B", Provider: "openai", APIKey: "key-B", BaseURL: internalSrv.URL,
-	})
-	mock.AddModel(models.ModelConfig{
-		ID: "internal-m", Name: "internal-m", Enabled: true, Internal: true,
-		InternalModel: "up-internal-m",
-		Credentials:   models.TestRefs("cred-A", "cred-B"),
-	})
-
-	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", envSrv.URL)
-	t.Setenv("UPSTREAM_CREDENTIAL_ID", "env-cred")
-	t.Setenv("RACE_RETRY_ENABLED", "false")
-	mgr, err := config.NewManager()
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	// Engine — must be wired into NewHandler (Phase 3 contract).
-	engine := credentiallb.NewEngine(time.Hour, time.Hour, 99, 60*time.Second)
-	t.Cleanup(engine.Stop)
-	engine.RebindFromStore("internal-m", models.TestRefs("cred-A", "cred-B"))
-
-	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
-
-	db := setupIntegrationDB(t)
-	tokenStore := auth.NewTokenStore(db, database.SQLite)
-	plaintextToken, _, err := tokenStore.CreateToken(
-		context.Background(), "env-cred-test", nil, "env-cred-test", false, "", nil,
-	)
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
-	bus := events.NewBus()
-	reqStore := store.NewRequestStore(100)
-	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
-	if err != nil {
-		t.Fatalf("NewBufferStore: %v", err)
-	}
-	counter := usage.NewCounter(db, database.SQLite)
-
-	cfg := &Config{ConfigMgr: mgr, ModelsConfig: resolver}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine)
-
-	// Drive N=3 requests for a model unknown to ModelsConfig. PRE-P1
-	// this exercised the external forward (env upstream via the retired
-	// global upstream-URL/credential pair — fields deleted in P1);
-	// POST-P1 the boundary gate 404s such models. The assertions below
-	// are the phase5 re-seed's delete-vs-convert territory (R12).
-	const N = 3
-	for i := 0; i < N; i++ {
-		rec := sendChatRequest(t, h, plaintextToken, "external-model-not-in-db", "phase5-test env-cred")
-		if rec.Code != http.StatusOK {
-			t.Errorf("request %d: status = %d, want 200 (body: %s)", i, rec.Code, rec.Body.String())
-		}
-	}
-
-	// Assert: every request hit the env upstream. Per-key counters on
-	// the env upstream show the env credential's API key N times.
-	envKeys := envUpstream.perKeyCallsSnapshot()
-	envHits := 0
-	for k, n := range envKeys {
-		if strings.Contains(k, "env-key") {
-			envHits += n
-		}
-	}
-	if envHits != N {
-		t.Errorf("env upstream hits on env-cred key = %d, want %d (per-key=%v)", envHits, N, envKeys)
-	}
-
-	// Assert: ZERO hits on the internal upstream's API keys (engine
-	// never picked a credential for the internal model — the external
-	// request never went through the internal path).
-	internalKeys := internalUpstream.perKeyCallsSnapshot()
-	for k, n := range internalKeys {
-		if strings.Contains(k, "key-A") || strings.Contains(k, "key-B") {
-			t.Errorf("internal upstream hit on %s = %d, want 0 (external path must not touch engine)", k, n)
-		}
-	}
-
-	// Assert: zero model_credential_selected events (the engine never
-	// stored a binding because no request resolved through it).
-	selectedEvents := drainEventsOfType(bus, "model_credential_selected")
-	if len(selectedEvents) != 0 {
-		t.Errorf("model_credential_selected events = %d, want 0 (engine never touched external path); events: %+v", len(selectedEvents), selectedEvents)
-	}
-	// Assert: zero model_credential_failover events.
-	failoverEvents := drainEventsOfType(bus, credentiallb.EventCredentialFailover)
-	if len(failoverEvents) != 0 {
-		t.Errorf("model_credential_failover events = %d, want 0 (engine never touched external path)", len(failoverEvents))
-	}
-
-	// Engine stats for the internal model: no bindings, no misses,
-	// no cooldowns — proves the engine didn't see any of the N requests.
-	stats := engine.Stats()
-	if st, ok := stats["internal-m"]; ok {
-		if st.Bindings != 0 {
-			t.Errorf("engine stats[internal-m].Bindings = %d, want 0 (engine never bound any conversation)", st.Bindings)
-		}
-		if st.Misses != 0 {
-			t.Errorf("engine stats[internal-m].Misses = %d, want 0 (engine never picked for this model)", st.Misses)
-		}
-		if st.Cooldowns != 0 {
-			t.Errorf("engine stats[internal-m].Cooldowns = %d, want 0 (engine never seeded cooldowns)", st.Cooldowns)
-		}
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // Test 5 — Task 45 (B1 structure via GetRequestStatuses: exactly
 // len(creds)-1 credFailover rows + 0-or-1 fallback row; per-row
 // credentialID on credFailover rows; no double-tries)
@@ -1250,9 +1107,9 @@ func runB1StructureWithFallback(t *testing.T) {
 	}
 	mock.AddModel(models.ModelConfig{
 		ID: "m1", Name: "m1", Enabled: true, Internal: true,
-		InternalModel:       "up-m1",
-		Credentials:         models.TestRefs(primaryCreds...),
-		FallbackChain:       []string{"m2"},
+		InternalModel: "up-m1",
+		Credentials:   models.TestRefs(primaryCreds...),
+		FallbackChain: []string{"m2"},
 	})
 
 	// Fallback model m2 — single credential (no failover); also 429s.

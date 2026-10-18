@@ -440,6 +440,20 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		normalizers.GetRegistry().ResetAll(normCtx)
 		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline, rawBody)
 	}
+
+	// remove-external-upstream P5: wire the tool-call repairer onto the
+	// OpenAI provider for the NON-STREAM path only. The deleted external
+	// arm repaired non-stream tool-call arguments via
+	// repairToolCallArgumentsInNonStreamingResponse; on the internal arm
+	// the equivalent seam is the provider's own repairer (openai.go:158-180,
+	// the same wiring internal_handler.go:363-368 uses). Streaming repair
+	// is owned by the toolcall buffer in handleInternalStream, so it is
+	// deliberately NOT wired here (avoids double repair).
+	if cfg.ToolRepair.Enabled {
+		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
+			openaiProvider.SetRepairer(toolrepair.NewRepairer(&cfg.ToolRepair), nil)
+		}
+	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
 }
 
