@@ -62,13 +62,13 @@ func (c *Config) Clone() ConfigSnapshot {
 }
 
 type ConfigSnapshot struct {
-	IdleTimeout          time.Duration
-	StreamDeadline       time.Duration // Time limit before picking best buffer and continuing streaming
-	MaxGenerationTime    time.Duration // Absolute hard timeout for entire request lifecycle
-	MaxStreamBufferSize  int
-	ModelsConfig         models.ModelsConfigInterface
-	LoopDetection        config.LoopDetectionConfig
-	ToolRepair           toolrepair.Config
+	IdleTimeout         time.Duration
+	StreamDeadline      time.Duration // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime   time.Duration // Absolute hard timeout for entire request lifecycle
+	MaxStreamBufferSize int
+	ModelsConfig        models.ModelsConfigInterface
+	LoopDetection       config.LoopDetectionConfig
+	ToolRepair          toolrepair.Config
 
 	// Race Retry
 	RaceRetryEnabled   bool
@@ -123,7 +123,8 @@ type Handler struct {
 // If credEngine is nil, the race coordinator's nil-engine branch serves
 // the legacy single-credential fast path (Phase 2 / E-3); behavior is
 // byte-identical to pre-Phase-3.
-//   credEngine may be nil.
+//
+//	credEngine may be nil.
 func NewHandler(
 	config *Config,
 	bus *events.Bus,
@@ -797,7 +798,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			var result ultimatemodel.ShouldTriggerResult
 			if forceUltimate {
 				result = h.ultimateHandler.ForceTrigger(msgMaps)
-				log.Printf("[DEBUG] ForceTrigger hash=%s", result.Hash[:8])
+				log.Printf("[DEBUG] ForceTrigger hash=%s", shortHash8(result.Hash))
 			} else {
 				result = h.ultimateHandler.ShouldTrigger(msgMaps)
 			}
@@ -805,11 +806,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// Exclusion gate: skip ultimate model switching for excluded models
 				// Note: forceUltimate always bypasses exclusion (admin override)
 				if !forceUltimate && rc.resolvedModel != nil && rc.resolvedModel.ExcludeFromUltimateSwitching {
-					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, result.Hash[:8])
+					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, shortHash8(result.Hash))
 					h.publishEvent("ultimate_model_excluded", map[string]interface{}{
 						"id":    rc.reqID,
 						"model": rc.resolvedModel.ID,
-						"hash":  result.Hash[:8],
+						"hash":  shortHash8(result.Hash),
 					})
 					// Fall through to normal flow (no ultimate model switch)
 				} else {
@@ -823,7 +824,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						}
 
 						log.Printf("[UltimateModel] Attempt limit exhausted for hash=%s (attempt %d/%d)",
-							result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
+							shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
 
 						// Determine if streaming
 						isStream := false
@@ -850,7 +851,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						// max-retries config knob.
 						h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
 							"id":            rc.reqID,
-							"hash":          result.Hash[:8],
+							"hash":          shortHash8(result.Hash),
 							"current_retry": result.CurrentAttempt,
 							"max_retries":   result.MaxAttempts,
 						})
@@ -867,7 +868,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
 					}
 					log.Printf("[UltimateModel] Triggered for duplicate request (schedule milestone), using %s, hash=%s, attempt=%d/%d",
-						ultimateModelID, result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
+						ultimateModelID, shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
 
 					// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
 
@@ -887,7 +888,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						"id":             rc.reqID,
 						"ultimate_model": ultimateModelID,
 						"original_model": rc.reqLog.Model,
-						"hash":           result.Hash[:8],
+						"hash":           shortHash8(result.Hash),
 						"current_retry":  result.CurrentAttempt,
 						"max_retries":    result.MaxAttempts,
 					})
@@ -1971,4 +1972,17 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 		}
 	}
+}
+
+// shortHash8 returns the first 8 characters of an ultimate-model hash,
+// or the input unchanged when it is shorter. The hash is EMPTY when
+// shouldTriggerInternal early-returns (no global ultimate model id, or an
+// empty message list), so slicing it blindly panics — as it did on the
+// ForceTrigger debug log before this guard. Every Hash[:8] site goes
+// through here.
+func shortHash8(h string) string {
+	if len(h) < 8 {
+		return h
+	}
+	return h[:8]
 }
