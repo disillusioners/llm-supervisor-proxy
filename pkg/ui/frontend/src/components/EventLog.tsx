@@ -75,8 +75,21 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   ultimate_model_failed: (e) => `Ultimate model failed: ${e.data?.ultimate_model || '?'} - ${e.data?.error || 'Unknown error'}`,
   race_started: (e) => `Race started with models: ${e.data?.models?.join(', ') || '?'}`,
   race_spawn: (e) => {
-    const trigger = e.data?.trigger ? ` (${e.data.trigger})` : '';
+    // race-error-reason-classification — ADDITIVE: the classified reason
+    // rides INSIDE the trigger paren (` (main_error · upstream_5xx
+    // status=502)`) when the backend enrichment is present; without it
+    // the line is byte-identical to the pre-enrichment shape.
+    const trigger = e.data?.trigger
+      ? ` (${e.data.trigger}${e.data.reason_class ? ` · ${e.data.reason_class}` : ''}${e.data.reason_status ? ` status=${e.data.reason_status}` : ''})`
+      : '';
     return `Spawned ${e.data?.type || '?'} request #${e.data?.request_index ?? '?'}: ${e.data?.model || '?'}${trigger}`;
+  },
+  race_request_failed: (e) => {
+    const reason = e.data?.reason_class
+      ? ` (${e.data.reason_class}${e.data.reason_status ? ` status=${e.data.reason_status}` : ''})`
+      : '';
+    const detail = e.data?.error ? ` - ${e.data.error}` : '';
+    return `Race request failed: ${e.data?.model || '?'} #${e.data?.request_index ?? '?'}${reason}${detail}`;
   },
   race_winner_selected: (e) => {
     const duration = e.data?.duration_ms ? ` in ${e.data.duration_ms}ms` : '';
@@ -139,6 +152,7 @@ const EVENT_COLORS: Record<EventType, string> = {
   race_spawn: 'text-blue-400',
   race_winner_selected: 'text-green-400',
   race_all_failed: 'text-red-400',
+  race_request_failed: 'text-red-400',
   race_secondary_model_used: 'text-purple-400',
   tool_repair: 'text-amber-400',
   ultimate_model_retry_exhausted: 'text-red-400',
@@ -184,6 +198,7 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   race_spawn: 'RACE_SPAWN',
   race_winner_selected: 'RACE_WINNER',
   race_all_failed: 'RACE_ALL_FAILED',
+  race_request_failed: 'RACE_REQUEST_FAILED',
   race_secondary_model_used: 'SECONDARY_MODEL_USED',
   tool_repair: 'TOOL_REPAIR',
   ultimate_model_retry_exhausted: 'ULTIMATE_ATTEMPTS_EXHAUSTED',

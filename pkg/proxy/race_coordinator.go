@@ -114,6 +114,15 @@ type spawnTriggerInfo struct {
 	// reader, and if the field is empty for that path it defensively
 	// falls back to c.models[0] (single-model chain safety).
 	modelID string
+
+	// reason (race-error-reason-classification) is the classified,
+	// bounded failure reason for the spawn — populated by the Case-1
+	// classification site in manage() from the failed attempt's error
+	// + stored HTTP status. Zero-value (empty Class) for main spawns
+	// and idle-timeout spawns (W4: no error exists to classify there).
+	// Consumed by spawn()'s race_spawn publish as additive
+	// reason/reason_class/reason_status payload fields.
+	reason failureReason
 }
 
 // raceCoordinator manages multiple parallel upstream requests
@@ -381,7 +390,10 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 
 	// Add detailed error information if this spawn was triggered by an error
 	if triggerInfo.trigger == triggerMainError {
-		eventData["trigger_reason"] = triggerInfo.errorMessage
+		// trigger_reason keeps its key (and its role: the failed
+		// attempt's error text) but is now the BOUNDED, redacted
+		// detail — an upstream body can no longer flood the payload.
+		eventData["trigger_reason"] = triggerInfo.reason.Detail
 		eventData["failed_request_index"] = triggerInfo.failedRequest
 	}
 	// Phase 3 / Task 18 — surface the reselected credential on
@@ -389,6 +401,20 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	if triggerInfo.trigger == triggerRateLimit && triggerInfo.credentialID != "" {
 		eventData["credential_id"] = triggerInfo.credentialID
 		eventData["failed_request_index"] = triggerInfo.failedRequest
+	}
+
+	// race-error-reason-classification — ADDITIVE enrichment: every
+	// trigger that carries a classification publishes the bounded,
+	// greppable reason (reason=… status=… detail="…") plus the
+	// structured class/status fields. Event name, existing keys, and
+	// key semantics are unchanged; idle_timeout spawns (no error to
+	// classify) publish nothing extra, byte-identical to before.
+	if triggerInfo.trigger != "" && triggerInfo.reason.Class != "" {
+		eventData["reason"] = triggerInfo.reason.String()
+		eventData["reason_class"] = triggerInfo.reason.Class
+		if triggerInfo.reason.Status > 0 {
+			eventData["reason_status"] = triggerInfo.reason.Status
+		}
 	}
 
 	// Publish race_spawn event
@@ -554,7 +580,13 @@ func (c *raceCoordinator) manage() {
 					latestReq := c.requests[len(c.requests)-1]
 					if latestReq.IsDone() && latestReq.GetError() != nil {
 
-						errMsg := latestReq.GetError().Error()
+						// race-error-reason-classification — classify ONCE
+						// per failed attempt (bounded + redacted detail),
+						// then reuse across the credFailover branch, the
+						// model-fallback branch, and the log line. The raw
+						// error string never reaches an event payload or a
+						// [RACE] log line unbounded again.
+						failReason := classifyRequestFailure(latestReq)
 
 						// ── HOISTED CRED-FAILOVER BRANCH (Round 3c C1;
 						// Tasks 18-20) ── rate-limit classified AND internal
@@ -570,7 +602,7 @@ func (c *raceCoordinator) manage() {
 							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan.retryAfter)
 							c.spawn(modelTypeCredFailover, spawnTriggerInfo{
 								trigger:       triggerRateLimit,
-								errorMessage:  errMsg,
+								errorMessage:  failReason.Detail,
 								failedRequest: latestReq.id,
 								credentialID:  plan.credentialID,
 								// Phase 3 / Round 3j C1 critical fix —
@@ -578,6 +610,10 @@ func (c *raceCoordinator) manage() {
 								// info so spawn() targets the SAME model
 								// that just 429'd (not c.models[0]).
 								modelID: latestReq.modelID,
+								// race-error-reason-classification — the
+								// classified 429 reason rides the trigger
+								// info into the race_spawn payload.
+								reason: failReason,
 							})
 							c.mu.Lock()
 							// Budget bookkeeping (Task 19 / R3-5 — mutated only
@@ -594,12 +630,17 @@ func (c *raceCoordinator) manage() {
 							// Skip the model-fallback spawn this tick — the
 							// credFailover row IS this tick's spawn.
 						} else {
-							log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, errMsg)
+							// Bounded classified log line — the raw errMsg
+							// (which can embed a whole upstream error body
+							// on the context-overflow path) stays out of
+							// the server log.
+							log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
 							shouldSpawn = true
 							triggerInfo = spawnTriggerInfo{
 								trigger:       triggerMainError,
-								errorMessage:  errMsg,
+								errorMessage:  failReason.Detail,
 								failedRequest: latestReq.id,
+								reason:        failReason,
 							}
 						}
 					}
@@ -688,16 +729,25 @@ func (c *raceCoordinator) manage() {
 				if allFailed {
 					log.Printf("[RACE] All requests failed")
 
-					// Collect all error details
+					// Collect all error details. Per-row `error` is the
+					// bounded/redacted text; `reason` is the additive
+					// classified form (race-error-reason-classification).
 					errors := make([]map[string]interface{}, 0, len(c.requests))
 					for _, r := range c.requests {
 						if r.GetError() != nil {
-							errors = append(errors, map[string]interface{}{
+							rReason := classifyRequestFailure(r)
+							row := map[string]interface{}{
 								"request_index": r.id,
 								"model":         r.modelID,
 								"type":          string(r.modelType),
-								"error":         r.GetError().Error(),
-							})
+								"error":         rReason.Detail,
+								"reason":        rReason.String(),
+								"reason_class":  rReason.Class,
+							}
+							if rReason.Status > 0 {
+								row["reason_status"] = rReason.Status
+							}
+							errors = append(errors, row)
 						}
 					}
 
@@ -963,15 +1013,30 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 
 	if err != nil {
 		req.MarkFailed(err)
-		log.Printf("[RACE] Request %d failed: %v", req.id, err)
+		// race-error-reason-classification — the [RACE] log line and the
+		// event payload carry the classified, bounded reason; the raw
+		// error (which can embed an entire upstream error body on the
+		// context-overflow path) never reaches a log or payload
+		// unbounded.
+		failReason := classifyRequestFailure(req)
+		log.Printf("[RACE] Request %d failed: %s", req.id, failReason)
 
-		// Publish race_request_failed event with detailed error info
-		c.publishEvent("race_request_failed", map[string]interface{}{
+		// Publish race_request_failed event with detailed error info.
+		// Existing keys unchanged (`error` is the same error text, now
+		// bounded + redacted); reason/reason_class/reason_status are
+		// additive.
+		failEventData := map[string]interface{}{
 			"request_index": req.id,
 			"model":         req.modelID,
 			"type":          string(req.modelType),
-			"error":         err.Error(),
-		})
+			"error":         failReason.Detail,
+			"reason":        failReason.String(),
+			"reason_class":  failReason.Class,
+		}
+		if failReason.Status > 0 {
+			failEventData["reason_status"] = failReason.Status
+		}
+		c.publishEvent("race_request_failed", failEventData)
 	} else {
 		req.MarkCompleted()
 		log.Printf("[RACE] Request %d completed successfully", req.id)
