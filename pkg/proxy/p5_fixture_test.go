@@ -117,13 +117,22 @@ func seedInternalFixtureNamed(t *testing.T, mc models.ModelsConfigInterface, ups
 	}
 }
 
+// seedInternalModels registers an internal model row for each id (all
+// sharing the fixture credential pointed at upstreamURL).
+func seedInternalModels(mc models.ModelsConfigInterface, upstreamURL string, ids ...string) {
+	for _, id := range ids {
+		_ = seedInternalFixtureErr(mc, upstreamURL, id)
+	}
+}
+
 // seededModelsConfig builds a ModelsConfig carrying the canonical fixture
-// pair pointed at upstreamURL — for callers that build a ConfigSnapshot
+// pointed at upstreamURL — for callers that build a ConfigSnapshot
 // directly (race / tool-repair tests) instead of going through
-// newTestHandler.
+// newTestHandler. The low-level race tests hand-build multi-model lists
+// ("test-model" + a fallback), so the common fallback IDs are seeded too.
 func seededModelsConfig(t *testing.T, upstreamURL string) models.ModelsConfigInterface {
 	t.Helper()
 	mc := models.NewModelsConfig()
-	seedInternalFixture(t, mc, upstreamURL)
+	seedInternalModels(mc, upstreamURL, p5FixtureModelID, "fallback-model", "test-model-fallback")
 	return mc
 }

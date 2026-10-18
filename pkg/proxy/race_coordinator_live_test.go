@@ -78,7 +78,7 @@ func liveTestCfg(upstreamURL string, streamDeadline time.Duration) *ConfigSnapsh
 	// resolution path, so the snapshot carries a seeded internal model
 	// (test-model) whose credential base_url is the mock upstream.
 	mc := models.NewModelsConfig()
-	_ = seedInternalFixtureErr(mc, upstreamURL, p5FixtureModelID)
+	seedInternalModels(mc, upstreamURL, p5FixtureModelID, "m", "mA", "mB")
 	return &ConfigSnapshot{
 		RaceRetryEnabled:   true,
 		RaceMaxParallel:    1,
@@ -109,13 +109,13 @@ func TestLiveRelay_FirstByteWinner(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: chunk1\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk1"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 		firstWriteTime.Store(time.Now().UnixNano())
 		time.Sleep(200 * time.Millisecond)
-		w.Write([]byte("data: chunk2\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk2"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -165,9 +165,13 @@ func TestLiveRelay_FirstByteWinner(t *testing.T) {
 // TestLiveRelay_PredicateVariants exercises the four live-mode winner-
 // eligibility shapes plus the negative case (task 2.3).
 func TestLiveRelay_PredicateVariants(t *testing.T) {
-	t.Run("RoleOnlyFirst_Wins", func(t *testing.T) {
-		// Upstream emits role-only first chunk, then content, then [DONE].
-		// Live mode: winner fires on role-only first chunk (NOT waiting for content).
+	t.Run("RoleOnlyFirst_GateFiresOnFirstForwardableChunk", func(t *testing.T) {
+		// Upstream emits a role-only first chunk, then content, then [DONE].
+		// remove-external-upstream P5: post-P1 the request runs through the
+		// internal provider, whose typed-event stream emits NO wire byte for
+		// a role-only delta (the deleted external raw-forward relayed it
+		// verbatim). The first FORWARDABLE chunk is the content delta, so the
+		// gate fires there — never on the (non-forwardable) role chunk.
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -198,10 +202,11 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		if winner == nil {
 			t.Fatal("No winner")
 		}
-		// Role-only chunk must have fired the predicate — i.e. winner
-		// arrived well before upstream completion (~250ms).
-		if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-			t.Errorf("Role-only chunk did NOT fire first-byte winner gate (elapsed=%v)", elapsed)
+		// The gate must NOT fire on the role-only chunk (no wire byte on
+		// the internal arm): a winner before the content delta (~200ms)
+		// would mean a non-forwardable chunk leaked into the predicate.
+		if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+			t.Errorf("winner fired at %v — before the first forwardable (content) chunk; the internal arm must not emit a role-only first byte", elapsed)
 		}
 	})
 
@@ -467,13 +472,13 @@ func TestLiveRelay_BufferedModeKeepsIsCompletedGate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: chunk1\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk1"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
 		firstWriteTime.Store(time.Now().UnixNano())
 		time.Sleep(200 * time.Millisecond)
-		w.Write([]byte("data: chunk2\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk2"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -692,7 +697,7 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: hi\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("hi"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -1114,6 +1119,12 @@ func newLiveRelayHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsC
 	t.Cleanup(upstream.Close)
 
 	mgr := newTestManagerWithConfig(t, upstream.URL, opts...)
+	// remove-external-upstream P5: the handler needs a resolvable internal
+	// model (the deleted external arm no longer serves unknown models).
+	if modelsCfg == nil {
+		modelsCfg = models.NewModelsConfig()
+	}
+	seedInternalFixture(t, modelsCfg, upstream.URL)
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
@@ -1463,21 +1474,16 @@ func TestLiveRelay_R2_EstimatorUnderPrunePressure(t *testing.T) {
 	// the handler writes precomputed lines; the expected byte count is
 	// computed on the TEST goroutine — no shared mutable state.
 	//
-	// Byte math: each wire line "data: X\n\n" produces TWO stored chunks
-	// on the race-external path — the data line itself (Add re-appends
-	// the stripped newline: len+1) AND the blank SSE separator line,
-	// which ProcessChunk passes through empty and Add stores as a bare
-	// '\n' (+1). [DONE] (break before its separator) contributes len+1.
+	// remove-external-upstream P5: the recorded raw bytes are now the
+	// internal provider's RE-ENCODED SSE chunks (the external raw
+	// line-level pass-through that made per-line byte math possible is
+	// deleted), so the anti-truncation check is structural — EVERY
+	// payload marker must survive in the capture.
 	streamLines := make([]string, 0, chunkCount+1)
-	expectedBytes := 0
 	for i := 0; i < chunkCount; i++ {
-		line := "data: " + mockCreateChunk(fmt.Sprintf("prune-piece-%03d-payload", i))
-		streamLines = append(streamLines, line)
-		expectedBytes += len(line) + 1 // the data line
-		expectedBytes += 1             // its blank SSE separator chunk
+		streamLines = append(streamLines, "data: "+mockCreateChunk(fmt.Sprintf("prune-piece-%03d-payload", i)))
 	}
 	streamLines = append(streamLines, "data: [DONE]")
-	expectedBytes += len("data: [DONE]") + 1
 
 	writeStream := func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1520,16 +1526,19 @@ func TestLiveRelay_R2_EstimatorUnderPrunePressure(t *testing.T) {
 			t.Fatalf("live mode: bufferStore saves = %d, want EXACTLY 1 (Done capture only; entry capture is live-gated)", len(saves))
 		}
 		size, _ := saves[0].Data.(map[string]interface{})["size_bytes"].(int)
-		if size != expectedBytes {
-			t.Errorf("saved size = %d, want the EXACT full-stream byte count %d — mid-stream Prune truncation?", size, expectedBytes)
-		}
 		// The persisted file itself must be the FULL stream.
 		saved := readSavedResponseFile(t, dir)
-		if len(saved) != expectedBytes {
-			t.Errorf("persisted buffer bytes = %d, want exact full-stream %d", len(saved), expectedBytes)
+		if size != len(saved) {
+			t.Errorf("saved size_bytes = %d must equal the persisted file length %d", size, len(saved))
 		}
-		if !strings.Contains(string(saved), "prune-piece-000-payload") || !strings.Contains(string(saved), fmt.Sprintf("prune-piece-%03d-payload", chunkCount-1)) {
-			t.Errorf("persisted buffer missing first/last chunks — truncated capture")
+		if len(saved) == 0 {
+			t.Error("persisted buffer is empty")
+		}
+		// Anti-prune: EVERY payload marker must survive in the capture.
+		for i := 0; i < chunkCount; i++ {
+			if !strings.Contains(string(saved), fmt.Sprintf("prune-piece-%03d-payload", i)) {
+				t.Fatalf("persisted buffer missing chunk %d of %d — mid-stream Prune truncated the capture (size=%d)", i, chunkCount, len(saved))
+			}
 		}
 		assertEstimatorSawFullStream(t, reqStore)
 	})
@@ -1557,8 +1566,8 @@ func TestLiveRelay_R2_EstimatorUnderPrunePressure(t *testing.T) {
 		}
 		for i, s := range saves {
 			size, _ := s.Data.(map[string]interface{})["size_bytes"].(int)
-			if size != expectedBytes {
-				t.Errorf("buffered save[%d] size = %d, want full %d", i, size, expectedBytes)
+			if size <= 0 {
+				t.Errorf("buffered save[%d] size = %d, want a non-empty full-stream capture", i, size)
 			}
 		}
 	})
@@ -1646,10 +1655,6 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 
 		bufStore, dir := mustBufferStoreWithDir(t)
 		firstLine := "data: " + mockCreateChunk("ks-chunk-1")
-		// data line (+1 newline) + blank separator chunk (+1); the error
-		// chunk is never Added (task 2.3 reorder) and its separator is
-		// never read (the executor returns at the error-chunk check).
-		expectedBytes := len(firstLine) + 2
 		h, _, bus, _ := newLiveRelayHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -1678,8 +1683,8 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 			t.Fatalf("live mode failing relay: bufferStore saves = %d, want EXACTLY 1 (no entry+Done double-write)", len(saves))
 		}
 		saved := readSavedResponseFile(t, dir)
-		if len(saved) != expectedBytes {
-			t.Errorf("saved bytes = %d, want the full pre-failure prefix %d", len(saved), expectedBytes)
+		if len(saved) == 0 {
+			t.Error("saved buffer is empty; want the full pre-failure prefix")
 		}
 		if !strings.Contains(string(saved), "ks-chunk-1") {
 			t.Errorf("saved buffer missing the pre-failure chunk: %q", string(saved))
@@ -1690,8 +1695,6 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 		t.Setenv("LOG_RAW_UPSTREAM_RESPONSE", "true")
 
 		firstLine := "data: " + mockCreateChunk("ks-buf-chunk")
-		// chunk line (+1) + blank separator (+1) + [DONE] (+1).
-		expectedBytes := len(firstLine) + 2 + len("data: [DONE]") + 1
 		h, _, bus, _ := newLiveRelayHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -1715,8 +1718,8 @@ func TestLiveRelay_BufferStoreDoubleSave_Benign(t *testing.T) {
 		}
 		for i, s := range saves {
 			size, _ := s.Data.(map[string]interface{})["size_bytes"].(int)
-			if size != expectedBytes {
-				t.Errorf("buffered save[%d] size = %d, want full %d", i, size, expectedBytes)
+			if size <= 0 {
+				t.Errorf("buffered save[%d] size = %d, want a non-empty full-stream capture", i, size)
 			}
 		}
 	})
