@@ -1252,6 +1252,82 @@ func TestHandleInternalStream_WithToolRepair(t *testing.T) {
 	}
 }
 
+type mockProviderWithCapture struct {
+	name               string
+	capturedModel      string
+	chatCompletionResp *providers.ChatCompletionResponse
+	chatCompletionErr  error
+	streamEvents       []providers.StreamEvent
+	streamErr          error
+	mu                 sync.Mutex
+}
+
+func newMockProviderWithCapture() *mockProviderWithCapture {
+	return &mockProviderWithCapture{name: "mock-with-capture"}
+}
+
+func (m *mockProviderWithCapture) Name() string {
+	return m.name
+}
+
+func (m *mockProviderWithCapture) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	// Capture the model name from the request
+	m.mu.Lock()
+	m.capturedModel = req.Model
+	m.mu.Unlock()
+
+	if m.chatCompletionErr != nil {
+		return nil, m.chatCompletionErr
+	}
+	return m.chatCompletionResp, nil
+}
+
+func (m *mockProviderWithCapture) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	// Capture the model name from the request
+	m.mu.Lock()
+	m.capturedModel = req.Model
+	m.mu.Unlock()
+
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+
+	ch := make(chan providers.StreamEvent, len(m.streamEvents))
+	events := make([]providers.StreamEvent, len(m.streamEvents))
+	copy(events, m.streamEvents)
+	go func() {
+		defer close(ch)
+		for _, event := range events {
+			select {
+			case ch <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch, nil
+}
+
+func (m *mockProviderWithCapture) IsRetryable(err error) bool {
+	var providerErr *providers.ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.Retryable
+	}
+	return false
+}
+
+func (m *mockProviderWithCapture) setStreamEvents(events []providers.StreamEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.streamEvents = events
+}
+
+func (m *mockProviderWithCapture) getCapturedModel() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.capturedModel
+}
+
 func TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream(t *testing.T) {
 	// Create mock provider that captures model name
 	provider := newMockProviderWithCapture()
