@@ -245,3 +245,44 @@ func TestForceUltimateHoist_ForceHeader_UnentitledToken_404(t *testing.T) {
 		t.Error("UltimateModelUsed=true on an unentitled force request — the ultimate path must not run")
 	}
 }
+
+// doNoAuth is do() with NO Authorization header (the unauthenticated
+// force-ultimate guard, P5 D5).
+func (e *hoistTestEnv) doNoAuth(t *testing.T, forceHeader bool) *httptest.ResponseRecorder {
+	t.Helper()
+	return e.doWithAuth(t, forceHeader, "")
+}
+
+// doBadToken is do() with a malformed bearer token (P5 D5).
+func (e *hoistTestEnv) doBadToken(t *testing.T, forceHeader bool) *httptest.ResponseRecorder {
+	t.Helper()
+	return e.doWithAuth(t, forceHeader, "not-a-real-token")
+}
+
+// doWithAuth is the parameterized body of do(): an unresolvable body
+// model + an optional bearer token.
+func (e *hoistTestEnv) doWithAuth(t *testing.T, forceHeader bool, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := map[string]interface{}{
+		"model":  "no-such-model",
+		"stream": false,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hoist me"},
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if forceHeader {
+		req.Header.Set("X-Force-Ultimate-Model", "true")
+	}
+	rec := httptest.NewRecorder()
+	e.h.HandleChatCompletions(rec, req)
+	return rec
+}
