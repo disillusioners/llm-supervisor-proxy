@@ -17,14 +17,10 @@ package ultimatemodel
 // S2 = response side (client-bound body unchanged)
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"

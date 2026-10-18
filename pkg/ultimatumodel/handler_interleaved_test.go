@@ -3,14 +3,10 @@ package ultimatemodel
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
