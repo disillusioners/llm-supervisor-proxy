@@ -231,9 +231,6 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		leadingUserRun = credentiallb.ExtractLeadingUserRun(originalMessages)
 	}
 
-	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
-	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
-
 	// Per-request delivery mode from the X-LLMProxy-Buffer-Response opt-in
 	// header (real-streaming-default plan, Phase 1). Locked L1 semantics are
 	// presence-aware — see bufferModeFor below. Precedence (Q3, as amended):
@@ -258,7 +255,6 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		method:           r.Method,
 		baseCtx:          r.Context(),
 		originalMessages: originalMessages,
-		bypassInternal:   bypassInternal,
 		bufferMode:       bufferMode,
 		leadingUserRun:   leadingUserRun,
 	}, nil

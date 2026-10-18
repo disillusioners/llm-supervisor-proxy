@@ -106,9 +106,6 @@ type requestContext struct {
 	streamID    string
 	streamIDSet bool
 
-	// Proxy-only flags (stripped before forwarding upstream)
-	bypassInternal bool // Force external upstream, skip internal provider routing
-
 	// Streaming non-retryable state (Q4 resolved 2026-08-27: sync/atomic.Bool
 	// so any future reader gets a race-free Load without holding writeMu).
 	// When true: stream is live — no racing / fallback / mid-stream
@@ -318,8 +315,7 @@ func parseMessages(requestBody map[string]interface{}) []store.Message {
 func copyHeaders(dst *http.Request, src http.Header) {
 	// Headers to strip (never forward upstream)
 	stripHeaders := map[string]bool{
-		"Content-Length":             true,
-		"X-Llmproxy-Bypass-Internal": true,
+		"Content-Length": true,
 	}
 	for name, values := range src {
 		if stripHeaders[name] {
