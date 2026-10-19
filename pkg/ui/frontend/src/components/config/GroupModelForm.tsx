@@ -78,6 +78,9 @@ interface FormFields {
 
 // Returns the form's initial state: hydrated from initialData in edit
 // mode, pre-filled from wrapTarget in add mode (Am30), empty otherwise.
+// `backup_only` round-trips verbatim — a saved group with backup
+// members restores them on edit; load-and-save round-trip must not
+// drop the flag (D7, group-backup-members).
 function makeInitialState(
   initialData: GroupModel | undefined,
   wrapTarget: Model | null | undefined,
@@ -89,6 +92,7 @@ function makeInitialState(
       members: (initialData.members ?? []).map((m) => ({
         model_id: m.model_id,
         weight: m.weight,
+        ...(m.backup_only ? { backup_only: true as const } : {}),
       })),
       shadow_model_id: initialData.shadow_model_id ?? '',
       enabled: initialData.enabled,
@@ -174,6 +178,18 @@ export function GroupModelForm({
         const badWeight = fields.members.find((m) => !Number.isFinite(m.weight) || m.weight <= 0);
         if (badWeight) {
           nextErrors.members = `Weight for member ${badWeight.model_id} must be > 0`;
+        } else {
+          // group-backup-members / D2 client-side mirror:
+          // at least one member must NOT be marked backup_only.
+          // The server validator at
+          // pkg/models/group.go ValidateGroupMembers is
+          // authoritative — this is the cheap belt-and-suspenders
+          // gate that surfaces a clear message before the request
+          // round-trips.
+          const hasDefault = fields.members.some((m) => m.backup_only !== true);
+          if (!hasDefault) {
+            nextErrors.members = `At least one non-backup (default) member is required`;
+          }
         }
       }
     }
@@ -212,7 +228,16 @@ export function GroupModelForm({
         name: fields.name,
         kind: HARDCODED_KIND,
         internal: HARDCODED_INTERNAL,
-        members: fields.members,
+        members: fields.members.map((m) => ({
+          model_id: m.model_id,
+          weight: m.weight,
+          // Drop the key entirely when false so the JSON form is
+          // "absent ⇒ default" — matches the Go omitempty
+          // semantics and keeps the D7 backward-compat shape
+          // (existing groups without backup_only round-trip with no
+          // field present).
+          ...(m.backup_only ? { backup_only: true as const } : {}),
+        })),
         shadow_model_id: shadow,
         enabled: fields.enabled,
         exclude_from_ultimate_switching: HARDCODED_EXCLUDE_FROM_ULTIMATE,

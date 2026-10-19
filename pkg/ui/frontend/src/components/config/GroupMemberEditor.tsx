@@ -53,6 +53,26 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
     onChange(members.map((m, i) => (i === index ? { ...m, weight: Number.isFinite(parsed) ? parsed : 0 } : m)));
   };
 
+  // group-backup-members: per-member "Backup only" tick. Default is
+  // false (D7 backward compat); the server-side D2 ≥1-default
+  // validation is the authoritative gate, but exposing the tick in
+  // the editor lets the operator mark a member as a recourse-tier
+  // pool member without ever touching the JSON column by hand.
+  const toggleMemberBackupOnly = (index: number, value: boolean) => {
+    onChange(
+      members.map((m, i) => {
+        if (i !== index) return m;
+        // drop the key entirely when false so the JSON form is
+        // "absent ⇒ default" (matches Go omitempty semantics; the
+        // round-trip in GroupModelForm preserves an existing
+        // true, never invents one on load).
+        if (value) return { ...m, backup_only: true };
+        const { backup_only: _drop, ...rest } = m;
+        return rest;
+      }),
+    );
+  };
+
   const removeMember = (index: number) => {
     onChange(members.filter((_, i) => i !== index));
   };
@@ -109,6 +129,26 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
                 class="w-20 px-2 py-1.5 bg-gray-800 border border-gray-600 rounded-md text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                 data-testid="group-member-weight-input"
               />
+              {/* group-backup-members: per-member "Backup only" tick
+                  (recourse-tier marker). Compact label-only chrome so
+                  the row width does not balloon. Tooltip + aria-label
+                  make the semantics legible to A11Y tools. */}
+              <label
+                class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer select-none"
+                title="Backup only — this member is a recourse-tier pool entry, picked only after every default member has failed"
+              >
+                <input
+                  type="checkbox"
+                  checked={member.backup_only === true}
+                  onChange={(e) =>
+                    toggleMemberBackupOnly(index, (e.target as HTMLInputElement).checked)
+                  }
+                  class="w-4 h-4 bg-gray-800 border border-gray-600 rounded focus:ring-2 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
+                  aria-label={`Member ${index + 1} backup only`}
+                  data-testid="group-member-backup-only"
+                />
+                <span class="whitespace-nowrap">Backup</span>
+              </label>
               <button
                 type="button"
                 onClick={() => removeMember(index)}
@@ -147,7 +187,7 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
         Add Member
       </button>
       <p class="text-xs text-gray-400 mt-1">
-        Add up to {MAX_GROUP_MEMBERS} chat models. Higher weight = more requests routed to that member. Members run their own full pipeline (credentials, fallback, race).
+        Add up to {MAX_GROUP_MEMBERS} chat models. Higher weight = more requests routed to that member. Members run their own full pipeline (credentials, fallback, race). Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — same weighted-random + sticky rules apply among backups.
       </p>
     </div>
   );
