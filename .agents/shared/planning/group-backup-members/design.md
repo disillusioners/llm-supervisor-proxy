@@ -309,3 +309,130 @@ one for backup) over a single map with a `pool` discriminator
 tag, because the per-pool GetOrSelect/ExcludeAndReselect hot
 paths stay key-on-memberID-only and the cooldown map (shared)
 is the only structure that crosses pools.
+
+---
+
+## D8 — selection-time stale-binding resolution (two-layer model)
+
+Added after the D1–D7 implementation, in response to the user's
+requirement: *"Group membership can change ON THE FLY; sticky
+bindings must survive/repair correctly."*
+
+### The problem D8 closes
+
+The D1 implementation binds a conversation to a member and relies on
+`OnGroupChanged` (the push-based survivor filter) to drop bindings
+whose member left the group. That leaves two gaps:
+
+1. **The config-change → selection race.** A request already in
+   flight can write its binding AFTER the `OnGroupChanged` call that
+   dropped the old row — the binding then points at a member the
+   membership no longer contains, and it survives until the NEXT
+   config change. The push layer cannot see it (its delta already
+   passed).
+2. **The reclassification nuance.** A member whose `backup_only`
+   flag flipped still EXISTS (it moved pools, it did not leave).
+   Membership-scoped drop semantics cannot express "keep, but the
+   pool rules changed" — a pool-scoped existence test would kill
+   the binding, and the D8 ruling is that the binding is
+   **grandfathered** (continuity for in-flight conversations).
+
+### The two layers
+
+| Layer | Trigger | Mechanism | Scope |
+|-------|---------|-----------|-------|
+| **PUSH (pre-existing)** | group config write → `Engine.OnGroupChanged` (pkg/grouplb/engine.go) | rebuild membership + drop orphan bindings whose member is absent from the NEW membership (both binding maps) | eager GC of bindings for conversations that never come back; keeps `bindingsCount` accurate |
+| **PULL (new, D8)** | every selection (`GetOrSelect` / `PickBackupMember`) | resolve the bound member id against the CURRENT membership — the **UNION of both pools** (default ∪ backup). Absent ⇒ discard the binding, re-pick per pool rules, emit the `binding=stale` token | race window (1) + reclassification (2) |
+
+The PULL layer is a strict superset of the PUSH layer's *removal*
+semantics: both end at "no binding may point at a member that is
+not in the group". The PUSH layer is kept because it is the only
+layer that reclaims bindings for conversations that never return.
+
+**Composition rules (no double-drop, no stale repopulation):**
+
+- The PUSH layer drops by *membership delta* (the removed id is not
+  in the new refs).
+- The PULL layer drops by *existence check at selection time* (the
+  bound id is not in the current union).
+- Every PULL drop is guarded by `if b, ok := st.bindings[key]; ok`
+  — the `bindingsCount` decrement happens at most once per row, so
+  the two layers cannot double-drop a row or underflow the counter.
+- After a drop, the re-pick is made against the CURRENT membership
+  (the selector was rebuilt by the PUSH layer) — a stale member is
+  never re-bound.
+- The PULL layer never re-populates a row the PUSH layer dropped:
+  the re-pick writes a binding for a member that IS in the union.
+
+### Where the selection-time resolution lives
+
+- `pkg/grouplb/engine.go` — `getOrSelect` (the internal
+  implementation behind `GetOrSelect` / `GetOrSelectWithRepair`):
+  the binding-validity check splits the "member left the group"
+  case out of the "TTL-expired" / "cooling" case, logs the
+  `binding=stale` token, discards the row, and re-picks. The
+  existence test is **union-scoped** (`memberInRefs(st.members, …)`
+  where `st.members` holds default ∪ backup) — the D1 code already
+  used the union here; D8 keeps it and makes it load-bearing.
+- `pkg/grouplb/engine.go` — `pickBackupMember` (internal impl
+  behind `PickBackupMember` / `PickBackupMemberWithRepair`): same
+  stale branch; the existence test CHANGES from backup-pool-scoped
+  (`st.backupMembers`) to **union-scoped** (`st.members`) so a
+  backup→default reclassification is grandfathered rather than
+  killed.
+- `pkg/grouplb/engine.go` — `ExcludeAndReselect` /
+  `ExcludeAndBackupReselect`: the B2 precondition now ALSO
+  requires the currently-bound member to still exist in the union —
+  a removed member can never be returned as the reselect
+  replacement.
+- `pkg/store/database/store_group_rewrite.go` —
+  `pickServableGroupMember`: uses the repair-aware engine entry
+  points, carries the repair signal up to the proxy, and treats
+  `ErrNoMembers` from the default pool as "default pool exhausted"
+  (fall through to the backup pool) instead of failing the request.
+
+### Grandfathering asymmetry (explicit)
+
+| Case | Existing binding | New picks |
+|------|------------------|-----------|
+| member **removed** (either pool) | DISCARDED, re-pick per pool rules (default first; backup only when the default pool is exhausted) | n/a |
+| **default → backup** flag flip (member still exists) | **CONTINUES on that member** (grandfathered — continuity) | never land on it while backup-flagged (the default selector no longer contains it) |
+| **backup → default** flag flip (member still exists) | **CONTINUES on that member** (fully consistent with the row above) | never land on it while default-flagged (the backup selector no longer contains it) |
+
+The asymmetry is DELIBERATE and is the reason the existence test is
+union-scoped rather than pool-scoped: a reclassification is a
+*configuration* change to the member, not a removal of the member,
+so the conversation's continuity is preserved. Grandfathering ends
+naturally on any of: actual removal, idle-TTL eviction of the
+binding, or the run excluding that member for failure (the
+exclude-and-reselect path rebinds away from it).
+
+### Empty-default defensive path
+
+The "all defaults removed" state is **unreachable via the API** — D2
+rejects a zero-default group at the write path
+(`pkg/models/group.go:ValidateGroupMembers`). The picker must
+still handle it defensively:
+
+- `GetOrSelect` on a group whose default pool is empty returns
+  `ErrNoMembers` (the default selector is nil).
+- `pickServableGroupMember` treats that as **"default pool
+  exhausted"** and falls through to the backup pool — the request
+  is served by a backup member instead of failing.
+- The engine-level test constructs the state DIRECTLY (bypassing
+  the write-path validation) to assert "no error + correct pool".
+
+### Stale token surface
+
+- **Log** (engine, same idiom as `pool=backup`):
+  `[grouplb] group=%s conv=%s binding=stale member=%s (member no longer configured) — re-picking`
+  and the backup-pool variant carrying `pool=backup` before `conv`.
+  Bounded + redacted by construction: it carries only the group id,
+  the conversation key and the member id — the same three internal
+  identifiers the surrounding `[grouplb]` log family already prints.
+- **Event**: the additive `"binding": "stale"` field on the
+  `model_member_selected` payload — the SAME carrier the D5
+  `"pool"` field uses (`pkg/proxy/race_coordinator.go`). Absent
+  unless the condition occurs. The signal travels
+  engine → `pickServableGroupMember` → `GroupRewriteResult.BindingStale`
+  → `groupPickInfo.BindingStale` → event payload.
