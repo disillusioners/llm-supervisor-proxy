@@ -1019,6 +1019,17 @@ func (c *CachedModelsConfig) cacheModel(m *models.ModelConfig) {
 	delete(c.negByID, cp.ID)
 	delete(c.negByName, cp.Name)
 	c.modelsSnap, c.enabledSnap = rebuildSnapshotsLocked(c.modelsByID)
+	if cp.IsGroup() {
+		// A GROUP row that ENTERS the cache activates its shadow
+		// claim: the claim index is DERIVED from the cached rows
+		// (rebuildClaimsLocked), so a cached group row that is not
+		// indexed would leave the client-facing GetModel resolving
+		// the shadowed ID to the native row instead of the group row
+		// — a divergence the write-through mutators never have (they
+		// rebuild on every write). Conditional (group rows only) so
+		// the O(rows) rebuild stays OFF the hot fill path.
+		c.rebuildClaimsLocked()
+	}
 }
 
 // ─── load-balance-groups rewrite seam forwarding (§3.6.1 / Am21) ────────────
@@ -1047,17 +1058,57 @@ func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, member
 	return "", "", false
 }
 
-// GetModelNative forwards the load-balance-groups Am22 L1 direct-ID
-// lookup to the inner manager (claims BYPASSED). The decorator
-// caches nothing for this path: the per-attempt race/Anthropic
-// call site uses it to obtain the real member row (not the claims-
-// redirected group row) after the Am21 rewrite has picked a member.
+// GetModelNative serves the load-balance-groups Am22 L1 direct-ID
+// lookup (claims BYPASSED) FROM THE CACHE.
+//
+// The per-attempt race/Anthropic call sites use it to obtain the real
+// member row (not the claims-redirected group row) after the Am21
+// rewrite has picked a member: race_executor.go:48 (MiniMax gate),
+// :114 (per-attempt re-fetch), :208 (reselected-credential check),
+// :353 (secondary-upstream read), race_coordinator.go:1547
+// (cred-failover eligibility), :1668 (cred-failover budget),
+// handler_anthropic.go:521 (Anthropic attempt loop).
+//
+// 2026-10-19 (shadowfollowup Y1) — the read is CACHE-BACKED. The
+// decorator used to forward every call to the inner manager's
+// DB-direct lookup (store.go GetModelNative), so those per-attempt
+// execution reads fired 2-3 raw SQL queries per attempt whenever
+// CACHE_LAYER_ENABLED (default ON) — a hot-path cost regression the
+// P0 row-identity fix introduced.
+//
+// CLAIM-BLIND BY CONSTRUCTION: modelsByID is keyed by ROW ID and the
+// claims redirect lives ONLY in the client-facing GetModel (it never
+// rewrites modelsByID), so a hit is always the row of the requested
+// ID — never the group row a claim would redirect to (Am22 L1: "member
+// refs resolve by direct ID; claims apply to client-facing resolution
+// only"). The claim index is NOT consulted on this path.
+//
+// A miss fills through the SAME claim-blind path the rest of the
+// decorator uses (fillModelByDirectID → inner GetModelStrict, which
+// is claim-blind) and installs the row, so the next read is a pure
+// cache hit. A genuine not-found stores the standard negative verdict
+// (negByID / ModelsNegTTL) — the same convention every other read
+// path uses — so a missing row can never spin the fill path.
+//
+// The returned row is a private copy (deep-copy-on-read, the cache
+// isolation contract): the caller may not mutate cache state through
+// it.
 func (c *CachedModelsConfig) GetModelNative(modelID string) *models.ModelConfig {
-	if gr, ok := c.inner.(interface {
-		GetModelNative(string) *models.ModelConfig
-	}); ok {
-		return gr.GetModelNative(modelID)
+	if modelID == "" {
+		return nil
 	}
-	return nil
+	// Fast path: hit under RLock — the write lock is never taken and
+	// the store is never touched on a hit.
+	m, negFresh := c.lookupCachedModel(modelID)
+	if negFresh {
+		return nil
+	}
+	if m != nil {
+		return deepCopyModelConfig(m)
+	}
+	// Miss: the claim-blind fill (installs the row on success).
+	// fillModelByDirectID returns the freshly-read row (never the
+	// cached instance), so it is already a private copy.
+	return c.fillModelByDirectID(modelID)
 }
 
