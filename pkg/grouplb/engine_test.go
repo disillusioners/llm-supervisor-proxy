@@ -1387,3 +1387,122 @@ func TestD8_NoDoubleDrop_PullLayer(t *testing.T) {
 		t.Fatalf("(14) backup mirror underflowed: %d", got)
 	}
 }
+
+// ─── group-backup-members / C4 — refresh semantics + counter drift ─────────
+//
+// A same-member STICKY REFRESH must report newlyBound=false: the proxy
+// emits model_member_selected only when NewlyBound is true
+// (race_executor.go gate), so a refresh that reported true would
+// re-emit the event on every request. The O(1) binding mirror must also
+// not drift: the increment is guarded by map-existence (C4).
+
+// TestBackup_FastPath_RefreshNotNewlyBoundAndNoCountDrift — the
+// single-backup FAST path (n==1, no cooldowns).
+func TestBackup_FastPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+	})
+
+	first, newly1, err := e.PickBackupMember("g", "conv-refresh")
+	if err != nil {
+		t.Fatalf("first pick: %v", err)
+	}
+	if first != "backup-x" || !newly1 {
+		t.Fatalf("first pick = (%q, %v), want (backup-x, true)", first, newly1)
+	}
+	if got := e.backupBindingsCountForTest("g"); got != 1 {
+		t.Fatalf("after first pick: backupBindingsCount = %d, want 1", got)
+	}
+
+	// C4: repeated same-member refreshes must NOT report newlyBound
+	// and must NOT inflate the counter.
+	for i := 0; i < 5; i++ {
+		m, newly, err := e.PickBackupMember("g", "conv-refresh")
+		if err != nil {
+			t.Fatalf("refresh %d: %v", i, err)
+		}
+		if m != "backup-x" {
+			t.Fatalf("refresh %d: member = %q, want backup-x (sticky)", i, m)
+		}
+		if newly {
+			t.Fatalf("refresh %d: newlyBound = true — the model_member_selected event would re-emit", i)
+		}
+		if got := e.backupBindingsCountForTest("g"); got != 1 {
+			t.Fatalf("refresh %d: backupBindingsCount = %d, want 1 (no count drift)", i, got)
+		}
+	}
+
+	// The repair-aware variant agrees: a healthy refresh is not a repair.
+	if _, _, stale, err := e.PickBackupMemberWithRepair("g", "conv-refresh"); err != nil || stale {
+		t.Fatalf("repair-aware refresh: stale=%v err=%v, want healthy", stale, err)
+	}
+}
+
+// TestBackup_FullPath_RefreshNotNewlyBoundAndNoCountDrift — the same
+// C4 contract on the FULL path (2 backups ⇒ no fast path).
+func TestBackup_FullPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+		{ModelID: "backup-y", Weight: 1, Position: 2, BackupOnly: true},
+	})
+
+	first, newly1, err := e.PickBackupMember("g", "conv-refresh-full")
+	if err != nil || first == "" || !newly1 {
+		t.Fatalf("first pick = (%q, %v, %v), want (member, true, nil)", first, newly1, err)
+	}
+	if got := e.backupBindingsCountForTest("g"); got != 1 {
+		t.Fatalf("after first pick: backupBindingsCount = %d, want 1", got)
+	}
+	for i := 0; i < 5; i++ {
+		m, newly, err := e.PickBackupMember("g", "conv-refresh-full")
+		if err != nil {
+			t.Fatalf("refresh %d: %v", i, err)
+		}
+		if m != first {
+			t.Fatalf("refresh %d: member = %q, want sticky %q", i, m, first)
+		}
+		if newly {
+			t.Fatalf("refresh %d: newlyBound = true on a same-member refresh", i)
+		}
+		if got := e.backupBindingsCountForTest("g"); got != 1 {
+			t.Fatalf("refresh %d: backupBindingsCount = %d, want 1", i, got)
+		}
+	}
+}
+
+// TestDefaultPoolHealthy — the C1 support query: true iff the DEFAULT
+// pool has at least one non-cooling member; false for an empty default
+// pool / unknown group / nil receiver.
+func TestDefaultPoolHealthy(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+		{ModelID: "backup-x", Weight: 1, Position: 2, BackupOnly: true},
+	})
+	if !e.DefaultPoolHealthy("g") {
+		t.Fatal("healthy defaults must report true")
+	}
+	// Cool one default — still healthy.
+	e.InjectAllCoolingForTest("g", "default-b", "backup-x")
+	if !e.DefaultPoolHealthy("g") {
+		t.Fatal("one healthy default must keep the pool healthy")
+	}
+	// Cool both defaults — exhausted.
+	e.InjectAllCoolingForTest("g", "backup-x")
+	if e.DefaultPoolHealthy("g") {
+		t.Fatal("all defaults cooling must report the pool exhausted")
+	}
+	// Defensive: unknown group / nil receiver.
+	if e.DefaultPoolHealthy("nope") {
+		t.Error("unknown group must report false")
+	}
+	var nilE *Engine
+	if nilE.DefaultPoolHealthy("g") {
+		t.Error("nil receiver must report false")
+	}
+}

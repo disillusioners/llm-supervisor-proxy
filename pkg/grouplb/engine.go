@@ -286,6 +286,42 @@ func (e *Engine) HasBackupPool(groupID string) bool {
 	return st.backupSelector != nil && st.backupSelector.totalWeight > 0
 }
 
+// DefaultPoolHealthy reports whether the group's DEFAULT pool has at
+// least one non-cooling member as of now (group-backup-members / C1).
+//
+// D1 says backups engage when every default member has failed; a
+// default under cooldown is exactly that. The manager's two-pool
+// picker consults this ONLY when HasBackupPool is true — a
+// backup-less group keeps the v1 all-cooling availability ruling
+// (serve the soonest-expiring default) byte-identically (D7).
+//
+// Nil receiver / unknown group / empty default pool ⇒ false.
+func (e *Engine) DefaultPoolHealthy(groupID string) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return false
+	}
+	now := time.Now()
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	// C2: selector/ref reads hold st.mu (applyRefsLocked replaces
+	// both under the write lock).
+	if st.selector == nil || st.selector.totalWeight <= 0 {
+		return false // empty default pool
+	}
+	for _, ref := range st.defaultMembers {
+		if !st.isCoolingLocked(ref.ModelID, now) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetOrSelect returns the member pinned to (groupID, conversationKey)
 // if a fresh binding exists; otherwise picks a new member via
 // weighted random (among non-cooling, renormalized), persists the
@@ -832,7 +868,24 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 	if st == nil {
 		return pickOutcome{err: ErrNoMembers}
 	}
-	if st.backupSelector == nil || st.backupSelector.totalWeight <= 0 {
+
+	// C2: every read of the per-group selector / ref slices must hold
+	// st.mu — applyRefsLocked replaces them wholesale under the write
+	// lock, so even a bare selector or length check is a read (the
+	// binding.go memberCount pattern). One locked snapshot here feeds
+	// BOTH the entry guard and the fast-path eligibility decision, so
+	// the fast path no longer needs a second read-lock acquisition.
+	st.mu.RLock()
+	hasBackups := st.backupSelector != nil && st.backupSelector.totalWeight > 0
+	n := len(st.backupMembers)
+	fastEligible := hasBackups && n == 1 && len(st.cooldowns) == 0
+	fastID := ""
+	if fastEligible {
+		fastID = st.backupMembers[0].ModelID
+	}
+	st.mu.RUnlock()
+
+	if !hasBackups || n == 0 {
 		return pickOutcome{err: ErrNoMembers}
 	}
 
@@ -842,20 +895,12 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 	// hand-off (D8).
 	staleRepaired := false
 
-	st.mu.RLock()
-	n := len(st.backupMembers)
-	if n == 0 {
-		st.mu.RUnlock()
-		return pickOutcome{err: ErrNoMembers}
-	}
 	// Fast path (single backup member): no cooldowns, no other
 	// backup to choose from — return directly. Mirrors the default
 	// pool's E-3 fast-path semantics.
-	if n == 1 && len(st.cooldowns) == 0 {
-		id := st.backupMembers[0].ModelID
-		st.mu.RUnlock()
+	if fastEligible {
 		if conversationKey == "" {
-			return pickOutcome{memberID: id}
+			return pickOutcome{memberID: fastID}
 		}
 		st.mu.Lock()
 		// D8: an EXISTING binding for this conversation wins when it
@@ -890,17 +935,21 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 		// swap backupMembers between the two lock sections —
 		// persisting the stale id would orphan the binding).
 		if st.backupSelector != nil && len(st.backupMembers) == 1 &&
-			len(st.cooldowns) == 0 && st.backupMembers[0].ModelID == id {
-			st.backupBindings[conversationKey] = &binding{memberID: id, boundAt: now}
-			st.backupBindingsCount++
+			len(st.cooldowns) == 0 && st.backupMembers[0].ModelID == fastID {
+			// C4: the counter increment is guarded by map-existence
+			// (the row was either just deleted above or never
+			// existed) so a future write path cannot drift the O(1)
+			// mirror.
+			if _, exists := st.backupBindings[conversationKey]; !exists {
+				st.backupBindingsCount++
+			}
+			st.backupBindings[conversationKey] = &binding{memberID: fastID, boundAt: now}
 			st.mu.Unlock()
-			log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, id)
-			return pickOutcome{memberID: id, newlyBound: true, staleRepaired: staleRepaired}
+			log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, fastID)
+			return pickOutcome{memberID: fastID, newlyBound: true, staleRepaired: staleRepaired}
 		}
 		st.mu.Unlock()
 		// fall through to full path
-	} else {
-		st.mu.RUnlock()
 	}
 
 	st.mu.Lock()
@@ -959,8 +1008,13 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 		return pickOutcome{memberID: pick, staleRepaired: staleRepaired}
 	}
 
+	// C4: guard the O(1) mirror increment by map-existence (the row
+	// was dropped above if it existed), so no future write path can
+	// drift the counter.
+	if _, exists := st.backupBindings[conversationKey]; !exists {
+		st.backupBindingsCount++
+	}
 	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
-	st.backupBindingsCount++
 	log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, pick)
 	return pickOutcome{memberID: pick, newlyBound: true, staleRepaired: staleRepaired}
 }
@@ -995,7 +1049,16 @@ func (e *Engine) ExcludeAndBackupReselect(
 	if st == nil {
 		return "", ReselectNone
 	}
-	if st.backupSelector == nil || st.backupSelector.totalWeight <= 0 {
+
+	// C2: selector / length reads must hold st.mu (applyRefsLocked
+	// replaces both under the write lock — the binding.go memberCount
+	// pattern). Snapshot once, then re-validate anything the decision
+	// depends on under the write lock below.
+	st.mu.RLock()
+	hasBackups := st.backupSelector != nil && st.backupSelector.totalWeight > 0
+	backupCount := len(st.backupMembers)
+	st.mu.RUnlock()
+	if !hasBackups || backupCount == 0 {
 		return "", ReselectNone
 	}
 
@@ -1003,15 +1066,25 @@ func (e *Engine) ExcludeAndBackupReselect(
 	// pool. Mark the cooldown so the member is gated on a follow-up
 	// attempt, but do not try to pick (mirrors the default pool's
 	// E-3 fast-path guard).
-	if len(st.backupMembers) == 1 {
+	//
+	// C2: the single-backup count is RE-VALIDATED under the write
+	// lock — OnGroupChanged can add or remove a backup between the
+	// read snapshot above and this acquisition (the 34b3f51
+	// fast-path pattern). On a change we fall through to the full
+	// path, which re-reads everything under its own write lock.
+	if backupCount == 1 {
 		now0 := time.Now()
 		st.mu.Lock()
-		if st.cooldowns == nil {
-			st.cooldowns = make(map[string]time.Time)
+		if st.backupSelector != nil && len(st.backupMembers) == 1 {
+			if st.cooldowns == nil {
+				st.cooldowns = make(map[string]time.Time)
+			}
+			st.cooldowns[excludedMemberID] = now0.Add(retryAfterIf(retryAfter, e.defaultCooldown))
+			st.mu.Unlock()
+			return "", ReselectNone
 		}
-		st.cooldowns[excludedMemberID] = now0.Add(retryAfterIf(retryAfter, e.defaultCooldown))
 		st.mu.Unlock()
-		return "", ReselectNone
+		// Membership changed under us — fall through.
 	}
 
 	cooldown := retryAfter
