@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -373,22 +372,11 @@ func TestAnthropicLiveStream_SequentialFallbackBreak(t *testing.T) {
 	}))
 	t.Cleanup(internalUpstream.Close)
 
-	var fallbackAttempts int32
-	externalUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&fallbackAttempts, 1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		chunk := makeOpenAITextChunk("fallback response")
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
-	}))
-	t.Cleanup(externalUpstream.Close)
-
+	// remove-external-upstream P1: the former external fallback target (and
+	// its UPSTREAM_URL env wiring) is retired. The fallback chain below
+	// resolves to no external upstream, so a post-first-byte fallback can no
+	// longer reach one — the guard is now structural, not fixture-pinned.
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", externalUpstream.URL)
 	mgr, _ := config.NewManager()
 	modelsCfg := models.NewModelsConfig()
 	modelsCfg.AddCredential(models.CredentialConfig{
@@ -422,9 +410,10 @@ func TestAnthropicLiveStream_SequentialFallbackBreak(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.HandleAnthropicMessages(rr, req)
 
-	if got := atomic.LoadInt32(&fallbackAttempts); got != 0 {
-		t.Errorf("live mode fallback guard FAILED: external upstream was hit %d times after first byte", got)
-	}
+	// Fallback guard: post-P1 there is no external upstream a fallback could
+	// hit, so this is structural (previously asserted via an external-target
+	// hit counter that no longer has a target). The first-byte assertion below
+	// remains the load-bearing live-mode check.
 
 	respBody := rr.Body.String()
 	if !strings.Contains(respBody, "first byte") {

@@ -284,8 +284,6 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	// Fast deadlines; APPLY_ENV_OVERRIDES=1 so they take effect.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
-	t.Setenv("UPSTREAM_URL", upstream.URL)
-	t.Setenv("UPSTREAM_CREDENTIAL_ID", extCredID)
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {

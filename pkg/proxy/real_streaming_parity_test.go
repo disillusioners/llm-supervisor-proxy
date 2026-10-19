@@ -419,7 +419,6 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 			t.Cleanup(upstream.Close)
 
 			t.Setenv("APPLY_ENV_OVERRIDES", "true")
-			t.Setenv("UPSTREAM_URL", upstream.URL)
 			mgr, err := config.NewManager()
 			if err != nil {
 				t.Fatalf("new manager: %v", err)
@@ -429,7 +428,7 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 			// Provider="anthropic" — this is the gate that selects the
 			// passthrough branch at attemptAnthropicModel
 			// (handler_anthropic.go:401-403). The credential's BaseURL
-			// overrides the default UPSTREAM_URL.
+			// is the upstream.
 			modelsCfg := models.NewModelsConfig()
 			if err := modelsCfg.AddCredential(models.CredentialConfig{
 				ID:       "anthropic-passthrough-cred",
@@ -696,7 +695,6 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		modelsCfg := models.NewModelsConfig()
 		if err := modelsCfg.AddCredential(models.CredentialConfig{

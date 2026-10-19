@@ -254,12 +254,11 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		// Real passthrough fixture: internal model with
 		// anthropic-provider credential pointing at the upstream
 		// (handler_anthropic.go:401-403 dispatch gate). Without
-		// this, the path falls back to external translation and
+		// this, the path falls back to the internal translator and
 		// the structural assertion below would still hold (the
 		// translator is also live-streaming), but the test would
 		// no longer exercise the passthrough code path — which is

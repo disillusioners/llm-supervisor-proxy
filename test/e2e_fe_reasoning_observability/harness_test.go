@@ -262,14 +262,9 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		t.Setenv("ULTIMATE_MODEL_ID", opts.ultimateModelID)
 	}
 
-	// External upstream URL + credential. M rows bind the MiniMax
-	// credential so the race-external translation gate fires.
-	credID := externalCredID
-	if opts.upstreamProviderMinimax {
-		credID = minimaxCredID
-	}
-	t.Setenv("UPSTREAM_URL", upstream.URL)
-	t.Setenv("UPSTREAM_CREDENTIAL_ID", credID)
+	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
+	// env wiring is retired (internal models carry their own credential). The
+	// M rows bind the MiniMax credential directly on the model.
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {

@@ -318,19 +318,8 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 	}
 	t.Setenv("ULTIMATE_MODEL_ID", ultimateID)
 
-	// External upstream URL + credential (race-external gate reads this
-	// credential's provider).
-	if !opts.noUpstreamCred {
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-		t.Setenv("UPSTREAM_CREDENTIAL_ID", func() string {
-			if opts.upstreamProvider != "" {
-				return openaiCredID
-			}
-			return minimaxCredID
-		}())
-	} else {
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-	}
+	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
+	// env wiring is retired — every model carries its own credential.
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {
