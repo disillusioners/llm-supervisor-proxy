@@ -478,3 +478,16 @@ and by the BACKUP pool's fast + full paths. It is NOT emitted by the
 default pool's E-3 single-member fast path (see finding 1) — the
 member served is still always correct there, only the observability
 signal is absent.
+
+### D8 annotation honesty (pinned)
+
+A **grandfathered** pick is NOT a fallback. A default→backup (or
+backup→default) reclassification keeps an EXISTING binding serving
+its member, and that pick is reported with its ORIGINAL pool token
+(`pool=default` for a grandfathered default binding) — never
+`pool=backup`. Only a genuine cascade into the backup pool (all
+defaults exhausted) carries the `pool=backup` annotation and the D4
+member-metering row. Pinned by
+`TestGroup_C3_GrandfatheredPickKeepsDefaultAnnotation`
+(pkg/store/database) and by the (j) engine test's
+`staleRepaired=false` assertion.
