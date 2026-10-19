@@ -412,12 +412,23 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	// closes the observability gap (FE EventLog + downstream
 	// failover dashboards).
 	if h.bus != nil {
-		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
+		payload := map[string]interface{}{
 			"id":          arc.reqID,
 			"group_id":    pick.GroupID,
 			"member_id":   pick.MemberID,
 			"replacement": replacement,
-		})
+		}
+		// group-backup-members / D5: the additive `pool` field
+		// marks a BACKUP-pool serve ("backup"); ABSENT for a
+		// default-pool serve (M3 contract — a "default" value is
+		// never emitted). Mirrors the OpenAI path's emission at
+		// handler.go — the same defect (the newlyBound-gated
+		// model_member_selected emission never fires on the
+		// re-entry) applies to both protocols.
+		if pool == models.PoolBackup {
+			payload["pool"] = models.PoolBackup
+		}
+		h.publishEvent(grouplb.EventMemberFailover, payload)
 	}
 	return true
 }
