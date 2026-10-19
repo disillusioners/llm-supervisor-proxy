@@ -1972,7 +1972,7 @@ func TestTypesafeProvider_InspectResponse_OrdersAnswers(t *testing.T) {
 // sibling to translate index-string → label, then locate the
 // matching level. Asserts every level is mapped to the correct
 // index and the mass distribution survives verbatim.
-func TestTypesafeProvider_InspectResponse_ScoreEmitsLevelIndex(t *testing.T) {
+func TestTypesafeProvider_InspectResponse_ScoreScalar_AndLegendIndexedProbabilities(t *testing.T) {
 	p := NewTypesafeProvider()
 	req := &DecisionRequest{
 		Questions: []Question{
@@ -2084,11 +2084,24 @@ func TestTypesafeProvider_InspectResponse_ScoreLegacyLabelKeys(t *testing.T) {
 		t.Errorf("RelayStatus = %d, want 0", outcome.RelayStatus)
 	}
 	if resp.Answers[0].Score == nil || *resp.Answers[0].Score != 0 {
-		t.Errorf("score = %v, want 0 (int level index)", resp.Answers[0].Score)
+		t.Errorf("score = %v, want 0 (scalar score passes through verbatim)", resp.Answers[0].Score)
 	}
 	probs := resp.Answers[0].GetScoreProbabilities()
 	if len(probs) != 2 {
 		t.Fatalf("score probabilities len = %d, want 2; got=%+v", len(probs), probs)
+	}
+	// Mirror the unit twin's per-label Value+Probability
+	// assertions so a future refactor dropping strategy 3
+	// (label-keyed legacy lookup) cannot pass silently here.
+	byLabel := make(map[string]ScoreAnswerEntry, len(probs))
+	for _, e := range probs {
+		byLabel[e.Label] = e
+	}
+	if e, ok := byLabel["calm"]; !ok || e.Value != 0 || math.Abs(e.Probability-0.7) > 1e-9 {
+		t.Errorf("probabilities[calm] = %+v, want {0 calm 0.7} (label-keyed legacy)", byLabel["calm"])
+	}
+	if e, ok := byLabel["angry"]; !ok || e.Value != 1 || math.Abs(e.Probability-0.3) > 1e-9 {
+		t.Errorf("probabilities[angry] = %+v, want {1 angry 0.3} (label-keyed legacy)", byLabel["angry"])
 	}
 }
 

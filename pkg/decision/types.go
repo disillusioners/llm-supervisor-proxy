@@ -178,11 +178,13 @@ type Answer struct {
 	Probabilities []ChoiceAnswer `json:"probabilities,omitempty"`
 	Confidence    *float64       `json:"confidence,omitempty"`
 
-	// Score-specific. Score is the integer level index (liteLLM
-	// semantics — A24). ScoreProbabilities is the level-indexed
-	// distribution. NOTE: re-mapped to `probabilities` in the
-	// wire JSON via MarshalJSON below — same key the choice
-	// discriminator uses.
+	// Score-specific. Score is the scalar level value —
+	// either an integer level index OR a fractional float
+	// that may land between levels (A24; liteLLM
+	// precedent). ScoreProbabilities is the level-indexed
+	// distribution. NOTE: re-mapped to `probabilities` in
+	// the wire JSON via MarshalJSON below — same key the
+	// choice discriminator uses.
 	Score              *float64           `json:"score,omitempty"`
 	scoreProbabilities []ScoreAnswerEntry `json:"-"`
 

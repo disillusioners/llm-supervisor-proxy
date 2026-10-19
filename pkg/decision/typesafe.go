@@ -578,14 +578,19 @@ func synthesizeChoiceAnswer(q *Question, choiceRaw json.RawMessage, probs map[st
 		// both shapes).
 		for k, v := range probs {
 			prob, _ := strconvFloat(v)
-			// k is a Go string (not JSON-formatted);
-			// wrap in quotes before unmarshaling into
-			// interface{} so the typed Value preserves
-			// the option value as a JSON value (string /
-			// boolean / number).
-			rawKey := json.RawMessage(`"` + k + `"`)
-			var val interface{}
-			_ = json.Unmarshal(rawKey, &val)
+			// k is a Go map key (always a string).
+			// Properly JSON-encode it (rather than
+			// concatenating quotes) so keys containing
+			// `"`, `\`, or control characters survive
+			// intact. The decoded `val` is a Go string —
+			// booleans and numbers arrive as their
+			// literal text, not their JSON-decoded
+			// form, because the Jev choice wire always
+			// uses string-keyed option values.
+			var val any
+			if kb, err := json.Marshal(k); err == nil {
+				_ = json.Unmarshal(kb, &val)
+			}
 			out.Probabilities = append(out.Probabilities, ChoiceAnswer{
 				Value:       val,
 				Probability: prob,
@@ -625,8 +630,8 @@ func synthesizeChoiceAnswer(q *Question, choiceRaw json.RawMessage, probs map[st
 // but not silently dropped — same posture as the pre-fix
 // behavior).
 //
-// The scalar `score` is parsed verbatim (systemOneScore is a
-// float-compatible JSON number); no level-index coercion.
+// The scalar `score` is parsed verbatim as a float-compatible
+// JSON number; no level-index coercion.
 func synthesizeScoreAnswer(q *Question, scoreRaw json.RawMessage, probs map[string]json.RawMessage, conf *json.RawMessage, legend map[string]string) Answer {
 	// A24 — emit the scalar score as a float; OpenAI wire
 	// accepts both int and float (liteLLM precedent; System
