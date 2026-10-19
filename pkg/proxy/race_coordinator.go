@@ -994,16 +994,40 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	if c.eventBus != nil && c.groupPick != nil {
 		gp := c.groupPick
 		publishMember = func(memberID string, cred models.ResolvedCredential) {
+			payload := map[string]interface{}{
+				"group_id":          gp.GroupID,
+				"member_id":         memberID,
+				"upstream_provider": cred.Provider,
+				"upstream_model":    cred.InternalModel,
+				"id":                c.requestID,
+			}
+			// group-backup-members / D5 observability: the
+			// additive `pool` field rides on the same event as
+			// reason / reason_class. It is emitted ONLY for a
+			// BACKUP-pool serve ("backup" — every default member
+			// in the run's exclusion set had failed); a
+			// default-pool serve leaves the field ABSENT (the
+			// FE's existing default branch — no "default" value
+			// is ever emitted). The enclosing `c.groupPick != nil`
+			// guard means a group rewrite always happened.
+			if gp.Pool == models.PoolBackup {
+				payload["pool"] = models.PoolBackup
+			}
+			// group-backup-members / D8 observability: the
+			// additive `binding` field marks a selection-time
+			// repair — the conversation's sticky binding pointed
+			// at a member that left the group, so the binding was
+			// discarded and the member re-picked. Omitted unless
+			// the condition occurs (same additive style as the
+			// `pool` field above: present only on the condition,
+			// absent otherwise).
+			if gp.BindingStale {
+				payload["binding"] = "stale"
+			}
 			c.eventBus.Publish(events.Event{
 				Type:      "model_member_selected",
 				Timestamp: time.Now().Unix(),
-				Data: map[string]interface{}{
-					"group_id":          gp.GroupID,
-					"member_id":         memberID,
-					"upstream_provider": cred.Provider,
-					"upstream_model":    cred.InternalModel,
-					"id":                c.requestID,
-				},
+				Data:      payload,
 			})
 		}
 	}
@@ -1508,7 +1532,19 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	if c.winner != nil {
 		return false
 	}
-	modelCfg := c.cfg.ModelsConfig.GetModel(latest.modelID)
+	// P0 shadowfix — resolve by ROW IDENTITY (directGetModel →
+	// GetModelNative), not by the client-facing claims-first GetModel.
+	// This read decides the CREDENTIAL-FAILOVER eligibility of the
+	// failed attempt: the credential count comes from the attempt's
+	// own model row. For a member ID claimed by its own group (the
+	// day-1 self-shadow shape coding-group[coding]) the claims-first
+	// read returned the GROUP row (zero credentials) ⇒ the count
+	// check `len(Credentials) <= 1` failed ⇒ credential failover was
+	// SILENTLY DISABLED for that member and the upstream 429 bubbled
+	// out of the member instead of being absorbed by the member's own
+	// credential LB. Execution-resolution reads are row-identity reads
+	// (Am22 L1); the client-facing seam is untouched.
+	modelCfg := directGetModel(c.cfg, latest.modelID)
 	// remove-external-upstream P1 (A20): the `!modelCfg.Internal`
 	// conjunct is GONE — every resolvable model is internal by
 	// construction (the boundary 404 gate rejects the rest), so
@@ -1620,11 +1656,16 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 
 // modelBudget returns len(credentials)−1 (R3-5 budget cap) for the
 // INFO log line; 0 when the model config is unavailable.
+//
+// P0 shadowfix — row-identity read (directGetModel), matching the
+// eligibility gate above: the budget is derived from the ATTEMPT's
+// own model row, so a member ID claimed by its own group is counted
+// from the member (not from the credential-less group row).
 func modelBudget(c *raceCoordinator, modelID string) int {
 	if c.cfg == nil || c.cfg.ModelsConfig == nil {
 		return 0
 	}
-	mc := c.cfg.ModelsConfig.GetModel(modelID)
+	mc := directGetModel(c.cfg, modelID)
 	if mc == nil {
 		return 0
 	}

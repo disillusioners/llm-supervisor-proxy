@@ -1230,12 +1230,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // all-attempts-failed exit. Returns true when the request should
 // resume execution with the rebuilt list (exactly once per request —
 // the caller's groupReentered flag is set here).
+//
+// group-backup-members / D5: when the recovery is sourced from the
+// BACKUP pool (all defaults had been excluded/failed), the log
+// line carries an explicit pool=backup token; the
+// model_member_selected event's pool field is the same. The
+// retry-after log line preserves existing behavior for the
+// default-pool re-entry.
 func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {
 		return false
 	}
-	replacement, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID)
+	replacement, pool, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID)
 	if !avail || replacement == "" {
 		return false // single-member group / all members exhausted — real failure
 	}
@@ -1255,8 +1262,13 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	} else {
 		rc.reqLog.RouteModel = ""
 	}
-	log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → re-entering once",
-		rc.reqID, pick.GroupID, pick.MemberID)
+	if pool == models.PoolBackup {
+		log.Printf("[grouplb] request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+			rc.reqID, pick.GroupID, pick.MemberID)
+	} else {
+		log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+			rc.reqID, pick.GroupID, pick.MemberID)
+	}
 	if h.bus != nil {
 		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
 			"id":          rc.reqID,

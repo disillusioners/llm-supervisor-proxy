@@ -422,3 +422,50 @@ func TestModelsConfig_Group_RemoveModel_MemberScan(t *testing.T) {
 		t.Fatalf("after member removal the delete should succeed, got: %v", err)
 	}
 }
+
+// TestValidateGroupMembers_BackupOnly_D2 —
+// group-backup-members / D2: a group must keep ≥1 NON-BACKUP
+// (default) member. All-backup is a write-time VALIDATION ERROR.
+// Mixed (≥1 default + ≥1 backup) is valid. Mirror at
+// pkg/ui/frontend/src/components/config/GroupModelForm.tsx.
+func TestValidateGroupMembers_BackupOnly_D2(t *testing.T) {
+	t.Run("D2_all_backup_rejected", func(t *testing.T) {
+		group, collection := groupBaseFixture()
+		// Mark every member as backup-only — D2 must reject.
+		group.Members = []GroupMember{
+			{ModelID: "coding", Weight: 1, BackupOnly: true},
+			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+		}
+		err := ValidateGroupMembers(&group, collection)
+		if err == nil {
+			t.Fatal("D2: all-backup group should be rejected with ≥1-default error")
+		}
+		if !strings.Contains(err.Error(), "non-backup (default) member") {
+			t.Errorf("D2 error %q does not contain the expected message", err.Error())
+		}
+	})
+
+	t.Run("D2_mixed_default_and_backup_accepted", func(t *testing.T) {
+		group, collection := groupBaseFixture()
+		// ≥1 default + ≥1 backup — valid.
+		group.Members = []GroupMember{
+			{ModelID: "coding", Weight: 1, BackupOnly: false},
+			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+		}
+		if err := ValidateGroupMembers(&group, collection); err != nil {
+			t.Errorf("D2 mixed: should accept ≥1 default + ≥1 backup, got: %v", err)
+		}
+	})
+
+	t.Run("D2_absent_field_defaults_to_default_member", func(t *testing.T) {
+		group, collection := groupBaseFixture()
+		// No BackupOnly field anywhere — backward compat (D7).
+		group.Members = []GroupMember{
+			{ModelID: "coding", Weight: 1},
+			{ModelID: "coding-alt", Weight: 1},
+		}
+		if err := ValidateGroupMembers(&group, collection); err != nil {
+			t.Errorf("D7: groups without backup_only fields should round-trip identically, got: %v", err)
+		}
+	})
+}

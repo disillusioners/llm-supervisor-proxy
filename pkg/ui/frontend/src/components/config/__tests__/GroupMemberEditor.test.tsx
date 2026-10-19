@@ -148,4 +148,76 @@ describe('GroupMemberEditor — chat-kind picker + weight + MIN/MAX + dup-warn (
     );
     expect(container.textContent).toContain('deepseek');
   });
+
+  // group-backup-members — the per-member "Backup only" tick
+  // (recourse-tier marker). Renders a checkbox per row (D1);
+  // toggling it stores `backup_only: true` via onChange;
+  // toggling it OFF drops the key entirely so the JSON form is
+  // "absent ⇒ default" (D7 round-trip shape, matches the Go
+  // omitempty semantics). The label-only chrome keeps the row
+  // width reasonable; the tooltip + aria-label carry the
+  // semantics for A11Y.
+  it('renders a "Backup" tick per row, unchecked by default', () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <GroupMemberEditor
+        members={makeMembers([{ model_id: 'chat-1', weight: 1 }, { model_id: 'chat-2', weight: 1 }])}
+        chatModels={chatModels}
+        onChange={onChange}
+      />,
+    );
+    const ticks = container.querySelectorAll('[data-testid="group-member-backup-only"]');
+    expect(ticks.length).toBe(2);
+    expect((ticks[0] as HTMLInputElement).checked).toBe(false);
+    expect((ticks[1] as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('toggling the Backup tick on stores backup_only=true via onChange', () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <GroupMemberEditor
+        members={makeMembers([{ model_id: 'chat-1', weight: 1 }])}
+        chatModels={chatModels}
+        onChange={onChange}
+      />,
+    );
+    const tick = container.querySelector('[data-testid="group-member-backup-only"]') as HTMLInputElement;
+    fireEvent.click(tick);
+    expect(onChange).toHaveBeenCalledWith([{ model_id: 'chat-1', weight: 1, backup_only: true }]);
+  });
+
+  it('toggling the Backup tick OFF drops the key (matches omitempty semantics — D7 round-trip shape)', () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <GroupMemberEditor
+        members={makeMembers([{ model_id: 'chat-1', weight: 1, backup_only: true }])}
+        chatModels={chatModels}
+        onChange={onChange}
+      />,
+    );
+    const tick = container.querySelector('[data-testid="group-member-backup-only"]') as HTMLInputElement;
+    expect(tick.checked).toBe(true);
+    fireEvent.click(tick);
+    // The key is dropped entirely so an absent field means
+    // "default member" — preserves the D7 backward-compat
+    // pre-existing-groups round-trip shape.
+    expect(onChange).toHaveBeenCalledWith([{ model_id: 'chat-1', weight: 1 }]);
+  });
+
+  it('existing rows with backup_only hydrated already render the tick CHECKED on load (load-and-edit round-trip — D7)', () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <GroupMemberEditor
+        members={makeMembers([
+          { model_id: 'chat-1', weight: 1, backup_only: true },
+          { model_id: 'chat-2', weight: 1 },
+        ])}
+        chatModels={chatModels}
+        onChange={onChange}
+      />,
+    );
+    const ticks = container.querySelectorAll('[data-testid="group-member-backup-only"]');
+    expect((ticks[0] as HTMLInputElement).checked).toBe(true);
+    expect((ticks[1] as HTMLInputElement).checked).toBe(false);
+  });
 });

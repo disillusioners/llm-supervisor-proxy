@@ -90,12 +90,14 @@ func TestSelector_WeightDistribution(t *testing.T) {
 	e := NewEngine(time.Hour, time.Hour, 99, time.Minute)
 	defer e.Stop()
 	st := newGroupState("dist", 99)
-	st.members = []MemberRef{{ModelID: "m-a", Weight: 3}, {ModelID: "m-b", Weight: 1}}
-	st.selector = newWeightedSelector(st.members)
+	defaults := []MemberRef{{ModelID: "m-a", Weight: 3}, {ModelID: "m-b", Weight: 1}}
+	st.members = append([]MemberRef(nil), defaults...)
+	st.defaultMembers = append([]MemberRef(nil), defaults...)
+	st.selector = newWeightedSelector(defaults)
 	counts := map[string]int{}
 	now := time.Now()
 	for i := 0; i < 4000; i++ {
-		m := st.pickHealthyLocked(now)
+		m := st.pickHealthyLocked(now, st.selector, st.defaultMembers)
 		counts[m]++
 	}
 	if counts["m-a"] < 2600 || counts["m-a"] > 3400 {

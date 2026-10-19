@@ -10,6 +10,7 @@ package decision
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -342,9 +343,11 @@ func TestSynthesizeAnswer_RefusalAndFallbacks(t *testing.T) {
 }
 
 // TestSynthesizeAnswer_ScoreUnknownLabel_SentinelIndex — a
-// probability label absent from the request's levels[] still
-// emits an entry with the sentinel index 0 (degraded, not
-// dropped).
+// probability key that resolves through none of the three
+// strategies (legend / positional / label lookup) still emits
+// an entry with the sentinel index 0 (degraded, not dropped).
+// The fixture uses a label-keyed legacy shape whose key does
+// not match any level label.
 func TestSynthesizeAnswer_ScoreUnknownLabel_SentinelIndex(t *testing.T) {
 	q := &Question{Type: QuestionTypeScore, Name: "s", Levels: []ScoreLevel{{Label: "calm"}}}
 	a := synthesizeAnswer(q, json.RawMessage(`{"score":1,"probabilities":{"mystery":0.5}}`))
@@ -357,6 +360,214 @@ func TestSynthesizeAnswer_ScoreUnknownLabel_SentinelIndex(t *testing.T) {
 	}
 	if entries[0].Value != 0 || entries[0].Label != "mystery" || entries[0].Probability != 0.5 {
 		t.Errorf("entry = %+v, want {0 mystery 0.5}", entries[0])
+	}
+}
+
+// TestSynthesizeAnswer_ChoiceBareString_RealFixture — R1 fix
+// regression guard. The DOCUMENTED Jev / System One wire emits
+// `choice` as a BARE STRING with `probabilities` and
+// `confidence` as siblings. Pre-fix, the parser expected
+// `choice` to be a nested object and silently turned every real
+// choice answer into a refusal (HTTP 200 with the wrong
+// answer). Fixture is a verbatim real capture (2026-10-19).
+func TestSynthesizeAnswer_ChoiceBareString_RealFixture(t *testing.T) {
+	q := &Question{Type: QuestionTypeChoice, Name: "department",
+		Choices: []ChoiceOption{{Value: "billing"}, {Value: "technical"}, {Value: "sales"}}}
+	a := synthesizeAnswer(q, json.RawMessage(`{"type":"choice","choice":"billing","probabilities":{"billing":0.88,"technical":0.12,"sales":0.0},"confidence":0.81}`))
+	if a.Type != QuestionTypeChoice {
+		t.Fatalf("type = %q, want choice (R1 fix: bare-string choice must parse)", a.Type)
+	}
+	if a.Refusal != "" {
+		t.Errorf("refusal = %q, want empty (R1 fix: must NOT be a refusal)", a.Refusal)
+	}
+	if a.Choice != "billing" {
+		t.Errorf("choice = %q, want %q (R1 fix: chosen value must survive)", a.Choice, "billing")
+	}
+	if len(a.Probabilities) != 3 {
+		t.Fatalf("probabilities = %+v, want 3 entries (R1 fix)", a.Probabilities)
+	}
+	byValue := make(map[string]float64, len(a.Probabilities))
+	for _, p := range a.Probabilities {
+		if s, ok := p.Value.(string); ok {
+			byValue[s] = p.Probability
+		}
+	}
+	for wantKey, wantProb := range map[string]float64{"billing": 0.88, "technical": 0.12, "sales": 0.0} {
+		got, ok := byValue[wantKey]
+		if !ok {
+			t.Errorf("probabilities entry for value %q missing (R1 fix)", wantKey)
+			continue
+		}
+		if math.Abs(got-wantProb) > 1e-9 {
+			t.Errorf("probabilities[%q] = %v, want %v (R1 fix)", wantKey, got, wantProb)
+		}
+	}
+	if a.Confidence == nil || math.Abs(*a.Confidence-0.81) > 1e-9 {
+		t.Errorf("confidence = %v, want 0.81 (R1 fix: confidence is a sibling of choice)", a.Confidence)
+	}
+}
+
+// TestSynthesizeAnswer_ChoiceNestedObject_LegacyFixture — the
+// nested-object `choice` variant is tolerated defensively.
+// Sibling probabilities/confidence WIN over the nested ones;
+// when the outer level omits them, the nested form supplies
+// them (that's the path this test pins).
+func TestSynthesizeAnswer_ChoiceNestedObject_LegacyFixture(t *testing.T) {
+	q := &Question{Type: QuestionTypeChoice, Name: "c",
+		Choices: []ChoiceOption{{Value: "billing"}, {Value: "other"}}}
+	a := synthesizeAnswer(q, json.RawMessage(`{"type":"choice","choice":{"value":"billing","probabilities":{"billing":0.7,"other":0.3},"confidence":0.6}}`))
+	if a.Type != QuestionTypeChoice || a.Choice != "billing" {
+		t.Errorf("legacy nested = %+v, want choice/billing", a)
+	}
+	if len(a.Probabilities) != 2 {
+		t.Errorf("legacy nested probs len = %d, want 2; got=%+v", len(a.Probabilities), a.Probabilities)
+	}
+	if a.Confidence == nil || *a.Confidence != 0.6 {
+		t.Errorf("legacy nested confidence = %v, want 0.6 (from nested object)", a.Confidence)
+	}
+}
+
+// TestSynthesizeAnswer_ScoreLegendIndexed_RealFixture — R2 fix
+// regression guard. The DOCUMENTED Jev / System One wire keys
+// `probabilities` by LEVEL INDEX AS STRING and carries a
+// sibling `legend` map translating index-string → label. Pre-fix,
+// the parser compared each key ("0", "1", "2") against the
+// level LABELS and never matched — every entry collapsed to
+// sentinel index 0, dumping all probability mass onto level 0
+// with the label "0". Fixture is a verbatim real capture.
+func TestSynthesizeAnswer_ScoreLegendIndexed_RealFixture(t *testing.T) {
+	q := &Question{Type: QuestionTypeScore, Name: "frustration",
+		Levels: []ScoreLevel{{Label: "Calm"}, {Label: "Frustrated"}, {Label: "Very angry"}}}
+	a := synthesizeAnswer(q, json.RawMessage(`{"type":"score","score":1.05,"legend":{"0":"Calm","1":"Frustrated","2":"Very angry"},"probabilities":{"0":0.0,"1":0.95,"2":0.05},"confidence":0.92}`))
+	if a.Type != QuestionTypeScore {
+		t.Fatalf("type = %q, want score", a.Type)
+	}
+	// Scalar score survives verbatim (fractional between levels).
+	if a.Score == nil || *a.Score != 1.05 {
+		t.Errorf("score = %v, want 1.05 (R2 fix: scalar score keeps working)", a.Score)
+	}
+	if a.Confidence == nil || math.Abs(*a.Confidence-0.92) > 1e-9 {
+		t.Errorf("confidence = %v, want 0.92 (R2 fix: confidence is a sibling of score)", a.Confidence)
+	}
+	entries := a.GetScoreProbabilities()
+	if len(entries) != 3 {
+		t.Fatalf("score probabilities = %+v, want 3 entries (R2 fix)", entries)
+	}
+	byLabel := make(map[string]ScoreAnswerEntry, len(entries))
+	for _, e := range entries {
+		byLabel[e.Label] = e
+	}
+	wantByLabel := map[string]struct {
+		Value       int
+		Probability float64
+	}{
+		"Calm":       {Value: 0, Probability: 0.0},
+		"Frustrated": {Value: 1, Probability: 0.95},
+		"Very angry": {Value: 2, Probability: 0.05},
+	}
+	for label, want := range wantByLabel {
+		got, ok := byLabel[label]
+		if !ok {
+			t.Errorf("probabilities entry for level %q missing (R2 fix); got=%+v", label, entries)
+			continue
+		}
+		if got.Value != want.Value {
+			t.Errorf("probabilities[%q].Value = %d, want %d (R2 fix: legend translation must resolve correct level index; NO collapse to 0)",
+				label, got.Value, want.Value)
+		}
+		if math.Abs(got.Probability-want.Probability) > 1e-9 {
+			t.Errorf("probabilities[%q].Probability = %v, want %v (R2 fix: mass distribution must survive)",
+				label, got.Probability, want.Probability)
+		}
+	}
+}
+
+// TestSynthesizeAnswer_ScoreLegendAbsent_PositionalFallback —
+// when `legend` is absent but the probability keys are numeric
+// index strings, the parser falls back to POSITIONAL mapping
+// against q.Levels. Defensive path for clients that omit
+// legend when keys already align positionally.
+func TestSynthesizeAnswer_ScoreLegendAbsent_PositionalFallback(t *testing.T) {
+	q := &Question{Type: QuestionTypeScore, Name: "s",
+		Levels: []ScoreLevel{{Label: "Calm"}, {Label: "Frustrated"}, {Label: "Very angry"}}}
+	a := synthesizeAnswer(q, json.RawMessage(`{"score":2,"probabilities":{"0":0.1,"1":0.2,"2":0.7},"confidence":0.8}`))
+	if a.Score == nil || *a.Score != 2 {
+		t.Errorf("score = %v, want 2", a.Score)
+	}
+	entries := a.GetScoreProbabilities()
+	if len(entries) != 3 {
+		t.Fatalf("score probabilities = %+v, want 3 entries", entries)
+	}
+	byLabel := make(map[string]ScoreAnswerEntry, len(entries))
+	for _, e := range entries {
+		byLabel[e.Label] = e
+	}
+	wantByLabel := map[string]struct {
+		Value       int
+		Probability float64
+	}{
+		"Calm":       {Value: 0, Probability: 0.1},
+		"Frustrated": {Value: 1, Probability: 0.2},
+		"Very angry": {Value: 2, Probability: 0.7},
+	}
+	for label, want := range wantByLabel {
+		got, ok := byLabel[label]
+		if !ok {
+			t.Errorf("probabilities entry for level %q missing (positional fallback); got=%+v", label, entries)
+			continue
+		}
+		if got.Value != want.Value {
+			t.Errorf("probabilities[%q].Value = %d, want %d (positional fallback)",
+				label, got.Value, want.Value)
+		}
+		if math.Abs(got.Probability-want.Probability) > 1e-9 {
+			t.Errorf("probabilities[%q].Probability = %v, want %v (positional fallback)",
+				label, got.Probability, want.Probability)
+		}
+	}
+}
+
+// TestSynthesizeAnswer_ScoreLabelKeyed_LegacyFixture — the
+// older Jev SDK shape where `probabilities` is keyed directly
+// by level label (no legend, no index strings) is tolerated
+// defensively via strategy 3 (label lookup).
+func TestSynthesizeAnswer_ScoreLabelKeyed_LegacyFixture(t *testing.T) {
+	q := &Question{Type: QuestionTypeScore, Name: "s",
+		Levels: []ScoreLevel{{Label: "calm"}, {Label: "angry"}}}
+	a := synthesizeAnswer(q, json.RawMessage(`{"score":1,"probabilities":{"calm":0.6,"angry":0.4},"confidence":0.75}`))
+	if a.Score == nil || *a.Score != 1 {
+		t.Errorf("score = %v, want 1", a.Score)
+	}
+	entries := a.GetScoreProbabilities()
+	if len(entries) != 2 {
+		t.Fatalf("score probabilities = %+v, want 2 entries", entries)
+	}
+	byLabel := make(map[string]ScoreAnswerEntry, len(entries))
+	for _, e := range entries {
+		byLabel[e.Label] = e
+	}
+	if e, ok := byLabel["calm"]; !ok || e.Value != 0 || math.Abs(e.Probability-0.6) > 1e-9 {
+		t.Errorf("probabilities[calm] = %+v, want {0 calm 0.6} (label-keyed legacy)", byLabel["calm"])
+	}
+	if e, ok := byLabel["angry"]; !ok || e.Value != 1 || math.Abs(e.Probability-0.4) > 1e-9 {
+		t.Errorf("probabilities[angry] = %+v, want {1 angry 0.4} (label-keyed legacy)", byLabel["angry"])
+	}
+}
+
+// TestSynthesizeAnswer_Noul_RealFixture — the noul path (never
+// broken, but pinned here so the parser keeps working). Fixture
+// is a verbatim real capture from the jev-1.13-free model.
+func TestSynthesizeAnswer_Noul_RealFixture(t *testing.T) {
+	q := &Question{Type: QuestionTypePredicate, Name: "should_refund"}
+	a := synthesizeAnswer(q, json.RawMessage(`{"type":"noul","noul":0.45}`))
+	if a.Type != QuestionTypePredicate {
+		t.Errorf("type = %q, want predicate", a.Type)
+	}
+	if a.Probability == nil || *a.Probability != 0.45 {
+		t.Errorf("probability = %v, want 0.45", a.Probability)
+	}
+	if a.Refusal != "" {
+		t.Errorf("refusal = %q, want empty", a.Refusal)
 	}
 }
 

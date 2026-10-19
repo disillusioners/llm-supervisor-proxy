@@ -41,12 +41,38 @@ type GroupRewriteResult struct {
 	// model_member_selected event (newlyBound-only, Q15).
 	MemberNewlyBound bool
 
+	// MemberPool is the pool the served member was drawn from
+	// (group-backup-members / D5 observability): "default" when the
+	// member came from the configured default sub-pool, "backup"
+	// when every default member in the run's exclusion set had
+	// failed. Empty when no group entry was rewritten. Surfaced
+	// through model_member_selected and the proxy log line — the
+	// reason taxonomy is unchanged (D5).
+	MemberPool string
+
+	// BindingStale is true when the selection-time repair
+	// (group-backup-members / D8) discarded a sticky binding whose
+	// member had LEFT the group, and the pick was re-made. False
+	// for the ordinary case (binding honoured, or fresh pick with
+	// no prior binding). Surfaced as the additive "binding" event
+	// field on model_member_selected.
+	BindingStale bool
+
 	// FailedGroupID is non-empty when a group entry had NO servable
 	// member at runtime (Am28 re-validation exhausted the member
 	// set — all stale/disabled/deleted). The caller surfaces the
 	// normal resolve-failure envelope; never a panic.
 	FailedGroupID string
 }
+
+// Pool constants (group-backup-members / D5): the only two strings
+// MemberPool may carry on the rewrite path. Public so consumers
+// (proxy telemetry, FE surfaces) can reference the same vocabulary
+// instead of duplicating literals.
+const (
+	PoolDefault = "default"
+	PoolBackup  = "backup"
+)
 
 // GroupRewriter is the rewrite + group-level-reselect seam (Am21 +
 // Am24). Implemented by *database.ModelsManager; forwarded by the
@@ -64,11 +90,19 @@ type GroupRewriter interface {
 
 	// ExcludeGroupMember marks the member as cooling for the group
 	// (60s default) and rebinds the conversation to the next healthy
-	// member (ExcludeAndReselect). Returns the replacement member
-	// and ok=true when a member is available for a re-entry attempt
-	// (Healthy or SoonestExpiry modes); ("", false) when no
-	// alternative exists (single-member group / all exhausted) —
-	// the caller treats the failure as real (max-ONE re-entry,
-	// Am24).
-	ExcludeGroupMember(groupID, conversationKey, memberID string) (replacement string, ok bool)
+	// member (ExcludeAndReselect). Returns the replacement member,
+	// the pool the member was drawn from ("default" / "backup"),
+	// and ok=true on ReselectHealthy, on ReselectSoonestExpiry in a
+	// backup-less group (the v1 all-cooling availability re-serve of
+	// the soonest-expiring default), or on a successful backup-pool
+	// cascade (ReselectNone / ReselectSoonestExpiry with
+	// HasBackupPool); ("", "", false) when no alternative exists
+	// (single-member group / all exhausted) — the caller treats the
+	// failure as real (max-ONE re-entry, Am24).
+	// group-backup-members / D5: the pool string is observable ONLY
+	// on actual fallback; ReselectNone / ReselectSoonestExpiry in the
+	// default pool cascades into the backup pool before returning
+	// ok=false (the fall-through is invisible to the caller unless the
+	// pool=backup path actually serves).
+	ExcludeGroupMember(groupID, conversationKey, memberID string) (replacement string, pool string, ok bool)
 }

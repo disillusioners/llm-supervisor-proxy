@@ -23,11 +23,24 @@ import (
 
 // groupPickInfo records the (main) group rewrite outcome for the
 // request: metering stamps (Am25), group-level failure semantics
-// (Am24), and the Q15 member event key on these fields.
+// (Am24), and the Q15 member event key on these fields. The `Pool`
+// field (group-backup-members / D5) carries the pool the served
+// member was drawn from — empty before the rewrite succeeded,
+// "default" / "backup" after. The model_member_selected event
+// payload picks it up additively. `BindingStale` (D8) is true when
+// the selection-time repair discarded a sticky binding whose member
+// had left the group and re-picked — surfaced as the additive
+// "binding" event field.
 type groupPickInfo struct {
 	GroupID    string
 	MemberID   string
 	NewlyBound bool // grouplb W-1 signal for model_member_selected (Q15)
+	Pool       string
+	// BindingStale marks a D8 selection-time repair: the
+	// conversation's sticky binding pointed at a member that left
+	// the group, so the binding was discarded and the member
+	// re-picked.
+	BindingStale bool
 }
 
 // applyGroupRewrite is the ONE shared rewrite entry point (Am21).
@@ -46,6 +59,10 @@ type groupPickInfo struct {
 //   - pick non-nil: the list was rewritten; the caller stamps its
 //     context (modelList swap + original preserved for Am24 rebuild)
 //     and the served-member metering record (Am25).
+//   - pick.Pool (group-backup-members / D5) is "default" when the
+//     pick came from the configured default sub-pool and "backup"
+//     when the defaults had all been excluded/failed; the Q15
+//     event site reads it for the additive payload field.
 func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, conversationKey string) (newList []string, pick *groupPickInfo, failGroupID string) {
 	if conf == nil || conf.ModelsConfig == nil {
 		return modelList, nil, ""
@@ -61,10 +78,16 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 	if !res.AnyGroup {
 		return modelList, nil, ""
 	}
+	pool := res.MemberPool
+	if pool == "" {
+		pool = models.PoolDefault // back-compat: groups created before D5 rewrite ⇒ no pool tag ⇒ default.
+	}
 	return res.ModelList, &groupPickInfo{
-		GroupID:    res.GroupID,
-		MemberID:   res.MemberID,
-		NewlyBound: res.MemberNewlyBound,
+		GroupID:      res.GroupID,
+		MemberID:     res.MemberID,
+		NewlyBound:   res.MemberNewlyBound,
+		Pool:         pool,
+		BindingStale: res.BindingStale,
 	}, ""
 }
 
@@ -359,7 +382,7 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	if !ok {
 		return false
 	}
-	replacement, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID)
+	replacement, pool, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID)
 	if !avail || replacement == "" {
 		return false
 	}
@@ -376,8 +399,13 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	} else {
 		arc.reqLog.RouteModel = ""
 	}
-	log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
-		arc.reqID, pick.GroupID, pick.MemberID)
+	if pool == models.PoolBackup {
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+			arc.reqID, pick.GroupID, pick.MemberID)
+	} else {
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+			arc.reqID, pick.GroupID, pick.MemberID)
+	}
 	// load-balance-groups / P4.5 (P2 deferred #1) — publish the
 	// EventMemberFailover event for the Anthropic path; the OpenAI
 	// path emits the same event at handler.go:1221. Symmetry
@@ -410,9 +438,27 @@ type directModelGetter interface {
 }
 
 // directGetModel returns the row for modelID bypassing claims when
-// the backend supports it; otherwise claims-aware. Used by the
-// per-attempt re-fetch sites in race_executor and the Anthropic
-// sequential loop.
+// the backend supports it; otherwise claims-aware.
+//
+// EXECUTION-resolution call sites — every read of an ATTEMPT's own
+// model row must land on the MEMBER row, never on the group row that
+// claims it:
+//   - race_executor.go:48  — the MiniMax interleaved-thinking gate
+//     (raceIntProviderIsMiniMax)
+//   - race_executor.go:114 — the per-attempt re-fetch (executeRequest)
+//   - race_executor.go:208 — the reselected-credential check
+//     (resolveSpecificInternalCredential)
+//   - race_executor.go:353 — the secondary-upstream read
+//     (executeInternalRequest)
+//   - race_coordinator.go:1523 — the credential-failover ELIGIBILITY
+//     gate (credFailoverEligibleLocked)
+//   - race_coordinator.go:1644 — the credential-failover BUDGET
+//     (modelBudget)
+//   - handler_anthropic.go:521 — the Anthropic sequential attempt loop
+//     (attemptAnthropicModel)
+//
+// The CLIENT-facing resolution (the handler's model lookup) stays
+// claims-first; only these execution reads bypass claims.
 func directGetModel(cfg *ConfigSnapshot, modelID string) *models.ModelConfig {
 	if cfg == nil || cfg.ModelsConfig == nil {
 		return nil

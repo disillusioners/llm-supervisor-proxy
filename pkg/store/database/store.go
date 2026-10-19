@@ -783,9 +783,21 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 //
 // The loop exits when the channel closes (Close → bus.Unsubscribe
 // closes it). It must never call back into ModelsManager write
-// paths: GetModel takes m.mu.RLock only, and Bus.Publish sends are
-// non-blocking, so a publisher holding m.mu cannot deadlock with a
+// paths: GetModelNative takes m.mu.RLock only, and Bus.Publish sends
+// are non-blocking, so a publisher holding m.mu cannot deadlock with a
 // drain iteration waiting on that RLock.
+//
+// P0 shadowfix — the re-read is ROW IDENTITY (GetModelNative), not
+// the client-facing claims-first GetModel. The drain refreshes the
+// ENGINE state of the model the event names; for a member ID that its
+// own group claims (the day-1 self-shadow shape coding-group[coding])
+// the claims-first read returned the GROUP row — whose credential
+// list is EMPTY — so the refresh called OnModelChanged(id, nil), which
+// DELETES the member's engine state. The member's next multi-
+// credential resolution then hit ErrNoCredentials and failed with
+// "failed to resolve internal config for model coding" (502) — and
+// because the drain always fed it the group row, the state was never
+// restored (a permanent failure for that member until a reboot).
 func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
 	for evt := range ch {
 		if evt.Type != credentiallb.EventCredentialsChanged {
@@ -803,7 +815,7 @@ func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
 		if modelID == "" {
 			continue
 		}
-		mc := m.GetModel(modelID)
+		mc := m.GetModelNative(modelID)
 		if mc == nil {
 			// Model removed between publish and drain (or removed by
 			// another writer): drop the engine state entirely.
@@ -1619,14 +1631,16 @@ func (m *ModelsManager) notifyGroupEngineLocked(kind, modelID string, members []
 }
 
 // GroupMemberRefs converts config member entries to engine refs
-// (positions = slice order).
+// (positions = slice order). group-backup-members / D1: the
+// BackupOnly flag is preserved verbatim so the engine can split
+// the pool.
 func GroupMemberRefs(members []models.GroupMember) []grouplb.MemberRef {
 	if len(members) == 0 {
 		return nil
 	}
 	refs := make([]grouplb.MemberRef, len(members))
 	for i, mm := range members {
-		refs[i] = grouplb.MemberRef{ModelID: mm.ModelID, Weight: mm.Weight, Position: i}
+		refs[i] = grouplb.MemberRef{ModelID: mm.ModelID, Weight: mm.Weight, Position: i, BackupOnly: mm.BackupOnly}
 	}
 	return refs
 }
@@ -2398,7 +2412,15 @@ func (m *ModelsManager) publishCredentialsChanged(modelID string) {
 // fast path (byte-identical to pre-change behavior) and as the
 // nil-engine delegation target.
 func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
-	modelConfig := m.GetModel(modelID)
+	// P0 shadowfix — resolve by ROW IDENTITY (GetModelNative), like
+	// ResolveInternalConfigWithAffinity above. This is an EXECUTION-
+	// resolution seam (its only consumer is the normalizer's provider
+	// detection, which runs per attempt): for a member ID claimed by
+	// its own group (the day-1 self-shadow shape coding-group[coding])
+	// the claims-first read returned the GROUP row (no credentials) and
+	// the provider came back "unknown" for that member only.
+	// Client-facing reads keep the claims-first GetModel.
+	modelConfig := m.GetModelNative(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return "", "", "", "", false
 	}

@@ -22,26 +22,26 @@
 //  9. Provider lookup on the local registry. Unknown provider ⇒ 502
 //     + "no decision adapter registered for provider" (finding 6
 //     trimmed message).
-// 10. provider.BuildUpstream(cred, req, rawBody). On err ⇒ 502 +
+//  10. provider.BuildUpstream(cred, req, rawBody). On err ⇒ 502 +
 //     house envelope code "decision_upstream_build_failed" (Q15).
-// 11. Timeout ctx (DecisionTimeout, default 30s, clamp [10s,60s]).
-// 12. sharedHTTPClient.Do with the timeout ctx threaded via
+//  11. Timeout ctx (DecisionTimeout, default 30s, clamp [10s,60s]).
+//  12. sharedHTTPClient.Do with the timeout ctx threaded via
 //     http.NewRequestWithContext (finding 4; NEVER r.Context() —
 //     would leak parent request lifecycle and defeat the
 //     per-request clamp).
-// 13. Response cap io.LimitReader(cap+1) at 64MB (mirror
+//  13. Response cap io.LimitReader(cap+1) at 64MB (mirror
 //     pkg/imggen/handler.go:404); over-cap ⇒ 502.
-// 14. provider.InspectResponse(respBytes, originalReq) — unified
+//  14. provider.InspectResponse(respBytes, originalReq) — unified
 //     2-arg typed signature (finding 5). On success returns typed
 //     *DecisionResponse for relay; on PromoteToError returns
 //     Outcome{RelayStatus, Reason} with body preserved verbatim.
-// 15. Relay write: Outcome.RelayStatus == 0 ⇒ body verbatim;
+//  15. Relay write: Outcome.RelayStatus == 0 ⇒ body verbatim;
 //     != 0 ⇒ set that status, body preserved verbatim.
-// 16. Meter on success only — Increment + IncrementModelUsage with
+//  16. Meter on success only — Increment + IncrementModelUsage with
 //     input_tokens + output_tokens (chat semantics; chat at
 //     pkg/proxy/handler.go:899 / :915); detached 5s ctx (mirror
 //     pkg/imggen/handler.go:581). Failures write NO usage row.
-// 17. DecisionEvent via events.Bus on every completed decision
+//  17. DecisionEvent via events.Bus on every completed decision
 //     (sibling of imggen eventTypeImageGeneration).
 package decision
 

@@ -21,6 +21,8 @@ package database
 // panic.
 
 import (
+	"log"
+
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
@@ -53,7 +55,7 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			continue
 		}
 		res.AnyGroup = true
-		memberID, newlyBound, ok := m.pickServableGroupMember(row, conversationKey)
+		memberID, newlyBound, pool, staleRepaired, ok := m.pickServableGroupMember(row, conversationKey)
 		if !ok {
 			res.FailedGroupID = row.ID
 			continue // unservable group entry is dropped; caller fails clean
@@ -71,6 +73,8 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			res.GroupID = row.ID
 			res.MemberID = memberRow.ID
 			res.MemberNewlyBound = newlyBound
+			res.MemberPool = pool
+			res.BindingStale = staleRepaired
 		}
 	}
 	res.ModelList = out
@@ -81,34 +85,84 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 // re-validates it (Am28). Stale picks (deleted / disabled / wrong
 // kind between group write and request) are skip-and-reselected: the
 // stale member is excluded (default cooldown) and the next healthy
-// member picked. Bounded by the member count; exhaustion ⇒ ok=false
-// (empty-at-runtime group).
-func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, ok bool) {
+// member picked. Bounded by the member count; exhaustion of the
+// default pool falls through to the BACKUP pool
+// (group-backup-members / D1); exhaustion of the backup pool
+// returns ok=false (empty-at-runtime group).
+//
+// Pool selection mirrors the engine partition: the default pool is
+// tried first; the backup pool is tried only when the default pool
+// has no servable member left. Returns the pool the served member
+// was drawn from ("default" | "backup") for D5 observability.
+//
+// group-backup-members / D8: the engine's selection-time repair
+// (union-scoped existence check) is what detects a binding whose
+// member left the group; the repair signal is carried up to the
+// proxy (the `binding=stale` observability token). The default
+// pool's ErrNoMembers is treated as "the default pool is exhausted"
+// — NOT as a request failure — so the backup pool is consulted;
+// this is the defensive empty-default path (the all-defaults-
+// removed state is unreachable via the API — D2 blocks zero-default
+// writes — but the picker must not fail on it).
+func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, pool string, staleRepaired bool, ok bool) {
 	if m.groupEngine == nil {
-		return "", false, false
+		return "", false, "", false, false
 	}
 	refs := GroupMemberRefs(group.Members)
 	if !m.groupEngine.HasGroup(group.ID) {
 		// Am15 lazy seed — first rewrite after boot.
 		m.groupEngine.OnGroupChanged(group.ID, refs)
 	}
-	// +1 defensive iteration over the member count bounds the loop
-	// even when every pick comes back stale (single-member groups
-	// hit the n==1 fast path, which ignores cooldowns — the loop
-	// then terminates on the attempt bound).
-	for attempt := 0; attempt <= len(refs); attempt++ {
-		pick, newly, err := m.groupEngine.GetOrSelect(group.ID, conversationKey)
+
+	// C1: when a backup pool exists AND every default is cooling, the
+	// default pool is exhausted for this run — the backup pool takes
+	// over. Without this the rebuild would re-serve a cooling
+	// default (the v1 all-cooling availability ruling) and undo the
+	// re-entry cascade in ExcludeGroupMember. Backup-less groups
+	// keep the v1 ruling byte-identically (D7).
+	defaultPoolExhausted := m.groupEngine.HasBackupPool(group.ID) && !m.groupEngine.DefaultPoolHealthy(group.ID)
+
+	// Pool 1: defaults. +1 defensive iteration over the default
+	// member count bounds the loop even when every pick comes back
+	// stale. All-defaults exhausted ⇒ fall through to the backup
+	// loop.
+	defaults := defaultRefs(refs)
+	for attempt := 0; !defaultPoolExhausted && attempt <= len(defaults); attempt++ {
+		pick, newly, repaired, err := m.groupEngine.GetOrSelectWithRepair(group.ID, conversationKey)
 		if err != nil {
-			return "", false, false
+			// D8: the default pool has no member at all (empty
+			// default pool / refs invalidated under us) ⇒ the
+			// default pool is EXHAUSTED. Fall through to the
+			// backup pool instead of failing the request.
+			break
 		}
 		if isServableGroupMember(m.GetModelNative(pick)) {
-			return pick, newly, true
+			return pick, newly, models.PoolDefault, repaired, true
 		}
 		// Am28: stale — skip-and-reselect (cools the stale member;
 		// rebinds the conversation to the next healthy member).
 		m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
 	}
-	return "", false, false
+
+	// Pool 2: backups (group-backup-members / D1). Tries each
+	// backup member in turn; exhausts the BACKUP pool only after
+	// every backup member is stale/excluded. Returns ok=false
+	// when even the backup pool is exhausted.
+	backups := backupRefs(refs)
+	for attempt := 0; attempt <= len(backups); attempt++ {
+		pick, newly, repaired, err := m.groupEngine.PickBackupMemberWithRepair(group.ID, conversationKey)
+		if err != nil {
+			return "", false, "", false, false
+		}
+		if isServableGroupMember(m.GetModelNative(pick)) {
+			if m.groupEngine.HasBackupPool(group.ID) {
+				log.Printf("[grouplb] group=%s pool=backup member=%s — all default members exhausted for this run", group.ID, pick)
+			}
+			return pick, newly, models.PoolBackup, repaired, true
+		}
+		m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
+	}
+	return "", false, "", false, false
 }
 
 // isServableGroupMember is the Am28 re-validation predicate: the
@@ -129,18 +183,102 @@ func isServableGroupMember(row *models.ModelConfig) bool {
 	}
 }
 
+// defaultRefs / backupRefs split engine refs into their two pools
+// (group-backup-members / D1). Kept as plain helpers; the engine's
+// own partition is the authoritative read source — these exist only
+// so the manager can size its loop bound per pool.
+func defaultRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
+	out := make([]grouplb.MemberRef, 0, len(refs))
+	for _, r := range refs {
+		if !r.BackupOnly {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func backupRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
+	out := make([]grouplb.MemberRef, 0, len(refs))
+	for _, r := range refs {
+		if r.BackupOnly {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // ExcludeGroupMember implements models.GroupRewriter (Am24): the
 // GROUP-level exclude-and-reselect fired on terminal member-pipeline
-// failure. ok=true (Healthy or SoonestExpiry mode) means a member is
-// available for the single re-entry attempt; ("", false) means no
-// alternative exists — the failure is real.
-func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, bool) {
+// failure. ok=true means a member is available for the single
+// re-entry attempt; ("", "", false) means no alternative exists —
+// the failure is real (max ONE re-entry per request, Am24).
+//
+// group-backup-members / C1 + D5 — the cascade decision is
+// mode-aware:
+//
+//   - ReselectHealthy: a live default is available → serve it
+//     (PoolDefault).
+//   - ReselectSoonestExpiry (EVERY default is now cooling) WITH a
+//     backup pool: cascade to the backup pool (PoolBackup). Serving
+//     the soonest-expiring cooling default here would re-run the
+//     member that just failed and keep the backups dead on the
+//     terminal-failure seam — the C1 defect. Backup-less groups keep
+//     the v1 soonest-default re-serve byte-identically (D7).
+//   - ReselectSoonestExpiry WITHOUT a backup pool: serve the
+//     soonest-expiring default (v1 behavior, D7).
+//   - ReselectNone (default pool genuinely exhausted, or a
+//     single-member group): cascade to the backup pool; a
+//     single-member backup-less group therefore fails fast exactly
+//     as v1 did.
+//
+// The returned `pool` is "backup" only when the backup pool actually
+// served a member, so the proxy's D5 `pool=backup` annotation + the
+// D4 metering predicate flow unchanged.
+func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, string, bool) {
 	if m.groupEngine == nil {
-		return "", false
+		return "", "", false
 	}
 	pick, mode := m.groupEngine.ExcludeAndReselect(groupID, conversationKey, memberID, 0)
-	if pick == "" || mode == grouplb.ReselectNone {
+
+	switch {
+	case mode == grouplb.ReselectHealthy && pick != "":
+		// A live default is available.
+		return pick, models.PoolDefault, true
+
+	case mode == grouplb.ReselectSoonestExpiry && pick != "" && !m.groupEngine.HasBackupPool(groupID):
+		// v1 all-cooling availability ruling — backup-less groups
+		// only (D7 byte-compat).
+		return pick, models.PoolDefault, true
+
+	default:
+		// C1: every default is cooling (SoonestExpiry) with a backup
+		// pool, OR the default pool is genuinely exhausted
+		// (ReselectNone). The backup pool takes over; if it cannot
+		// serve, the failure is real.
+		if bPick, ok := m.pickServableBackup(groupID, conversationKey); ok {
+			return bPick, models.PoolBackup, true
+		}
+		return "", "", false
+	}
+}
+
+// pickServableBackup resolves a servable BACKUP member for a re-entry
+// attempt (group-backup-members / C1): pick, validate at the Am28
+// predicate, and on a stale pick reselect once within the backup pool
+// (mirrors the rewrite loop's skip-and-reselect). Returns ("", false)
+// when no servable backup exists.
+func (m *ModelsManager) pickServableBackup(groupID, conversationKey string) (string, bool) {
+	bPick, _, err := m.groupEngine.PickBackupMember(groupID, conversationKey)
+	if err != nil || bPick == "" {
 		return "", false
 	}
-	return pick, true
+	if isServableGroupMember(m.GetModelNative(bPick)) {
+		return bPick, true
+	}
+	// Stale backup — reselect once within the backup pool.
+	replacement, mode := m.groupEngine.ExcludeAndBackupReselect(groupID, conversationKey, bPick, 0)
+	if replacement == "" || mode == grouplb.ReselectNone {
+		return "", false
+	}
+	return replacement, true
 }

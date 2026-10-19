@@ -174,9 +174,18 @@ export type DecisionModel = Model & { kind: 'decision' };
 // EXISTING chat-kind model (app-level FK, G3; groups carry no
 // credentials); `weight` is a positive float driving the sticky weighted
 // picker (higher = picked more often; G3: weight > 0).
+//
+// group-backup-members: `backup_only` (optional, defaults to false)
+// flags the member as a recourse-tier candidate picked ONLY after
+// every default member in the request's exclusion set has failed
+// (D1). Two-tier member pools per group: defaults always served
+// first, backups consulted only when defaults exhaust. Absent
+// ⇒ default member (D7 backward compat — pre-existing groups with
+// no flag round-trip identically).
 export interface GroupMember {
   model_id: string;
   weight: number;
+  backup_only?: boolean;
 }
 
 // Narrowed Model alias for group rows (load-balance-groups — 2026-10-16 /
