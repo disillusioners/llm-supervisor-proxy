@@ -308,6 +308,7 @@ export type EventType =
   | 'race_spawn'
   | 'race_winner_selected'
   | 'race_all_failed'
+  | 'race_request_failed'
   | 'race_secondary_model_used'
   // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
@@ -374,6 +375,8 @@ export interface EventData {
   request_index?: number;      // For race_spawn
   type?: string;               // Request type: main, second, fallback
   trigger?: string;            // Spawn trigger: idle_timeout, main_error
+  reason_class?: string;       // Classification token (race-error-reason-classification)
+  reason_status?: number;      // Upstream HTTP status when attributable
   winner_index?: number;       // For race_winner_selected
   winner_type?: string;        // main, second, fallback
   winner_model?: string;       // Model ID of winner
