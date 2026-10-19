@@ -92,14 +92,17 @@ type GroupRewriter interface {
 	// (60s default) and rebinds the conversation to the next healthy
 	// member (ExcludeAndReselect). Returns the replacement member,
 	// the pool the member was drawn from ("default" / "backup"),
-	// and ok=true when a member is available for a re-entry attempt
-	// (Healthy or SoonestExpiry modes); ("", "", false) when no
-	// alternative exists (single-member group / all exhausted) —
-	// the caller treats the failure as real (max-ONE re-entry,
-	// Am24). group-backup-members / D5: the pool string is
-	// observable ONLY on actual fallback; ReselectNone / ReselectSoonestExpiry
-	// in the default pool cascades into the backup pool before
-	// returning ok=false (the fall-through is invisible to the
-	// caller unless the pool=backup path actually serves).
+	// and ok=true on ReselectHealthy, on ReselectSoonestExpiry in a
+	// backup-less group (the v1 all-cooling availability re-serve of
+	// the soonest-expiring default), or on a successful backup-pool
+	// cascade (ReselectNone / ReselectSoonestExpiry with
+	// HasBackupPool); ("", "", false) when no alternative exists
+	// (single-member group / all exhausted) — the caller treats the
+	// failure as real (max-ONE re-entry, Am24).
+	// group-backup-members / D5: the pool string is observable ONLY
+	// on actual fallback; ReselectNone / ReselectSoonestExpiry in the
+	// default pool cascades into the backup pool before returning
+	// ok=false (the fall-through is invisible to the caller unless the
+	// pool=backup path actually serves).
 	ExcludeGroupMember(groupID, conversationKey, memberID string) (replacement string, pool string, ok bool)
 }
