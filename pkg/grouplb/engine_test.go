@@ -1199,3 +1199,191 @@ func TestD8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 		t.Fatalf("empty default pool: pick = %q, want backup-x", member)
 	}
 }
+
+// TestD8_NoDoubleDrop_PullLayer pins the D8 two-layer composition's
+// counter invariant mechanically.
+//
+// The PUSH layer (OnGroupChanged's membership-delta survivor filter)
+// and the PULL layer (selection-time stale repair) BOTH drop binding
+// rows, and each drop decrements the O(1) row mirror exactly once.
+// The decrements are guarded by a row-presence check
+// (`if b, ok := map[key]; ok`); this test drives the interleavings
+// that would expose a missing or mis-scoped guard — a double
+// decrement, or a counter underflow (bindingsCount is uint64, so an
+// underflow surfaces as a negative int through bindingsCountForTest).
+//
+// Deterministic: no race harness and no sleeps — the config-change →
+// selection race window is constructed DIRECTLY by injecting the
+// binding after the push layer has already run.
+func TestD8_NoDoubleDrop_PullLayer(t *testing.T) {
+	const key = "conv-d8-nodouble"
+
+	// ── Default-pool map discipline ─────────────────────────────────
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", staleMemberRefs()) // [default-a, default-b, backup-x]
+
+	// (1) Prime a binding to a live member: one row, count 1.
+	e.InjectPreconditionStateForTest("g", key, "default-a")
+	if got := e.bindingsCountForTest("g"); got != 1 {
+		t.Fatalf("(1) prime: bindingsCount = %d, want 1", got)
+	}
+
+	// (2) PUSH layer removes the bound member — the survivor filter
+	// drops the row, decrementing EXACTLY once.
+	reduced := []MemberRef{
+		{ModelID: "default-b", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+	}
+	e.OnGroupChanged("g", reduced)
+	if got := e.bindingsCountForTest("g"); got != 0 {
+		t.Fatalf("(2) push-layer drop: bindingsCount = %d, want 0 (exactly one decrement, no underflow)", got)
+	}
+
+	// (2b) The push layer runs AGAIN over the same (now empty) map —
+	// the already-dropped row must not be double-decremented.
+	e.OnGroupChanged("g", reduced)
+	if got := e.bindingsCountForTest("g"); got != 0 {
+		t.Fatalf("(2b) repeated push-layer pass: bindingsCount = %d, want 0 (no double decrement / underflow)", got)
+	}
+
+	// (3) Re-create the race state: an in-flight request writes the
+	// OLD (removed-member) binding AFTER the push layer ran.
+	e.InjectPreconditionStateForTest("g", key, "default-a")
+	if got := e.bindingsCountForTest("g"); got != 1 {
+		t.Fatalf("(3) race injection: bindingsCount = %d, want 1", got)
+	}
+
+	// (4) PULL layer repairs: one decrement (stale row) + one
+	// increment (re-picked row) ⇒ count is exactly 1, never -1.
+	member, _, stale, err := e.GetOrSelectWithRepair("g", key)
+	if err != nil {
+		t.Fatalf("(4) repair: %v", err)
+	}
+	if !stale {
+		t.Fatal("(4) staleRepaired must be true — the bound member left the group")
+	}
+	if member != "default-b" {
+		t.Fatalf("(4) repaired pick = %q, want default-b", member)
+	}
+	if got := e.bindingsCountForTest("g"); got != 1 {
+		t.Fatalf("(4) pull-layer repair: bindingsCount = %d, want 1 (one drop + one re-pick; underflow would show as -1)", got)
+	}
+
+	// (5) Repeat the selection for the SAME key — the repaired
+	// binding is healthy, so neither layer may drop or re-add it.
+	for i := 0; i < 3; i++ {
+		m, _, stale2, err := e.GetOrSelectWithRepair("g", key)
+		if err != nil {
+			t.Fatalf("(5) repeat %d: %v", i, err)
+		}
+		if m != "default-b" {
+			t.Fatalf("(5) repeat %d: pick = %q, want default-b (sticky)", i, m)
+		}
+		if stale2 {
+			t.Fatalf("(5) repeat %d: the healthy binding must not be reported stale", i)
+		}
+		if got := e.bindingsCountForTest("g"); got != 1 {
+			t.Fatalf("(5) repeat %d: bindingsCount = %d, want 1", i, got)
+		}
+	}
+
+	// (6) The push layer re-runs with the same membership — the
+	// surviving binding must be untouched.
+	e.OnGroupChanged("g", reduced)
+	if got := e.bindingsCountForTest("g"); got != 1 {
+		t.Fatalf("(6) idempotent push-layer pass: bindingsCount = %d, want 1", got)
+	}
+
+	// (7) A second conversation binds — one row PER KEY, no inflation.
+	if _, _, _, err := e.GetOrSelectWithRepair("g", "conv-d8-nodouble-2"); err != nil {
+		t.Fatalf("(7) second conversation: %v", err)
+	}
+	if got := e.bindingsCountForTest("g"); got != 2 {
+		t.Fatalf("(7) second conversation: bindingsCount = %d, want 2 (one row per key)", got)
+	}
+
+	// (8) Remove the member the first conversation is bound to — the
+	// push layer drops exactly that row; the second conversation's
+	// row survives.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "backup-x", Weight: 1, Position: 0, BackupOnly: true},
+	})
+	if got := e.bindingsCountForTest("g"); got != 0 {
+		t.Fatalf("(8) all-defaults-removed push pass: bindingsCount = %d, want 0 (both bound defaults gone, one decrement each)", got)
+	}
+
+	// (9) The default pool is now empty (the D8 defensive path); the
+	// BACKUP pool serves and binds — count stays consistent.
+	if m, _, _, err := e.PickBackupMemberWithRepair("g", key); err != nil || m != "backup-x" {
+		t.Fatalf("(9) backup serve: member=%q err=%v, want backup-x", m, err)
+	}
+	if got := e.bindingsCountForTest("g"); got != 0 {
+		t.Fatalf("(9) backup serve must not touch the DEFAULT map; bindingsCount = %d, want 0", got)
+	}
+
+	// ── Backup-pool map discipline ──────────────────────────────────
+	eb := newTestEngine(t, time.Hour, time.Hour)
+	eb.OnGroupChanged("gb", onlyBackupsRefs()) // [backup-a, backup-b, backup-c]
+
+	// (10) Prime a BACKUP binding: one row, count 1.
+	eb.InjectBackupPreconditionStateForTest("gb", key, "backup-a")
+	if got := eb.backupBindingsCountForTest("gb"); got != 1 {
+		t.Fatalf("(10) prime: backupBindingsCount = %d, want 1", got)
+	}
+
+	// (11) PUSH layer removes the bound backup — exactly one
+	// decrement.
+	reducedBackups := []MemberRef{
+		{ModelID: "backup-b", Weight: 1, Position: 0, BackupOnly: true},
+		{ModelID: "backup-c", Weight: 1, Position: 1, BackupOnly: true},
+	}
+	eb.OnGroupChanged("gb", reducedBackups)
+	if got := eb.backupBindingsCountForTest("gb"); got != 0 {
+		t.Fatalf("(11) push-layer drop: backupBindingsCount = %d, want 0", got)
+	}
+	// (11b) repeated push-layer pass — no double decrement.
+	eb.OnGroupChanged("gb", reducedBackups)
+	if got := eb.backupBindingsCountForTest("gb"); got != 0 {
+		t.Fatalf("(11b) repeated push-layer pass: backupBindingsCount = %d, want 0 (no underflow)", got)
+	}
+
+	// (12) Race injection + PULL-layer repair: one drop + one
+	// re-pick ⇒ exactly 1.
+	eb.InjectBackupPreconditionStateForTest("gb", key, "backup-a")
+	m2, _, stale2, err := eb.PickBackupMemberWithRepair("gb", key)
+	if err != nil {
+		t.Fatalf("(12) backup repair: %v", err)
+	}
+	if !stale2 {
+		t.Fatal("(12) staleRepaired must be true — the bound backup left the group")
+	}
+	if m2 != "backup-b" && m2 != "backup-c" {
+		t.Fatalf("(12) repaired pick = %q, want a remaining backup", m2)
+	}
+	if got := eb.backupBindingsCountForTest("gb"); got != 1 {
+		t.Fatalf("(12) pull-layer repair: backupBindingsCount = %d, want 1 (underflow would show as -1)", got)
+	}
+
+	// (13) Repeat selection + a re-run of the push layer — stable at 1.
+	for i := 0; i < 3; i++ {
+		if _, _, s, err := eb.PickBackupMemberWithRepair("gb", key); err != nil || s {
+			t.Fatalf("(13) repeat %d: stale=%v err=%v, want healthy", i, s, err)
+		}
+		if got := eb.backupBindingsCountForTest("gb"); got != 1 {
+			t.Fatalf("(13) repeat %d: backupBindingsCount = %d, want 1", i, got)
+		}
+	}
+	eb.OnGroupChanged("gb", reducedBackups)
+	if got := eb.backupBindingsCountForTest("gb"); got != 1 {
+		t.Fatalf("(13) idempotent push-layer pass: backupBindingsCount = %d, want 1", got)
+	}
+
+	// (14) Final invariant sweep: both mirrors are non-negative and
+	// match the number of live rows (never a stale/decremented value).
+	if got := e.bindingsCountForTest("g"); got < 0 {
+		t.Fatalf("(14) default mirror underflowed: %d", got)
+	}
+	if got := eb.backupBindingsCountForTest("gb"); got < 0 {
+		t.Fatalf("(14) backup mirror underflowed: %d", got)
+	}
+}
