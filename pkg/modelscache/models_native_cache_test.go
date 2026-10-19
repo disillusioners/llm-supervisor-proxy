@@ -31,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
@@ -86,8 +85,18 @@ func newCountingCacheManager(t *testing.T) (*countingModelsStore, *CachedModelsC
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
-	bus := events.NewBus()
-	_, mgr, err := database.InitializeManagers(store, bus)
+	// nil event bus: the manager's bus-drain goroutine
+	// (drainCredentialsChanged, store.go:770) is production-owned and
+	// unjoinable from this package, yet it keeps reading the temp-dir
+	// SQLite db AFTER mgr.Close() returns (Unsubscribe only closes the
+	// channel — buffered events are still processed post-close), so
+	// t.TempDir()'s RemoveAll races it — the ~1/16-batch unlinkat
+	// flake. Nil bus = the goroutine is never created (the sanctioned
+	// nil-bus mode; publishCredentialsChanged is nil-tolerant, and the
+	// package's other DB-backed fixtures already pass nil). The
+	// credentiallb engine keeps its synchronous write-path
+	// invalidation, which is all these decorator tests observe.
+	_, mgr, err := database.InitializeManagers(store, nil)
 	if err != nil {
 		store.Close()
 		t.Fatalf("InitializeManagers: %v", err)
@@ -111,6 +120,11 @@ func newCountingCacheManager(t *testing.T) (*countingModelsStore, *CachedModelsC
 	}
 	return counting, primed, func() {
 		primed.Stop()
+		// Full join of the decorator's reconciler goroutine: Stop()'s
+		// wait is BOUNDED (StrictFillTimeout + stopWaitSlack) and may
+		// abandon it mid-scan; cleanup must not proceed while any
+		// scanner can still touch the temp-dir db.
+		primed.reconcileWG.Wait()
 		mgr.Close()
 		store.Close()
 	}
