@@ -1,6 +1,7 @@
 package grouplb
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,5 +426,292 @@ func TestEngine_ZeroCredentialImportGuard(t *testing.T) {
 				t.Errorf("%s contains banned credential/provider reference %q (Am31: zero credential awareness)", name, b)
 			}
 		}
+	}
+}
+
+// ─── group-backup-members / D1, D2, D5 behavioural tests ───────────────────
+//
+// (a) backup never picked while a default can serve;
+// (b) backup picked only when defaults exhausted;
+// (c) backup pool respects weights + sticky among themselves;
+// (d) multi-backup (≥2 backups; exclusion chain across backups).
+//
+// The (e)/(f) legs live in pkg/proxy (existing suite must remain
+// green) and pkg/models (D2 validation).
+
+// defaultPlusBackupRefs builds a 2-default + 1-backup member list
+// for the (a)/(b)/(c) tests. The backup carries weight 1 to mirror
+// the defaults' weight 1 — distribution is therefore uniform
+// within each pool; binding semantics carry the affinity.
+func defaultPlusBackupRefs() []MemberRef {
+	return []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+		{ModelID: "backup-x", Weight: 1, Position: 2, BackupOnly: true},
+	}
+}
+
+// onlyBackupsRefs builds a 3-backup member list with no defaults
+// for the (d) test. Engine tests bypass the write-path D2
+// validation deliberately (D2 lives at models.ValidateGroupMembers;
+// the engine is the picker, not the validator).
+func onlyBackupsRefs() []MemberRef {
+	return []MemberRef{
+		{ModelID: "backup-a", Weight: 2, Position: 0, BackupOnly: true},
+		{ModelID: "backup-b", Weight: 1, Position: 1, BackupOnly: true},
+		{ModelID: "backup-c", Weight: 1, Position: 2, BackupOnly: true},
+	}
+}
+
+// (a) backup never picked while a default can serve — over many
+// GetOrSelect calls with distinct conversation keys (so every call
+// is a fresh pick), the result is always a default member. The
+// backup pool's `backupSelector` is built and HasBackupPool is
+// true, but GetOrSelect never touches it. PickBackupMember works
+// independently because the backup pool exists.
+func TestBackup_NeverPickedWhileDefaultCanServe(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", defaultPlusBackupRefs())
+	if !e.HasBackupPool("g") {
+		t.Fatal("HasBackupPool must be true for a group with a backup member")
+	}
+
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("conv-a-%d", i)
+		m, _, err := e.GetOrSelect("g", key)
+		if err != nil {
+			t.Fatalf("GetOrSelect[%d]: %v", i, err)
+		}
+		if m == "backup-x" {
+			t.Fatalf("iteration %d: GetOrSelect returned the backup member %q while defaults existed", i, m)
+		}
+		if m != "default-a" && m != "default-b" {
+			t.Fatalf("iteration %d: unexpected pick %q (want default-a|default-b)", i, m)
+		}
+	}
+
+	// PickBackupMember DOES reach the backup pool — proving the
+	// partition is correctly populated, not silently dropped.
+	bp, _, err := e.PickBackupMember("g", "conv-a-backup")
+	if err != nil {
+		t.Fatalf("PickBackupMember: %v", err)
+	}
+	if bp != "backup-x" {
+		t.Fatalf("PickBackupMember pick = %q, want backup-x (the only configured backup)", bp)
+	}
+}
+
+// (b) backup picked only when defaults exhausted. With every
+// default in cooldown (InjectAllCoolingForTest minus the backup),
+// GetOrSelect still picks a default (the all-cooling soonest-expiry
+// path is a per-pool check, so the default pool's soonest-expiry
+// returns one of the cooling defaults), and a direct
+// PickBackupMember yields the backup with its own sticky binding.
+//
+// More importantly: when ALL defaults are stuck (e.g. degraded + a
+// stale re-validation cycles them through ExcludeAndReselect), the
+// call flow returns the backup via PickBackupMember.
+func TestBackup_PickedWhenDefaultsExhausted(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", defaultPlusBackupRefs())
+
+	// Defaults are all live — must NOT pick a backup.
+	m1, _, err := e.GetOrSelect("g", "conv-b-default")
+	if err != nil {
+		t.Fatalf("first GetOrSelect: %v", err)
+	}
+	if m1 == "backup-x" {
+		t.Fatalf("default-pool pick returned backup: %q", m1)
+	}
+
+	// Now mark the defaults cooling — ExcludeAndReselect re-bind
+	// loops: cool the picked default + bound member, repeat, until
+	// the default pool is fully cooling. The expected behaviour is
+	// that the default pick degrades to the all-cooling
+	// soonest-expiry path. Concurrent with that, the backup pool
+	// is reachable directly.
+	e.InjectAllCoolingForTest("g") // cools BOTH pools (shared cooldown map)
+	// Direct call on the backup pool — the single configured
+	// backup is also cooling now, so the call falls into the
+	// backup pool's all-cooling soonest-expiry path. The picked
+	// member is one of the backups.
+	soonestPick, _, err := e.PickBackupMember("g", "conv-b-backup")
+	if err != nil {
+		t.Fatalf("PickBackupMember under shared cooldown: %v", err)
+	}
+	if soonestPick != "backup-x" {
+		t.Fatalf("backup-only group all-cooling soonest pick = %q, want backup-x", soonestPick)
+	}
+
+	// Reset the backup-only cooldowns so the binding map path is
+	// reachable. Defaults remain cooling.
+	e.forceCooldownExpiryForTest("g", "backup-x")
+	bp, newly, err := e.PickBackupMember("g", "conv-b-backup-reset")
+	if err != nil {
+		t.Fatalf("PickBackupMember after backup cooldown expiry: %v", err)
+	}
+	if bp != "backup-x" {
+		t.Fatalf("PickBackupMember pick = %q, want backup-x", bp)
+	}
+	if !newly {
+		t.Fatal("first PickBackupMember on a fresh key must be newlyBound=true")
+	}
+
+	// Verify sticky on the backup binding.
+	bp2, newly2, err := e.PickBackupMember("g", "conv-b-backup-reset")
+	if err != nil {
+		t.Fatalf("re-pick: %v", err)
+	}
+	if bp2 != bp {
+		t.Fatalf("backup sticky violated: %q vs %q", bp2, bp)
+	}
+	if newly2 {
+		t.Fatal("in-TTL backup reuse must be newlyBound=false")
+	}
+}
+
+// (c) backup pool respects weights + sticky among themselves.
+// With multiple backups and the all-defaults excluded,
+// PickBackupMember distributes among backups according to weight
+// (statistical) and pins the same conversation to the picked
+// backup (sticky).
+func TestBackup_WeightAndStickyWithinBackupPool(t *testing.T) {
+	refs := []MemberRef{
+		{ModelID: "default-z", Weight: 1, Position: 0},
+		{ModelID: "backup-heavy", Weight: 5, Position: 1, BackupOnly: true},
+		{ModelID: "backup-light", Weight: 1, Position: 2, BackupOnly: true},
+	}
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", refs)
+
+	// Cool the default and switch to backup pool — multiple
+	// distinct keys fresh-pick the backup pool. Heavy must
+	// dominate.
+	e.InjectAllCoolingForTest("g", "backup-heavy", "backup-light") // cool the default; leave backups alive
+	counts := map[string]int{}
+	for i := 0; i < 500; i++ {
+		key := fmt.Sprintf("conv-c-%d", i)
+		m, _, err := e.PickBackupMember("g", key)
+		if err != nil {
+			t.Fatalf("PickBackupMember[%d]: %v", i, err)
+		}
+		counts[m]++
+	}
+	// 5:1 ⇒ heavy ~ 415±30 of 500 within tolerance.
+	if counts["backup-heavy"] < 380 || counts["backup-heavy"] > 460 {
+		t.Errorf("5:1 weight distribution off: %+v", counts)
+	}
+	if counts["default-z"] != 0 {
+		t.Errorf("backup pool yielded a default member: %+v", counts)
+	}
+
+	// Sticky within backup: same conversation re-picks same
+	// backup. Pick once, then re-pick 5x — all identical.
+	m1, _, _ := e.PickBackupMember("g", "conv-c-sticky")
+	if m1 != "backup-heavy" && m1 != "backup-light" {
+		t.Fatalf("first sticky pick = %q (want a backup)", m1)
+	}
+	for i := 0; i < 5; i++ {
+		m2, _, _ := e.PickBackupMember("g", "conv-c-sticky")
+		if m2 != m1 {
+			t.Fatalf("sticky violated: got %q want %q (iter %d)", m2, m1, i)
+		}
+	}
+}
+
+// (d) multi-backup — exclusion chain across backups. The
+// 3-backup group + ExcludeAndBackupReselect chain drives
+// ReselectHealthy → ReselectHealthy → ReselectHealthy → and
+// finally ReselectNone. Note: the engine itself accepts a
+// backup-only configuration (D2 is a write-path concern; the
+// engine is the picker) so this test pins the picker semantics
+// independent of write validation.
+func TestBackup_MultiBackupExclusionChain(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", onlyBackupsRefs())
+
+	// First pick
+	p1, _, err := e.PickBackupMember("g", "conv-d-sticky")
+	if err != nil {
+		t.Fatalf("first PickBackupMember: %v", err)
+	}
+	if p1 != "backup-a" && p1 != "backup-b" && p1 != "backup-c" {
+		t.Fatalf("unexpected pick %q", p1)
+	}
+
+	// Cycle 1: exclude the picked member.
+	p2, mode := e.ExcludeAndBackupReselect("g", "conv-d-sticky", p1, 0)
+	if mode != ReselectHealthy {
+		t.Fatalf("exclude 1: mode=%v want ReselectHealthy", mode)
+	}
+	if p2 == p1 {
+		t.Fatalf("exclude 1 must rebind to a DIFFERENT member; got %q again", p2)
+	}
+
+	// Cycle 2: exclude that one too.
+	p3, mode := e.ExcludeAndBackupReselect("g", "conv-d-sticky", p2, 0)
+	if mode != ReselectHealthy {
+		t.Fatalf("exclude 2: mode=%v want ReselectHealthy", mode)
+	}
+	if p3 == p2 || p3 == p1 {
+		t.Fatalf("exclude 2 must rebind to a fresh member; got %q (prev %q, %q)", p3, p1, p2)
+	}
+
+	// Cycle 3: exclude the third — all-cooling again ⇒
+	// ReselectSoonestExpiry.
+	p4, mode := e.ExcludeAndBackupReselect("g", "conv-d-sticky", p3, 0)
+	if mode != ReselectSoonestExpiry {
+		t.Fatalf("exclude 3: mode=%v want ReselectSoonestExpiry", mode)
+	}
+	if p4 == "" {
+		t.Fatal("all-cooling soonest pick must be non-empty")
+	}
+}
+
+// (helper) HasBackupPool negative case — a default-only group
+// returns false even though it has per-group state. Pins the
+// distinction between "configured" and "configured-with-backups".
+func TestBackup_HasBackupPoolFalseForDefaultOnly(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", refs2())
+	if e.HasBackupPool("g") {
+		t.Fatal("default-only group must report HasBackupPool=false")
+	}
+}
+
+// (helper) ExcludeAndBackupReselect on a single-backup group ⇒
+// ReselectNone (no alternative within the backup pool).
+func TestBackup_SingleBackup_NoCooldown(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("solo-backup", []MemberRef{
+		{ModelID: "only-backup", Weight: 1, BackupOnly: true},
+	})
+	e.InjectPreconditionStateForTest("solo-backup", "conv-key", "only-backup")
+
+	_, mode := e.ExcludeAndBackupReselect("solo-backup", "conv-key", "only-backup", 0)
+	if mode != ReselectNone {
+		t.Fatalf("single-backup mode=%v want ReselectNone", mode)
+	}
+}
+
+// (helper) Orphans a backup binding via OnGroupChanged — proves
+// the survivor filter operates across BOTH binding maps.
+func TestBackup_OnGroupChanged_DropsOrphanedBackupBinding(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", defaultPlusBackupRefs())
+	// Prime a backup binding directly: pickBackup + repeat.
+	_, _, _ = e.PickBackupMember("g", "conv-orphan-stick")
+	if e.backupBindingsCountForTest("g") != 1 {
+		t.Fatalf("backupBindingsCount = %d, want 1 after prime", e.backupBindingsCountForTest("g"))
+	}
+
+	// Remove the only backup — survivor filter must drop the
+	// orphan backup binding.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1},
+		{ModelID: "default-b", Weight: 1},
+	})
+	if e.backupBindingsCountForTest("g") != 0 {
+		t.Fatalf("backupBindingsCount = %d after backup removal, want 0", e.backupBindingsCountForTest("g"))
 	}
 }

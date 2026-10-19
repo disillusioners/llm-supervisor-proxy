@@ -23,11 +23,16 @@ import (
 
 // groupPickInfo records the (main) group rewrite outcome for the
 // request: metering stamps (Am25), group-level failure semantics
-// (Am24), and the Q15 member event key on these fields.
+// (Am24), and the Q15 member event key on these fields. The `Pool`
+// field (group-backup-members / D5) carries the pool the served
+// member was drawn from — empty before the rewrite succeeded,
+// "default" / "backup" after. The model_member_selected event
+// payload picks it up additively.
 type groupPickInfo struct {
 	GroupID    string
 	MemberID   string
 	NewlyBound bool // grouplb W-1 signal for model_member_selected (Q15)
+	Pool       string
 }
 
 // applyGroupRewrite is the ONE shared rewrite entry point (Am21).
@@ -46,6 +51,10 @@ type groupPickInfo struct {
 //   - pick non-nil: the list was rewritten; the caller stamps its
 //     context (modelList swap + original preserved for Am24 rebuild)
 //     and the served-member metering record (Am25).
+//   - pick.Pool (group-backup-members / D5) is "default" when the
+//     pick came from the configured default sub-pool and "backup"
+//     when the defaults had all been excluded/failed; the Q15
+//     event site reads it for the additive payload field.
 func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, conversationKey string) (newList []string, pick *groupPickInfo, failGroupID string) {
 	if conf == nil || conf.ModelsConfig == nil {
 		return modelList, nil, ""
@@ -61,10 +70,15 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 	if !res.AnyGroup {
 		return modelList, nil, ""
 	}
+	pool := res.MemberPool
+	if pool == "" {
+		pool = models.PoolDefault // back-compat: groups created before D5 rewrite ⇒ no pool tag ⇒ default.
+	}
 	return res.ModelList, &groupPickInfo{
 		GroupID:    res.GroupID,
 		MemberID:   res.MemberID,
 		NewlyBound: res.MemberNewlyBound,
+		Pool:       pool,
 	}, ""
 }
 
@@ -359,7 +373,7 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	if !ok {
 		return false
 	}
-	replacement, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID)
+	replacement, pool, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID)
 	if !avail || replacement == "" {
 		return false
 	}
@@ -376,8 +390,13 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	} else {
 		arc.reqLog.RouteModel = ""
 	}
-	log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
-		arc.reqID, pick.GroupID, pick.MemberID)
+	if pool == models.PoolBackup {
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+			arc.reqID, pick.GroupID, pick.MemberID)
+	} else {
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+			arc.reqID, pick.GroupID, pick.MemberID)
+	}
 	// load-balance-groups / P4.5 (P2 deferred #1) — publish the
 	// EventMemberFailover event for the Anthropic path; the OpenAI
 	// path emits the same event at handler.go:1221. Symmetry

@@ -33,9 +33,16 @@ const MaxGroupMembers = 16
 //     (G5 — flat membership only, USER-DECIDED).
 //   - Weight: positive float; the higher, the more often picked by
 //     the sticky weighted selector. Validation: must be > 0 (G3).
+//   - BackupOnly: group-backup-members (D2). When true, the member
+//     participates in the BACKUP sub-pool only — served exclusively
+//     after every default member in the request's exclusion set has
+//     failed. Round-trips through models.members_json as the
+//     additive bool field `backup_only`; absent ⇒ false (D7 backward
+//     compat). Carries no required-migration cost (additive JSON).
 type GroupMember struct {
-	ModelID string  `json:"model_id"`
-	Weight  float64 `json:"weight"`
+	ModelID    string  `json:"model_id"`
+	Weight     float64 `json:"weight"`
+	BackupOnly bool    `json:"backup_only,omitempty"`
 }
 
 // validateGroupRules enforces the FIELD-level subset of the group
@@ -123,6 +130,25 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 	}
 	if len(m.Members) > MaxGroupMembers {
 		return fmt.Errorf("model %s: kind %q members list exceeds max of %d entries (got %d)", m.ID, KindGroup, MaxGroupMembers, len(m.Members))
+	}
+
+	// group-backup-members / D2: a group must keep ≥1 NON-BACKUP
+	// (default) member. An all-backup group would have no first-tier
+	// pick — the engine's default pool would be empty and the
+	// fall-to-backup engine entry would carry every request (which
+	// the operator does not want, since backups are a recourse
+	// only). Rejected here at write time so the operator sees a
+	// clear message rather than a misroute-shaped failure later.
+	// Cheaper client-side mirror lives in
+	// pkg/ui/frontend/src/components/config/GroupModelForm.tsx.
+	defaults := 0
+	for _, mm := range m.Members {
+		if !mm.BackupOnly {
+			defaults++
+		}
+	}
+	if defaults < 1 {
+		return fmt.Errorf("model %s: kind %q requires at least one non-backup (default) member (currently %d default, %d backup)", m.ID, KindGroup, defaults, len(m.Members)-defaults)
 	}
 
 	// Build the collection lookup: ID -> (kind, row).

@@ -994,16 +994,29 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	if c.eventBus != nil && c.groupPick != nil {
 		gp := c.groupPick
 		publishMember = func(memberID string, cred models.ResolvedCredential) {
+			payload := map[string]interface{}{
+				"group_id":          gp.GroupID,
+				"member_id":         memberID,
+				"upstream_provider": cred.Provider,
+				"upstream_model":    cred.InternalModel,
+				"id":                c.requestID,
+			}
+			// group-backup-members / D5 observability: the
+			// additive `pool` field rides on the same event as
+			// reason / reason_class. "default" when the member was
+			// drawn from the configured default sub-pool,
+			// "backup" when every default member in the run's
+			// exclusion set had been failed. Omitted when no
+			// group rewrite happened (defensive — should not
+			// happen because the close `c.groupPick != nil`
+			// guard fires first).
+			if gp.Pool == models.PoolBackup {
+				payload["pool"] = models.PoolBackup
+			}
 			c.eventBus.Publish(events.Event{
 				Type:      "model_member_selected",
 				Timestamp: time.Now().Unix(),
-				Data: map[string]interface{}{
-					"group_id":          gp.GroupID,
-					"member_id":         memberID,
-					"upstream_provider": cred.Provider,
-					"upstream_model":    cred.InternalModel,
-					"id":                c.requestID,
-				},
+				Data:      payload,
 			})
 		}
 	}

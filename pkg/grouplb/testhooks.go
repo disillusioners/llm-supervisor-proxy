@@ -221,3 +221,22 @@ func (e *Engine) bindingsCountForTest(groupID string) int {
 	defer st.mu.RUnlock()
 	return int(st.bindingsCount)
 }
+
+// backupBindingsCountForTest is the BACKUP-pool twin of
+// bindingsCountForTest — the O(1) mirror for the per-pool
+// backup-bindings map (group-backup-members / D1). Used by the
+// orphan-filter and TTL-sweep assertions on the backup path.
+func (e *Engine) backupBindingsCountForTest(groupID string) int {
+	if e == nil {
+		return 0
+	}
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return 0
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return int(st.backupBindingsCount)
+}

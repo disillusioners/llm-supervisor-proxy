@@ -641,22 +641,25 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.AddModel(validGroup()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	pick, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
 	if !ok {
 		t.Fatal("two-member group must produce a replacement")
 	}
 	if pick != "coding-alt" {
 		t.Errorf("reselect pick = %q, want coding-alt (the only other member)", pick)
 	}
+	if pool != models.PoolDefault {
+		t.Errorf("reselect pool = %q, want default", pool)
+	}
 
 	// Now make the group single-member: ExcludeGroupMember on a
-	// single-member group returns ("" , false) — no alternative.
+	// single-member group returns ("" , "", false) — no alternative.
 	updated := validGroup()
 	updated.Members = []models.GroupMember{{ModelID: "coding", Weight: 1}}
 	if err := mgr.UpdateModel("coding-group", updated); err != nil {
 		t.Fatalf("update to single-member: %v", err)
 	}
-	_, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
 	if ok2 {
 		t.Error("single-member ExcludeGroupMember must return ok=false (no alternative)")
 	}

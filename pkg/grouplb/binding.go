@@ -32,6 +32,14 @@ func (b *binding) expired(ttl time.Duration, now time.Time) bool {
 // sync.RWMutex under the Engine's outer lock (E-1 discipline: outer
 // lock before any groupState lock; never two groupState locks at
 // once).
+//
+// group-backup-members / D1: members split into two selectors and
+// two binding maps. Defaults populate `members` + `selector` +
+// `bindings`; backups populate a parallel slice/selector/map. They
+// never cross on the read or write paths. Cooldowns are SHARED
+// across both pools (a member that failed in the default pool stays
+// cooling in the backup pool too — a "this member is bad right now"
+// gate; matches the existing cross-call exclusion semantics).
 type groupState struct {
 	mu sync.RWMutex
 
@@ -40,36 +48,62 @@ type groupState struct {
 	// OnGroupChanged.
 	members []MemberRef
 
-	// selector is the prebuilt prefix-sum selector over members.
-	// nil when the ref list is empty/invalid (no valid members).
+	// selector is the prebuilt prefix-sum selector over the DEFAULT
+	// members (those with BackupOnly=false). nil when the default
+	// ref list is empty/invalid (no valid default member).
 	selector *weightedSelector
 
-	// bindings maps conversationKey → binding. Empty conversation
-	// keys are NEVER stored here (W-2 carried).
+	// defaultMembers is the DEFAULT-pool refs (the slice `selector`
+	// was built over — the cooldown walk iterates it directly per
+	// R3-4). nil when no default member is configured.
+	defaultMembers []MemberRef
+
+	// backupMembers / backupSelector mirror the default pair for
+	// the BACKUP sub-pool (BackupOnly=true). Lazily allocated; nil
+	// when the group has no backup member (a backup-less group's
+	// PickBackupMember returns ErrNoMembers — clean, never a
+	// silent default-pool passthrough).
+	backupMembers  []MemberRef
+	backupSelector *weightedSelector
+
+	// bindings maps conversationKey → binding for the DEFAULT
+	// pool. Empty conversation keys are NEVER stored here (W-2
+	// carried).
 	bindings map[string]*binding
+
+	// backupBindings maps conversationKey → binding for the BACKUP
+	// pool. Separate from `bindings`; never cross-referenced (a
+	// conversation that never fell back never sees this map; one
+	// that did keeps its backup binding per-pool, refreshed on
+	// every in-TTL hit, same sliding-idle-TTL semantics).
+	backupBindings map[string]*binding
 
 	// cooldowns maps memberID → cooldownUntil. Separate from
 	// bindings; entries are swept by the janitor when
-	// cooldownUntil <= now.
+	// cooldownUntil <= now. SHARED across pools (see D5 note
+	// above).
 	cooldowns map[string]time.Time
 
 	// rng is the per-group RNG (E-4 carried): seeded from the engine
 	// seed XORed with the group-ID hash, removing first-selection
 	// contention across groups. Only used while holding mu (write
-	// lock) or from paths that otherwise own exclusive access.
+	// lock) or from paths that otherwise own exclusive access. SHARED
+	// across both pools — one RNG per group, sequentially consumed.
 	rng *rand.Rand
 
-	// bindingsCount mirrors len(bindings) (O(1) stats without a map
-	// walk under lock).
-	bindingsCount uint64
+	// bindingsCount / backupBindingsCount mirror len(bindings) /
+	// len(backupBindings) (O(1) stats without a map walk under lock).
+	bindingsCount       uint64
+	backupBindingsCount uint64
 }
 
 // newGroupState builds a groupState with its per-group seeded RNG.
 func newGroupState(groupID string, rngSeed int64) *groupState {
 	return &groupState{
-		bindings:  make(map[string]*binding),
-		cooldowns: make(map[string]time.Time),
-		rng:       rand.New(rand.NewSource(groupRNGSeed(rngSeed, groupID))),
+		bindings:       make(map[string]*binding),
+		backupBindings: make(map[string]*binding),
+		cooldowns:      make(map[string]time.Time),
+		rng:            rand.New(rand.NewSource(groupRNGSeed(rngSeed, groupID))),
 	}
 }
 
@@ -106,29 +140,36 @@ func (st *groupState) isCoolingLocked(memberID string, now time.Time) bool {
 // every configured member is cooling (the caller then applies the
 // all-cooling soonest-expiry path) or the selector is invalid.
 //
+// group-backup-members / D1: takes the pool's selector +
+// pre-screened refs list. The hot path uses the per-pool
+// prebuilt prefix-sum selector (zero allocation, no cooldown
+// walk); the renormalized walk iterates ONLY the pool's refs (not
+// the cross-pool `members` slice) so an all-cooling-defaults run
+// does not silently pick a backup member.
+//
 // Caller holds st.mu (WRITE lock — the per-group RNG is consumed).
-func (st *groupState) pickHealthyLocked(now time.Time) string {
-	if st.selector == nil || st.selector.totalWeight <= 0 {
+func (st *groupState) pickHealthyLocked(now time.Time, sel *weightedSelector, refs []MemberRef) string {
+	if sel == nil || sel.totalWeight <= 0 {
 		return ""
 	}
 	if len(st.cooldowns) == 0 {
 		// Hot path: prebuilt prefix-sum selector, zero allocation.
-		return st.selector.pick(st.rng.Float64() * st.selector.totalWeight)
+		return sel.pick(st.rng.Float64() * sel.totalWeight)
 	}
-	// Renormalized walk over the healthy (non-cooling) set.
+	// Renormalized walk over the healthy (non-cooling) set — pool-scoped.
 	total := 0.0
-	for _, ref := range st.members {
+	for _, ref := range refs {
 		if st.isCoolingLocked(ref.ModelID, now) {
 			continue
 		}
 		total += ref.Weight
 	}
 	if total <= 0 {
-		return "" // all cooling
+		return "" // all cooling in this pool
 	}
 	r := st.rng.Float64() * total
 	cum := 0.0
-	for _, ref := range st.members {
+	for _, ref := range refs {
 		if st.isCoolingLocked(ref.ModelID, now) {
 			continue
 		}
@@ -142,17 +183,19 @@ func (st *groupState) pickHealthyLocked(now time.Time) string {
 }
 
 // soonestCooldownLocked returns the member with the SOONEST
-// cooldownUntil and whether EVERY configured member is currently
-// cooling (the 0-of-N-healthy pin carried).
+// cooldownUntil and whether EVERY member of the supplied pool is
+// currently cooling (the 0-of-N-healthy pin carried —
+// pool-scoped per D1; the all-cooling windows are independent
+// across the default and backup pools).
 //
 // Caller holds st.mu (read or write).
-func (st *groupState) soonestCooldownLocked(now time.Time) (string, bool) {
+func (st *groupState) soonestCooldownLocked(now time.Time, refs []MemberRef) (string, bool) {
 	best := ""
 	var bestUntil time.Time
-	for _, ref := range st.members {
+	for _, ref := range refs {
 		until, ok := st.cooldowns[ref.ModelID]
 		if !ok || !until.After(now) {
-			return "", false // at least one healthy → not all-cooling
+			return "", false // at least one healthy in this pool
 		}
 		if best == "" || until.Before(bestUntil) {
 			best, bestUntil = ref.ModelID, until

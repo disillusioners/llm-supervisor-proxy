@@ -30,10 +30,30 @@ const (
 // MODEL ID with a positive float weight and its position (slice
 // order). Zero credential awareness (plan §3.5 / Am31): no
 // credential IDs, no provider, no composite keys.
+//
+// group-backup-members (D1): BackupOnly marks the member as a
+// recourse-tier candidate picked ONLY after every default member
+// in the request's exclusion set has failed. The engine splits the
+// group into two selectors (defaultSel + backupSel) and two binding
+// maps (bindings + backupBindings); pool choice never crosses.
+// Carries the per-member `backup_only` JSON field with
+// default-false; existing groups (no flags) round-trip identically.
 type MemberRef struct {
-	ModelID  string
-	Weight   float64
-	Position int
+	ModelID    string
+	Weight     float64
+	Position   int
+	BackupOnly bool
+}
+
+// retryAfterIf returns retryAfter when > 0, else the fallback —
+// used by the single-backup guard so the mark-the-cooldown step
+// honors whichever duration the caller passed (retryAfter from the
+// race coordinator or the engine's defaultCooldown).
+func retryAfterIf(retryAfter, fallback time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return retryAfter
+	}
+	return fallback
 }
 
 // Engine maintains (groupID, conversationKey) → memberID bindings
@@ -194,6 +214,13 @@ func (e *Engine) sweepOnce() {
 				evicted++
 			}
 		}
+		for key, b := range st.backupBindings {
+			if b.expired(e.ttl, now) {
+				delete(st.backupBindings, key)
+				st.backupBindingsCount--
+				evicted++
+			}
+		}
 		st.mu.Unlock()
 		if evicted > 0 {
 			log.Printf("[DEBUG] [grouplb] janitor evicted %d idle bindings for group state", evicted)
@@ -238,6 +265,25 @@ func (e *Engine) HasGroup(groupID string) bool {
 	defer e.mu.RUnlock()
 	_, ok := e.groups[groupID]
 	return ok
+}
+
+// HasBackupPool reports whether the configured group has any
+// BACKUP-pool members (group-backup-members / D1). False for a
+// pure-default group; true once one or more members carry
+// BackupOnly=true. Nil receiver / unknown group ⇒ false.
+func (e *Engine) HasBackupPool(groupID string) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return false
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return st.backupSelector != nil && st.backupSelector.totalWeight > 0
 }
 
 // GetOrSelect returns the member pinned to (groupID, conversationKey)
@@ -292,9 +338,11 @@ func (e *Engine) GetOrSelect(groupID, conversationKey string) (memberID string, 
 		return "", false, ErrNoMembers
 	}
 
-	// E-3 fast path: single member — read members[0] under the
-	// per-group RLock (members is replaced wholesale under the write
-	// lock) and return directly. NO binding-map writes.
+	// E-3 fast path: single total-member group → return members[0]
+	// without engaging cooldowns. The D2 ≥1-default validation lives
+	// at the write path, so a single-member group always has a
+	// default member; backups live separately in backupMembers and
+	// are never returned through GetOrSelect.
 	if n == 1 {
 		st.mu.RLock()
 		id := st.members[0].ModelID
@@ -356,10 +404,10 @@ func (e *Engine) GetOrSelect(groupID, conversationKey string) (memberID string, 
 		}
 	}
 
-	pick := st.pickHealthyLocked(now)
+	pick := st.pickHealthyLocked(now, st.selector, st.defaultMembers)
 	if pick == "" {
 		// All-cooling (F.4): soonest-expiring pick, selection-only.
-		soonest, allCooling := st.soonestCooldownLocked(now)
+		soonest, allCooling := st.soonestCooldownLocked(now, st.defaultMembers)
 		if !allCooling || soonest == "" {
 			// Refs went invalid under us (race with OnGroupChanged).
 			return "", false, ErrNoMembers
@@ -414,6 +462,11 @@ func (e *Engine) OnGroupChanged(groupID string, refs []MemberRef) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	e.applyRefsLocked(st, refs)
+	// group-backup-members / D1: the survivor filter runs against
+	// the FULL surviving set (default + backup) so an
+	// editor-driven change that removes a backup member drops its
+	// binding the same way a removed default does (no orphan
+	// bindings linger on either side).
 	surviving := make(map[string]bool, len(refs))
 	for _, r := range refs {
 		surviving[r.ModelID] = true
@@ -425,13 +478,43 @@ func (e *Engine) OnGroupChanged(groupID string, refs []MemberRef) {
 			log.Printf("[grouplb] group=%s dropped orphan binding conv=%s→member=%s (member no longer configured)", groupID, key, b.memberID)
 		}
 	}
+	for key, b := range st.backupBindings {
+		if !surviving[b.memberID] {
+			delete(st.backupBindings, key)
+			st.backupBindingsCount--
+			log.Printf("[grouplb] group=%s dropped orphan backup binding conv=%s→member=%s (member no longer configured)", groupID, key, b.memberID)
+		}
+	}
 }
 
-// applyRefsLocked replaces the group's member list + selector.
-// Caller holds e.mu (write) and st.mu (write).
+// applyRefsLocked replaces the group's member list + selectors per
+// the partition (default + backup). Caller holds e.mu (write) and
+// st.mu (write).
+//
+// Partition discipline (group-backup-members / D1): a ref with
+// BackupOnly=false goes into the default slice (members + selector);
+// a ref with BackupOnly=true goes into the backup slice
+// (backupMembers + backupSelector). Each pool's selector is built
+// independently with its own weighted prefix sums — so a request
+// that consumes the entire default pool falls to a backup pool whose
+// weights balance among themselves.
 func (e *Engine) applyRefsLocked(st *groupState, refs []MemberRef) {
-	st.members = append([]MemberRef(nil), refs...) // defensive copy
-	st.selector = newWeightedSelector(st.members)
+	defaults := make([]MemberRef, 0, len(refs))
+	backups := make([]MemberRef, 0, len(refs))
+	for _, r := range refs {
+		if r.BackupOnly {
+			backups = append(backups, r)
+		} else {
+			defaults = append(defaults, r)
+		}
+	}
+	// Defensive copy of the FULL slice (diagnostic / survivor filter
+	// only; the partition's own slices are the read-paths' source).
+	st.members = append([]MemberRef(nil), refs...)
+	st.defaultMembers = append([]MemberRef(nil), defaults...)
+	st.selector = newWeightedSelector(defaults)
+	st.backupMembers = append([]MemberRef(nil), backups...)
+	st.backupSelector = newWeightedSelector(backups)
 }
 
 // Stop terminates the janitor goroutine. Idempotent (sync.Once +
@@ -572,13 +655,15 @@ func (e *Engine) ExcludeAndReselect(
 
 	// (3) Weighted random among non-cooling (renormalized),
 	// defensively skipping members absent from the configured list.
-	pick := st.pickHealthyLocked(now)
+	// group-backup-members / D1: pool-scoped to the DEFAULT pool
+	// (the picker operates on the same pool as the original pick).
+	pick := st.pickHealthyLocked(now, st.selector, st.defaultMembers)
 	if pick == "" || pick == excludedMemberID {
 		// All-cooling (or defensively the only healthy pick is the
 		// just-excluded one) → soonest-expiry single-attempt path.
-		soonest, allCooling := st.soonestCooldownLocked(now)
+		soonest, allCooling := st.soonestCooldownLocked(now, st.defaultMembers)
 		if !allCooling || soonest == "" {
-			return "", ReselectNone // genuinely no candidate
+			return "", ReselectNone // genuinely no candidate in the default pool
 		}
 		log.Printf("[LB-FAILOVER] group=%s all members cooling; picking soonest-expiring member=%s", groupID, soonest)
 		return soonest, ReselectSoonestExpiry
@@ -596,5 +681,217 @@ func (e *Engine) ExcludeAndReselect(
 		st.bindingsCount++
 	}
 	st.bindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	return pick, ReselectHealthy
+}
+
+// PickBackupMember returns the sticky-picked BACKUP-pool member for
+// (groupID, conversationKey) — the fallback tier reached ONLY after
+// every default member in the request's exclusion set has failed
+// (group-backup-members / D1).
+//
+// Mechanical twin of GetOrSelect, restricted to the BACKUP pool:
+//   - Returns ("", false, ErrNoMembers) when the group has no
+//     configured backup members (clean, never a default-pool
+//     passthrough; the proxy surfaces the normal group_unservable
+//     envelope).
+//   - Weighted random among non-cooling, renormalized, uses the
+//     per-group RNG.
+//   - Sticky binding map is `backupBindings` — SEPARATE from the
+//     default pool's `bindings` map (no cross-pool lookup; a
+//     conversation that fell back keeps its backup binding per-pool
+//     but never sees its default binding on the backup path).
+//   - Same empty-key fresh-pick / binding-write semantics.
+//   - Cooldowns are SHARED (see D1 note in `groupState`).
+//   - All-cooling ⇒ soonest-expiring pick, selection-only, no
+//     binding (mirrors GetOrSelect).
+//   - Nil receiver: ErrNoMembers.
+func (e *Engine) PickBackupMember(groupID, conversationKey string) (memberID string, newlyBound bool, err error) {
+	if e == nil {
+		return "", false, ErrNoMembers
+	}
+	now := time.Now()
+
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+
+	if st == nil {
+		return "", false, ErrNoMembers
+	}
+	if st.backupSelector == nil || st.backupSelector.totalWeight <= 0 {
+		return "", false, ErrNoMembers
+	}
+
+	st.mu.RLock()
+	n := len(st.backupMembers)
+	if n == 0 {
+		st.mu.RUnlock()
+		return "", false, ErrNoMembers
+	}
+	// Fast path (single backup member): no cooldowns, no other
+	// backup to choose from — return directly. Mirrors the default
+	// pool's E-3 fast-path semantics.
+	if n == 1 && len(st.cooldowns) == 0 {
+		id := st.backupMembers[0].ModelID
+		st.mu.RUnlock()
+		if conversationKey == "" {
+			return id, false, nil
+		}
+		st.mu.Lock()
+		// Re-check under write lock: still single + still no cool.
+		if st.backupSelector != nil && len(st.backupMembers) == 1 && len(st.cooldowns) == 0 {
+			// W-2 analog: empty key ⇒ no binding stored.
+			if conversationKey == "" {
+				st.mu.Unlock()
+				return id, false, nil
+			}
+			st.backupBindings[conversationKey] = &binding{memberID: id, boundAt: now}
+			st.backupBindingsCount++
+			st.mu.Unlock()
+			log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, id)
+			return id, true, nil
+		}
+		st.mu.Unlock()
+		// fall through to full path
+	} else {
+		st.mu.RUnlock()
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	// Re-check selector under write lock (race with OnGroupChanged).
+	if st.backupSelector == nil || st.backupSelector.totalWeight <= 0 {
+		return "", false, ErrNoMembers
+	}
+
+	if conversationKey != "" {
+		if b, ok := st.backupBindings[conversationKey]; ok {
+			valid := !b.expired(e.ttl, now) &&
+				memberInRefs(st.backupMembers, b.memberID) &&
+				!st.isCoolingLocked(b.memberID, now)
+			if valid {
+				b.boundAt = now
+				return b.memberID, false, nil
+			}
+			delete(st.backupBindings, conversationKey)
+			st.backupBindingsCount--
+		}
+	}
+
+	pick := st.pickHealthyLocked(now, st.backupSelector, st.backupMembers)
+	if pick == "" {
+		soonest, allCooling := st.soonestCooldownLocked(now, st.backupMembers)
+		if !allCooling || soonest == "" {
+			return "", false, ErrNoMembers
+		}
+		log.Printf("[LB-FAILOVER] group=%s pool=backup all backups cooling; picking soonest-expiring member=%s", groupID, soonest)
+		return soonest, false, nil
+	}
+
+	if conversationKey == "" {
+		return pick, false, nil
+	}
+
+	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.backupBindingsCount++
+	log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, pick)
+	return pick, true, nil
+}
+
+// ExcludeAndBackupReselect is the BACKUP-pool twin of
+// ExcludeAndReselect: marks excludedMemberID as cooling AND
+// rebinds (groupID, conversationKey) to the next healthy BACKUP
+// member. Same shared-cooldown semantics (a member in either pool's
+// exclusion set is cooling in both).
+//
+// Returns the ReselectMode for caller observability:
+//   - ReselectHealthy: a backup member is available for this call.
+//   - ReselectSoonestExpiry: all backups are cooling; soonest picked.
+//   - ReselectNone: backup pool exhausted — caller surfaces real
+//     failure (no fallback beyond backups in v1).
+//
+// Single-backup group ⇒ ReselectNone (no alternative exists within
+// the backup pool). Nil receiver ⇒ ("", ReselectNone).
+func (e *Engine) ExcludeAndBackupReselect(
+	groupID, conversationKey, excludedMemberID string,
+	retryAfter time.Duration,
+) (memberID string, mode ReselectMode) {
+	if e == nil {
+		return "", ReselectNone
+	}
+	now := time.Now()
+
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+
+	if st == nil {
+		return "", ReselectNone
+	}
+	if st.backupSelector == nil || st.backupSelector.totalWeight <= 0 {
+		return "", ReselectNone
+	}
+
+	// Single-backup group: no alternative exists within the backup
+	// pool. Mark the cooldown so the member is gated on a follow-up
+	// attempt, but do not try to pick (mirrors the default pool's
+	// E-3 fast-path guard).
+	if len(st.backupMembers) == 1 {
+		now0 := time.Now()
+		st.mu.Lock()
+		if st.cooldowns == nil {
+			st.cooldowns = make(map[string]time.Time)
+		}
+		st.cooldowns[excludedMemberID] = now0.Add(retryAfterIf(retryAfter, e.defaultCooldown))
+		st.mu.Unlock()
+		return "", ReselectNone
+	}
+
+	cooldown := retryAfter
+	if cooldown <= 0 {
+		cooldown = e.defaultCooldown
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	// (1) Mark the excluded member cooling (shared with the default
+	// pool by D1 — the cooldown map is the cross-pool "bad right
+	// now" gate).
+	if st.cooldowns == nil {
+		st.cooldowns = make(map[string]time.Time)
+	}
+	st.cooldowns[excludedMemberID] = now.Add(cooldown)
+
+	// (2) B2 precondition — re-read the binding under the write lock.
+	if conversationKey != "" {
+		if b, ok := st.backupBindings[conversationKey]; ok && b.memberID != excludedMemberID {
+			if !st.isCoolingLocked(b.memberID, now) {
+				return b.memberID, ReselectHealthy
+			}
+		}
+	}
+
+	// (3) Weighted random among non-cooling (renormalized) in the
+	// backup pool.
+	pick := st.pickHealthyLocked(now, st.backupSelector, st.backupMembers)
+	if pick == "" || pick == excludedMemberID {
+		soonest, allCooling := st.soonestCooldownLocked(now, st.backupMembers)
+		if !allCooling || soonest == "" {
+			return "", ReselectNone
+		}
+		log.Printf("[LB-FAILOVER] group=%s pool=backup all backups cooling; picking soonest-expiring member=%s", groupID, soonest)
+		return soonest, ReselectSoonestExpiry
+	}
+
+	if conversationKey == "" {
+		return pick, ReselectHealthy
+	}
+
+	if _, exists := st.backupBindings[conversationKey]; !exists {
+		st.backupBindingsCount++
+	}
+	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
 	return pick, ReselectHealthy
 }
