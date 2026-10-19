@@ -1,0 +1,21 @@
+-- Migration 032 (down, SQLite): MANUAL artifact, best-effort.
+-- Full restore requires the pre-flight inventory dump (see
+-- .agents/shared/planning/remove-external-upstream/phase4-migration-data-safety.md).
+-- This down re-disables nothing and un-backfills nothing by itself; it is
+-- provided so the migration registry stays symmetric. Operators who must
+-- roll back should restore the affected rows from the pre-flight dump
+-- (columns: id, internal, enabled) captured BEFORE applying 032.
+--
+-- Operator note (same as 030/031's): this down is a MANUAL artifact.
+-- It is not auto-run by runMigration(). schema_migrations records the
+-- .up application. Operators who run the .down + re-apply .up should
+-- DELETE FROM schema_migrations WHERE version = '032' between the two
+-- steps to keep the record clean.
+--
+-- The only provably-safe inverse arm — re-hide rows that were un-hidden
+-- by nothing — is included as a comment-only signal of intent. Do NOT
+-- broaden this narrow arm into a blanket `UPDATE models SET enabled = 1;`
+-- — which rows were disabled by 032 vs pre-existing is not recoverable
+-- without the pre-flight dump:
+--   UPDATE models SET enabled = 0 WHERE internal = 0;
+SELECT 1; -- no-op placeholder; see operator note above

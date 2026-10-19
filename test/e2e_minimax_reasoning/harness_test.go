@@ -2,14 +2,17 @@
 // MiniMax reasoning_details feature on branch feature/minimax-reasoning-details.
 //
 // It drives the FULL proxy handler (proxy.Handler.HandleChatCompletions) in
-// process, wired to a capturing mock upstream (external paths) or a
-// MiniMax-shaped mock provider upstream served over HTTP (internal paths),
-// and asserts the wire-visible feature contract on all four proxy paths:
+// process, wired to a capturing MiniMax-shaped mock provider upstream served
+// over HTTP, and asserts the wire-visible feature contract on the surviving
+// internal proxy paths:
 //
-//	race-external      — unknown model id + MiniMax upstream credential
-//	race-internal      — registered model with Internal:true + MiniMax credential
-//	ultimate-external  — X-Force-Ultimate-Model + ultimate model Internal:false
-//	ultimate-internal  — X-Force-Ultimate-Model + ultimate model Internal:true
+//	raceExtModel      — registered MiniMax model + MiniMax credential
+//	race-internal     — registered model with Internal:true + MiniMax credential
+//	ultExtModel       — X-Force-Ultimate-Model target (ModelID=ultExtModel)
+//	ultimate-internal — X-Force-Ultimate-Model target (ModelID=ultIntModel)
+//
+// remove-external-upstream P1: the external dispatch is deleted; the "Ext"
+// model ids above are ordinary INTERNAL registrations kept as fixtures.
 //
 // The harness mirrors test/e2e_ultimate_internal_reasoning/ (real
 // database.Store + auth.TokenStore + models.ModelsConfig + proxy.Handler).
@@ -115,16 +118,16 @@ const (
 	// openaiCredID is a non-MiniMax credential used for negative paths.
 	openaiCredID = "openai-cred"
 
-	// raceExtModel is an UNREGISTERED model id: initRequestContext leaves
-	// resolvedModel nil ⇒ modelList=[raw name] ⇒ race-external path.
+	// raceExtModel is a registered INTERNAL MiniMax model (P1: the former
+	// unregistered/external dispatch is deleted; the id is historical).
 	raceExtModel = "unregistered-minimax-external"
 
 	// raceIntModel is registered Internal:true with the MiniMax credential
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "race-internal-minimax"
 
-	// ultExtModel is the X-Force-Ultimate-Model target with Internal:false
-	// ⇒ ultimate-external path.
+	// ultExtModel is an X-Force-Ultimate-Model target (Internal:true; the
+	// former ultimate-external dispatch is deleted; the id is historical).
 	ultExtModel = "ultimate-external-minimax"
 
 	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
@@ -157,10 +160,10 @@ type testEnv struct {
 
 // envOptions customizes setupTestEnv per test.
 type envOptions struct {
-	// upstreamProvider replaces "minimax" on the EXTERNAL (UpstreamCredentialID)
+	// upstreamProvider replaces "minimax" on the EXTERNAL (bound upstream credential)
 	// credential. Empty means "minimax".
 	upstreamProvider string
-	// noUpstreamCred leaves UpstreamCredentialID unset for the external path
+	// noUpstreamCred leaves the upstream credential unset for the external path
 	// (S10: no credential resolvable ⇒ feature inert on race-external).
 	noUpstreamCred bool
 	// ultimateModelID overrides ULTIMATE_MODEL_ID. Empty uses ultIntModel.
@@ -175,7 +178,7 @@ type envOptions struct {
 //   - ultExtModel      Internal:false + minimax cred (ultimate target, external)
 //   - ultIntModel      Internal:true  + minimax cred (ultimate target, internal)
 //
-// The external upstream credential (config.UpstreamCredentialID) is MiniMax
+// The external upstream credential (the retired upstream-credential config) is MiniMax
 // unless overridden via envOptions — race-external gate = flag && that
 // credential is MiniMax.
 func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOptions) *testEnv {
@@ -238,13 +241,26 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		}
 	}
 
+	// The "race external" model. remove-external-upstream P5: the raw
+	// unregistered model + env upstream-credential dispatch is deleted,
+	// so it is registered as an ordinary INTERNAL MiniMax model — the
+	// translation gate is credential-driven and still fires.
+	addModel(models.ModelConfig{
+		ID:            raceExtModel,
+		Name:          "Race MiniMax",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs(minimaxCredID),
+		InternalModel: "minimax-race-upstream-name",
+	})
+
 	// Race-internal model (MiniMax credential).
 	addModel(models.ModelConfig{
 		ID:            raceIntModel,
 		Name:          "Race Internal MiniMax",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(minimaxCredID),
+		Credentials:   models.TestRefs(minimaxCredID),
 		InternalModel: "minimax-internal-name",
 	})
 
@@ -254,34 +270,39 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		Name:          "Race Internal OpenAI",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(openaiCredID),
+		Credentials:   models.TestRefs(openaiCredID),
 		InternalModel: "gpt-4o-mini",
 	})
 
 	// Ultimate models. Both are registered so X-Force-Ultimate-Model can
 	// route to them; ULTIMATE_MODEL_ID env picks the active one per test.
+	// remove-external-upstream P5: registered INTERNAL (the ultimate-
+	// external dispatch is deleted); the MiniMax translation gate is
+	// credential-driven, so the credential choice still governs it.
 	addModel(models.ModelConfig{
-		ID:           ultExtModel,
-		Name:         "Ultimate External MiniMax",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(minimaxCredID),
+		ID:            ultExtModel,
+		Name:          "Ultimate MiniMax Target",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs(minimaxCredID),
+		InternalModel: "minimax-ultimate-external-name",
 	})
 	addModel(models.ModelConfig{
 		ID:            ultIntModel,
 		Name:          "Ultimate Internal MiniMax",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(minimaxCredID),
+		Credentials:   models.TestRefs(minimaxCredID),
 		InternalModel: "minimax-ultimate-internal-name",
 	})
-	// Ultimate-external target bound to the non-MiniMax credential (S9).
+	// Ultimate target bound to the non-MiniMax credential (S9).
 	addModel(models.ModelConfig{
-		ID:           ultExtModelOpenAI,
-		Name:         "Ultimate External OpenAI",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(openaiCredID),
+		ID:            ultExtModelOpenAI,
+		Name:          "Ultimate OpenAI Target",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs(openaiCredID),
+		InternalModel: "gpt-4o-ultimate-external",
 	})
 
 	// Env: ultimate model + fast deadlines. X-Force-Ultimate-Model
@@ -297,19 +318,8 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 	}
 	t.Setenv("ULTIMATE_MODEL_ID", ultimateID)
 
-	// External upstream URL + credential (race-external gate reads this
-	// credential's provider).
-	if !opts.noUpstreamCred {
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-		t.Setenv("UPSTREAM_CREDENTIAL_ID", func() string {
-			if opts.upstreamProvider != "" {
-				return openaiCredID
-			}
-			return minimaxCredID
-		}())
-	} else {
-		t.Setenv("UPSTREAM_URL", upstream.URL)
-	}
+	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
+	// env wiring is retired — every model carries its own credential.
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {

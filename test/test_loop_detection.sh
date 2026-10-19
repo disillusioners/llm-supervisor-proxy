@@ -3,12 +3,16 @@
 #
 # This script:
 #   1. Starts mock_llm_loop.go on port 4002
-#   2. Sends requests through the proxy (which must be running with UPSTREAM_URL=http://localhost:4002)
+#   2. Sends requests through the proxy (which must have the mock registered
+#      as an internal model — see below)
 #   3. Displays responses and checks proxy logs for [LOOP-DETECTION] entries
 #
-# Pre-requisites:
-#   - The proxy must be running: UPSTREAM_URL=http://localhost:4002 go run cmd/main.go
-#   - OR: modify config.json to set upstream_url to http://localhost:4002
+# Pre-requisites (remove-external-upstream: the global UPSTREAM_URL env var
+# is retired — register the mock as an internal model instead, recipe in
+# docs/testing/loop-detection-manual-testing.md §4):
+#   - Proxy running (PORT=4321 go run cmd/main.go) with a credential whose
+#     base_url is http://localhost:4002 and an internal chat model using it
+#     (Web UI → Settings → Credentials / Models)
 #
 # Usage:
 #   cd test && bash test_loop_detection.sh

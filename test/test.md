@@ -115,11 +115,23 @@ curl --location 'http://localhost:4321/v1/chat/completions' \
 cd test && go run mock_llm_loop.go
 ```
 
-## Start the proxy pointing to the loop mock
+## Start the proxy and register the loop mock as a model
+
+The global `UPSTREAM_URL` env var is retired (remove-external-upstream):
+every request routes through the internal credential of the model it
+names. Start the proxy plain, then register the mock loop server as an
+internal model (full recipe:
+`docs/testing/loop-detection-manual-testing.md` §4):
 
 ```bash
-UPSTREAM_URL=http://localhost:4002 go run cmd/main.go
+PORT=4321 go run cmd/main.go
 ```
+
+1. Web UI at `http://localhost:4321` → **Settings → Credentials**: create
+   a credential with **Base URL** `http://localhost:4002` (the mock loop
+   server), provider `openai`, any placeholder API key.
+2. **Settings → Models**: add a chat model that uses that credential with
+   **Upstream Model Name** matching the `"model"` field used below.
 
 ## Trigger keywords (use as the prompt content)
 

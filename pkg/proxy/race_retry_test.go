@@ -50,33 +50,33 @@ func TestRaceCoordinator_Basic(t *testing.T) {
 	// Setup mock upstream
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Mock upstream reached: %s %s\n", r.Method, r.URL.Path)
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/chat/completions" {
 			http.Error(w, "Invalid path: "+r.URL.Path, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: chunk1\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk1"))
 		time.Sleep(50 * time.Millisecond)
-		w.Write([]byte("data: chunk2\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("chunk2"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceMaxParallel:    2,
 		RaceMaxBufferBytes: 1000,
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Allow enough time for request to complete
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx := context.Background()
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -119,13 +119,12 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 		// Second request succeeds
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: success from request 2\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("success from request 2"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    2,
@@ -133,14 +132,15 @@ func TestRaceCoordinator_Retry(t *testing.T) {
 		IdleTimeout:        100 * time.Millisecond, // Fast idle timeout to trigger second spawn
 		StreamDeadline:     5 * time.Second,        // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second,        // Allow enough time for retry
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	// Provide two models so the coordinator can spawn a second request when the first fails
 	models := []string{"test-model", "test-model-fallback"}
 
@@ -168,13 +168,12 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		// Fast response - completes well before idle timeout
-		w.Write([]byte("data: fast response\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("fast response"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -182,12 +181,13 @@ func TestRaceScenario_MainWinsBeforeIdleTimeout(t *testing.T) {
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx := context.Background()
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -226,13 +226,12 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		// Note: With 2 models, the second request uses the fallback model
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: fallback success\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("fallback success"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -240,14 +239,15 @@ func TestRaceScenario_FallbackWins(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond, // Fast idle timeout
 		StreamDeadline:     5 * time.Second,       // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second,       // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -276,7 +276,6 @@ func TestRaceScenario_AllFail(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -284,14 +283,15 @@ func TestRaceScenario_AllFail(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -329,7 +329,6 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -337,13 +336,14 @@ func TestRaceScenario_ClientDisconnectCancelsAll(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Absolute hard timeout
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -383,18 +383,17 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 		if callCount == 1 {
 			// First request sends too much data (will overflow buffer)
 			for i := 0; i < 100; i++ {
-				w.Write([]byte("data: " + strings.Repeat("x", 100) + "\n\n"))
+				fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk(strings.Repeat("x", 100)))
 			}
 		} else {
 			// Second request succeeds with small response
-			w.Write([]byte("data: small response\n\n"))
+			fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("small response"))
 			w.Write([]byte("data: [DONE]\n\n"))
 		}
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -402,14 +401,15 @@ func TestRaceScenario_BufferOverflowHandling(t *testing.T) {
 		IdleTimeout:        50 * time.Millisecond,
 		StreamDeadline:     5 * time.Second, // Time limit before picking best buffer
 		MaxGenerationTime:  5 * time.Second, // Add streaming deadline
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)
@@ -501,13 +501,12 @@ func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: success\n\n"))
+		fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("success"))
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	cfg := &ConfigSnapshot{
-		UpstreamURL:        server.URL,
 		RaceRetryEnabled:   true,
 		RaceParallelOnIdle: true,
 		RaceMaxParallel:    3,
@@ -515,14 +514,15 @@ func TestRaceCoordinator_SecondaryFlagAccessible(t *testing.T) {
 		IdleTimeout:        1 * time.Second,
 		StreamDeadline:     5 * time.Second,
 		MaxGenerationTime:  5 * time.Second,
+		ModelsConfig:       seededModelsConfig(t, server.URL),
 		ModelID:            "test-model",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
-	rawBody := []byte(`{"model":"test-model"}`)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test-model","stream":true}`))
+	rawBody := []byte(`{"model":"test-model","stream":true}`)
 	models := []string{"test-model", "fallback-model"}
 
 	coordinator := newRaceCoordinator(ctx, cfg, req, rawBody, models, false)

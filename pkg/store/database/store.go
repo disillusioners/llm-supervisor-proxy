@@ -87,14 +87,9 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	result := existing // Start with existing config
 
 	// Proxy settings: update if incoming has non-zero values
-	// UpstreamURL is required, empty string means not sent
-	if incoming.UpstreamURL != "" {
-		result.UpstreamURL = incoming.UpstreamURL
-	}
-	// UpstreamCredentialID: empty string means not sent
-	if incoming.UpstreamCredentialID != "" {
-		result.UpstreamCredentialID = incoming.UpstreamCredentialID
-	}
+	// (remove-external-upstream P1 task 8 / approver B3: the
+	// retired upstream-URL / upstream-credential merge rows are GONE with the
+	// retired config fields.)
 	// Port: 0 means not sent (0 is invalid anyway)
 	if incoming.Port != 0 {
 		result.Port = incoming.Port
@@ -235,13 +230,6 @@ func (m *ConfigManager) Get() config.Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg
-}
-
-// GetUpstreamURL returns the upstream URL
-func (m *ConfigManager) GetUpstreamURL() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.UpstreamURL
 }
 
 // GetPort returns the port
@@ -837,7 +825,7 @@ func (m *ModelsManager) Close() {
 		if m.eventBus != nil && m.subCh != nil {
 			m.eventBus.Unsubscribe(m.subCh) // closes subCh → drain loop exits
 		}
-		m.engine.Stop()       // nil-safe
+		m.engine.Stop()      // nil-safe
 		m.groupEngine.Stop() // nil-safe (load-balance-groups lifecycle twin)
 	})
 }
@@ -1522,6 +1510,15 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		return models.ErrInvalidModelName
 	}
 
+	// remove-external-upstream P1 (task 7, layer ii/iii): the
+	// Internal=true WRITE-STAMP. Order is a MANDATE (approver NB7):
+	// stamp BEFORE validateBeforeWrite so the credential gates run on
+	// the stamped value — an AddModel without credentials for a
+	// stamped-internal row is REJECTED here, not silently stored
+	// non-internal. Never place this inside validateBeforeWrite: it
+	// takes the model by value, so a stamp there cannot propagate.
+	model.Internal = true
+
 	// Phase-1 W4 hardening — validate before write (cheap guards
 	// above already passed; per-ref rules + secondary + peak-hour
 	// rules live in validateBeforeWrite → validateModelAgainstCredentials).
@@ -1655,6 +1652,11 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	if model.ID != modelID {
 		return models.ErrCannotChangeModelID
 	}
+
+	// remove-external-upstream P1 (task 7, layer ii/iii): the
+	// Internal=true WRITE-STAMP, BEFORE validate (ordering mandate,
+	// same rationale as AddModel above).
+	model.Internal = true
 
 	// Phase-1 W4 hardening — validate before write.
 	if err := m.validateBeforeWrite(model); err != nil {
@@ -1934,14 +1936,16 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 			return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 		}
 	}
-	// Note: non-internal models MAY carry Credentials — the
-	// ultimate-external D3 provider probe reads Credentials[0] to
-	// classify the upstream provider without injecting credentials.
-	// Rejecting non-internal-with-creds would break the D3 path.
-	// The plan's Task 6 validation rule "non-internal with
-	// non-empty Credentials ⇒ reject" was an oversight vs. the
-	// existing D3-probe call site; preserving the existing
-	// behavior is the contract-correct call.
+	// DEAD-POST-P1 (remove-external-upstream): the non-internal
+	// credentials carve-out below existed ONLY for the
+	// ultimate-external D3 provider probe, whose sole reader
+	// (pkg/ultimatemodel/handler_external.go) was deleted with the
+	// external upstream path. With every write stamping internal=true
+	// (P1 task 7) and legacy internal=0 rows disabled by migration 032,
+	// no non-internal model can carry credentials through this
+	// validator anymore. The tolerate-credentials-when-not-internal
+	// behavior is kept verbatim (it is now vacuous) — removing it is a
+	// schema-adjacent behavior change this commission does not bundle.
 
 	// Validate secondary upstream model
 	if model.SecondaryUpstreamModel != "" {
@@ -2485,7 +2489,21 @@ type ResolvedCredential = models.ResolvedCredential
 // picks is phase3's responsibility (handler-side) — this layer stays
 // silent for them.
 func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationKey string) (ResolvedCredential, bool) {
-	modelConfig := m.GetModel(modelID)
+	// remove-external-upstream P5 — resolve by ROW IDENTITY (claims
+	// bypassed), NOT the client-facing claim-first GetModel. This seam
+	// is an EXECUTION-resolution step: every caller already holds the
+	// concrete member row (directGetModel / NewInternalHandler's
+	// modelConfig), and the group member machinery is documented to
+	// resolve by row identity (GetModelNative / §3.4 Am22-L1 — a
+	// claims-first lookup here infinite-loops the day-1 self-shadow
+	// group coding[coding]). The JSON backend's twin and the
+	// modelscache decorator are ALREADY claim-blind (the decorator's
+	// lookupCachedModel is the claim-blind fast path); this aligns the
+	// raw DB manager with both. Pre-P1 the difference was invisible
+	// (group members were external and never resolved); post-P1 every
+	// member is internal, so the self-shadow member must resolve its
+	// OWN credentials.
+	modelConfig := m.GetModelNative(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return ResolvedCredential{}, false
 	}

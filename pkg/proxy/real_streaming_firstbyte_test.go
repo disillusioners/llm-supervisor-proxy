@@ -172,6 +172,28 @@ func (f *firstByteRecorder) firstByte() time.Time {
 // on a 500ms hold + 100ms tick). If the upstream was buffered
 // (today's behavior), the client first byte would arrive AFTER
 // `holdDuration` (not BEFORE it), and the assertion fails.
+// assertFirstByteWaitsForForwardableChunk pins the internal-arm contract
+// for an upstream whose FIRST chunk is not forwardable (role-only /
+// usage-only delta): no wire byte is emitted for it, so the client's
+// first byte coincides with the first CONTENT chunk — i.e. after the
+// upstream's hold window, NOT within ~150ms of the upstream's first byte.
+// (The deleted external relay forwarded the raw chunk verbatim and fired
+// the first byte immediately; remove-external-upstream P5 retired that.)
+func assertFirstByteWaitsForForwardableChunk(t *testing.T, pathName string, clientFirstByte, upstreamFirstByte, upstreamDone time.Time, holdDuration time.Duration) {
+	t.Helper()
+	if clientFirstByte.IsZero() {
+		t.Fatalf("%s: client never observed a first byte", pathName)
+	}
+	if upstreamFirstByte.IsZero() {
+		t.Fatalf("%s: upstream never recorded first byte (test fixture error)", pathName)
+	}
+	clientGap := clientFirstByte.Sub(upstreamFirstByte)
+	if clientGap < holdDuration/2 {
+		t.Errorf("%s: client first byte gap=%v — a non-forwardable first chunk leaked onto the wire (expected to wait ~%v for the content chunk)",
+			pathName, clientGap, holdDuration)
+	}
+}
+
 func assertFirstByteBeforeUpstreamDone(t *testing.T, pathName string, clientFirstByte, upstreamFirstByte, upstreamDone time.Time, holdDuration time.Duration) {
 	t.Helper()
 	if clientFirstByte.IsZero() {
@@ -232,12 +254,11 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		// Real passthrough fixture: internal model with
 		// anthropic-provider credential pointing at the upstream
 		// (handler_anthropic.go:401-403 dispatch gate). Without
-		// this, the path falls back to external translation and
+		// this, the path falls back to the internal translator and
 		// the structural assertion below would still hold (the
 		// translator is also live-streaming), but the test would
 		// no longer exercise the passthrough code path — which is
@@ -278,20 +299,22 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		assertFirstByteBeforeUpstreamDone(t, "AnthropicPassthrough", rec.firstDataAt, firstUp, done, holdDuration)
 	})
 
-	// (2) Anthropic→OpenAI-wire external translation. Same shape as
-	// path 1 but the upstream speaks OpenAI wire and the proxy's
-	// incremental translator converts to Anthropic SSE on the fly.
+	// (2) Anthropic→OpenAI-wire INTERNAL translation (E2E through the
+	// boundary resolution; renamed from the external path in P5). The
+	// upstream speaks OpenAI wire and the proxy's incremental translator
+	// converts to Anthropic SSE on the fly.
 	// Structural property: live mode forwards the first translated
 	// chunk BEFORE upstream done.
-	t.Run("2_AnthropicExternalTranslation_FirstByteBeforeDone", func(t *testing.T) {
+	t.Run("2_AnthropicTranslation_FirstByteBeforeDone", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		upstream := httptest.NewServer(blockingStreamHandler(probe, chunk1, chunk2, holdDuration))
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		modelsCfg := models.NewModelsConfig()
+		// remove-external-upstream P5: internal openai fixture.
+		seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
 		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -302,7 +325,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		h.HandleAnthropicMessages(rec, req)
 
 		_, firstUp, done, _ := probe.snapshot()
-		assertFirstByteBeforeUpstreamDone(t, "AnthropicExternal", rec.firstDataAt, firstUp, done, holdDuration)
+		assertFirstByteBeforeUpstreamDone(t, "AnthropicTranslation", rec.firstDataAt, firstUp, done, holdDuration)
 	})
 
 	// (3) Anthropic→OpenAI-wire internal translation
@@ -351,7 +374,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		reqDone := make(chan struct{})
 		go func() {
 			defer close(reqDone)
-			req := makeRequest(t, simpleBody("mock-model", true))
+			req := makeRequest(t, simpleBody("test-model", true))
 			req.Header.Del("X-LLMProxy-Buffer-Response") // live mode
 			rec := newFirstDataRecorder()
 			h.HandleChatCompletions(rec, req)
@@ -431,10 +454,11 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}
 	})
 
-	// (5) Ultimate external — pinned by existing
-	// TestUltimateExternal_LiveStream_ForwardBytesBeforeCompletion.
+	// (5) Ultimate external — REMOVED with the external arm
+	// (remove-external-upstream P1); the surviving first-byte pin is
+	// the internal test TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion.
 	t.Run("5_UltimateExternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 5 pinned by existing pkg/ultimatemodel TestUltimateExternal_LiveStream_ForwardBytesBeforeCompletion")
+		t.Skip("path 5 (Ultimate external) removed with the external arm; first-byte pinned by pkg/ultimatemodel TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion")
 	})
 
 	// (6) Ultimate internal — pinned by existing
@@ -461,27 +485,27 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 	holdDuration := 500 * time.Millisecond
 
-	t.Run("RoleOnlyFirst", func(t *testing.T) {
+	t.Run("RoleOnlyFirst_NotAForwardableFirstByte", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		// Role-only first chunk (no content), then content.
 		roleOnly := `{"choices":[{"index":0,"delta":{"role":"assistant"}}]}`
 		// The proxy's upstream IS newTestHandler's server (single
 		// server — reviewer's wasted-fixture cleanup).
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, roleOnly, mockCreateChunk("hi"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
 
 		_, firstUpstream, done, _ := probe.snapshot()
-		assertFirstByteBeforeUpstreamDone(t, "RoleOnlyFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
+		assertFirstByteWaitsForForwardableChunk(t, "RoleOnlyFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 
 	t.Run("ThinkingFirst", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		thinkFirst := mockCreateReasoningChunk("thinking now")
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, thinkFirst, mockCreateChunk("answer"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
@@ -490,17 +514,17 @@ func TestRealStreaming_FirstByteTiming_PredicateVariants(t *testing.T) {
 		assertFirstByteBeforeUpstreamDone(t, "ThinkingFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 
-	t.Run("UsageFirst", func(t *testing.T) {
+	t.Run("UsageFirst_NotAForwardableFirstByte", func(t *testing.T) {
 		probe := &upstreamProbe{}
 		usageFirst := mockCreateUsageChunk(1, 1)
 		h, _ := newTestHandler(t, blockingStreamHandler(probe, usageFirst, mockCreateChunk("late"), holdDuration), models.NewModelsConfig())
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		req.Header.Del("X-LLMProxy-Buffer-Response")
 		rec := newFirstDataRecorder()
 		h.HandleChatCompletions(rec, req)
 
 		_, firstUpstream, done, _ := probe.snapshot()
-		assertFirstByteBeforeUpstreamDone(t, "UsageFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
+		assertFirstByteWaitsForForwardableChunk(t, "UsageFirst", rec.firstDataAt, firstUpstream, done, holdDuration)
 	})
 }
 
@@ -525,7 +549,7 @@ func TestRealStreaming_FirstByteTiming_NonStreamUnaffected(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))
 	}), models.NewModelsConfig())
-	req := makeRequest(t, simpleBody("mock-model", false)) // stream=false
+	req := makeRequest(t, simpleBody("test-model", false)) // stream=false
 	req.Header.Del("X-LLMProxy-Buffer-Response")
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, req)

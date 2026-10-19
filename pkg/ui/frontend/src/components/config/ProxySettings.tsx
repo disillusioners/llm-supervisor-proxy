@@ -1,9 +1,6 @@
-import type { Credential, Model, AppConfig } from '../../types';
+import type { Model } from '../../types';
 
 interface ProxySettingsProps {
-  upstreamUrl: string;
-  upstreamCredentialId: string;
-  credentials: Credential[];
   models: Model[];
   port: number;
   idleTimeout: string;
@@ -26,8 +23,6 @@ interface ProxySettingsProps {
   logRawUpstreamOnError: boolean;
   logRawUpstreamMaxKB: number;
   // Handlers
-  onUpstreamUrlChange: (value: string) => void;
-  onUpstreamCredentialIdChange: (value: string) => void;
   onPortChange: (value: number) => void;
   onIdleTimeoutChange: (value: string) => void;
   onStreamDeadlineChange: (value: string) => void;
@@ -48,9 +43,6 @@ interface ProxySettingsProps {
 }
 
 export function ProxySettings({
-  upstreamUrl,
-  upstreamCredentialId,
-  credentials,
   models,
   port,
   idleTimeout,
@@ -68,8 +60,6 @@ export function ProxySettings({
   logRawUpstreamResponse,
   logRawUpstreamOnError,
   logRawUpstreamMaxKB,
-  onUpstreamUrlChange,
-  onUpstreamCredentialIdChange,
   onPortChange,
   onIdleTimeoutChange,
   onStreamDeadlineChange,
@@ -99,47 +89,6 @@ export function ProxySettings({
 
   return (
     <div class="space-y-4">
-      {/* Upstream URL */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">Upstream URL</label>
-        <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-            </svg>
-          </span>
-          <input
-            type="text"
-            value={upstreamUrl}
-            onInput={(e) => onUpstreamUrlChange((e.target as HTMLInputElement).value)}
-            class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="https://api.openai.com/v1"
-          />
-        </div>
-      </div>
-
-      {/* Upstream Credential */}
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">
-          Upstream Credential
-        </label>
-        <select
-          value={upstreamCredentialId}
-          onChange={(e) => onUpstreamCredentialIdChange((e.target as HTMLSelectElement).value)}
-          class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-        >
-          <option value="">None (use client's token)</option>
-          {credentials.map((cred) => (
-            <option key={cred.id} value={cred.id}>
-              {cred.id} ({cred.provider})
-            </option>
-          ))}
-        </select>
-        <p class="text-xs text-gray-400 mt-1">
-          Select a credential to use when forwarding requests to external upstream.
-        </p>
-      </div>
-
       {/* Port */}
       <div>
         <label class="block text-sm font-medium text-gray-300 mb-1 flex items-center justify-between">

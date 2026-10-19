@@ -13,8 +13,10 @@ vendor/
 test_output.txt
 
 *.txt
-# Frontend
-/pkg/ui/frontend/node_modules/
+# Frontend (no trailing slash: must also match the node_modules SYMLINK
+# used by the documented local-tooling workflow — a symlink is not a
+# directory, so the trailing-slash form does not ignore it)
+/pkg/ui/frontend/node_modules
 /pkg/ui/frontend/dist/
 
 # load-balance-groups P4.3 — tsc baseline freeze; tracked.

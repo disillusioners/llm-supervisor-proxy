@@ -9,6 +9,9 @@ import { MultiCredentialEditor } from './MultiCredentialEditor';
 // decision models, it goes here, not in the JSX.
 //
 // `kind` and `internal: true` mirror ImgGen exactly (per plan §6.2).
+// `internal: true` is now the only mode repo-wide — the
+// remove-external-upstream commission retired the external tick, so
+// every model kind stamps it unconditionally.
 // `internal_provider` is the ONLY divergence from ImgGen's hardcoded
 // minimax — it's a dropdown over the BE-served provider list filtered
 // to the recommended identity B (openai + typesafe). The Q11 default

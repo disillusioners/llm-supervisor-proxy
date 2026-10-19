@@ -39,6 +39,7 @@ func TestIsValidProvider(t *testing.T) {
 		{"grok valid", "grok", true},
 		{"opencode valid", "opencode", true},
 		{"opencode-go valid", "opencode-go", true},
+		{"lightllm valid", "lightllm", true},
 
 		// Case sensitivity - should be lowercase
 		{"OpenAI uppercase", "OpenAI", false},
@@ -61,6 +62,26 @@ func TestIsValidProvider(t *testing.T) {
 				t.Errorf("isValidProvider(%q) = %v, want %v", tt.provider, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestValidProviderNames_IncludesLightLLM pins the lightllm
+// enrollment in the derived provider vocabulary
+// (remove-external-upstream phase 2). ValidProviderNames() is a sorted
+// snapshot of the validProviders map, so this assertion fails if the
+// map entry is ever removed — guarding the enrollment against
+// accidental deletion, the same way the providers package's
+// no-attribution-leak guard consumes the derived list.
+func TestValidProviderNames_IncludesLightLLM(t *testing.T) {
+	found := false
+	for _, name := range ValidProviderNames() {
+		if name == "lightllm" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf(`ValidProviderNames() missing "lightllm" — the validProviders map entry was removed or renamed`)
 	}
 }
 
@@ -233,6 +254,16 @@ func TestCredentialConfigValidate(t *testing.T) {
 				Provider: "openai",
 				APIKey:   "sk-test",
 				BaseURL:  "https://api.example.com",
+			},
+			wantErr:    false,
+			errContain: "",
+		},
+		{
+			name: "valid lightllm credential",
+			cred: CredentialConfig{
+				ID:       "lightllm-creds",
+				Provider: "lightllm",
+				APIKey:   "sk-litellm-test",
 			},
 			wantErr:    false,
 			errContain: "",

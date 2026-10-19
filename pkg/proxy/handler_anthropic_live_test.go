@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,9 +196,12 @@ func TestAnthropicLiveStream_ForwardBytesBeforeCompletion(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", mock.URL)
 	mgr, _ := config.NewManager()
-	cfg := &Config{ConfigMgr: mgr, ModelsConfig: models.NewModelsConfig()}
+	// remove-external-upstream P5: internal fixture replaces the deleted
+	// UPSTREAM_URL external path.
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
+	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -370,22 +372,11 @@ func TestAnthropicLiveStream_SequentialFallbackBreak(t *testing.T) {
 	}))
 	t.Cleanup(internalUpstream.Close)
 
-	var fallbackAttempts int32
-	externalUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&fallbackAttempts, 1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		chunk := makeOpenAITextChunk("fallback response")
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
-	}))
-	t.Cleanup(externalUpstream.Close)
-
+	// remove-external-upstream P1: the former external fallback target (and
+	// its UPSTREAM_URL env wiring) is retired. The fallback chain below
+	// resolves to no external upstream, so a post-first-byte fallback can no
+	// longer reach one — the guard is now structural, not fixture-pinned.
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", externalUpstream.URL)
 	mgr, _ := config.NewManager()
 	modelsCfg := models.NewModelsConfig()
 	modelsCfg.AddCredential(models.CredentialConfig{
@@ -419,9 +410,10 @@ func TestAnthropicLiveStream_SequentialFallbackBreak(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.HandleAnthropicMessages(rr, req)
 
-	if got := atomic.LoadInt32(&fallbackAttempts); got != 0 {
-		t.Errorf("live mode fallback guard FAILED: external upstream was hit %d times after first byte", got)
-	}
+	// Fallback guard: post-P1 there is no external upstream a fallback could
+	// hit, so this is structural (previously asserted via an external-target
+	// hit counter that no longer has a target). The first-byte assertion below
+	// remains the load-bearing live-mode check.
 
 	respBody := rr.Body.String()
 	if !strings.Contains(respBody, "first byte") {
@@ -444,9 +436,12 @@ func TestAnthropicLiveStream_BufferedModeUnchanged(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", mock.URL)
 	mgr, _ := config.NewManager()
-	cfg := &Config{ConfigMgr: mgr, ModelsConfig: models.NewModelsConfig()}
+	// remove-external-upstream P5: internal fixture replaces the deleted
+	// UPSTREAM_URL external path.
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
+	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -488,7 +483,7 @@ func TestReviewFix2_MultiToolMirror(t *testing.T) {
 
 	// Tool A — first content_block_start at index 0.
 	cbA, _ := json.Marshal(map[string]interface{}{
-		"type": "content_block_start",
+		"type":  "content_block_start",
 		"index": 0,
 		"content_block": map[string]interface{}{
 			"type": "tool_use",
@@ -511,7 +506,7 @@ func TestReviewFix2_MultiToolMirror(t *testing.T) {
 
 	// Tool B — second content_block_start at index 1.
 	cbB, _ := json.Marshal(map[string]interface{}{
-		"type": "content_block_start",
+		"type":  "content_block_start",
 		"index": 1,
 		"content_block": map[string]interface{}{
 			"type": "tool_use",
@@ -585,7 +580,7 @@ func TestReviewFix2_MultiToolMirror_SameID_FillsEmpty(t *testing.T) {
 
 	// First content_block_start with id but no name.
 	cb1, _ := json.Marshal(map[string]interface{}{
-		"type": "content_block_start",
+		"type":  "content_block_start",
 		"index": 0,
 		"content_block": map[string]interface{}{
 			"type": "tool_use",
@@ -605,7 +600,7 @@ func TestReviewFix2_MultiToolMirror_SameID_FillsEmpty(t *testing.T) {
 
 	// Second content_block_start with SAME id but now name arrives.
 	cb2, _ := json.Marshal(map[string]interface{}{
-		"type": "content_block_start",
+		"type":  "content_block_start",
 		"index": 0,
 		"content_block": map[string]interface{}{
 			"type": "tool_use",
@@ -665,9 +660,12 @@ func TestReviewFix3_PreamblePreservedOnParseError(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", mock.URL)
 	mgr, _ := config.NewManager()
-	cfg := &Config{ConfigMgr: mgr, ModelsConfig: models.NewModelsConfig()}
+	// remove-external-upstream P5: internal fixture replaces the deleted
+	// UPSTREAM_URL external path.
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
+	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -688,20 +686,21 @@ func TestReviewFix3_PreamblePreservedOnParseError(t *testing.T) {
 		t.Errorf("ReviewFix3: ping missing on wire despite parse-fail preamble preservation; body=%q", respBody)
 	}
 
-	// The recovered text content must still appear.
-	if !strings.Contains(respBody, "recovered") {
-		t.Errorf("ReviewFix3: recovered text content missing; body=%q", respBody)
+	// remove-external-upstream P5: post-P1 the internal provider parses
+	// typed SSE events, so an unparseable upstream chunk is a TERMINAL
+	// error rather than a skippable line (the deleted external loop's
+	// `continue`-on-error semantics are gone). The preamble-preservation
+	// invariant still holds and is what we pin: the last well-formed
+	// bytes on the wire are the preamble + a properly framed Anthropic
+	// error event — never a bare text_delta with no message_start.
+	if !strings.Contains(respBody, "event: error") {
+		t.Errorf("ReviewFix3: malformed upstream chunk must surface a well-formed Anthropic error event; body=%q", respBody)
 	}
-
-	// message_start MUST appear BEFORE the recovered text — that's the
-	// whole point of the preamble preservation. Without the fix, the
-	// first wire byte after the SSE preamble would be a text_delta,
-	// which is a malformed Anthropic stream.
 	idxStart := strings.Index(respBody, "event: message_start")
-	idxText := strings.Index(respBody, "recovered")
-	if idxStart < 0 || idxText < 0 || idxStart >= idxText {
-		t.Errorf("ReviewFix3: message_start (%d) must precede text content (%d) on the wire; body=%q",
-			idxStart, idxText, respBody)
+	idxErr := strings.Index(respBody, "event: error")
+	if idxStart < 0 || idxErr < 0 || idxStart >= idxErr {
+		t.Errorf("ReviewFix3: message_start (%d) must precede the error event (%d) on the wire; body=%q",
+			idxStart, idxErr, respBody)
 	}
 }
 
@@ -751,9 +750,12 @@ func TestReviewFix5_NonDataLinesDroppedOnLiveWire(t *testing.T) {
 	t.Cleanup(mock.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", mock.URL)
 	mgr, _ := config.NewManager()
-	cfg := &Config{ConfigMgr: mgr, ModelsConfig: models.NewModelsConfig()}
+	// remove-external-upstream P5: internal fixture replaces the deleted
+	// UPSTREAM_URL external path.
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
+	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -775,10 +777,12 @@ func TestReviewFix5_NonDataLinesDroppedOnLiveWire(t *testing.T) {
 		t.Errorf("ReviewFix5: 'id: 42' SSE framing leaked to Anthropic wire; body=%q", respBody)
 	}
 
-	// The SSE comment `: heartbeat` should still be present.
-	if !strings.Contains(respBody, ": heartbeat") {
-		t.Errorf("ReviewFix5: SSE comment ': heartbeat' should be forwarded; body=%q", respBody)
-	}
+	// remove-external-upstream P5: post-P1 the request is served through
+	// the internal provider (typed SSE events), which consumes upstream
+	// SSE comments — comment forwarding was a behavior of the deleted
+	// external raw-forward loop and is no longer part of the contract.
+	// The wire must remain well-formed Anthropic SSE: the translated
+	// text arrives with its content_block framing.
 
 	// The translated text should still arrive.
 	if !strings.Contains(respBody, "ok") {

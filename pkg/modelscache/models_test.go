@@ -5,12 +5,9 @@ package modelscache
 // resolvers, dead-default WARN, LRU).
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -562,6 +559,13 @@ func TestCachedModelsConfig_WriteThrough_ModelMutators(t *testing.T) {
 	if m := c.GetModel("m-new"); m == nil {
 		t.Fatal("AddModel write-through must make the model immediately visible")
 	}
+	// remove-external-upstream P1 (task 7 / R1): the fixture omits
+	// Internal (false) — the DECORATOR-layer stamp must surface on the
+	// immediate read-back (the pre-stamp decorator cached the caller's
+	// unstamped copy, false-404ing fresh writes for ≤60s).
+	if m := c.GetModel("m-new"); m == nil || !m.Internal {
+		t.Errorf("AddModel layered stamp: GetModel().Internal = %v, want true (decorator read-back)", m)
+	}
 
 	// UpdateModel replaces the authoritative payload.
 	if err := c.UpdateModel("m-new", models.ModelConfig{ID: "m-new", Name: "new2", Enabled: true, InternalModel: "replaced"}); err != nil {
@@ -569,6 +573,10 @@ func TestCachedModelsConfig_WriteThrough_ModelMutators(t *testing.T) {
 	}
 	if m := c.GetModel("m-new"); m == nil || m.InternalModel != "replaced" {
 		t.Errorf("UpdateModel write-through: %+v", m)
+	}
+	// task 7 / R1: UpdateModel stamps too — read-back must stay true.
+	if m := c.GetModel("m-new"); m == nil || !m.Internal {
+		t.Errorf("UpdateModel layered stamp: GetModel().Internal = %v, want true (decorator read-back)", m)
 	}
 	if m := c.GetModelByName("new2"); m == nil {
 		t.Error("rename must update the name index (new2)")
@@ -1187,7 +1195,7 @@ func TestCachedModelsConfig_ResolveInternalConfig_LegacyHotPathZeroDB(t *testing
 		t.Errorf("legacy hot path must not touch inner legacy reads (got %d)", inner.legacyCalls())
 	}
 
-	// Unknown / external models keep the legacy contract.
+	// Unknown / non-internal models keep the legacy contract.
 	if _, _, _, _, ok := c.ResolveInternalConfig("never"); ok {
 		t.Error("unknown model must not resolve")
 	}
@@ -1199,7 +1207,8 @@ func TestCachedModelsConfig_ResolveInternalConfig_LegacyHotPathZeroDB(t *testing
 // TestCachedModelsConfig_DetectProvider_UnderDBDown (W1): the
 // decorator's cache-served legacy ResolveInternalConfig keeps
 // normalizers.DetectProvider returning the real provider during a DB
-// outage instead of the "external" fallback.
+// outage instead of the "unknown" fallback (the remove-external-upstream
+// P1 rename of the retired "external" literal).
 func TestCachedModelsConfig_DetectProvider_UnderDBDown(t *testing.T) {
 	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
 	c := mustWrap(t, inner, Options{})
@@ -1215,54 +1224,16 @@ func TestCachedModelsConfig_DetectProvider_UnderDBDown(t *testing.T) {
 	if got := normalizers.DetectProvider(c, "m-alpha"); got != "openai" {
 		t.Errorf("DetectProvider under DB-down must return cached provider, got %q", got)
 	}
-	if got := normalizers.DetectProvider(c, "unknown-model"); got != "external" {
-		t.Errorf("unknown model stays external, got %q", got)
+	// remove-external-upstream P1 (A19): "external" is retired —
+	// unknown models normalize under "unknown".
+	if got := normalizers.DetectProvider(c, "unknown-model"); got != "unknown" {
+		t.Errorf("unknown model normalizes to \"unknown\", got %q", got)
 	}
 }
 
 // markUnhealthyForTest forces the unhealthy flag (test-only helper;
 // production flips it via the reconciler).
 func (c *CachedModelsConfig) markUnhealthyForTest() { c.markUnhealthy() }
-
-// ─── dead-default WARN ───────────────────────────────────────────────────────
-
-func TestCachedModelsConfig_Warn_DeadDefault(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(log.LstdFlags)
-	}()
-
-	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
-	c, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "http://localhost:4001"})
-	if err != nil {
-		t.Fatalf("NewCachedModelsConfig: %v", err)
-	}
-	defer c.Stop()
-
-	out := buf.String()
-	if !strings.Contains(out, "development default http://localhost:4001") {
-		t.Errorf("expected dead-default WARN at boot, log: %q", out)
-	}
-	if !strings.Contains(out, "for model m-alpha") {
-		t.Errorf("WARN must name the model, log: %q", out)
-	}
-
-	// Non-default upstream → no WARN.
-	buf.Reset()
-	c2, err := NewCachedModelsConfig(inner, Options{UpstreamURL: "https://litellm.example.com"})
-	if err != nil {
-		t.Fatalf("NewCachedModelsConfig: %v", err)
-	}
-	defer c2.Stop()
-	if strings.Contains(buf.String(), "localhost:4001") {
-		t.Errorf("no WARN expected for configured upstream, log: %q", buf.String())
-	}
-}
-
-// ─── LRU (1.B.4 acceptance) ──────────────────────────────────────────────────
 
 func TestLRU_EvictsOldestBeyondCap(t *testing.T) {
 	l := newLRU(3)

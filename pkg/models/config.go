@@ -350,13 +350,13 @@ type ModelConfig struct {
 	FallbackChain  []string `json:"fallback_chain,omitempty"`
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
-	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
+	// Internal upstream configuration (call the AI provider directly via a credential)
 	Internal        bool           `json:"internal,omitempty"`
 	InternalBaseURL string         `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
 	InternalModel   string         `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
 
 	// Credentials is the ordered, weighted list of credential refs. Empty for
-	// external / non-internal models. Validation: if non-empty, every entry's
+	// legacy / non-internal rows. Validation: if non-empty, every entry's
 	// CredentialID must exist in the credentials table; every entry's weight
 	// must be > 0; every entry's provider must match Credentials[0]'s provider
 	// (provider-match invariant). Use PrimaryCredentialID() to read the
@@ -443,12 +443,11 @@ func (m *ModelConfig) GetReleaseStreamChunkDeadline() time.Duration {
 // the model has no credentials configured.
 //
 // This is the single-credential fast path used by every existing
-// call site (race-internal, ultimate-internal, ultimate-external's
-// D3 provider probe) until the Phase 2 LB engine (pkg/credentiallb)
-// wires the affinity-aware variant. Behavior is byte-identical to
-// the pre-Phase-1 m.CredentialID reads when the model has exactly
-// one credential; it returns "" for external models with empty
-// Credentials (same as the old default string value).
+// call site (race-internal, ultimate-internal) until the Phase 2 LB
+// engine (pkg/credentiallb) wires the affinity-aware variant. Behavior
+// is byte-identical to the pre-Phase-1 m.CredentialID reads when the
+// model has exactly one credential; it returns "" for legacy rows with
+// empty Credentials (same as the old default string value).
 func (m *ModelConfig) PrimaryCredentialID() string {
 	if len(m.Credentials) == 0 {
 		return ""
@@ -716,11 +715,22 @@ func (mc *ModelsConfig) rebuildClaimsLocked() {
 // Save atomically saves the models configuration to a JSON file.
 // It writes to a temporary file first, then renames to the target file.
 func (mc *ModelsConfig) Save() error {
-	mc.mu.RLock()
+	// remove-external-upstream P1 (task 7, layer iii/iii): Save takes no
+	// parameter, so the Internal=true stamp runs as a LOOP over the
+	// in-memory models — every row leaving through the JSON backend is
+	// internal, converging any legacy unstamped rows on the next save.
+	// Stamped under the WRITE lock (the slice header below shares the
+	// backing array with mc.Models — a read lock must not cover a
+	// mutation). (The DB backend's Save is a NO-OP by design — store.go
+	// — and is deliberately NOT mirrored there.)
+	mc.mu.Lock()
+	for i := range mc.Models {
+		mc.Models[i].Internal = true
+	}
 	filePath := mc.filePath
 	models := mc.Models
 	credentials := mc.Credentials
-	mc.mu.RUnlock()
+	mc.mu.Unlock()
 
 	// Validate before saving
 	tempConfig := snapshotForValidation(models, credentials)
@@ -822,6 +832,12 @@ func (mc *ModelsConfig) AddModel(model ModelConfig) error {
 		return ErrInvalidModelName
 	}
 
+	// remove-external-upstream P1 (task 7, layer iii/iii): the
+	// Internal=true WRITE-STAMP on the JSON backend, BEFORE validation
+	// (ordering mandate — the snapshot validation below must see the
+	// stamped value so the credential gates enforce on it).
+	model.Internal = true
+
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
@@ -853,6 +869,11 @@ func (mc *ModelsConfig) UpdateModel(modelID string, model ModelConfig) error {
 	if model.Name == "" {
 		return ErrInvalidModelName
 	}
+
+	// remove-external-upstream P1 (task 7, layer iii/iii): the
+	// Internal=true WRITE-STAMP on the JSON backend, BEFORE validation
+	// (ordering mandate — same as AddModel above).
+	model.Internal = true
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
@@ -1076,11 +1097,10 @@ func (mc *ModelsConfig) Validate() error {
 				return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
 			}
 		}
-		// Note: non-internal models MAY carry Credentials — the
-		// ultimate-external D3 provider probe reads Credentials[0] to
-		// classify the upstream provider without injecting credentials.
-		// (See ModelsConfig.Validate comment for the rationale on the
-		// plan's "non-internal with creds ⇒ reject" rule deviation.)
+		// Note: non-internal/legacy rows MAY carry Credentials. The
+		// plan's "non-internal with creds ⇒ reject" rule was NOT
+		// adopted — legacy rows (internal = 0) keep their Credentials
+		// and load cleanly rather than being force-rejected on load.
 
 		// Validate secondary upstream model
 		if model.SecondaryUpstreamModel != "" {

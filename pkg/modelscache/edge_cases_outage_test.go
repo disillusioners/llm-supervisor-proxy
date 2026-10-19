@@ -100,9 +100,18 @@ func TestEdgeCase_EmptyDBAtBoot_SucceedsHealthy(t *testing.T) {
 
 	// AddModel after boot is the first read-write; it must succeed
 	// (boot state is not "marked down" by virtue of being empty).
-	// Use an external model — internal=true would require a
-	// credential_id which the empty DB doesn't have yet (chicken/egg).
-	first := models.ModelConfig{ID: "first", Name: "first", Enabled: true}
+	// remove-external-upstream P1 task 7: every AddModel is stamped
+	// Internal=true and the credential gate requires a resolvable ref,
+	// so the credential is seeded FIRST (the old "external model avoids
+	// the chicken/egg" workaround is gone — there is no external class
+	// to seed anymore).
+	if err := c.AddCredential(models.CredentialConfig{ID: "cred-first", Provider: "openai", APIKey: "sk-first", BaseURL: "https://first.example.com"}); err != nil {
+		t.Fatalf("AddCredential after empty-DB boot must succeed; got %v", err)
+	}
+	first := models.ModelConfig{ID: "first", Name: "first", Enabled: true,
+		InternalModel: "first-x",
+		Credentials:   models.TestRefs("cred-first"),
+	}
 	if err := c.AddModel(first); err != nil {
 		t.Fatalf("AddModel after empty-DB boot must succeed; got %v", err)
 	}

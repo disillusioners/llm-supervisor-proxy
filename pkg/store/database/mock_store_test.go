@@ -14,9 +14,6 @@ func TestNewMockConfigManager(t *testing.T) {
 
 	// Verify defaults are applied
 	cfg := mock.Get()
-	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
-		t.Errorf("Expected default UpstreamURL %s, got %s", config.Defaults.UpstreamURL, cfg.UpstreamURL)
-	}
 	if cfg.Port != config.Defaults.Port {
 		t.Errorf("Expected default Port %d, got %d", config.Defaults.Port, cfg.Port)
 	}
@@ -25,7 +22,6 @@ func TestNewMockConfigManager(t *testing.T) {
 func TestNewMockConfigManagerWithConfig(t *testing.T) {
 	customCfg := config.Config{
 		Version:       "1.0",
-		UpstreamURL:   "http://custom:9999",
 		Port:          8888,
 		IdleTimeout:   config.Duration(30 * time.Second),
 		StreamDeadline: config.Duration(60 * time.Second),
@@ -35,9 +31,6 @@ func TestNewMockConfigManagerWithConfig(t *testing.T) {
 	mock := NewMockConfigManagerWithConfig(customCfg)
 
 	cfg := mock.Get()
-	if cfg.UpstreamURL != "http://custom:9999" {
-		t.Errorf("Expected UpstreamURL 'http://custom:9999', got %s", cfg.UpstreamURL)
-	}
 	if cfg.Port != 8888 {
 		t.Errorf("Expected Port 8888, got %d", cfg.Port)
 	}
@@ -47,19 +40,8 @@ func TestMockConfigManager_Get(t *testing.T) {
 	mock := NewMockConfigManager()
 
 	cfg := mock.Get()
-	if cfg.UpstreamURL == "" {
-		t.Error("Expected non-empty UpstreamURL")
-	}
-}
-
-func TestMockConfigManager_GetUpstreamURL(t *testing.T) {
-	mock := NewMockConfigManager()
-	mock.SetConfig(config.Config{
-		UpstreamURL: "http://test:4001",
-	})
-
-	if mock.GetUpstreamURL() != "http://test:4001" {
-		t.Errorf("Expected 'http://test:4001', got %s", mock.GetUpstreamURL())
+	if cfg.Port != config.Defaults.Port {
+		t.Errorf("Expected default port %d, got %d", config.Defaults.Port, cfg.Port)
 	}
 }
 
@@ -288,7 +270,6 @@ func TestMockConfigManager_Save(t *testing.T) {
 	mock := NewMockConfigManager()
 
 	newCfg := config.Config{
-		UpstreamURL:       "http://saved:4001",
 		Port:              6666,
 		IdleTimeout:       config.Duration(50 * time.Second),
 		StreamDeadline:    config.Duration(100 * time.Second),
@@ -313,14 +294,8 @@ func TestMockConfigManager_Save(t *testing.T) {
 	if savedCfg == nil {
 		t.Fatal("Expected SavedConfig to be non-nil")
 	}
-	if savedCfg.UpstreamURL != "http://saved:4001" {
-		t.Errorf("Expected UpstreamURL 'http://saved:4001', got %s", savedCfg.UpstreamURL)
-	}
 
 	// Verify current config was updated
-	if mock.Get().UpstreamURL != "http://saved:4001" {
-		t.Errorf("Expected current config to be updated")
-	}
 }
 
 func TestMockConfigManager_SaveError(t *testing.T) {
@@ -381,21 +356,15 @@ func TestMockConfigManager_Reset(t *testing.T) {
 
 	// Modify the mock
 	mock.SetConfig(config.Config{
-		UpstreamURL: "http://modified:4001",
 		Port:        9999,
 	})
 	mock.SetReadOnly(true)
 	mock.SetSaveError(errors.New("test error"))
-	_, _ = mock.Save(config.Config{UpstreamURL: "http://saved:4001"})
 
 	// Reset
 	mock.Reset()
 
 	// Verify all state is reset
-	cfg := mock.Get()
-	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
-		t.Errorf("Expected default UpstreamURL after reset, got %s", cfg.UpstreamURL)
-	}
 	if mock.IsReadOnly() {
 		t.Error("Expected IsReadOnly to be false after reset")
 	}
@@ -420,7 +389,6 @@ func TestMockConfigManager_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_ = mock.Get()
-			_ = mock.GetUpstreamURL()
 			_ = mock.GetPort()
 			_ = mock.GetIdleTimeout()
 		}()
@@ -433,7 +401,6 @@ func TestMockConfigManager_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			cfg := config.Config{
 				Port:        1000 + i,
-				UpstreamURL: "http://test:4001",
 			}
 			mock.SetConfig(cfg)
 		}(i)
@@ -446,7 +413,6 @@ func TestMockConfigManager_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			cfg := config.Config{
 				Port:        2000 + i,
-				UpstreamURL: "http://saved:4001",
 			}
 			_, _ = mock.Save(cfg)
 		}(i)

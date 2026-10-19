@@ -218,17 +218,22 @@ func newAnthropicTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) (*H
 	t.Helper()
 	upstream := httptest.NewServer(upstreamHandler)
 
-	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", upstream.URL)
-
+	// remove-external-upstream P5: the UPSTREAM_URL env pair is gone.
+	// Seed an internal model (ID = the model the Anthropic tests
+	// request) whose credential points at the mock upstream, so the
+	// boundary 404 gate resolves the request and the internal
+	// Anthropic→OpenAI translation path runs.
 	mgr, err := config.NewManager()
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
 
+	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
+
 	cfg := &Config{
 		ConfigMgr:    mgr,
-		ModelsConfig: models.NewModelsConfig(),
+		ModelsConfig: modelsCfg,
 	}
 
 	bus := events.NewBus()
@@ -862,18 +867,17 @@ func TestExtractOpenAIResponseContentFromJSON_NoMessage(t *testing.T) {
 
 // newInternalFallbackTestHandler builds a Handler whose ModelsConfig maps
 // model "internal-primary" (internal, credential provider=openai pointed at
-// internalUpstream) with fallback chain ["external-fallback"], and whose
-// external upstream is externalUpstream. Used by the W4 isolation tests to
-// drive the real HandleAnthropicMessages flow: internal attempt first, then
-// external fallback.
-func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpstream http.HandlerFunc) *Handler {
+// internalUpstream) with fallback chain ["internal-fallback"] (an INTERNAL
+// model with its own credential pointed at fallbackUpstream). Used by the W4
+// isolation tests to drive the real HandleAnthropicMessages flow: primary
+// attempt first, then fallback.
+func newInternalFallbackTestHandler(t *testing.T, internalUpstream, fallbackUpstream http.HandlerFunc) *Handler {
 	t.Helper()
 	internalSrv := httptest.NewServer(internalUpstream)
-	externalSrv := httptest.NewServer(externalUpstream)
-	t.Cleanup(func() { internalSrv.Close(); externalSrv.Close() })
+	fallbackSrv := httptest.NewServer(fallbackUpstream)
+	t.Cleanup(func() { internalSrv.Close(); fallbackSrv.Close() })
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", externalSrv.URL)
 
 	mgr, err := config.NewManager()
 	if err != nil {
@@ -894,11 +898,32 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 		Name:          "Internal Primary",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-openai-cred"),
+		Credentials:   models.TestRefs("test-openai-cred"),
 		InternalModel: "gpt-4o-internal",
-		FallbackChain: []string{"external-fallback"},
+		FallbackChain: []string{"internal-fallback"},
 	}); err != nil {
 		t.Fatalf("add model: %v", err)
+	}
+	// remove-external-upstream P5: the fallback is a real INTERNAL model
+	// now (the external arm that used to serve a raw fallback name is
+	// gone), so it carries its own credential pointed at fallbackSrv.
+	if err := modelsCfg.AddCredential(models.CredentialConfig{
+		ID:       "test-fallback-cred",
+		Provider: "openai",
+		APIKey:   "sk-test",
+		BaseURL:  fallbackSrv.URL,
+	}); err != nil {
+		t.Fatalf("add fallback credential: %v", err)
+	}
+	if err := modelsCfg.AddModel(models.ModelConfig{
+		ID:            "internal-fallback",
+		Name:          "Internal Fallback",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs("test-fallback-cred"),
+		InternalModel: "gpt-4o-fallback",
+	}); err != nil {
+		t.Fatalf("add fallback model: %v", err)
 	}
 
 	cfg := &Config{
@@ -921,7 +946,7 @@ func anthropicTestRequestStore(h *Handler) *store.RequestStore {
 // deltas, then dies mid-stream WITHOUT [DONE]/finish_reason (the provider
 // layer surfaces "stream ended without [DONE] marker"), so the internal
 // attempt fails AFTER partial thinking was already captured into the sink.
-// The external fallback then succeeds and streams its own thinking + content.
+// The fallback then succeeds and streams its own thinking + content.
 //
 // The persisted store.Message.Thinking must contain ONLY the fallback's
 // thinking — the internal partial thinking must not appear (neither
@@ -958,7 +983,7 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 		return
 	})
 
-	externalUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
@@ -983,7 +1008,7 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 		flusher.Flush()
 	})
 
-	h := newInternalFallbackTestHandler(t, internalUpstream, externalUpstream)
+	h := newInternalFallbackTestHandler(t, internalUpstream, fallbackUpstream)
 
 	body := anthropicBody("internal-primary", true, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -1004,8 +1029,14 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), fallbackContent) {
 		t.Errorf("expected fallback content on the wire; body=%q", rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "thinking") {
-		t.Errorf("expected fallback thinking on the wire (fallback is external; its reasoning is translated normally); body=%q", rr.Body.String())
+	// remove-external-upstream P5: the fallback is now an INTERNAL model
+	// served through the buffered recorder path, where thinking is
+	// capture-only by contract (never emitted as raw OpenAI chunks on
+	// the wire). The W4 invariant that matters is checked below on the
+	// persisted message; here we pin that the failed internal attempt's
+	// PARTIAL thinking never reaches the wire.
+	if strings.Contains(rr.Body.String(), internalPartialThinking) {
+		t.Errorf("internal partial thinking must never reach the wire; body=%q", rr.Body.String())
 	}
 
 	// Core W4 assertion: the persisted assistant message must carry ONLY the

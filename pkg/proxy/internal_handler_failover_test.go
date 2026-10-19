@@ -204,7 +204,6 @@ func TestAnthropicPassthrough_RateLimitFailover(t *testing.T) {
 
 	conf := newTestConfigSnapshot("am1")
 	conf.ModelsConfig = resolver
-	conf.UpstreamURL = srv.URL
 
 	arc := &anthropicRequestContext{
 		conf:                *conf,
@@ -275,7 +274,6 @@ func TestAnthropicPassthrough_HeadersSent_Guard(t *testing.T) {
 
 	conf := newTestConfigSnapshot("am1")
 	conf.ModelsConfig = resolver
-	conf.UpstreamURL = srv.URL
 
 	arc := &anthropicRequestContext{
 		conf:                *conf,

@@ -89,8 +89,6 @@ Environment variables can override configuration values when `APPLY_ENV_OVERRIDE
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UPSTREAM_URL` | `http://localhost:4001` | LLM provider URL |
-| `UPSTREAM_CREDENTIAL_ID` | *(empty)* | Credential ID for upstream provider |
 | `PORT` | `4321` | Proxy listening port |
 | `IDLE_TIMEOUT` | `60s` | Max wait between tokens before spawning parallel requests |
 | `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming |
@@ -186,9 +184,8 @@ import (
 ```go
 // Config holds all application configuration
 type Config struct {
-    Version     string `json:"version"`
-    UpstreamURL string `json:"upstream_url"`
-    Port        int    `json:"port"`
+    Version string `json:"version"`
+    Port    int    `json:"port"`
 
     // Timeouts
     IdleTimeout       Duration `json:"idle_timeout"`

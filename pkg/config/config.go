@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,20 +62,18 @@ func (d Duration) Duration() time.Duration {
 
 // Config holds all application configuration
 type Config struct {
-	Version              string              `json:"version"`
-	UpstreamURL          string              `json:"upstream_url"`
-	UpstreamCredentialID string              `json:"upstream_credential_id,omitempty"`
-	Port                 int                 `json:"port"`
-	IdleTimeout          Duration            `json:"idle_timeout"`
-	StreamDeadline       Duration            `json:"stream_deadline"`        // Time limit before picking best buffer and continuing streaming (default: 110s)
-	MaxGenerationTime    Duration            `json:"max_generation_time"`    // Absolute hard timeout for entire request lifecycle (default: 300s)
-	MaxStreamBufferSize  int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
-	BufferStorageDir     string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
-	BufferMaxStorageMB   int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
-	LoopDetection        LoopDetectionConfig `json:"loop_detection"`
-	ToolRepair           toolrepair.Config   `json:"tool_repair"`
-	UltimateModel        UltimateModelConfig `json:"ultimate_model"`
-	UpdatedAt            string              `json:"updated_at"` // ISO8601 string for readability
+	Version             string              `json:"version"`
+	Port                int                 `json:"port"`
+	IdleTimeout         Duration            `json:"idle_timeout"`
+	StreamDeadline      Duration            `json:"stream_deadline"`        // Time limit before picking best buffer and continuing streaming (default: 110s)
+	MaxGenerationTime   Duration            `json:"max_generation_time"`    // Absolute hard timeout for entire request lifecycle (default: 300s)
+	MaxStreamBufferSize int                 `json:"max_stream_buffer_size"` // Max bytes to buffer for streaming retry (0 = unlimited)
+	BufferStorageDir    string              `json:"buffer_storage_dir"`     // Directory to store buffer content files
+	BufferMaxStorageMB  int                 `json:"buffer_max_storage_mb"`  // Max total storage for buffers in MB (0 = unlimited)
+	LoopDetection       LoopDetectionConfig `json:"loop_detection"`
+	ToolRepair          toolrepair.Config   `json:"tool_repair"`
+	UltimateModel       UltimateModelConfig `json:"ultimate_model"`
+	UpdatedAt           string              `json:"updated_at"` // ISO8601 string for readability
 
 	// Race Retry (Redesign)
 	RaceRetryEnabled   bool `json:"race_retry_enabled"`
@@ -121,7 +118,6 @@ type Config struct {
 // Both JSON and database-backed implementations must satisfy this interface
 type ManagerInterface interface {
 	Get() Config
-	GetUpstreamURL() string
 	GetPort() int
 	GetIdleTimeout() time.Duration
 	GetStreamDeadline() time.Duration
@@ -185,15 +181,13 @@ type UltimateModelConfig struct {
 
 // Defaults - used when env not set and file doesn't exist
 var Defaults = Config{
-	Version:              ConfigVersion,
-	UpstreamURL:          "http://localhost:4001",
-	UpstreamCredentialID: "",
-	Port:                 4321,
-	IdleTimeout:          Duration(60 * time.Second),
-	StreamDeadline:       Duration(110 * time.Second), // Time limit before picking best buffer and continuing streaming
-	MaxGenerationTime:    Duration(300 * time.Second), // Absolute hard timeout for entire request lifecycle
-	MaxStreamBufferSize:  10 * 1024 * 1024,            // 10MB default
-	BufferStorageDir:     "",                          // Empty means use default data directory
+	Version:             ConfigVersion,
+	Port:                4321,
+	IdleTimeout:         Duration(60 * time.Second),
+	StreamDeadline:      Duration(110 * time.Second), // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime:   Duration(300 * time.Second), // Absolute hard timeout for entire request lifecycle
+	MaxStreamBufferSize: 10 * 1024 * 1024,            // 10MB default
+	BufferStorageDir:    "",                          // Empty means use default data directory
 	BufferMaxStorageMB:  100,                         // 100MB default
 	LoopDetection: LoopDetectionConfig{
 		Enabled:                   true,
@@ -254,21 +248,12 @@ var Defaults = Config{
 	DecisionTimeout: Duration(30 * time.Second),
 }
 
-// Validate ensures config values are valid before saving
+// Validate ensures config values are valid before saving.
+// remove-external-upstream P1 (task 8): the upstream_url required/scheme/
+// host validation is GONE with the field — a legacy config.json carrying
+// a stale upstream_url key must boot cleanly (json.Unmarshal silently
+// ignores unknown fields).
 func (c *Config) Validate() error {
-	if c.UpstreamURL == "" {
-		return errors.New("upstream_url is required")
-	}
-	parsedURL, err := url.Parse(c.UpstreamURL)
-	if err != nil {
-		return fmt.Errorf("upstream_url is not a valid URL: %w", err)
-	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return errors.New("upstream_url must use http or https scheme")
-	}
-	if parsedURL.Host == "" {
-		return errors.New("upstream_url must have a host")
-	}
 	if c.Port < 1 || c.Port > 65535 {
 		return errors.New("port must be between 1 and 65535")
 	}
@@ -426,12 +411,8 @@ func applyEnvOverrides(cfg Config) Config {
 		return cfg
 	}
 	// Only apply if env var exists AND is non-empty
-	if v := os.Getenv("UPSTREAM_URL"); v != "" {
-		cfg.UpstreamURL = v
-	}
-	if v := os.Getenv("UPSTREAM_CREDENTIAL_ID"); v != "" {
-		cfg.UpstreamCredentialID = v
-	}
+	// remove-external-upstream P1 (task 8): the UPSTREAM_URL /
+	// UPSTREAM_CREDENTIAL_ID env branches are GONE with the fields.
 	if v := os.Getenv("PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil && port > 0 && port <= 65535 {
 			cfg.Port = port
@@ -631,13 +612,6 @@ func (m *Manager) Get() Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config
-}
-
-// GetUpstreamURL returns the upstream URL
-func (m *Manager) GetUpstreamURL() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.config.UpstreamURL
 }
 
 // GetPort returns the port

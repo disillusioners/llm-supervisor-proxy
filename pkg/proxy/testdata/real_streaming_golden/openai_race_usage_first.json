@@ -1,4 +1,4 @@
 {
-  "body": "data: {\"choices\":[],\"usage\":{\"completion_tokens\":4,\"prompt_tokens\":2,\"total_tokens\":6}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late content\"}}]}\n\ndata: [DONE]\n",
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"late content\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":4,\"prompt_tokens\":2,\"total_tokens\":6}}\n\n",
   "content_type": "text/event-stream"
 }

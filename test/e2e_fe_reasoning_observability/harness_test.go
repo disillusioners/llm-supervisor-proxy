@@ -94,33 +94,22 @@ func (m *mockUpstream) startCapturingServer(t *testing.T) *httptest.Server {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	// glmModel is an UNREGISTERED model id: initRequestContext leaves
-	// resolvedModel nil ⇒ modelList=[raw name] ⇒ race-external path.
-	// This mirrors the original bug scenario exactly: a real-world model
-	// name (glm-5.3) hitting the external upstream credential.
+	// glmModel is a plain INTERNAL registration (P5: the former external
+	// dispatch it rode is deleted). Its rows (R1/R2) exercise the
+	// race-internal capture path with a real-world model name (glm-5.3).
 	glmModel = "glm-5.3"
 
-	// externalCredID is the credential bound to UPSTREAM_CREDENTIAL_ID so
-	// the race-external path resolves it for upstream auth/base URL.
+	// externalCredID is the fixture credential every matrix model binds
+	// to (auth/base URL for the race-internal path).
 	externalCredID = "external-cred"
 
 	// raceIntModel is registered Internal:true with the openai credential
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "matrix-race-internal"
 
-	// ultExtModel is the X-Force-Ultimate-Model target with Internal:false
-	// ⇒ ultimate-external path.
-	ultExtModel = "matrix-ultimate-external"
-
 	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
 	// ⇒ ultimate-internal path.
 	ultIntModel = "matrix-ultimate-internal"
-
-	// ultExtModelMiniMax is an ultimate-external target bound to the
-	// MiniMax credential: the ultimate-external translation gate reads the
-	// MODEL's CredentialID (not the global upstream credential), so the M2
-	// row must use a MiniMax-credentialed ultimate model.
-	ultExtModelMiniMax = "matrix-ultimate-external-minimax"
 
 	// minimaxCredID drives the MiniMax translation gate rows (M1/M2):
 	// credential provider must be "minimax" AND the request must carry
@@ -221,23 +210,26 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		}
 	}
 
+	// GLM model (the original closure-gate scenario's model). remove-
+	// external-upstream P5: it is now an ordinary INTERNAL registration —
+	// the env-credential external dispatch it used to ride is deleted.
+	addModel(models.ModelConfig{
+		ID:            glmModel,
+		Name:          "Matrix GLM Internal",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs(externalCredID),
+		InternalModel: "matrix-glm-upstream",
+	})
+
 	// Race-internal model (openai credential ⇒ internal OpenAI handler).
 	addModel(models.ModelConfig{
 		ID:            raceIntModel,
 		Name:          "Matrix Race Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-race-internal-upstream",
-	})
-
-	// Ultimate-external model (Internal:false ⇒ executeExternal).
-	addModel(models.ModelConfig{
-		ID:           ultExtModel,
-		Name:         "Matrix Ultimate External",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(externalCredID),
 	})
 
 	// Ultimate-internal model (Internal:true ⇒ executeInternal).
@@ -246,19 +238,8 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Ultimate Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-ult-internal-upstream",
-	})
-
-	// Ultimate-external model bound to the MiniMax credential — the M2
-	// translation-gate row. The ultimate-external gate resolves
-	// upstreamProvider from THIS model's CredentialID.
-	addModel(models.ModelConfig{
-		ID:           ultExtModelMiniMax,
-		Name:         "Matrix Ultimate External MiniMax",
-		Enabled:      true,
-		Internal:     false,
-		Credentials: models.TestRefs(minimaxCredID),
 	})
 
 	// Anthropic-client internal model (openai provider ⇒ translation mode,
@@ -268,7 +249,7 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		Name:          "Matrix Anthropic Internal",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs(externalCredID),
+		Credentials:   models.TestRefs(externalCredID),
 		InternalModel: "matrix-anthropic-internal-upstream",
 	})
 
@@ -281,14 +262,9 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		t.Setenv("ULTIMATE_MODEL_ID", opts.ultimateModelID)
 	}
 
-	// External upstream URL + credential. M rows bind the MiniMax
-	// credential so the race-external translation gate fires.
-	credID := externalCredID
-	if opts.upstreamProviderMinimax {
-		credID = minimaxCredID
-	}
-	t.Setenv("UPSTREAM_URL", upstream.URL)
-	t.Setenv("UPSTREAM_CREDENTIAL_ID", credID)
+	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
+	// env wiring is retired (internal models carry their own credential). The
+	// M rows bind the MiniMax credential directly on the model.
 
 	cfgMgr, err := config.NewManager()
 	if err != nil {
@@ -350,8 +326,8 @@ type chatRequest struct {
 	model    string
 	stream   *bool // nil ⇒ omit the "stream" field entirely (original bug shape)
 	messages []map[string]interface{}
-	flag     bool   // send X-Proxy-Interleaved-Thinking: true
-	forceUlt bool   // send X-Force-Ultimate-Model: true
+	flag     bool // send X-Proxy-Interleaved-Thinking: true
+	forceUlt bool // send X-Force-Ultimate-Model: true
 	token    string
 }
 
@@ -600,30 +576,5 @@ func minimaxDetailsStreamHandler(entry1ID, entry1Text, entry2ID, entry2Text stri
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(up))
-	}
-}
-
-// minimaxDetailsNonStreamHandler serves a non-stream response carrying
-// message.reasoning_details (translated to reasoning_content for the client).
-func minimaxDetailsNonStreamHandler(entry1Text, entry2Text string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-mock-mm", "object": "chat.completion", "created": 1700000000, "model": "mock",
-			"choices": []map[string]interface{}{
-				{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role":    "assistant",
-						"content": "final",
-						"reasoning_details": []map[string]interface{}{
-							{"type": "reasoning.text", "id": "reasoning-text-1", "format": "MiniMax-response-v1", "index": 0, "text": entry1Text},
-							{"type": "reasoning.text", "id": "reasoning-text-2", "format": "MiniMax-response-v1", "index": 0, "text": entry2Text},
-						},
-					},
-					"finish_reason": "stop",
-				},
-			},
-		})
 	}
 }

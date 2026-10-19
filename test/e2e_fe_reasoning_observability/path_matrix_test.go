@@ -1,33 +1,30 @@
 // PATH MATRIX suite — thinking visible in the FE API on EVERY capture path.
 //
 // The closure gate (Scenario A in e2e_fe_reasoning_observability_test.go)
-// proved one path (race-external non-stream). This matrix walks every
+// proved one path (the glm-model non-stream race path). This matrix walks every
 // capture path the proxy has and asserts the SAME contract on each:
 //
-//	POSITIVE rows (R1..R11, M1..M2): upstream sends reasoning; the FE API
+//	POSITIVE rows (R1..R11, M1): upstream sends reasoning; the FE API
 //	  GET /fe/api/requests/{id} assistant message `thinking` must equal the
 //	  expected reasoning BYTE-EXACT and be non-empty.
-//	NEGATIVE rows (N1..N4): upstream sends NO reasoning; the FE payload for
+//	NEGATIVE rows (N1/N2/N4): upstream sends NO reasoning; the FE payload for
 //	  that request id must contain ZERO occurrences of the substring
 //	  "thinking" (omitempty cleanliness).
 //
 // Row map (path mechanics, file:line verified):
 //
-//	R1  race-external      non-stream  glmModel unregistered (Scenario A)
-//	R2  race-external      stream      glmModel + stream:true
+//	R1  race-internal      non-stream  glmModel internal registration (Scenario A)
+//	R2  race-internal      stream      glmModel + stream:true
 //	R3  race-internal      non-stream  raceIntModel Internal:true
 //	R4  race-internal      stream      raceIntModel + stream:true
-//	R5  ultimate-external  non-stream  ULTIMATE_MODEL_ID=ultExtModel + X-Force-Ultimate-Model
-//	R6  ultimate-external  stream      same + stream:true
 //	R7  ultimate-internal  non-stream  ULTIMATE_MODEL_ID=ultIntModel + X-Force-Ultimate-Model
 //	R8  ultimate-internal  stream      same + stream:true
 //	R9  anthropic-client   stream      POST /v1/messages, internal model
-//	R10 anthropic-client   non-stream  POST /v1/messages, external upstream
+//	R10 anthropic-client   non-stream  POST /v1/messages, internal model (glmModel)
 //	R11 anthropic-client   non-stream  POST /v1/messages, internal model —
 //	    the S3 cell (live-mode thinking AND content capture, fix 64da4ae)
-//	N1..N4  the four race/ultimate paths, non-stream, NO reasoning upstream
-//	M1  minimax translated race-external     stream  (reasoning_details → deltas)
-//	M2  minimax translated ultimate-external non-stream
+//	N1/N2/N4  the surviving race/ultimate paths, non-stream, NO reasoning upstream
+//	M1  minimax translated race-internal  stream  (reasoning_details → deltas)
 //
 // X-Force-Ultimate-Model requires a token with ultimateModelEnabled=true
 // (pkg/proxy/handler.go:466-469) — setupMatrixEnv creates it. ULTIMATE_MODEL_
@@ -152,9 +149,9 @@ func assertFENegative(t *testing.T, env *testEnv, row string) string {
 // Core 10-path matrix
 // ═════════════════════════════════════════════════════════════════════════════
 
-// TestPathMatrix_R1_RaceExternal_NonStream is matrix row 1 — the closure
+// TestPathMatrix_R1_RaceInternal_NonStream is matrix row 1 — the closure
 // gate scenario itself, kept as a matrix row (byte-exact FE thinking).
-func TestPathMatrix_R1_RaceExternal_NonStream(t *testing.T) {
+func TestPathMatrix_R1_RaceInternal_NonStream(t *testing.T) {
 	env := setupMatrixEnv(t, reasoningNonStreamHandler(matrixReasoningFull), matrixOptions{})
 	rr := env.run(chatRequest{model: glmModel, token: env.plainToken, messages: matrixUserMessages})
 	if rr.Code != http.StatusOK {
@@ -163,9 +160,9 @@ func TestPathMatrix_R1_RaceExternal_NonStream(t *testing.T) {
 	assertFEPositive(t, env, "R1", matrixReasoningFull)
 }
 
-// TestPathMatrix_R2_RaceExternal_Stream drives the race-external path with
+// TestPathMatrix_R2_RaceInternal_Stream drives the race-internal path with
 // stream:true and reasoning split across two SSE deltas.
-func TestPathMatrix_R2_RaceExternal_Stream(t *testing.T) {
+func TestPathMatrix_R2_RaceInternal_Stream(t *testing.T) {
 	env := setupMatrixEnv(t, reasoningStreamHandler(matrixReasoningPart1, matrixReasoningPart2), matrixOptions{})
 	streamTrue := true
 	rr := env.run(chatRequest{model: glmModel, token: env.plainToken, stream: &streamTrue, messages: matrixUserMessages})
@@ -196,35 +193,6 @@ func TestPathMatrix_R4_RaceInternal_Stream(t *testing.T) {
 		t.Fatalf("R4: client status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	assertFEPositive(t, env, "R4", matrixReasoningFull)
-}
-
-// TestPathMatrix_R5_UltimateExternal_NonStream drives X-Force-Ultimate-Model
-// with ULTIMATE_MODEL_ID=ultExtModel (Internal:false ⇒ executeExternal).
-func TestPathMatrix_R5_UltimateExternal_NonStream(t *testing.T) {
-	env := setupMatrixEnv(t, reasoningNonStreamHandler(matrixReasoningFull), matrixOptions{ultimateModelID: ultExtModel})
-	rr := env.run(chatRequest{
-		model: raceIntModel, token: env.ultimateToken, forceUlt: true,
-		messages: matrixUserMessages,
-	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("R5: client status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	assertFEPositive(t, env, "R5", matrixReasoningFull)
-}
-
-// TestPathMatrix_R6_UltimateExternal_Stream is R5 with stream:true
-// (executeExternal → streamResponse passive capture).
-func TestPathMatrix_R6_UltimateExternal_Stream(t *testing.T) {
-	env := setupMatrixEnv(t, reasoningStreamHandler(matrixReasoningPart1, matrixReasoningPart2), matrixOptions{ultimateModelID: ultExtModel})
-	streamTrue := true
-	rr := env.run(chatRequest{
-		model: raceIntModel, token: env.ultimateToken, forceUlt: true, stream: &streamTrue,
-		messages: matrixUserMessages,
-	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("R6: client status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	assertFEPositive(t, env, "R6", matrixReasoningFull)
 }
 
 // TestPathMatrix_R7_UltimateInternal_NonStream drives X-Force-Ultimate-Model
@@ -273,10 +241,10 @@ func TestPathMatrix_R9_AnthropicClient_Internal_Stream(t *testing.T) {
 	assertFEPositive(t, env, "R9", matrixReasoningFull)
 }
 
-// TestPathMatrix_R10_AnthropicClient_External_NonStream drives the Anthropic
-// Messages endpoint with an UNREGISTERED model (external upstream,
-// OpenAI-translation mode), non-stream.
-func TestPathMatrix_R10_AnthropicClient_External_NonStream(t *testing.T) {
+// TestPathMatrix_R10_AnthropicClient_GlmModel_NonStream drives the Anthropic
+// Messages endpoint with the glmModel internal registration
+// (OpenAI-translation mode), non-stream.
+func TestPathMatrix_R10_AnthropicClient_GlmModel_NonStream(t *testing.T) {
 	env := setupMatrixEnv(t, reasoningNonStreamHandler(matrixReasoningFull), matrixOptions{})
 	rr := env.runAnthropic(anthropicRequest{
 		model:    glmModel,
@@ -318,7 +286,7 @@ func TestPathMatrix_R11_AnthropicClient_Internal_NonStream(t *testing.T) {
 // Negative rows — omitempty cleanliness (NO reasoning upstream)
 // ═════════════════════════════════════════════════════════════════════════════
 
-func TestPathMatrix_N1_RaceExternal_NoReasoning(t *testing.T) {
+func TestPathMatrix_N1_RaceInternal_NoReasoning(t *testing.T) {
 	env := setupMatrixEnv(t, plainNonStreamHandler(), matrixOptions{})
 	rr := env.run(chatRequest{model: glmModel, token: env.plainToken, messages: matrixUserMessages})
 	if rr.Code != http.StatusOK {
@@ -334,18 +302,6 @@ func TestPathMatrix_N2_RaceInternal_NoReasoning(t *testing.T) {
 		t.Fatalf("N2: client status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	assertFENegative(t, env, "N2")
-}
-
-func TestPathMatrix_N3_UltimateExternal_NoReasoning(t *testing.T) {
-	env := setupMatrixEnv(t, plainNonStreamHandler(), matrixOptions{ultimateModelID: ultExtModel})
-	rr := env.run(chatRequest{
-		model: raceIntModel, token: env.ultimateToken, forceUlt: true,
-		messages: matrixUserMessages,
-	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("N3: client status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	assertFENegative(t, env, "N3")
 }
 
 func TestPathMatrix_N4_UltimateInternal_NoReasoning(t *testing.T) {
@@ -364,12 +320,12 @@ func TestPathMatrix_N4_UltimateInternal_NoReasoning(t *testing.T) {
 // MiniMax translated rows — reasoning_details → reasoning_content
 // ═════════════════════════════════════════════════════════════════════════════
 
-// TestPathMatrix_M1_MiniMax_RaceExternal_Stream drives the MiniMax
+// TestPathMatrix_M1_MiniMax_RaceInternal_Stream drives the MiniMax
 // translation gate (credential provider=minimax + X-Proxy-Interleaved-
-// Thinking) on race-external STREAM: upstream reasoning_details are
+// Thinking) on race-internal STREAM: upstream reasoning_details are
 // translated to reasoning_content deltas for the client, and the FE
 // thinking must equal the translated text (what the client sees).
-func TestPathMatrix_M1_MiniMax_RaceExternal_Stream(t *testing.T) {
+func TestPathMatrix_M1_MiniMax_RaceInternal_Stream(t *testing.T) {
 	const e1, e2 = "mm-think-one ", "mm-think-two"
 	env := setupMatrixEnv(
 		t,
@@ -389,28 +345,4 @@ func TestPathMatrix_M1_MiniMax_RaceExternal_Stream(t *testing.T) {
 		t.Fatalf("M1: client stream does not carry translated reasoning deltas — raw=%s", rr.Body.String())
 	}
 	assertFEPositive(t, env, "M1", e1+e2)
-}
-
-// TestPathMatrix_M2_MiniMax_UltimateExternal_NonStream drives the MiniMax
-// translation gate on ultimate-external NON-STREAM: reasoning_details are
-// translated into reasoning_content in the response body, and the FE
-// thinking must equal the translated text.
-func TestPathMatrix_M2_MiniMax_UltimateExternal_NonStream(t *testing.T) {
-	const e1, e2 = "mm-ult-one ", "mm-ult-two"
-	env := setupMatrixEnv(
-		t,
-		minimaxDetailsNonStreamHandler(e1, e2),
-		// ultimate-external gate reads the MODEL's CredentialID (the
-		// minimax harness S9 documents this), so the ultimate model must
-		// be MiniMax-credentialed for the gate to fire.
-		matrixOptions{ultimateModelID: ultExtModelMiniMax},
-	)
-	rr := env.run(chatRequest{
-		model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true,
-		messages: matrixUserMessages,
-	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("M2: client status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	assertFEPositive(t, env, "M2", e1+e2)
 }

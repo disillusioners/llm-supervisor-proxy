@@ -1,30 +1,31 @@
-# tsc baseline — load-balance-groups P4.3 freeze
+# tsc baseline — FE compile-error count freeze.
 #
-# This file pins the TypeScript compile-error count for the FE
-# dashboard at the load-balance-groups release (commit 0c607b5 +
-# this P4 commit). The verifier in src/__tests__/tsc-baseline.test.ts
-# runs `tsc --noEmit` programmatically and asserts the current
-# error count + file set match the values recorded here. A future
-# regression (new tsc errors, new files in the set) breaks the test
-# and is a release gate.
+# Originally frozen at the load-balance-groups release (commit 0c607b5 +
+# P4; 26 errors across 11 files). Updated by the remove-external-upstream
+# commission, P3 (frontend): the legacy `ConfigModal.tsx` (6 errors) was
+# deleted as dead code, and `ProxySettings.tsx` dropped its now-unused
+# `AppConfig` import (1 error) after the external upstream URL /
+# upstream-credential settings were retired. Net: 19 errors across
+# 9 files. The verifier in src/utils/__tests__/tsc-baseline.test.ts runs
+# `tsc --noEmit` programmatically and asserts the current error count +
+# file set match the values recorded here. A future regression (new tsc
+# errors, new files in the set) breaks the test and is a release gate.
 #
 # Recorded at:
 #   tsc: TypeScript 5.x via npx tsc --noEmit (package.json tsc script)
-#   baseline: 26 errors across 11 files (pre-P4, FE-only)
+#   baseline: 19 errors across 9 files (post remove-external-upstream P3)
 #
 # Per-file error count:
-6 src/components/ConfigModal.tsx
 6 src/components/SettingsPage.tsx
 6 src/components/config/ModelsTab.tsx
 1 src/components/EventLog.tsx
 1 src/components/config/CredentialsTab.tsx
 1 src/components/config/ModelForm.tsx
-1 src/components/config/ProxySettings.tsx
 1 src/components/mcp/MCPServersTab.tsx
 1 src/components/usage/ModelUsageChart.tsx
 1 src/components/usage/UsageChart.tsx
 1 src/utils/helpers.ts
 
 # Aggregate (machine-readable footer):
-TOTAL_ERRORS=26
-TOTAL_FILES=11
+TOTAL_ERRORS=19
+TOTAL_FILES=9

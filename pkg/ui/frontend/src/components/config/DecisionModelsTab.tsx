@@ -70,11 +70,12 @@ export function DecisionModelsTab({
       if (formMode === 'add') {
         // Strip the local-only wrapper to a wire-shaped Model. The
         // form has already stamped kind/internal/internal_provider/
-        // exclude_from_ultimate_switching, so the parent's addModel
-        // just forwards the body to POST /fe/api/models. Decision
-        // models never have a fallback chain (decision models reject
-        // it per plan §6.2 row decision rules), so we send an empty
-        // array.
+        // exclude_from_ultimate_switching (internal is now
+        // unconditionally true repo-wide — no external upstream), so the
+        // parent's addModel just forwards the body to POST
+        // /fe/api/models. Decision models never have a fallback chain
+        // (decision models reject it per plan §6.2 row decision rules),
+        // so we send an empty array.
         const { id, name, kind, internal, internal_provider, internal_model, internal_base_url, credentials, enabled, exclude_from_ultimate_switching } = payload;
         await onAddModel({
           id,
@@ -103,6 +104,7 @@ export function DecisionModelsTab({
           exclude_from_ultimate_switching,
           // kind/internal are immutable in edit — the form does not
           // surface them and the BE rejects a kind flip anyway.
+          // (internal is now unconditionally true repo-wide.)
         });
         setStatus({ type: 'success', message: TOAST.updated });
       }
@@ -208,7 +210,10 @@ export function DecisionModelsTab({
                       <div class="flex-1 min-w-0">
                         <p class="text-gray-100 font-medium truncate flex items-center gap-2">
                           {escapeHtml(model.name)}
-                          {model.internal && (
+                        {/* remove-external-upstream P5/A4 (R3): badge
+                            guard dropped — chips render
+                            unconditionally post-032. */}
+                        {(
                             <span
                               class="inline-flex items-center gap-1 text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded"
                               title={`Internal upstream: ${model.internal_provider || 'unknown'}`}
@@ -221,7 +226,7 @@ export function DecisionModelsTab({
                         <p class="text-gray-400 text-sm truncate font-mono bg-gray-800/50 px-1 py-0.5 rounded mt-1 inline-block">
                           {escapeHtml(model.id)}
                         </p>
-                        {model.internal && model.internal_model && (
+                        {model.internal_model && (
                           <div class="mt-1 flex items-center gap-1.5 flex-wrap">
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
                                          bg-blue-900/50 text-blue-300 border border-blue-700">

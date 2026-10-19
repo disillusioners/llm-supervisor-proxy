@@ -424,7 +424,7 @@ fi
 echo "${YELLOW}[5/9] Starting proxy on $PROXY_PORT (HOME=$HOME)...${NC}"
 export PORT="$PROXY_PORT"
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://127.0.0.1:$MOCK_PORT/v1"   # dummy; internal model overrides
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export LOOP_DETECTION_ENABLED="false"
@@ -510,8 +510,9 @@ if ! echo "$MODEL_RESP" | grep -q '"id"'; then
 fi
 echo "${GREEN}  internal openai-credentialed model created (translation path)${NC}"
 
-# Create ultimate model (external type — scenario C target; uses UpstreamURL)
-# Use openai credential on ultimate model so its base_url is well-defined for external
+# [HISTORICAL] ultimate model for scenario C — the external type is retired
+# with remove-external-upstream P1 (handler_external.go / executeExternal gone).
+# Use openai credential on ultimate model so its base_url is well-defined.
 curl -s -X POST "http://127.0.0.1:$PROXY_PORT/fe/api/credentials" \
     -H "Content-Type: application/json" \
     -d "{
@@ -792,11 +793,17 @@ PYEOF
 echo "$B_EVIDENCE" | head -20
 
 # ============================================================
-# Scenario C: Ultimate external path — DOCUMENTED-IMPRACTICAL
+# Scenario C: Ultimate external path
+#   [HISTORICAL — remove-external-upstream P1 retired the external race path]
+#   This scenario documents the pre-P1 external architecture. The cited
+#   sites (handler_anthropic.go:84, pkg/ultimatemodel/handler_external.go:115,
+#   handler.go:733 executeExternal) are DELETED on the post-P1 tree; the block
+#   is retained as a historical artifact only.
 # ============================================================
 echo ""
 echo "${BLUE}=== Scenario C: Ultimate external path ===${NC}"
-echo "${YELLOW}DOCUMENTED-IMPRACTICAL:${NC}"
+echo "${YELLOW}[HISTORICAL — remove-external-upstream P1 retired the external race path]${NC}"
+echo "${YELLOW}DOCUMENTED-IMPRACTICAL (pre-P1):${NC}"
 echo "  Architectural constraint: pkg/proxy/handler_anthropic.go:84 hardcodes"
 echo "  isAnthropicUpstream=false for external models. When ultimate-external"
 echo "  fires for an Anthropic client request, the upstream call goes to"

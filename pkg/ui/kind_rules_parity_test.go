@@ -21,6 +21,17 @@ package ui
 // handlers_models_kind_test.go for test-helper reuse
 // (modelTestServer + addDecisionCreds + post/put helpers in this
 // file). All symbols are package-private; same package; works.
+//
+// remove-external-upstream (2026-10-18) / P3 WS (a) — the FE parity
+// note: the chat ModelForm no longer renders an "internal upstream"
+// tick and always stamps `internal: true` on submit (the BE ALSO
+// write-stamps `internal=true` on every model write, layered, P1
+// R1). The D1/G1 `internal` cases below therefore pin the BE-side
+// mirrors as DEFENSE-IN-DEPTH for any legacy/back-compat payload
+// that still carries `internal: false` — the FE can no longer
+// produce one, but the server contract must still reject it. The
+// three enforcement sites (helper ≡ POST inline ≡ PUT inline) are
+// unchanged by WS (a); this lock is retained deliberately.
 
 import (
 	"encoding/json"
@@ -187,6 +198,11 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 
 	cases := []ruleCase{
 		{
+			// D1 — decision rows require internal=true. Post-P3 WS (a)
+			// the FE always stamps internal=true (and the BE
+			// write-stamps it), so this mutation models a legacy /
+			// hand-crafted payload; the mirror must still reject it
+			// (defense-in-depth).
 			name:   "D1_decision_requires_internal",
 			substr: "kind \"decision\" requires internal to be true",
 			mutate: func(m *models.ModelConfig) { m.Internal = false },
@@ -476,6 +492,9 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 
 	cases := []ruleCase{
 		{
+			// G1 — group rows require internal=true (same
+			// defense-in-depth posture as D1 post-P3 WS (a): the FE
+			// always stamps internal=true).
 			name:   "G1_group_requires_internal",
 			substr: "requires internal to be true",
 			mutate: func(m *models.ModelConfig) { m.Internal = false },

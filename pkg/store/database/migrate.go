@@ -67,6 +67,14 @@ var migrations = []migration{
 	// Without this append the columns never land and every group
 	// write fails at the storage layer.
 	{"031", "031_add_group_fields.up"},
+	// remove-external-upstream commission / P4 (Amendment-1 trap,
+	// fourth occurrence): this registry is an ordered slice, NOT
+	// a directory scanner; this append activates the 032 SQL files
+	// (data-only convergence: backfill fully-configurable legacy
+	// external rows to internal=1, disable the rest). Without this
+	// append the 032 files are silently inert and legacy external
+	// rows stay on the 404 path.
+	{"032", "032_internal_only_data.up"},
 }
 
 // RunMigrations executes database schema migrations

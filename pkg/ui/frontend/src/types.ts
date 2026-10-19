@@ -61,8 +61,6 @@ export interface UltimateModelConfig {
 
 export interface AppConfig {
   version: string;
-  upstream_url: string;
-  upstream_credential_id?: string;
   port: number;
   idle_timeout: string;
   stream_deadline: string;
@@ -92,7 +90,6 @@ export interface AppConfig {
   idle_termination_enabled?: boolean;
   idle_termination_timeout?: string;
   // Deprecated - kept for backward compatibility with older backend versions
-  max_upstream_error_retries?: number;
   max_idle_retries?: number;
   max_generation_retries?: number;
   shadow_retry_enabled?: boolean;
@@ -106,7 +103,7 @@ export interface ConfigUpdateResponse extends AppConfig {
 // Legacy alias for backward compatibility
 export type ProxyConfig = AppConfig;
 
-export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe';
+export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe' | 'lightllm';
 
 export interface Model {
   id: string;
@@ -311,6 +308,7 @@ export type EventType =
   | 'race_spawn'
   | 'race_winner_selected'
   | 'race_all_failed'
+  | 'race_request_failed'
   | 'race_secondary_model_used'
   // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
@@ -377,6 +375,8 @@ export interface EventData {
   request_index?: number;      // For race_spawn
   type?: string;               // Request type: main, second, fallback
   trigger?: string;            // Spawn trigger: idle_timeout, main_error
+  reason_class?: string;       // Classification token (race-error-reason-classification)
+  reason_status?: number;      // Upstream HTTP status when attributable
   winner_index?: number;       // For race_winner_selected
   winner_type?: string;        // main, second, fallback
   winner_model?: string;       // Model ID of winner

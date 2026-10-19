@@ -129,13 +129,16 @@ func TestMigration028_Backfill(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Run 001..027 only (insert two test rows first against a
-	// pre-028 schema, then run 028 to verify the backfill).
+	// Run 001..027 + 029..031 (insert two test rows first against a
+	// pre-028 schema, then run 028 to verify the backfill). The loop
+	// pattern `len(migrations)-1` excludes the most-recent entry
+	// (032 post-P4); benign because 031 columns are additive (the
+	// pre-028 fixture inserts do not reference them).
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
 	for i := 0; i < len(migrations)-1; i++ {
-		// Skip 028 (last entry) — we want a pre-028 schema.
+		// Skip 028 — we want a pre-028 schema.
 		if migrations[i].version == "028" {
 			continue
 		}
@@ -239,7 +242,9 @@ func TestMigration028_EscapeSafeBackfill(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Run 001..027 only.
+	// Run 001..027 + 029..031 (the loop pattern `len(migrations)-1`
+	// excludes the most-recent entry — 032 post-P4; benign because
+	// 031 columns are additive).
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
@@ -506,8 +511,11 @@ func TestMigration028_FileLevelTransactionSQLite_Rollback(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Bring up migrations 001..027 only (skip 028 — we want to test
-	// the column-add step in isolation, against a pre-028 schema).
+	// Bring up migrations 001..027 + 029..031 only (skip 028 — we want
+	// to test the column-add step in isolation, against a pre-028
+	// schema). The loop pattern `len(migrations)-1` excludes the
+	// most-recent entry — 032 post-P4; benign because 031 columns
+	// are additive.
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
@@ -752,5 +760,217 @@ func TestMigration031_ForwardFreshDB(t *testing.T) {
 	}
 	if !columnExists(t, store.DB, "models", "shadow_model_id") {
 		t.Error("shadow_model_id column missing from models (031 SQL not applied)")
+	}
+}
+
+// TestMigration032_ForwardFreshDB asserts that migration 032
+// (remove-external-upstream / P4 — data-only convergence on models:
+// backfill fully-configurable legacy external rows to internal=1,
+// disable the rest) lands in the registry (Amendment-1 trap, fourth
+// occurrence — the migrations slice is an ordered list, NOT a
+// directory scanner; the SQL files alone are silently inert) AND
+// applies the safe-rule convergence correctly across the four
+// fixture shapes per phase4 §Exit Criterion.
+//
+// Same shape as TestMigration031_ForwardFreshDB but the assertion
+// is BEHAVIORAL (post-state row shape), not structural (column
+// presence) — 032 is a data-only migration, so the fixture seeds
+// pre-032 row shapes and the test asserts the post-state.
+//
+// Fixtures:
+//   - glm-4.5-air shape (internal=0, enabled=1, credentials_json='[]',
+//     internal_model=”) → internal stays 0, enabled flips to 0
+//   - glm-5 shape (internal=0, enabled=0, fully empty) → internal
+//     stays 0, enabled stays 0
+//   - fully-configured external row (internal=0, credentials_json
+//     != '[]', internal_model != ”) → internal flips to 1, enabled
+//     UNTOUCHED
+//   - kind='group' row (internal=1, enabled=1, empty credentials_json
+//   - empty internal_model — agentic-group/coding-group shape) →
+//     UNTOUCHED (must NOT false-positive against the convergence
+//     queries; B3 / verification kind != 'group' conjunct)
+func TestMigration032_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Bring up migrations 001..031 only — we want a pre-032 schema so
+	// the fixtures can be inserted in their pre-convergence shape.
+	if err := store.ensureMigrationsTable(ctx); err != nil {
+		t.Fatalf("ensureMigrationsTable: %v", err)
+	}
+	for _, m := range migrations {
+		if m.version == "032" {
+			continue
+		}
+		if err := store.runMigration(ctx, m); err != nil {
+			t.Fatalf("migration %s: %v", m.version, err)
+		}
+	}
+
+	// Seed the four fixture shapes (post-031 schema = full models
+	// table; the column list mirrors the existing 028-backfill test
+	// insertions, extended with kind / members_json for the group
+	// row).
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, kind, members_json, shadow_model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"glm-4-5-air", "GLM-4.5 Air", 1, "[]", "[]", 0, "[]", "", "", "", "chat", "", "",
+	); err != nil {
+		t.Fatalf("insert glm-4.5-air: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, kind, members_json, shadow_model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"glm-5", "GLM-5", 0, "[]", "[]", 0, "[]", "", "", "", "chat", "", "",
+	); err != nil {
+		t.Fatalf("insert glm-5: %v", err)
+	}
+	// fully-configured external row → backfill arm hits this row
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, kind, members_json, shadow_model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"ext-fully-configured", "Ext Fully Configured", 1, "[]", "[]", 0,
+		`[{"credential_id":"cred-X","weight":1,"position":0}]`, "cred-X", "", "ext-model-name",
+		"chat", "", "",
+	); err != nil {
+		t.Fatalf("insert ext-fully-configured: %v", err)
+	}
+	// kind='group' row in agentic-group/coding-group shape — must
+	// NOT be touched by 032 (already internal=1).
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO models (id, name, enabled, fallback_chain_json, truncate_params_json, internal, credentials_json, credential_id, internal_base_url, internal_model, kind, members_json, shadow_model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"agentic-group", "Agentic Group", 1, "[]", "[]", 1, "[]", "", "", "", "group",
+		`[{"model_id":"some-model","weight":1}]`, "",
+	); err != nil {
+		t.Fatalf("insert agentic-group: %v", err)
+	}
+
+	// Find 032 in the array and run it (per-entry, no full sweep —
+	// the rest were already applied above).
+	var mig032 *migration
+	for i := range migrations {
+		if migrations[i].version == "032" {
+			mig032 = &migrations[i]
+			break
+		}
+	}
+	if mig032 == nil {
+		t.Fatal("032 not found in migrations array — registry append missing")
+	}
+	if err := store.runMigration(ctx, *mig032); err != nil {
+		t.Fatalf("runMigration 032: %v", err)
+	}
+
+	// schema_migrations must contain row 032 (registry-append pin).
+	versions, err := store.GetAppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "032" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 032 (registry append missing) — applied versions: %v", versions)
+	}
+
+	// Helper to read a model's (internal, enabled) post-state.
+	readState := func(id string) (int64, int64) {
+		t.Helper()
+		var internal, enabled int64
+		if err := store.DB.QueryRowContext(ctx,
+			`SELECT internal, enabled FROM models WHERE id = ?`, id,
+		).Scan(&internal, &enabled); err != nil {
+			t.Fatalf("select %s: %v", id, err)
+		}
+		return internal, enabled
+	}
+
+	// Fixture 1: glm-4.5-air shape — internal stays 0, enabled flips to 0.
+	if internal, enabled := readState("glm-4-5-air"); internal != 0 || enabled != 0 {
+		t.Errorf("glm-4.5-air: got (internal=%d, enabled=%d), want (0, 0)", internal, enabled)
+	}
+
+	// Fixture 2: glm-5 shape — internal stays 0, enabled stays 0.
+	if internal, enabled := readState("glm-5"); internal != 0 || enabled != 0 {
+		t.Errorf("glm-5: got (internal=%d, enabled=%d), want (0, 0)", internal, enabled)
+	}
+
+	// Fixture 3: ext-fully-configured — internal flips to 1, enabled UNTOUCHED (still 1).
+	if internal, enabled := readState("ext-fully-configured"); internal != 1 || enabled != 1 {
+		t.Errorf("ext-fully-configured: got (internal=%d, enabled=%d), want (1, 1)", internal, enabled)
+	}
+
+	// Fixture 4: agentic-group (kind='group') — UNTOUCHED (internal=1, enabled=1).
+	// Must NOT false-positive against the backfill (already internal=1)
+	// or disable (already internal=1 → (internal IS NULL OR internal = 0) misses).
+	if internal, enabled := readState("agentic-group"); internal != 1 || enabled != 1 {
+		t.Errorf("agentic-group: got (internal=%d, enabled=%d), want (1, 1) — group row was touched", internal, enabled)
+	}
+
+	// Post-migration verification queries (dialect-split twin; SQLite
+	// here — PG twin is the operator's manual step, gated on
+	// pg_integration build tag).
+	//
+	// (i) B3 verification query: every enabled row must be a valid
+	// internal row (credentials + internal_model present), EXCLUDING
+	// kind='group' rows which legitimately have empty credentials +
+	// empty internal_model. The disable arm intentionally does NOT
+	// flip internal — the disabled legacy rows stay internal=0 so the
+	// phase1 404 gate keeps blocking them; the B3 check is therefore
+	// the only "must-return-zero-rows" assertion that holds.
+	var invalidEnabled int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM models WHERE enabled != 0 AND kind != 'group' AND (credentials_json = '[]' OR COALESCE(internal_model,'') = '')`,
+	).Scan(&invalidEnabled); err != nil {
+		t.Fatalf("B3 invalid-enabled count: %v", err)
+	}
+	if invalidEnabled != 0 {
+		t.Errorf("B3 verification failed — %d enabled non-group rows lack credentials or internal_model", invalidEnabled)
+	}
+
+	// Commission deliverable-4 operator-safety twin: zero ENABLED non-group
+	// rows may remain non-internal after 032. Distinct from the B3 check
+	// above — B3 does not flag an enabled backfill-eligible row left at
+	// internal=0; this twin does (defense-in-depth for a partial/missed
+	// disable arm).
+	var enabledNonInternal int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM models WHERE enabled != 0 AND internal = 0 AND kind != 'group'`,
+	).Scan(&enabledNonInternal); err != nil {
+		t.Fatalf("operator-safety twin count: %v", err)
+	}
+	if enabledNonInternal != 0 {
+		t.Errorf("operator-safety twin failed — %d enabled non-group rows remain non-internal after 032", enabledNonInternal)
+	}
+
+	// (ii) Convergence informational check — the "simpler"
+	// `WHERE (internal IS NULL OR internal = 0)` query: returns the
+	// disabled-by-032 count (glm-4.5-air + glm-5 = 2), which is
+	// expected and INTENTIONAL. The disable arm does NOT flip
+	// internal (see spec §Safe-rule + phase4-migration-data-safety
+	// comment block at sqlite/032_internal_only_data.up.sql:64-65)
+	// so that the phase1 404 gate's `!Internal` conjunct keeps
+	// blocking these rows. Assert the count equals the number of
+	// fixtures that should land on DISABLE.
+	var residualNonInternal int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM models WHERE (internal IS NULL OR internal = 0)`,
+	).Scan(&residualNonInternal); err != nil {
+		t.Fatalf("residual non-internal count: %v", err)
+	}
+	// Expected: 2 (glm-4.5-air + glm-5; ext-fully-configured
+	// backfilled to internal=1; agentic-group was already internal=1).
+	const expectedResidual = 2
+	if residualNonInternal != expectedResidual {
+		t.Errorf("residual non-internal count: got %d, want %d (glm-4.5-air + glm-5 land on DISABLE)", residualNonInternal, expectedResidual)
 	}
 }

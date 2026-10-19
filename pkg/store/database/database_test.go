@@ -162,9 +162,6 @@ func TestConfigManager(t *testing.T) {
 
 	// Test Get
 	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL == "" {
-		t.Error("Expected non-empty upstream URL")
-	}
 
 	// Test GetPort
 	port := cfgMgr.GetPort()
@@ -174,7 +171,6 @@ func TestConfigManager(t *testing.T) {
 
 	// Test Save
 	newCfg := cfg
-	newCfg.UpstreamURL = "http://test.example.com:8080"
 	result, err := cfgMgr.Save(newCfg)
 	if err != nil {
 		t.Fatalf("Failed to save config: %v", err)
@@ -183,11 +179,6 @@ func TestConfigManager(t *testing.T) {
 		t.Error("Expected non-nil save result")
 	}
 
-	// Verify save
-	updatedCfg := cfgMgr.Get()
-	if updatedCfg.UpstreamURL != "http://test.example.com:8080" {
-		t.Errorf("Expected upstream URL to be updated, got: %s", updatedCfg.UpstreamURL)
-	}
 }
 
 func TestModelsManager(t *testing.T) {
@@ -217,11 +208,27 @@ func TestModelsManager(t *testing.T) {
 		t.Errorf("Expected empty models list, got: %d", len(modelList))
 	}
 
+	// Add a test credential (remove-external-upstream P1 task 7: the
+	// Internal=true write-stamp makes every AddModel an internal write,
+	// so the CRUD fixture needs the canonical internal shape —
+	// credential + internal_model — to pass the write-path gates).
+	testCred := models.CredentialConfig{
+		ID:       "crud-test-cred",
+		Provider: "openai",
+		APIKey:   "test-api-key-for-crud",
+	}
+	if err := modelsMgr.AddCredential(testCred); err != nil {
+		t.Fatalf("Failed to add credential: %v", err)
+	}
+
 	// Test AddModel
 	testModel := models.ModelConfig{
 		ID:             "test-model",
 		Name:           "Test Model",
 		Enabled:        true,
+		Internal:       true,
+		InternalModel:  "upstream-test-model",
+		Credentials:    models.TestRefs("crud-test-cred"),
 		FallbackChain:  []string{"fallback-model"},
 		TruncateParams: []string{"max_tokens"},
 	}
@@ -297,10 +304,7 @@ func TestInitializeAll(t *testing.T) {
 	defer store.Close()
 
 	// Verify managers work
-	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL == "" {
-		t.Error("Expected non-empty config")
-	}
+	_ = cfgMgr
 
 	modelList := modelsMgr.GetModels()
 	_ = modelList // May be empty, which is fine
@@ -406,9 +410,6 @@ func TestPostgreSQLConfigManager(t *testing.T) {
 
 	// Test Get - should return defaults
 	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL == "" {
-		t.Error("Expected non-empty upstream URL")
-	}
 
 	// Test GetPort
 	port := cfgMgr.GetPort()
@@ -418,7 +419,6 @@ func TestPostgreSQLConfigManager(t *testing.T) {
 
 	// Test Save
 	newCfg := cfg
-	newCfg.UpstreamURL = "http://test.example.com:8080"
 	result, err := cfgMgr.Save(newCfg)
 	if err != nil {
 		t.Fatalf("Failed to save config: %v", err)
@@ -428,21 +428,12 @@ func TestPostgreSQLConfigManager(t *testing.T) {
 	}
 
 	// Verify save
-	updatedCfg := cfgMgr.Get()
-	if updatedCfg.UpstreamURL != "http://test.example.com:8080" {
-		t.Errorf("Expected upstream URL to be updated, got: %s", updatedCfg.UpstreamURL)
-	}
 
 	// Clean up - reset to default
 	defaultCfg := config.Defaults
-	defaultCfg.UpstreamURL = "http://localhost:4001"
 	_, _ = cfgMgr.Save(defaultCfg)
 
 	// Verify cleanup
-	cleanedCfg := cfgMgr.Get()
-	if cleanedCfg.UpstreamURL != "http://localhost:4001" {
-		t.Errorf("Expected upstream URL to be reset, got: %s", cleanedCfg.UpstreamURL)
-	}
 }
 
 func TestPostgreSQLModelsManager(t *testing.T) {
@@ -569,7 +560,6 @@ func TestConfigManager_EnvOverrides(t *testing.T) {
 	}
 
 	cfg := cfgMgr.Get()
-	cfg.UpstreamURL = "http://database-value:4001"
 	cfg.Port = 5000
 	cfg.RaceRetryEnabled = false
 	if _, err := cfgMgr.Save(cfg); err != nil {
@@ -578,12 +568,10 @@ func TestConfigManager_EnvOverrides(t *testing.T) {
 
 	// Set environment variables to override database values
 	os.Setenv("APPLY_ENV_OVERRIDES", "true")
-	os.Setenv("UPSTREAM_URL", "http://env-override:9999")
 	os.Setenv("PORT", "8888")
 	os.Setenv("RACE_RETRY_ENABLED", "true")
 	defer func() {
 		os.Unsetenv("APPLY_ENV_OVERRIDES")
-		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("RACE_RETRY_ENABLED")
 	}()
@@ -596,9 +584,6 @@ func TestConfigManager_EnvOverrides(t *testing.T) {
 
 	// Verify env overrides are applied
 	loadedCfg := cfgMgr2.Get()
-	if loadedCfg.UpstreamURL != "http://env-override:9999" {
-		t.Errorf("Expected UpstreamURL to be overridden by env to 'http://env-override:9999', got: %s", loadedCfg.UpstreamURL)
-	}
 	if loadedCfg.Port != 8888 {
 		t.Errorf("Expected Port to be overridden by env to 8888, got: %d", loadedCfg.Port)
 	}
@@ -948,9 +933,6 @@ func TestConfigManager_EmptyDatabase(t *testing.T) {
 
 	// Should return defaults
 	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
-		t.Errorf("Expected default UpstreamURL %s, got %s", config.Defaults.UpstreamURL, cfg.UpstreamURL)
-	}
 	if cfg.Port != config.Defaults.Port {
 		t.Errorf("Expected default Port %d, got %d", config.Defaults.Port, cfg.Port)
 	}
@@ -1008,9 +990,6 @@ func TestConfigManager_ValidJSON(t *testing.T) {
 	}
 
 	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL != "http://json-test:4001" {
-		t.Errorf("Expected UpstreamURL 'http://json-test:4001', got %s", cfg.UpstreamURL)
-	}
 	if cfg.Port != 5555 {
 		t.Errorf("Expected Port 5555, got %d", cfg.Port)
 	}
@@ -1062,9 +1041,6 @@ func TestConfigManager_InvalidJSON(t *testing.T) {
 
 	// Should fall back to defaults
 	cfg := cfgMgr.Get()
-	if cfg.UpstreamURL != config.Defaults.UpstreamURL {
-		t.Errorf("Expected default UpstreamURL after corruption, got %s", cfg.UpstreamURL)
-	}
 	if cfg.Port != config.Defaults.Port {
 		t.Errorf("Expected default Port after corruption, got %d", cfg.Port)
 	}
@@ -1094,7 +1070,6 @@ func TestConfigManager_PartialUpdate(t *testing.T) {
 
 	// First, save a complete config with non-default values
 	fullCfg := cfgMgr.Get()
-	fullCfg.UpstreamURL = "http://initial:4001"
 	fullCfg.Port = 7777
 	fullCfg.RaceRetryEnabled = true
 	fullCfg.RaceMaxParallel = 10
@@ -1106,13 +1081,10 @@ func TestConfigManager_PartialUpdate(t *testing.T) {
 		t.Fatalf("Failed to save initial config: %v", err)
 	}
 
-	// Now save a partial config (only changing UpstreamURL)
-	// IMPORTANT: We only set UpstreamURL and required duration fields.
 	// We do NOT set RaceMaxParallel because that would trigger isRaceRetryProvided()
 	// which would then copy all race retry fields (including RaceRetryEnabled=false).
 	// The merge logic only merges race retry if it detects race retry was "provided".
 	partialCfg := config.Config{
-		UpstreamURL: "http://updated:4001",
 	}
 	// Set only the required duration fields for validation (these are always sent by frontend)
 	partialCfg.IdleTimeout = fullCfg.IdleTimeout
@@ -1127,10 +1099,6 @@ func TestConfigManager_PartialUpdate(t *testing.T) {
 	// Verify merge behavior
 	loadedCfg := cfgMgr.Get()
 
-	// UpstreamURL should be updated
-	if loadedCfg.UpstreamURL != "http://updated:4001" {
-		t.Errorf("Expected UpstreamURL 'http://updated:4001', got %s", loadedCfg.UpstreamURL)
-	}
 
 	// Port should be preserved from previous config
 	if loadedCfg.Port != 7777 {
@@ -1194,7 +1162,6 @@ func TestIdleTerminationMergeConfig(t *testing.T) {
 	// Step 2: Save partial config WITHOUT idle termination fields
 	// This should preserve the existing idle termination values
 	partialCfg := config.Config{
-		UpstreamURL:       "http://updated:4001",
 		IdleTimeout:       fullCfg.IdleTimeout,
 		StreamDeadline:    fullCfg.StreamDeadline,
 		MaxGenerationTime: fullCfg.MaxGenerationTime,
@@ -1219,7 +1186,6 @@ func TestIdleTerminationMergeConfig(t *testing.T) {
 	// Note: To trigger merge, we need IdleTerminationTimeout != 0 (isIdleTerminationProvided check)
 	// When we provide IdleTerminationTimeout != 0, it gets copied along with IdleTerminationEnabled
 	disabledCfg := config.Config{
-		UpstreamURL:            "http://disabled:4001",
 		IdleTimeout:            fullCfg.IdleTimeout,
 		StreamDeadline:         fullCfg.StreamDeadline,
 		MaxGenerationTime:      fullCfg.MaxGenerationTime,
@@ -1244,7 +1210,6 @@ func TestIdleTerminationMergeConfig(t *testing.T) {
 	// Step 4: Save config with only IdleTerminationTimeout changed
 	// Note: We need IdleTerminationTimeout != 0 to trigger merge, but enabled stays same
 	timeoutCfg := config.Config{
-		UpstreamURL:            "http://timeout:4001",
 		IdleTimeout:            fullCfg.IdleTimeout,
 		StreamDeadline:         fullCfg.StreamDeadline,
 		MaxGenerationTime:      fullCfg.MaxGenerationTime,
@@ -1307,13 +1272,11 @@ func TestConfigManager_EnvOverridePrecedence(t *testing.T) {
 
 	// Set ENV overrides
 	os.Setenv("APPLY_ENV_OVERRIDES", "true")
-	os.Setenv("UPSTREAM_URL", "http://env-override:9999")
 	os.Setenv("PORT", "8888")
 	os.Setenv("RACE_RETRY_ENABLED", "true")
 	os.Setenv("RACE_MAX_PARALLEL", "7")
 	defer func() {
 		os.Unsetenv("APPLY_ENV_OVERRIDES")
-		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("RACE_RETRY_ENABLED")
 		os.Unsetenv("RACE_MAX_PARALLEL")
@@ -1328,9 +1291,6 @@ func TestConfigManager_EnvOverridePrecedence(t *testing.T) {
 	cfg := cfgMgr.Get()
 
 	// ENV should override database values
-	if cfg.UpstreamURL != "http://env-override:9999" {
-		t.Errorf("Expected UpstreamURL from ENV 'http://env-override:9999', got %s", cfg.UpstreamURL)
-	}
 	if cfg.Port != 8888 {
 		t.Errorf("Expected Port from ENV 8888, got %d", cfg.Port)
 	}
@@ -1427,12 +1387,6 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 	loadedCfg := cfgMgr.Get()
 
 	// Verify core fields
-	if loadedCfg.UpstreamURL != "http://roundtrip:4001" {
-		t.Errorf("UpstreamURL mismatch: got %s, want http://roundtrip:4001", loadedCfg.UpstreamURL)
-	}
-	if loadedCfg.UpstreamCredentialID != "cred-123" {
-		t.Errorf("UpstreamCredentialID mismatch: got %s, want cred-123", loadedCfg.UpstreamCredentialID)
-	}
 	if loadedCfg.Port != 9999 {
 		t.Errorf("Port mismatch: got %d, want 9999", loadedCfg.Port)
 	}
@@ -1798,14 +1752,17 @@ func TestModelsManager_ResolveInternalConfig_PeakHourNonInternal(t *testing.T) {
 	// invalid for non-internal). The test is about ResolveInternalConfig's
 	// non-internal short-circuit, not about peak-hour resolution on
 	// non-internal models.
-	testModel := models.ModelConfig{
-		ID:      "non-internal-peak-test",
-		Name:    "Non Internal Peak Test",
-		Enabled: true,
-		Internal: false, // Not internal — short-circuits in ResolveInternalConfig
-	}
-	if err := modelsMgr.AddModel(testModel); err != nil {
-		t.Fatalf("Failed to add model: %v", err)
+	//
+	// remove-external-upstream P1 (task 7): the layered Internal=true
+	// write-stamp makes mgr.AddModel REJECT a zero-credential row, so the
+	// PERMANENT legacy-row shape (internal=0) is seeded via direct SQL —
+	// mirroring migration 032's disable arm, which never flips internal.
+	if _, err := modelsMgr.store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, internal, credentials_json, credential_id, internal_model, created_at, updated_at)
+		 VALUES (?, ?, 1, 0, '[]', '', '', ?, ?)`,
+		"non-internal-peak-test", "Non Internal Peak Test",
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed legacy non-internal model: %v", err)
 	}
 
 	// Non-internal models return ok=false regardless of any other fields.
@@ -2063,18 +2020,22 @@ func TestModelsManager_AddModel_SecondaryWithNonInternal(t *testing.T) {
 		Internal:               false,
 		SecondaryUpstreamModel: "glm-4-flash",
 	}
-	// Phase-1 W4: AddModel now REJECTS this shape — the rule
-	// "secondary_upstream_model requires internal to be true" is
-	// enforced at write time, not only at Validate time.
+	// remove-external-upstream P1 (task 7): AddModel still REJECTS this
+	// shape, but through the STAMPED-INTERNAL credential gate — the
+	// Internal=true write-stamp supersedes the "secondary_upstream_model
+	// requires internal to be true" rule on the write path (every write
+	// is internal now; secondary-on-internal is legal, so the zero-
+	// credential gate is what fires). The rule remains alive for direct
+	// Validate() callers — see TestModelsManager_Validate_SecondaryWithNonInternal.
 	err := modelsMgr.AddModel(testModel)
 	if err == nil {
-		t.Errorf("AddModel should reject non-internal model with secondary_upstream_model, got nil error")
+		t.Errorf("AddModel should reject zero-credential stamped-internal model, got nil error")
 		// cleanup if it accidentally succeeded
 		_ = modelsMgr.RemoveModel("invalid-secondary-external")
 		return
 	}
-	if !strings.Contains(err.Error(), "secondary_upstream_model requires internal to be true") {
-		t.Errorf("AddModel error = %q, want substring %q", err.Error(), "secondary_upstream_model requires internal to be true")
+	if !strings.Contains(err.Error(), "credential_id is required when internal is true") {
+		t.Errorf("AddModel error = %q, want substring %q", err.Error(), "credential_id is required when internal is true")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
@@ -94,8 +95,9 @@ func mockSlowDataHandler(stopCh <-chan struct{}, chunkInterval time.Duration) ht
 func newTestHandlerWithURL(t *testing.T, upstreamURL string) *Handler {
 	t.Helper()
 
+	// remove-external-upstream P5: the UPSTREAM_URL env pair is gone —
+	// the upstream flows through the seeded internal fixture.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
-	t.Setenv("UPSTREAM_URL", upstreamURL)
 	t.Setenv("MAX_GENERATION_TIME", "300s") // 5 minutes for long tests
 	t.Setenv("STREAM_DEADLINE", "180s")     // 3 minutes to allow heartbeat tests
 	t.Setenv("IDLE_TIMEOUT", "180s")        // 3 minutes idle timeout
@@ -105,9 +107,12 @@ func newTestHandlerWithURL(t *testing.T, upstreamURL string) *Handler {
 		t.Fatalf("new manager: %v", err)
 	}
 
+	modelsConfig := models.NewModelsConfig()
+	seedInternalFixture(t, modelsConfig, upstreamURL)
+
 	cfg := &Config{
 		ConfigMgr:    mgr,
-		ModelsConfig: nil,
+		ModelsConfig: modelsConfig,
 	}
 
 	bus := events.NewBus()
@@ -136,7 +141,7 @@ func TestHeartbeat_MockServer_Basic(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -199,7 +204,7 @@ func TestHeartbeat_MockServer_OneMinute(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -270,7 +275,7 @@ func TestHeartbeat_MockServer_TwoMinutes(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -336,7 +341,7 @@ func TestHeartbeat_MockServer_WithPeriodicData(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -462,7 +467,7 @@ func TestHeartbeat_StartsBeforeWaitForWinner(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := newSafeResponseWriter()
 
@@ -572,7 +577,7 @@ func TestHeartbeat_MockServer_ThreeMinutes(t *testing.T) {
 	h := newTestHandlerWithURL(t, server.URL)
 
 	// Make request
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
