@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
@@ -42,8 +41,14 @@ func newCacheManager(t *testing.T) (*database.ModelsManager, *CachedModelsConfig
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
-	bus := events.NewBus()
-	_, mgr, err := database.InitializeManagers(store, bus)
+	// nil event bus: see newCountingCacheManager
+	// (models_native_cache_test.go) — the manager's bus-drain
+	// goroutine (drainCredentialsChanged, store.go:770) is
+	// production-owned and unjoinable from this package, yet it reads
+	// the temp-dir SQLite db after mgr.Close() returns, racing
+	// t.TempDir()'s RemoveAll (the ~1/16-batch unlinkat flake). Nil
+	// bus = the goroutine is never created.
+	_, mgr, err := database.InitializeManagers(store, nil)
 	if err != nil {
 		store.Close()
 		t.Fatalf("InitializeManagers: %v", err)
@@ -67,6 +72,10 @@ func newCacheManager(t *testing.T) (*database.ModelsManager, *CachedModelsConfig
 	}
 	return mgr, primed, func() {
 		primed.Stop()
+		// Full join of the decorator's reconciler goroutine — Stop()'s
+		// wait is bounded and may abandon it mid-scan (same rationale
+		// as newCountingCacheManager).
+		primed.reconcileWG.Wait()
 		mgr.Close()
 		store.Close()
 		_ = os.RemoveAll(tmp)

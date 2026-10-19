@@ -59,6 +59,29 @@ package proxy
 // upstream, and no race_request_failed event may be published) —
 // never on the HTTP status alone (a 200 can be served by a fallback).
 //
+// PROTOCOL PARITY (G7) — why there is no Anthropic /v1/messages
+// self-shadow case here. The shared seam is applyGroupRewrite
+// (pkg/proxy/handler_groups.go:66) — THE one rewrite entry point —
+// called from BOTH protocol arms after their conversation-key
+// derivation:
+//
+//	OpenAI  /v1/chat/completions : pkg/proxy/handler.go:594
+//	Anthropic /v1/messages       : pkg/proxy/handler_anthropic.go:357
+//
+// Both route through the SAME RewriteGroupEntries/models.GroupRewriter
+// store rewrite, and self-shadow MEMBER resolution happens strictly
+// BELOW that seam (RewriteGroupEntries → directGetModel →
+// GetModelNative — the claims-bypassing read under test here); the
+// wire envelope differs only ABOVE it. The two Am24 group-re-entry
+// parity helpers (pkg/proxy/handler.go:1253 tryGroupReentry, and
+// pkg/proxy/handler_groups.go:390 tryGroupReentryAnthropic) rebuild
+// through the SAME helper, so the parity holds on the failure path
+// too. Between the seam and the upstream capture the Anthropic arm
+// adds NO protocol-specific member-resolution branch (its per-
+// iteration GetModel runs the same store read), so an envelope-level
+// Anthropic case would re-exercise byte-identical seam code and is
+// deliberately NOT duplicated here.
+//
 // The four shapes the P0 brief demands:
 //   (a) live shape  — group shadows "coding" AND lists "coding" as a member
 //   (b) day-1 shape — the legal equivalent of "group id == shadow id ==
@@ -395,10 +418,21 @@ func TestShadowFix_SelfShadowMemberCredentialFailover(t *testing.T) {
 	defer h.close()
 
 	// Swap the stub: credential A rate-limits, credential B serves.
-	// keyAHits counts the rate-limited calls — the test asserts the
-	// 429 path was ACTUALLY exercised (a 50/50 credential pick would
-	// let the test pass trivially).
-	var keyAHits int32
+	// The test asserts the credential-failover path was NOT just
+	// admitted — it must have actually WON at the wire:
+	//   keyAHits counts the rate-limited calls (the 429 path was
+	//   exercised — a 50/50 credential pick would let the test pass
+	//   trivially without it).
+	//   keyBHits (NEW win proof, G4) counts the successful calls. The
+	//   member has NO fallback chain, so the only way the request can
+	//   land a 200 is via the credential-failover attempt reaching
+	//   the upstream with credential B (the stub returns 200 ONLY on
+	//   the non-key-A branch). keyBHits>0 therefore proves the
+	//   failover attempt actually won at the wire — not merely that
+	//   it was admitted by the coordinator's eligibility gate. The
+	//   two counters together cover: keyAHits — first leg fired;
+	//   keyBHits — failover leg served.
+	var keyAHits, keyBHits int32
 	h.up.Close()
 	h.up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
@@ -409,6 +443,9 @@ func TestShadowFix_SelfShadowMemberCredentialFailover(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"429"}}`))
 			return
 		}
+		// Every non-key-A wire is a credential-B serve (the member
+		// has exactly 2 credentials, both pointed at this stub).
+		atomic.AddInt32(&keyBHits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(stubUpstreamBody("glm-5", "ok")))
@@ -464,6 +501,16 @@ func TestShadowFix_SelfShadowMemberCredentialFailover(t *testing.T) {
 	}
 	if atomic.LoadInt32(&keyAHits) == 0 {
 		t.Fatalf("self-shadow credential failover: the rate-limited credential was never exercised (keyAHits=0) — the test would pass trivially")
+	}
+	// G4 WIN PROOF — the failover attempt must have actually WON, not
+	// merely been admitted. The member has no fallback chain, and the
+	// stub returns 200 only on the credential-B branch, so a client
+	// 200 combined with keyBHits>0 pins the win at the wire: without
+	// the failover leg (i.e. the pre-shadowfix defect where the
+	// eligibility gate read the GROUP row and saw 0 credentials), the
+	// 429 would bubble up and keyBHits would stay 0.
+	if atomic.LoadInt32(&keyBHits) == 0 {
+		t.Fatalf("self-shadow credential failover: the failover attempt never WON (keyBHits=0 despite keyAHits=%d and a 200) — credential B never reached the upstream, so the 200 did not come from the failover leg", atomic.LoadInt32(&keyAHits))
 	}
 }
 
