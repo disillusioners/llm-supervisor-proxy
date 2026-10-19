@@ -783,9 +783,21 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 //
 // The loop exits when the channel closes (Close → bus.Unsubscribe
 // closes it). It must never call back into ModelsManager write
-// paths: GetModel takes m.mu.RLock only, and Bus.Publish sends are
-// non-blocking, so a publisher holding m.mu cannot deadlock with a
+// paths: GetModelNative takes m.mu.RLock only, and Bus.Publish sends
+// are non-blocking, so a publisher holding m.mu cannot deadlock with a
 // drain iteration waiting on that RLock.
+//
+// P0 shadowfix — the re-read is ROW IDENTITY (GetModelNative), not
+// the client-facing claims-first GetModel. The drain refreshes the
+// ENGINE state of the model the event names; for a member ID that its
+// own group claims (the day-1 self-shadow shape coding-group[coding])
+// the claims-first read returned the GROUP row — whose credential
+// list is EMPTY — so the refresh called OnModelChanged(id, nil), which
+// DELETES the member's engine state. The member's next multi-
+// credential resolution then hit ErrNoCredentials and failed with
+// "failed to resolve internal config for model coding" (502) — and
+// because the drain always fed it the group row, the state was never
+// restored (a permanent failure for that member until a reboot).
 func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
 	for evt := range ch {
 		if evt.Type != credentiallb.EventCredentialsChanged {
@@ -803,7 +815,7 @@ func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
 		if modelID == "" {
 			continue
 		}
-		mc := m.GetModel(modelID)
+		mc := m.GetModelNative(modelID)
 		if mc == nil {
 			// Model removed between publish and drain (or removed by
 			// another writer): drop the engine state entirely.
