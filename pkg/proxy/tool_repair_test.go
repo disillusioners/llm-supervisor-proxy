@@ -127,12 +127,12 @@ func TestToolRepair_StreamingIntegration(t *testing.T) {
 			defer server.Close()
 
 			cfg := &ConfigSnapshot{
-				UpstreamURL:        server.URL,
 				RaceRetryEnabled:   false,
 				RaceMaxBufferBytes: 1024 * 1024,
 				IdleTimeout:        30 * time.Second,
 				StreamDeadline:     10 * time.Second,
 				MaxGenerationTime:  15 * time.Second,
+				ModelsConfig:       seededModelsConfig(t, server.URL),
 				ModelID:            "test-model",
 				ToolRepair:         tt.config,
 			}
@@ -296,12 +296,12 @@ func TestToolRepair_NonStreamingIntegration(t *testing.T) {
 			defer server.Close()
 
 			cfg := &ConfigSnapshot{
-				UpstreamURL:        server.URL,
 				RaceRetryEnabled:   false,
 				RaceMaxBufferBytes: 1024 * 1024,
 				IdleTimeout:        30 * time.Second,
 				StreamDeadline:     10 * time.Second,
 				MaxGenerationTime:  15 * time.Second,
+				ModelsConfig:       seededModelsConfig(t, server.URL),
 				ModelID:            "test-model",
 				ToolRepair:         tt.config,
 			}

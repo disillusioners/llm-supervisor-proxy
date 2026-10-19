@@ -599,16 +599,17 @@ func TestModelsCredentials_M1ShadowWriteContract(t *testing.T) {
 	}
 	assertShadow(t, store, "m1", "cred-D")
 
-	// UpdateModel: empty Credentials (non-internal path allowed) —
-	// shadow must be empty.
-	if err := modelsMgr.UpdateModel("m1", models.ModelConfig{
-		ID: "m1", Name: "M1",
-		Enabled:   false,
-		Internal:  false,
-		InternalModel: "x",
-		Credentials: nil,
-	}); err != nil {
-		t.Fatalf("UpdateModel empty creds: %v", err)
+	// remove-external-upstream P1 (task 7): the "UpdateModel with empty
+	// Credentials on a non-internal row" write path is RETIRED — the
+	// Internal=true write-stamp makes a zero-credential update REJECTED
+	// (stamped internal ⇒ credential gates fire). The empty-shadow READ
+	// behavior is still load-bearing for the PERMANENT legacy rows
+	// (internal=0, no credentials — migration 032's disable arm), so this
+	// sub-case seeds that shape via direct SQL and asserts the shadow
+	// reads back empty.
+	if _, err := store.DB.ExecContext(context.Background(),
+		`UPDATE models SET internal = 0, credentials_json = '[]', credential_id = '' WHERE id = 'm1'`); err != nil {
+		t.Fatalf("seed legacy m1 shape: %v", err)
 	}
 	assertShadow(t, store, "m1", "")
 }

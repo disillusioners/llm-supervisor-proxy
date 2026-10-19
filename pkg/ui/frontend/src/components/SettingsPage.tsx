@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
-import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig, Credential } from '../types';
-import { getCredentials } from '../hooks/useApi';
+import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig } from '../types';
 import { ProxySettings } from './config/ProxySettings';
 import { ModelsTab } from './config/ModelsTab';
 import { ImgGenModelsTab } from './config/ImgGenModelsTab';
@@ -128,9 +127,6 @@ export function SettingsPage({
   };
 
   // Proxy Settings state
-  const [upstreamUrl, setUpstreamUrl] = useState('');
-  const [upstreamCredentialId, setUpstreamCredentialId] = useState('');
-  const [credentials, setCredentials] = useState<Credential[]>([]);
   const [port, setPort] = useState<number>(8089);
   const [idleTimeout, setIdleTimeout] = useState('');
   const [streamDeadline, setStreamDeadline] = useState('');
@@ -165,8 +161,6 @@ export function SettingsPage({
   // Sync state when config changes
   useEffect(() => {
     if (config) {
-      setUpstreamUrl(config.upstream_url || '');
-      setUpstreamCredentialId(config.upstream_credential_id || '');
       setPort(config.port || 8089);
       setOriginalPort(config.port || 8089);
       setIdleTimeout(config.idle_timeout || '');
@@ -190,25 +184,10 @@ export function SettingsPage({
     }
   }, [config]);
 
-  // Fetch credentials on mount
-  useEffect(() => {
-    const fetchCredentials = async () => {
-      try {
-        const data = await getCredentials();
-        setCredentials(data || []);
-      } catch (e) {
-        console.error('Failed to fetch credentials:', e);
-      }
-    };
-    fetchCredentials();
-  }, []);
-
   // Proxy Settings handlers
   const handleApplyProxy = async () => {
     try {
       const response = await onUpdateConfig({
-        upstream_url: upstreamUrl,
-        upstream_credential_id: upstreamCredentialId,
         port,
         idle_timeout: idleTimeout,
         stream_deadline: streamDeadline,
@@ -538,9 +517,6 @@ export function SettingsPage({
         <div class="max-w-4xl mx-auto">
           {activeTab === 'proxy' && (
             <ProxySettings
-              upstreamUrl={upstreamUrl}
-              upstreamCredentialId={upstreamCredentialId}
-              credentials={credentials}
               models={models}
               port={port}
               idleTimeout={idleTimeout}
@@ -558,8 +534,6 @@ export function SettingsPage({
               logRawUpstreamMaxKB={logRawUpstreamMaxKB}
               idleTerminationEnabled={idleTerminationEnabled}
               idleTerminationTimeout={idleTerminationTimeout}
-              onUpstreamUrlChange={setUpstreamUrl}
-              onUpstreamCredentialIdChange={setUpstreamCredentialId}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
               onStreamDeadlineChange={setStreamDeadline}

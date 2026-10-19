@@ -19,6 +19,7 @@ func TestNewProvider(t *testing.T) {
 		{"deepseek", "deepseek", false},
 		{"opencode", "opencode", false},
 		{"opencode-go", "opencode-go", false},
+		{"lightllm", "lightllm", false},
 		{"unknown", "unknown", true},
 	}
 
@@ -42,7 +43,7 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestIsProviderSupported(t *testing.T) {
-	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go"}
+	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go", "lightllm"}
 	for _, p := range supported {
 		if !IsProviderSupported(p) {
 			t.Errorf("expected %s to be supported", p)
@@ -56,19 +57,23 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	// 12 types post-opencode-go commission (OpenCode Go is a DISTINCT
-	// provider from OpenCode Zen — subscription realm, default base
-	// URL https://opencode.ai/inference/go/openai/v1, provider-native
+	// 13 types post-lightllm commission (remove-external-upstream
+	// phase 2 — LightLLM becomes a REGULAR OpenAI-compatible chat
+	// provider, default base URL http://localhost:4001 inherited
+	// from the retired external-upstream config default; see
+	// factory.go:ProviderLightLLM). Prior lineage: 12 post-opencode-go
+	// commission (OpenCode Go is a DISTINCT provider from OpenCode
+	// Zen — subscription realm, default base URL
+	// https://opencode.ai/inference/go/openai/v1, provider-native
 	// session/UA attribution; see factory.go:ProviderOpencodeGo and
-	// opencodego.go). OpenCode Zen remains 11-of-12 from the prior
-	// opencode commission. Decision Models / §5.2 also
+	// opencodego.go), 11 post-opencode. Decision Models / §5.2
 	// adds ProviderTypesafe for /v1/decisions — the chat layer
 	// doesn't speak System One, so typesafe returns "not yet
 	// implemented" from NewProvider, but the id is registered so
 	// /fe/api/providers and the FE DecisionModelForm provider
 	// dropdown can see it.
-	if len(types) != 12 {
-		t.Errorf("expected 12 provider types, got %d", len(types))
+	if len(types) != 13 {
+		t.Errorf("expected 13 provider types, got %d", len(types))
 	}
 	// Spot-check the typesafe addition.
 	foundTypesafe := false
@@ -91,6 +96,17 @@ func TestGetProviderTypes(t *testing.T) {
 	}
 	if !foundOpencodeGo {
 		t.Errorf("ProviderOpencodeGo missing from GetProviderTypes()")
+	}
+	// Spot-check the lightllm addition (regular OpenAI-compatible chat provider).
+	foundLightLLM := false
+	for _, t := range types {
+		if t == ProviderLightLLM {
+			foundLightLLM = true
+			break
+		}
+	}
+	if !foundLightLLM {
+		t.Errorf("ProviderLightLLM missing from GetProviderTypes()")
 	}
 }
 

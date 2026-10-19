@@ -2,9 +2,10 @@ package proxy
 
 // handler_anthropic_boundary_test.go — db-cache-layer 1D boundary
 // contract tests (Anthropic path), mirroring the OpenAI trio:
-//   - nil + healthy              → today's legit external passthrough
+//   - nil + healthy              → 404 not_found_error / model_not_found
+//     (remove-external-upstream P1: the external passthrough is GONE)
 //   - nil + !healthy             → 503 config_store_unavailable
-//   - nil + no health capability → today's behavior (legacy safe)
+//   - nil + no health capability → 404 model_not_found (same gate)
 
 import (
 	"bytes"
@@ -35,7 +36,7 @@ func anthropicRequest(t *testing.T, model string) *http.Request {
 	return req
 }
 
-func TestAnthropicBoundary_HealthyNilReturnsExternalPassthrough(t *testing.T) {
+func TestAnthropicBoundary_HealthyUnknownReturns404(t *testing.T) {
 	var hits atomic.Int64
 	mc := &healthStubModels{ModelsConfig: models.NewModelsConfig(), healthy: true}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
@@ -43,11 +44,16 @@ func TestAnthropicBoundary_HealthyNilReturnsExternalPassthrough(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.HandleAnthropicMessages(w, anthropicRequest(t, "not-configured-model"))
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("nil + healthy must be today's external passthrough, got %d: %s", w.Code, w.Body.String())
+	// remove-external-upstream P1: an unresolved model 404s at the
+	// boundary with the Anthropic envelope; the upstream is untouched.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("healthy + unresolved model must 404, got %d: %s", w.Code, w.Body.String())
 	}
-	if hits.Load() == 0 {
-		t.Error("external passthrough must reach the upstream")
+	if !containsAll(w.Body.String(), `"code":"model_not_found"`, "not-configured-model") {
+		t.Errorf("404 payload must carry code=model_not_found and the model name: %s", w.Body.String())
+	}
+	if hits.Load() != 0 {
+		t.Error("unknown model must NEVER reach the upstream (the anti-bypass guarantee)")
 	}
 }
 
@@ -89,7 +95,7 @@ func TestAnthropicBoundary_UnhealthyNilReturnsServiceUnavailable(t *testing.T) {
 	}
 }
 
-func TestAnthropicBoundary_NoHealthCapabilityLegacySafe(t *testing.T) {
+func TestAnthropicBoundary_NoHealthCapabilityUnknownReturns404(t *testing.T) {
 	var hits atomic.Int64
 	mc := &plainModels{ModelsConfig: models.NewModelsConfig()}
 	h, _ := newTestHandler(t, upstreamCountingHandler(&hits), mc)
@@ -97,10 +103,12 @@ func TestAnthropicBoundary_NoHealthCapabilityLegacySafe(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.HandleAnthropicMessages(w, anthropicRequest(t, "legacy-external-model"))
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("no-health-capability must keep today's behavior (passthrough), got %d: %s", w.Code, w.Body.String())
+	// remove-external-upstream P1: same 404 gate without the health
+	// capability (which only decides 503-vs-404).
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("no-health-capability + unresolved model must 404, got %d: %s", w.Code, w.Body.String())
 	}
-	if hits.Load() == 0 {
-		t.Error("legacy path must still reach the upstream")
+	if hits.Load() != 0 {
+		t.Error("unknown model must NEVER reach the upstream")
 	}
 }

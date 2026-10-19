@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -41,15 +40,35 @@ func (e *configUnavailableError) Error() string {
 
 func (e *configUnavailableError) Unwrap() error { return modelscache.ErrConfigUnavailable }
 
+// ErrModelNotFound — the unknown/non-internal model sentinel returned by
+// initRequestContext (remove-external-upstream P1). Every model must
+// resolve through internal credentials; an unknown OR legacy
+// non-internal model 404s at the boundary with ZERO upstream requests.
+var ErrModelNotFound = errors.New("model_not_found")
+
+// modelNotFoundError is the sentinel returned by initRequestContext
+// when the unknown/non-internal 404 gate trips. It wraps
+// ErrModelNotFound (so errors.Is keeps matching at the caller) and
+// carries the request-scoped context (reqID, model) the caller needs
+// to publish the model_not_found event — the requestContext is nil on
+// this path, so the event fields ride on the error (exact
+// configUnavailableError pattern above).
+type modelNotFoundError struct {
+	reqID string
+	model string
+}
+
+func (e *modelNotFoundError) Error() string {
+	return fmt.Sprintf("%s: unknown or non-internal model %q", ErrModelNotFound, e.model)
+}
+
+func (e *modelNotFoundError) Unwrap() error { return ErrModelNotFound }
+
 // Request-parse sentinels returned by initRequestContext and matched
 // with errors.Is at the HandleChatCompletions dispatch (tidy finding
 // 6). The message strings are the historical wire contract — they
 // must stay byte-identical (they were string-compared before).
 var (
-	// ErrInvalidUpstreamURL — the configured upstream URL could not
-	// be joined into a request target URL.
-	ErrInvalidUpstreamURL = errors.New("invalid_upstream_url")
-
 	// ErrReadBodyFailed — the request body could not be read.
 	ErrReadBodyFailed = errors.New("read_body_failed")
 
@@ -61,11 +80,11 @@ var (
 // resolves the fallback chain, and returns a fully populated requestContext.
 func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	conf := h.config.Clone()
-	targetURL, err := url.JoinPath(conf.UpstreamURL, "/v1/chat/completions")
-	if err != nil {
-		return nil, ErrInvalidUpstreamURL
-	}
 
+	// remove-external-upstream P1 (task 8, A1): the external targetURL
+	// build is GONE — no request context carries a global-upstream
+	// target anymore (the internal arms build their own targets from
+	// the resolved credential).
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		return nil, ErrReadBodyFailed
@@ -132,18 +151,60 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// pkg/proxy source sites this feature touched: this gate in
 	// handler_functions.go, the sentinel→503/event conversion in
 	// handler.go, and the Anthropic mirror in handler_anthropic.go).
-	// A nil resolution is
-	// LEGITIMATE (an external/unknown model → passthrough, a real
-	// feature) ONLY when the config store can actually answer. When
-	// the store is unhealthy (DB outage, cache exhausted) nil means
-	// "cannot know" — silently passing such a request through to the
-	// external upstream is exactly the 2026-08-27 misroute class. The
-	// caller (HandleChatCompletions) converts the sentinel into a 503
-	// config_store_unavailable.
+	// A nil resolution means "cannot know" when the store is
+	// unhealthy (DB outage, cache exhausted) — silently passing such
+	// a request through is exactly the 2026-08-27 misroute class, so
+	// the caller (HandleChatCompletions) converts the sentinel into a
+	// 503 config_store_unavailable. Post-P1 a HEALTHY store that
+	// answers nil 404s at the gate below instead.
 	if resolvedModel == nil && conf.ModelsConfig != nil {
 		if health, ok := conf.ModelsConfig.(modelscache.ConfigStoreHealth); ok && !health.Healthy() {
 			return nil, &configUnavailableError{reqID: reqID, model: originalModel}
 		}
+	}
+
+	// remove-external-upstream P1 — unknown/non-internal 404 gate.
+	// Runs AFTER the resolve and AFTER the cache-unhealthy 503 check
+	// above: an unhealthy store still wins with config_store_unavailable
+	// ("cannot know"), but a HEALTHY store that answers nil — or answers
+	// with a legacy `internal = 0` row — now 404s instead of bypass-
+	// forwarding to the retired global upstream.
+	//
+	// P1 fixup (leader ruling 2026-10-18): the force-ultimate
+	// interception is hoisted ABOVE this gate — a request carrying
+	// X-Force-Ultimate-Model from an ultimate-entitled token must NOT
+	// 404 on body-model resolvability (the ultimate raw-passthrough is
+	// an internal-model route the commission kept; option (c) was
+	// rejected as a silent behavior break of a commissioned feature).
+	// Auth has not run yet at this point, so header presence is the
+	// only pre-auth signal available: the gate is DEFERRED (not
+	// skipped) for header-bearing requests and HandleChatCompletions
+	// re-fires it post-auth when the request does not qualify for the
+	// ultimate path.
+	//
+	// The `!Internal` conjunct is LOAD-BEARING, not belt-and-braces:
+	// GetModel never filters `enabled` for non-group rows, and migration
+	// 032's disable arm leaves `internal = 0` on legacy rows PERMANENTLY
+	// (it never flips internal) — so for the permanent legacy rows the
+	// conjunct is the SOLE 404 mechanism. Do not simplify it away.
+	//
+	// reqLog finalization (review I8): the log row was added with
+	// Status "running" above; the pre-existing cache-503 path leaves
+	// that row stuck ("running" ghost). This gate finalizes it —
+	// Status "failed" + Error/EndTime/Duration, re-Add (overwrite-by-ID).
+	// The requestContext is nil on this path, so reqID/model ride on the
+	// sentinel (modelNotFoundError) for the caller's event publication.
+	forceUltimateRequested := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
+	modelUnresolvable := resolvedModel == nil || !resolvedModel.Internal
+	deferredModelNotFound := modelUnresolvable && forceUltimateRequested
+	if modelUnresolvable && !deferredModelNotFound {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", originalModel)
+		reqLog.Status = "failed"
+		reqLog.Error = notFoundMsg
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = reqLog.EndTime.Sub(startTime).String()
+		h.store.Add(reqLog)
+		return nil, &modelNotFoundError{reqID: reqID, model: originalModel}
 	}
 
 	// Build model list using resolved config
@@ -154,11 +215,11 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		modelList = append(modelList, resolvedModel.ID)
 		modelList = append(modelList, resolvedModel.FallbackChain...)
 	} else {
-		// External/unknown model — no fallback chain, just use raw name
+		// Unknown model — no fallback chain, just use raw name
 		modelList = []string{originalModel}
 	}
 
-	// Set ModelID to the resolved ID (or raw name for external models)
+	// Set ModelID to the resolved ID (or raw name for unknown models)
 	if resolvedModel != nil {
 		conf.ModelID = resolvedModel.ID
 	} else {
@@ -174,12 +235,13 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	// contents (ExtractLeadingUserRun); multimodal content
 	// ([]interface{}) is canonical-JSON hashed per A-2.
 	var leadingUserRun string
-	if resolvedModel != nil && resolvedModel.Internal {
+	// remove-external-upstream P1 (A12): the `.Internal` conjunct is
+	// GONE — the boundary 404 gate already rejected unknown/non-internal
+	// models above, so every surviving resolvedModel is internal. The
+	// nil check stays (defensive; the gate guarantees non-nil).
+	if resolvedModel != nil {
 		leadingUserRun = credentiallb.ExtractLeadingUserRun(originalMessages)
 	}
-
-	// Extract proxy-only flags from headers (these are stripped before forwarding upstream)
-	bypassInternal := strings.EqualFold(r.Header.Get("x-llmproxy-bypass-internal"), "true")
 
 	// Per-request delivery mode from the X-LLMProxy-Buffer-Response opt-in
 	// header (real-streaming-default plan, Phase 1). Locked L1 semantics are
@@ -191,23 +253,32 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 	bufferMode := bufferModeFor(r)
 
 	return &requestContext{
-		conf:             conf,
-		targetURL:        targetURL,
-		reqID:            reqID,
-		startTime:        startTime,
-		reqLog:           reqLog,
-		modelList:        modelList,
-		resolvedModel:    resolvedModel,
-		requestBody:      requestBody,
-		rawBody:          bodyBytes, // Save original body bytes
-		isStream:         isStream,
-		originalHeaders:  r.Header,
-		method:           r.Method,
-		baseCtx:          r.Context(),
-		originalMessages: originalMessages,
-		bypassInternal:   bypassInternal,
-		bufferMode:       bufferMode,
-		leadingUserRun:   leadingUserRun,
+		conf: conf,
+		// remove-external-upstream P1 (task 8, A1): targetURL is an
+		// EMPTY placeholder — no request context carries a global-
+		// upstream target anymore (the internal arms build their own
+		// targets from the resolved credential; mirrors the Anthropic
+		// twin's post-A13 placeholder).
+		targetURL:     "",
+		reqID:         reqID,
+		startTime:     startTime,
+		reqLog:        reqLog,
+		modelList:     modelList,
+		resolvedModel: resolvedModel,
+		// P1 fixup (leader ruling 2026-10-18): non-zero only when the
+		// boundary 404 gate was deferred for a force-ultimate request —
+		// see the gate comment above and the post-auth re-fire site in
+		// HandleChatCompletions.
+		modelNotFoundDeferred: deferredModelNotFound,
+		requestBody:           requestBody,
+		rawBody:               bodyBytes, // Save original body bytes
+		isStream:              isStream,
+		originalHeaders:       r.Header,
+		method:                r.Method,
+		baseCtx:               r.Context(),
+		originalMessages:      originalMessages,
+		bufferMode:            bufferMode,
+		leadingUserRun:        leadingUserRun,
 	}, nil
 }
 

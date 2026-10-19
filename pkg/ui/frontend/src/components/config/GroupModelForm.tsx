@@ -10,7 +10,9 @@ import { GroupMemberEditor } from './GroupMemberEditor';
 //
 //   kind: 'group'                      — the kind discriminator (G-arm)
 //   internal: true                     — G1: routes the row through the
-//                                        ~11 internal-dispatch predicates
+//                                        ~11 internal-dispatch predicates.
+//                                        Now the only mode repo-wide
+//                                        (remove-external-upstream).
 //   exclude_from_ultimate_switching:
 //   true                               — G7: explicit enforcement; ultimate
 //                                        switching is evaluated on the group

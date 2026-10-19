@@ -164,7 +164,7 @@ echo -e "\n${YELLOW}[2/10] Test 1: Logging Disabled (default) - no events, no fi
 
 # Start proxy
 export APPLY_ENV_OVERRIDES="true"
-export UPSTREAM_URL="http://localhost:$MOCK_PORT"
+# UPSTREAM_URL retired (remove-external-upstream P1): internal models carry the upstream via their credentials
 export PORT="$PROXY_PORT"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"

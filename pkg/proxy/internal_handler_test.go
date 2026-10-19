@@ -222,9 +222,14 @@ func TestCanHandleInternal(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "not internal",
+			// remove-external-upstream P1 (A18): CanHandleInternal is
+			// `modelConfig != nil` — the Internal conjunct is gone (the
+			// boundary 404 gate already rejected non-internal models, so
+			// a non-nil config reaching this seam is internal by
+			// construction). Pre-P1 this case expected false.
+			name:     "non-nil config (legacy non-internal) handled post-P1",
 			config:   &models.ModelConfig{Internal: false},
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "internal true",

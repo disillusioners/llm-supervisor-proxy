@@ -61,8 +61,6 @@ export interface UltimateModelConfig {
 
 export interface AppConfig {
   version: string;
-  upstream_url: string;
-  upstream_credential_id?: string;
   port: number;
   idle_timeout: string;
   stream_deadline: string;
@@ -92,7 +90,6 @@ export interface AppConfig {
   idle_termination_enabled?: boolean;
   idle_termination_timeout?: string;
   // Deprecated - kept for backward compatibility with older backend versions
-  max_upstream_error_retries?: number;
   max_idle_retries?: number;
   max_generation_retries?: number;
   shadow_retry_enabled?: boolean;
@@ -106,7 +103,7 @@ export interface ConfigUpdateResponse extends AppConfig {
 // Legacy alias for backward compatibility
 export type ProxyConfig = AppConfig;
 
-export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe';
+export type InternalProvider = 'openai' | 'zhipu' | 'azure' | 'zai' | 'minimax' | 'grok' | 'deepseek' | 'opencode' | 'opencode-go' | 'typesafe' | 'lightllm';
 
 export interface Model {
   id: string;

@@ -1,4 +1,4 @@
 {
-  "body": "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n",
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"hi\",\"role\":\"assistant\"},\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"model\":\"test-upstream-model\",\"object\":\"chat.completion.chunk\"}\n\n",
   "content_type": "text/event-stream"
 }

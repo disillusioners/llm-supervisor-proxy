@@ -91,7 +91,7 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
               </select>
               {/* Provider badge for the selected member (Q10 — sourced
                   from the model row itself, no BE round-trip). */}
-              {selected?.internal && selected.internal_provider && (
+              {selected?.internal_provider && (
                 <span
                   class="hidden sm:inline-flex items-center text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded whitespace-nowrap"
                   title={`Internal upstream: ${selected.internal_provider}`}

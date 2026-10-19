@@ -185,9 +185,12 @@ func (h *InternalHandler) SetLiveArc(arc *anthropicRequestContext) {
 	h.liveArc = arc
 }
 
-// CanHandleInternal checks if a model should use internal upstream
+// CanHandleInternal checks if a model should use internal upstream.
+// remove-external-upstream P1 (A18): every resolvable model is internal
+// by construction (the boundary 404 gate rejects unknown/non-internal
+// models), so the Internal test collapses to config presence.
 func CanHandleInternal(modelConfig *models.ModelConfig) bool {
-	return modelConfig != nil && modelConfig.Internal
+	return modelConfig != nil
 }
 
 // HandleRequest handles a request using internal provider
@@ -414,7 +417,8 @@ func (h *InternalHandler) executeWithResolved(ctx context.Context, requestBody m
 // handleNonStream) is reachable from exactly two sites — both inside
 // doAnthropicInternalRequest in handler_anthropic.go (the Anthropic-
 // internal path). The OpenAI race path uses a DIFFERENT function
-// (`handleNonStreamingResponse` in race_executor.go:1116) and is not
+// (the external-response loop deleted from race_executor.go by the
+// remove-external-upstream commission) and is not
 // affected. So liveArc != nil is a precise live-mode signal here.
 func (h *InternalHandler) handleNonStream(ctx context.Context, provider providers.Provider, req *providers.ChatCompletionRequest, w http.ResponseWriter, internalModel string) error {
 	resp, err := provider.ChatCompletion(ctx, req)

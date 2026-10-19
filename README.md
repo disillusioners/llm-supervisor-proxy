@@ -76,8 +76,6 @@ The proxy uses a three-tier configuration system with the following precedence:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UPSTREAM_URL` | `http://localhost:4001` | The URL of your actual LLM provider. |
-| `UPSTREAM_CREDENTIAL_ID` | *(empty)* | ID of stored credential to use for upstream authentication. |
 | `PORT` | `4321` | Port for the proxy to listen on. |
 | `IDLE_TIMEOUT` | `60s` | Max time to wait between tokens before spawning parallel requests. |
 | `STREAM_DEADLINE` | `110s` | Time limit before picking best buffer and continuing streaming. |
@@ -93,7 +91,7 @@ The proxy wraps its configuration/token database access with an in-process cache
 
 - **Models & credentials** are boot-primed into memory (boot fails fast if the DB is down at startup — same behavior as before) and refreshed by a background reconciler every **60s**. During an outage the proxy keeps serving **last-known-good** configuration (hard cap **24h**), including decrypted credentials — plaintext keys live in memory only and are never logged or written to disk.
 - **Auth tokens** use a three-tier cache: fresh positives (**60s** TTL), stale positives (served **only** when the database is unreachable — degraded-allow), and negatives (**60s** TTL, never stale-served). Known tokens stay authorized through an outage; unknown tokens still get 401.
-- **Fail-fast instead of silent misroute**: a request for a model the proxy has never seen while the DB is unreachable returns **503 `config_store_unavailable`** — never a silent passthrough to the external upstream (the 2026-08-27 incident class). Genuinely external models keep passing through when the store is healthy.
+- **Fail-fast instead of silent misroute**: a request for a model the proxy has never seen while the DB is unreachable returns **503 `config_store_unavailable`** — never a silent passthrough (the 2026-08-27 incident class). With the store healthy, a model that resolves to no internal config is rejected at the boundary gate with **404 `model_not_found`**, making zero upstream requests — there is no external upstream path to fall back to.
 - **Recovery**: once the DB returns, the cache converges within **≤120s** worst case (60s reconciler tick + scan). Revoking a token or changing a model takes effect within **60s** worst case via the same TTLs; API/UI mutations apply immediately via synchronous write-through.
 - Credentials that fail decryption are never served (503 path) and never expose ciphertext.
 
@@ -264,6 +262,7 @@ The proxy supports multiple LLM providers out of the box:
 | **ZAI** | `https://api.z.ai/api/coding/paas/v4` | OpenAI | OpenAI-compatible |
 | **OpenCode Zen** | `https://opencode.ai/inference/openai/v1` | OpenAI | OpenAI-compatible (override base_url to `https://opencode.ai/zen/v1` for the stable-docs route) |
 | **OpenCode Go** | `https://opencode.ai/inference/go/openai/v1` | OpenAI | OpenAI-compatible, subscription realm — DISTINCT provider from Zen; carries provider-native `x-opencode-session` (conversation-derived) + official-format User-Agent (override via `OPENCODE_GO_USER_AGENT`) |
+| **LightLLM** | `http://localhost:4001` | OpenAI | OpenAI-compatible (self-hosted LiteLLM gateway; chat-only) |
 
 Configure per-model credentials and base URLs via the Web UI or database.
 
@@ -282,10 +281,9 @@ The proxy handles protocol translation automatically:
 
 | Context | Protocol | Behavior |
 |---------|----------|----------|
-| External upstream | OpenAI (`/v1/chat/completions`) | Always uses OpenAI protocol (LiteLLM-compatible) |
 | Internal (with Anthropic credential) | Anthropic (`/v1/messages`) | Passthrough — requests forwarded as-is |
 
-When using internal credentials with `credential.Provider == 'anthropic'`, the proxy auto-detects Anthropic protocol for passthrough mode. For all other cases, it uses OpenAI protocol.
+When using internal credentials with `credential.Provider == 'anthropic'`, the proxy auto-detects Anthropic protocol for passthrough mode. For all other internal credentials, it uses OpenAI protocol.
 
 ### Claude Code Setup
 
@@ -437,11 +435,10 @@ pick its own affinity; there is no cross-pod stickiness. Redis-backed
 or sticky-load-balancer affinity is **future work (v2)** — for now,
 plan capacity per replica, not per cluster.
 
-**Env path bypasses load balancing.** Requests served through the
-external race path using the `UPSTREAM_CREDENTIAL_ID` env credential
-bypass credential load balancing entirely — there is no `credentials[]`
-on that path. To load-balance, configure `credentials[]` on an
-**internal** model.
+**Every request load-balances.** remove-external-upstream removed the
+external race path (and its `UPSTREAM_CREDENTIAL_ID` env bypass): all
+requests route through the `credentials[]` of an internal model, so
+credential load balancing applies uniformly.
 
 **`modelTypeSecond` re-key on 429 (counterintuitive but correct).**
 When a secondary-model attempt is rate-limited (HTTP 429), credential

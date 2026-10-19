@@ -104,9 +104,19 @@ func TestResolveInternalConfigWithAffinity_BranchTable(t *testing.T) {
 		empty.ID, empty.Name, empty.InternalModel, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
 		t.Fatalf("seed empty model: %v", err)
 	}
-	external := models.ModelConfig{ID: "ext", Name: "ext", Enabled: true}
-	if err := mgr.AddModel(external); err != nil {
-		t.Fatal(err)
+	// remove-external-upstream P1 (task 7, approver NB7 consequence):
+	// the layered Internal=true write-stamp makes mgr.AddModel REJECT a
+	// zero-credential row (stamped internal ⇒ credential gates fire), so
+	// the PERMANENT legacy-row shape (internal=0, no credentials) can no
+	// longer be seeded through the write path. Seed via direct SQL
+	// preserving internal=0 — mirroring migration 032's disable arm,
+	// which also never flips internal. The ok=false assertion below then
+	// documents the permanent legacy-row resolution behavior.
+	if _, err := store.DB.ExecContext(context.Background(),
+		`INSERT INTO models (id, name, enabled, internal, credentials_json, credential_id, internal_model, created_at, updated_at)
+		 VALUES (?, ?, 1, 0, '[]', '', '', ?, ?)`,
+		"ext", "ext", time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed legacy external model: %v", err)
 	}
 
 	// Case 1: unknown model → ok=false, zero struct.

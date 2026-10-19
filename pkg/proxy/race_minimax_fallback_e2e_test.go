@@ -6,8 +6,9 @@ package proxy
 // COVERAGE GAP being filled:
 // race_minimax_body_gate_test.go (and the unit matrix in
 // race_interleaved_matrix_test.go) covers the gate LOGIC at the
-// executeInternalRequest / executeExternalRequest level with a single
-// model. They do NOT exercise the full incident path: race coordinator
+// executeInternalRequest level with a single model (the external arm
+// itself was removed by the remove-external-upstream commission). They
+// do NOT exercise the full incident path: race coordinator
 // with TWO internal models, the primary fails with a real rate-limit
 // error (IsRateLimitError returns true), the coordinator spawns the
 // fallback via triggerMainError, and the fallback model — configured

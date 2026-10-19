@@ -44,6 +44,14 @@ func newStrictTestManager(t *testing.T) *ModelsManager {
 		t.Fatalf("NewModelsManager: %v", err)
 	}
 	t.Cleanup(mgr.Close)
+	// remove-external-upstream P1 (task 7): the Internal=true write-stamp
+	// makes every AddModel an internal write — seed the credential the
+	// strictTestModel fixtures reference.
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: "strict-test-cred", Provider: "openai", APIKey: "k",
+	}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
 	return mgr
 }
 
@@ -67,7 +75,16 @@ func withTestEncryptionKey(t *testing.T) {
 }
 
 func strictTestModel(id string) models.ModelConfig {
-	return models.ModelConfig{ID: id, Name: id + "-name", Enabled: true}
+	// remove-external-upstream P1 (task 7): canonical internal shape —
+	// the write-stamp makes credential-less seeds un-writable.
+	return models.ModelConfig{
+		ID:            id,
+		Name:          id + "-name",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: id + "-upstream",
+		Credentials:   models.TestRefs("strict-test-cred"),
+	}
 }
 
 // ─── GetModelStrict ──────────────────────────────────────────────────────────
@@ -383,7 +400,15 @@ func TestGetCredentialsStrict_TransientErrorReturnsNilSlice(t *testing.T) {
 }
 
 func TestGetCredentialsStrict_EmptyResultLegit(t *testing.T) {
-	mgr := newStrictTestManager(t)
+	// remove-external-upstream P1 (task 7): built WITHOUT the seeded
+	// strict-test credential — this test's subject is the EMPTY
+	// credentials table, so it uses the plain store+manager directly.
+	store := newStrictTestStore(t)
+	mgr, err := NewModelsManager(store, nil)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
 	result, err := mgr.GetCredentialsStrict(context.Background())
 	if err != nil {
 		t.Fatalf("legit-empty must not error: %v", err)

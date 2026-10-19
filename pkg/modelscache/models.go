@@ -44,9 +44,6 @@ type Options struct {
 	StrictFillTimeout time.Duration
 	LRUCap            int
 	ReconcileInterval time.Duration
-	// UpstreamURL is the global proxy upstream used ONLY by the
-	// boot-time dead-default WARN tripwire (warn.go). Optional.
-	UpstreamURL string
 	// Clock overrides time.Now for tests. Optional.
 	Clock func() time.Time
 }
@@ -165,9 +162,9 @@ func NewCachedModelsConfig(inner strictSource, opts Options) (*CachedModelsConfi
 
 	c.applySnapshot(modelsList, enabledList, creds)
 
-	// Boot-only observability: dead-default tripwire (1.B.10 / K) and
-	// the one-time decorator-meta line (1.E.2).
-	warnDeadDefaultUpstream(o.UpstreamURL, c.enabledSnap)
+	// Boot-only observability: the one-time decorator-meta line (1.E.2).
+	// (remove-external-upstream P1 task 8 / R3: the dead-default
+	// upstream WARN tripwire is GONE with the retired config field.)
 	log.Printf("[cache] models decorator enabled (modelsNeg=%s staleCap=%s, %d models, %d credentials)",
 		o.ModelsNegTTL, o.StaleCap, len(c.modelsSnap), len(c.credsByID))
 
@@ -679,7 +676,7 @@ func (c *CachedModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversa
 // cache (task 1.B.5, mandatory override (b) / W1): without it,
 // normalizers.DetectProvider (called on every request at
 // race_executor.go:393/:559) would hit the DB-bound legacy path and
-// return "external" during an outage for known internal models —
+// return "unknown" during an outage for known internal models —
 // partially re-arming the misroute bug class.
 //
 // Semantics mirror the store's single-credential fall-through:
@@ -729,7 +726,21 @@ func (c *CachedModelsConfig) ResolveInternalConfig(modelID string) (provider, ap
 // next resolve), and the decorator claim index is rebuilt in the
 // same locked section — synchronously inside this write, before any
 // subsequent resolve can read a stale entry.
+//
+// remove-external-upstream P1 (task 7, R1 — release-blocking): the
+// Internal=true WRITE-STAMP happens HERE, on the caller's copy, BEFORE
+// delegation. The inner manager stamps its own by-value copy, but this
+// decorator caches the CALLER's struct via deepCopyModelConfig below —
+// stamping inner-only would leave the positive cache holding
+// Internal=false, false-404ing every fresh write for ≤1 reconcile
+// cycle (~60s) and showing internal=false in the FE despite a correct
+// DB row. The negative tier is NOT implicated (negByID is cleared
+// below regardless).
 func (c *CachedModelsConfig) AddModel(model models.ModelConfig) error {
+	// P1 task 7 layered stamp (layer i/iii): stamp BEFORE the inner
+	// call so the cached copy is already stamped and the inner
+	// validation runs on the stamped value.
+	model.Internal = true
 	if err := c.inner.AddModel(model); err != nil {
 		return err
 	}
@@ -755,7 +766,14 @@ func (c *CachedModelsConfig) AddModel(model models.ModelConfig) error {
 // parity with AddModel; without this, a model renamed onto a name
 // that was negative-cached in the prior TTL window would shadow the
 // live entry in GetModelByName.
+//
+// remove-external-upstream P1 (task 7, R1): same layered WRITE-STAMP
+// rationale as AddModel — the stamp lands on the caller's copy BEFORE
+// delegation so the positive cache can never hold Internal=false.
 func (c *CachedModelsConfig) UpdateModel(modelID string, model models.ModelConfig) error {
+	// P1 task 7 layered stamp (layer i/iii): stamp BEFORE the inner
+	// call.
+	model.Internal = true
 	if err := c.inner.UpdateModel(modelID, model); err != nil {
 		return err
 	}

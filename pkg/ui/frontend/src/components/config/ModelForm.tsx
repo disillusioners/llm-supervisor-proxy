@@ -117,7 +117,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     name: string;
     fallback_chain: string;
     truncate_params: string;
-    internal: boolean;
     credentials: CredentialRef[];
     internal_api_key: string;
     internal_base_url: string;
@@ -135,7 +134,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     name: '',
     fallback_chain: '',
     truncate_params: '',
-    internal: false,
     credentials: [],
     internal_api_key: '',
     internal_base_url: '',
@@ -211,7 +209,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         name: initialData.name,
         fallback_chain: (initialData.fallback_chain ?? []).join(', '),
         truncate_params: truncateParams,
-        internal: initialData.internal ?? false,
         credentials: hydCreds,
         internal_api_key: '',
         internal_base_url: initialData.internal_base_url || '',
@@ -232,7 +229,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         name: '',
         fallback_chain: '',
         truncate_params: '',
-        internal: false,
         credentials: [],
         internal_api_key: '',
         internal_base_url: '',
@@ -269,21 +265,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         }
       }
 
-      // Clear credentials, base URL override, secondary model, and peak-hour
-      // fields when internal upstream is turned off (mirrors prior behavior
-      // for the old single `credential_id` field).
-      if (field === 'internal' && value === false) {
-        updated.credentials = [];
-        updated.internal_api_key = '';
-        updated.secondary_upstream_model = '';
-        // Clear all peak hour fields when internal upstream is turned off
-        updated.peak_hour_enabled = false;
-        updated.peak_hour_start = '';
-        updated.peak_hour_end = '';
-        updated.peak_hour_timezone = '+0';
-        updated.peak_hour_model = '';
-      }
-      
       // Clear peak hour fields when peak_hour_enabled is toggled off
       if (field === 'peak_hour_enabled' && value === false) {
         updated.peak_hour_start = '';
@@ -320,7 +301,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       const truncate = formData.truncate_params.split(',').map(s => s.trim()).filter(Boolean);
 
       // Validate peak hour fields when enabled
-      if (formData.internal && formData.peak_hour_enabled) {
+      if (formData.peak_hour_enabled) {
         const errors: string[] = [];
         if (!formData.peak_hour_start) errors.push('Peak Hour Start is required');
         if (!formData.peak_hour_end) errors.push('Peak Hour End is required');
@@ -334,36 +315,35 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
 
       // Phase 4 multi-credential validation. Mirrors the server-side 400
       // rules so users get immediate feedback instead of a round-trip.
+      // Every model is internal now, so credentials are always required.
       let validatedCredentials: CredentialRef[] | undefined;
-      if (formData.internal) {
-        if (formData.credentials.length === 0) {
-          throw new Error('Internal upstream requires at least one credential');
-        }
-        if (formData.credentials.length > MAX_CREDENTIALS) {
-          throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed`);
-        }
-        const seen = new Set<string>();
-        for (let i = 0; i < formData.credentials.length; i++) {
-          const row = formData.credentials[i];
-          if (!row.credential_id) {
-            throw new Error(`Credential row ${i + 1}: please select a credential`);
-          }
-          if (!Number.isFinite(row.weight) || row.weight < 1) {
-            throw new Error(`Credential row ${i + 1}: weight must be at least 1`);
-          }
-          if (seen.has(row.credential_id)) {
-            throw new Error(
-              `Credential row ${i + 1}: duplicate credential "${row.credential_id}"`,
-            );
-          }
-          seen.add(row.credential_id);
-        }
-        validatedCredentials = formData.credentials.map((c, i) => ({
-          credential_id: c.credential_id,
-          weight: c.weight,
-          position: i,
-        }));
+      if (formData.credentials.length === 0) {
+        throw new Error('Internal upstream requires at least one credential');
       }
+      if (formData.credentials.length > MAX_CREDENTIALS) {
+        throw new Error(`At most ${MAX_CREDENTIALS} credentials allowed`);
+      }
+      const seen = new Set<string>();
+      for (let i = 0; i < formData.credentials.length; i++) {
+        const row = formData.credentials[i];
+        if (!row.credential_id) {
+          throw new Error(`Credential row ${i + 1}: please select a credential`);
+        }
+        if (!Number.isFinite(row.weight) || row.weight < 1) {
+          throw new Error(`Credential row ${i + 1}: weight must be at least 1`);
+        }
+        if (seen.has(row.credential_id)) {
+          throw new Error(
+            `Credential row ${i + 1}: duplicate credential "${row.credential_id}"`,
+          );
+        }
+        seen.add(row.credential_id);
+      }
+      validatedCredentials = formData.credentials.map((c, i) => ({
+        credential_id: c.credential_id,
+        weight: c.weight,
+        position: i,
+      }));
 
       if (mode === 'add') {
         if (!formData.id || !formData.name) {
@@ -380,19 +360,20 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         name: formData.name,
         fallback_chain: fallback,
         truncate_params: truncate,
-        internal: formData.internal || undefined,
+        // Every model is internal now (stamped unconditionally). The BE
+        // also write-stamps internal=true server-side; this is explicit.
+        internal: true,
         credentials: validatedCredentials,
-        internal_api_key: formData.internal && formData.internal_api_key ? formData.internal_api_key : undefined,
-        internal_base_url: formData.internal && formData.internal_base_url ? formData.internal_base_url : undefined,
-        internal_model: formData.internal && formData.internal_model ? formData.internal_model : undefined,
-        secondary_upstream_model: formData.internal ? (formData.secondary_upstream_model || '') : undefined,
+        internal_api_key: formData.internal_api_key ? formData.internal_api_key : undefined,
+        internal_base_url: formData.internal_base_url ? formData.internal_base_url : undefined,
+        internal_model: formData.internal_model ? formData.internal_model : undefined,
+        secondary_upstream_model: formData.secondary_upstream_model || '',
         release_stream_chunk_deadline: formData.release_stream_chunk_deadline || undefined,
-        // Peak hour fields only included when internal is true
-        peak_hour_enabled: formData.internal ? formData.peak_hour_enabled : undefined,
-        peak_hour_start: formData.internal && formData.peak_hour_enabled ? formData.peak_hour_start : undefined,
-        peak_hour_end: formData.internal && formData.peak_hour_enabled ? formData.peak_hour_end : undefined,
-        peak_hour_timezone: formData.internal && formData.peak_hour_enabled ? formData.peak_hour_timezone : undefined,
-        peak_hour_model: formData.internal && formData.peak_hour_enabled ? formData.peak_hour_model : undefined,
+        peak_hour_enabled: formData.peak_hour_enabled,
+        peak_hour_start: formData.peak_hour_enabled ? formData.peak_hour_start : undefined,
+        peak_hour_end: formData.peak_hour_enabled ? formData.peak_hour_end : undefined,
+        peak_hour_timezone: formData.peak_hour_enabled ? formData.peak_hour_timezone : undefined,
+        peak_hour_model: formData.peak_hour_enabled ? formData.peak_hour_model : undefined,
         exclude_from_ultimate_switching: formData.exclude_from_ultimate_switching,
       });
     } catch (e) {
@@ -546,253 +527,244 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         </div>
         */}
 
-        {/* Internal Upstream Section */}
-        <div class="border-t border-gray-600 pt-4">
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={formData.internal}
-              onInput={(e) => handleInputChange('internal', (e.target as HTMLInputElement).checked)}
-              class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800"
-            />
-            <span class="text-gray-300 font-medium">Internal Upstream</span>
-            <span class="text-xs text-gray-500">(use custom provider instead of global upstream)</span>
-          </label>
-        </div>
+        {/* All models route through internal upstream providers — the
+            external-upstream tick is gone (commission
+            remove-external-upstream). */}
+        <p class="text-xs text-gray-500 border-t border-gray-600 pt-4">
+          All models use internal upstream providers.
+        </p>
 
-        {formData.internal && (
-          <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
-            {legacyCredentialNotice && (
-              <div class="bg-amber-900/30 border border-amber-700/50 rounded-md p-2">
-                <p class="text-xs text-amber-200">{legacyCredentialNotice}</p>
-              </div>
-            )}
-            <MultiCredentialEditor
-              credentials={formData.credentials}
-              availableCredentials={credentials}
-              loading={loadingCredentials}
-              onChange={handleCredentialRowsChange}
-              onNavigateToCredentials={onNavigateToCredentials}
-            />
-            {selectedProvider && (
-              <div class="mt-2 flex items-center gap-2">
-                <span class="text-xs text-gray-400">Provider:</span>
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
-                  {getProviderName(selectedProvider)}
-                </span>
-              </div>
-            )}
-            {selectedCredential?.base_url && (
-              <p class="text-xs text-gray-500 mt-1">
-                Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
-              </p>
-            )}
-
-            {formData.credentials[0]?.credential_id && (
-              <div>
-                <label class="block text-sm font-medium text-gray-300 mb-1">
-                  API Key Override <span class="text-gray-500">(optional, overrides the primary credential's API key)</span>
-                </label>
-                <input
-                  type="password"
-                  value={formData.internal_api_key}
-                  onInput={(e) => handleInputChange('internal_api_key', (e.target as HTMLInputElement).value)}
-                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                  placeholder="Overrides the primary credential's API key if set"
-                />
-                <p class="text-xs text-gray-400 mt-1">Overrides the primary credential's API key if set</p>
-              </div>
-            )}
-
-            <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Base URL Override <span class="text-gray-500">(optional)</span></label>
-              <input
-                type="text"
-                value={formData.internal_base_url}
-                onInput={(e) => handleInputChange('internal_base_url', (e.target as HTMLInputElement).value)}
-                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={defaultBaseUrl}
-              />
-              <p class="text-xs text-gray-400 mt-1">Default: {defaultBaseUrl}</p>
+        <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
+          {legacyCredentialNotice && (
+            <div class="bg-amber-900/30 border border-amber-700/50 rounded-md p-2">
+              <p class="text-xs text-amber-200">{legacyCredentialNotice}</p>
             </div>
-
-            <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Upstream Model Name <span class="text-red-400">*</span></label>
-              <input
-                type="text"
-                value={formData.internal_model}
-                onInput={(e) => handleInputChange('internal_model', (e.target as HTMLInputElement).value)}
-                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-                placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : selectedProvider === 'deepseek' ? 'deepseek-chat' : 'gpt-4'}
-              />
-              <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
+          )}
+          <MultiCredentialEditor
+            credentials={formData.credentials}
+            availableCredentials={credentials}
+            loading={loadingCredentials}
+            onChange={handleCredentialRowsChange}
+            onNavigateToCredentials={onNavigateToCredentials}
+          />
+          {selectedProvider && (
+            <div class="mt-2 flex items-center gap-2">
+              <span class="text-xs text-gray-400">Provider:</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
+                {getProviderName(selectedProvider)}
+              </span>
             </div>
+          )}
+          {selectedCredential?.base_url && (
+            <p class="text-xs text-gray-500 mt-1">
+              Credential base URL: <span class="text-gray-400">{selectedCredential.base_url}</span>
+            </p>
+          )}
 
-            {/* Secondary Upstream Model - for retry */}
+          {formData.credentials[0]?.credential_id && (
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-1">
-                Secondary Upstream Model <span class="text-gray-500 font-normal">(optional)</span>
+                API Key Override <span class="text-gray-500">(optional, overrides the primary credential's API key)</span>
               </label>
               <input
-                type="text"
-                value={formData.secondary_upstream_model}
-                onInput={(e) => handleInputChange('secondary_upstream_model', (e.target as HTMLInputElement).value)}
-                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 
-                       focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-shadow"
-                placeholder="e.g., glm-4-flash (optional retry model)"
+                type="password"
+                value={formData.internal_api_key}
+                onInput={(e) => handleInputChange('internal_api_key', (e.target as HTMLInputElement).value)}
+                class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+                placeholder="Overrides the primary credential's API key if set"
               />
-              <p class="text-xs text-gray-400 mt-1">
-                Upstream model to use for retries when the primary fails (e.g., faster/cheaper model). 
-                Leave empty to retry with the same model.
-              </p>
+              <p class="text-xs text-gray-400 mt-1">Overrides the primary credential's API key if set</p>
             </div>
+          )}
 
-            {/* Peak Hour Auto-Switch Section */}
-            <div class="border-t border-gray-600/50 pt-3">
-              <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
-                <label class="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.peak_hour_enabled}
-                    onInput={(e) => handleInputChange('peak_hour_enabled', (e.target as HTMLInputElement).checked)}
-                    class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-gray-800"
-                  />
-                  <span class="text-gray-300 font-medium">Enable Peak Hour Switch</span>
-                </label>
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">Base URL Override <span class="text-gray-500">(optional)</span></label>
+            <input
+              type="text"
+              value={formData.internal_base_url}
+              onInput={(e) => handleInputChange('internal_base_url', (e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+              placeholder={defaultBaseUrl}
+            />
+            <p class="text-xs text-gray-400 mt-1">Default: {defaultBaseUrl}</p>
+          </div>
 
-                {formData.peak_hour_enabled && (
-                  <div class="space-y-3 pl-6">
-                    {/* Peak Hour Errors */}
-                    {peakHourErrors.length > 0 && (
-                      <div class="bg-red-900/30 border border-red-700/50 rounded-md p-2">
-                        {peakHourErrors.map((err, i) => (
-                          <p key={i} class="text-xs text-red-300">{err}</p>
-                        ))}
-                      </div>
-                    )}
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">Upstream Model Name <span class="text-red-400">*</span></label>
+            <input
+              type="text"
+              value={formData.internal_model}
+              onInput={(e) => handleInputChange('internal_model', (e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+              placeholder={selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'zhipu' ? 'glm-4' : selectedProvider === 'deepseek' ? 'deepseek-chat' : 'gpt-4'}
+            />
+            <p class="text-xs text-gray-400 mt-1">Actual model name at the provider (e.g., "gpt-4o" for OpenAI)</p>
+          </div>
 
-                    {/* Time Window Inputs */}
-                    <div class="flex gap-4">
-                      <div class="flex-1">
-                        <label class="block text-sm font-medium text-gray-300 mb-1">
-                          Peak Hour Start <span class="text-red-400">*</span>
-                        </label>
-                        <input
-                          type="time"
-                          value={formData.peak_hour_start}
-                          onInput={(e) => handleInputChange('peak_hour_start', (e.target as HTMLInputElement).value)}
-                          class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
-                        />
-                      </div>
-                      <div class="flex-1">
-                        <label class="block text-sm font-medium text-gray-300 mb-1">
-                          Peak Hour End <span class="text-red-400">*</span>
-                        </label>
-                        <input
-                          type="time"
-                          value={formData.peak_hour_end}
-                          onInput={(e) => handleInputChange('peak_hour_end', (e.target as HTMLInputElement).value)}
-                          class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
-                        />
-                      </div>
-                    </div>
-                    <p class="text-xs text-gray-400 mt-1">Times in local timezone (with selected offset from UTC)</p>
+          {/* Secondary Upstream Model - for retry */}
+          <div>
+            <label class="block text-sm font-medium text-gray-300 mb-1">
+              Secondary Upstream Model <span class="text-gray-500 font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={formData.secondary_upstream_model}
+              onInput={(e) => handleInputChange('secondary_upstream_model', (e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 
+                     focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-shadow"
+              placeholder="e.g., glm-4-flash (optional retry model)"
+            />
+            <p class="text-xs text-gray-400 mt-1">
+              Upstream model to use for retries when the primary fails (e.g., faster/cheaper model). 
+              Leave empty to retry with the same model.
+            </p>
+          </div>
 
-                    {/* Timezone Selector */}
-                    <div>
-                      <label class="block text-sm font-medium text-gray-300 mb-1">
-                        Timezone Offset
-                      </label>
-                      <select
-                        value={formData.peak_hour_timezone}
-                        onChange={(e) => handleInputChange('peak_hour_timezone', (e.target as HTMLSelectElement).value)}
-                        class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
-                      >
-                        {TIMEZONE_OFFSETS.map(tz => (
-                          <option key={tz.value} value={tz.value}>{tz.label}</option>
-                        ))}
-                      </select>
-                      <p class="text-xs text-gray-400 mt-1">Offset from UTC (e.g., +8 for China, +5.5 for India)</p>
-                    </div>
-
-                    {/* Peak Hour Model Name */}
-                    <div>
-                      <label class="block text-sm font-medium text-gray-300 mb-1">
-                        Peak Hour Model Name <span class="text-red-400">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.peak_hour_model}
-                        onInput={(e) => handleInputChange('peak_hour_model', (e.target as HTMLInputElement).value)}
-                        class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
-                        placeholder="gpt-4o-mini"
-                      />
-                      <p class="text-xs text-gray-400 mt-1">Model to use during peak hours (e.g., faster/cheaper model)</p>
-                    </div>
-
-                    {/* Live Status Indicator */}
-                    {formData.peak_hour_start && formData.peak_hour_end && formData.peak_hour_model && (
-                      <div class={`rounded-md px-3 py-2 text-xs font-medium ${
-                        peakHourActive
-                          ? 'bg-red-900/40 border border-red-700/50 text-red-200'
-                          : 'bg-green-900/40 border border-green-700/50 text-green-200'
-                      }`}>
-                        <div class="flex items-center gap-2">
-                          <span class={`w-2 h-2 rounded-full ${
-                            peakHourActive
-                              ? 'bg-red-500 animate-pulse'
-                              : 'bg-green-500'
-                          }`}></span>
-                          <span>
-                            Currently using: <span class="font-semibold">{
-                              peakHourActive
-                                ? formData.peak_hour_model
-                                : formData.internal_model
-                            }</span> ({
-                              peakHourActive
-                                ? 'peak hour'
-                                : 'off-peak'
-                            })
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Exclude from Ultimate Model Switching */}
-            <div class="border-t border-gray-600/50 pt-3">
-              <label class="flex items-start gap-2 cursor-pointer">
+          {/* Peak Hour Auto-Switch Section */}
+          <div class="border-t border-gray-600/50 pt-3">
+            <div class="bg-gray-800/50 rounded-md p-4 space-y-3 border border-gray-600/50">
+              <label class="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={formData.exclude_from_ultimate_switching}
-                  onInput={(e) => handleInputChange('exclude_from_ultimate_switching', (e.target as HTMLInputElement).checked)}
-                  class="w-4 h-4 mt-0.5 rounded border-gray-600 bg-gray-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-gray-800"
+                  checked={formData.peak_hour_enabled}
+                  onInput={(e) => handleInputChange('peak_hour_enabled', (e.target as HTMLInputElement).checked)}
+                  class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-gray-800"
                 />
-                <div>
-                  <span class="text-gray-300 font-medium">Exclude from Ultimate Model Switching</span>
-                  <p class="text-xs text-gray-400 mt-0.5">
-                    When enabled, this model will never trigger ultimate model switching, even for duplicate requests
-                  </p>
-                </div>
+                <span class="text-gray-300 font-medium">Enable Peak Hour Switch</span>
               </label>
-            </div>
 
-            <div class="pt-2 flex items-center gap-2">
-              <button
-                onClick={handleTestConnection}
-                class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-md transition-colors text-sm font-medium"
-                disabled={!canTestConnection || testing}
-                title="Tests against the primary credential only"
-              >
-                {testing ? 'Testing...' : 'Test Connection'}
-              </button>
-              <span class="text-xs text-gray-500">Tests against the primary credential only.</span>
+              {formData.peak_hour_enabled && (
+                <div class="space-y-3 pl-6">
+                  {/* Peak Hour Errors */}
+                  {peakHourErrors.length > 0 && (
+                    <div class="bg-red-900/30 border border-red-700/50 rounded-md p-2">
+                      {peakHourErrors.map((err, i) => (
+                        <p key={i} class="text-xs text-red-300">{err}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Time Window Inputs */}
+                  <div class="flex gap-4">
+                    <div class="flex-1">
+                      <label class="block text-sm font-medium text-gray-300 mb-1">
+                        Peak Hour Start <span class="text-red-400">*</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={formData.peak_hour_start}
+                        onInput={(e) => handleInputChange('peak_hour_start', (e.target as HTMLInputElement).value)}
+                        class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
+                      />
+                    </div>
+                    <div class="flex-1">
+                      <label class="block text-sm font-medium text-gray-300 mb-1">
+                        Peak Hour End <span class="text-red-400">*</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={formData.peak_hour_end}
+                        onInput={(e) => handleInputChange('peak_hour_end', (e.target as HTMLInputElement).value)}
+                        class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
+                      />
+                    </div>
+                  </div>
+                  <p class="text-xs text-gray-400 mt-1">Times in local timezone (with selected offset from UTC)</p>
+
+                  {/* Timezone Selector */}
+                  <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">
+                      Timezone Offset
+                    </label>
+                    <select
+                      value={formData.peak_hour_timezone}
+                      onChange={(e) => handleInputChange('peak_hour_timezone', (e.target as HTMLSelectElement).value)}
+                      class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
+                    >
+                      {TIMEZONE_OFFSETS.map(tz => (
+                        <option key={tz.value} value={tz.value}>{tz.label}</option>
+                      ))}
+                    </select>
+                    <p class="text-xs text-gray-400 mt-1">Offset from UTC (e.g., +8 for China, +5.5 for India)</p>
+                  </div>
+
+                  {/* Peak Hour Model Name */}
+                  <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">
+                      Peak Hour Model Name <span class="text-red-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.peak_hour_model}
+                      onInput={(e) => handleInputChange('peak_hour_model', (e.target as HTMLInputElement).value)}
+                      class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-shadow"
+                      placeholder="gpt-4o-mini"
+                    />
+                    <p class="text-xs text-gray-400 mt-1">Model to use during peak hours (e.g., faster/cheaper model)</p>
+                  </div>
+
+                  {/* Live Status Indicator */}
+                  {formData.peak_hour_start && formData.peak_hour_end && formData.peak_hour_model && (
+                    <div class={`rounded-md px-3 py-2 text-xs font-medium ${
+                      peakHourActive
+                        ? 'bg-red-900/40 border border-red-700/50 text-red-200'
+                        : 'bg-green-900/40 border border-green-700/50 text-green-200'
+                    }`}>
+                      <div class="flex items-center gap-2">
+                        <span class={`w-2 h-2 rounded-full ${
+                          peakHourActive
+                            ? 'bg-red-500 animate-pulse'
+                            : 'bg-green-500'
+                        }`}></span>
+                        <span>
+                          Currently using: <span class="font-semibold">{
+                            peakHourActive
+                              ? formData.peak_hour_model
+                              : formData.internal_model
+                          }</span> ({
+                            peakHourActive
+                              ? 'peak hour'
+                              : 'off-peak'
+                          })
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
-        )}
+
+          {/* Exclude from Ultimate Model Switching */}
+          <div class="border-t border-gray-600/50 pt-3">
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={formData.exclude_from_ultimate_switching}
+                onInput={(e) => handleInputChange('exclude_from_ultimate_switching', (e.target as HTMLInputElement).checked)}
+                class="w-4 h-4 mt-0.5 rounded border-gray-600 bg-gray-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-gray-800"
+              />
+              <div>
+                <span class="text-gray-300 font-medium">Exclude from Ultimate Model Switching</span>
+                <p class="text-xs text-gray-400 mt-0.5">
+                  When enabled, this model will never trigger ultimate model switching, even for duplicate requests
+                </p>
+              </div>
+            </label>
+          </div>
+
+          <div class="pt-2 flex items-center gap-2">
+            <button
+              onClick={handleTestConnection}
+              class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white rounded-md transition-colors text-sm font-medium"
+              disabled={!canTestConnection || testing}
+              title="Tests against the primary credential only"
+            >
+              {testing ? 'Testing...' : 'Test Connection'}
+            </button>
+            <span class="text-xs text-gray-500">Tests against the primary credential only.</span>
+          </div>
+        </div>
 
         <div class="flex justify-end gap-3 pt-2">
           <button

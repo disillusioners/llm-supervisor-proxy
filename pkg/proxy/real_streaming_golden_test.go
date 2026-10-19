@@ -132,18 +132,24 @@ func genAnthropicPassthrough(t *testing.T, variant string) (string, string) {
 	return rec.Body.String(), rec.Header().Get("Content-Type")
 }
 
-// genAnthropicExternal runs the named variant through the
-// Anthropic→OpenAI-wire external translation path with header-present.
-func genAnthropicExternal(t *testing.T, variant string) (string, string) {
+// genAnthropicTranslation runs the named variant through the E2E
+// Anthropic→OpenAI-wire INTERNAL translation path: the client hits
+// /v1/messages and the proxy resolves an internal openai-provider model
+// pointed at the mock upstream, then translates the OpenAI-wire stream
+// back to Anthropic wire. Renamed from genAnthropicExternal in
+// remove-external-upstream P5 — the raw external passthrough (env
+// UPSTREAM_URL, no resolution) is deleted; this is the surviving
+// equivalent, exercised through the real boundary resolution.
+func genAnthropicTranslation(t *testing.T, variant string) (string, string) {
 	t.Helper()
 	fixture := fixtureSet()[variant]
 	upstream := httptest.NewServer(fixture.handler())
 	t.Cleanup(upstream.Close)
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
-	t.Setenv("UPSTREAM_URL", upstream.URL)
 	mgr, _ := config.NewManager()
 	modelsCfg := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
 	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
@@ -191,7 +197,7 @@ func genOpenAIRace(t *testing.T, variant string) (string, string) {
 	fixture := fixtureSet()[variant]
 	h, _ := newTestHandler(t, fixture.handler(), models.NewModelsConfig())
 
-	reqHTTP := makeRequest(t, simpleBody("mock-model", true))
+	reqHTTP := makeRequest(t, simpleBody("test-model", true))
 	reqHTTP.Header.Set("X-LLMProxy-Buffer-Response", "true")
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, reqHTTP)
@@ -226,12 +232,13 @@ func goldenRegistry() []goldenGen {
 			gen:  func(t *testing.T) (string, string) { return genAnthropicPassthrough(t, variant) },
 		})
 	}
-	// Path 2 — Anthropic→OpenAI-wire external translation.
+	// Path 2 — Anthropic→OpenAI-wire internal translation (E2E through the
+	// boundary resolution; renamed from anthropic_external_* in P5).
 	for _, variant := range []string{"text", "thinking", "tool_call", "usage", "role_only", "usage_first", "comment_first"} {
 		variant := variant
 		out = append(out, goldenGen{
-			name: "anthropic_external_" + variant,
-			gen:  func(t *testing.T) (string, string) { return genAnthropicExternal(t, variant) },
+			name: "anthropic_translation_" + variant,
+			gen:  func(t *testing.T) (string, string) { return genAnthropicTranslation(t, variant) },
 		})
 	}
 	// Path 3 — Anthropic→OpenAI-wire internal translation
@@ -321,13 +328,13 @@ func truncate(s string, n int) string {
 // eventRecorder wraps events.Bus.Subscribe to collect all events for
 // a request, optionally filtering by request ID.
 type eventRecorder struct {
-	ch    chan events.Event
-	bus   *events.Bus
-	mu    sync.Mutex
-	got   []events.Event
-	done  chan struct{}
-	once  sync.Once
-	hits  map[string]int // event type -> count (guarded by mu)
+	ch   chan events.Event
+	bus  *events.Bus
+	mu   sync.Mutex
+	got  []events.Event
+	done chan struct{}
+	once sync.Once
+	hits map[string]int // event type -> count (guarded by mu)
 }
 
 func newEventRecorder(bus *events.Bus) *eventRecorder {
@@ -375,7 +382,7 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		// Rebuild handler with fresh bus + store.
 		h2, _ := newTestHandler(t, fixtureSet()["text"].handler(), models.NewModelsConfig())
 		rec := newEventRecorder(h2.bus)
-		req := makeRequest(t, simpleBody("mock-model", true))
+		req := makeRequest(t, simpleBody("test-model", true))
 		if bufMode {
 			req.Header.Set("X-LLMProxy-Buffer-Response", "true")
 		} else {
@@ -446,9 +453,11 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		t.Cleanup(upstream.Close)
 
 		t.Setenv("APPLY_ENV_OVERRIDES", "true")
-		t.Setenv("UPSTREAM_URL", upstream.URL)
 		mgr, _ := config.NewManager()
 		modelsCfg := models.NewModelsConfig()
+		// remove-external-upstream P5: internal openai fixture (the
+		// deleted external passthrough resolved nothing).
+		seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
 		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
 
 		rec := newEventRecorder(h.bus)

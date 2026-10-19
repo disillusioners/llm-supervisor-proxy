@@ -80,20 +80,18 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// Get config snapshot
 	conf := h.config.Clone()
 
-	// For external upstream (default): always OpenAI protocol (LiteLLM)
-	// For internal upstream: detection happens inside attemptAnthropicModel via credential.Provider
+	// remove-external-upstream P1 (task 4, A13): the external-default
+	// target URL (built from the retired global upstream setting) is GONE.
+	// There is no external upstream anymore: the translated-OpenAI body
+	// below is consumed by the INTERNAL arms — the OpenAI-protocol
+	// internal handler (doAnthropicInternalRequest) builds its own
+	// upstream target from the resolved credential, and the
+	// anthropic-provider passthrough branch rebuilds arc.targetURL from
+	// the credential's base URL before every doAnthropicRequest. The
+	// initial arc.targetURL is therefore an empty placeholder that is
+	// always overwritten before use (attemptAnthropicModel sets it on
+	// the passthrough path; the OpenAI-internal path never reads it).
 	isAnthropicUpstream := false
-
-	// Build target URL — strip trailing /v1 from upstream to avoid double path
-	cleanURL := strings.TrimSuffix(conf.UpstreamURL, "/v1")
-	cleanURL = strings.TrimSuffix(cleanURL, "/")
-
-	var targetURL string
-	if isAnthropicUpstream {
-		targetURL = cleanURL + "/v1/messages"
-	} else {
-		targetURL = cleanURL + "/v1/chat/completions"
-	}
 
 	// Build request body
 	var requestBody []byte
@@ -175,6 +173,38 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// remove-external-upstream P1 — unknown/non-internal 404 gate,
+	// Anthropic twin (task 2). INLINE mirror of the OpenAI gate in
+	// initRequestContext (handler_functions.go) — a SEPARATE gate site,
+	// not a shared helper (the two inits are parallel by design).
+	// Same condition, same load-bearing `!Internal` conjunct (the SOLE
+	// 404 mechanism for the permanent legacy rows: GetModel never
+	// filters `enabled` for non-group rows and migration 032 never
+	// flips internal). Envelope is the ROUTE'S family (Anthropic):
+	// not_found_error + code model_not_found — NOT the misroute guard's
+	// 400-class invalid_request_error literal (R7). reqLog finalized
+	// here (Status failed + Error/EndTime/Duration, re-Add
+	// overwrite-by-ID) — the log row was added "running" above.
+	if resolvedModel == nil || !resolvedModel.Internal {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", originalModel)
+		reqLog.Status = "failed"
+		reqLog.Error = notFoundMsg
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = reqLog.EndTime.Sub(startTime).String()
+		h.store.Add(reqLog)
+		h.publishEvent("model_not_found", map[string]interface{}{
+			"id":              reqID,
+			"model":           originalModel,
+			"outcome":         "model_not_found",
+			"upstream_status": 0,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+			"not_found_error", "model_not_found", notFoundMsg))
+		return
+	}
+
 	// Decision Models commission / §3.1 site 8 — NEW post-resolve
 	// guard on the /v1/messages (Anthropic) route. The route had
 	// ZERO misroute checks today (a verified gap); a decision
@@ -214,11 +244,11 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		modelList = append(modelList, resolvedModel.ID)
 		modelList = append(modelList, resolvedModel.FallbackChain...)
 	} else {
-		// External/unknown model — no fallback chain, just use raw name
+		// Unknown model — no fallback chain, just use raw name
 		modelList = []string{originalModel}
 	}
 
-	// Set ModelID to the resolved ID (or raw name for external models)
+	// Set ModelID to the resolved ID (or raw name for unknown models)
 	if resolvedModel != nil {
 		conf.ModelID = resolvedModel.ID
 	} else {
@@ -227,8 +257,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 
 	// Create anthropic request context
 	arc := &anthropicRequestContext{
-		conf:                conf,
-		targetURL:           targetURL,
+		conf: conf,
+		// targetURL: empty placeholder — the retired external-default
+		// build is gone (task 4/A13); the passthrough arm rebuilds it
+		// from the credential before every doAnthropicRequest, and the
+		// OpenAI-internal arm never reads it.
+		targetURL:           "",
 		reqID:               reqID,
 		startTime:           startTime,
 		reqLog:              reqLog,
@@ -274,7 +308,11 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arcTokenID = authToken.ID
 		}
 	}
-	if resolvedModel != nil && resolvedModel.Internal {
+	// remove-external-upstream P1 (A11 anthropic twin, R11): the
+	// `.Internal` conjunct is GONE — the boundary 404 gate above already
+	// rejected unknown/non-internal models, so every surviving
+	// resolvedModel is internal. The nil check stays (defensive).
+	if resolvedModel != nil {
 		arc.leadingUserRun = credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(anthropicReq.Messages))
 		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
 		// authenticated token's ID for salted conversation keys (the
@@ -473,8 +511,15 @@ loop:
 // attemptAnthropicModel attempts a single model request
 func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicRequestContext, modelIndex int, currentModel string) bool {
 	// Check if this model uses internal upstream
+	// remove-external-upstream P1 (task 4, A15): every resolved model is
+	// internal by construction (the boundary 404 gate rejects
+	// unknown/non-internal models before the loop), so the internal test
+	// collapses to model-config presence. modelConfig can still be nil
+	// for a DANGLING fallback-chain name (legacy chains hold e.g.
+	// 'MiniMax-M2.5') — that case falls to the well-formed attempt
+	// failure below.
 	modelConfig := directGetModel(&arc.conf, currentModel)
-	isInternal := modelConfig != nil && modelConfig.Internal
+	isInternal := modelConfig != nil
 
 	if arc.baseCtx.Err() != nil {
 		return true // Client disconnected
@@ -518,7 +563,19 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				credAPIKey = cred.ResolveAPIKey()
 			}
 			if passthroughURL == "" {
-				passthroughURL = arc.conf.UpstreamURL
+				// remove-external-upstream P1 (task 4, A16): the
+				// global-upstream fallback is GONE. An anthropic-provider
+				// credential/model with no base URL anywhere is a
+				// configuration error — fail the ATTEMPT (well-formed,
+				// mirroring the deleted pkg/ultimatemodel
+				// handler_external.go "upstream URL not configured"
+				// shape) and let the model fallback loop / all-models
+				// 502 envelope carry it. Never forward to a retired
+				// global upstream.
+				log.Printf("Anthropic passthrough attempt for model %s failed: no upstream URL configured (credential base_url and internal_base_url both empty)", modelConfig.ID)
+				arc.lastError = []byte("upstream URL not configured for anthropic passthrough")
+				arc.lastStatusCode = http.StatusBadGateway
+				return false
 			}
 			cleanURL := strings.TrimSuffix(passthroughURL, "/v1")
 			cleanURL = strings.TrimSuffix(cleanURL, "/")
@@ -618,7 +675,17 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 			success = h.doAnthropicInternalRequest(w, arc, modelConfig)
 		}
 	} else {
-		success = h.doAnthropicRequest(w, arc)
+		// remove-external-upstream P1 (task 4): the external dispatch
+		// arm is GONE. This branch is still REACHABLE — a dangling
+		// fallback-chain name resolves to nil modelConfig (R5; legacy
+		// chains hold e.g. 'MiniMax-M2.5'). Fail the ATTEMPT with a
+		// well-formed error so the model fallback loop / all-models
+		// 502 envelope carries it — never a panic, never a silent
+		// forward to a retired global upstream.
+		log.Printf("Anthropic attempt for model %q failed: no internal model config (dangling reference; external upstream path removed)", currentModel)
+		arc.lastError = []byte(fmt.Sprintf("model %q has no internal model config", currentModel))
+		arc.lastStatusCode = http.StatusBadGateway
+		return false
 	}
 
 	return success
@@ -641,24 +708,12 @@ func (h *Handler) doAnthropicRequest(w http.ResponseWriter, arc *anthropicReques
 	}
 
 	// Resolve credential and set auth header
-	if arc.conf.UpstreamCredentialID != "" {
-		req.Header.Del("Authorization")
-		req.Header.Del("X-API-Key")
-		req.Header.Del("x-api-key")
-		req.Header.Del("api-key")
-
-		cred := arc.conf.ModelsConfig.GetCredential(arc.conf.UpstreamCredentialID)
-		if cred != nil {
-			apiKey := cred.ResolveAPIKey()
-			if apiKey != "" {
-				if arc.isAnthropicUpstream {
-					req.Header.Set("x-api-key", apiKey)
-				} else {
-					req.Header.Set("Authorization", "Bearer "+apiKey)
-				}
-			}
-		}
-	} else if arc.credentialAPIKey != "" {
+	// remove-external-upstream P1 (task 4, A17): the
+	// env-credential (retired upstream-credential setting) arm is GONE
+	// with the external
+	// path; the passthrough branch authenticates with the model's OWN
+	// resolved credential (arc.credentialAPIKey).
+	if arc.credentialAPIKey != "" {
 		// Internal model passthrough: use credential's API key
 		req.Header.Del("Authorization")
 		req.Header.Del("X-API-Key")
@@ -876,6 +931,18 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, w, arc.isStream, arc.conversationKey)
 	if err != nil {
 		log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
+		// remove-external-upstream P5: a NON-STREAM provider error is
+		// raised before any wire write (handleNonStream returns the
+		// provider error without writing — internal_handler.go:424-427),
+		// so nothing has reached the client. Surface it through the
+		// standard error-envelope path (lastError/lastStatusCode → the
+		// caller's `!headersSent` branch) instead of returning true,
+		// which would leave the client with an empty 200.
+		if !arc.isStream {
+			arc.lastError = []byte(err.Error())
+			arc.lastStatusCode = http.StatusBadGateway
+			return false
+		}
 		// Mid-stream error path (NB2): the InternalHandler's
 		// case "error" arm has already run translator.Finalize()
 		// + emitted a well-formed Anthropic error event on the wire
@@ -1066,11 +1133,9 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 	debugLog("Request ID: %s", arc.reqID)
 	debugLog("Model: %s", arc.originalModel)
 
-	// Construct the per-request translator. The arc.liveTranslator
-	// field is unused here (the external variant drives via raw SSE
-	// lines from the scanner) but we still install it for symmetry
-	// with the internal variant's wiring and for tests that inspect
-	// it.
+	// Construct the per-request translator. Installed lazily so tests
+	// can pre-inspect/inject it; the scanner-driven loop below feeds
+	// it raw SSE lines via ProcessChunk.
 	if arc.liveTranslator == nil {
 		arc.liveTranslator = translator.NewIncrementalStreamTranslator(arc.originalModel)
 	}
@@ -1500,10 +1565,10 @@ type anthropicRequestContext struct {
 	accumulatedToolCalls []store.ToolCall
 
 	// liveTranslator is set ONLY in live mode (bufferMode==false) by
-	// doAnthropicInternalRequest. The internal-variant handler drives
-	// it from the typed-event entry (ProcessEvent); the external
-	// variant drives it from the upstream scanner via
-	// handleAnthropicLiveStreamResponse. nil in buffered mode.
+	// doAnthropicInternalRequest. The internal typed-event path drives
+	// it via ProcessEvent; the scanner-driven live handler
+	// (handleAnthropicLiveStreamResponse) feeds it raw SSE lines via
+	// ProcessChunk. nil in buffered mode.
 	liveTranslator *translator.IncrementalStreamTranslator
 }
 

@@ -113,7 +113,7 @@ func TestHeartbeat_DuringLongStream(t *testing.T) {
 		name:       "Heartbeat_DuringLongStream",
 		upstreamFn: slowUpstream,
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -171,7 +171,7 @@ func TestHeartbeat_ConcurrentWriteSafety(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	h.HandleChatCompletions(trackingRecorder, req)
 
@@ -232,7 +232,7 @@ func TestHeartbeat_StoppedBeforeFinalWrite(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	h.HandleChatCompletions(timingRecorder, req)
 
@@ -284,7 +284,7 @@ func TestHeartbeat_GoroutineCleanup(t *testing.T) {
 
 	// Run multiple requests
 	for i := 0; i < 5; i++ {
-		body := simpleBody("mock-model", true)
+		body := simpleBody("test-model", true)
 		req := makeRequest(t, body)
 		rr := httptest.NewRecorder()
 		h.HandleChatCompletions(rr, req)
@@ -329,7 +329,7 @@ func TestHeartbeat_ClientDisconnect(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 
 	// Create a recorder and cancel context mid-stream

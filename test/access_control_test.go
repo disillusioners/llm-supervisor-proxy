@@ -131,7 +131,7 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 			Name:          m.name,
 			Enabled:       true,
 			Internal:      true,
-			Credentials: models.TestRefs("test-cred"),
+			Credentials:   models.TestRefs("test-cred"),
 			InternalModel: m.internalModel,
 		}); err != nil {
 			t.Fatalf("Failed to add model %s: %v", m.id, err)
@@ -166,7 +166,7 @@ func setupAccessControlEnv(t *testing.T) *accessControlTestEnv {
 // makeAccessControlRequest creates a request with a specific model ID
 func makeAccessControlRequest(modelID, plaintextToken string) *http.Request {
 	body := map[string]interface{}{
-		"model": modelID,
+		"model":  modelID,
 		"stream": false,
 		"messages": []interface{}{
 			map[string]interface{}{
@@ -248,7 +248,12 @@ func TestA2_AllowedModelMismatch(t *testing.T) {
 	}
 }
 
-// TestA3_UnknownModelFailClosed verifies that unknown models with restricted tokens are DENIED
+// TestA3_UnknownModelFailClosed verifies that unknown models are DENIED.
+// remove-external-upstream P1/P5: the boundary 404 gate runs BEFORE auth
+// (the deleted external passthrough is what used to let an unresolved
+// model past the access check), so an unknown model is now a clean 404
+// model_not_found — still fail-closed (zero upstream calls), with the
+// restricted token never consulted.
 func TestA3_UnknownModelFailClosed(t *testing.T) {
 	env := setupAccessControlEnv(t)
 	ctx := context.Background()
@@ -259,14 +264,13 @@ func TestA3_UnknownModelFailClosed(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with a model name that does NOT exist in the DB
-	// "Unknown Model" is not in modelsConfig → should be 403 (fail-closed)
+	// Request with a model that does NOT exist in the DB.
 	req := makeAccessControlRequest("Unknown Model", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden (fail-closed for unknown model with restrictions), got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 Not Found (fail-closed for unknown model), got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// Verify error structure
@@ -278,11 +282,8 @@ func TestA3_UnknownModelFailClosed(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected 'error' field in response")
 	}
-	if errorObj["type"] != "access_denied" {
-		t.Errorf("Expected error type 'access_denied', got %v", errorObj["type"])
-	}
-	if errorObj["message"] != "model not allowed for this token" {
-		t.Errorf("Expected error message 'model not allowed for this token', got %v", errorObj["message"])
+	if errorObj["code"] != "model_not_found" {
+		t.Errorf("Expected error code 'model_not_found', got %v", errorObj["code"])
 	}
 }
 
@@ -297,13 +298,10 @@ func TestA4_OpenAccessUnrestricted(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with a model name that does NOT exist in the DB
-	// Since no restrictions, external/unknown models should be allowed
-	// Note: This test needs to work with external upstream mode
-	// The handler allows unknown models when allowed_models is nil
-
-	// First test with known model (should work)
-	req := makeAccessControlRequest("First Model", plaintext)
+	// remove-external-upstream P5: requests resolve by model ID, so use
+	// the registered ID (the previous "First Model" name only ever
+	// worked because the deleted external arm forwarded it unresolved).
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
@@ -326,8 +324,8 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with any model
-	req := makeAccessControlRequest("First Model", plaintext)
+	// Request with any registered model (post-P1: resolve by ID)
+	req := makeAccessControlRequest("model-id-1", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
@@ -339,9 +337,12 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 	}
 }
 
-// TestA5_RestrictedToken_ExternalModel_Denied verifies that external models
-// (not in DB) are denied when the token has allowed_models restrictions (fail-closed)
-func TestA5_RestrictedToken_ExternalModel_Denied(t *testing.T) {
+// TestA5_RestrictedToken_UnknownModel_Denied verifies that an unknown model
+// is denied (fail-closed) even for a token with allowed_models
+// restrictions. remove-external-upstream P1/P5: the boundary 404 gate runs
+// BEFORE auth, so the denial is a 404 model_not_found — the unrestricted
+// external dispatch that this test used to exercise is gone.
+func TestA5_RestrictedToken_UnknownModel_Denied(t *testing.T) {
 	env := setupAccessControlEnv(t)
 	ctx := context.Background()
 
@@ -351,14 +352,13 @@ func TestA5_RestrictedToken_ExternalModel_Denied(t *testing.T) {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
 
-	// Request with "Some External Model" (not in DB)
-	// External model + restricted token = 403 Forbidden (fail-closed)
+	// Request with a model that is NOT in the DB.
 	req := makeAccessControlRequest("Some External Model", plaintext)
 	rr := httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden (external model with restricted token), got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 Not Found (fail-closed for unknown model), got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	// Verify error structure
@@ -370,11 +370,8 @@ func TestA5_RestrictedToken_ExternalModel_Denied(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected 'error' field in response")
 	}
-	if errorObj["type"] != "access_denied" {
-		t.Errorf("Expected error type 'access_denied', got %v", errorObj["type"])
-	}
-	if errorObj["message"] != "model not allowed for this token" {
-		t.Errorf("Expected error message 'model not allowed for this token', got %v", errorObj["message"])
+	if errorObj["code"] != "model_not_found" {
+		t.Errorf("Expected error code 'model_not_found', got %v", errorObj["code"])
 	}
 }
 
@@ -492,7 +489,6 @@ func TestC1_IsModelAllowedReceivesIDs(t *testing.T) {
 	}
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Edge Case Tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -508,7 +504,7 @@ func TestEdge_IDMatchesName(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-cred"),
+		Credentials:   models.TestRefs("test-cred"),
 		InternalModel: "gpt-4",
 	}); err != nil {
 		t.Fatalf("Failed to add model: %v", err)
@@ -550,13 +546,17 @@ func TestEdge_CaseSensitiveIDMatch(t *testing.T) {
 		t.Errorf("Expected 200 OK for 'model-id-1', got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// Request with "MODEL-ID-1" (uppercase) → should fail (case-sensitive ID matching)
+	// Request with "MODEL-ID-1" (uppercase) → must fail. remove-external-
+	// upstream P1/P5: the boundary resolution is exact (case-sensitive)
+	// and runs BEFORE auth, so a case mismatch is a clean 404 — the
+	// deleted external arm is what used to forward it unresolved and let
+	// the access check produce the 403.
 	req = makeAccessControlRequest("MODEL-ID-1", plaintext)
 	rr = httptest.NewRecorder()
 	env.handler.HandleChatCompletions(rr, req)
 
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden for 'MODEL-ID-1' (case mismatch), got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 Not Found for 'MODEL-ID-1' (case mismatch, fail-closed), got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -575,9 +575,9 @@ func TestEdge_MultipleModelsAllowed(t *testing.T) {
 		modelID     string
 		shouldAllow bool
 	}{
-		{"model-id-1", true},    // allowed
-		{"model-id-2", true},    // allowed
-		{"ultimate-id", false},  // not allowed
+		{"model-id-1", true},   // allowed
+		{"model-id-2", true},   // allowed
+		{"ultimate-id", false}, // not allowed
 	}
 
 	for _, tc := range testCases {

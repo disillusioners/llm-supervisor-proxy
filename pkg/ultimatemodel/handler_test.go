@@ -29,7 +29,6 @@ func newMockConfigManager() *mockConfigManager {
 	return &mockConfigManager{
 		cfg: config.Config{
 			Version:           "test",
-			UpstreamURL:       "http://localhost:4001",
 			Port:              4321,
 			IdleTimeout:       config.Duration(60 * time.Second),
 			StreamDeadline:    config.Duration(110 * time.Second),
@@ -44,10 +43,6 @@ func newMockConfigManager() *mockConfigManager {
 
 func (m *mockConfigManager) Get() config.Config {
 	return m.cfg
-}
-
-func (m *mockConfigManager) GetUpstreamURL() string {
-	return m.cfg.UpstreamURL
 }
 
 func (m *mockConfigManager) GetPort() int {
@@ -778,7 +773,6 @@ func TestSendRetryExhaustedError_EmptyHash(t *testing.T) {
 
 func TestExecute_ModelNotFound(t *testing.T) {
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = "http://localhost:9999" // Won't be used
 	modelsCfg := newMockModelsConfig()
 	// Don't add the model
 	h := NewHandler(cfg, modelsCfg, nil, nil)
@@ -806,173 +800,6 @@ func TestExecute_ModelNotFound(t *testing.T) {
 	}
 }
 
-// TestExecute_ExternalNonStreaming tests non-streaming external requests
-func TestExecute_ExternalNonStreaming(t *testing.T) {
-	// Create a mock upstream server
-	upstreamCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamCalled = true
-
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]interface{}{
-			"id":      "chatcmpl-test",
-			"object":  "chat.completion",
-			"created": time.Now().Unix(),
-			"model":   "ultimate-model",
-			"choices": []map[string]interface{}{
-				{
-					"index":         0,
-					"message":       map[string]interface{}{"role": "assistant", "content": "Hello!"},
-					"finish_reason": "stop",
-				},
-			},
-			"usage": map[string]interface{}{
-				"prompt_tokens":     10,
-				"completion_tokens": 5,
-				"total_tokens":      15,
-			},
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL // Use mock server
-	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r.Header.Set("Authorization", "Bearer test-key")
-	body := map[string]interface{}{
-		"model": "original-model",
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "Hello"},
-		},
-	}
-
-	hash := "testhash123"
-	headersSent := false
-	execResult, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
-
-	if err != nil {
-		t.Errorf("Execute returned error: %v", err)
-	}
-
-	if !upstreamCalled {
-		t.Error("Upstream server should have been called")
-	}
-
-	if !headersSent {
-		t.Error("Headers should have been sent")
-	}
-
-	if execResult == nil {
-		t.Error("ExecuteResult should not be nil")
-	} else if execResult.Usage == nil {
-		t.Error("Usage should be extracted")
-	} else {
-		if execResult.Usage.PromptTokens != 10 {
-			t.Errorf("PromptTokens = %d, want 10", execResult.Usage.PromptTokens)
-		}
-		if execResult.Usage.CompletionTokens != 5 {
-			t.Errorf("CompletionTokens = %d, want 5", execResult.Usage.CompletionTokens)
-		}
-	}
-
-	// Check the attempt counter was cleared by the success-path Remove:
-	// the next attempt for this hash restarts at 1 (schedule re-arms)
-	if count := h.hashCache.RecordAttempt(hash); count != 1 {
-		t.Errorf("Attempt count should restart at 1 after success, got %d", count)
-	}
-}
-
-// TestExecute_ExternalStreaming tests streaming external requests
-func TestExecute_ExternalStreaming(t *testing.T) {
-	// Create a mock upstream server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-
-		// Send SSE chunks
-		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
-		flusher.Flush()
-
-		time.Sleep(10 * time.Millisecond)
-		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n")
-		flusher.Flush()
-
-		time.Sleep(10 * time.Millisecond)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
-	}))
-	defer server.Close()
-
-	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
-	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	body := map[string]interface{}{
-		"model":    "original-model",
-		"stream":   true,
-		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
-	}
-
-	hash := "streamhash"
-	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
-
-	if err != nil {
-		t.Errorf("Execute returned error: %v", err)
-	}
-
-	if !headersSent {
-		t.Error("Headers should have been sent")
-	}
-}
-
-// TestExecute_UpstreamError tests handling of upstream errors
-func TestExecute_UpstreamError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Internal Server Error"))
-	}))
-	defer server.Close()
-
-	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
-	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
-	h := NewHandler(cfg, modelsCfg, nil, nil)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	body := map[string]interface{}{
-		"model":    "original-model",
-		"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
-	}
-
-	hash := "errorhash"
-	headersSent := false
-	_, err := h.Execute(context.Background(), w, r, body, "original-model", hash, &headersSent, nil, "")
-
-	if err == nil {
-		t.Error("Execute should return error for upstream failure")
-	}
-
-	// Error should contain upstream status code
-	if !strings.Contains(err.Error(), "upstream returned") {
-		t.Errorf("Error should contain 'upstream returned', got: %v", err)
-	}
-}
-
-// TestExecute_ContextCancellation tests cancellation via context
 func TestExecute_ContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(2 * time.Second) // Simulate slow response
@@ -981,7 +808,6 @@ func TestExecute_ContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 	cfg.cfg.MaxGenerationTime = config.Duration(50 * time.Millisecond) // Short timeout
 	modelsCfg := newMockModelsConfig()
 	modelsCfg.AddModel(models.ModelConfig{ID: "ultimate-model", Name: "ultimate-model", Enabled: true, Internal: false})
@@ -1169,8 +995,7 @@ func TestExecuteInternal_NonStreaming(t *testing.T) {
 
 func TestUltimateModelError(t *testing.T) {
 	err := &ultimateModelError{
-		message:  "test error",
-		internal: true,
+		message: "test error",
 	}
 
 	if err.Error() != "test error" {
@@ -1328,13 +1153,12 @@ func TestExecute_PerTokenOverride_NonStream(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model" // Global config model
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	// Add both the global model and the per-token override model
 	// Note: TokenForm.tsx stores model.name as value, not model.id
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
-	modelsCfg.AddModel(models.ModelConfig{ID: "token-override-model", Name: "token-override", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
+	modelsCfg.AddInternalModel("token-override-model", "openai", "test-key", server.URL, "token-override-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1393,11 +1217,10 @@ func TestExecute_PerTokenOverride_Stream(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
-	modelsCfg.AddModel(models.ModelConfig{ID: "token-stream-override", Name: "token-stream", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
+	modelsCfg.AddInternalModel("token-stream-override", "openai", "test-key", server.URL, "token-stream-override")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1460,10 +1283,9 @@ func TestExecute_PerTokenOverride_Empty_UsesGlobal(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1527,10 +1349,9 @@ func TestExecute_PerTokenOverrideNil_UsesGlobal(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1566,7 +1387,7 @@ func TestExecute_PerTokenOverride_NonexistentModel(t *testing.T) {
 
 	modelsCfg := newMockModelsConfig()
 	// Only add the global model, NOT the per-token override model
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1603,7 +1424,7 @@ func TestExecute_PerTokenOverride_NonexistentModel_Streaming(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1664,17 +1485,13 @@ func TestExecute_GlobalConfig_UsesGetModelByID(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-model-id" // Global config uses ID
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
 	// Add model with ID that matches global config, but different NAME
-	// Global config should find it by ID (GetModel)
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "global-model-id",
-		Name:     "totally-different-name", // Different from ID
-		Enabled:  true,
-		Internal: false,
-	})
+	// Global config should find it by ID (GetModel). remove-external-
+	// upstream P5: the row must carry a resolvable internal config too.
+	modelsCfg.AddInternalModel("global-model-id", "openai", "test-key", server.URL, "global-model-id")
+	modelsCfg.models["global-model-id"].Name = "totally-different-name" // Different from ID
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1739,17 +1556,12 @@ func TestExecute_PerTokenOverride_WithID(t *testing.T) {
 
 	cfg := newMockConfigManager()
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", server.URL, "global-ultimate-model")
 	// Add model with UUID-like ID for per-token override
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "550e8400-e29b-41d4-a716-446655440000", // UUID-like ID
-		Name:     "per-token-model",                      // Human-readable name
-		Enabled:  true,
-		Internal: false,
-	})
+	modelsCfg.AddInternalModel("550e8400-e29b-41d4-a716-446655440000", "openai", "test-key", server.URL, "550e8400-e29b-41d4-a716-446655440000")
+	modelsCfg.models["550e8400-e29b-41d4-a716-446655440000"].Name = "per-token-model" // Human-readable name
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1784,7 +1596,7 @@ func TestExecute_PerTokenOverride_WithID_Nonexistent(t *testing.T) {
 	cfg.cfg.UltimateModel.ModelID = "global-ultimate-model"
 
 	modelsCfg := newMockModelsConfig()
-	modelsCfg.AddModel(models.ModelConfig{ID: "global-ultimate-model", Name: "global", Enabled: true, Internal: false})
+	modelsCfg.AddInternalModel("global-ultimate-model", "openai", "test-key", "http://127.0.0.1:0", "global-ultimate-model")
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 
@@ -1844,22 +1656,14 @@ func TestExecute_AllLookupsUseID(t *testing.T) {
 	defer server.Close()
 
 	cfg := newMockConfigManager()
-	cfg.cfg.UpstreamURL = server.URL
 
 	modelsCfg := newMockModelsConfig()
-	// Add models with different ID and NAME
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "global-model-id",
-		Name:     "Global Model",
-		Enabled:  true,
-		Internal: false,
-	})
-	modelsCfg.AddModel(models.ModelConfig{
-		ID:       "per-token-model-id",
-		Name:     "Per Token Model",
-		Enabled:  true,
-		Internal: false,
-	})
+	// Add models with different ID and NAME. remove-external-upstream P5:
+	// each row also carries a resolvable internal config.
+	modelsCfg.AddInternalModel("global-model-id", "openai", "test-key", server.URL, "global-model-id")
+	modelsCfg.models["global-model-id"].Name = "Global Model"
+	modelsCfg.AddInternalModel("per-token-model-id", "openai", "test-key", server.URL, "per-token-model-id")
+	modelsCfg.models["per-token-model-id"].Name = "Per Token Model"
 
 	h := NewHandler(cfg, modelsCfg, nil, nil)
 

@@ -99,7 +99,8 @@ export function GroupModelsTab({
     try {
       if (formMode === 'add') {
         // The form has already stamped kind/internal/
-        // exclude_from_ultimate_switching (G1/G7), the empty
+        // exclude_from_ultimate_switching (G1/G7; internal is now
+        // unconditionally true repo-wide), the empty
         // fallback_chain (G6), and the empty credentials list (groups
         // carry none); the parent's addModel just forwards the body to
         // POST /fe/api/models.
@@ -110,7 +111,8 @@ export function GroupModelsTab({
         // kind/internal are stamped here too (not just inherited from
         // the hook's client-side merge) because the BE PUT decodes the
         // body wholesale — a sparse PUT that dropped kind would skip
-        // the group validation arm entirely.
+        // the group validation arm entirely. (internal is now
+        // unconditionally true repo-wide.)
         await onUpdateModel(id, {
           name,
           enabled,

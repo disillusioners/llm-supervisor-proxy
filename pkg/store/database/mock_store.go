@@ -63,13 +63,6 @@ func (m *MockConfigManager) Get() config.Config {
 	return m.Config
 }
 
-// GetUpstreamURL returns the upstream URL from the current config.
-func (m *MockConfigManager) GetUpstreamURL() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Config.UpstreamURL
-}
-
 // GetPort returns the port from the current config.
 func (m *MockConfigManager) GetPort() int {
 	m.mu.RLock()

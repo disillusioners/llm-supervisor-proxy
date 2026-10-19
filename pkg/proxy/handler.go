@@ -39,8 +39,6 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		UpstreamURL:            cfg.UpstreamURL,
-		UpstreamCredentialID:   cfg.UpstreamCredentialID,
 		IdleTimeout:            cfg.IdleTimeout.Duration(),
 		StreamDeadline:         cfg.StreamDeadline.Duration(),
 		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
@@ -64,15 +62,13 @@ func (c *Config) Clone() ConfigSnapshot {
 }
 
 type ConfigSnapshot struct {
-	UpstreamURL          string
-	UpstreamCredentialID string
-	IdleTimeout          time.Duration
-	StreamDeadline       time.Duration // Time limit before picking best buffer and continuing streaming
-	MaxGenerationTime    time.Duration // Absolute hard timeout for entire request lifecycle
-	MaxStreamBufferSize  int
-	ModelsConfig         models.ModelsConfigInterface
-	LoopDetection        config.LoopDetectionConfig
-	ToolRepair           toolrepair.Config
+	IdleTimeout         time.Duration
+	StreamDeadline      time.Duration // Time limit before picking best buffer and continuing streaming
+	MaxGenerationTime   time.Duration // Absolute hard timeout for entire request lifecycle
+	MaxStreamBufferSize int
+	ModelsConfig        models.ModelsConfigInterface
+	LoopDetection       config.LoopDetectionConfig
+	ToolRepair          toolrepair.Config
 
 	// Race Retry
 	RaceRetryEnabled   bool
@@ -127,7 +123,8 @@ type Handler struct {
 // If credEngine is nil, the race coordinator's nil-engine branch serves
 // the legacy single-credential fast path (Phase 2 / E-3); behavior is
 // byte-identical to pre-Phase-3.
-//   credEngine may be nil.
+//
+//	credEngine may be nil.
 func NewHandler(
 	config *Config,
 	bus *events.Bus,
@@ -340,28 +337,16 @@ func (h *Handler) authenticate(r *http.Request) (*auth.AuthToken, bool) {
 	return token, true
 }
 
-// requiresInternalAuth checks if any model in the request chain uses internal upstream
-// and therefore requires client API key validation
+// requiresInternalAuth checks whether the request requires client API key
+// validation. remove-external-upstream P1 (A10): every resolvable model is
+// internal by construction (the boundary 404 gate rejects unknown and
+// non-internal models before this point), so the old modelList walk for
+// internal-ness is provably always-true and collapses to the tokenStore
+// check. Auth semantics preserved: when a tokenStore is present every
+// request authenticates exactly as known-internal models did before.
 func (h *Handler) requiresInternalAuth(rc *requestContext) bool {
 	// If tokenStore is nil, auth is disabled
-	if h.tokenStore == nil {
-		return false
-	}
-
-	// Check if resolved model (primary) is internal
-	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
-		return true
-	}
-
-	// Check all models in the chain (IDs for resolved models, raw names for external)
-	for _, modelID := range rc.modelList {
-		modelConfig := rc.conf.ModelsConfig.GetModel(modelID)
-		if modelConfig != nil && modelConfig.Internal {
-			return true
-		}
-	}
-
-	return false
+	return h.tokenStore != nil
 }
 
 // sendAuthError sends a 401 Unauthorized JSON error response
@@ -440,9 +425,29 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			})
 			return
 		}
-		if errors.Is(err, ErrInvalidUpstreamURL) {
-			http.Error(w, "Invalid Upstream URL configuration", http.StatusInternalServerError)
-		} else if errors.Is(err, ErrReadBodyFailed) {
+		if errors.Is(err, ErrModelNotFound) {
+			// remove-external-upstream P1 — unknown/non-internal model.
+			// Real-API 404 semantics (R7): invalid_request_error + code
+			// model_not_found — NOT the decision/imggen server-error
+			// shape. rc is nil on this path, so the event fields ride on
+			// the sentinel (modelNotFoundError) — parity with the
+			// config_store_unavailable site above. The request log was
+			// already finalized at the gate (initRequestContext).
+			evtID, evtModel := "", ""
+			var mnfe *modelNotFoundError
+			if errors.As(err, &mnfe) {
+				evtID, evtModel = mnfe.reqID, mnfe.model
+			}
+			h.publishEvent("model_not_found", map[string]interface{}{
+				"id":              evtID,
+				"model":           evtModel,
+				"outcome":         "model_not_found",
+				"upstream_status": 0,
+			})
+			h.sendError(w, http.StatusNotFound, fmt.Sprintf("model '%s' not found", evtModel), "invalid_request_error", "model_not_found")
+			return
+		}
+		if errors.Is(err, ErrReadBodyFailed) {
 			http.Error(w, "Failed to read body", http.StatusInternalServerError)
 		} else if errors.Is(err, ErrInvalidJSON) {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
@@ -540,10 +545,13 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// key — they receive the unsalted key because rc.tokenID is the
 	// zero value "" (the requestContext defaults it to empty). The
 	// key is NEVER computed in initRequestContext (tokenID is unset
-	// there at handler.go:352). The key is only meaningful for
-	// INTERNAL models — external / unknown models leave
-	// rc.conversationKey == "" and the engine path is skipped at every
-	// call site.
+	// there at handler.go:352).
+	//
+	// remove-external-upstream P1 (A11): the `resolvedModel.Internal`
+	// conjunct is GONE — every model that reaches this point is
+	// internal by construction (the boundary 404 gate rejects
+	// unknown/non-internal models). The nil check stays (the gate
+	// guarantees non-nil, but the compiler cannot see it).
 	//
 	// W-2 + C2: when no leading user run was extracted (assistant-first
 	// conversation, system-only, tool entry before any user message,
@@ -552,7 +560,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// per W-2; ComputeConversationKey never returns "" by itself, so
 	// the caller owns this gate). The DEBUG log below is the canonical
 	// C2 observability mechanism.
-	if rc.resolvedModel != nil && rc.resolvedModel.Internal {
+	if rc.resolvedModel != nil {
 		if rc.leadingUserRun == "" {
 			rc.conversationKey = ""
 			log.Printf("[LB] empty conversationKey for modelID=%s; engine will pick fresh per request (no binding stored)",
@@ -618,7 +626,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// === MODEL ACCESS CHECK ===
 	// Check if the requested model is allowed for this token
 	// This check happens AFTER authentication for internal models
-	// For external models: only check if token has restrictions (fail-closed)
+	// For unknown models: only check if token has restrictions (fail-closed)
 	//
 	// load-balance-groups §3.4 (Q1 tail): the allow-list evaluates the
 	// CLIENT-REQUESTED ID STRING — for a claimed ID (claims-first
@@ -674,7 +682,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			h.sendModelNotAllowedError(w, rc.reqLog.Model)
 			return
 		}
-		// else: model not in DB and no restrictions → allow (external/open models)
+		// else: model not in DB and no restrictions → allow
 	}
 	// === END MODEL ACCESS CHECK ===
 
@@ -688,6 +696,36 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	if forceUltimate && authToken != nil && rc.ultimateModelEnabled {
 		rc.ultimateModelEnabled = true
 		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
+	}
+
+	// remove-external-upstream P1 fixup — DEFERRED boundary 404 (leader
+	// ruling 2026-10-18): initRequestContext deferred the
+	// unknown/non-internal 404 gate for this request because it carries
+	// X-Force-Ultimate-Model (auth had not run at the gate, so ultimate
+	// entitlement could not be checked there). The interception above is
+	// the hoist: an ultimate-entitled token takes the raw-passthrough
+	// path regardless of body-model resolvability (pre-P1 semantics;
+	// option (c) rejected). Any other header-bearing request — no
+	// ultimate handler wired, unauthenticated, or a token without
+	// ultimate_model_enabled — is a normal request and keeps the full
+	// 404 gate, fired here with the boundary site's exact envelope and
+	// event payload. rc.modelNotFoundDeferred implies the header was
+	// present at init, so the forceUltimate conjunct is belt-and-braces.
+	if rc.modelNotFoundDeferred && !(h.ultimateHandler != nil && forceUltimate && rc.ultimateModelEnabled) {
+		notFoundMsg := fmt.Sprintf("model '%s' not found", rc.reqLog.Model)
+		rc.reqLog.Status = "failed"
+		rc.reqLog.Error = notFoundMsg
+		rc.reqLog.EndTime = time.Now()
+		rc.reqLog.Duration = time.Since(rc.startTime).String()
+		h.store.Add(rc.reqLog)
+		h.publishEvent("model_not_found", map[string]interface{}{
+			"id":              rc.reqID,
+			"model":           rc.reqLog.Model,
+			"outcome":         "model_not_found",
+			"upstream_status": 0,
+		})
+		h.sendError(w, http.StatusNotFound, notFoundMsg, "invalid_request_error", "model_not_found")
+		return
 	}
 
 	// Header-driven flag for MiniMax reasoning_details split-mode translation.
@@ -760,7 +798,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			var result ultimatemodel.ShouldTriggerResult
 			if forceUltimate {
 				result = h.ultimateHandler.ForceTrigger(msgMaps)
-				log.Printf("[DEBUG] ForceTrigger hash=%s", result.Hash[:8])
+				log.Printf("[DEBUG] ForceTrigger hash=%s", shortHash8(result.Hash))
 			} else {
 				result = h.ultimateHandler.ShouldTrigger(msgMaps)
 			}
@@ -768,11 +806,11 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				// Exclusion gate: skip ultimate model switching for excluded models
 				// Note: forceUltimate always bypasses exclusion (admin override)
 				if !forceUltimate && rc.resolvedModel != nil && rc.resolvedModel.ExcludeFromUltimateSwitching {
-					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, result.Hash[:8])
+					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, shortHash8(result.Hash))
 					h.publishEvent("ultimate_model_excluded", map[string]interface{}{
 						"id":    rc.reqID,
 						"model": rc.resolvedModel.ID,
-						"hash":  result.Hash[:8],
+						"hash":  shortHash8(result.Hash),
 					})
 					// Fall through to normal flow (no ultimate model switch)
 				} else {
@@ -786,7 +824,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						}
 
 						log.Printf("[UltimateModel] Attempt limit exhausted for hash=%s (attempt %d/%d)",
-							result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
+							shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
 
 						// Determine if streaming
 						isStream := false
@@ -813,7 +851,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						// max-retries config knob.
 						h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
 							"id":            rc.reqID,
-							"hash":          result.Hash[:8],
+							"hash":          shortHash8(result.Hash),
 							"current_retry": result.CurrentAttempt,
 							"max_retries":   result.MaxAttempts,
 						})
@@ -830,7 +868,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
 					}
 					log.Printf("[UltimateModel] Triggered for duplicate request (schedule milestone), using %s, hash=%s, attempt=%d/%d",
-						ultimateModelID, result.Hash[:8], result.CurrentAttempt, result.MaxAttempts)
+						ultimateModelID, shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
 
 					// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
 
@@ -850,7 +888,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 						"id":             rc.reqID,
 						"ultimate_model": ultimateModelID,
 						"original_model": rc.reqLog.Model,
-						"hash":           result.Hash[:8],
+						"hash":           shortHash8(result.Hash),
 						"current_retry":  result.CurrentAttempt,
 						"max_retries":    result.MaxAttempts,
 					})
@@ -1934,4 +1972,17 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 		}
 	}
+}
+
+// shortHash8 returns the first 8 characters of an ultimate-model hash,
+// or the input unchanged when it is shorter. The hash is EMPTY when
+// shouldTriggerInternal early-returns (no global ultimate model id, or an
+// empty message list), so slicing it blindly panics — as it did on the
+// ForceTrigger debug log before this guard. Every Hash[:8] site goes
+// through here.
+func shortHash8(h string) string {
+	if len(h) < 8 {
+		return h
+	}
+	return h[:8]
 }

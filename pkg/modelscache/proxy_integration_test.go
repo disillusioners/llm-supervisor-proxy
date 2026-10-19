@@ -108,7 +108,7 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	// The external upstream records hits — a hit during the outage
+	// The stub upstream records hits — a hit during the outage
 	// scenario for an UNKNOWN model would be the misroute class.
 	var upstreamHits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -170,20 +170,37 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 		t.Errorf("body must carry config_store_unavailable: %s", w.Body.String())
 	}
 	if upstreamHits.Load() != 0 {
-		t.Fatalf("MISROUTE: unknown-model request reached the external upstream during the outage")
+		t.Fatalf("MISROUTE: unknown-model request reached the upstream during the outage")
 	}
 
-	// A KNOWN (cached) configured-external model still serves
-	// end-to-end while the DB is down — zero failures for known
-	// entities (criterion A). Seed it directly on the manager
-	// (out-of-band write), let the cache learn it while "up", then
-	// re-enter the outage.
-	if err := mgr.AddModel(models.ModelConfig{ID: "ext-configured", Name: "ext-configured", Enabled: true}); err != nil {
-		t.Fatalf("seed external model: %v", err)
+	// A KNOWN (cached) model still serves end-to-end while the DB is
+	// down — zero failures for known entities (criterion A).
+	// remove-external-upstream P1: the former "configured external"
+	// fixture is now a regular INTERNAL model — the stamp requires a
+	// credential, and its base_url points at the same httptest upstream
+	// the internal arm will hit, so the "serves exactly once during the
+	// outage" assertion keeps its meaning. Seed it directly on the
+	// manager (out-of-band write), let the cache learn it while "up",
+	// then re-enter the outage.
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-ext", Provider: "openai", APIKey: "sk-ext", BaseURL: upstream.URL}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{ID: "ext-configured", Name: "ext-configured", Enabled: true,
+		InternalModel: "ext-x",
+		Credentials:   models.TestRefs("cred-ext"),
+	}); err != nil {
+		t.Fatalf("seed model: %v", err)
 	}
 	src.down = false
 	if m := cached.GetModel("ext-configured"); m == nil {
-		t.Fatalf("cache must learn the configured external model while up")
+		t.Fatalf("cache must learn the configured internal model while up")
+	}
+	// Warm the credential into the decorator's credsByID too — the
+	// internal arm's resolution needs BOTH the model entry and the
+	// credential while the DB is down (the old external passthrough
+	// needed neither).
+	if cached.GetCredential("cred-ext") == nil {
+		t.Fatalf("cache must learn the credential while up")
 	}
 	src.down = true
 
@@ -192,6 +209,6 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 		t.Fatalf("known configured model must serve during the outage, got %d: %s", w2.Code, w2.Body.String())
 	}
 	if upstreamHits.Load() != 1 {
-		t.Errorf("known external model should hit the upstream exactly once, got %d", upstreamHits.Load())
+		t.Errorf("known internal model should hit the upstream exactly once, got %d", upstreamHits.Load())
 	}
 }

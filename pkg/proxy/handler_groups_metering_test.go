@@ -113,6 +113,13 @@ func newMeteringHarness(t *testing.T, upstream http.HandlerFunc) (*groupHarness,
 	mgrCfg := newTestManagerWithConfig(t, up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	counter := newMeteringCounter(t)
+	// remove-external-upstream P5: member chat rows need a credential
+	// (write-stamp forces Internal=true); point it at the stub upstream.
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: up.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential(%s): %v", p5FixtureCredID, err)
+	}
 	g := &groupHarness{mgr: mgr, h: NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine()), up: up, bus: bus}
 	g.clean = func() {
 		up.Close()
@@ -218,7 +225,7 @@ func TestHandlerGroups_Am25_Metering_RowShapes(t *testing.T) {
 		g, counter := newMeteringHarness(t, meteringStubUpstream(""))
 		defer g.close()
 		if err := g.mgr.AddModel(models.ModelConfig{
-			ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: false,
+			ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("AddModel(solo): %v", err)
 		}
@@ -303,12 +310,12 @@ func TestHandlerGroups_Am25_Metering_RowShapes(t *testing.T) {
 		defer g.close()
 		if err := g.mgr.AddModel(models.ModelConfig{
 			ID: "fb-a", Name: "FB-A", Enabled: true, Kind: models.KindChat,
-			Internal: false, FallbackChain: []string{"fb-b"},
+			Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID), FallbackChain: []string{"fb-b"},
 		}); err != nil {
 			t.Fatalf("AddModel(fb-a): %v", err)
 		}
 		if err := g.mgr.AddModel(models.ModelConfig{
-			ID: "fb-b", Name: "FB-B", Enabled: true, Kind: models.KindChat, Internal: false,
+			ID: "fb-b", Name: "FB-B", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID),
 		}); err != nil {
 			t.Fatalf("AddModel(fb-b): %v", err)
 		}
@@ -337,12 +344,12 @@ func TestHandlerGroups_Am25_Metering_StreamSite_NonGroupFallback(t *testing.T) {
 	defer g.close()
 	if err := g.mgr.AddModel(models.ModelConfig{
 		ID: "fb-a", Name: "FB-A", Enabled: true, Kind: models.KindChat,
-		Internal: false, FallbackChain: []string{"fb-b"},
+		Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID), FallbackChain: []string{"fb-b"},
 	}); err != nil {
 		t.Fatalf("AddModel(fb-a): %v", err)
 	}
 	if err := g.mgr.AddModel(models.ModelConfig{
-		ID: "fb-b", Name: "FB-B", Enabled: true, Kind: models.KindChat, Internal: false,
+		ID: "fb-b", Name: "FB-B", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "stub-model", Credentials: models.TestRefs(p5FixtureCredID),
 	}); err != nil {
 		t.Fatalf("AddModel(fb-b): %v", err)
 	}

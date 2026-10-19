@@ -20,15 +20,31 @@ npm run dev
 ```
 
 ### 3. Start the Supervisor Proxy (Active Mode)
-We need to point the proxy to our mock loop server and disable `shadow_mode` so it actively interrupts the loops.
+We need to disable `shadow_mode` so it actively interrupts the loops.
 ```bash
 go build -o supervisor-proxy ./cmd/main.go
 
-UPSTREAM_URL=http://localhost:4002 \
 PORT=4321 \
 LOOP_DETECTION_SHADOW_MODE=false \
 ./supervisor-proxy
 ```
+
+### 4. Register the mock loop server as an internal model
+The proxy no longer has a global external upstream URL (`UPSTREAM_URL` is
+retired) — every request is routed through the internal credential of the
+model it names. So instead of pointing the proxy at the mock server with an
+env var, register the mock server as a model:
+
+1. Open the Web UI at `http://localhost:4321` → **Settings → Credentials**
+   and create a credential whose **Base URL** is `http://localhost:4002`
+   (the mock loop server) — provider `openai`, any placeholder API key.
+2. **Settings → Models** and add a chat model with id `gpt-4` that uses that
+   credential and has **Upstream Model Name** `gpt-4`.
+
+That is the internal-credential equivalent of the retired
+`UPSTREAM_URL=http://localhost:4002`: an internal model + credential whose
+`base_url` is the mock upstream. The `"model": "gpt-4"` requests below then
+route to the mock loop server.
 
 ---
 

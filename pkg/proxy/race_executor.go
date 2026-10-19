@@ -1,15 +1,13 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,21 +24,6 @@ import (
 
 // newProviderClient is a variable that can be overridden in tests to inject mock providers
 var newProviderClient = providers.NewProvider
-
-// raceExtProviderIsMiniMax returns true iff cfg.UpstreamCredentialID is set
-// and resolves to a credential whose Provider matches providers.ProviderMiniMax
-// (case-insensitive). Empty UpstreamCredentialID or missing credential ⇒
-// false (D3). Used by the race-external 5th-site gate (P1-8 b).
-func raceExtProviderIsMiniMax(cfg *ConfigSnapshot) bool {
-	if cfg == nil || cfg.ModelsConfig == nil || cfg.UpstreamCredentialID == "" {
-		return false
-	}
-	cred := cfg.ModelsConfig.GetCredential(cfg.UpstreamCredentialID)
-	if cred == nil {
-		return false
-	}
-	return strings.ToLower(cred.Provider) == strings.ToLower(string(providers.ProviderMiniMax))
-}
 
 // raceIntProviderIsMiniMax returns true iff the resolved internal model
 // has a primary credential (Credentials[0]) that resolves to a MiniMax
@@ -140,13 +123,22 @@ func executeRequest(
 		}
 	}
 
-	// External upstream: use the configured upstream URL. The
-	// load-balance-groups / Q15 event still fires here for the
-	// GROUP pick (when the picked member is external) — the
-	// publish site owns BOTH paths so the event coverage is
-	// complete (mirror of model_credential_selected's
-	// W-1/newlyBound-only asymmetry for the member axis).
-	err := executeExternalRequest(ctx, cfg, originalReq, rawBody, req, interleaved)
+	// remove-external-upstream P1 (task 3) — the external arm is GONE.
+	// This branch is still REACHABLE (R5): the pre-032 group-member
+	// window plus dangling fallback-chain names (legacy rows' own chains
+	// hold e.g. 'MiniMax-M2.5') can land a non-internal / unresolved
+	// modelID here — isServableGroupMember does NOT check Internal
+	// (real in code, unreachable-in-prod per the inventory; both facts
+	// stated). Return a WELL-FORMED attempt error so the per-attempt
+	// path flows into the standard failure machinery (502 envelope via
+	// GetFinalErrorInfo) — never a panic, never an unreachable assert.
+	//
+	// The load-balance-groups / Q15 member event still fires here for
+	// the GROUP pick (when the picked member fails this check) — the
+	// publish site owns the member axis (mirror of the deleted
+	// external arm's publish-then-return shape; an unresolved member
+	// carries the zero ResolvedCredential via resolvedOK=false).
+	err := fmt.Errorf("model %q has no internal credential resolution; the external upstream path has been removed", req.modelID)
 	publishCredentialSelected(req)
 	return err
 }
@@ -168,12 +160,11 @@ func publishCredentialSelected(req *upstreamRequest) {
 		return
 	}
 	// load-balance-groups / Q15: the member event fires regardless
-	// of the credential resolution outcome — an EXTERNAL member
-	// never resolves a credential (resolvedOK=false) but its group
-	// pick may still be newlyBound. The payload's
-	// upstream_provider/upstream_model carry the resolved values
-	// when available (empty for external members — they have no
-	// internal resolution by construction).
+	// of the credential resolution outcome — a member with no
+	// resolvable credential (resolvedOK=false) may still have a
+	// newlyBound group pick. The payload's upstream_provider/upstream_model
+	// carry the resolved values when available (empty when unresolved —
+	// no internal resolution exists by construction).
 	if req.groupPick != nil && req.groupPick.NewlyBound && req.onMemberSelected != nil {
 		cred := req.resolved
 		if !req.resolvedOK {
@@ -268,7 +259,54 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	}, true
 }
 
-// executeInternalRequest handles requests to internal providers (bypassing external upstream).
+// toolRepairEventCallback builds the telemetry callback for the race
+// NON-STREAM repairer — the events.ToolRepairEvent ("tool_repair") publish
+// that the stream path exposes through InternalHandler.eventCallback
+// (internal_handler.go:364-368). The callback is nil-safe: a nil bus yields
+// a nil callback, which SetRepairer accepts.
+func toolRepairEventCallback(cfg *ConfigSnapshot, reqID int) toolrepair.RepairEventCallback {
+	bus := cfg.EventBus
+	if bus == nil {
+		return nil
+	}
+	return func(stats *toolrepair.RepairStats, results []*toolrepair.RepairResult) {
+		if stats == nil {
+			return
+		}
+		details := make([]events.RepairDetail, 0, len(results))
+		for _, r := range results {
+			if r == nil {
+				continue
+			}
+			details = append(details, events.RepairDetail{
+				ToolName:   r.ToolName,
+				Success:    r.Success,
+				Strategies: strings.Join(r.Strategies, ","),
+				Error:      r.Error,
+			})
+		}
+		strategies := make([]string, 0, len(stats.StrategiesUsed))
+		for name := range stats.StrategiesUsed {
+			strategies = append(strategies, name)
+		}
+		sort.Strings(strategies)
+		bus.Publish(events.Event{
+			Type:      "tool_repair",
+			Timestamp: time.Now().Unix(),
+			Data: events.ToolRepairEvent{
+				RequestID:      fmt.Sprintf("%d", reqID),
+				TotalToolCalls: stats.TotalToolCalls,
+				Repaired:       stats.Repaired,
+				Failed:         stats.Failed,
+				StrategiesUsed: strategies,
+				Duration:       stats.Duration.String(),
+				Details:        details,
+			},
+		})
+	}
+}
+
+// executeInternalRequest handles requests to internal providers.
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
 // entry, threaded via executeRequest). Drives the MiniMax
@@ -449,169 +487,21 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		normalizers.GetRegistry().ResetAll(normCtx)
 		return handleInternalStream(ctx, providerClient, providerReq, req, internalModel, normCtx, cfg.ToolRepair, cfg.StreamDeadline, rawBody)
 	}
+
+	// remove-external-upstream P5: wire the tool-call repairer onto the
+	// OpenAI provider for the NON-STREAM path only. (The former external
+	// arm's own non-stream repair helper is gone with the external arm;
+	// the internal arm's equivalent seam is the provider's own repairer
+	// — openai.go:158-180, the same wiring internal_handler.go:363-368
+	// uses.) Streaming repair is owned by the toolcall buffer in
+	// handleInternalStream, so it is deliberately NOT wired here (avoids
+	// double repair).
+	if cfg.ToolRepair.Enabled {
+		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
+			openaiProvider.SetRepairer(toolrepair.NewRepairer(&cfg.ToolRepair), toolRepairEventCallback(cfg, req.id))
+		}
+	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
-}
-
-// executeExternalRequest handles requests to external upstream (LiteLLM, etc.).
-//
-// Phase 3 / Task 24 (Round 3 — R3-7 scope guard): this env-only path is
-// UNCHANGED by credential load-balancing and rate-limit credential
-// failover. The cfg.UpstreamCredentialID resolution below uses the
-// deployment's single env credential — it is NOT model-owned, so a 429
-// here follows the existing model-racing behavior (no
-// ExcludeAndReselect, no cooldown, no modelTypeCredFailover spawn).
-// grep-guard: zero hits of ExcludeAndReselect / IsRateLimitError /
-// modelTypeCredFailover within this function.
-//
-// interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
-// entry, threaded via executeRequest). Drives the MiniMax
-// reasoning_details split-mode gate for race-external; when gated on, the
-// translator mutates bodyMap before re-marshalling.
-func executeExternalRequest(ctx context.Context, cfg *ConfigSnapshot, originalReq *http.Request, rawBody []byte, req *upstreamRequest, interleaved bool) error {
-	// 1. Prepare upstream request
-	// Check for test upstream header (for testing with mock servers)
-	upstreamURL := cfg.UpstreamURL
-
-	// Set the target URL to upstream
-	u, err := url.Parse(upstreamURL)
-	if err != nil {
-		return fmt.Errorf("invalid upstream URL: %w", err)
-	}
-	u.Path, _ = url.JoinPath(u.Path, "/v1/chat/completions")
-
-	// 1.5 Modify body to use current model ID
-	var bodyMap map[string]interface{}
-	finalBody := rawBody
-	if err := json.Unmarshal(rawBody, &bodyMap); err == nil {
-		bodyMap["model"] = req.modelID
-
-		// P1-8(b): 5th wiring site — race-external body-map mutation.
-		// Gate = interleaved && upstream credential is MiniMax. Empty
-		// UpstreamCredentialID ⇒ providerIsMiniMax=false (D3).
-		//
-		// The pre-existing model-override unmarshal (above) and marshal
-		// (below) run unconditionally regardless of the gate — the model
-		// field is always overwritten. The NEW translator call is the
-		// only mutation gated on interleaved && raceExtProviderIsMiniMax(cfg);
-		// gated-off means the translator is not invoked, so no new body
-		// change occurs beyond the pre-existing model-override behavior.
-		if interleaved && raceExtProviderIsMiniMax(cfg) {
-			if err := translator.TranslateRequestBody(bodyMap); err != nil {
-				return fmt.Errorf("race-external translator: %w", err)
-			}
-		}
-
-		if b, err := json.Marshal(bodyMap); err == nil {
-			finalBody = b
-		}
-	}
-	// Create fresh request with context and body
-	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(finalBody))
-	if err != nil {
-		return fmt.Errorf("failed to create upstream request: %w", err)
-	}
-
-	// Copy headers from original request
-	for k, v := range originalReq.Header {
-		// Skip standard proxy-unsafe headers
-		if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Host") || strings.HasPrefix(strings.ToLower(k), "x-llmproxy-") {
-			continue
-		}
-		// D4: NARROW strip of exactly x-proxy-interleaved-thinking on the
-		// race-external path. Case-insensitive via strings.EqualFold. The
-		// general x-proxy-* strip is REJECTED (would change flag-absent
-		// forwarding behavior — old clients never send this header, so
-		// the narrow strip preserves the flag-absent invariant). Mirrors
-		// the same strip in pkg/ultimatemodel/handler_external.go:79-87.
-		if strings.EqualFold(k, "x-proxy-interleaved-thinking") {
-			continue
-		}
-		upstreamReq.Header[k] = v
-	}
-	upstreamReq.Host = u.Host
-
-	// If UpstreamCredentialID is configured, resolve the credential and set auth header
-	// This allows the proxy to authenticate with external upstream providers
-	// using a different token than what the client provided
-	if cfg.UpstreamCredentialID != "" && cfg.ModelsConfig != nil {
-		// Remove all auth headers first to avoid conflicts
-		upstreamReq.Header.Del("Authorization")
-		upstreamReq.Header.Del("X-API-Key")
-		upstreamReq.Header.Del("x-api-key")
-		upstreamReq.Header.Del("api-key")
-
-		// Resolve credential
-		cred := cfg.ModelsConfig.GetCredential(cfg.UpstreamCredentialID)
-		if cred != nil {
-			apiKey := cred.ResolveAPIKey()
-			if apiKey != "" {
-				upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
-				log.Printf("[DEBUG] Race attempt %d: using upstream credential %s for authentication", req.id, cfg.UpstreamCredentialID)
-			}
-		} else {
-			log.Printf("[WARN] Race attempt %d: upstream credential %s not found", req.id, cfg.UpstreamCredentialID)
-		}
-	}
-
-	log.Printf("[DEBUG] Race attempt %d calling: %s (Host: %s)", req.id, upstreamReq.URL.String(), upstreamReq.Host)
-
-	client := &http.Client{
-		Timeout: 0, // Timeout is handled by context
-	}
-
-	// 2. Perform request
-	resp, err := client.Do(upstreamReq)
-	if err != nil {
-		return fmt.Errorf("upstream request failed: %w", err)
-	}
-
-	// Deferred function to close response body only if req.resp hasn't been
-	// cleared by cleanup() (which happens when Cancel() is called).
-	// This prevents double-close when both Cancel() and this defer execute.
-	defer func() {
-		req.mu.Lock()
-		if req.resp != nil && req.resp.Body != nil {
-			req.resp.Body.Close()
-			req.resp = nil
-		}
-		req.mu.Unlock()
-	}()
-
-	req.SetResp(resp)
-
-	// Track HTTP status code for error type detection
-	req.SetHTTPStatus(resp.StatusCode)
-
-	// 3. Check for immediate error
-	if resp.StatusCode >= 400 {
-		// Read response body for error details
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		bodyStr := string(bodyBytes)
-
-		// Check if the response body contains context overflow patterns
-		if models.IsContextOverflowError(fmt.Errorf("%s", bodyStr)) {
-			return fmt.Errorf("upstream returned error: %s - %s", resp.Status, bodyStr)
-		}
-
-		return fmt.Errorf("upstream returned error: %s", resp.Status)
-	}
-
-	// 4. Check if this is a streaming or non-streaming response
-	contentType := resp.Header.Get("Content-Type")
-	isStreaming := strings.Contains(contentType, "text/event-stream")
-
-	if !isStreaming {
-		// Non-streaming response: read entire body as single chunk
-		// (interleaved is threaded through P2-4 so the response
-		// translator's MiniMax gate is visible at the call site).
-		return handleNonStreamingResponse(ctx, cfg, resp, req, finalBody, interleaved)
-	}
-
-	// Streaming response
-	req.MarkStreaming()
-	// Detect provider for normalization
-	provider := normalizers.DetectProvider(cfg.ModelsConfig, req.modelID)
-	return handleStreamingResponse(ctx, cfg, resp, req, provider, finalBody, interleaved)
 }
 
 // handleInternalNonStream handles non-streaming requests for internal providers
@@ -1167,98 +1057,6 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 	return req, nil
 }
 
-// handleNonStreamingResponse reads a non-streaming JSON response
-//
-// interleaved is the X-Proxy-Interleaved-Thinking flag carried from
-// the race coordinator (via executeRequest → executeExternalRequest).
-// P2-4 (a): drives the response-side MiniMax reasoning_details
-// translator on the race-external non-stream path. The gate is
-// (interleaved && raceExtProviderIsMiniMax(cfg)) — short-circuits
-// BEFORE any parse (H5). Gated-off is a pure no-op (preserves
-// byte-identical negative-case invariant).
-func handleNonStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, rawBody []byte, interleaved bool) error {
-	// Limit body size to 10MB to prevent unbounded memory consumption
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return fmt.Errorf("read error: %w", err)
-	}
-
-	// Apply tool repair to non-streaming JSON response if enabled
-	if cfg.ToolRepair.Enabled {
-		repairedBody, repaired := repairToolCallArgumentsInNonStreamingResponse(body, cfg.ToolRepair)
-		if repaired {
-			body = repairedBody
-			log.Printf("[TOOL-REPAIR] Race attempt %d: repaired malformed tool_call arguments in non-streaming response", req.id)
-		}
-	}
-
-	// P2-4 (a): race-external non-stream — invoke the response
-	// translator on the upstream body BEFORE the final buffer add.
-	// Gate is (interleaved && raceExtProviderIsMiniMax(cfg)) — the
-	// provider check uses the same helper as the request-side gate
-	// (D3). Gate short-circuits BEFORE any parse, so gated-off
-	// preserves byte-identical behavior on this verbatim path.
-	if interleaved && raceExtProviderIsMiniMax(cfg) {
-		translated, terr := translator.TranslateNonStreamResponseBytes(body)
-		if terr != nil {
-			// §6.1 — non-stream KEEPS error return; caller
-			// (race_executor's coordinator) routes to
-			// WriteError 502 api_error. We return the wrapped
-			// error to surface the parse/shape failure to the
-			// client as an upstream error.
-			return fmt.Errorf("race-external response translator: %w", terr)
-		}
-		body = translated
-	}
-
-	// Extract usage from response and store it
-	var respMap map[string]interface{}
-	if err := json.Unmarshal(body, &respMap); err == nil {
-		if usageMap, ok := respMap["usage"].(map[string]interface{}); ok {
-			promptTokens := intValue(usageMap["prompt_tokens"])
-			completionTokens := intValue(usageMap["completion_tokens"])
-			totalTokens := intValue(usageMap["total_tokens"])
-			if promptTokens > 0 || completionTokens > 0 || totalTokens > 0 {
-				req.SetUsage(&TokenUsage{
-					PromptTokens:     promptTokens,
-					CompletionTokens: completionTokens,
-					TotalTokens:      totalTokens,
-				})
-			}
-		}
-	}
-
-	// If provider didn't return usage, use fallback token counting
-	if usage := req.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
-		if token.FallbackEnabled() {
-			tokenizer := token.GetTokenizer()
-			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
-			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
-			}
-			completionText := token.ExtractCompletionTextFromJSON(body)
-			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
-			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
-			}
-			req.SetUsage(&TokenUsage{
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      promptTokens + completionTokens,
-			})
-			log.Printf("[DEBUG][fallback-token-count] non-streaming: model=%s prompt=%d completion=%d total=%d",
-				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
-		}
-	}
-
-	// Add as single chunk (the non-streaming JSON response)
-	if buf := req.GetBuffer(); !buf.Add(body) {
-		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", req.modelID)
-	}
-
-	return nil
-}
-
 // getNormalizerDescription returns a human-readable description of what a normalizer fixes
 func getNormalizerDescription(normalizerName string) string {
 	switch normalizerName {
@@ -1303,12 +1101,13 @@ func intValue(v interface{}) int {
 // meter reads exactly ONE final value per stream ⇒ exactly ONE meter
 // increment, for every provider and every usage shape.
 //
-// Framing note (review): this raw-seam guard is DEFENSIVE-ONLY —
-// reachable only from the executeExternalRequest env-upstream path
-// (env-chosen provider ⇒ never opencode-go). The LOAD-BEARING F12 fix
-// is the typed seam (lastStreamUsage, pkg/providers/openai.go); and
-// SetUsage here is a single-slot overwrite read once per completion
-// (race_request.go), never an accumulator.
+// Framing note (review): this raw-seam guard is DEFENSIVE-ONLY since
+// the remove-external-upstream commission deleted the external
+// env-upstream path it used to guard — the raw SSE seam now has no
+// production caller (the internal arm consumes the typed seam). The
+// LOAD-BEARING F12 fix is the typed seam (lastStreamUsage,
+// pkg/providers/openai.go); SetUsage here is a single-slot overwrite
+// read once per completion (race_request.go), never an accumulator.
 func extractUsageFromSSEChunk(req *upstreamRequest, line []byte) {
 	// Check if this is a data line
 	const dataPrefix = "data: "
@@ -1371,389 +1170,4 @@ func getKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-// repairToolCallArgumentsInNonStreamingResponse repairs malformed JSON in tool_call arguments
-// within a non-streaming JSON response. Returns the (potentially modified) body and whether it was modified.
-func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepair.Config) ([]byte, bool) {
-	if !config.Enabled {
-		return body, false
-	}
-
-	repairer := toolrepair.NewRepairer(&config)
-
-	// Try to parse as JSON
-	var resp map[string]interface{}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return body, false
-	}
-
-	// Navigate to choices[].message.tool_calls
-	choices, ok := resp["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return body, false
-	}
-
-	modified := false
-
-	for _, choice := range choices {
-		choiceMap, ok := choice.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		message, ok := choiceMap["message"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		toolCalls, ok := message["tool_calls"].([]interface{})
-		if !ok || len(toolCalls) == 0 {
-			continue
-		}
-
-		// Process each tool call
-		for _, tc := range toolCalls {
-			tcMap, ok := tc.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Get function object
-			fn, ok := tcMap["function"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Get arguments string
-			args, ok := fn["arguments"].(string)
-			if !ok || args == "" {
-				continue
-			}
-
-			// Check if arguments are already valid JSON
-			var js interface{}
-			if json.Unmarshal([]byte(args), &js) == nil {
-				continue
-			}
-
-			// Attempt repair
-			result := repairer.RepairArguments(args, "")
-			if result.Success && result.Repaired != args {
-				fn["arguments"] = result.Repaired
-				modified = true
-			}
-		}
-	}
-
-	if !modified {
-		return body, false
-	}
-
-	// Marshal back to JSON
-	repaired, err := json.Marshal(resp)
-	if err != nil {
-		return body, false
-	}
-
-	return repaired, true
-}
-
-// handleStreamingResponse handles SSE streaming responses
-// IMPORTANT: This function does NOT return error on idle timeout.
-// Per the unified race retry design, the main request should continue streaming
-// even after idle timeout - the coordinator will spawn parallel requests.
-// Idle timeout detection is handled by the coordinator via TrackActivity().
-//
-// interleaved is the X-Proxy-Interleaved-Thinking flag carried from
-// the race coordinator (via executeRequest → executeExternalRequest).
-// P2-5 (a): drives the response-side StreamTranslator on the
-// race-external stream path. The gate is (interleaved &&
-// raceExtProviderIsMiniMax(cfg)) — short-circuits BEFORE any parse
-// (H5). Gated-off is a pure no-op: the StreamTranslator instance
-// is only constructed when the gate fires.
-func handleStreamingResponse(ctx context.Context, cfg *ConfigSnapshot, resp *http.Response, req *upstreamRequest, provider string, rawBody []byte, interleaved bool) error {
-	// Snapshot the buffer once: Cancel() (client disconnect) releases the
-	// buffer field concurrently (cleanup sets it to nil), so this handler
-	// must never re-read req.buffer after this point. The snapshot stays
-	// valid after Close() — Add returns false, GetAllRawBytesOnce still
-	// returns the buffered chunks.
-	buf := req.GetBuffer()
-
-	// MEMORY TRAP FIX: Use bufio.Reader with increased buffer instead of bufio.Scanner
-	// to avoid issues with long SSE lines and memory retention.
-	reader := bufio.NewReaderSize(resp.Body, 64*1024) // 64KB buffer
-
-	sawDone := false
-
-	// Create normalization context for this stream
-	normCtx := normalizers.NewContext(provider, fmt.Sprintf("%d", req.id))
-
-	// Reset normalizer state for this new stream to avoid state leakage
-	normalizers.GetRegistry().ResetAll(normCtx)
-
-	// Create tool call buffer with integrated repair
-	// This replaces the separate accumulator + post-stream repair pattern
-	// Repair happens during streaming when tool calls are emitted
-	var toolCallBuffer *toolcall.ToolCallBuffer
-	if !cfg.ToolCallBufferDisabled && cfg.ToolRepair.Enabled {
-		toolCallBuffer = toolcall.NewToolCallBufferWithRepair(
-			cfg.ToolCallBufferMaxSize,
-			req.modelID,
-			fmt.Sprintf("%d", req.id),
-			&cfg.ToolRepair,
-		)
-	} else if !cfg.ToolCallBufferDisabled {
-		// Buffer without repair (repair disabled)
-		toolCallBuffer = toolcall.NewToolCallBuffer(
-			cfg.ToolCallBufferMaxSize,
-			req.modelID,
-			fmt.Sprintf("%d", req.id),
-		)
-	}
-
-	// P2-5 (a): race-external stream — construct the StreamTranslator
-	// per-stream instance ONLY when the gate fires. Gated-off ⇒ no
-	// instance ⇒ no per-chunk work ⇒ byte-identical passthrough.
-	// The instance's lifetime is the loop scope (P2-3 / §3.3).
-	var streamTranslator *translator.StreamTranslator
-	if interleaved && raceExtProviderIsMiniMax(cfg) {
-		streamTranslator = translator.NewStreamTranslator()
-	}
-
-	for {
-		// Set idle timeout for reading
-		var line []byte
-		var readErr error
-
-		// Setup idle timeout wrapper with configurable timeout
-		// Use a longer read timeout to allow the coordinator to detect idle
-		readTimeout := time.Duration(cfg.IdleTimeout) * 2 // Double the idle timeout for read
-		if readTimeout < 30*time.Second {
-			readTimeout = 30 * time.Second // Minimum 30s
-		}
-
-		readDone := make(chan struct{})
-		go func() {
-			line, readErr = reader.ReadBytes('\n')
-			close(readDone)
-		}()
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-readDone:
-			// Track activity for coordinator's idle detection
-			req.TrackActivity()
-			// Check if the request was cancelled to exit promptly
-			// This ensures the goroutine exits immediately when Cancel() is called,
-			// even if context cancellation hasn't propagated yet
-			if req.IsCancelled() {
-				return context.Canceled
-			}
-			// Continuous processing
-		case <-time.After(readTimeout):
-			// Read timeout - but DON'T return error!
-			// The coordinator will detect idle and spawn parallel requests.
-			// We continue waiting for the read to complete.
-			// This prevents cancelling the main request prematurely.
-			log.Printf("[RACE] Request %d: read timeout after %v, continuing to wait...", req.id, readTimeout)
-			// Wait for the read to eventually complete or context cancellation
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-readDone:
-				req.TrackActivity()
-				// Continue processing
-			}
-		}
-
-		if len(line) > 0 {
-			// Remove trailing newline for consistency with scanner
-			if line[len(line)-1] == '\n' {
-				line = line[:len(line)-1]
-			}
-			// and \r if present
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
-			}
-
-			// IMPORTANT: Apply normalization FIRST
-			// This fixes issues like concatenated JSON chunks from providers like MiniMax
-			// Example malformed input:  data: {...} {...}
-			// Fixed output:             data: {...}\ndata: {...}
-			normalizedLine, modified, normalizerName := normalizers.NormalizeWithContextAndName(line, normCtx)
-			if modified {
-				log.Printf("[DEBUG] Race attempt %d: normalized malformed stream chunk by %s", req.id, normalizerName)
-
-				// Publish event to frontend if event bus is available
-				if cfg.EventBus != nil {
-					description := getNormalizerDescription(normalizerName)
-					cfg.EventBus.Publish(events.Event{
-						Type:      "stream_normalize",
-						Timestamp: time.Now().Unix(),
-						Data: map[string]interface{}{
-							"id":          fmt.Sprintf("%d", req.id),
-							"normalizer":  normalizerName,
-							"provider":    provider,
-							"description": description,
-						},
-					})
-				}
-			}
-
-			// P2-5 (a) / P2-7: apply the response-side stream
-			// translator BEFORE the tool call buffer (W3 ordering
-			// — the tool-call buffer sees a chunk already stripped
-			// of reasoning_details so it never has to special-case
-			// the field). The translator returns (stripped,
-			// emitted) — the caller writes stripped first, then
-			// each emitted[i] in order, before the next flush
-			// boundary. The translator is error-free by
-			// construction (§6.1); err is always nil.
-			translatorLine := normalizedLine
-			var translatorEmitted [][]byte
-			if streamTranslator != nil {
-				var terr error
-				translatorLine, translatorEmitted, terr = streamTranslator.ChunkBytes(normalizedLine)
-				if terr != nil {
-					// §6.1: should be impossible. Log + continue
-					// with the original line.
-					log.Printf("[WARN] race-external stream translator: %v", terr)
-					translatorLine = normalizedLine
-					translatorEmitted = nil
-				}
-			}
-
-			// Process through tool call buffer (if enabled)
-			// The buffer accumulates tool call fragments, repairs when complete, and emits
-			// Non-tool-call chunks pass through immediately
-			var chunksToEmit [][]byte
-			if toolCallBuffer != nil {
-				chunksToEmit = toolCallBuffer.ProcessChunk(translatorLine)
-			} else {
-				chunksToEmit = [][]byte{translatorLine}
-			}
-
-			// Prepend the translator's emitted chunks (if any) so
-			// the client sees reasoning_content deltas before the
-			// stripped upstream chunk on each loop iteration. C1
-			// uniform-framing contract: ChunkBytes frames both
-			// `stripped` and each `emitted[i]` (data: + \n\n) on
-			// the mutated path, and returns the ORIGINAL line
-			// VERBATIM (already framed) on the unchanged path.
-			// The call site is therefore responsible for ZERO
-			// framing here — just concatenate in order. The
-			// stripping pattern matches the SSE shape used by
-			// the race-external path's downstream consumer.
-			if len(translatorEmitted) > 0 {
-				full := make([][]byte, 0, len(translatorEmitted)+len(chunksToEmit))
-				full = append(full, translatorEmitted...)
-				full = append(full, chunksToEmit...)
-				chunksToEmit = full
-			}
-
-			// Add all chunks to buffer
-			// Phase 2 / real-streaming-default — PREDICATE HAZARD FIX
-			// (task 2.3): the isStreamErrorChunk check must run BEFORE
-			// the Add loop. A stream whose ONLY chunk is an error chunk
-			// must not transiently win the first-byte winner gate
-			// (`req.GetError()==nil && req.GetBuffer().TotalLen()>0`) —
-			// if the error chunk is Added before the error is returned,
-			// the predicate fires on it and preempts fallback. Behavior-
-			// neutral in buffered mode (failed buffers are never read
-			// there); only the on-error raw-dump content at
-			// handler.go:1159-1164 changes.
-			if isStreamErrorChunk(line) != "" {
-				return fmt.Errorf("upstream streamed error chunk: %s", isStreamErrorChunk(line))
-			}
-
-			for _, chunk := range chunksToEmit {
-				if !buf.Add(chunk) {
-					return fmt.Errorf("buffer limit exceeded: streaming tool_call chunk for model %s", req.modelID)
-				}
-			}
-
-			// Extract usage from SSE chunk if present
-			extractUsageFromSSEChunk(req, normalizedLine)
-
-			// Check for [DONE]
-			if string(line) == "data: [DONE]" {
-				sawDone = true
-				break
-			}
-		}
-
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			return fmt.Errorf("read error: %w", readErr)
-		}
-	}
-
-	if !sawDone {
-		return fmt.Errorf("upstream closed connection prematurely")
-	}
-
-	// Flush any remaining buffered tool calls
-	// This ensures even incomplete tool calls are emitted at stream end
-	if toolCallBuffer != nil {
-		flushChunks := toolCallBuffer.Flush()
-		for _, chunk := range flushChunks {
-			if !buf.Add(chunk) {
-				log.Printf("[WARN] Race attempt %d: failed to add flushed tool call chunk (buffer limit exceeded)", req.id)
-				break
-			}
-		}
-		if len(flushChunks) > 0 {
-			log.Printf("[DEBUG] Race attempt %d: flushed %d buffered tool call chunks at stream end", req.id, len(flushChunks))
-		}
-
-		// Log repair stats if any repairs occurred
-		stats := toolCallBuffer.GetRepairStats()
-		if stats.Attempted > 0 {
-			log.Printf("[TOOL-BUFFER] Race attempt %d: Repair stats: attempted=%d, success=%d, failed=%d",
-				req.id, stats.Attempted, stats.Successful, stats.Failed)
-
-			// Publish event to frontend if event bus is available
-			if cfg.EventBus != nil {
-				cfg.EventBus.Publish(events.Event{
-					Type:      "tool_repair",
-					Timestamp: time.Now().Unix(),
-					Data: map[string]interface{}{
-						"id":          fmt.Sprintf("%d", req.id),
-						"provider":    provider,
-						"description": fmt.Sprintf("Repaired %d malformed JSON in tool_call arguments (during streaming)", stats.Successful),
-					},
-				})
-			}
-		}
-	}
-
-	// If no usage was found during streaming, use fallback
-	if usage := req.GetUsage(); usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0) {
-		if token.FallbackEnabled() {
-			tokenizer := token.GetTokenizer()
-			promptTokens, err := tokenizer.CountPromptTokens(rawBody, req.modelID)
-			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting prompt tokens: %v, model=%s", err, req.modelID)
-			}
-			rawBytes := buf.GetAllRawBytesOnce()
-			completionText := token.ExtractCompletionTextFromChunks(rawBytes)
-			completionTokens, err := tokenizer.CountCompletionTokens(completionText, req.modelID)
-			if err != nil {
-				log.Printf("[DEBUG][fallback-token-count] error counting completion tokens: %v, model=%s", err, req.modelID)
-			}
-			req.SetUsage(&TokenUsage{
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      promptTokens + completionTokens,
-			})
-			log.Printf("[DEBUG][fallback-token-count] streaming: model=%s prompt=%d completion=%d total=%d",
-				req.modelID, promptTokens, completionTokens, promptTokens+completionTokens)
-		}
-	}
-
-	return nil
 }

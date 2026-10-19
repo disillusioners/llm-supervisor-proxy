@@ -5,11 +5,12 @@ package proxy
 // continue to NOT persist (empty-response hygiene preserved).
 //
 // Mirrors the setup of handler_capture_persistence_test.go (Fix 3
-// persistence tests): an External ultimate model pointing at a
-// mock httptest upstream; trigger via X-Force-Ultimate-Model;
-// verify the persisted store.Message on the ultimate RequestLog.
+// persistence tests): an Internal ultimate model pointing at a
+// mock httptest upstream (the external arm is gone with P1);
+// trigger via X-Force-Ultimate-Model; verify the persisted
+// store.Message on the ultimate RequestLog.
 //
-// Self-contained in this file — adds mockUltimateExternalToolCallResponse
+// Self-contained in this file — adds mockUltimateToolCallResponse
 // (non-stream) and a stream-emitting handler variant (stream).
 
 import (
@@ -34,12 +35,12 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
-// mockUltimateExternalToolCallResponse builds a non-stream
+// mockUltimateToolCallResponse builds a non-stream
 // upstream body that is purely a tool call: empty content +
 // reasoning_content + real tool_calls array. Mirrors the
 // assistant-turn shape most OpenAI-compatible providers emit when
 // the model decides to invoke a function without any preamble.
-func mockUltimateExternalToolCallResponse(toolCalls []map[string]interface{}, prompt, completion, total int) string {
+func mockUltimateToolCallResponse(toolCalls []map[string]interface{}, prompt, completion, total int) string {
 	resp := map[string]interface{}{
 		"id":      "chatcmpl-w7-capture-test",
 		"object":  "chat.completion",
@@ -66,12 +67,12 @@ func mockUltimateExternalToolCallResponse(toolCalls []map[string]interface{}, pr
 	return string(b)
 }
 
-// mockUltimateExternalEmptyResponse builds a non-stream upstream
+// mockUltimateEmptyResponse builds a non-stream upstream
 // body that has no observable assistant turn at all (empty
 // content + no tool_calls + finish_reason=stop). Used to verify
 // the negative branch of the W7 conditional — that this case
 // still does NOT persist a blank store.Message.
-func mockUltimateExternalEmptyResponse() string {
+func mockUltimateEmptyResponse() string {
 	resp := map[string]interface{}{
 		"id":      "chatcmpl-w7-empty-test",
 		"object":  "chat.completion",
@@ -95,7 +96,7 @@ func mockUltimateExternalEmptyResponse() string {
 	return string(b)
 }
 
-// bootstrapToolCallUltimateTest wires up an external ultimate
+// bootstrapToolCallUltimateTest wires up an INTERNAL ultimate
 // model pointing at `upstreamURL`. Returns the httptest-driven
 // recorder after invoking HandleChatCompletions with the
 // X-Force-Ultimate-Model header — saves the persistence-target
@@ -142,11 +143,12 @@ func bootstrapToolCallUltimateTest(t *testing.T, upstreamURL, wantBody string, s
 		t.Fatalf("AddCredential: %v", err)
 	}
 	if err := modelsConfig.AddModel(models.ModelConfig{
-		ID:           "ultimate-model",
-		Name:         "Ultimate Model",
-		Enabled:      true,
-		Internal:     false, // EXTERNAL — executes through executeExternal
-		Credentials: models.TestRefs("test-credential"),
+		ID:            "ultimate-model",
+		Name:          "Ultimate Model",
+		Enabled:       true,
+		Internal:      true, // INTERNAL — the external ultimate arm is gone
+		InternalModel: "internal-model",
+		Credentials:   models.TestRefs("test-credential"),
 	}); err != nil {
 		t.Fatalf("AddModel (ultimate): %v", err)
 	}
@@ -220,7 +222,7 @@ func findUltimateAssistantMessage(t *testing.T, reqStore *store.RequestStore) *s
 	return nil
 }
 
-// TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream
+// TestUltimateModel_PersistsAssistantToolCallsOnly_NonStream
 // is the W7 non-stream test: a tool-call-only ultimate response
 // (empty content + empty reasoning_content + real tool_calls)
 // MUST persist a store.Message{Role: "assistant", ToolCalls:
@@ -229,7 +231,7 @@ func findUltimateAssistantMessage(t *testing.T, reqStore *store.RequestStore) *s
 // `message.tool_calls` directly when present, so populating the
 // ToolCalls field also restores UI observability of WHAT the
 // assistant decided to invoke.
-func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *testing.T) {
+func TestUltimateModel_PersistsAssistantToolCallsOnly_NonStream(t *testing.T) {
 	wantToolCalls := []map[string]interface{}{
 		{
 			"id":   "call_w7_1",
@@ -240,7 +242,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *test
 			},
 		},
 	}
-	upstreamBody := mockUltimateExternalToolCallResponse(wantToolCalls, 5, 4, 9)
+	upstreamBody := mockUltimateToolCallResponse(wantToolCalls, 5, 4, 9)
 
 	reqStore := bootstrapToolCallUltimateTest(t, "", upstreamBody, false)
 	msg := findUltimateAssistantMessage(t, reqStore)
@@ -271,7 +273,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *test
 	}
 }
 
-// TestUltimateModel_PersistsAssistantToolCallsOnly_External_Stream
+// TestUltimateModel_PersistsAssistantToolCallsOnly_Stream
 // is the W7 streaming counterpart. The upstream emits SSE chunks
 // that include tool_calls deltas (across multiple chunks so
 // the by-index accumulator has to be exercised); the request is
@@ -279,7 +281,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_NonStream(t *test
 // has the assembled tool_calls, and the client bytes contain the
 // raw tool_calls (byte-identity proof — capture must not strip,
 // reorder, or reframe).
-func TestUltimateModel_PersistsAssistantToolCallsOnly_External_Stream(t *testing.T) {
+func TestUltimateModel_PersistsAssistantToolCallsOnly_Stream(t *testing.T) {
 	upstreamBody := "" +
 		// Single streaming chunk with the entire tool call —
 		// simpler than an incremental multi-chunk case but
@@ -287,7 +289,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_Stream(t *testing
 		// chunk / repair-matrix coverage lives in
 		// pkg/toolcall and pkg/proxy/handler_helpers tests;
 		// W7 cares that the W7 conditional fires for the
-		// streaming external path (capture-side parses the
+		// streaming internal path (capture-side parses the
 		// SAME wire bytes the client sees).
 		`data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_w7_stream_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Hanoi\"}"}}]}}]}` + "\n\n" +
 		`data: [DONE]` + "\n\n"
@@ -328,7 +330,7 @@ func TestUltimateModel_PersistsAssistantToolCallsOnly_External_Stream(t *testing
 // hygiene invariant). Without this, regressions that weaken the
 // persistence gate to unconditional would silently pass.
 func TestUltimateModel_DoesNotPersistEmptyAssistantMessage(t *testing.T) {
-	upstreamBody := mockUltimateExternalEmptyResponse()
+	upstreamBody := mockUltimateEmptyResponse()
 
 	reqStore := bootstrapToolCallUltimateTest(t, "", upstreamBody, false)
 	if msg := findUltimateAssistantMessage(t, reqStore); msg != nil {

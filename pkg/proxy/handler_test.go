@@ -69,7 +69,7 @@ func mockNonStreamResponse(content string) string {
 		"id":      "chatcmpl-123",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
-		"model":   "mock-model",
+		"model":   "test-model",
 		"choices": []map[string]interface{}{
 			{
 				"index": 0,
@@ -199,8 +199,11 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request)
 func newTestManagerWithConfig(t *testing.T, upstreamURL string, opts ...func(*config.Config)) *config.Manager {
 	t.Helper()
 
+	// remove-external-upstream P1/P5: the UPSTREAM_URL env pair is gone
+	// (the config field was deleted). The mock upstream now flows through
+	// the seeded internal fixture (see seedInternalFixture).
+	_ = upstreamURL
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
-	t.Setenv("UPSTREAM_URL", upstreamURL)
 	t.Setenv("MAX_GENERATION_TIME", "10s")
 
 	mgr, err := config.NewManager()
@@ -237,6 +240,13 @@ func newTestHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig
 	upstream := httptest.NewServer(upstreamHandler)
 
 	mgr := newTestManagerWithConfig(t, upstream.URL, configOpts...)
+
+	// remove-external-upstream P5: every handler needs a resolvable
+	// internal model or the boundary 404 gate rejects the request.
+	if modelsConfig == nil {
+		modelsConfig = models.NewModelsConfig()
+	}
+	seedInternalFixture(t, modelsConfig, upstream.URL)
 
 	cfg := &Config{
 		ConfigMgr:    mgr,
@@ -372,7 +382,7 @@ func TestMockLLM_NormalStreaming(t *testing.T) {
 		name:       "MockLLM_NormalStreaming",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -413,7 +423,7 @@ func TestMockLLM_NonStreaming(t *testing.T) {
 		name:       "MockLLM_NonStreaming",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", false)
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -457,7 +467,7 @@ func TestMockLLM_ThinkingStream(t *testing.T) {
 		name:       "MockLLM_ThinkingStream",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-think please")
+			body := bodyWithPrompt("test-model", true, "mock-think please")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -499,7 +509,7 @@ func TestMockLLM_ToolCall(t *testing.T) {
 		name:       "MockLLM_ToolCall",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-tool call")
+			body := bodyWithPrompt("test-model", true, "mock-tool call")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -529,7 +539,7 @@ func TestMockLLM_LongStream(t *testing.T) {
 		name:       "MockLLM_LongStream",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-long content")
+			body := bodyWithPrompt("test-model", true, "mock-long content")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -571,7 +581,7 @@ func TestMockLLM_500Error(t *testing.T) {
 		name:       "MockLLM_500Error",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := bodyWithPrompt("mock-model", true, "mock-500 trigger")
+			body := bodyWithPrompt("test-model", true, "mock-500 trigger")
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -610,10 +620,9 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 		name: "MockLLM_500WithRetryThenSuccess",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Set up fallback chain so race retry has multiple models to try
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "mock-model", Name: "mock-model", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
+			// Post-P1 write-stamp: an internal row needs a credential.
+			seedInternalTestModel(mc, "test-model", "test-upstream-model", "fallback-mock")
+			seedInternalTestModel(mc, "fallback-mock", "fallback-upstream-model")
 			return mc
 		}(),
 		configOpts: []func(*config.Config){
@@ -637,7 +646,7 @@ func TestMockLLM_500WithRetryThenSuccess(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -673,9 +682,8 @@ func TestMockLLM_FallbackAfter500(t *testing.T) {
 		name: "MockLLM_FallbackAfter500",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "primary-mock", Name: "primary-mock", Enabled: true, FallbackChain: []string{"fallback-mock"}})
-			mc.AddModel(models.ModelConfig{ID: "fallback-mock", Name: "fallback-mock", Enabled: true})
+			seedInternalTestModel(mc, "primary-mock", "primary-upstream-model", "fallback-mock")
+			seedInternalTestModel(mc, "fallback-mock", "fallback-upstream-model")
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -729,10 +737,13 @@ func TestMockLLM_HeadersForwarded(t *testing.T) {
 		name: "MockLLM_HeadersForwarded",
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
-				// Verify Authorization header was forwarded
+				// remove-external-upstream P1/P5: the client Authorization
+				// is NOT forwarded on the internal arm — the proxy
+				// authenticates to the provider with the resolved
+				// credential's API key (fixture: "test-key").
 				auth := r.Header.Get("Authorization")
-				if auth != "Bearer mock-test-token" {
-					t.Errorf("expected Authorization 'Bearer mock-test-token', got '%s'", auth)
+				if auth != "Bearer test-key" {
+					t.Errorf("expected internal-arm credential Authorization 'Bearer test-key', got '%s'", auth)
 				}
 
 				// Run the mock handler
@@ -740,7 +751,7 @@ func TestMockLLM_HeadersForwarded(t *testing.T) {
 			}
 		},
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", false)
+			body := simpleBody("test-model", false)
 			req := makeRequest(t, body)
 			req.Header.Set("Authorization", "Bearer mock-test-token")
 			rr := httptest.NewRecorder()
@@ -764,7 +775,7 @@ func TestMockLLM_MultipleMessages(t *testing.T) {
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
 			body := map[string]interface{}{
-				"model":  "mock-model",
+				"model":  "test-model",
 				"stream": false,
 				"messages": []interface{}{
 					map[string]interface{}{"role": "system", "content": "You are a helpful assistant"},
@@ -808,7 +819,7 @@ func TestMockLLM_StreamSSEFormat(t *testing.T) {
 		name:       "MockLLM_StreamSSEFormat",
 		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
 		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := simpleBody("mock-model", true)
+			body := simpleBody("test-model", true)
 			req := makeRequest(t, body)
 			rr := httptest.NewRecorder()
 			handle(rr, req)
@@ -883,35 +894,80 @@ func TestUpstream4xxNoPassthrough_RetriesExhausted(t *testing.T) {
 // a winner is selected, an HTTP error is returned (not SSE error after headers sent)
 
 func TestEmptyMessages(t *testing.T) {
-	runBothVersions(t, testCase{
-		name:       "EmptyMessages",
-		upstreamFn: func(t *testing.T) http.HandlerFunc { return mockLLMHandler(t) },
-		fn: func(t *testing.T, handle handlerFunc, h *Handler, upstream *httptest.Server) {
-			body := map[string]interface{}{
-				"model":    "test-model",
-				"stream":   false,
-				"messages": []interface{}{},
-			}
-			req := makeRequest(t, body)
-			rr := httptest.NewRecorder()
-			handle(rr, req)
+	// P1 fixup (review blocker 1): the former fixture ran the
+	// empty-messages edge case through the EXTERNAL passthrough (nil
+	// ModelsConfig, unresolved "test-model") — an arm P1 deleted, which
+	// left the request 404ing at the boundary gate and the assertions
+	// below indexing an empty Messages slice: the non-fatal length
+	// assert at the old :907 was followed by Messages[0] and PANICKED,
+	// aborting the entire pkg/proxy test binary. Converted to the
+	// internal rewrite pattern (smallest correct change): the model now
+	// resolves internal with a credential at the mock upstream, the
+	// assertions are unchanged, and the length check below is a
+	// t.Fatalf BEFORE the index — a regression can never again panic
+	// the binary.
+	upstream := httptest.NewServer(mockLLMHandler(t))
+	t.Cleanup(upstream.Close)
 
-			if rr.Code != http.StatusOK {
-				t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
-			}
+	modelsConfig := models.NewModelsConfig()
+	if err := modelsConfig.AddCredential(models.CredentialConfig{
+		ID:       "test-credential",
+		Provider: "openai",
+		APIKey:   "test-api-key",
+		BaseURL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := modelsConfig.AddModel(models.ModelConfig{
+		ID:            "test-model",
+		Name:          "test-model",
+		Enabled:       true,
+		Internal:      true,
+		Credentials:   models.TestRefs("test-credential"),
+		InternalModel: "test-model",
+	}); err != nil {
+		t.Fatalf("AddModel: %v", err)
+	}
 
-			reqs := h.store.List()
-			if len(reqs) != 1 {
-				t.Fatalf("expected 1 request in store, got %d", len(reqs))
-			}
-			if len(reqs[0].Messages) != 1 {
-				t.Errorf("expected 1 message (assistant response), got %d", len(reqs[0].Messages))
-			}
-			if reqs[0].Messages[0].Role != "assistant" {
-				t.Errorf("expected message role 'assistant', got '%s'", reqs[0].Messages[0].Role)
-			}
-		},
-	})
+	t.Setenv("APPLY_ENV_OVERRIDES", "true")
+	t.Setenv("MAX_GENERATION_TIME", "10s")
+	t.Setenv("RACE_RETRY_ENABLED", "false")
+	mgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	bus := events.NewBus()
+	reqStore := store.NewRequestStore(100)
+	bufStore, err := bufferstore.New(t.TempDir(), 1024*1024)
+	if err != nil {
+		t.Fatalf("NewBufferStore: %v", err)
+	}
+	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsConfig}, bus, reqStore, bufStore, nil, nil, nil)
+
+	body := map[string]interface{}{
+		"model":    "test-model",
+		"stream":   false,
+		"messages": []interface{}{},
+	}
+	req := makeRequest(t, body)
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d (body: %s)", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	reqs := h.store.List()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request in store, got %d", len(reqs))
+	}
+	// Length guard BEFORE the index — the load-bearing panic fix.
+	if len(reqs[0].Messages) != 1 {
+		t.Fatalf("expected 1 message (assistant response), got %d", len(reqs[0].Messages))
+	}
+	if reqs[0].Messages[0].Role != "assistant" {
+		t.Errorf("expected message role 'assistant', got '%s'", reqs[0].Messages[0].Role)
+	}
 }
 
 // TestProviderSpecificThinking removed - this test needs the handler to extract
@@ -924,9 +980,8 @@ func TestFallback4xxTriggered(t *testing.T) {
 		name: "Fallback4xxTriggered",
 		modelsConfig: func() *models.ModelsConfig {
 			mc := models.NewModelsConfig()
-			// Note: Name must match the model value used in request body for resolution
-			mc.AddModel(models.ModelConfig{ID: "primary", Name: "primary", Enabled: true, FallbackChain: []string{"secondary"}})
-			mc.AddModel(models.ModelConfig{ID: "secondary", Name: "secondary", Enabled: true})
+			seedInternalTestModel(mc, "primary", "primary-upstream-model", "secondary")
+			seedInternalTestModel(mc, "secondary", "secondary-upstream-model")
 			return mc
 		}(),
 		upstreamFn: func(t *testing.T) http.HandlerFunc {
@@ -1061,7 +1116,7 @@ func TestLoopDetection_ExactMatch(t *testing.T) {
 	// Within each stream, only 1 message is added to the detector window.
 	// After 2+ identical messages in the window, exact match should trigger.
 	for i := 0; i < 3; i++ {
-		body := simpleBody("mock-model", true)
+		body := simpleBody("test-model", true)
 		req := makeRequest(t, body)
 		rr := httptest.NewRecorder()
 		h.HandleChatCompletions(rr, req)
@@ -1094,7 +1149,7 @@ func TestLoopDetection_NormalNoTrigger(t *testing.T) {
 	// Send different types of requests — each is a separate request with its own detector
 	prompts := []string{"Hello there", "mock-think please", "mock-tool call"}
 	for _, prompt := range prompts {
-		body := bodyWithPrompt("mock-model", true, prompt)
+		body := bodyWithPrompt("test-model", true, prompt)
 		req := makeRequest(t, body)
 		rr := httptest.NewRecorder()
 		h.HandleChatCompletions(rr, req)
@@ -1164,7 +1219,7 @@ func TestLoopDetection_ToolCallExtraction(t *testing.T) {
 	h, upstream := newTestHandler(t, toolCallHandler, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1319,7 +1374,7 @@ func TestTTFB_HeadersSentImmediately(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1369,7 +1424,7 @@ func TestClientDisconnectDuringBuffering(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 
 	// Create a cancelable context
@@ -1426,7 +1481,7 @@ func TestBufferedStreaming_BodyBufferedUntilDone(t *testing.T) {
 	}, nil)
 	defer upstream.Close()
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1808,13 +1863,13 @@ func TestIdleTermination_Triggered(t *testing.T) {
 	// Create mock upstream that hangs after a few chunks
 	upstream := httptest.NewServer(mockIdleHangHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -1872,13 +1927,13 @@ func TestIdleTermination_Disabled_NoTermination(t *testing.T) {
 	// Use normal mock handler (completes successfully)
 	upstream := httptest.NewServer(mockLLMHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -1935,13 +1990,13 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	// Use mock that sends continuously (50ms between chunks)
 	upstream := httptest.NewServer(mockContinuousStreamHandler(t))
 	defer upstream.Close()
+	seedInternalFixture(t, proxyCfg.ModelsConfig, upstream.URL)
 
 	// Update manager to point to our mock
 	cfg := mgr.Get()
-	cfg.UpstreamURL = upstream.URL
 	mgr.Save(cfg)
 
-	body := simpleBody("mock-model", true)
+	body := simpleBody("test-model", true)
 	req := makeRequest(t, body)
 	rr := httptest.NewRecorder()
 
@@ -2040,6 +2095,13 @@ func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc
 
 	mgr := newTestManagerWithConfig(t, upstream.URL, configOpts...)
 
+	// remove-external-upstream P5: every handler needs a resolvable
+	// internal model or the boundary 404 gate rejects the request.
+	if modelsConfig == nil {
+		modelsConfig = models.NewModelsConfig()
+	}
+	seedInternalFixture(t, modelsConfig, upstream.URL)
+
 	cfg := &Config{
 		ConfigMgr:    mgr,
 		ModelsConfig: modelsConfig,
@@ -2061,14 +2123,11 @@ func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc
 // the ultimate model gate does not block the request and allows normal flow to proceed.
 // This test verifies the permission gate allows through authorized requests.
 func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true, // This triggers authentication
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Set up ultimate model config
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
@@ -2130,14 +2189,11 @@ func TestUltimateModelPermissionGranted_AllowsFlow(t *testing.T) {
 // TestUltimateModelPermissionDenied_SkipsUltimateModel tests that when permission is denied,
 // the ultimate model check is skipped entirely and requests fall through to normal proxy.
 func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true, // This triggers authentication
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Set up ultimate model config
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
@@ -2194,14 +2250,11 @@ func TestUltimateModelPermissionDenied_SkipsUltimateModel(t *testing.T) {
 // TestUltimateModelPermissionDenied_HashInCache_Skips tests that even if a hash exists in
 // the ultimate model cache, the permission gate prevents ultimate model triggering.
 func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
-	// Create internal model config (triggers auth)
+	// Create internal model config (triggers auth). remove-external-
+	// upstream P1/P5: the write-stamp forces Internal=true, so the row
+	// needs a credential (seeded via the fixture).
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:       "internal-model",
-		Name:     "Internal Model",
-		Enabled:  true,
-		Internal: true,
-	})
+	seedInternalTestModel(mc, "internal-model", "internal-model-upstream")
 
 	// Create mock token store with permission DENIED
 	tokenStore := newMockTokenStore()
@@ -2260,17 +2313,15 @@ func TestUltimateModelPermissionDenied_HashInCache_Skips(t *testing.T) {
 }
 
 // TestUltimateModelPermission_NoAuth_DefaultsFalse tests that when no authentication
-// is required (external model), ultimate model is not triggered because rc.ultimateModelEnabled
+// is required (no token present), ultimate model is not triggered because rc.ultimateModelEnabled
 // defaults to false.
 func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
-	// Create external model config (does NOT trigger auth)
+	// remove-external-upstream P1/P5: the model must be internal-
+	// resolvable (the deleted external arm no longer serves a
+	// passthrough); the test only cares that the ultimate gate is
+	// skipped without a token.
 	mc := models.NewModelsConfig()
-	mc.AddModel(models.ModelConfig{
-		ID:      "external-model",
-		Name:    "External Model",
-		Enabled: true,
-		// Internal: false (default) - no auth required
-	})
+	seedInternalTestModel(mc, "external-model", "external-model-upstream")
 
 	// Create handler WITHOUT token store (auth disabled)
 	h, upstream := newTestHandlerWithTokenStore(t, mockLLMHandler(t), mc, nil, func(c *config.Config) {
@@ -2288,7 +2339,7 @@ func TestUltimateModelPermission_NoAuth_DefaultsFalse(t *testing.T) {
 	// Send request without authentication
 	body := bodyWithPrompt("external-model", true, "test prompt no auth")
 	req := makeRequest(t, body)
-	// No Authorization header - simulates external model request
+	// No Authorization header — the no-token path
 
 	rr := httptest.NewRecorder()
 	h.HandleChatCompletions(rr, req)
@@ -2395,7 +2446,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "claude-3",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "claude-3",
 	})
 	if err != nil {
@@ -2408,7 +2459,7 @@ func TestHandler_ModelNotAllowed_Returns403(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2504,7 +2555,7 @@ func TestHandler_ModelAllowed_PassesThrough(t *testing.T) {
 		Name:          "gpt-4",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "gpt-4",
 	})
 	if err != nil {
@@ -2591,7 +2642,7 @@ func TestHandler_AllModelsAllowed_PassesThrough(t *testing.T) {
 		Name:          "any-model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials: models.TestRefs("test-credential"),
+		Credentials:   models.TestRefs("test-credential"),
 		InternalModel: "any-model",
 	})
 	if err != nil {

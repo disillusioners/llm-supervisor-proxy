@@ -659,17 +659,19 @@ func TestHandleModelDetail_DELETE_JSONFileBackend_RemainingModel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed survivor: %v", err)
 	}
-	// Seed the model to be DELETED — trivial, no credentials, so
-	// it does not directly trip the guard. The remaining
-	// "survivor" row is the one that fails the testConfig
-	// Validate() scan.
+	// Seed the model to be DELETED. remove-external-upstream P1:
+	// the store-level internal=true stamp applies to every seeded row,
+	// so this row now carries the same credential ref as the survivor
+	// (a credential-less seed fails the internal-model credential
+	// validation before the DELETE ever runs). The row's purpose is
+	// unchanged: exist long enough to be DELETEd.
 	if err := ts.mc.AddModel(models.ModelConfig{
-		ID:      "to-delete",
-		Name:    "To Delete",
-		Enabled: true,
-		// Internal: false — non-internal, no credentials, no
-		// secondary, no peak hours. This row's only purpose is to
-		// exist long enough to be DELETEd.
+		ID:            "to-delete",
+		Name:          "To Delete",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		Credentials:   models.TestRefs("openai-cred"),
 	}); err != nil {
 		t.Fatalf("seed to-delete: %v", err)
 	}
@@ -711,7 +713,9 @@ func TestHandleModelDetail_DELETE_DBBackend_ImmuneProbe(t *testing.T) {
 	defer ts.cleanup()
 
 	// Seed the survivor (carries the credential ref) and the
-	// trivial to-delete row.
+	// to-delete row — which post-P1 also carries a credential ref
+	// (the store-level internal=true stamp makes credential-less
+	// seeds fail validation; see the JSON-file twin above).
 	if err := ts.mgr.AddModel(models.ModelConfig{
 		ID:            "survivor-db",
 		Name:          "Survivor",
@@ -723,7 +727,12 @@ func TestHandleModelDetail_DELETE_DBBackend_ImmuneProbe(t *testing.T) {
 		t.Fatalf("seed survivor-db: %v", err)
 	}
 	if err := ts.mgr.AddModel(models.ModelConfig{
-		ID: "to-delete-db", Name: "To Delete", Enabled: true,
+		ID:            "to-delete-db",
+		Name:          "To Delete",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4o",
+		Credentials:   models.TestRefs("openai-cred"),
 	}); err != nil {
 		t.Fatalf("seed to-delete-db: %v", err)
 	}

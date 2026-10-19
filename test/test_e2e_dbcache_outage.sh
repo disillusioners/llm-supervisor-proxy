@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# [HISTORICAL — remove-external-upstream P1 retired the external race path]
+# This script drives the proxy via the deleted external/UPSTREAM_URL route
+# (env-pinned or the default global upstream). It CANNOT pass as-is on the
+# post-P1 tree; retained as a historical artifact of the pre-P1 architecture.
+# Reviving it means redesigning its fixtures around internal models +
+# credentials (internal-path pattern: test/test_mock_openai_internal.sh).
 # =============================================================================
 # E2E Pack A — DB-cache-layer outage close-out (feature/db-cache-layer @ 42d98f3)
 #

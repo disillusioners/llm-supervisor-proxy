@@ -4,8 +4,8 @@ package translator
 // reasoning_details mutation funnels through the translator module.
 //
 // This test walks the AST of every wiring file that calls into the
-// translator on the four request/response paths (race-external,
-// race-internal, ultimate-internal, ultimate-external). If any of those
+// translator on the three surviving paths (race-internal,
+// ultimate-internal, and the shared internal executor). If any of those
 // files contains a `translator.ReasoningDetail{...}` (or
 // `&translator.ReasoningDetail{...}`) composite literal, the test
 // fails — inline field mutation outside the translator module is the
@@ -16,7 +16,7 @@ package translator
 //     declarations, function params, range loops, or field types).
 //   - Type must resolve to `translator.ReasoningDetail` (the named
 //     composite type defined in this package).
-//   - Files outside `pkg/proxy/translator/` (the four call sites).
+//   - Files outside `pkg/proxy/translator/` (the three surviving call sites).
 //
 // Pure Go test, no subprocess, no git dependency — deterministic and
 // CI-portable per H10.
@@ -32,14 +32,16 @@ import (
 	"testing"
 )
 
-// wiringFiles are the four call-site files whose ASTs must NOT contain
+// wiringFiles are the call-site files whose ASTs must NOT contain
 // a `translator.ReasoningDetail{...}` composite literal. Paths are
 // resolved relative to the test package directory via repoRoot().
+// remove-external-upstream P1: pkg/ultimatemodel/handler_external.go
+// is deleted with the external arm — dropped from this list (the
+// drift trap now walks the three surviving wiring files).
 var wiringFiles = []string{
 	"pkg/proxy/race_executor.go",
 	"pkg/proxy/internal_handler.go",
 	"pkg/ultimatemodel/handler_internal.go",
-	"pkg/ultimatemodel/handler_external.go",
 }
 
 // translatorSourceFiles is the allow-list — the only files in which

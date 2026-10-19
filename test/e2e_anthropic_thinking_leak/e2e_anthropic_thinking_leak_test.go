@@ -1,4 +1,4 @@
-// Scenarios S1A/S1B/S2/S3 for the anthropic thinking-leak spot-check
+// Scenarios S1A/S1B/S3 for the anthropic thinking-leak spot-check
 // (Task 4, re-based against the real-streaming-default D8 wire-shape
 // contract — docs/real-streaming-default.md §D8).
 //
@@ -6,7 +6,7 @@
 // asserts the legacy "no thinking bytes on wire" invariant. S1B exercises
 // LIVE mode (no header) and asserts the D8 positive contract — Anthropic
 // thinking content_block + thinking_delta ARE emitted on wire while the
-// sink side-channel capture is preserved. S2 and S3 are unchanged.
+// sink side-channel capture is preserved. S3 is unchanged.
 //
 // Each scenario drives the full proxy.Handler.HandleAnthropicMessages against
 // a capturing mock OpenAI upstream and asserts the byte-identity constraint
@@ -151,14 +151,12 @@ func TestS1A_Buffered_InternalStream_NoThinkingOnWire(t *testing.T) {
 // `thinking` content_block + `thinking_delta` events on the wire when
 // upstream carries reasoning_content, AND preserves sink side-channel
 // capture ("sink capture preserved in both modes"). S1A is the BUFFERED-
-// mode mirror (suppressed on wire, sink-only). S2 is the EXTERNAL-path
-// reference.
+// mode mirror (suppressed on wire, sink-only).
 //
 // Assertions:
 //   - "thinking_delta" PRESENT on client wire (D8 deliberate positive).
 //   - "type":"thinking" PRESENT (content_block_start).
-//   - reasoning text chunks appear INSIDE thinking_delta payloads (mirror
-//     of S2's positive checks on the external path).
+//   - reasoning text chunks appear INSIDE thinking_delta payloads.
 //   - "reasoning_content" still ABSENT (no cross-protocol leak — Anthropic
 //     translator must not echo the OpenAI-wire field name).
 //   - persisted assistant Thinking == concatenated reasoning (sink invariant
@@ -191,8 +189,7 @@ func TestS1B_Live_InternalStream_ThinkingDeltaEmitted(t *testing.T) {
 	assertContains(t, wire, `"thinking_delta"`, "S1B/thinking_delta")
 	assertContains(t, wire, `"type":"thinking"`, "S1B/content_block_start_thinking")
 
-	// (b) Reasoning text MUST appear inside thinking_delta payloads
-	// (mirror of S2's positive checks on the external path). This proves
+	// (b) Reasoning text MUST appear inside thinking_delta payloads. This proves
 	// the translator accumulated reasoning_content and emitted it as
 	// Anthropic thinking text rather than dropping it or leaking it as a
 	// different field.
@@ -229,63 +226,6 @@ func TestS1B_Live_InternalStream_ThinkingDeltaEmitted(t *testing.T) {
 	}
 
 	t.Logf("EVIDENCE S1B: request id=%s status=%s wire length=%d", log.ID, log.Status, len(wire))
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// S2 — EXTERNAL path, stream: over-swallow regression guard (byte-identity reference)
-// ═════════════════════════════════════════════════════════════════════════════
-
-// TestS2_ExternalStream_ThinkingTranslated drives an UNREGISTERED model
-// (resolvedModel=nil ⇒ external path via doAnthropicRequest) with the same
-// reasoning SSE upstream. The external path translates reasoning_content →
-// thinking_delta on the wire BY DESIGN (the TestAnthropic_ThinkingStream
-// contract). This scenario confirms the sink did NOT over-swallow on the
-// external path — thinking_delta MUST be present.
-func TestS2_ExternalStream_ThinkingTranslated(t *testing.T) {
-	env := setupTestEnv(t, reasoningSSEHandler)
-
-	rr := env.run(anthropicRequest{model: extModel, stream: true})
-	wire := rr.Body.String()
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("S2: status=%d body=%s", rr.Code, wire)
-	}
-
-	// Routing proof: external path sends the RAW model name (no internal
-	// rewrite), proving we exercised doAnthropicRequest, not the internal
-	// handler.
-	cap := env.mockUp.last()
-	if got, _ := cap.BodyParsed["model"].(string); got != extModel {
-		t.Fatalf("S2: upstream model=%q want %q (external path not exercised); captured=%s",
-			got, extModel, string(cap.Body))
-	}
-	t.Logf("EVIDENCE S2: upstream model=%q (external path confirmed)", extModel)
-
-	// POSITIVE: thinking_delta MUST appear on the external wire (by-design
-	// translation — the regression guard that the sink did not over-swallow).
-	assertContains(t, wire, `"thinking_delta"`, "S2/thinking_delta")
-
-	// The reasoning text itself should appear inside the translated
-	// thinking_delta payload (the translator accumulates and emits it).
-	assertContains(t, wire, reasoningChunk1, "S2/reasoning1")
-	assertContains(t, wire, reasoningChunk2, "S2/reasoning2")
-
-	// Content still intact.
-	assertContains(t, wire, wireContent, "S2/content")
-
-	// Persisted thinking: the external path accumulates via
-	// extractOpenAIResponseContentFromSSE (handler_anthropic.go:691-694),
-	// so it should equal the concatenated reasoning too.
-	assistant, log, ok := env.lastAssistant()
-	if !ok {
-		t.Fatalf("S2: no persisted assistant message")
-	}
-	if got := assistant.Thinking; got != reasoningFull {
-		t.Logf("EVIDENCE S2: persisted thinking=%q (want %q)", got, reasoningFull)
-	} else {
-		t.Logf("EVIDENCE S2: persisted thinking == concatenated reasoning (%d bytes)", len(got))
-	}
-	t.Logf("EVIDENCE S2: request id=%s status=%s wire length=%d", log.ID, log.Status, len(wire))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

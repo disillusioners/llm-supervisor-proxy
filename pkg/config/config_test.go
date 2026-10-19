@@ -225,7 +225,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -237,7 +236,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "valid config with https",
 			cfg: Config{
-				UpstreamURL:       "https://api.example.com",
 				Port:              443,
 				IdleTimeout:       Duration(30 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -246,43 +244,14 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantError: false,
 		},
-		{
-			name: "missing upstream_url",
-			cfg: Config{
-				UpstreamURL:       "",
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url is required",
-		},
-		{
-			name: "invalid upstream_url - no http prefix",
-			cfg: Config{
-				UpstreamURL:       "localhost:4001",
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url must use http or https scheme",
-		},
-		{
-			name: "invalid upstream_url - bad protocol",
-			cfg: Config{
-				UpstreamURL:       "ftp://localhost:4001",
-				Port:              8089,
-				IdleTimeout:       Duration(10 * time.Second),
-				MaxGenerationTime: Duration(180 * time.Second),
-			},
-			wantError: true,
-			errorMsg:  "upstream_url must use http or https scheme",
-		},
+		// remove-external-upstream P1 (task 8): the three upstream_url
+		// validation subtests (missing / no-http-prefix / bad-protocol)
+		// are RETIRED with the field and its Validate() block — a config
+		// with no upstream URL is now VALID (the concept is gone; legacy
+		// config.json keys are silently ignored by json.Unmarshal).
 		{
 			name: "port too low",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              0,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
@@ -293,7 +262,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port too high",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              65536,
 				IdleTimeout:       Duration(10 * time.Second),
 				MaxGenerationTime: Duration(180 * time.Second),
@@ -304,7 +272,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port at minimum",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              1,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -316,7 +283,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "port at maximum",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              65535,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -328,7 +294,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle_timeout too low",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(500 * time.Millisecond),
 				MaxGenerationTime: Duration(180 * time.Second),
@@ -339,7 +304,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle_timeout at minimum",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(1 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -351,7 +315,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "max_generation_time too low",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -363,7 +326,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "max_generation_time at minimum",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -375,7 +337,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "race_max_parallel too low",
 			cfg: Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              8089,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -388,7 +349,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "race_max_buffer_bytes negative",
 			cfg: Config{
-				UpstreamURL:        "http://localhost:4001",
 				Port:               8089,
 				IdleTimeout:        Duration(10 * time.Second),
 				StreamDeadline:     Duration(110 * time.Second),
@@ -402,7 +362,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "race_max_buffer_bytes too small",
 			cfg: Config{
-				UpstreamURL:        "http://localhost:4001",
 				Port:               8089,
 				IdleTimeout:        Duration(10 * time.Second),
 				StreamDeadline:     Duration(110 * time.Second),
@@ -416,7 +375,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "race_max_buffer_bytes zero allowed",
 			cfg: Config{
-				UpstreamURL:        "http://localhost:4001",
 				Port:               8089,
 				IdleTimeout:        Duration(10 * time.Second),
 				StreamDeadline:     Duration(110 * time.Second),
@@ -429,7 +387,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "race_max_buffer_bytes at minimum",
 			cfg: Config{
-				UpstreamURL:        "http://localhost:4001",
 				Port:               8089,
 				IdleTimeout:        Duration(10 * time.Second),
 				StreamDeadline:     Duration(110 * time.Second),
@@ -443,7 +400,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle termination enabled with valid timeout",
 			cfg: Config{
-				UpstreamURL:            "http://localhost:4001",
 				Port:                   8089,
 				IdleTimeout:            Duration(10 * time.Second),
 				StreamDeadline:         Duration(110 * time.Second),
@@ -457,7 +413,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle termination enabled with timeout too low",
 			cfg: Config{
-				UpstreamURL:            "http://localhost:4001",
 				Port:                   8089,
 				IdleTimeout:            Duration(10 * time.Second),
 				StreamDeadline:         Duration(110 * time.Second),
@@ -472,7 +427,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle termination enabled with zero timeout",
 			cfg: Config{
-				UpstreamURL:            "http://localhost:4001",
 				Port:                   8089,
 				IdleTimeout:            Duration(10 * time.Second),
 				StreamDeadline:         Duration(110 * time.Second),
@@ -487,7 +441,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle termination disabled with zero timeout",
 			cfg: Config{
-				UpstreamURL:            "http://localhost:4001",
 				Port:                   8089,
 				IdleTimeout:            Duration(10 * time.Second),
 				StreamDeadline:         Duration(110 * time.Second),
@@ -501,7 +454,6 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "idle termination disabled with valid timeout",
 			cfg: Config{
-				UpstreamURL:            "http://localhost:4001",
 				Port:                   8089,
 				IdleTimeout:            Duration(10 * time.Second),
 				StreamDeadline:         Duration(110 * time.Second),
@@ -536,7 +488,6 @@ func TestConfig_Validate(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	wantVersion := ConfigVersion
-	wantUpstreamURL := "http://localhost:4001"
 	wantPort := 4321
 	wantIdleTimeout := Duration(60 * time.Second)
 	wantMaxGenerationTime := Duration(300 * time.Second)
@@ -545,9 +496,6 @@ func TestDefaults(t *testing.T) {
 
 	if Defaults.Version != wantVersion {
 		t.Errorf("Defaults.Version = %s, want %s", Defaults.Version, wantVersion)
-	}
-	if Defaults.UpstreamURL != wantUpstreamURL {
-		t.Errorf("Defaults.UpstreamURL = %s, want %s", Defaults.UpstreamURL, wantUpstreamURL)
 	}
 	if Defaults.Port != wantPort {
 		t.Errorf("Defaults.Port = %d, want %d", Defaults.Port, wantPort)
@@ -595,9 +543,6 @@ func TestManager_Load_NoFile(t *testing.T) {
 	if cfg.Version != ConfigVersion {
 		t.Errorf("Version = %s, want %s", cfg.Version, ConfigVersion)
 	}
-	if cfg.UpstreamURL != Defaults.UpstreamURL {
-		t.Errorf("UpstreamURL = %s, want %s", cfg.UpstreamURL, Defaults.UpstreamURL)
-	}
 	if cfg.Port != Defaults.Port {
 		t.Errorf("Port = %d, want %d", cfg.Port, Defaults.Port)
 	}
@@ -615,7 +560,6 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 	// Create a config file with custom values
 	customCfg := Config{
 		Version:           ConfigVersion,
-		UpstreamURL:       "http://custom:8080",
 		Port:              9999,
 		IdleTimeout:       Duration(20 * time.Second),
 		StreamDeadline:    Duration(110 * time.Second),
@@ -639,9 +583,6 @@ func TestManager_Load_ExistingFile(t *testing.T) {
 	}
 
 	cfg := m.Get()
-	if cfg.UpstreamURL != customCfg.UpstreamURL {
-		t.Errorf("UpstreamURL = %s, want %s", cfg.UpstreamURL, customCfg.UpstreamURL)
-	}
 	if cfg.Port != customCfg.Port {
 		t.Errorf("Port = %d, want %d", cfg.Port, customCfg.Port)
 	}
@@ -674,10 +615,7 @@ func TestManager_Load_CorruptedFile(t *testing.T) {
 	}
 
 	// Should fall back to defaults
-	cfg := m.Get()
-	if cfg.UpstreamURL != Defaults.UpstreamURL {
-		t.Errorf("Expected defaults after corrupted file, got UpstreamURL = %s", cfg.UpstreamURL)
-	}
+	_ = m.Get()
 
 	// Original file should be backed up
 	corruptedFiles, err := filepath.Glob(configPath + ".corrupted.*")
@@ -695,7 +633,6 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 
 	// Set env vars BEFORE loading
 	os.Setenv("APPLY_ENV_OVERRIDES", "1")
-	os.Setenv("UPSTREAM_URL", "http://envoverride:1234")
 	os.Setenv("PORT", "9000")
 	os.Setenv("IDLE_TIMEOUT", "30s")
 	os.Setenv("MAX_GENERATION_TIME", "600s")
@@ -705,7 +642,6 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	os.Setenv("IDLE_TERMINATION_TIMEOUT", "30s")
 	defer func() {
 		os.Unsetenv("APPLY_ENV_OVERRIDES")
-		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("IDLE_TIMEOUT")
 		os.Unsetenv("MAX_GENERATION_TIME")
@@ -724,9 +660,6 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	}
 
 	cfg := m.Get()
-	if cfg.UpstreamURL != "http://envoverride:1234" {
-		t.Errorf("UpstreamURL = %s, want http://envoverride:1234", cfg.UpstreamURL)
-	}
 	if cfg.Port != 9000 {
 		t.Errorf("Port = %d, want 9000", cfg.Port)
 	}
@@ -755,13 +688,11 @@ func TestManager_Load_EmptyEnvVarsDontOverride(t *testing.T) {
 	configPath := filepath.Join(tempDir, "config.json")
 
 	// Set env vars to empty
-	os.Setenv("UPSTREAM_URL", "")
 	os.Setenv("PORT", "")
 	os.Setenv("IDLE_TIMEOUT", "")
 	os.Setenv("MAX_GENERATION_TIME", "")
 	os.Setenv("RACE_RETRY_ENABLED", "")
 	defer func() {
-		os.Unsetenv("UPSTREAM_URL")
 		os.Unsetenv("PORT")
 		os.Unsetenv("IDLE_TIMEOUT")
 		os.Unsetenv("MAX_GENERATION_TIME")
@@ -771,7 +702,6 @@ func TestManager_Load_EmptyEnvVarsDontOverride(t *testing.T) {
 	// Create a config file with values
 	customCfg := Config{
 		Version:     ConfigVersion,
-		UpstreamURL: "http://file:8080",
 		Port:        8888,
 		IdleTimeout: Duration(15 * time.Second),
 	}
@@ -788,9 +718,6 @@ func TestManager_Load_EmptyEnvVarsDontOverride(t *testing.T) {
 
 	cfg := m.Get()
 	// Empty env vars should not override file values
-	if cfg.UpstreamURL != customCfg.UpstreamURL {
-		t.Errorf("UpstreamURL = %s, want %s", cfg.UpstreamURL, customCfg.UpstreamURL)
-	}
 	if cfg.Port != customCfg.Port {
 		t.Errorf("Port = %d, want %d", cfg.Port, customCfg.Port)
 	}
@@ -809,7 +736,6 @@ func TestManager_Save(t *testing.T) {
 	}
 
 	newCfg := Config{
-		UpstreamURL:       "http://saved:9000",
 		Port:              9001,
 		IdleTimeout:       Duration(25 * time.Second),
 		StreamDeadline:    Duration(110 * time.Second),
@@ -832,9 +758,6 @@ func TestManager_Save(t *testing.T) {
 
 	// Verify in-memory config was updated
 	cfg := m.Get()
-	if cfg.UpstreamURL != newCfg.UpstreamURL {
-		t.Errorf("UpstreamURL = %s, want %s", cfg.UpstreamURL, newCfg.UpstreamURL)
-	}
 	if cfg.Port != newCfg.Port {
 		t.Errorf("Port = %d, want %d", cfg.Port, newCfg.Port)
 	}
@@ -847,9 +770,6 @@ func TestManager_Save(t *testing.T) {
 	var savedCfg Config
 	if err := json.Unmarshal(fileData, &savedCfg); err != nil {
 		t.Fatalf("Failed to unmarshal saved config: %v", err)
-	}
-	if savedCfg.UpstreamURL != newCfg.UpstreamURL {
-		t.Errorf("Saved UpstreamURL = %s, want %s", savedCfg.UpstreamURL, newCfg.UpstreamURL)
 	}
 }
 
@@ -866,16 +786,19 @@ func TestManager_Save_ValidatesBeforeWriting(t *testing.T) {
 	}
 
 	// Try to save invalid config
+	// remove-external-upstream P1 (task 8): the retired upstream_url
+	// validation no longer fires — this fixture's remaining violation is
+	// the idle_timeout floor.
 	invalidCfg := Config{
-		UpstreamURL: "", // Invalid: missing
 		Port:        8089,
+		IdleTimeout: 0,
 	}
 
 	_, err := m.Save(invalidCfg)
 	if err == nil {
 		t.Error("Expected error when saving invalid config")
 	}
-	if err.Error() != "validation failed: upstream_url is required" {
+	if err.Error() != "validation failed: idle_timeout must be at least 1s" {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }
@@ -886,10 +809,8 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 
 	// Set env override
 	os.Setenv("APPLY_ENV_OVERRIDES", "1")
-	os.Setenv("UPSTREAM_URL", "http://envoverride:1234")
 	defer func() {
 		os.Unsetenv("APPLY_ENV_OVERRIDES")
-		os.Unsetenv("UPSTREAM_URL")
 	}()
 
 	m := &Manager{
@@ -902,7 +823,6 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 
 	// Save with different URL
 	newCfg := Config{
-		UpstreamURL:       "http://saved:9000",
 		Port:              9001,
 		IdleTimeout:       Duration(25 * time.Second),
 		StreamDeadline:    Duration(110 * time.Second),
@@ -916,10 +836,7 @@ func TestManager_Save_ReapplysEnvOverrides(t *testing.T) {
 	}
 
 	// Env override should still be applied
-	cfg := m.Get()
-	if cfg.UpstreamURL != "http://envoverride:1234" {
-		t.Errorf("Expected env override to persist after save, got %s", cfg.UpstreamURL)
-	}
+	_ = m.Get()
 }
 
 func TestManager_SaveResult_RestartRequired(t *testing.T) {
@@ -937,7 +854,6 @@ func TestManager_SaveResult_RestartRequired(t *testing.T) {
 	// Save with same port - no restart required
 	cfg := m.Get()
 	cfg.Port = m.Get().Port
-	cfg.UpstreamURL = "http://changed"
 
 	result, err := m.Save(cfg)
 	if err != nil {
@@ -971,7 +887,6 @@ func TestManager_ReadOnly(t *testing.T) {
 
 	// Attempt to save should fail
 	_, err := m.Save(Config{
-		UpstreamURL:       "http://localhost:4001",
 		Port:              8089,
 		IdleTimeout:       Duration(10 * time.Second),
 		StreamDeadline:    Duration(110 * time.Second),
@@ -1036,7 +951,6 @@ func TestManager_ConcurrentGet(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				_ = m.Get()
-				_ = m.GetUpstreamURL()
 				_ = m.GetPort()
 				_ = m.GetIdleTimeout()
 				_ = m.GetMaxGenerationTime()
@@ -1088,7 +1002,6 @@ func TestManager_ConcurrentGetWhileSave(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
 				cfg := Config{
-					UpstreamURL:       "http://localhost:4001",
 					Port:              8089 + j,
 					IdleTimeout:       Duration(10 * time.Second),
 					StreamDeadline:    Duration(110 * time.Second),
@@ -1134,7 +1047,6 @@ func TestManager_ConcurrentSave(t *testing.T) {
 		go func(port int) {
 			defer wg.Done()
 			cfg := Config{
-				UpstreamURL:       "http://localhost:4001",
 				Port:              port,
 				IdleTimeout:       Duration(10 * time.Second),
 				StreamDeadline:    Duration(110 * time.Second),
@@ -1168,7 +1080,6 @@ func TestManager_ConcurrentSave(t *testing.T) {
 func TestConfig_JSONRoundtrip(t *testing.T) {
 	original := Config{
 		Version:           ConfigVersion,
-		UpstreamURL:       "http://test:8080",
 		Port:              9999,
 		IdleTimeout:       Duration(45 * time.Second),
 		StreamDeadline:    Duration(110 * time.Second),
@@ -1189,9 +1100,6 @@ func TestConfig_JSONRoundtrip(t *testing.T) {
 
 	if loaded.Version != original.Version {
 		t.Errorf("Version = %s, want %s", loaded.Version, original.Version)
-	}
-	if loaded.UpstreamURL != original.UpstreamURL {
-		t.Errorf("UpstreamURL = %s, want %s", loaded.UpstreamURL, original.UpstreamURL)
 	}
 	if loaded.Port != original.Port {
 		t.Errorf("Port = %d, want %d", loaded.Port, original.Port)

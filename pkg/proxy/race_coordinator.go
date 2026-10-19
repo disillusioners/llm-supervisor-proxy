@@ -127,7 +127,8 @@ type raceCoordinator struct {
 
 	// interleaved is the X-Proxy-Interleaved-Thinking flag parsed from the
 	// incoming request header (handler.go entry). Threaded down through
-	// executeRequest → executeInternalRequest / executeExternalRequest so
+	// executeRequest → executeInternalRequest (the sole arm since the
+	// remove-external-upstream commission deleted the external arm) so
 	// race-internal sites have the flag without needing *requestContext
 	// (which never crosses into race_executor). See B3 (architecture §4.1).
 	interleaved bool
@@ -1449,7 +1450,11 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 		return false
 	}
 	modelCfg := c.cfg.ModelsConfig.GetModel(latest.modelID)
-	if modelCfg == nil || !modelCfg.Internal || len(modelCfg.Credentials) <= 1 {
+	// remove-external-upstream P1 (A20): the `!modelCfg.Internal`
+	// conjunct is GONE — every resolvable model is internal by
+	// construction (the boundary 404 gate rejects the rest), so
+	// credential failover eligibility keys on credential count only.
+	if modelCfg == nil || len(modelCfg.Credentials) <= 1 {
 		return false
 	}
 	// W3: once the single SoonestExpiry attempt is spent, the next 429
