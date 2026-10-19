@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
@@ -205,30 +206,12 @@ func (fakeNetTimeoutErr) Error() string   { return "i/o timeout while reading up
 func (fakeNetTimeoutErr) Timeout() bool   { return true }
 func (fakeNetTimeoutErr) Temporary() bool { return false }
 
-// raceExternalBuildError drives the REAL external-request builder
-// (executeExternalRequest, race_executor.go) so the table rows below
-// assert on the producer's ACTUAL output. If a producer literal drifts,
-// the row's calculated error drifts with it and the classification
-// assertion fails — instead of silently passing on a hand-typed copy
-// (which is exactly how the case-sensitivity defect survived).
-//
-//   - upstreamURL = "http://[::1" → url.Parse fails at
-//     race_executor.go:478, returning "invalid upstream URL: …".
-//   - ctx = nil → http.NewRequestWithContext fails at
-//     race_executor.go:511, returning "failed to create upstream request: …".
-func raceExternalBuildError(t *testing.T, upstreamURL string, ctx context.Context) error {
-	t.Helper()
-	cfg := newTestConfigSnapshot("m1")
-	cfg.UpstreamURL = upstreamURL
-	rawBody := []byte(`{"model":"m1"}`)
-	origReq := httptest.NewRequest("POST", "http://placeholder/v1/chat/completions", nil)
-	upReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "m1", 1024*1024)
-	err := executeExternalRequest(ctx, cfg, origReq, rawBody, upReq, false)
-	if err == nil {
-		t.Fatalf("executeExternalRequest(upstreamURL=%q, ctx=%v) unexpectedly returned nil", upstreamURL, ctx)
-	}
-	return err
-}
+// (The external-request fixtures this file once carried —
+// raceExternalBuildError driving executeExternalRequest via
+// ConfigSnapshot.UpstreamURL — died with the external bypass:
+// executeExternalRequest removed in e5bbf85, the snapshot URL fields
+// in ad12d08. The two producer-driven table rows were re-pointed to
+// classifier-vocabulary pins; see TestClassifyAttemptFailure_Table.)
 
 func TestClassifyAttemptFailure_Table(t *testing.T) {
 	tests := []struct {
@@ -366,23 +349,38 @@ func TestClassifyAttemptFailure_Table(t *testing.T) {
 			wantStatus: 0,
 		},
 		{
-			// Driven from the REAL producer at race_executor.go:478 via
-			// raceExternalBuildError. The producer emits the MIXED-CASE
-			// "invalid upstream URL"; the classifier must lowercase
-			// before matching (a case-sensitive compare yields unknown).
-			name:       "invalid upstream URL (real producer race_executor.go:478) → proxy_internal",
-			err:        raceExternalBuildError(t, "http://[::1", context.Background()),
+			// Post-external-removal vocabulary pin (producer row
+			// re-pointed). The REAL producer of this literal —
+			// executeExternalRequest's url.Parse, old
+			// race_executor.go:478 — was deleted with the external
+			// bypass (e5bbf85; ConfigSnapshot.UpstreamURL in ad12d08).
+			// No pkg/proxy path emits it anymore: post-removal a
+			// malformed credential/internal base URL is NOT eagerly
+			// parsed (providers.NewProvider never validates the URL) —
+			// it fails at request time as a *url.Error → connection,
+			// not proxy_internal. The literal itself is RETAINED in
+			// classifyIsProxyInternal's marker list, so this row pins
+			// the surviving contract: the MIXED-CASE literal still
+			// routes proxy_internal (a case-sensitive compare yields
+			// unknown — the defect this file exists to catch).
+			name:       "invalid upstream URL marker (retained vocabulary) → proxy_internal",
+			err:        errors.New(`invalid upstream URL: parse "http://[::1": missing ']' in host`),
 			wantClass:  reasonClassProxyInternal,
 			wantStatus: 0,
 		},
 		{
-			// Driven from the REAL producer at race_executor.go:511 via
-			// raceExternalBuildError (nil ctx ⇒ NewRequestWithContext
-			// error). The producer literal is "failed to create upstream
-			// request" — the old marker's "failed to build upstream
-			// request" had no producer in pkg/proxy and never matched.
-			name:       "failed to create upstream request (real producer race_executor.go:511) → proxy_internal",
-			err:        raceExternalBuildError(t, "http://example.invalid/v1", nil),
+			// Post-external-removal vocabulary pin (producer row
+			// re-pointed). The REAL producer — executeExternalRequest's
+			// http.NewRequestWithContext, old race_executor.go:511 —
+			// died with the external bypass (e5bbf85); the race-internal
+			// path always holds a live coordinator ctx, so the nil-ctx
+			// trigger is unreachable. The literal's only live emitter is
+			// pkg/mcp/proxy.go, whose errors never enter this
+			// classifier — the marker stays in
+			// classifyIsProxyInternal's list, and this row pins its
+			// case-insensitive proxy_internal routing.
+			name:       "failed to create upstream request marker (retained vocabulary) → proxy_internal",
+			err:        errors.New("failed to create upstream request: http: nil Context"),
 			wantClass:  reasonClassProxyInternal,
 			wantStatus: 0,
 		},
@@ -509,8 +507,14 @@ func TestRaceFailureReason_FailingUpstreamEndToEnd(t *testing.T) {
 	bus := events.NewBus()
 	evCh := collectReasonEvents(t, bus)
 
+	// Post-external-removal wiring: the mock upstream is reached
+	// through the INTERNAL fixture (credential base_url = srv.URL),
+	// not a snapshot URL field (ConfigSnapshot.UpstreamURL removed in
+	// ad12d08).
+	mc := models.NewModelsConfig()
+	seedInternalFixtureNamed(t, mc, srv.URL, "m1")
 	cfg := newTestConfigSnapshot("m1")
-	cfg.UpstreamURL = srv.URL
+	cfg.ModelsConfig = mc
 
 	coord := newRaceCoordinatorWithEvents(
 		context.Background(), cfg, newTestRequest(),
