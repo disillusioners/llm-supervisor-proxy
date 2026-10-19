@@ -229,13 +229,13 @@ func TestDecision_Resolver_DecisionModel_ProviderLookup_502(t *testing.T) {
 			return nil
 		}
 		return &models.ModelConfig{
-			ID:                         "dec-1",
-			Name:                       "Decision 1",
-			Enabled:                    true,
-			Kind:                       models.KindDecision,
-			Internal:                   true,
-			InternalModel:              "gpt-6-luna",
-			Credentials:                []models.CredentialRef{{CredentialID: "anth-cred", Weight: 1, Position: 0}},
+			ID:                           "dec-1",
+			Name:                         "Decision 1",
+			Enabled:                      true,
+			Kind:                         models.KindDecision,
+			Internal:                     true,
+			InternalModel:                "gpt-6-luna",
+			Credentials:                  []models.CredentialRef{{CredentialID: "anth-cred", Weight: 1, Position: 0}},
 			ExcludeFromUltimateSwitching: true,
 		}
 	}
