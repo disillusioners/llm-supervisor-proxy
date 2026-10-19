@@ -30,9 +30,27 @@ func copyCredentialRefs(src []models.CredentialRef) []models.CredentialRef {
 	return dst
 }
 
+// copyGroupMembers clones a group member list. GroupMember carries
+// value fields only (ModelID, Weight, BackupOnly), so the element
+// copy is a full clone.
+func copyGroupMembers(src []models.GroupMember) []models.GroupMember {
+	if src == nil {
+		return nil
+	}
+	dst := make([]models.GroupMember, len(src))
+	copy(dst, src)
+	return dst
+}
+
 // deepCopyModelConfig clones a ModelConfig including the mutable
-// slices (FallbackChain, TruncateParams, Credentials). PeakHour*
-// and other fields are value types carried by the struct copy.
+// slices (FallbackChain, TruncateParams, Credentials, Members).
+// PeakHour* and other fields are value types carried by the struct
+// copy.
+//
+// Members (the group member list) is cloned since the cached group
+// rows are now handed out by the claim-blind native read too
+// (GetModelNative) — a shared slice would let a caller mutate cache
+// state through the returned pointer.
 func deepCopyModelConfig(m *models.ModelConfig) *models.ModelConfig {
 	if m == nil {
 		return nil
@@ -41,6 +59,7 @@ func deepCopyModelConfig(m *models.ModelConfig) *models.ModelConfig {
 	cp.FallbackChain = copyStrings(m.FallbackChain)
 	cp.TruncateParams = copyStrings(m.TruncateParams)
 	cp.Credentials = copyCredentialRefs(m.Credentials)
+	cp.Members = copyGroupMembers(m.Members)
 	return &cp
 }
 

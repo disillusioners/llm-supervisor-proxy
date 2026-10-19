@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
@@ -85,10 +86,55 @@ func TestShadowFix_CredentialsChangedDrain_KeepsSelfShadowMemberEngineState(t *t
 		t.Fatalf("UpdateModel(coding): %v", err)
 	}
 
-	// Let the asynchronous drain process the event. The bus delivery is
-	// sub-millisecond; the settle window is generous so the assertion
-	// is about the settled state, not about a race.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the ASYNCHRONOUS drain (drainCredentialsChanged) to
+	// process the member's credentials-changed event — the assertion
+	// below must observe the POST-drain state.
+	//
+	// Polling "does the member resolve?" is NOT a valid wait here.
+	// The WRITE PATH already refreshed the engine synchronously
+	// (UpdateModel -> engine.OnModelChanged), so that condition is
+	// TRUE BEFORE the drain runs: a poll on it is satisfied in
+	// microseconds and would no longer observe the drain's effect —
+	// it would MASK the regression this test pins (measured against
+	// the claims-first drain: a naive poll passes in ~0.3ms). The wait
+	// below is a FIFO BARRIER instead:
+	//
+	//   * the drain consumes ONE channel in ONE goroutine, so events
+	//     are handled in publish order;
+	//   * the canary event is published AFTER the member write, so
+	//     the drain reaches it only after the member's event;
+	//   * the canary is a model that exists ONLY in the engine (it
+	//     has no DB row), so the drain's re-read finds nothing and
+	//     DROPS its engine state — a deterministic, observable
+	//     marker of drain progress.
+	//
+	// Once the canary's engine state is gone, the member's event has
+	// been processed and the member's engine state has settled.
+	const canaryModel = "drain-canary"
+	mgr.Engine().RebindFromStore(canaryModel, models.TestRefs("cred-openai"))
+	if _, ok := mgr.Engine().Stats()[canaryModel]; !ok {
+		t.Fatalf("canary prime failed: the engine has no state for %q", canaryModel)
+	}
+	bus.Publish(events.Event{
+		Type:      credentiallb.EventCredentialsChanged,
+		Timestamp: time.Now().Unix(),
+		Data:      map[string]interface{}{"model_id": canaryModel},
+	})
+
+	const (
+		drainDeadline     = 3 * time.Second
+		drainPollInterval = 25 * time.Millisecond
+	)
+	deadline := time.Now().Add(drainDeadline)
+	for {
+		if _, ok := mgr.Engine().Stats()[canaryModel]; !ok {
+			break // the drain passed the member's event — state settled
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the credentials-changed drain did not process the member's event within %s (the canary engine state is still present, so the drain never reached the canary event)", drainDeadline)
+		}
+		time.Sleep(drainPollInterval)
+	}
 
 	res, ok := mgr.ResolveInternalConfigWithAffinity("coding", "conv-1")
 	if !ok {
