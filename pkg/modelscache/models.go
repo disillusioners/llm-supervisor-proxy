@@ -972,12 +972,14 @@ func (c *CachedModelsConfig) RewriteGroupEntries(modelList []string, conversatio
 }
 
 // ExcludeGroupMember forwards the group-level exclude-and-reselect
-// (Am24) to the inner manager's engine.
-func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, bool) {
+// (Am24) to the inner manager's engine. group-backup-members / D5:
+// the returned `pool` string ("default" / "backup") propagates
+// verbatim so the proxy can observe a backup-pool transition.
+func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, string, bool) {
 	if gr, ok := c.inner.(models.GroupRewriter); ok {
 		return gr.ExcludeGroupMember(groupID, conversationKey, memberID)
 	}
-	return "", false
+	return "", "", false
 }
 
 // GetModelNative forwards the load-balance-groups Am22 L1 direct-ID

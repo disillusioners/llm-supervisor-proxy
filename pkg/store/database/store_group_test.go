@@ -641,22 +641,25 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.AddModel(validGroup()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	pick, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
 	if !ok {
 		t.Fatal("two-member group must produce a replacement")
 	}
 	if pick != "coding-alt" {
 		t.Errorf("reselect pick = %q, want coding-alt (the only other member)", pick)
 	}
+	if pool != models.PoolDefault {
+		t.Errorf("reselect pool = %q, want default", pool)
+	}
 
 	// Now make the group single-member: ExcludeGroupMember on a
-	// single-member group returns ("" , false) — no alternative.
+	// single-member group returns ("" , "", false) — no alternative.
 	updated := validGroup()
 	updated.Members = []models.GroupMember{{ModelID: "coding", Weight: 1}}
 	if err := mgr.UpdateModel("coding-group", updated); err != nil {
 		t.Fatalf("update to single-member: %v", err)
 	}
-	_, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
 	if ok2 {
 		t.Error("single-member ExcludeGroupMember must return ok=false (no alternative)")
 	}
@@ -736,4 +739,329 @@ func otherOf(memberID string) string {
 		return "coding-alt"
 	}
 	return "coding"
+}
+
+// ─── group-backup-members / D8 — manager-level stale-binding behaviour ──────
+//
+// The engine-level D8 tests (pkg/grouplb/engine_test.go) cover the
+// picker. These cover the SEAM: the manager's two-pool picker
+// (pickServableGroupMember) and the rewrite that surfaces it
+// (RewriteGroupEntries) — including the empty-default defensive path
+// (unreachable via the API — D2 blocks zero-default writes — but the
+// picker must still serve a backup instead of failing).
+
+// TestGroup_D8_RemovedMemberRePicks — a group's member is removed
+// while a conversation is bound to it; the next rewrite for the SAME
+// conversation key must serve a live member (never the removed id).
+func TestGroup_D8_RemovedMemberRePicks(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	const key = "conv-d8-removed"
+
+	// First rewrite: binds the conversation to one of the two members.
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if res.FailedGroupID != "" || res.MemberID == "" {
+		t.Fatalf("first rewrite failed: %+v", res)
+	}
+	bound := res.MemberID
+	if bound != "coding" && bound != "coding-alt" {
+		t.Fatalf("first rewrite member = %q, want coding|coding-alt", bound)
+	}
+
+	// Remove the bound member from the group (config change on the
+	// fly) — the survivor filter (push layer) drops the binding.
+	// The surviving member is the OTHER one.
+	remaining := "coding"
+	if bound == "coding" {
+		remaining = "coding-alt"
+	}
+	updated := validGroup()
+	updated.Members = []models.GroupMember{{ModelID: remaining, Weight: 1}}
+	if err := mgr.UpdateModel("coding-group", updated); err != nil {
+		t.Fatalf("update group: %v", err)
+	}
+
+	// The same conversation key now re-picks — onto the surviving
+	// member, never the removed one.
+	res2 := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if res2.FailedGroupID != "" {
+		t.Fatalf("post-removal rewrite failed: %+v", res2)
+	}
+	if res2.MemberID == bound {
+		t.Fatalf("post-removal rewrite served the REMOVED member %q", res2.MemberID)
+	}
+	if res2.MemberID != remaining {
+		t.Fatalf("post-removal rewrite member = %q, want %q (the only remaining member)", res2.MemberID, remaining)
+	}
+	if res2.MemberPool != models.PoolDefault {
+		t.Errorf("post-removal rewrite pool = %q, want default", res2.MemberPool)
+	}
+}
+
+// TestGroup_D8_EmptyDefaultPool_FallsToBackup — the DEFENSIVE
+// empty-default path: a group whose members are ALL backup-flagged
+// (unreachable via the write path — D2 rejects zero-default groups —
+// so the group row is constructed directly and handed to the picker)
+// must still SERVE a backup member (no error, correct pool) instead
+// of failing the request.
+func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Hand-built all-backup group — bypasses the D2 write validation
+	// on purpose (the state is unreachable via the API).
+	allBackup := models.ModelConfig{
+		ID:                           "coding-group",
+		Name:                         "Coding Group",
+		Enabled:                      true,
+		Kind:                         models.KindGroup,
+		Internal:                     true,
+		ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "coding", Weight: 1, BackupOnly: true},
+			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+		},
+	}
+	// The engine's membership for this group must reflect the
+	// all-backup shape — exactly what the write path's
+	// notifyGroupEngineLocked → OnGroupChanged does on a config
+	// change. (The seeded group above registered the DEFAULT shape
+	// under the same group id.)
+	mgr.groupEngine.OnGroupChanged(allBackup.ID, GroupMemberRefs(allBackup.Members))
+
+	memberID, newlyBound, pool, stale, ok := mgr.pickServableGroupMember(&allBackup, "conv-d8-empty")
+	if !ok {
+		t.Fatal("empty default pool: the picker must serve a BACKUP member, not fail")
+	}
+	if memberID != "coding" && memberID != "coding-alt" {
+		t.Fatalf("empty default pool: member = %q, want coding|coding-alt", memberID)
+	}
+	if pool != models.PoolBackup {
+		t.Fatalf("empty default pool: pool = %q, want backup", pool)
+	}
+	if stale {
+		t.Error("empty default pool: staleRepaired must be false (no prior binding)")
+	}
+	_ = newlyBound
+}
+
+// ─── FIX ROUND R1 coverage — C1 cascade, C3 annotation honesty, D2 gate ────
+
+// TestGroup_C1_ReentryCascadesToBackup — C1 regression pin.
+//
+// A 1-default + 1-backup group whose default fails on the terminal
+// member-pipeline path must hand the re-entry to the BACKUP member —
+// NOT re-serve the default that just failed (the C1 defect: the
+// default pool's all-cooling SoonestExpiry path returned a non-empty
+// cooling default, so the ReselectNone-only cascade never fired for a
+// D2-valid group). When no servable backup remains, the failure is
+// real (ok=false).
+func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+
+	g := models.ModelConfig{
+		ID: "g-c1", Name: "C1 Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "coding", Weight: 1},
+			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+		},
+	}
+	if err := mgr.AddModel(g); err != nil {
+		t.Fatalf("seed group: %v", err)
+	}
+
+	// The DEFAULT failed terminally → the re-entry must hand to the
+	// BACKUP, annotated as a backup-pool pick (D5).
+	pick, pool, ok := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding")
+	if !ok {
+		t.Fatal("C1: a servable backup must be handed to the re-entry (got ok=false)")
+	}
+	if pick == "coding" {
+		t.Fatal("C1: the re-entry re-served the default that just failed")
+	}
+	if pick != "coding-alt" {
+		t.Fatalf("C1: re-entry member = %q, want coding-alt (the backup)", pick)
+	}
+	if pool != models.PoolBackup {
+		t.Fatalf("C1: pool = %q, want backup (D5 annotation must flow)", pool)
+	}
+
+	// Make the backup UNSERVABLE (disabled between write and
+	// request) — now no servable member remains anywhere: the
+	// failure is real.
+	row := mgr.GetModelNative("coding-alt")
+	if row == nil {
+		t.Fatal("seed: coding-alt row missing")
+	}
+	row.Enabled = false
+	if err := mgr.UpdateModel("coding-alt", *row); err != nil {
+		t.Fatalf("disable backup: %v", err)
+	}
+	// The default is still cooling from the first call; the backup is
+	// unservable ⇒ terminal.
+	if pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding"); ok2 {
+		t.Fatalf("C1: both pools exhausted must be terminal, got (%q, %q, true)", pick2, pool2)
+	}
+}
+
+// TestGroup_C1_BackupLessGroupsKeepV1Semantics — D7 byte-compat: a
+// backup-less group keeps the v1 shapes exactly.
+func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+
+	// (a) 1-member backup-less group: fail fast (ReselectNone).
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "g-solo", Name: "Solo Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("seed solo group: %v", err)
+	}
+	if pick, pool, ok := mgr.ExcludeGroupMember("g-solo", "conv-solo", "coding"); ok {
+		t.Fatalf("1-member group must fail fast, got (%q, %q, true)", pick, pool)
+	}
+
+	// (b) 2-default backup-less group, all defaults cooling: the v1
+	// all-cooling availability ruling still re-serves the
+	// soonest-expiring default (NOT a failure).
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "g-two", Name: "Two Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "coding", Weight: 1},
+			{ModelID: "coding-alt", Weight: 1},
+		},
+	}); err != nil {
+		t.Fatalf("seed two group: %v", err)
+	}
+	// First exclusion: ReselectHealthy → the other default.
+	first, pool1, ok1 := mgr.ExcludeGroupMember("g-two", "conv-two", "coding")
+	if !ok1 || pool1 != models.PoolDefault || first == "coding" {
+		t.Fatalf("v1 reselect: (%q, %q, %v), want a different default with pool=default", first, pool1, ok1)
+	}
+	// Second exclusion (all defaults now cooling): v1 availability
+	// ruling re-serves a cooling default rather than failing.
+	second, pool2, ok2 := mgr.ExcludeGroupMember("g-two", "conv-two", first)
+	if !ok2 || pool2 != models.PoolDefault || second == "" {
+		t.Fatalf("v1 all-cooling: (%q, %q, %v), want the soonest default re-served", second, pool2, ok2)
+	}
+}
+
+// TestGroup_C3_GrandfatheredPickKeepsDefaultAnnotation — C3
+// annotation honesty: a default→backup reclassification grandfathers
+// the existing binding (the member still exists), and the
+// grandfathered pick is NOT a fallback — it must be reported as
+// pool=default, never pool=backup.
+func TestGroup_C3_GrandfatheredPickKeepsDefaultAnnotation(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	const key = "conv-c3"
+	first := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if first.FailedGroupID != "" || first.MemberID == "" {
+		t.Fatalf("first rewrite: %+v", first)
+	}
+	if first.MemberPool != models.PoolDefault {
+		t.Fatalf("first rewrite pool = %q, want default", first.MemberPool)
+	}
+
+	// Reclassify the bound member: default → backup (it still EXISTS).
+	updated := validGroup()
+	for i := range updated.Members {
+		if updated.Members[i].ModelID == first.MemberID {
+			updated.Members[i].BackupOnly = true
+		}
+	}
+	if err := mgr.UpdateModel("coding-group", updated); err != nil {
+		t.Fatalf("reclassify: %v", err)
+	}
+
+	// The grandfathered binding continues on the same member AND the
+	// annotation stays "default" (no fallback token).
+	second := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if second.FailedGroupID != "" {
+		t.Fatalf("grandfathered rewrite failed: %+v", second)
+	}
+	if second.MemberID != first.MemberID {
+		t.Fatalf("C3: grandfathered pick = %q, want the unchanged %q", second.MemberID, first.MemberID)
+	}
+	if second.MemberPool != models.PoolDefault {
+		t.Fatalf("C3 annotation honesty: pool = %q, want default (a grandfathered pick is NOT a fallback)", second.MemberPool)
+	}
+	if second.BindingStale {
+		t.Error("C3: a reclassification is not a removal — BindingStale must stay false")
+	}
+}
+
+// TestGroup_D2_ZeroDefaultRejectedOnWritePath — D2 at the DB write
+// path (validateBeforeWrite → validateGroupWrite → ValidateGroupMembers):
+// a zero-default group is REJECTED on both AddModel and UpdateModel;
+// a ≥1-default group is accepted.
+func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+
+	zeroDefault := func(id string) models.ModelConfig {
+		return models.ModelConfig{
+			ID: id, Name: "Zero Default", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			ExcludeFromUltimateSwitching: true,
+			Members: []models.GroupMember{
+				{ModelID: "coding", Weight: 1, BackupOnly: true},
+				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+			},
+		}
+	}
+
+	// AddModel path.
+	err := mgr.AddModel(zeroDefault("g-zero"))
+	if err == nil {
+		t.Fatal("D2: zero-default group must be REJECTED on AddModel")
+	}
+	if !strings.Contains(err.Error(), "non-backup (default) member") {
+		t.Errorf("D2 AddModel error = %q, want the ≥1-default message", err.Error())
+	}
+
+	// UpdateModel path.
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed valid group: %v", err)
+	}
+	upd := zeroDefault("coding-group")
+	if err := mgr.UpdateModel("coding-group", upd); err == nil {
+		t.Fatal("D2: zero-default group must be REJECTED on UpdateModel")
+	} else if !strings.Contains(err.Error(), "non-backup (default) member") {
+		t.Errorf("D2 UpdateModel error = %q, want the ≥1-default message", err.Error())
+	}
+
+	// ≥1 default is ACCEPTED on both paths.
+	oneDefault := func(id string) models.ModelConfig {
+		return models.ModelConfig{
+			ID: id, Name: "One Default", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			ExcludeFromUltimateSwitching: true,
+			Members: []models.GroupMember{
+				{ModelID: "coding", Weight: 1},
+				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+			},
+		}
+	}
+	if err := mgr.AddModel(oneDefault("g-one-default")); err != nil {
+		t.Fatalf("D2: ≥1-default group must be accepted on AddModel, got: %v", err)
+	}
+	if err := mgr.UpdateModel("g-one-default", oneDefault("g-one-default")); err != nil {
+		t.Fatalf("D2: ≥1-default group must be accepted on UpdateModel, got: %v", err)
+	}
 }

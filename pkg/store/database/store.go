@@ -1619,14 +1619,16 @@ func (m *ModelsManager) notifyGroupEngineLocked(kind, modelID string, members []
 }
 
 // GroupMemberRefs converts config member entries to engine refs
-// (positions = slice order).
+// (positions = slice order). group-backup-members / D1: the
+// BackupOnly flag is preserved verbatim so the engine can split
+// the pool.
 func GroupMemberRefs(members []models.GroupMember) []grouplb.MemberRef {
 	if len(members) == 0 {
 		return nil
 	}
 	refs := make([]grouplb.MemberRef, len(members))
 	for i, mm := range members {
-		refs[i] = grouplb.MemberRef{ModelID: mm.ModelID, Weight: mm.Weight, Position: i}
+		refs[i] = grouplb.MemberRef{ModelID: mm.ModelID, Weight: mm.Weight, Position: i, BackupOnly: mm.BackupOnly}
 	}
 	return refs
 }

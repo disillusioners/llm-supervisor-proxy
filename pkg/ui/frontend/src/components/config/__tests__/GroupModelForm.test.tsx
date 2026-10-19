@@ -283,3 +283,78 @@ describe('GroupModelForm — payload stamping + client G-rule mirror (load-balan
     expect(nameInput.getAttribute('aria-describedby')).toBe('group-form-name-error');
   });
 });
+
+// ─── group-backup-members ─────────────────────────────────────────────────
+// Client-side D2 mirror (≥1 default member) + payload round-trip
+// (`backup_only` carries verbatim, absent ⇒ drop the key — matches
+// the Go omitempty semantics).
+
+describe('GroupModelForm — backup_only round-trip + D2 client guard (group-backup-members)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('D2 client guard — all-backup member rows surface the validation error and block submit', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const initialData = {
+      ...makeModel({ id: 'g1', name: 'Existing', kind: 'group' as const }),
+      members: [
+        { model_id: 'coding', weight: 1, backup_only: true },
+        { model_id: 'helper', weight: 1, backup_only: true },
+      ],
+      shadow_model_id: '',
+    } as GroupModel;
+    const { container } = render(<GroupModelForm {...makeProps({ mode: 'edit', initialData, onSave, groups: [] })} />);
+
+    fireEvent.click(container.querySelector('[data-testid="group-form-submit"]')!);
+    // Save MUST NOT be called (the D2 guard blocks submit).
+    expect(onSave).not.toHaveBeenCalled();
+    // The error message renders under the members section.
+    await waitFor(() => {
+      const err = container.querySelector('[data-testid="group-form-members-error"]');
+      expect(err?.textContent).toContain('non-backup (default) member');
+    });
+  });
+
+  it('D2 mixed default + backup — submits cleanly with backup_only in the payload', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const initialData = {
+      ...makeModel({ id: 'g1', name: 'Existing', kind: 'group' as const }),
+      members: [
+        { model_id: 'coding', weight: 1 },
+        { model_id: 'helper', weight: 1, backup_only: true },
+      ],
+      shadow_model_id: '',
+    } as GroupModel;
+    const { container } = render(<GroupModelForm {...makeProps({ mode: 'edit', initialData, onSave, groups: [] })} />);
+
+    fireEvent.click(container.querySelector('[data-testid="group-form-submit"]')!);
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const payload = onSave.mock.calls[0][0];
+    expect(payload.members).toEqual([
+      { model_id: 'coding', weight: 1 },
+      { model_id: 'helper', weight: 1, backup_only: true },
+    ]);
+  });
+
+  it('D7 round-trip — pre-existing group without backup_only submits with the key ABSENT (omitempty semantics)', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const initialData = {
+      ...makeModel({ id: 'g1', name: 'Existing', kind: 'group' as const }),
+      members: [{ model_id: 'coding', weight: 1 }],
+      shadow_model_id: '',
+    } as GroupModel;
+    const { container } = render(<GroupModelForm {...makeProps({ mode: 'edit', initialData, onSave, groups: [] })} />);
+
+    fireEvent.click(container.querySelector('[data-testid="group-form-submit"]')!);
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const payload = onSave.mock.calls[0][0];
+    expect(payload.members).toEqual([{ model_id: 'coding', weight: 1 }]);
+    // Key is dropped entirely (not present as backup_only: undefined).
+    expect('backup_only' in payload.members[0]).toBe(false);
+  });
+});

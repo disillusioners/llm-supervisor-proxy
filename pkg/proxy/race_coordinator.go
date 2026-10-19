@@ -994,16 +994,40 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 	if c.eventBus != nil && c.groupPick != nil {
 		gp := c.groupPick
 		publishMember = func(memberID string, cred models.ResolvedCredential) {
+			payload := map[string]interface{}{
+				"group_id":          gp.GroupID,
+				"member_id":         memberID,
+				"upstream_provider": cred.Provider,
+				"upstream_model":    cred.InternalModel,
+				"id":                c.requestID,
+			}
+			// group-backup-members / D5 observability: the
+			// additive `pool` field rides on the same event as
+			// reason / reason_class. It is emitted ONLY for a
+			// BACKUP-pool serve ("backup" — every default member
+			// in the run's exclusion set had failed); a
+			// default-pool serve leaves the field ABSENT (the
+			// FE's existing default branch — no "default" value
+			// is ever emitted). The enclosing `c.groupPick != nil`
+			// guard means a group rewrite always happened.
+			if gp.Pool == models.PoolBackup {
+				payload["pool"] = models.PoolBackup
+			}
+			// group-backup-members / D8 observability: the
+			// additive `binding` field marks a selection-time
+			// repair — the conversation's sticky binding pointed
+			// at a member that left the group, so the binding was
+			// discarded and the member re-picked. Omitted unless
+			// the condition occurs (same additive style as the
+			// `pool` field above: present only on the condition,
+			// absent otherwise).
+			if gp.BindingStale {
+				payload["binding"] = "stale"
+			}
 			c.eventBus.Publish(events.Event{
 				Type:      "model_member_selected",
 				Timestamp: time.Now().Unix(),
-				Data: map[string]interface{}{
-					"group_id":          gp.GroupID,
-					"member_id":         memberID,
-					"upstream_provider": cred.Provider,
-					"upstream_model":    cred.InternalModel,
-					"id":                c.requestID,
-				},
+				Data:      payload,
 			})
 		}
 	}

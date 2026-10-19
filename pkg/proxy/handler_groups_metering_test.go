@@ -300,6 +300,85 @@ func TestHandlerGroups_Am25_Metering_RowShapes(t *testing.T) {
 		}
 	})
 
+	t.Run("BackupServed_ExactlyTwoRows_GroupMasked", func(t *testing.T) {
+		// group-backup-members / C1 + D3 + D4: the group's ONLY
+		// default fails terminally; the re-entry cascades to the
+		// BACKUP member (C1). Metering must produce the SAME
+		// dual-row shape as a default-served request (group row +
+		// served-member row), and the masked response identity must
+		// be the GROUP id — never the backup member's id.
+		//
+		// This leg is the backup-served counterpart of
+		// MultiMemberGroup_ExactlyTwoRows (which covers
+		// default-served only) and doubles as the C1 end-to-end
+		// regression pin: without the cascade the request would
+		// re-run the failed default and end 502.
+		g, counter := newMeteringHarness(t, meteringStubUpstream("b-default"))
+		defer g.close()
+		for _, id := range []string{"b-default", "b-backup"} {
+			if err := g.mgr.AddModel(models.ModelConfig{
+				ID: id, Name: id, Enabled: true, Kind: models.KindChat,
+				// InternalModel == the row ID so the stub's fail-model
+				// comparison (which sees the UPSTREAM wire model)
+				// targets this member. The metering assertions still
+				// key on the row ID (winner.GetModelID()).
+				Internal: true, InternalModel: id,
+				Credentials: models.TestRefs(p5FixtureCredID),
+			}); err != nil {
+				t.Fatalf("AddModel(%s): %v", id, err)
+			}
+		}
+		if err := g.mgr.AddModel(models.ModelConfig{
+			ID: "g-backup", Name: "Backup Group", Enabled: true,
+			Kind: models.KindGroup, Internal: true,
+			ExcludeFromUltimateSwitching: true,
+			Members: []models.GroupMember{
+				{ModelID: "b-default", Weight: 1},
+				{ModelID: "b-backup", Weight: 1, BackupOnly: true},
+			},
+		}); err != nil {
+			t.Fatalf("AddModel(g-backup): %v", err)
+		}
+
+		rec := httptest.NewRecorder()
+		g.h.HandleChatCompletions(rec, makeChatRequest(t, map[string]interface{}{
+			"model":    "g-backup",
+			"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+		}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("backup-served: status=%d body=%s (C1 cascade did not reach the backup)", rec.Code, rec.Body.String())
+		}
+
+		// D3 masking: the served member is internal; the client sees
+		// the GROUP id only.
+		var body map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if m, _ := body["model"].(string); m != "g-backup" {
+			t.Errorf("masking: model = %q, want the group id \"g-backup\"", m)
+		}
+
+		rows := waitForModelUsageRows(t, counter, 2)
+		got := map[string]int{}
+		for _, r := range rows {
+			got[r.ModelID] += r.RequestCount
+		}
+		// Exactly two rows: the group row + the BACKUP member row.
+		if len(got) != 2 {
+			t.Fatalf("backup-served rows = %v, want exactly 2 (group + backup member)", got)
+		}
+		if got["g-backup"] != 1 {
+			t.Fatalf("group-name row missing/wrong: %v", got)
+		}
+		if got["b-backup"] != 1 {
+			t.Fatalf("backup member row missing/wrong: %v", got)
+		}
+		if _, ok := got["b-default"]; ok {
+			t.Fatalf("the failed default must not be metered: %v", got)
+		}
+	})
+
 	t.Run("NonGroupFallback_ExactlyOneRow", func(t *testing.T) {
 		// THE regression case: fb-a fails, fb-b serves — an ordinary
 		// NON-group fallback. Base behavior (first-class AC
