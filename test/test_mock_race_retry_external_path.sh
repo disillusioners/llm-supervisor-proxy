@@ -3,6 +3,12 @@
 # Test script for Race Retry functionality
 # Tests idle timeout spawning and stream deadline behavior
 # Maximum runtime: 30 seconds
+#
+# NOTE: despite the filename, this script exercises the INTERNAL path — the
+# model below is configured internal=true and routes via its credential's
+# internal_base_url. The external UPSTREAM_URL arm is retired (remove-external-
+# upstream P1); the filename is retained as a historical artifact (a dedicated
+# internal-path sibling lives at test_mock_race_retry_internal_path.sh).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -141,7 +147,7 @@ else
     echo -e "${RED}Failed to create credential: $CREDENTIAL_RESPONSE${NC}"
 fi
 
-# Create main external model
+# Create main model (the "external" id is historical; configured internal=true)
 MODEL_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -H "Content-Type: application/json" \
     -d "{

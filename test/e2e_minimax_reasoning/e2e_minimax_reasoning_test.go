@@ -17,13 +17,13 @@ import (
 )
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S1 — Request translation, race-external
+// S1 — Request translation, race path (raceExtModel)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// TestS1_RequestTranslation_RaceExternal drives an UNREGISTERED model id
-// (resolvedModel=nil ⇒ race-external path) with flag ON + MiniMax upstream
-// credential. The captured upstream body must carry the translated shape.
-func TestS1_RequestTranslation_RaceExternal(t *testing.T) {
+// TestS1_RequestTranslation_RaceExtModel drives the raceExtModel internal
+// registration with flag ON + MiniMax upstream credential. The captured
+// upstream body must carry the translated shape.
+func TestS1_RequestTranslation_RaceExtModel(t *testing.T) {
 	env := setupTestEnv(t, okNonStreamHandler(), envOptions{})
 	tok := env.plainToken
 
@@ -187,7 +187,7 @@ func TestS5_NonStreamResponse_Internal(t *testing.T) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S6 — Stream response, external (StreamTranslator semantics)
+// S6 — Stream response, race path (StreamTranslator semantics)
 // ═════════════════════════════════════════════════════════════════════════════
 
 func sseStream(lines ...string) string {
@@ -216,9 +216,9 @@ func streamHandler(body string) http.HandlerFunc {
 	return rawStringHandler(http.StatusOK, body, "text/event-stream")
 }
 
-// TestS6_StreamResponse_External exercises the external stream translator
-// through the full handler (race-external path).
-func TestS6_StreamResponse_External(t *testing.T) {
+// TestS6_StreamResponse_RaceExtModel exercises the stream translator through
+// the full handler (race path).
+func TestS6_StreamResponse_RaceExtModel(t *testing.T) {
 	t.Run("mode_incremental_three_deltas_in_order", func(t *testing.T) {
 		up := sseStream(
 			reasoningDetailsChunk(detailEntry("reasoning-text-1", "think-1")),
@@ -537,7 +537,7 @@ func TestS11_UpstreamError_CleanFailure(t *testing.T) {
 	errHandler := rawStringHandler(http.StatusInternalServerError,
 		`{"error":{"message":"upstream exploded","type":"server_error"}}`, "application/json")
 
-	t.Run("race_external_500", func(t *testing.T) {
+	t.Run("race_ext_model_500", func(t *testing.T) {
 		env := setupTestEnv(t, errHandler, envOptions{})
 		rr := env.run(chatRequest{model: raceExtModel, token: env.plainToken, flag: true, messages: reasoningMessages})
 		if rr.Code == http.StatusOK {
@@ -551,7 +551,7 @@ func TestS11_UpstreamError_CleanFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("ultimate_external_500", func(t *testing.T) {
+	t.Run("ultimate_ext_model_500", func(t *testing.T) {
 		env := setupTestEnv(t, errHandler, envOptions{ultimateModelID: ultExtModel})
 		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
 		if rr.Code == http.StatusOK && !strings.Contains(rr.Body.String(), "error") {

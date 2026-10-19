@@ -28,10 +28,6 @@
 //	     INSIDE thinking_delta payloads, reasoning_content stays absent
 //	     (no cross-protocol leak), AND persisted Thinking still equals the
 //	     concatenated reasoning (sink invariant preserved in live mode).
-//	S2  — EXTERNAL path, stream: byte-identity reference. reasoning_content
-//	     IS translated to thinking_delta on the wire by design (the
-//	     TestAnthropic_ThinkingStream contract) — guards against the sink
-//	     over-swallowing.
 //	S3  — INTERNAL path, non-stream: persisted thinking == reasoning value;
 //	     wire classified against the pre-fix base (fea5874) differential
 //	     since translator/response.go is unchanged since base.
@@ -89,13 +85,10 @@ const (
 	// captured upstream body's model field must equal it (proof the
 	// request actually routed through the internal path).
 	intModelUpstreamName = "gpt-internal-leak-test"
-	// extModel is UNREGISTERED: resolvedModel=nil ⇒ modelList=[raw name]
-	// ⇒ external path via doAnthropicRequest (UPSTREAM_URL/credential).
-	extModel = "unregistered-anthropic-external"
 
 	// openaiCredID backs the internal model (provider=openai).
 	openaiCredID = "openai-cred"
-	// extCredID is the UPSTREAM_CREDENTIAL_ID for the external path.
+	// extCredID is the legacy external-path fixture credential.
 	extCredID = "ext-openai-cred"
 )
 
@@ -225,9 +218,8 @@ type testEnv struct {
 // setupTestEnv wires a full proxy.Handler for the anthropic endpoint.
 //
 // handlerFactory receives the capturing mock so scenario handlers can record
-// upstream requests. One httptest upstream (ephemeral port) serves BOTH
-// paths: the internal credential base_url and the external UPSTREAM_URL
-// point at it.
+// upstream requests. One httptest upstream (ephemeral port) backs the
+// internal credential base_url (the external UPSTREAM_URL arm is retired).
 func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerFunc) *testEnv {
 	t.Helper()
 
@@ -268,7 +260,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 		t.Fatalf("add openai cred: %v", err)
 	}
 
-	// External-path credential (UPSTREAM_CREDENTIAL_ID).
+	// Legacy external-path credential fixture.
 	if err := modelsConfig.AddCredential(models.CredentialConfig{
 		ID:       extCredID,
 		Provider: "openai",

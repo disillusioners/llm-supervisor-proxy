@@ -442,13 +442,13 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	}
 
 	// remove-external-upstream P5: wire the tool-call repairer onto the
-	// OpenAI provider for the NON-STREAM path only. The deleted external
-	// arm repaired non-stream tool-call arguments via
-	// repairToolCallArgumentsInNonStreamingResponse; on the internal arm
-	// the equivalent seam is the provider's own repairer (openai.go:158-180,
-	// the same wiring internal_handler.go:363-368 uses). Streaming repair
-	// is owned by the toolcall buffer in handleInternalStream, so it is
-	// deliberately NOT wired here (avoids double repair).
+	// OpenAI provider for the NON-STREAM path only. (The former external
+	// arm's own non-stream repair helper is gone with the external arm;
+	// the internal arm's equivalent seam is the provider's own repairer
+	// — openai.go:158-180, the same wiring internal_handler.go:363-368
+	// uses.) Streaming repair is owned by the toolcall buffer in
+	// handleInternalStream, so it is deliberately NOT wired here (avoids
+	// double repair).
 	if cfg.ToolRepair.Enabled {
 		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
 			openaiProvider.SetRepairer(toolrepair.NewRepairer(&cfg.ToolRepair), nil)
@@ -1123,90 +1123,4 @@ func getKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-// repairToolCallArgumentsInNonStreamingResponse repairs malformed JSON in tool_call arguments
-// within a non-streaming JSON response. Returns the (potentially modified) body and whether it was modified.
-func repairToolCallArgumentsInNonStreamingResponse(body []byte, config toolrepair.Config) ([]byte, bool) {
-	if !config.Enabled {
-		return body, false
-	}
-
-	repairer := toolrepair.NewRepairer(&config)
-
-	// Try to parse as JSON
-	var resp map[string]interface{}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return body, false
-	}
-
-	// Navigate to choices[].message.tool_calls
-	choices, ok := resp["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return body, false
-	}
-
-	modified := false
-
-	for _, choice := range choices {
-		choiceMap, ok := choice.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		message, ok := choiceMap["message"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		toolCalls, ok := message["tool_calls"].([]interface{})
-		if !ok || len(toolCalls) == 0 {
-			continue
-		}
-
-		// Process each tool call
-		for _, tc := range toolCalls {
-			tcMap, ok := tc.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Get function object
-			fn, ok := tcMap["function"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Get arguments string
-			args, ok := fn["arguments"].(string)
-			if !ok || args == "" {
-				continue
-			}
-
-			// Check if arguments are already valid JSON
-			var js interface{}
-			if json.Unmarshal([]byte(args), &js) == nil {
-				continue
-			}
-
-			// Attempt repair
-			result := repairer.RepairArguments(args, "")
-			if result.Success && result.Repaired != args {
-				fn["arguments"] = result.Repaired
-				modified = true
-			}
-		}
-	}
-
-	if !modified {
-		return body, false
-	}
-
-	// Marshal back to JSON
-	repaired, err := json.Marshal(resp)
-	if err != nil {
-		return body, false
-	}
-
-	return repaired, true
 }

@@ -2,14 +2,17 @@
 // MiniMax reasoning_details feature on branch feature/minimax-reasoning-details.
 //
 // It drives the FULL proxy handler (proxy.Handler.HandleChatCompletions) in
-// process, wired to a capturing mock upstream (external paths) or a
-// MiniMax-shaped mock provider upstream served over HTTP (internal paths),
-// and asserts the wire-visible feature contract on all four proxy paths:
+// process, wired to a capturing MiniMax-shaped mock provider upstream served
+// over HTTP, and asserts the wire-visible feature contract on the surviving
+// internal proxy paths:
 //
-//	race-external      — unknown model id + MiniMax upstream credential
-//	race-internal      — registered model with Internal:true + MiniMax credential
-//	ultimate-external  — X-Force-Ultimate-Model + ultimate model Internal:false
-//	ultimate-internal  — X-Force-Ultimate-Model + ultimate model Internal:true
+//	raceExtModel      — registered MiniMax model + MiniMax credential
+//	race-internal     — registered model with Internal:true + MiniMax credential
+//	ultExtModel       — X-Force-Ultimate-Model target (ModelID=ultExtModel)
+//	ultimate-internal — X-Force-Ultimate-Model target (ModelID=ultIntModel)
+//
+// remove-external-upstream P1: the external dispatch is deleted; the "Ext"
+// model ids above are ordinary INTERNAL registrations kept as fixtures.
 //
 // The harness mirrors test/e2e_ultimate_internal_reasoning/ (real
 // database.Store + auth.TokenStore + models.ModelsConfig + proxy.Handler).
@@ -115,16 +118,16 @@ const (
 	// openaiCredID is a non-MiniMax credential used for negative paths.
 	openaiCredID = "openai-cred"
 
-	// raceExtModel is an UNREGISTERED model id: initRequestContext leaves
-	// resolvedModel nil ⇒ modelList=[raw name] ⇒ race-external path.
+	// raceExtModel is a registered INTERNAL MiniMax model (P1: the former
+	// unregistered/external dispatch is deleted; the id is historical).
 	raceExtModel = "unregistered-minimax-external"
 
 	// raceIntModel is registered Internal:true with the MiniMax credential
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "race-internal-minimax"
 
-	// ultExtModel is the X-Force-Ultimate-Model target with Internal:false
-	// ⇒ ultimate-external path.
+	// ultExtModel is an X-Force-Ultimate-Model target (Internal:true; the
+	// former ultimate-external dispatch is deleted; the id is historical).
 	ultExtModel = "ultimate-external-minimax"
 
 	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true

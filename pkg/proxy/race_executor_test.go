@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -471,112 +469,6 @@ func TestConvertToProviderRequest(t *testing.T) {
 	}
 }
 
-func TestRepairToolCallArgumentsInNonStreamingResponse(t *testing.T) {
-	tests := []struct {
-		name         string
-		body         string
-		config       toolrepair.Config
-		wantModified bool
-	}{
-		{
-			name: "valid JSON with tool_calls needing repair - disabled config",
-			body: `{"choices":[{"message":{"tool_calls":[{"function":{"name":"test","arguments":"{invalid"}},{"function":{"name":"test2","arguments":"{}"}}]}}]}`,
-			config: toolrepair.Config{
-				Enabled:    false,
-				Strategies: []string{},
-			},
-			wantModified: false,
-		},
-		{
-			name: "valid JSON with tool_calls needing repair - enabled config with library_repair",
-			body: `{"choices":[{"message":{"tool_calls":[{"function":{"name":"test","arguments":"{invalid"}}]}}]}`,
-			config: toolrepair.Config{
-				Enabled:          true,
-				Strategies:       []string{"trim_trailing_garbage", "extract_json", "library_repair"},
-				MaxArgumentsSize: 100 * 1024,
-			},
-			wantModified: true,
-		},
-		{
-			name: "valid JSON with tool_calls needing repair - extract_json only cannot fix",
-			body: `{"choices":[{"message":{"tool_calls":[{"function":{"name":"test","arguments":"{invalid"}}]}}]}`,
-			config: toolrepair.Config{
-				Enabled:          true,
-				Strategies:       []string{"extract_json"},
-				MaxArgumentsSize: 100 * 1024,
-			},
-			wantModified: false,
-		},
-		{
-			name: "no tool_calls",
-			body: `{"choices":[{"message":{"content":"Hello"}}]}`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-		{
-			name: "malformed JSON",
-			body: `not valid json`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-		{
-			name: "empty body",
-			body: `{}`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-		{
-			name: "tool_calls with valid arguments",
-			body: `{"choices":[{"message":{"tool_calls":[{"function":{"name":"test","arguments":"{}"}}]}}]}`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-		{
-			name: "empty tool_calls array",
-			body: `{"choices":[{"message":{"tool_calls":[]}}]}`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-		{
-			name: "no choices",
-			body: `{"model":"gpt-4"}`,
-			config: toolrepair.Config{
-				Enabled:    true,
-				Strategies: []string{"extract_json"},
-			},
-			wantModified: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, modified := repairToolCallArgumentsInNonStreamingResponse([]byte(tt.body), tt.config)
-			if modified != tt.wantModified {
-				t.Errorf("modified = %v, want %v", modified, tt.wantModified)
-			}
-			// If not modified, result should be same as input
-			if !modified && string(result) != tt.body {
-				t.Errorf("expected unchanged body when not modified")
-			}
-		})
-	}
-}
-
 func TestGetNormalizerDescription(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -712,15 +604,6 @@ func newTestUpstreamRequest(modelID string) *upstreamRequest {
 	return newUpstreamRequest(0, modelTypeMain, modelID, 1024*1024)
 }
 
-// Helper to create an http.Response with a body
-func newResponse(body string) *http.Response {
-	return &http.Response{
-		StatusCode: 200,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     http.Header{},
-	}
-}
-
 // Helper to create a minimal ChatCompletionRequest
 func newChatCompletionRequest() *providers.ChatCompletionRequest {
 	return &providers.ChatCompletionRequest{
@@ -729,17 +612,6 @@ func newChatCompletionRequest() *providers.ChatCompletionRequest {
 			{Role: "user", Content: "Hello"},
 		},
 	}
-}
-
-// errorReader is an io.Reader that always returns an error
-type errorReader struct{}
-
-func (e *errorReader) Read(p []byte) (n int, err error) {
-	return 0, errors.New("read error")
-}
-
-func (e *errorReader) Close() error {
-	return nil
 }
 
 // =============================================================================

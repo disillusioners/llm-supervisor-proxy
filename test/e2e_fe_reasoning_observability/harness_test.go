@@ -94,33 +94,22 @@ func (m *mockUpstream) startCapturingServer(t *testing.T) *httptest.Server {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	// glmModel is an UNREGISTERED model id: initRequestContext leaves
-	// resolvedModel nil ⇒ modelList=[raw name] ⇒ race-external path.
-	// This mirrors the original bug scenario exactly: a real-world model
-	// name (glm-5.3) hitting the external upstream credential.
+	// glmModel is a plain INTERNAL registration (P5: the former external
+	// dispatch it rode is deleted). Its rows (R1/R2) exercise the
+	// race-internal capture path with a real-world model name (glm-5.3).
 	glmModel = "glm-5.3"
 
-	// externalCredID is the credential bound to UPSTREAM_CREDENTIAL_ID so
-	// the race-external path resolves it for upstream auth/base URL.
+	// externalCredID is the fixture credential every matrix model binds
+	// to (auth/base URL for the race-internal path).
 	externalCredID = "external-cred"
 
 	// raceIntModel is registered Internal:true with the openai credential
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "matrix-race-internal"
 
-	// ultExtModel is the X-Force-Ultimate-Model target with Internal:false
-	// ⇒ ultimate-external path.
-	ultExtModel = "matrix-ultimate-external"
-
 	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
 	// ⇒ ultimate-internal path.
 	ultIntModel = "matrix-ultimate-internal"
-
-	// ultExtModelMiniMax is an ultimate-external target bound to the
-	// MiniMax credential: the ultimate-external translation gate reads the
-	// MODEL's CredentialID (not the global upstream credential), so the M2
-	// row must use a MiniMax-credentialed ultimate model.
-	ultExtModelMiniMax = "matrix-ultimate-external-minimax"
 
 	// minimaxCredID drives the MiniMax translation gate rows (M1/M2):
 	// credential provider must be "minimax" AND the request must carry
@@ -592,30 +581,5 @@ func minimaxDetailsStreamHandler(entry1ID, entry1Text, entry2ID, entry2Text stri
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(up))
-	}
-}
-
-// minimaxDetailsNonStreamHandler serves a non-stream response carrying
-// message.reasoning_details (translated to reasoning_content for the client).
-func minimaxDetailsNonStreamHandler(entry1Text, entry2Text string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-mock-mm", "object": "chat.completion", "created": 1700000000, "model": "mock",
-			"choices": []map[string]interface{}{
-				{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role":    "assistant",
-						"content": "final",
-						"reasoning_details": []map[string]interface{}{
-							{"type": "reasoning.text", "id": "reasoning-text-1", "format": "MiniMax-response-v1", "index": 0, "text": entry1Text},
-							{"type": "reasoning.text", "id": "reasoning-text-2", "format": "MiniMax-response-v1", "index": 0, "text": entry2Text},
-						},
-					},
-					"finish_reason": "stop",
-				},
-			},
-		})
 	}
 }
