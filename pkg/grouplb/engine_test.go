@@ -715,3 +715,130 @@ func TestBackup_OnGroupChanged_DropsOrphanedBackupBinding(t *testing.T) {
 		t.Fatalf("backupBindingsCount = %d after backup removal, want 0", e.backupBindingsCountForTest("g"))
 	}
 }
+
+// singleBackupRefs returns a one-member BACKUP-only ref list — the
+// shape that triggers PickBackupMember's single-member fast path
+// (n == 1 && len(cooldowns) == 0).
+func singleBackupRefs(id string) []MemberRef {
+	return []MemberRef{{ModelID: id, Weight: 1, Position: 0, BackupOnly: true}}
+}
+
+// TestPickBackupMember_FastPath_ReValidatesMemberID pins the
+// single-backup fast path's WLock re-validation: the member ID read
+// under RLock must STILL be the pool's only configured member when
+// the binding write fires, else the pick must fall through to the
+// full path and re-select against the CURRENT backup set.
+//
+// The race window is RUnlock → WLock inside the fast path; an
+// OnGroupChanged swap landing there used to persist the stale id as
+// the binding (an orphan the next OnGroupChanged had to clean).
+//
+// Shape ( cribbed from TestEngine_ConcurrentGetOrSelect ): pickers
+// hammer fresh conversation keys while a swapper alternates the
+// single backup between two IDs via OnGroupChanged. n stays == 1 and
+// cooldowns stay empty throughout, so the fast path's RLock
+// preconditions hold at every attempt — the ONLY thing that varies
+// is WHICH member is configured, exactly the swap the fix guards.
+func TestPickBackupMember_FastPath_ReValidatesMemberID(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", singleBackupRefs("backup-a"))
+
+	// Deterministic prime: fresh pool, no swap — fast path binds the
+	// only member and the binding row matches the returned id.
+	id, newly, err := e.PickBackupMember("g", "conv-prime")
+	if err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if id != "backup-a" || !newly {
+		t.Fatalf("prime: id=%q newly=%v want backup-a/true", id, newly)
+	}
+
+	// Swap away: orphan filter drops the prime binding, leaving a
+	// fresh pool where the next pick must re-bind to the NEW member.
+	e.OnGroupChanged("g", singleBackupRefs("backup-b"))
+	if got := e.backupBindingsCountForTest("g"); got != 0 {
+		t.Fatalf("backupBindingsCount = %d after swap, want 0 (orphan filter)", got)
+	}
+	id, _, err = e.PickBackupMember("g", "conv-post-swap")
+	if err != nil {
+		t.Fatalf("post-swap: %v", err)
+	}
+	if id != "backup-b" {
+		t.Fatalf("post-swap pick = %q, want backup-b (current member)", id)
+	}
+
+	// Concurrent phase: pickers race the swapper. Post-fix, every
+	// pick reflects the CURRENT backup set at its own write-lock
+	// section — a stale RLock-read id falls through to the full
+	// path, which re-picks against the fresh pool.
+	const pickers = 8
+	const iters = 200
+	var wg sync.WaitGroup
+	for w := 0; w < pickers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				key := fmt.Sprintf("conv-w%d-i%d", w, i)
+				m, newlyBound, err := e.PickBackupMember("g", key)
+				if err != nil {
+					t.Errorf("worker %d pick[%d]: %v", w, i, err)
+					return
+				}
+				if m != "backup-a" && m != "backup-b" {
+					t.Errorf("worker %d pick[%d]: id %q outside the swap set {backup-a, backup-b}", w, i, m)
+					return
+				}
+				if !newlyBound {
+					t.Errorf("worker %d pick[%d]: fresh key must be newlyBound=true", w, i)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < pickers*iters; i++ {
+			if i%2 == 0 {
+				e.OnGroupChanged("g", singleBackupRefs("backup-b"))
+			} else {
+				e.OnGroupChanged("g", singleBackupRefs("backup-a"))
+			}
+		}
+	}()
+	wg.Wait()
+
+	// Freeze at backup-a, then walk every surviving backup binding.
+	// OnGroupChanged's orphan filter has just dropped anything whose
+	// memberID ∉ {backup-a}; a FRESH pick after the freeze must bind
+	// the current member — proving the fast path still binds the
+	// pool's sole member after heavy swap pressure.
+	e.OnGroupChanged("g", singleBackupRefs("backup-a"))
+	e.mu.RLock()
+	st := e.groups["g"]
+	e.mu.RUnlock()
+	st.mu.RLock()
+	if len(st.backupMembers) != 1 || st.backupMembers[0].ModelID != "backup-a" {
+		st.mu.RUnlock()
+		t.Fatalf("freeze failed: backupMembers = %v", st.backupMembers)
+	}
+	for key, b := range st.backupBindings {
+		if b.memberID != "backup-a" {
+			st.mu.RUnlock()
+			t.Fatalf("stale binding survived the freeze: conv=%s→member=%s (want backup-a)", key, b.memberID)
+		}
+	}
+	st.mu.RUnlock()
+
+	id, newly, err = e.PickBackupMember("g", "conv-post-race")
+	if err != nil {
+		t.Fatalf("post-race: %v", err)
+	}
+	if id != "backup-a" || !newly {
+		t.Fatalf("post-race pick: id=%q newly=%v want backup-a/true", id, newly)
+	}
+	if got := e.backupBindingsCountForTest("g"); got < 1 {
+		t.Fatalf("backupBindingsCount = %d after post-race pick, want >= 1", got)
+	}
+}

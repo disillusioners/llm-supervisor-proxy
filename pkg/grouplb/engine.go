@@ -73,20 +73,20 @@ func retryAfterIf(retryAfter, fallback time.Duration) time.Duration {
 // Per-group state has TWO axes — both non-lazy at boot, but only
 // one is non-lazy at write-time:
 //
-//   1. PER-GROUP SELECTOR (cumulative prefix weights + member
-//      refs): NOT lazy at boot. Every group Add/Update on the
-//      owning ModelsManager calls notifyGroupEngineLocked →
-//      OnGroupChanged immediately (P2.2 design — load-bearing
-//      for the Am28 survivor filter on member edits; verified and
-//      approved at P2 review). HasGroup returns true for any
-//      group that has been AddModel'd, even before any request
-//      has been served.
+//  1. PER-GROUP SELECTOR (cumulative prefix weights + member
+//     refs): NOT lazy at boot. Every group Add/Update on the
+//     owning ModelsManager calls notifyGroupEngineLocked →
+//     OnGroupChanged immediately (P2.2 design — load-bearing
+//     for the Am28 survivor filter on member edits; verified and
+//     approved at P2 review). HasGroup returns true for any
+//     group that has been AddModel'd, even before any request
+//     has been served.
 //
-//   2. PER-CONVERSATION BINDINGS (sticky affinity): LAZY. Created
-//      on the first GetOrSelect call per (groupID, conversationKey)
-//      (W-1 / W-2) and TTL-evicted by the janitor. Empty-key
-//      requests return NewlyBound=false and store NO binding
-//      (C2 — Q15 model_member_selected surfaces newlyBound-only).
+//  2. PER-CONVERSATION BINDINGS (sticky affinity): LAZY. Created
+//     on the first GetOrSelect call per (groupID, conversationKey)
+//     (W-1 / W-2) and TTL-evicted by the janitor. Empty-key
+//     requests return NewlyBound=false and store NO binding
+//     (C2 — Q15 model_member_selected surfaces newlyBound-only).
 //
 // Manager construction/boot performs NO rehydration walk — a
 // freshly NewModelsManager'd grouplb.Engine has zero entries.
@@ -738,13 +738,13 @@ func (e *Engine) PickBackupMember(groupID, conversationKey string) (memberID str
 			return id, false, nil
 		}
 		st.mu.Lock()
-		// Re-check under write lock: still single + still no cool.
-		if st.backupSelector != nil && len(st.backupMembers) == 1 && len(st.cooldowns) == 0 {
-			// W-2 analog: empty key ⇒ no binding stored.
-			if conversationKey == "" {
-				st.mu.Unlock()
-				return id, false, nil
-			}
+		// Re-check under write lock: still single, still no
+		// cooldowns, AND the member ID read under RLock is still
+		// the pool's only configured member (OnGroupChanged can
+		// swap backupMembers between the two lock sections —
+		// persisting the stale id would orphan the binding).
+		if st.backupSelector != nil && len(st.backupMembers) == 1 &&
+			len(st.cooldowns) == 0 && st.backupMembers[0].ModelID == id {
 			st.backupBindings[conversationKey] = &binding{memberID: id, boundAt: now}
 			st.backupBindingsCount++
 			st.mu.Unlock()
