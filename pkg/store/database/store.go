@@ -2398,7 +2398,15 @@ func (m *ModelsManager) publishCredentialsChanged(modelID string) {
 // fast path (byte-identical to pre-change behavior) and as the
 // nil-engine delegation target.
 func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool) {
-	modelConfig := m.GetModel(modelID)
+	// P0 shadowfix — resolve by ROW IDENTITY (GetModelNative), like
+	// ResolveInternalConfigWithAffinity above. This is an EXECUTION-
+	// resolution seam (its only consumer is the normalizer's provider
+	// detection, which runs per attempt): for a member ID claimed by
+	// its own group (the day-1 self-shadow shape coding-group[coding])
+	// the claims-first read returned the GROUP row (no credentials) and
+	// the provider came back "unknown" for that member only.
+	// Client-facing reads keep the claims-first GetModel.
+	modelConfig := m.GetModelNative(modelID)
 	if modelConfig == nil || !modelConfig.Internal {
 		return "", "", "", "", false
 	}

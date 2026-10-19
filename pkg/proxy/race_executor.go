@@ -35,7 +35,17 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 	if cfg == nil || cfg.ModelsConfig == nil || modelID == "" {
 		return false
 	}
-	mc := cfg.ModelsConfig.GetModel(modelID)
+	// P0 shadowfix — resolve by ROW IDENTITY (directGetModel →
+	// GetModelNative), not by the client-facing claims-first GetModel.
+	// This is an EXECUTION-resolution read of the attempt's model row:
+	// when the attempt's model ID is a member ID claimed by its own
+	// group (the day-1 self-shadow shape coding-group[coding]), the
+	// claims-first read returned the GROUP row (no credentials) and
+	// this gate answered "not MiniMax" — the interleaved-thinking
+	// split was then skipped for that member only. The client-facing
+	// seam (the handler's model resolution) is untouched, so plain
+	// shadow routing is unchanged.
+	mc := directGetModel(cfg, modelID)
 	if mc == nil {
 		return false
 	}

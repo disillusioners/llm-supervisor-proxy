@@ -633,6 +633,45 @@ func (c *CachedModelsConfig) GetCredentials() []models.CredentialConfig {
 
 // ─── Resolution paths (the hot seam) ─────────────────────────────────────────
 
+// fillModelByDirectID strict-fills the row for modelID by DIRECT ID
+// (claims BYPASSED) and installs it in the cache.
+//
+// It is the CLAIM-BLIND twin of the GetModel fill path: the strict
+// twins are deliberately claim-blind (admin surfaces), and the
+// execution-resolution seam needs the same property — the row it
+// resolves is the CONCRETE row of the attempt's model ID, never the
+// group row a claim redirects to (Am22 L1 — "member refs resolve by
+// direct ID; claims apply to client-facing resolution only").
+//
+// The fill is STORE-DIRECT (one claim-blind single-row read against
+// the inner manager) and installs the result in the cache, so the
+// caller keeps the zero-DB hot path on every subsequent resolve and
+// the row is re-populated in BOTH cache states (fresh and
+// post-eviction).
+//
+// A not-found row is cached as a fresh negative (same verdict the
+// GetModel fill path stores); an infra error marks the store
+// unhealthy and returns nil (the caller degrades to ok=false — never
+// a misroute).
+func (c *CachedModelsConfig) fillModelByDirectID(modelID string) *models.ModelConfig {
+	if modelID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.opts.StrictFillTimeout)
+	m, err := c.inner.GetModelStrict(ctx, modelID)
+	cancel()
+	if err != nil {
+		if errors.Is(err, database.ErrModelNotFound) {
+			c.storeNegativeByID(modelID)
+			return nil
+		}
+		c.markUnhealthy()
+		return nil
+	}
+	c.cacheModel(m)
+	return m
+}
+
 // ResolveInternalConfigWithAffinity is the ZERO-DB hot path: read the
 // cached model, back a credential-lookup closure with the cached
 // credential map, and delegate to the strict resolver variant
@@ -649,10 +688,36 @@ func (c *CachedModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversa
 		// Unknown model: strict-fill once so a post-boot DB add becomes
 		// visible; if the DB is down this degrades to ok=false (the
 		// caller-side failure path), never a misroute.
-		c.GetModel(modelID)
-		c.mu.RLock()
-		cached = c.modelsByID[modelID]
-		c.mu.RUnlock()
+		//
+		// P0 shadowfix — the fill is CLAIM-BLIND (direct ID). The
+		// pre-fix fill called c.GetModel(modelID), whose claims
+		// redirect returns the GROUP row for an ID that a group
+		// claims — including a member ID the group claims through its
+		// OWN shadow (the day-1 self-shadow shape
+		// coding-group[coding]). The member row was therefore never
+		// fetched and the resolution failed with "failed to resolve
+		// internal config for model coding" (502) even though the
+		// member row carries the credentials.
+		//
+		// The leak is REACHABLE, not a corner case: the §3.4
+		// claim-eviction hook (evictClaimEntriesLocked) DELETES the
+		// claimed ID's cache entry on every group write, so after any
+		// runtime group write (PUT/POST /fe/api/models) the member row
+		// is missing until the next reconciler sweep — and the claims
+		// redirect blocks the fill for exactly that window. A cold
+		// boot is NOT affected (the boot snapshot carries the member
+		// row), which is why the failure looked write-triggered.
+		//
+		// A fresh negative verdict stays authoritative (no DB hit) —
+		// unchanged from the pre-fix behavior.
+		if !negFresh {
+			cached = c.fillModelByDirectID(modelID)
+		}
+		if cached == nil {
+			c.mu.RLock()
+			cached = c.modelsByID[modelID]
+			c.mu.RUnlock()
+		}
 		if cached == nil {
 			return models.ResolvedCredential{}, false
 		}
