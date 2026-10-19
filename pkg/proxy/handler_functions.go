@@ -259,26 +259,26 @@ func (h *Handler) initRequestContext(r *http.Request) (*requestContext, error) {
 		// upstream target anymore (the internal arms build their own
 		// targets from the resolved credential; mirrors the Anthropic
 		// twin's post-A13 placeholder).
-		targetURL:        "",
-		reqID:            reqID,
-		startTime:        startTime,
-		reqLog:           reqLog,
-		modelList:        modelList,
-		resolvedModel:    resolvedModel,
+		targetURL:     "",
+		reqID:         reqID,
+		startTime:     startTime,
+		reqLog:        reqLog,
+		modelList:     modelList,
+		resolvedModel: resolvedModel,
 		// P1 fixup (leader ruling 2026-10-18): non-zero only when the
 		// boundary 404 gate was deferred for a force-ultimate request —
 		// see the gate comment above and the post-auth re-fire site in
 		// HandleChatCompletions.
 		modelNotFoundDeferred: deferredModelNotFound,
-		requestBody:      requestBody,
-		rawBody:          bodyBytes, // Save original body bytes
-		isStream:         isStream,
-		originalHeaders:  r.Header,
-		method:           r.Method,
-		baseCtx:          r.Context(),
-		originalMessages: originalMessages,
-		bufferMode:       bufferMode,
-		leadingUserRun:   leadingUserRun,
+		requestBody:           requestBody,
+		rawBody:               bodyBytes, // Save original body bytes
+		isStream:              isStream,
+		originalHeaders:       r.Header,
+		method:                r.Method,
+		baseCtx:               r.Context(),
+		originalMessages:      originalMessages,
+		bufferMode:            bufferMode,
+		leadingUserRun:        leadingUserRun,
 	}, nil
 }
 

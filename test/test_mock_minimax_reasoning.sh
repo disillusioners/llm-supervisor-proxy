@@ -738,7 +738,7 @@ assert_not_contains "$T10_CAPTURED" '"reasoning_details"' "T10: NO reasoning_det
 CURRENT_T="T11"
 echo -e "\n${BLUE}=== T11 header hygiene: no x-proxy-interleaved-thinking leak upstream ===${NC}"
 # Use the LAST captured request (any mode that was sent with the header) to check
-# headers. We use the T2 capture (MODE-NS-DETAILS) — non-ultimate, race-external-style.
+# headers. We use the T2 capture (MODE-NS-DETAILS) — non-ultimate, race-style.
 LEAK_FOUND=0
 while IFS= read -r line; do
     H=$(echo "$line" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); h=r.get("headers") or {}; print("|".join(k for k in h.keys() if "interleaved-thinking" in k.lower()))' 2>/dev/null)

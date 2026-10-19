@@ -1195,7 +1195,7 @@ func TestCachedModelsConfig_ResolveInternalConfig_LegacyHotPathZeroDB(t *testing
 		t.Errorf("legacy hot path must not touch inner legacy reads (got %d)", inner.legacyCalls())
 	}
 
-	// Unknown / external models keep the legacy contract.
+	// Unknown / non-internal models keep the legacy contract.
 	if _, _, _, _, ok := c.ResolveInternalConfig("never"); ok {
 		t.Error("unknown model must not resolve")
 	}

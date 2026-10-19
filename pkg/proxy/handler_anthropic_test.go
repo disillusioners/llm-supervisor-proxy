@@ -867,15 +867,15 @@ func TestExtractOpenAIResponseContentFromJSON_NoMessage(t *testing.T) {
 
 // newInternalFallbackTestHandler builds a Handler whose ModelsConfig maps
 // model "internal-primary" (internal, credential provider=openai pointed at
-// internalUpstream) with fallback chain ["external-fallback"], and whose
-// external upstream is externalUpstream. Used by the W4 isolation tests to
-// drive the real HandleAnthropicMessages flow: internal attempt first, then
-// external fallback.
-func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpstream http.HandlerFunc) *Handler {
+// internalUpstream) with fallback chain ["internal-fallback"] (an INTERNAL
+// model with its own credential pointed at fallbackUpstream). Used by the W4
+// isolation tests to drive the real HandleAnthropicMessages flow: primary
+// attempt first, then fallback.
+func newInternalFallbackTestHandler(t *testing.T, internalUpstream, fallbackUpstream http.HandlerFunc) *Handler {
 	t.Helper()
 	internalSrv := httptest.NewServer(internalUpstream)
-	externalSrv := httptest.NewServer(externalUpstream)
-	t.Cleanup(func() { internalSrv.Close(); externalSrv.Close() })
+	fallbackSrv := httptest.NewServer(fallbackUpstream)
+	t.Cleanup(func() { internalSrv.Close(); fallbackSrv.Close() })
 
 	t.Setenv("APPLY_ENV_OVERRIDES", "true")
 
@@ -906,12 +906,12 @@ func newInternalFallbackTestHandler(t *testing.T, internalUpstream, externalUpst
 	}
 	// remove-external-upstream P5: the fallback is a real INTERNAL model
 	// now (the external arm that used to serve a raw fallback name is
-	// gone), so it carries its own credential pointed at externalSrv.
+	// gone), so it carries its own credential pointed at fallbackSrv.
 	if err := modelsCfg.AddCredential(models.CredentialConfig{
 		ID:       "test-fallback-cred",
 		Provider: "openai",
 		APIKey:   "sk-test",
-		BaseURL:  externalSrv.URL,
+		BaseURL:  fallbackSrv.URL,
 	}); err != nil {
 		t.Fatalf("add fallback credential: %v", err)
 	}
@@ -946,7 +946,7 @@ func anthropicTestRequestStore(h *Handler) *store.RequestStore {
 // deltas, then dies mid-stream WITHOUT [DONE]/finish_reason (the provider
 // layer surfaces "stream ended without [DONE] marker"), so the internal
 // attempt fails AFTER partial thinking was already captured into the sink.
-// The external fallback then succeeds and streams its own thinking + content.
+// The fallback then succeeds and streams its own thinking + content.
 //
 // The persisted store.Message.Thinking must contain ONLY the fallback's
 // thinking — the internal partial thinking must not appear (neither
@@ -983,7 +983,7 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 		return
 	})
 
-	externalUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackUpstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
@@ -1008,7 +1008,7 @@ func TestAnthropic_FailedInternalFallbackThinkingIsolation(t *testing.T) {
 		flusher.Flush()
 	})
 
-	h := newInternalFallbackTestHandler(t, internalUpstream, externalUpstream)
+	h := newInternalFallbackTestHandler(t, internalUpstream, fallbackUpstream)
 
 	body := anthropicBody("internal-primary", true, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},

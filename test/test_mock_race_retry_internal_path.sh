@@ -4,8 +4,9 @@
 # Tests idle timeout spawning and stream deadline behavior using internal models
 # Maximum runtime: 30 seconds
 #
-# This test uses an "internal" model configuration that bypasses the external
-# (the retired global UPSTREAM_URL) and calls the mock server directly via
+# This test uses an "internal" model configuration (the retired global
+# UPSTREAM_URL arm is gone) and calls the mock server directly via its
+# credential's internal_base_url.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"

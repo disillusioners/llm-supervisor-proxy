@@ -350,13 +350,13 @@ type ModelConfig struct {
 	FallbackChain  []string `json:"fallback_chain,omitempty"`
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
-	// Internal upstream configuration (bypass external LiteLLM, call AI provider directly)
+	// Internal upstream configuration (call the AI provider directly via a credential)
 	Internal        bool           `json:"internal,omitempty"`
 	InternalBaseURL string         `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
 	InternalModel   string         `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
 
 	// Credentials is the ordered, weighted list of credential refs. Empty for
-	// external / non-internal models. Validation: if non-empty, every entry's
+	// legacy / non-internal rows. Validation: if non-empty, every entry's
 	// CredentialID must exist in the credentials table; every entry's weight
 	// must be > 0; every entry's provider must match Credentials[0]'s provider
 	// (provider-match invariant). Use PrimaryCredentialID() to read the

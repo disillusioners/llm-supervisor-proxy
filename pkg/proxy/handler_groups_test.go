@@ -242,7 +242,7 @@ func TestHandlerGroups_Parity(t *testing.T) {
 	})
 	t.Run("Anthropic", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := makeAnthropicRequestExternal(t, map[string]interface{}{
+		req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
 			"model":      "coding",
 			"max_tokens": 16,
 			"messages": []interface{}{
@@ -541,7 +541,9 @@ func makeChatRequest(t *testing.T, body map[string]interface{}) *http.Request {
 	return req
 }
 
-func makeAnthropicRequestExternal(t *testing.T, body map[string]interface{}) *http.Request {
+// makeAnthropicRequestNoAuth builds an Anthropic-style /v1/messages request
+// WITHOUT the x-api-key / anthropic-version headers (the "no-auth" variant).
+func makeAnthropicRequestNoAuth(t *testing.T, body map[string]interface{}) *http.Request {
 	t.Helper()
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(b))

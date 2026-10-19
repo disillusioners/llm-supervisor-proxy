@@ -29,7 +29,7 @@ type requestContext struct {
 	reqLog    *store.RequestLog
 	modelList []string
 
-	// Resolved model config at the boundary (nil for external/unknown models)
+	// Resolved model config at the boundary (nil for unknown models)
 	resolvedModel *models.ModelConfig
 
 	// remove-external-upstream P1 fixup (leader ruling 2026-10-18): set by
@@ -68,8 +68,8 @@ type requestContext struct {
 	//   computed as
 	//   sha256(modelID + "|" + tokenID + "|" + leadingUserRun).
 	//
-	// For external / non-internal models both fields stay "" and the engine
-	// path is skipped at every call site.
+	// For unknown models both fields stay "" and the engine path is
+	// skipped at every call site.
 	leadingUserRun  string
 	conversationKey string
 

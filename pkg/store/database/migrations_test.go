@@ -779,14 +779,14 @@ func TestMigration031_ForwardFreshDB(t *testing.T) {
 //
 // Fixtures:
 //   - glm-4.5-air shape (internal=0, enabled=1, credentials_json='[]',
-//     internal_model='') → internal stays 0, enabled flips to 0
+//     internal_model=”) → internal stays 0, enabled flips to 0
 //   - glm-5 shape (internal=0, enabled=0, fully empty) → internal
 //     stays 0, enabled stays 0
 //   - fully-configured external row (internal=0, credentials_json
-//     != '[]', internal_model != '') → internal flips to 1, enabled
+//     != '[]', internal_model != ”) → internal flips to 1, enabled
 //     UNTOUCHED
 //   - kind='group' row (internal=1, enabled=1, empty credentials_json
-//     + empty internal_model — agentic-group/coding-group shape) →
+//   - empty internal_model — agentic-group/coding-group shape) →
 //     UNTOUCHED (must NOT false-positive against the convergence
 //     queries; B3 / verification kind != 'group' conjunct)
 func TestMigration032_ForwardFreshDB(t *testing.T) {

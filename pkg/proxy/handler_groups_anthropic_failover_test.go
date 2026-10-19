@@ -119,7 +119,7 @@ func TestHandlerGroups_AnthropicReentry_PublishesEventMemberFailover(t *testing.
 	defer close(stop)
 
 	rec := httptest.NewRecorder()
-	req := makeAnthropicRequestExternal(t, map[string]interface{}{
+	req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
 		"model":      "g-anth",
 		"max_tokens": 16,
 		"messages": []interface{}{

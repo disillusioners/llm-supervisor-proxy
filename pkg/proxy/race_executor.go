@@ -159,12 +159,11 @@ func publishCredentialSelected(req *upstreamRequest) {
 		return
 	}
 	// load-balance-groups / Q15: the member event fires regardless
-	// of the credential resolution outcome — an EXTERNAL member
-	// never resolves a credential (resolvedOK=false) but its group
-	// pick may still be newlyBound. The payload's
-	// upstream_provider/upstream_model carry the resolved values
-	// when available (empty for external members — they have no
-	// internal resolution by construction).
+	// of the credential resolution outcome — a member with no
+	// resolvable credential (resolvedOK=false) may still have a
+	// newlyBound group pick. The payload's upstream_provider/upstream_model
+	// carry the resolved values when available (empty when unresolved —
+	// no internal resolution exists by construction).
 	if req.groupPick != nil && req.groupPick.NewlyBound && req.onMemberSelected != nil {
 		cred := req.resolved
 		if !req.resolvedOK {
@@ -259,7 +258,7 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	}, true
 }
 
-// executeInternalRequest handles requests to internal providers (bypassing external upstream).
+// executeInternalRequest handles requests to internal providers.
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
 // entry, threaded via executeRequest). Drives the MiniMax
