@@ -29,12 +29,55 @@ package proxy
 // (AddModel → rebuildClaimsLocked, pkg/models/config.go:705) and the
 // claims-first / claim-blind divergence exercised here is the
 // production one.
+//
+// ── HERMETIC CAPTURE (round-3 C1) ────────────────────────────────────
+//
+// The provider seam used by the internal race path is the PACKAGE
+// GLOBAL `newProviderClient` (pkg/proxy/race_executor.go:26). The
+// pinning test swaps that global for a stub that hands the provider
+// mock to the request under test.
+//
+// A coordinator goroutine leaked by an EARLIER test in this package
+// (e.g. race_coordinator_test.go:1443-1449 — `coord.spawn(...)` is
+// spawned and never awaited) can resolve that SAME global AFTER the
+// pinning test installed its stub. The leaked goroutine then calls
+// ChatCompletion on the pinning test's provider mock with ITS OWN
+// request, and the shared mock's capture field is LAST-WRITE-WINS
+// (pkg/proxy/test_helpers.go:48 — `m.capturedReq = req`). The pinning
+// test therefore observed the LEAKED request instead of its own
+// (observed ~1/9 in full-repo runs).
+//
+// The fix is a PER-TEST CAPTURE SLOT that only the FIXTURE's own
+// request can occupy:
+//
+//   - the mock is private to this test (the shared testProvider is
+//     NOT used — test_helpers.go is left untouched, so no other test
+//     file's capture semantics change);
+//   - the slot is filled ONLY by a request that carries this file's
+//     UNIQUE marker token (shadowFixtureMarker) — a leaked goroutine
+//     can never carry it, so the slot cannot be clobbered;
+//   - the slot is FIRST-MATCH-WINS, so even a hypothetical second
+//     fixture-shaped request could not overwrite it.
+//
+// The marker is REQUIRED rather than reusing "MiniMax-M1" / "think-1":
+// those strings are shared with race_minimax_body_gate_test.go and
+// race_interleaved_test.go, so a model-name discriminator would still
+// be an ordering coincidence, not a guarantee.
+//
+// The slot's discriminator deliberately does NOT depend on
+// ReasoningSplit / ReasoningDetails: on a :48 revert the slot is
+// still occupied and the test fails on the PRECISE assertion
+// ("ReasoningSplit = nil, want ptr(true)") rather than on a vague
+// "no capture" — the fail-sensitivity of the pin is preserved.
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 )
 
@@ -48,7 +91,123 @@ import (
 var (
 	_ models.ModelsConfigInterface = (*models.ModelsConfig)(nil)
 	_ directModelGetter            = (*models.ModelsConfig)(nil)
+
+	// C2 — PRODUCTION SEAM ASSERTION. The JSON twin above is only the
+	// TEST fixture; production binds the CACHE-BACKED backend
+	// (modelscache.CachedModelsConfig, cmd/main.go:143 behind
+	// CACHE_LAYER_ENABLED). If that backend ever lost (or renamed)
+	// GetModelNative, directGetModel would silently degrade to the
+	// claims-aware fallback — reintroducing the P0 self-shadow bug for
+	// every PRODUCTION deployment — while this test (which drives the
+	// JSON twin) stayed green. This compile-time assertion closes that
+	// gap: the cached backend must satisfy the SAME seam.
+	_ directModelGetter = (*modelscache.CachedModelsConfig)(nil)
 )
+
+// shadowFixtureModel is the UPSTREAM model name carried by the
+// fixture's provider request (the member's internal_model).
+const shadowFixtureModel = "MiniMax-M1"
+
+// shadowFixtureMarker is a per-test UNIQUE token embedded in the
+// fixture's request body. It is the discriminator that makes the
+// capture slot hermetic: no other request produced anywhere in this
+// package carries it.
+const shadowFixtureMarker = "shadow-reasoning-pinning-fixture-marker"
+
+// shadowCaptureProvider is the per-test provider mock for the pinning
+// test. It records EVERY request it receives (for diagnostics) but
+// exposes a CAPTURE SLOT that only the FIXTURE's own request can
+// occupy.
+//
+// The provider seam is the package-global newProviderClient
+// (race_executor.go:26), so a leaked coordinator goroutine from an
+// earlier test in this package can reach THIS provider. Such a request
+// is recorded in `all` and answered normally (exactly as the shared
+// testProvider would answer it) — but it can never occupy the slot.
+type shadowCaptureProvider struct {
+	mu   sync.Mutex
+	slot *providers.ChatCompletionRequest
+	all  []*providers.ChatCompletionRequest
+	resp *providers.ChatCompletionResponse
+}
+
+// Name implements providers.Provider.
+func (p *shadowCaptureProvider) Name() string { return "shadow-capture" }
+
+// IsRetryable implements providers.Provider.
+func (p *shadowCaptureProvider) IsRetryable(err error) bool { return false }
+
+// ChatCompletion records the request and fills the slot when — and
+// only when — the request is the FIXTURE's own (marker + model match).
+// First match wins: a later request can never overwrite the slot.
+func (p *shadowCaptureProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	p.all = append(p.all, req)
+	if p.slot == nil && shadowRequestIsFixture(req) {
+		p.slot = req
+	}
+	p.mu.Unlock()
+	return p.resp, nil
+}
+
+// StreamChatCompletion records the request under the same slot rules
+// and answers with an immediately-closed channel — the same observable
+// shape the shared testProvider produces when no stream events were
+// configured, so a leaked streaming goroutine behaves identically to
+// the pre-fix run.
+func (p *shadowCaptureProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	p.mu.Lock()
+	p.all = append(p.all, req)
+	if p.slot == nil && shadowRequestIsFixture(req) {
+		p.slot = req
+	}
+	p.mu.Unlock()
+
+	ch := make(chan providers.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+
+// Slot returns the captured FIXTURE request, or nil when the fixture's
+// request never arrived.
+func (p *shadowCaptureProvider) Slot() *providers.ChatCompletionRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.slot
+}
+
+// Seen returns the upstream model names of every request the provider
+// received — diagnostics for the "slot empty" failure message.
+func (p *shadowCaptureProvider) Seen() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.all))
+	for _, r := range p.all {
+		out = append(out, r.Model)
+	}
+	return out
+}
+
+// shadowRequestIsFixture reports whether req is the FIXTURE's own
+// provider request.
+//
+// The discriminator is (a) the fixture's upstream model name AND (b)
+// the fixture's UNIQUE marker token in the first message. It does NOT
+// look at ReasoningSplit / ReasoningDetails: on a race_executor.go:48
+// revert the slot must STILL be occupied so the test fails on the
+// precise assertion instead of on a vacuous "nothing captured".
+func shadowRequestIsFixture(req *providers.ChatCompletionRequest) bool {
+	if req == nil {
+		return false
+	}
+	if req.Model != shadowFixtureModel {
+		return false
+	}
+	if len(req.Messages) == 0 {
+		return false
+	}
+	return req.Messages[0].Content == shadowFixtureMarker
+}
 
 // shadowReasoningModelsConfig builds the DAY-1 SELF-SHADOW shape
 // ("coding-group[coding]") on the real *models.ModelsConfig:
@@ -141,30 +300,37 @@ func TestRaceInternal_SelfShadowMember_MiniMax_ReasoningSplitApplied(t *testing.
 	}
 
 	// ── provider mock (captures the typed request) ─────────────────
-	mock := newTestProvider()
-	mock.SetChatCompletionResponse(&providers.ChatCompletionResponse{
-		ID: "r", Object: "chat.completion", Created: 1, Model: "MiniMax-M1",
-		Choices: []providers.Choice{
-			{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+	// Private per-test capture (see the HERMETIC CAPTURE note in the
+	// file header): the shared testProvider's last-write-wins
+	// capturedReq is reachable by a leaked coordinator goroutine
+	// through the package-global newProviderClient seam.
+	capture := &shadowCaptureProvider{
+		resp: &providers.ChatCompletionResponse{
+			ID: "r", Object: "chat.completion", Created: 1, Model: "MiniMax-M1",
+			Choices: []providers.Choice{
+				{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+			},
+			Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 		},
-		Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
-	})
+	}
 	origNewProvider := newProviderClient
 	t.Cleanup(func() { newProviderClient = origNewProvider })
 	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
-		return mock, nil
+		return capture, nil
 	}
 
 	cfg := newTestConfigSnapshot("coding")
 	cfg.ModelsConfig = mc
 
-	body := []byte(`{
+	// The marker token makes the fixture's request identifiable among
+	// every other request the provider may see (see the header note).
+	body := []byte(fmt.Sprintf(`{
   "model": "coding",
   "messages": [
-    {"role": "user", "content": "hi"},
+    {"role": "user", "content": %q},
     {"role": "assistant", "content": "answer", "reasoning_content": "think-1"}
   ]
-}`)
+}`, shadowFixtureMarker))
 	upstreamReq := newUpstreamRequest(0, upstreamModelType(ModelTypeMain), "coding", 1024*1024)
 
 	// interleaved=true — the X-Proxy-Interleaved-Thinking flag the
@@ -174,9 +340,9 @@ func TestRaceInternal_SelfShadowMember_MiniMax_ReasoningSplitApplied(t *testing.
 		t.Fatalf("executeInternalRequest: %v", err)
 	}
 
-	captured := mock.GetCapturedRequest()
+	captured := capture.Slot()
 	if captured == nil {
-		t.Fatal("provider did not capture the request")
+		t.Fatalf("provider did not capture the fixture request: slot empty (want model=%q with marker %q); requests observed by the provider: %v", shadowFixtureModel, shadowFixtureMarker, capture.Seen())
 	}
 
 	// ── THE ASSERTION (the :48 site) ───────────────────────────────

@@ -450,9 +450,9 @@ type directModelGetter interface {
 //     (resolveSpecificInternalCredential)
 //   - race_executor.go:353 — the secondary-upstream read
 //     (executeInternalRequest)
-//   - race_coordinator.go:1523 — the credential-failover ELIGIBILITY
+//   - race_coordinator.go:1547 — the credential-failover ELIGIBILITY
 //     gate (credFailoverEligibleLocked)
-//   - race_coordinator.go:1644 — the credential-failover BUDGET
+//   - race_coordinator.go:1668 — the credential-failover BUDGET
 //     (modelBudget)
 //   - handler_anthropic.go:521 — the Anthropic sequential attempt loop
 //     (attemptAnthropicModel)
