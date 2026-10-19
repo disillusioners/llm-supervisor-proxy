@@ -491,3 +491,20 @@ member-metering row. Pinned by
 `TestGroup_C3_GrandfatheredPickKeepsDefaultAnnotation`
 (pkg/store/database) and by the (j) engine test's
 `staleRepaired=false` assertion.
+
+### F1 availability ruling (leader, 2026-10-19) — backups-or-fail
+
+Configured backup pool ⇒ **backups-or-fail** when defaults cannot serve. When the
+default pool is unservable at pick time (all cooling) AND every backup is
+Am28-unservable (disabled/deleted/retyped), the initial pick returns `ok=false`
+(resolve-failure envelope) — CONSISTENT with the already-terminal re-entry path
+(pinned by `TestGroup_C1_ReentryCascadesToBackup`).
+
+**Rationale:** runtime degradation (cooling) degrades gracefully per the v1
+availability ruling; config breakage (unservable backups) surfaces loudly per the
+D2 fail-fast philosophy.
+
+**Deferred:** Option (ii) — the v1 soonest-default tail fallback on initial pick
+only — is deferred to the v2 ledger; it requires an explicit
+`reentry`/`allowDegradedDefault` flag, because a naive shared tail-fallback would
+reintroduce the C1 regression through the re-entry seam.
