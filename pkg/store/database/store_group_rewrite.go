@@ -55,7 +55,7 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			continue
 		}
 		res.AnyGroup = true
-		memberID, newlyBound, pool, ok := m.pickServableGroupMember(row, conversationKey)
+		memberID, newlyBound, pool, staleRepaired, ok := m.pickServableGroupMember(row, conversationKey)
 		if !ok {
 			res.FailedGroupID = row.ID
 			continue // unservable group entry is dropped; caller fails clean
@@ -74,6 +74,7 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			res.MemberID = memberRow.ID
 			res.MemberNewlyBound = newlyBound
 			res.MemberPool = pool
+			res.BindingStale = staleRepaired
 		}
 	}
 	res.ModelList = out
@@ -93,9 +94,19 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 // tried first; the backup pool is tried only when the default pool
 // has no servable member left. Returns the pool the served member
 // was drawn from ("default" | "backup") for D5 observability.
-func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, pool string, ok bool) {
+//
+// group-backup-members / D8: the engine's selection-time repair
+// (union-scoped existence check) is what detects a binding whose
+// member left the group; the repair signal is carried up to the
+// proxy (the `binding=stale` observability token). The default
+// pool's ErrNoMembers is treated as "the default pool is exhausted"
+// — NOT as a request failure — so the backup pool is consulted;
+// this is the defensive empty-default path (the all-defaults-
+// removed state is unreachable via the API — D2 blocks zero-default
+// writes — but the picker must not fail on it).
+func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, pool string, staleRepaired bool, ok bool) {
 	if m.groupEngine == nil {
-		return "", false, "", false
+		return "", false, "", false, false
 	}
 	refs := GroupMemberRefs(group.Members)
 	if !m.groupEngine.HasGroup(group.ID) {
@@ -109,12 +120,16 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 	// loop.
 	defaults := defaultRefs(refs)
 	for attempt := 0; attempt <= len(defaults); attempt++ {
-		pick, newly, err := m.groupEngine.GetOrSelect(group.ID, conversationKey)
+		pick, newly, repaired, err := m.groupEngine.GetOrSelectWithRepair(group.ID, conversationKey)
 		if err != nil {
-			return "", false, "", false
+			// D8: the default pool has no member at all (empty
+			// default pool / refs invalidated under us) ⇒ the
+			// default pool is EXHAUSTED. Fall through to the
+			// backup pool instead of failing the request.
+			break
 		}
 		if isServableGroupMember(m.GetModelNative(pick)) {
-			return pick, newly, models.PoolDefault, true
+			return pick, newly, models.PoolDefault, repaired, true
 		}
 		// Am28: stale — skip-and-reselect (cools the stale member;
 		// rebinds the conversation to the next healthy member).
@@ -127,19 +142,19 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 	// when even the backup pool is exhausted.
 	backups := backupRefs(refs)
 	for attempt := 0; attempt <= len(backups); attempt++ {
-		pick, newly, err := m.groupEngine.PickBackupMember(group.ID, conversationKey)
+		pick, newly, repaired, err := m.groupEngine.PickBackupMemberWithRepair(group.ID, conversationKey)
 		if err != nil {
-			return "", false, "", false
+			return "", false, "", false, false
 		}
 		if isServableGroupMember(m.GetModelNative(pick)) {
 			if m.groupEngine.HasBackupPool(group.ID) {
 				log.Printf("[grouplb] group=%s pool=backup member=%s — all default members exhausted for this run", group.ID, pick)
 			}
-			return pick, newly, models.PoolBackup, true
+			return pick, newly, models.PoolBackup, repaired, true
 		}
 		m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
 	}
-	return "", false, "", false
+	return "", false, "", false, false
 }
 
 // isServableGroupMember is the Am28 re-validation predicate: the

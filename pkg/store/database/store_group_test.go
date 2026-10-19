@@ -740,3 +740,112 @@ func otherOf(memberID string) string {
 	}
 	return "coding"
 }
+
+// ─── group-backup-members / D8 — manager-level stale-binding behaviour ──────
+//
+// The engine-level D8 tests (pkg/grouplb/engine_test.go) cover the
+// picker. These cover the SEAM: the manager's two-pool picker
+// (pickServableGroupMember) and the rewrite that surfaces it
+// (RewriteGroupEntries) — including the empty-default defensive path
+// (unreachable via the API — D2 blocks zero-default writes — but the
+// picker must still serve a backup instead of failing).
+
+// TestGroup_D8_RemovedMemberRePicks — a group's member is removed
+// while a conversation is bound to it; the next rewrite for the SAME
+// conversation key must serve a live member (never the removed id).
+func TestGroup_D8_RemovedMemberRePicks(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	const key = "conv-d8-removed"
+
+	// First rewrite: binds the conversation to one of the two members.
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if res.FailedGroupID != "" || res.MemberID == "" {
+		t.Fatalf("first rewrite failed: %+v", res)
+	}
+	bound := res.MemberID
+	if bound != "coding" && bound != "coding-alt" {
+		t.Fatalf("first rewrite member = %q, want coding|coding-alt", bound)
+	}
+
+	// Remove the bound member from the group (config change on the
+	// fly) — the survivor filter (push layer) drops the binding.
+	// The surviving member is the OTHER one.
+	remaining := "coding"
+	if bound == "coding" {
+		remaining = "coding-alt"
+	}
+	updated := validGroup()
+	updated.Members = []models.GroupMember{{ModelID: remaining, Weight: 1}}
+	if err := mgr.UpdateModel("coding-group", updated); err != nil {
+		t.Fatalf("update group: %v", err)
+	}
+
+	// The same conversation key now re-picks — onto the surviving
+	// member, never the removed one.
+	res2 := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if res2.FailedGroupID != "" {
+		t.Fatalf("post-removal rewrite failed: %+v", res2)
+	}
+	if res2.MemberID == bound {
+		t.Fatalf("post-removal rewrite served the REMOVED member %q", res2.MemberID)
+	}
+	if res2.MemberID != remaining {
+		t.Fatalf("post-removal rewrite member = %q, want %q (the only remaining member)", res2.MemberID, remaining)
+	}
+	if res2.MemberPool != models.PoolDefault {
+		t.Errorf("post-removal rewrite pool = %q, want default", res2.MemberPool)
+	}
+}
+
+// TestGroup_D8_EmptyDefaultPool_FallsToBackup — the DEFENSIVE
+// empty-default path: a group whose members are ALL backup-flagged
+// (unreachable via the write path — D2 rejects zero-default groups —
+// so the group row is constructed directly and handed to the picker)
+// must still SERVE a backup member (no error, correct pool) instead
+// of failing the request.
+func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Hand-built all-backup group — bypasses the D2 write validation
+	// on purpose (the state is unreachable via the API).
+	allBackup := models.ModelConfig{
+		ID:                           "coding-group",
+		Name:                         "Coding Group",
+		Enabled:                      true,
+		Kind:                         models.KindGroup,
+		Internal:                     true,
+		ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "coding", Weight: 1, BackupOnly: true},
+			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
+		},
+	}
+	// The engine's membership for this group must reflect the
+	// all-backup shape — exactly what the write path's
+	// notifyGroupEngineLocked → OnGroupChanged does on a config
+	// change. (The seeded group above registered the DEFAULT shape
+	// under the same group id.)
+	mgr.groupEngine.OnGroupChanged(allBackup.ID, GroupMemberRefs(allBackup.Members))
+
+	memberID, newlyBound, pool, stale, ok := mgr.pickServableGroupMember(&allBackup, "conv-d8-empty")
+	if !ok {
+		t.Fatal("empty default pool: the picker must serve a BACKUP member, not fail")
+	}
+	if memberID != "coding" && memberID != "coding-alt" {
+		t.Fatalf("empty default pool: member = %q, want coding|coding-alt", memberID)
+	}
+	if pool != models.PoolBackup {
+		t.Fatalf("empty default pool: pool = %q, want backup", pool)
+	}
+	if stale {
+		t.Error("empty default pool: staleRepaired must be false (no prior binding)")
+	}
+	_ = newlyBound
+}

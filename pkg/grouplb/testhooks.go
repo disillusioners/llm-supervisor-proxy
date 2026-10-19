@@ -147,6 +147,37 @@ func (e *Engine) InjectPreconditionStateForTest(groupID, convKey, memberID strin
 	st.bindings[convKey] = &binding{memberID: memberID, boundAt: time.Now()}
 }
 
+// InjectBackupPreconditionStateForTest primes the BACKUP-pool
+// binding map (backupBindings) so that backupBindings[convKey] =
+// memberID (boundAt = now) — the backup-pool twin of
+// InjectPreconditionStateForTest.
+//
+// group-backup-members / D8: the D8 tests need to place a binding
+// in the BACKUP map to exercise the backup pool's selection-time
+// existence check (a stale BACKUP binding whose member left the
+// group). It also models the config-change→selection race window
+// precisely: the membership is updated first (OnGroupChanged), THEN
+// the in-flight request writes its binding against the old member —
+// the push layer cannot see a row that does not exist yet.
+func (e *Engine) InjectBackupPreconditionStateForTest(groupID, convKey, memberID string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.groups[groupID]
+	if st == nil {
+		st = newGroupState(groupID, e.rngSeed)
+		e.groups[groupID] = st
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if _, exists := st.backupBindings[convKey]; !exists {
+		st.backupBindingsCount++
+	}
+	st.backupBindings[convKey] = &binding{memberID: memberID, boundAt: time.Now()}
+}
+
 // InjectSingleMemberExclusionForTest truncates the group's engine
 // state to its FIRST configured member (selector rebuilt, orphan
 // bindings filtered like OnGroupChanged), priming the single-member

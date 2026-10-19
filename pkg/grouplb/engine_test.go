@@ -842,3 +842,360 @@ func TestPickBackupMember_FastPath_ReValidatesMemberID(t *testing.T) {
 		t.Fatalf("backupBindingsCount = %d after post-race pick, want >= 1", got)
 	}
 }
+
+// ─── group-backup-members / D8 — selection-time stale-binding repair ───────
+//
+// (h) remove the sticky member mid-conversation → same hash re-picks a
+//     valid member (no error, no stale id);
+// (i) removal from the backup pool while bound to backup → re-picks a
+//     remaining backup;
+// (j) default→backup reclassification behaves per D8 (existing binding
+//     continues; NEW conversation never lands on the reclassified member
+//     while backup-flagged);
+// (k) add a new member → new picks may land on it, existing bindings
+//     unaffected.
+//
+// The D8 model is TWO-LAYER: the PUSH layer (OnGroupChanged's survivor
+// filter) drops bindings whose member left the group at config-change
+// time; the PULL layer (this file's subject) resolves the bound member
+// against the CURRENT membership (the UNION of both pools) at
+// selection time — covering the config-change→selection race and the
+// reclassification nuance.
+
+// staleMemberRefs returns a 2-default + 1-backup member list. The
+// default member ids are "default-a" / "default-b"; the backup id is
+// "backup-x".
+func staleMemberRefs() []MemberRef {
+	return []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+		{ModelID: "backup-x", Weight: 1, Position: 2, BackupOnly: true},
+	}
+}
+
+// (h) remove the sticky member mid-conversation → same hash re-picks
+// a valid member (no error, no stale id).
+//
+// Two sub-cases, one per layer:
+//
+//	h1 (PULL layer) — the binding points at a member that is no longer
+//	    in the membership. This is the config-change→selection race
+//	    window: the binding write landed AFTER the OnGroupChanged that
+//	    dropped the old row (or the notification never arrived). The
+//	    engine must detect it at selection time, discard it, and
+//	    re-pick — with the staleRepaired signal set.
+//	h2 (PUSH layer) — the removal goes through OnGroupChanged, whose
+//	    survivor filter drops the orphan. The end state is the same
+//	    (the conversation lands on a live member); the pull layer
+//	    simply never sees a stale row.
+//
+// The removed member must NEVER be returned to the caller, and the
+// call must not error.
+func TestD8_StaleBinding_RemovedMemberRepicks(t *testing.T) {
+	// h1 — PULL layer: binding to a member that left the group.
+	e := newTestEngine(t, time.Hour, time.Hour)
+	// The membership changes FIRST (the member is removed), THEN an
+	// in-flight request writes its binding against the OLD member —
+	// the config-change→selection race window. The push layer
+	// (OnGroupChanged) ran before the binding existed, so it could
+	// not drop it; the PULL layer must catch it at selection time.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-b", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+	})
+	e.InjectPreconditionStateForTest("g", "conv-h", "default-a")
+
+	member, _, stale, err := e.GetOrSelectWithRepair("g", "conv-h")
+	if err != nil {
+		t.Fatalf("(h1) GetOrSelectWithRepair: unexpected error %v", err)
+	}
+	if member == "default-a" {
+		t.Fatalf("(h1) returned the REMOVED member %q — must re-pick a live member", member)
+	}
+	if member != "default-b" {
+		t.Fatalf("(h1) pick = %q, want default-b (the only remaining default)", member)
+	}
+	if !stale {
+		t.Fatal("(h1) staleRepaired must be true when a stale binding was discarded")
+	}
+	// The repaired binding now points at a LIVE member (no stale
+	// repopulation).
+	m2, _, stale2, err := e.GetOrSelectWithRepair("g", "conv-h")
+	if err != nil {
+		t.Fatalf("(h1) re-select: %v", err)
+	}
+	if m2 != "default-b" {
+		t.Fatalf("(h1) re-select = %q, want default-b (sticky on the repaired binding)", m2)
+	}
+	if stale2 {
+		t.Fatal("(h1) the second select must NOT report a repair (binding is healthy now)")
+	}
+
+	// h2 — PUSH layer: the removal goes through OnGroupChanged.
+	e2 := newTestEngine(t, time.Hour, time.Hour)
+	e2.OnGroupChanged("g2", staleMemberRefs())
+	// Bind deterministically to "default-a" (the member that is
+	// about to be removed).
+	e2.InjectPreconditionStateForTest("g2", "conv-h2", "default-a")
+	first, _, err := e2.GetOrSelect("g2", "conv-h2")
+	if err != nil {
+		t.Fatalf("(h2) first GetOrSelect: %v", err)
+	}
+	if first != "default-a" {
+		t.Fatalf("(h2) first pick = %q, want default-a", first)
+	}
+	// Remove the bound member (the push layer's survivor filter drops
+	// the binding).
+	e2.OnGroupChanged("g2", []MemberRef{
+		{ModelID: "default-b", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+	})
+	member2, _, err := e2.GetOrSelect("g2", "conv-h2")
+	if err != nil {
+		t.Fatalf("(h2) post-removal GetOrSelect: %v", err)
+	}
+	if member2 == first {
+		t.Fatalf("(h2) returned the REMOVED member %q", member2)
+	}
+	if member2 != "default-b" {
+		t.Fatalf("(h2) pick = %q, want default-b (the only remaining default)", member2)
+	}
+}
+
+// (i) removal from the backup pool while bound to backup → re-picks a
+// remaining backup.
+//
+// The conversation is bound to a BACKUP member. That member leaves the
+// group. When the backup pool is consulted again, the stale binding is
+// detected (union-scoped existence check) and the pick is re-made among
+// the REMAINING backups — never the removed one, and never an error.
+//
+// The group is backup-only here (constructed directly at the engine
+// level, bypassing the D2 write-path validation) so the backup pool is
+// the only pool — the same construction the (d) test uses.
+func TestD8_StaleBinding_BackupMemberRemovedRepicks(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", onlyBackupsRefs())
+
+	// Bind the conversation to "backup-a" (a live backup) in the
+	// BACKUP binding map.
+	e.InjectBackupPreconditionStateForTest("g", "conv-i", "backup-a")
+	member, _, stale, err := e.PickBackupMemberWithRepair("g", "conv-i")
+	if err != nil {
+		t.Fatalf("(i) PickBackupMemberWithRepair: %v", err)
+	}
+	if member != "backup-a" {
+		t.Fatalf("(i) pick = %q, want backup-a (bound member is still a member)", member)
+	}
+	if stale {
+		t.Fatal("(i) no repair expected — backup-a is still in the group")
+	}
+
+	// "backup-a" leaves the group. The membership changes FIRST, THEN
+	// an in-flight request writes its backup binding against the OLD
+	// member (the config-change→selection race window the push
+	// layer cannot see).
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "backup-b", Weight: 1, Position: 0, BackupOnly: true},
+		{ModelID: "backup-c", Weight: 1, Position: 1, BackupOnly: true},
+	})
+	e.InjectBackupPreconditionStateForTest("g", "conv-i", "backup-a")
+
+	member2, _, stale2, err := e.PickBackupMemberWithRepair("g", "conv-i")
+	if err != nil {
+		t.Fatalf("(i) post-removal PickBackupMemberWithRepair: %v", err)
+	}
+	if member2 == "backup-a" {
+		t.Fatalf("(i) returned the REMOVED backup %q — must re-pick a remaining backup", member2)
+	}
+	if member2 != "backup-b" && member2 != "backup-c" {
+		t.Fatalf("(i) pick = %q, want backup-b or backup-c (a remaining backup)", member2)
+	}
+	if !stale2 {
+		t.Fatal("(i) staleRepaired must be true when a stale BACKUP binding was discarded")
+	}
+}
+
+// (j) default→backup reclassification behaves per D8: the existing
+// binding CONTINUES on that member (grandfathered — the member still
+// EXISTS, it merely changed pools), and a NEW conversation never lands
+// on the reclassified member while it is backup-flagged.
+//
+// The flip is a config change ⇒ OnGroupChanged carries the new refs.
+func TestD8_Reclassification_DefaultToBackup_Grandfathered(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", staleMemberRefs())
+
+	// Bind the conversation to a default member.
+	bound, _, err := e.GetOrSelect("g", "conv-j")
+	if err != nil {
+		t.Fatalf("(j) first GetOrSelect: %v", err)
+	}
+	if bound != "default-a" && bound != "default-b" {
+		t.Fatalf("(j) first pick = %q, want a default member", bound)
+	}
+
+	// Reclassify the bound member: default → backup (the member still
+	// EXISTS — only its pool changed).
+	reclassified := []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+		{ModelID: "backup-x", Weight: 1, Position: 2, BackupOnly: true},
+	}
+	for i, r := range reclassified {
+		if r.ModelID == bound {
+			reclassified[i].BackupOnly = true
+		}
+	}
+	e.OnGroupChanged("g", reclassified)
+
+	// The EXISTING binding continues on that member (grandfathered).
+	after, _, stale, err := e.GetOrSelectWithRepair("g", "conv-j")
+	if err != nil {
+		t.Fatalf("(j) post-reclassification GetOrSelectWithRepair: %v", err)
+	}
+	if after != bound {
+		t.Fatalf("(j) pick = %q, want the grandfathered %q (binding continues on a member that still exists)", after, bound)
+	}
+	if stale {
+		t.Fatal("(j) a reclassification is NOT a removal — staleRepaired must stay false")
+	}
+
+	// A NEW conversation must NEVER land on the reclassified member
+	// while it is backup-flagged — the default pool's selector no
+	// longer contains it.
+	for i := 0; i < 100; i++ {
+		m, _, err := e.GetOrSelect("g", fmt.Sprintf("conv-j-new-%d", i))
+		if err != nil {
+			t.Fatalf("(j) new-conversation GetOrSelect[%d]: %v", i, err)
+		}
+		if m == bound {
+			t.Fatalf("(j) new conversation %d landed on the reclassified (backup-flagged) member %q", i, m)
+		}
+	}
+}
+
+// (j-bis) backup→default reclassification: the backup binding
+// CONTINUES on the member (fully consistent with the default→backup
+// case). The union-scoped existence check in the backup pool is what
+// makes this work — a pool-scoped check would kill the binding.
+func TestD8_Reclassification_BackupToDefault_Grandfathered(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	// TWO backups — the backup pool must remain non-empty after the
+	// reclassification, otherwise the backup pool reports "exhausted"
+	// and the grandfathering case is unobservable.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1, BackupOnly: true},
+		{ModelID: "backup-y", Weight: 1, Position: 2, BackupOnly: true},
+	})
+
+	// Bind the conversation to the backup member.
+	e.InjectBackupPreconditionStateForTest("g", "conv-jb", "backup-x")
+	bound, _, err := e.PickBackupMember("g", "conv-jb")
+	if err != nil {
+		t.Fatalf("(j-bis) first PickBackupMember: %v", err)
+	}
+	if bound != "backup-x" {
+		t.Fatalf("(j-bis) first pick = %q, want backup-x", bound)
+	}
+
+	// Reclassify backup-x: backup → default (still EXISTS).
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "backup-x", Weight: 1, Position: 1}, // no BackupOnly ⇒ default now
+		{ModelID: "backup-y", Weight: 1, Position: 2, BackupOnly: true},
+	})
+
+	after, _, stale, err := e.PickBackupMemberWithRepair("g", "conv-jb")
+	if err != nil {
+		t.Fatalf("(j-bis) post-reclassification PickBackupMemberWithRepair: %v", err)
+	}
+	if after != bound {
+		t.Fatalf("(j-bis) pick = %q, want the grandfathered %q", after, bound)
+	}
+	if stale {
+		t.Fatal("(j-bis) a reclassification is NOT a removal — staleRepaired must stay false")
+	}
+}
+
+// (k) add a new member → new picks may land on it, existing bindings
+// are unaffected.
+func TestD8_AddMember_NewPicksMayLandOnIt(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+	})
+
+	// Bind the conversation before the addition.
+	bound, _, err := e.GetOrSelect("g", "conv-k")
+	if err != nil {
+		t.Fatalf("(k) first GetOrSelect: %v", err)
+	}
+
+	// Add a third member.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "default-a", Weight: 1, Position: 0},
+		{ModelID: "default-b", Weight: 1, Position: 1},
+		{ModelID: "default-c", Weight: 1, Position: 2},
+	})
+
+	// The existing binding is UNAFFECTED (the addition does not
+	// disturb it).
+	after, _, stale, err := e.GetOrSelectWithRepair("g", "conv-k")
+	if err != nil {
+		t.Fatalf("(k) post-addition GetOrSelectWithRepair: %v", err)
+	}
+	if after != bound {
+		t.Fatalf("(k) pick = %q, want the unchanged binding %q", after, bound)
+	}
+	if stale {
+		t.Fatal("(k) an addition is NOT a removal — staleRepaired must stay false")
+	}
+
+	// NEW conversations MAY land on the new member (the selector was
+	// rebuilt with it).
+	sawNew := false
+	for i := 0; i < 200; i++ {
+		m, _, err := e.GetOrSelect("g", fmt.Sprintf("conv-k-new-%d", i))
+		if err != nil {
+			t.Fatalf("(k) new-conversation GetOrSelect[%d]: %v", i, err)
+		}
+		if m == "default-c" {
+			sawNew = true
+			break
+		}
+	}
+	if !sawNew {
+		t.Fatal("(k) new conversations never landed on the added member — the selector was not rebuilt")
+	}
+}
+
+// (defensive) the all-defaults-removed state is unreachable via the
+// API (D2 blocks zero-default writes) — but the picker must still
+// handle it: the default pool reports "exhausted" (ErrNoMembers —
+// NOT a wrong member) and the BACKUP pool serves. The engine-level
+// construction bypasses the write-path validation on purpose.
+func TestD8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	// Backup-only group: the default pool is EMPTY.
+	e.OnGroupChanged("g", []MemberRef{
+		{ModelID: "backup-x", Weight: 1, Position: 0, BackupOnly: true},
+	})
+
+	// The default pool reports exhaustion (ErrNoMembers) — NOT a
+	// hard failure the caller must treat as fatal, and NOT the backup
+	// member leaking through the default entry point.
+	if member, _, err := e.GetOrSelect("g", "conv-empty"); err != ErrNoMembers {
+		t.Fatalf("empty default pool: err = %v (member %q), want ErrNoMembers", err, member)
+	}
+	// The backup pool serves the request.
+	member, _, _, err := e.PickBackupMemberWithRepair("g", "conv-empty")
+	if err != nil {
+		t.Fatalf("empty default pool: PickBackupMemberWithRepair: %v", err)
+	}
+	if member != "backup-x" {
+		t.Fatalf("empty default pool: pick = %q, want backup-x", member)
+	}
+}

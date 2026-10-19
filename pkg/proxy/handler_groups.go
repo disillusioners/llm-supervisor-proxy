@@ -27,12 +27,20 @@ import (
 // field (group-backup-members / D5) carries the pool the served
 // member was drawn from — empty before the rewrite succeeded,
 // "default" / "backup" after. The model_member_selected event
-// payload picks it up additively.
+// payload picks it up additively. `BindingStale` (D8) is true when
+// the selection-time repair discarded a sticky binding whose member
+// had left the group and re-picked — surfaced as the additive
+// "binding" event field.
 type groupPickInfo struct {
 	GroupID    string
 	MemberID   string
 	NewlyBound bool // grouplb W-1 signal for model_member_selected (Q15)
 	Pool       string
+	// BindingStale marks a D8 selection-time repair: the
+	// conversation's sticky binding pointed at a member that left
+	// the group, so the binding was discarded and the member
+	// re-picked.
+	BindingStale bool
 }
 
 // applyGroupRewrite is the ONE shared rewrite entry point (Am21).
@@ -75,10 +83,11 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 		pool = models.PoolDefault // back-compat: groups created before D5 rewrite ⇒ no pool tag ⇒ default.
 	}
 	return res.ModelList, &groupPickInfo{
-		GroupID:    res.GroupID,
-		MemberID:   res.MemberID,
-		NewlyBound: res.MemberNewlyBound,
-		Pool:       pool,
+		GroupID:      res.GroupID,
+		MemberID:     res.MemberID,
+		NewlyBound:   res.MemberNewlyBound,
+		Pool:         pool,
+		BindingStale: res.BindingStale,
 	}, ""
 }
 

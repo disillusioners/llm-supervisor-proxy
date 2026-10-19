@@ -1013,6 +1013,16 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 			if gp.Pool == models.PoolBackup {
 				payload["pool"] = models.PoolBackup
 			}
+			// group-backup-members / D8 observability: the
+			// additive `binding` field marks a selection-time
+			// repair — the conversation's sticky binding pointed
+			// at a member that left the group, so the binding was
+			// discarded and the member re-picked. Omitted unless
+			// the condition occurs (same additive style as the
+			// `pool` field above).
+			if gp.BindingStale {
+				payload["binding"] = "stale"
+			}
 			c.eventBus.Publish(events.Event{
 				Type:      "model_member_selected",
 				Timestamp: time.Now().Unix(),

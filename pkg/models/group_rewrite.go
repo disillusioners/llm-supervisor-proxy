@@ -50,6 +50,14 @@ type GroupRewriteResult struct {
 	// reason taxonomy is unchanged (D5).
 	MemberPool string
 
+	// BindingStale is true when the selection-time repair
+	// (group-backup-members / D8) discarded a sticky binding whose
+	// member had LEFT the group, and the pick was re-made. False
+	// for the ordinary case (binding honoured, or fresh pick with
+	// no prior binding). Surfaced as the additive "binding" event
+	// field on model_member_selected.
+	BindingStale bool
+
 	// FailedGroupID is non-empty when a group entry had NO servable
 	// member at runtime (Am28 re-validation exhausted the member
 	// set — all stale/disabled/deleted). The caller surfaces the

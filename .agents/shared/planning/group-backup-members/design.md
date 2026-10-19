@@ -436,3 +436,45 @@ still handle it defensively:
   unless the condition occurs. The signal travels
   engine → `pickServableGroupMember` → `GroupRewriteResult.BindingStale`
   → `groupPickInfo.BindingStale` → event payload.
+
+### D8 implementation findings (appended after the implementation)
+
+Three things the code reality forced, recorded here so the note stays
+accurate:
+
+1. **The default pool's E-3 single-member fast path does NOT
+   inspect bindings** (pre-existing load-balance-groups contract:
+   "the fast path ignores cooldowns … NO map writes"). It returns the
+   group's CURRENT single member, so a removed member can never be
+   served from it — but it also cannot REPORT a stale repair, because
+   it never looks at the binding map. Consequence: the
+   `binding=stale` signal is not emitted for a single-member default
+   group. The stale row is inert there (the fast path ignores it) and
+   is reclaimed by the janitor / the next push-layer drop.
+
+2. **The backup pool's single-member fast path DOES write a binding**
+   (it stores `backupBindings[convKey]`), so it had to be made
+   binding-aware for D8: an existing VALID binding for the
+   conversation now wins (grandfathering — the member may have been
+   reclassified into the default pool but still EXISTS), and a
+   binding whose member left the group is discarded with the
+   `binding=stale` token before the pool's only member is bound.
+   Without this, the fast path would silently rebind the
+   conversation to the pool's only member and break the
+   grandfathering ruling.
+
+3. **The E-3 fast path is DEFAULT-POOL ONLY.** A group whose single
+   member is backup-flagged has an EMPTY default pool; the fast path
+   must not serve that backup through the default entry point. It now
+   falls through to the full path, which reports the default pool as
+   exhausted (`ErrNoMembers`) so the manager falls to the backup
+   pool. (The state is unreachable via the API — D2 — but the engine
+   handles it defensively per the empty-default rule above.)
+
+### D8 known limitation (stated, not worked around)
+
+The `binding=stale` signal is emitted by the DEFAULT pool's full path
+and by the BACKUP pool's fast + full paths. It is NOT emitted by the
+default pool's E-3 single-member fast path (see finding 1) — the
+member served is still always correct there, only the observability
+signal is absent.
