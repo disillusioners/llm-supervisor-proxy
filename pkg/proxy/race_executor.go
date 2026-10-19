@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -258,6 +259,53 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	}, true
 }
 
+// toolRepairEventCallback builds the telemetry callback for the race
+// NON-STREAM repairer — the events.ToolRepairEvent ("tool_repair") publish
+// that the stream path exposes through InternalHandler.eventCallback
+// (internal_handler.go:364-368). The callback is nil-safe: a nil bus yields
+// a nil callback, which SetRepairer accepts.
+func toolRepairEventCallback(cfg *ConfigSnapshot, reqID int) toolrepair.RepairEventCallback {
+	bus := cfg.EventBus
+	if bus == nil {
+		return nil
+	}
+	return func(stats *toolrepair.RepairStats, results []*toolrepair.RepairResult) {
+		if stats == nil {
+			return
+		}
+		details := make([]events.RepairDetail, 0, len(results))
+		for _, r := range results {
+			if r == nil {
+				continue
+			}
+			details = append(details, events.RepairDetail{
+				ToolName:   r.ToolName,
+				Success:    r.Success,
+				Strategies: strings.Join(r.Strategies, ","),
+				Error:      r.Error,
+			})
+		}
+		strategies := make([]string, 0, len(stats.StrategiesUsed))
+		for name := range stats.StrategiesUsed {
+			strategies = append(strategies, name)
+		}
+		sort.Strings(strategies)
+		bus.Publish(events.Event{
+			Type:      "tool_repair",
+			Timestamp: time.Now().Unix(),
+			Data: events.ToolRepairEvent{
+				RequestID:      fmt.Sprintf("%d", reqID),
+				TotalToolCalls: stats.TotalToolCalls,
+				Repaired:       stats.Repaired,
+				Failed:         stats.Failed,
+				StrategiesUsed: strategies,
+				Duration:       stats.Duration.String(),
+				Details:        details,
+			},
+		})
+	}
+}
+
 // executeInternalRequest handles requests to internal providers.
 //
 // interleaved is the X-Proxy-Interleaved-Thinking flag (parsed at handler
@@ -450,7 +498,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// double repair).
 	if cfg.ToolRepair.Enabled {
 		if openaiProvider, ok := providerClient.(*providers.OpenAIProvider); ok {
-			openaiProvider.SetRepairer(toolrepair.NewRepairer(&cfg.ToolRepair), nil)
+			openaiProvider.SetRepairer(toolrepair.NewRepairer(&cfg.ToolRepair), toolRepairEventCallback(cfg, req.id))
 		}
 	}
 	return handleInternalNonStream(ctx, providerClient, providerReq, req, internalModel, rawBody)
