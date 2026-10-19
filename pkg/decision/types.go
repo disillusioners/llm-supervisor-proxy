@@ -128,10 +128,10 @@ type InputPart struct {
 // BuildUpstream for the typesafe adapter DOES marshal a derived
 // System One struct.
 type DecisionRequest struct {
-	Model           string                `json:"model"`
-	Input           json.RawMessage       `json:"input"` // string | DecisionInputMessage[]
-	Questions       []Question            `json:"questions"`
-	SafetyIdentifier string               `json:"safety_identifier,omitempty"`
+	Model            string          `json:"model"`
+	Input            json.RawMessage `json:"input"` // string | DecisionInputMessage[]
+	Questions        []Question      `json:"questions"`
+	SafetyIdentifier string          `json:"safety_identifier,omitempty"`
 }
 
 // DecisionResponse is the typed response surface the handler
@@ -165,8 +165,8 @@ type DecisionResponse struct {
 // reads Probabilities (for choice) or ScoreProbabilities (for
 // score) depending on Type.
 type Answer struct {
-	Type         QuestionType `json:"type"`
-	Name         string       `json:"name,omitempty"`
+	Type QuestionType `json:"type"`
+	Name string       `json:"name,omitempty"`
 
 	// Predicate-specific.
 	Probability *float64 `json:"probability,omitempty"`
@@ -174,9 +174,9 @@ type Answer struct {
 	// Choice-specific. `Choice` is the chosen option's value
 	// (string or boolean — typed as interface{}). Probabilities
 	// is the full distribution.
-	Choice     string         `json:"choice,omitempty"`
+	Choice        string         `json:"choice,omitempty"`
 	Probabilities []ChoiceAnswer `json:"probabilities,omitempty"`
-	Confidence *float64       `json:"confidence,omitempty"`
+	Confidence    *float64       `json:"confidence,omitempty"`
 
 	// Score-specific. Score is the integer level index (liteLLM
 	// semantics — A24). ScoreProbabilities is the level-indexed
@@ -201,14 +201,14 @@ func (a Answer) MarshalJSON() ([]byte, error) {
 	// Hand-roll a wrapper to dodge the recursion that a
 	// struct-with-typed-field can't express.
 	type wireAnswer struct {
-		Type         QuestionType   `json:"type"`
-		Name         string         `json:"name,omitempty"`
-		Probability  *float64       `json:"probability,omitempty"`
-		Choice       string         `json:"choice,omitempty"`
-		Probabilities interface{}   `json:"probabilities,omitempty"`
-		Confidence   *float64       `json:"confidence,omitempty"`
-		Score        *float64       `json:"score,omitempty"`
-		Refusal      string         `json:"refusal,omitempty"`
+		Type          QuestionType `json:"type"`
+		Name          string       `json:"name,omitempty"`
+		Probability   *float64     `json:"probability,omitempty"`
+		Choice        string       `json:"choice,omitempty"`
+		Probabilities interface{}  `json:"probabilities,omitempty"`
+		Confidence    *float64     `json:"confidence,omitempty"`
+		Score         *float64     `json:"score,omitempty"`
+		Refusal       string       `json:"refusal,omitempty"`
 	}
 	w := wireAnswer{
 		Type: a.Type, Name: a.Name, Probability: a.Probability,
@@ -238,14 +238,14 @@ func (a *Answer) UnmarshalJSON(data []byte) error {
 	// Probe the type first; the rest of the fields follow the
 	// discriminator.
 	var probe struct {
-		Type         QuestionType       `json:"type"`
-		Name         string             `json:"name"`
-		Probability  *float64           `json:"probability"`
-		Choice       string             `json:"choice"`
+		Type          QuestionType      `json:"type"`
+		Name          string            `json:"name"`
+		Probability   *float64          `json:"probability"`
+		Choice        string            `json:"choice"`
 		Probabilities []json.RawMessage `json:"probabilities"`
-		Confidence   *float64           `json:"confidence"`
-		Score        *float64           `json:"score"`
-		Refusal      string             `json:"refusal"`
+		Confidence    *float64          `json:"confidence"`
+		Score         *float64          `json:"score"`
+		Refusal       string            `json:"refusal"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return err
@@ -321,9 +321,9 @@ type ScoreAnswerEntry struct {
 // write a usage row; failure telemetry flows through
 // DecisionEvent only.
 type Usage struct {
-	InputTokens        int64 `json:"input_tokens"`
-	OutputTokens       int64 `json:"output_tokens"`
-	TotalTokens        int64 `json:"total_tokens"`
+	InputTokens        int64              `json:"input_tokens"`
+	OutputTokens       int64              `json:"output_tokens"`
+	TotalTokens        int64              `json:"total_tokens"`
 	InputTokensDetail  InputTokensDetail  `json:"input_tokens_details"`
 	OutputTokensDetail OutputTokensDetail `json:"output_tokens_details"`
 }
@@ -333,7 +333,7 @@ type Usage struct {
 // per OpenAI Decision wire; the proxy zero-fills them on the
 // typesafe path (System One doesn't break down input tokens).
 type InputTokensDetail struct {
-	CachedTokens    int64 `json:"cached_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 

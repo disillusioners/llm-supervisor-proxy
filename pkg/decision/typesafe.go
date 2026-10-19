@@ -3,6 +3,7 @@ package decision
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -30,8 +31,8 @@ type typesafeProvider struct{}
 // Struct-only fields; JSON encoding uses snake_case to match
 // the upstream wire.
 type systemOneRequest struct {
-	Model    string                       `json:"model"`
-	State    systemOneState               `json:"state"`
+	Model     string                       `json:"model"`
+	State     systemOneState               `json:"state"`
 	Questions map[string]systemOneQuestion `json:"questions"`
 }
 
@@ -46,10 +47,10 @@ type systemOneState struct{}
 // map. Type is one of {"noul","choice","score"}; only Choice
 // and Score need extra fields.
 type systemOneQuestion struct {
-	Type         string                      `json:"type"`
-	Instructions string                      `json:"instructions,omitempty"`
-	Choice       *systemOneChoice            `json:"choice,omitempty"`
-	Score        *systemOneScore             `json:"score,omitempty"`
+	Type         string           `json:"type"`
+	Instructions string           `json:"instructions,omitempty"`
+	Choice       *systemOneChoice `json:"choice,omitempty"`
+	Score        *systemOneScore  `json:"score,omitempty"`
 }
 
 // systemOneChoice is the System One choice sub-shape (per-question
@@ -357,9 +358,9 @@ func marshalSystemOne(req systemOneRequest, stateStr string) ([]byte, error) {
 
 // System One response shape (research-web §Q2 verified).
 type systemOneResponse struct {
-	Model   string                          `json:"model"`
-	Answers map[string]json.RawMessage      `json:"answers"`
-	Usage   systemOneUsage                  `json:"usage"`
+	Model   string                     `json:"model"`
+	Answers map[string]json.RawMessage `json:"answers"`
+	Usage   systemOneUsage             `json:"usage"`
 }
 
 // systemOneUsage carries input_tokens + output_tokens
@@ -448,8 +449,8 @@ func synthesizeAnswers(req *DecisionRequest, sys map[string]json.RawMessage) []A
 		if !ok {
 			// Question declined / absent in the upstream.
 			out = append(out, Answer{
-				Type:  QuestionTypeRefusal,
-				Name:  q.Name,
+				Type:    QuestionTypeRefusal,
+				Name:    q.Name,
 				Refusal: "upstream did not return an answer for this question",
 			})
 			continue
@@ -465,18 +466,37 @@ func synthesizeAnswers(req *DecisionRequest, sys map[string]json.RawMessage) []A
 // a shape hint.
 //
 // System One answer values are FLAT objects whose fields
-// signal the discriminator:
-//   - {noul: <float>} ⇒ predicate
-//   - {choice: {value, probabilities, confidence}} ⇒ choice
-//   - {score: <int|float>, probabilities: {label:prob}, confidence} ⇒ score
-//   - {refusal: {reason}} ⇒ refusal
+// signal the discriminator and carry siblings at the same level:
+//   - {noul: <float>} ⇒ predicate (siblings absent).
+//   - {choice: <bare-string>, probabilities: {<value>: <prob>},
+//     confidence: <float>} ⇒ choice. The bare-string `choice`
+//     carries the chosen option value; `probabilities` and
+//     `confidence` are siblings of it. Documented Jev wire.
+//   - {score: <float>, probabilities: {<index-str>: <prob>},
+//     legend: {<index-str>: <label>}, confidence: <float>}
+//     ⇒ score. `probabilities` is keyed by LEVEL INDEX as a
+//     string ("0", "1", "2"); `legend` is a sibling map from
+//     index-string to level label. Documented Jev wire.
+//   - {refusal: {reason}} ⇒ refusal.
+//
+// Tolerated defensive variants:
+//   - Choice with `choice` as a nested object
+//     {value, probabilities, confidence} (older Jev SDK shape).
+//   - Score with label-keyed probabilities (no legend present,
+//     keys directly match q.Levels[i].Label).
 func synthesizeAnswer(q *Question, raw json.RawMessage) Answer {
-	// Probe the answer's type via field presence.
+	// Probe the answer's discriminator + sibling fields. We
+	// use *json.RawMessage for the shape-polymorphic fields
+	// (choice/score can be any JSON shape) and a plain
+	// map for probabilities (always a map on the wire).
 	var probe struct {
-		Noul       *json.RawMessage    `json:"noul"`
-		Choice     *systemOneAnswerChoice `json:"choice"`
-		Score      json.RawMessage     `json:"score"`
-		Refusal    *systemOneAnswerRefusal `json:"refusal"`
+		Noul          *json.RawMessage           `json:"noul"`
+		Choice        *json.RawMessage           `json:"choice"`
+		Score         *json.RawMessage           `json:"score"`
+		Legend        map[string]string          `json:"legend"`
+		Probabilities map[string]json.RawMessage `json:"probabilities"`
+		Confidence    *json.RawMessage           `json:"confidence"`
+		Refusal       *json.RawMessage           `json:"refusal"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return Answer{Type: QuestionTypeRefusal, Name: q.Name, Refusal: "upstream answer unparseable"}
@@ -492,114 +512,221 @@ func synthesizeAnswer(q *Question, raw json.RawMessage) Answer {
 			Probability: &prob,
 		}
 	case probe.Choice != nil:
-		out := Answer{
-			Type:  QuestionTypeChoice,
-			Name:  q.Name,
-			Choice: stringifyValue(probe.Choice.Value),
-		}
-		// Probabilities map → array (typed `probabilities`).
-		if probe.Choice.Probabilities != nil {
-			out.Probabilities = make([]ChoiceAnswer, 0, len(probe.Choice.Probabilities))
-			// The map iteration order is non-deterministic
-			// in Go — we accept this for choice answers (the
-			// client doesn't depend on probabilistic-array
-			// order; liteLLM emits maps and clients handle
-			// both shapes).
-			for k, v := range probe.Choice.Probabilities {
-				prob, _ := strconvFloat(v)
-				rawKey := json.RawMessage(k)
-				var val interface{}
-				_ = json.Unmarshal(rawKey, &val)
-				out.Probabilities = append(out.Probabilities, ChoiceAnswer{
-					Value:       val,
-					Probability: prob,
-				})
+		return synthesizeChoiceAnswer(q, *probe.Choice, probe.Probabilities, probe.Confidence)
+	case probe.Score != nil:
+		return synthesizeScoreAnswer(q, *probe.Score, probe.Probabilities, probe.Confidence, probe.Legend)
+	case probe.Refusal != nil:
+		return synthesizeRefusalAnswer(q, *probe.Refusal)
+	}
+	return Answer{Type: QuestionTypeRefusal, Name: q.Name, Refusal: "upstream answer had no recognized type discriminator"}
+}
+
+// synthesizeChoiceAnswer converts a System One choice answer
+// to the typed OpenAI Answer shape.
+//
+// Wire form (documented Jev / System One): the `choice` field
+// is a BARE STRING carrying the chosen option value;
+// `probabilities` and `confidence` are SIBLINGS of `choice` at
+// the same object level (NOT nested inside `choice`).
+//
+// Tolerated defensive variants:
+//   - Nested-object legacy: `choice` is an object
+//     {value, probabilities, confidence} (older Jev SDK / proxy
+//     variants). When detected, sibling probabilities/confidence
+//     from the outer level win; only missing fields fall back to
+//     the nested form.
+//   - Non-string value (boolean true / false) bare: stringify as
+//     "true" / "false" so the typed Answer still carries a value.
+func synthesizeChoiceAnswer(q *Question, choiceRaw json.RawMessage, probs map[string]json.RawMessage, conf *json.RawMessage) Answer {
+	out := Answer{Type: QuestionTypeChoice, Name: q.Name}
+
+	// Primary path: documented bare-string form.
+	var chosen string
+	if err := json.Unmarshal(choiceRaw, &chosen); err == nil {
+		out.Choice = chosen
+	} else {
+		// Fall back to nested-object legacy form
+		// {value, probabilities, confidence}.
+		var nested systemOneAnswerChoice
+		if err := json.Unmarshal(choiceRaw, &nested); err == nil {
+			out.Choice = stringifyValue(nested.Value)
+			// Nested probabilities/confidence are
+			// shadowed by sibling fields when those are
+			// present; only fall back to nested when the
+			// outer level omitted them.
+			if probs == nil {
+				probs = nested.Probabilities
 			}
+			if conf == nil {
+				conf = nested.Confidence
+			}
+		} else {
+			// Last resort: stringify the raw bytes
+			// (handles boolean true / false bare values
+			// defensively).
+			out.Choice = stringifyValue(choiceRaw)
 		}
-		if probe.Choice.Confidence != nil {
-			conf, _ := strconvFloat(*probe.Choice.Confidence)
-			out.Confidence = &conf
+	}
+
+	// Probabilities map → array (typed `probabilities`).
+	if probs != nil {
+		out.Probabilities = make([]ChoiceAnswer, 0, len(probs))
+		// The map iteration order is non-deterministic
+		// in Go — we accept this for choice answers (the
+		// client doesn't depend on probabilistic-array
+		// order; liteLLM emits maps and clients handle
+		// both shapes).
+		for k, v := range probs {
+			prob, _ := strconvFloat(v)
+			// k is a Go string (not JSON-formatted);
+			// wrap in quotes before unmarshaling into
+			// interface{} so the typed Value preserves
+			// the option value as a JSON value (string /
+			// boolean / number).
+			rawKey := json.RawMessage(`"` + k + `"`)
+			var val interface{}
+			_ = json.Unmarshal(rawKey, &val)
+			out.Probabilities = append(out.Probabilities, ChoiceAnswer{
+				Value:       val,
+				Probability: prob,
+			})
 		}
-		return out
-	case len(probe.Score) > 0:
-		// A24 — emit the integer level index as OpenAI score
-		// (liteLLM precedent; System One score 0..levels-1).
-		scoreIdx, _ := strconvFloat(probe.Score)
-		out := Answer{
-			Type:  QuestionTypeScore,
-			Name:  q.Name,
-			Score: &scoreIdx,
-		}
-		// Synthesize probabilities[].value=int(key),
-		// .label=q.Levels[key].Label. This is the liteLLM
-		// pattern: the System One probabilities map keyed
-		// by label string; OpenAI wants an array with int
-		// key + label.
-		// Re-extract probabilities from raw for the score case.
-		var scoreRaw struct {
-			Probabilities map[string]json.RawMessage `json:"probabilities"`
-			Confidence    *json.RawMessage           `json:"confidence"`
-		}
-		_ = json.Unmarshal(raw, &scoreRaw)
-		if scoreRaw.Probabilities != nil && q.Type == QuestionTypeScore {
-			entries := make([]ScoreAnswerEntry, 0, len(scoreRaw.Probabilities))
-			for label, prob := range scoreRaw.Probabilities {
-				// Find the level index by label.
-				idx := -1
+	}
+	if conf != nil {
+		c, _ := strconvFloat(*conf)
+		out.Confidence = &c
+	}
+	return out
+}
+
+// synthesizeScoreAnswer converts a System One score answer to
+// the typed OpenAI Answer shape.
+//
+// Wire form (documented Jev / System One): the `score` field is
+// a JSON number (int or float; may land between integer levels);
+// `probabilities` is a map keyed by LEVEL INDEX AS STRING
+// ("0", "1", "2", ...); `legend` is a sibling map translating
+// each index-string to the level label sent in the request;
+// `confidence` is a sibling.
+//
+// Resolution strategy for each probability key:
+//  1. Use the `legend` sibling (when present) to translate
+//     the index-string to a level label, then locate the
+//     matching level in q.Levels by label. Documented path.
+//  2. If `legend` is absent, fall back to interpreting the key
+//     as a positional index against q.Levels (defensive — some
+//     clients omit legend when keys already align positionally).
+//  3. Final defensive fallback: treat the key as a level label
+//     and look it up in q.Levels (legacy Jev SDK shape where
+//     probabilities are keyed by label, not index).
+//
+// Any key that resolves to no level is emitted with a sentinel
+// index 0 and the resolved label preserved verbatim (degraded
+// but not silently dropped — same posture as the pre-fix
+// behavior).
+//
+// The scalar `score` is parsed verbatim (systemOneScore is a
+// float-compatible JSON number); no level-index coercion.
+func synthesizeScoreAnswer(q *Question, scoreRaw json.RawMessage, probs map[string]json.RawMessage, conf *json.RawMessage, legend map[string]string) Answer {
+	// A24 — emit the scalar score as a float; OpenAI wire
+	// accepts both int and float (liteLLM precedent; System
+	// One score may be a fractional float between levels).
+	scoreIdx, _ := strconvFloat(scoreRaw)
+	out := Answer{
+		Type:  QuestionTypeScore,
+		Name:  q.Name,
+		Score: &scoreIdx,
+	}
+	if probs != nil && q.Type == QuestionTypeScore {
+		entries := make([]ScoreAnswerEntry, 0, len(probs))
+		for key, prob := range probs {
+			p, _ := strconvFloat(prob)
+
+			label := key
+			idx := -1
+
+			// Strategy 1: legend-keyed (documented).
+			if l, ok := legend[key]; ok && l != "" {
+				label = l
 				for i := range q.Levels {
 					if q.Levels[i].Label == label {
 						idx = i
 						break
 					}
 				}
-				if idx < 0 {
-					// Unknown label — emit a
-					// sentinel int 0 (the
-					// response is degraded but
-					// not silently dropped).
-					idx = 0
-				}
-				p, _ := strconvFloat(prob)
-				entries = append(entries, ScoreAnswerEntry{
-					Value:       idx,
-					Label:       label,
-					Probability: p,
-				})
 			}
-			out.SetScoreProbabilities(entries)
+
+			// Strategy 2: positional fallback — key is a
+			// numeric string index that maps directly
+			// against q.Levels.
+			if idx < 0 {
+				if pos, convErr := strconv.Atoi(key); convErr == nil {
+					if pos >= 0 && pos < len(q.Levels) {
+						idx = pos
+						label = q.Levels[pos].Label
+					}
+				}
+			}
+
+			// Strategy 3 (defensive legacy): the key is a
+			// level label directly matching q.Levels.
+			if idx < 0 {
+				for i := range q.Levels {
+					if q.Levels[i].Label == key {
+						idx = i
+						label = key
+						break
+					}
+				}
+			}
+
+			// Unresolvable — degraded sentinel (not dropped).
+			if idx < 0 {
+				idx = 0
+			}
+			entries = append(entries, ScoreAnswerEntry{
+				Value:       idx,
+				Label:       label,
+				Probability: p,
+			})
 		}
-		if scoreRaw.Confidence != nil {
-			conf, _ := strconvFloat(*scoreRaw.Confidence)
-			out.Confidence = &conf
-		}
-		return out
-	case probe.Refusal != nil:
-		refusal := ""
-		if probe.Refusal.Reason != "" {
-			refusal = probe.Refusal.Reason
-		}
-		return Answer{
-			Type:    QuestionTypeRefusal,
-			Name:    q.Name,
-			Refusal: refusal,
-		}
+		out.SetScoreProbabilities(entries)
 	}
-	return Answer{Type: QuestionTypeRefusal, Name: q.Name, Refusal: "upstream answer had no recognized type discriminator"}
+	if conf != nil {
+		c, _ := strconvFloat(*conf)
+		out.Confidence = &c
+	}
+	return out
 }
 
-// systemOneAnswerChoice is the typed sub-shape of a System
-// One `choice` answer value.
+// synthesizeRefusalAnswer converts a System One refusal answer
+// to the typed OpenAI Answer shape. Refusal payloads are
+// consistent across Jev wire variants ({reason} may be present
+// or absent; an empty reason yields an empty Refusal string so
+// the client still sees the type discriminator).
+func synthesizeRefusalAnswer(q *Question, refusalRaw json.RawMessage) Answer {
+	var nested systemOneAnswerRefusal
+	// A missing {reason} object or empty object is fine —
+	// the Unmarshal yields a zero-valued struct with empty
+	// Reason, which is the documented empty-refusal form.
+	_ = json.Unmarshal(refusalRaw, &nested)
+	return Answer{
+		Type:    QuestionTypeRefusal,
+		Name:    q.Name,
+		Refusal: nested.Reason,
+	}
+}
+
+// systemOneAnswerChoice is the LEGACY nested-object shape of
+// a System One `choice` answer value. The documented Jev wire
+// emits `choice` as a BARE STRING (with `probabilities` and
+// `confidence` as siblings); this struct models the older
+// nested-object variant (`choice` carries
+// {value, probabilities, confidence}). synthesizeChoiceAnswer
+// falls back to this shape defensively when the bare-string
+// primary path fails to parse.
 type systemOneAnswerChoice struct {
 	Value         json.RawMessage            `json:"value"`
-	Probabilities map[string]json.RawMessage `json:"probabilities"`
-	Confidence    *json.RawMessage           `json:"confidence"`
-}
-
-// systemOneAnswerScore is the typed sub-shape of a System
-// One `score` answer value. `score` is a JSON number (can be
-// float in inter-level cases); we accept either form.
-type systemOneAnswerScore struct {
-	Score         json.RawMessage            `json:"score"`
 	Probabilities map[string]json.RawMessage `json:"probabilities"`
 	Confidence    *json.RawMessage           `json:"confidence"`
 }

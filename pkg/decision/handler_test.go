@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,7 +208,7 @@ func openAIDecisionSuccessBody(inputTokens, outputTokens int64) []byte {
 			"output_tokens": outputTokens,
 			"total_tokens":  inputTokens + outputTokens,
 			"input_tokens_details": map[string]interface{}{
-				"cached_tokens":     0,
+				"cached_tokens":      0,
 				"cache_write_tokens": 0,
 			},
 			"output_tokens_details": map[string]interface{}{
@@ -392,12 +393,12 @@ func newEnvForProvider(t *testing.T, script fakeScript, provider, internalModel,
 			return nil, false
 		}
 		return &models.ModelConfig{
-			ID:                         modelID,
-			Name:                       "Decision " + provider,
-			Kind:                       models.KindDecision,
-			Enabled:                    true,
-			Internal:                   true,
-			InternalModel:              internalModel,
+			ID:            modelID,
+			Name:          "Decision " + provider,
+			Kind:          models.KindDecision,
+			Enabled:       true,
+			Internal:      true,
+			InternalModel: internalModel,
 			Credentials: []models.CredentialRef{
 				{CredentialID: "cred-1", Weight: 1, Position: 0},
 			},
@@ -1393,22 +1394,46 @@ func TestHandler_TypeSafe_UsageDetailSynthesis(t *testing.T) {
 // TestHandler_TypeSafe_AnswerOrderPreserved — the System One
 // keyed map → ordered OpenAI `answers[]` using the original
 // questions[] order (per-question key map).
+//
+// Fixture: the documented Jev wire shape — `choice` is a BARE
+// STRING carrying the chosen option value, with `probabilities`
+// and `confidence` as siblings. Captured live from the Jev
+// typesafe endpoint (2026-10-19; real numbers).
+//
+// Asserts both the order AND the choice-parser fix (R1): a real
+// bare-string `choice` payload must synthesize into a Choice
+// answer (not a Refusal), the chosen value must match, the
+// probabilities distribution must survive, and the confidence
+// sibling must be preserved.
 func TestHandler_TypeSafe_AnswerOrderPreserved(t *testing.T) {
-	// System One returns "bar" before "foo" in the JSON map
-	// iteration (Go map ordering is randomized but we'll
-	// assert against the request order regardless).
+	// System One returns "department" before "foo" in the JSON
+	// map; the proxy must serialize answers[] in request order
+	// (foo then department) regardless of map iteration order.
 	answers := map[string]interface{}{
 		"foo": map[string]interface{}{"noul": 0.5},
-		"bar": map[string]interface{}{"choice": map[string]interface{}{"value": "billing", "probabilities": map[string]interface{}{"billing": 0.7, "other": 0.3}, "confidence": 0.6}},
+		"department": map[string]interface{}{
+			"type":   "choice",
+			"choice": "billing",
+			"probabilities": map[string]interface{}{
+				"billing":   0.88,
+				"technical": 0.12,
+				"sales":     0.0,
+			},
+			"confidence": 0.81,
+		},
 	}
-	body := systemOneSuccessBody(answers, 1, 1)
+	body := systemOneSuccessBody(answers, 318, 34)
 	env := newEnvTypesafe(t, fakeScript{status: 200, body: body})
 	reqJSON := `{
 		"model": "` + env.modelID + `",
 		"input": "x",
 		"questions": [
 			{"type":"predicate","name":"foo","instructions":"Is foo?"},
-			{"type":"choice","name":"bar","choices":[{"value":"billing"},{"value":"other"}]}
+			{"type":"choice","name":"department","choices":[
+				{"value":"billing"},
+				{"value":"technical"},
+				{"value":"sales"}
+			]}
 		]
 	}`
 	rec := env.sendRequest(http.MethodPost, reqJSON, nil)
@@ -1422,12 +1447,86 @@ func TestHandler_TypeSafe_AnswerOrderPreserved(t *testing.T) {
 	if len(got.Answers) != 2 {
 		t.Fatalf("answers len = %d, want 2; got=%+v", len(got.Answers), got.Answers)
 	}
-	// Order: foo first, bar second (request order).
+	// Order: foo first, department second (request order).
 	if got.Answers[0].Name != "foo" {
 		t.Errorf("answers[0].name = %q, want foo", got.Answers[0].Name)
 	}
-	if got.Answers[1].Name != "bar" {
-		t.Errorf("answers[1].name = %q, want bar", got.Answers[1].Name)
+	if got.Answers[1].Name != "department" {
+		t.Errorf("answers[1].name = %q, want department", got.Answers[1].Name)
+	}
+
+	// R1 fix proof — the choice answer must NOT be a refusal
+	// (the pre-fix parser silently degraded real bare-string
+	// `choice` payloads to "upstream answer unparseable"
+	// refusals with HTTP 200).
+	choiceAns := got.Answers[1]
+	if choiceAns.Type != QuestionTypeChoice {
+		t.Fatalf("answers[1].type = %q, want choice (R1 fix); full answers=%+v", choiceAns.Type, got.Answers)
+	}
+	if choiceAns.Choice != "billing" {
+		t.Errorf("answers[1].choice = %q, want %q (R1 fix: bare-string choice must be parsed)", choiceAns.Choice, "billing")
+	}
+	if choiceAns.Refusal != "" {
+		t.Errorf("answers[1].refusal = %q, want empty (R1 fix: must NOT be a refusal)", choiceAns.Refusal)
+	}
+	// Probabilities distribution must survive verbatim.
+	if len(choiceAns.Probabilities) != 3 {
+		t.Fatalf("answers[1].probabilities len = %d, want 3 (R1 fix)", len(choiceAns.Probabilities))
+	}
+	probSum := 0.0
+	for _, p := range choiceAns.Probabilities {
+		probSum += p.Probability
+	}
+	if math.Abs(probSum-1.0) > 1e-9 {
+		t.Errorf("answers[1].probabilities sum = %v, want 1.0 (R1 fix)", probSum)
+	}
+	// Confidence sibling must be preserved.
+	if choiceAns.Confidence == nil {
+		t.Fatalf("answers[1].confidence nil, want 0.81 (R1 fix: confidence is a sibling of choice)")
+	}
+	if math.Abs(*choiceAns.Confidence-0.81) > 1e-9 {
+		t.Errorf("answers[1].confidence = %v, want 0.81 (R1 fix)", *choiceAns.Confidence)
+	}
+}
+
+// TestHandler_TypeSafe_ChoiceAnswer_LegacyNestedShape — the
+// OLDER nested-object shape (`choice` as {value, probabilities,
+// confidence}) is still tolerated defensively. Captured legacy
+// variant — kept to ensure the secondary parse path remains
+// alive so older Jev SDK clients / proxies don't regress.
+func TestHandler_TypeSafe_ChoiceAnswer_LegacyNestedShape(t *testing.T) {
+	answers := map[string]interface{}{
+		"bar": map[string]interface{}{"choice": map[string]interface{}{"value": "billing", "probabilities": map[string]interface{}{"billing": 0.7, "other": 0.3}, "confidence": 0.6}},
+	}
+	body := systemOneSuccessBody(answers, 1, 1)
+	env := newEnvTypesafe(t, fakeScript{status: 200, body: body})
+	reqJSON := `{
+		"model": "` + env.modelID + `",
+		"input": "x",
+		"questions": [
+			{"type":"choice","name":"bar","choices":[{"value":"billing"},{"value":"other"}]}
+		]
+	}`
+	rec := env.sendRequest(http.MethodPost, reqJSON, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got DecisionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("typed: %v", err)
+	}
+	if len(got.Answers) != 1 {
+		t.Fatalf("answers len = %d, want 1; got=%+v", len(got.Answers), got.Answers)
+	}
+	a := got.Answers[0]
+	if a.Type != QuestionTypeChoice || a.Choice != "billing" {
+		t.Errorf("legacy nested choice = %+v, want choice/billing", a)
+	}
+	if len(a.Probabilities) != 2 {
+		t.Errorf("legacy nested choice probs len = %d, want 2; got=%+v", len(a.Probabilities), a.Probabilities)
+	}
+	if a.Confidence == nil || *a.Confidence != 0.6 {
+		t.Errorf("legacy nested choice confidence = %v, want 0.6", a.Confidence)
 	}
 }
 
@@ -1854,10 +1953,111 @@ func TestTypesafeProvider_InspectResponse_OrdersAnswers(t *testing.T) {
 }
 
 // TestTypesafeProvider_InspectResponse_ScoreEmitsLevelIndex —
-// A24: System One score (which may be int-like) → OpenAI score
-// is integer level index; probabilities[] includes label per
-// the request's levels[].
+// A24: System One score (which may be int-like or fractional
+// when landing between levels) → OpenAI score is the scalar;
+// probabilities[] entries map back to the request's levels[]
+// via the documented legend map.
+//
+// Fixture: real captured Jev / System One wire shape from a
+// `frustration` score question with three levels. The score is
+// fractional (1.05) and falls between level 1 (Frustrated) and
+// level 2 (Very angry); the probabilities distribution shows
+// the model assigned mass 0.95 to level 1 (Frustrated) and 0.05
+// to level 2 (Very angry). Pre-fix, the parser compared each
+// probability key ("0", "1", "2") against q.Levels[i].Label
+// ("Calm", "Frustrated", "Very angry") and NEVER matched —
+// every entry fell to the sentinel index 0, collapsing all mass
+// onto level 0 and emitting three "Calm"-labeled entries with
+// probabilities {0, 0.95, 0.05}. R2 fix: use the `legend`
+// sibling to translate index-string → label, then locate the
+// matching level. Asserts every level is mapped to the correct
+// index and the mass distribution survives verbatim.
 func TestTypesafeProvider_InspectResponse_ScoreEmitsLevelIndex(t *testing.T) {
+	p := NewTypesafeProvider()
+	req := &DecisionRequest{
+		Questions: []Question{
+			{Type: QuestionTypeScore, Name: "frustration",
+				Levels: []ScoreLevel{
+					{Label: "Calm"},
+					{Label: "Frustrated"},
+					{Label: "Very angry"},
+				}},
+		},
+	}
+	respBody := []byte(`{
+		"model": "jev-1.13.0",
+		"answers": {
+			"frustration": {
+				"type": "score",
+				"score": 1.05,
+				"legend": {"0": "Calm", "1": "Frustrated", "2": "Very angry"},
+				"probabilities": {"0": 0.0, "1": 0.95, "2": 0.05},
+				"confidence": 0.92
+			}
+		},
+		"usage": {"input_tokens": 304, "output_tokens": 18}
+	}`)
+	resp, outcome, err := p.InspectResponse(respBody, req)
+	if err != nil || outcome == nil {
+		t.Fatalf("InspectResponse: %v, %v", err, outcome)
+	}
+	if outcome.RelayStatus != 0 {
+		t.Errorf("RelayStatus = %d, want 0", outcome.RelayStatus)
+	}
+	if resp == nil || len(resp.Answers) != 1 {
+		t.Fatalf("answers = %+v, want 1 entry", resp)
+	}
+	// Scalar score survives verbatim (may be fractional).
+	if resp.Answers[0].Score == nil || *resp.Answers[0].Score != 1.05 {
+		t.Errorf("score = %v, want 1.05 (R2 fix: scalar score must keep working)", resp.Answers[0].Score)
+	}
+	// Confidence sibling preserved.
+	if resp.Answers[0].Confidence == nil || *resp.Answers[0].Confidence != 0.92 {
+		t.Errorf("confidence = %v, want 0.92 (R2 fix: confidence is a sibling of score)", resp.Answers[0].Confidence)
+	}
+	// Probability distribution must be mapped to the correct
+	// level indices and labels — NOT collapsed onto level 0.
+	probs := resp.Answers[0].GetScoreProbabilities()
+	if len(probs) != 3 {
+		t.Fatalf("score probabilities len = %d, want 3 (R2 fix); got=%+v", len(probs), probs)
+	}
+	// Index the entries by label for stable assertions (map
+	// iteration order in the parser is non-deterministic).
+	byLabel := make(map[string]ScoreAnswerEntry, len(probs))
+	for _, e := range probs {
+		byLabel[e.Label] = e
+	}
+	wantByLabel := map[string]struct {
+		Value       int
+		Probability float64
+	}{
+		"Calm":       {Value: 0, Probability: 0.0},
+		"Frustrated": {Value: 1, Probability: 0.95},
+		"Very angry": {Value: 2, Probability: 0.05},
+	}
+	for label, want := range wantByLabel {
+		got, ok := byLabel[label]
+		if !ok {
+			t.Errorf("probabilities entry for level %q missing (R2 fix); got=%+v", label, probs)
+			continue
+		}
+		if got.Value != want.Value {
+			t.Errorf("probabilities[%q].Value = %d, want %d (R2 fix: legend translation must locate correct level index)",
+				label, got.Value, want.Value)
+		}
+		if math.Abs(got.Probability-want.Probability) > 1e-9 {
+			t.Errorf("probabilities[%q].Probability = %v, want %v (R2 fix: mass distribution must survive)",
+				label, got.Probability, want.Probability)
+		}
+	}
+}
+
+// TestTypesafeProvider_InspectResponse_ScoreLegacyLabelKeys —
+// the older Jev SDK shape where `probabilities` is keyed
+// directly by level label (no legend, no index strings) is
+// still tolerated defensively. Kept so older clients and
+// proxies don't regress.
+func TestTypesafeProvider_InspectResponse_ScoreLegacyLabelKeys(t *testing.T) {
 	p := NewTypesafeProvider()
 	req := &DecisionRequest{
 		Questions: []Question{
@@ -1879,6 +2079,9 @@ func TestTypesafeProvider_InspectResponse_ScoreEmitsLevelIndex(t *testing.T) {
 	resp, outcome, err := p.InspectResponse(respBody, req)
 	if err != nil || outcome == nil {
 		t.Fatalf("InspectResponse: %v, %v", err, outcome)
+	}
+	if outcome.RelayStatus != 0 {
+		t.Errorf("RelayStatus = %d, want 0", outcome.RelayStatus)
 	}
 	if resp.Answers[0].Score == nil || *resp.Answers[0].Score != 0 {
 		t.Errorf("score = %v, want 0 (int level index)", resp.Answers[0].Score)
