@@ -1090,6 +1090,23 @@ func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, member
 // (negByID / ModelsNegTTL) — the same convention every other read
 // path uses — so a missing row can never spin the fill path.
 //
+// 2026-10-19 (shadowfollowup A3) — NEGATIVE-CACHE DIVERGENCE from the
+// old DB-direct forward: the native path now shares the decorator's
+// negative tier (≤ ModelsNegTTL — 60s by default), so a genuinely
+// missing row is held as a verdict for up to that bound; the OLD
+// DB-direct forward (store.go GetModelNative) had NO negative caching
+// on this path and re-queried the DB on every read. The divergence is
+// BOUNDED and safe: the failure mode is a clean boundary 502
+// (config_store_unavailable — the nil row degrades to the caller's
+// ok=false path), NEVER a misroute — the native read is claim-blind
+// and row-identity, so a stale negative can only withhold a row that
+// does not exist YET, never redirect to the wrong row. The behavior is
+// SIBLING-CONSISTENT with the decorator's other fill paths (GetModel /
+// GetModelByName apply the same negative verdict), and the negatives
+// are cleared by the write-through mutators (AddModel / UpdateModel /
+// RemoveModel drop the affected IDs' verdicts; Save is a no-op on the
+// DB backend) and by every successful reconciler snapshot.
+//
 // The returned row is a private copy (deep-copy-on-read, the cache
 // isolation contract): the caller may not mutate cache state through
 // it.
@@ -1109,6 +1126,17 @@ func (c *CachedModelsConfig) GetModelNative(modelID string) *models.ModelConfig 
 	// Miss: the claim-blind fill (installs the row on success).
 	// fillModelByDirectID returns the freshly-read row (never the
 	// cached instance), so it is already a private copy.
+	//
+	// 2026-10-19 (shadowfollowup A1) — ACCEPTED, DOCUMENTED ONLY: the
+	// fill install has a BOUNDED LOST-UPDATE WINDOW. An in-flight fill
+	// can install V1 (the row it read) and CLOBBER a fresher concurrent
+	// V2 written by UpdateModel while the fill was in flight. There is
+	// deliberately NO version guard on this path — that is an explicit
+	// ticket, not an oversight (do not "fix" it here). The window
+	// self-heals within ≤60s: when the fill lands FIRST the
+	// write-through mutator keeps the decorator current, and when the
+	// fill lands LAST the reconciler's next successful snapshot
+	// restores the authoritative row. Pre-existing shape, shared with
+	// the decorator's sibling fill paths (GetModel / GetModelByName).
 	return c.fillModelByDirectID(modelID)
 }
-
