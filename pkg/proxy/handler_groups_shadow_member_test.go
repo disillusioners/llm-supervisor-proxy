@@ -24,9 +24,35 @@ package proxy
 // member's cache entry, and the claims-first fill
 // (modelscache/models.go:456 GetModel → :641) can no longer restore
 // it (the redirect returns the GROUP row before the strict fill).
-// Every test below therefore drives a runtime group write through the
-// decorator — the production wiring (cmd/main.go:143,
-// CACHE_LAYER_ENABLED defaults ON).
+//
+// HARNESSES — the tests below do NOT all drive a runtime group write
+// through the decorator; this file uses TWO harnesses, and each pins a
+// different seam:
+//
+// (a) newShadowFixHarness (this file) — the PRODUCTION wiring: a real
+//     *database.ModelsManager wrapped by the modelscache decorator
+//     (cmd/main.go:143, CACHE_LAYER_ENABLED defaults ON). The runtime
+//     group write goes THROUGH the decorator, so the claim-eviction
+//     hook fires and the member row is MISSING from the cache — the
+//     exact post-write live state. Used by the tests that pin the
+//     RESOLUTION seam:
+//       (a) TestShadowFix_SelfShadowMemberServes_LiveShape
+//       (b) TestShadowFix_SelfShadowMemberServes_Day1Shape
+//       (c) TestShadowFix_PlainMemberUnaffected
+//
+// (b) newGroupHarness (handler_groups_test.go) — the RAW
+//     *database.ModelsManager, NO modelscache decorator (the Handler's
+//     ModelsConfig IS that raw manager). Used by:
+//       (d) TestShadowFix_SelfShadowMemberCredentialFailover
+//     That test needs no decorator: it pins the COORDINATOR's
+//     credential-failover ELIGIBILITY gate (race_coordinator.go:1523) —
+//     a gate on the attempt's OWN model row. The shadow claim it
+//     exercises lives in the MANAGER itself (GetModel is claims-first
+//     — store.go:988; GetModelNative bypasses claims — store.go:1010),
+//     so the raw manager reproduces the defect (a claims-first read
+//     returns the credential-less GROUP row) with no cache in the
+//     picture. The claim-eviction trigger is irrelevant to that gate:
+//     the READ is what is under test, not the cache state.
 //
 // ASSERTIONS: the member carries NO fallback chain, and the tests
 // assert on the RACE OUTCOME (the member's own attempt must reach the
@@ -387,6 +413,12 @@ func TestShadowFix_SelfShadowMemberCredentialFailover(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(stubUpstreamBody("glm-5", "ok")))
 	}))
+	// The harness cleanup closes the server captured at CONSTRUCTION
+	// (the stub closed just above — httptest.Server.Close is
+	// idempotent), so the REPLACEMENT would leak. Close whichever
+	// server is installed at cleanup time: h.up is read lazily, so
+	// this closes the replacement.
+	t.Cleanup(func() { h.up.Close() })
 	h.rebuildHandler(t)
 
 	for _, c := range []struct{ id, key string }{

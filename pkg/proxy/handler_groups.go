@@ -410,9 +410,27 @@ type directModelGetter interface {
 }
 
 // directGetModel returns the row for modelID bypassing claims when
-// the backend supports it; otherwise claims-aware. Used by the
-// per-attempt re-fetch sites in race_executor and the Anthropic
-// sequential loop.
+// the backend supports it; otherwise claims-aware.
+//
+// EXECUTION-resolution call sites — every read of an ATTEMPT's own
+// model row must land on the MEMBER row, never on the group row that
+// claims it:
+//   - race_executor.go:48  — the MiniMax interleaved-thinking gate
+//     (raceIntProviderIsMiniMax)
+//   - race_executor.go:114 — the per-attempt re-fetch (executeRequest)
+//   - race_executor.go:208 — the reselected-credential check
+//     (resolveSpecificInternalCredential)
+//   - race_executor.go:353 — the secondary-upstream read
+//     (executeInternalRequest)
+//   - race_coordinator.go:1523 — the credential-failover ELIGIBILITY
+//     gate (credFailoverEligibleLocked)
+//   - race_coordinator.go:1644 — the credential-failover BUDGET
+//     (modelBudget)
+//   - handler_anthropic.go:521 — the Anthropic sequential attempt loop
+//     (attemptAnthropicModel)
+//
+// The CLIENT-facing resolution (the handler's model lookup) stays
+// claims-first; only these execution reads bypass claims.
 func directGetModel(cfg *ConfigSnapshot, modelID string) *models.ModelConfig {
 	if cfg == nil || cfg.ModelsConfig == nil {
 		return nil
