@@ -1270,12 +1270,28 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 			rc.reqID, pick.GroupID, pick.MemberID)
 	}
 	if h.bus != nil {
-		h.publishEvent(grouplb.EventMemberFailover, map[string]interface{}{
+		payload := map[string]interface{}{
 			"id":          rc.reqID,
 			"group_id":    pick.GroupID,
 			"member_id":   pick.MemberID,
 			"replacement": replacement,
-		})
+		}
+		// group-backup-members / D5: the additive `pool` field
+		// marks a BACKUP-pool serve ("backup"). Per the M3 contract
+		// it is ABSENT for a default-pool serve — a "default" value
+		// is never emitted.
+		//
+		// The model_member_selected event's own `pool` field cannot
+		// cover this path: the re-entry's binding was created by
+		// ExcludeGroupMember, so the rebuild returns
+		// MemberNewlyBound=false and the newlyBound-gated
+		// model_member_selected emission never fires. The failover
+		// event is the only event the re-entry emits, so the pool
+		// rides here. Bounded + redacted by construction (ids only).
+		if pool == models.PoolBackup {
+			payload["pool"] = models.PoolBackup
+		}
+		h.publishEvent(grouplb.EventMemberFailover, payload)
 	}
 	return true
 }
