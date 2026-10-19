@@ -22,6 +22,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1004,6 +1005,24 @@ func TestGroup_C3_GrandfatheredPickKeepsDefaultAnnotation(t *testing.T) {
 	if second.BindingStale {
 		t.Error("C3: a reclassification is not a removal — BindingStale must stay false")
 	}
+
+	// GAP-2 (store seam): a NEW conversation must NEVER land on the
+	// reclassified (backup-flagged) member — the grandfathering
+	// covers the EXISTING binding only. The store-seam counterpart
+	// of the engine test
+	// TestEngine_D8_Reclassification_DefaultToBackup_Grandfathered
+	// (which asserts the same at the engine level): the manager's
+	// picker must not resolve a fresh conversation to the flipped
+	// member either.
+	for i := 0; i < 20; i++ {
+		fresh := mgr.RewriteGroupEntries([]string{"coding-group"}, fmt.Sprintf("conv-c3-new-%d", i))
+		if fresh.FailedGroupID != "" {
+			t.Fatalf("new conversation %d: rewrite failed: %+v", i, fresh)
+		}
+		if fresh.MemberID == first.MemberID {
+			t.Fatalf("new conversation %d landed on the reclassified (backup-flagged) member %q", i, fresh.MemberID)
+		}
+	}
 }
 
 // TestGroup_D2_ZeroDefaultRejectedOnWritePath — D2 at the DB write
@@ -1063,5 +1082,101 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 	}
 	if err := mgr.UpdateModel("g-one-default", oneDefault("g-one-default")); err != nil {
 		t.Fatalf("D2: ≥1-default group must be accepted on UpdateModel, got: %v", err)
+	}
+}
+
+// TestGroup_C1_MultiDefaultExclusionCascadeToBackup — GAP-1: the
+// per-member exclusion walk THROUGH the cascade gate (the exact seam
+// where C1 lived).
+//
+// Group shape: 2 defaults + 1 backup.
+//
+//  1. exclude default-1 → the OTHER DEFAULT serves (NOT the backup);
+//  2. exclude default-2 as well → the BACKUP serves (pool=backup);
+//  3. all excluded → terminal ok=false.
+//
+// Step 3 follows the F1 availability ruling (leader, design.md):
+// CONFIG BREAKAGE surfaces loudly (an Am28-unservable backup ⇒ the
+// request is terminal), while RUNTIME DEGRADATION degrades
+// gracefully (a merely COOLING backup is re-served under the v1
+// all-cooling availability ruling). Both halves are asserted below
+// so the distinction is pinned rather than assumed.
+func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	// A third member row — the fixture ships two.
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "coding-third", Name: "Coding Third", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "kimi", Credentials: models.TestRefs("cred-zhipu"),
+	}); err != nil {
+		t.Fatalf("seed third member: %v", err)
+	}
+	g := models.ModelConfig{
+		ID: "g-cascade", Name: "Cascade Group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "coding", Weight: 1},
+			{ModelID: "coding-alt", Weight: 1},
+			{ModelID: "coding-third", Weight: 1, BackupOnly: true},
+		},
+	}
+	if err := mgr.AddModel(g); err != nil {
+		t.Fatalf("seed group: %v", err)
+	}
+
+	// (1) exclude default-1 → the OTHER DEFAULT serves.
+	pick, pool, ok := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding")
+	if !ok {
+		t.Fatal("GAP-1: excluding one default must leave the other default to serve")
+	}
+	if pool != models.PoolDefault {
+		t.Fatalf("GAP-1: pool = %q, want default", pool)
+	}
+	if pick != "coding-alt" {
+		t.Fatalf("GAP-1: pick = %q, want coding-alt (the other DEFAULT — not the backup)", pick)
+	}
+	if pick == "coding-third" {
+		t.Fatal("GAP-1: the backup must not serve while a default can")
+	}
+
+	// (2) exclude default-2 as well → the BACKUP serves.
+	pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-alt")
+	if !ok2 {
+		t.Fatal("GAP-1: with every default excluded the backup must serve")
+	}
+	if pool2 != models.PoolBackup {
+		t.Fatalf("GAP-1: pool = %q, want backup", pool2)
+	}
+	if pick2 != "coding-third" {
+		t.Fatalf("GAP-1: pick = %q, want coding-third (the backup)", pick2)
+	}
+
+	// (3a) every member COOLING → RUNTIME DEGRADATION degrades
+	// gracefully (the v1 availability ruling re-serves the
+	// soonest-expiring backup; the F1 ruling keeps cooling
+	// graceful and reserves "loud" for config breakage).
+	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	if !ok3 {
+		t.Fatalf("GAP-1/F1: an all-cooling pool degrades gracefully (ok=true), got (%q, %q, false)", pick3, pool3)
+	}
+	if pool3 != models.PoolBackup || pick3 != "coding-third" {
+		t.Fatalf("GAP-1/F1: all-cooling fallback = (%q, %q), want (coding-third, backup)", pick3, pool3)
+	}
+
+	// (3b) CONFIG BREAKAGE — the backup row is Am28-unservable
+	// (disabled between write and request) ⇒ the failure is REAL
+	// (terminal ok=false).
+	row := mgr.GetModelNative("coding-third")
+	if row == nil {
+		t.Fatal("GAP-1: coding-third row missing")
+	}
+	row.Enabled = false
+	if err := mgr.UpdateModel("coding-third", *row); err != nil {
+		t.Fatalf("disable backup: %v", err)
+	}
+	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	if ok4 {
+		t.Fatalf("GAP-1: with every default excluded AND the backup unservable the failure must be terminal, got (%q, %q, true)", pick4, pool4)
 	}
 }
