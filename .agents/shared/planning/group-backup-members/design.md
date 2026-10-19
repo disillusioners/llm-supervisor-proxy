@@ -78,16 +78,16 @@ to include the pool string (`"default" | "backup"`). The
 proxy-tier surfaces it in TWO observation channels:
 
 1. A bounded, redacted log line at
-   `pkg/store/database/store_group_rewrite.go`:
-   `[grouplb] request %s: group=%s pool=backup member=%s`
-   (visible ONLY on actual backup fallback — default picks emit
-   the existing log line untouched).
+   `pkg/store/database/store_group_rewrite.go:159`:
+   `[grouplb] group=%s pool=backup member=%s — all default members exhausted for this run`
+   (emitted ONLY when the backup pool actually serves a member).
 
 2. The `model_member_selected` event payload at
    `pkg/proxy/race_coordinator.go:994-1007` carries an ADDITIVE
-   `pool` field with the same `"default"|"backup"` value, so the
-   FE EventLog / audit row reflects the fallback (default = the
-   FE's existing default branch — absent when not needed).
+   `pool` field, emitted ONLY for a backup-pool serve (`"backup"`);
+   a default-pool serve leaves the field ABSENT (the FE's existing
+   default branch), so the FE EventLog / audit row reflects the
+   fallback.
 
 Idiom: the race-reason class (`pkg/proxy/race_reason.go`) is
 deliberately NOT extended with a `pool` class; instead the
@@ -135,7 +135,7 @@ activates when at least one member carries `backup_only: true`.
 | Seam | File:line | What changes |
 |------|-----------|--------------|
 | Engine `MemberRef` | `pkg/grouplb/engine.go:33-37` | Add `BackupOnly bool` field |
-| Engine `OnGroupChanged` | `pkg/grouplb/engine.go:399-428` | Split refs into default + backup selectors + binding maps; survivor filter operates per-pool |
+| Engine `OnGroupChanged` | `pkg/grouplb/engine.go:399-428` | Split refs into default + backup selectors + binding maps; the survivor filter is UNION-scoped across BOTH binding maps (a member that merely changed pools keeps its binding) |
 | Engine new method | `pkg/grouplb/engine.go` (new) | `PickBackupMember(groupID, convKey)` — sticky weighted pick in backup pool only |
 | Engine new method | `pkg/grouplb/engine.go` (new) | `ExcludeAndBackupReselect(groupID, convKey, excludedMemberID, retryAfter)` — exclusion + sticky rebind in backup pool |
 | Engine preload | `pkg/grouplb/engine.go:399` | Adjust to receive the new flag |
@@ -276,10 +276,14 @@ from merged sources" — the FE source + assets ride together).
 
 ## Risks / known unknowns
 
-- The existing `OnGroupChanged` survivor filter keeps default
-  pool survivors even if the backup pool changes; verified under
+- The `OnGroupChanged` survivor filter is UNION-scoped across BOTH
+  binding maps: a binding survives iff its member is still in the
+  group's membership (default ∪ backup) — a member that merely
+  changed pools (default→backup flip) therefore KEEPS its binding
+  (the D8 grandfathering), and only a REMOVED member's binding is
+  dropped. Verified under
   `pkg/grouplb/engine_test.go:TestEngine_OnGroupChanged_SurvivorFilter`
-  — extension preserves the survivor semantics per-pool.
+  and `TestEngine_D8_Reclassification_DefaultToBackup_Grandfathered`.
 
 - The Anthropic mirror (`pkg/proxy/handler_anthropic.go`) MUST
   apply the same group pick rewrite — `applyGroupRewrite` is
@@ -508,3 +512,75 @@ D2 fail-fast philosophy.
 only — is deferred to the v2 ledger; it requires an explicit
 `reentry`/`allowDegradedDefault` flag, because a naive shared tail-fallback would
 reintroduce the C1 regression through the re-entry seam.
+
+---
+
+## v2 ledger — deferred items (NOT implemented in v1)
+
+Leader ruling (fix round R1 close-out): one pre-ship polish commit
+for the doc/name-level set only; every behaviour-adjacent item is
+deferred to v2 and recorded here. Nothing below changed v1
+behaviour.
+
+### Engine (pkg/grouplb)
+
+- **M1 — D8 stale-repair dedupe.** The stale-binding discard +
+  re-pick block is duplicated across the default full path, the
+  backup fast path and the backup full path. v2: extract
+  `resolveBindingLocked` / `deleteBindingLocked` helpers so the
+  existence test, the `binding=stale` emission and the guarded
+  counter decrement live in ONE place.
+- **M4 — refs allocation.** `defaultRefs` / `backupRefs` allocate a
+  slice per call just to count members. v2: one counting pass that
+  yields both counts without allocating.
+- **M11 — ReselectMode exhaustiveness.** `ExcludeAndReselect` /
+  `ExcludeAndBackupReselect` treat the mode set implicitly. v2: an
+  exhaustive `switch` over every `ReselectMode`, plus a log line for
+  a discarded/unexpected mode instead of a silent fall-through.
+- **M12 — error wrapping (ruling, recorded verbatim).** "%w wrapping
+  of ErrNoMembers (not a new sentinel); convert direct == checks on
+  that path to errors.Is; update engine_test.go:1190 to errors.Is —
+  IMPLEMENT IN V2". v1 keeps the direct `==` comparisons and the
+  unwrapped sentinel.
+- **F1 Option (ii) — initial-pick-only v1 soonest-default tail
+  fallback.** A degraded-default tail fallback for the INITIAL pick
+  only, with an explicit `reentry` / `allowDegradedDefault` flag.
+  A naive shared tail-fallback would reintroduce the C1 regression
+  through the re-entry seam (the re-entry must cascade to the
+  backup pool, never re-serve a cooling default).
+- **DefaultPoolHealthy torn-snapshot doc note.** The query reads
+  the default refs and the cooldown map in one locked pass, so it
+  is a consistent snapshot; the doc should state that explicitly
+  (and the C1 rebuild's use of it likewise).
+- **F2** — reviewer finding; deferred per the leader ruling.
+- **F6 — counter-guard uniformity.** The map-existence guard on
+  the binding counters is applied on the backup paths; v2: apply it
+  uniformly to the default-pool counters too.
+- **F7** — reviewer finding; deferred per the leader ruling.
+
+### Observability
+
+- **Observability pair (F3 family).** The `pool` and `binding`
+  event fields are emitted independently; a backup-pool serve that
+  ALSO repaired a stale binding drops the repair flag on the
+  cascade path (the re-entry's rewrite replaces the group pick, so
+  the repaired flag is lost). v2: carry both signals on one pick
+  record.
+- **F3 — event-field tests.** No test asserts the `pool` /
+  `binding` payload fields on `model_member_selected`; v2: add
+  event-payload assertions.
+
+### Frontend (pre-existing, not introduced by this commission)
+
+- `pkg/ui/frontend/src/components/tokens/TokenList.tsx:65-75` — the
+  inline ultimate-model select is not filtered by kind.
+- `pkg/ui/frontend/src/components/tokens/ModelMultiSelect.tsx:376`
+  — same, unfiltered by kind.
+
+### Tidier Lows
+
+L1–L19 were triaged; the ledger-worthy ones are folded into the
+entries above (M1/M4/M11/M12, the F-series, the counter-guard
+uniformity, and the observability pair). The remainder are pure
+style/noise for this commission's surface and are not recorded
+individually.

@@ -43,9 +43,10 @@ func (b *binding) expired(ttl time.Duration, now time.Time) bool {
 type groupState struct {
 	mu sync.RWMutex
 
-	// members is the current configured ref list (slice order ==
-	// Position order). Replaced wholesale under mu.Lock by
-	// OnGroupChanged.
+	// members holds the group's CURRENT configured refs (slice order
+	// == Position order); replaced wholesale under mu.Lock by
+	// OnGroupChanged. It spans BOTH pools (default ∪ backup) and is
+	// the D8 existence source for the selection-time repair.
 	members []MemberRef
 
 	// selector is the prebuilt prefix-sum selector over the DEFAULT
@@ -59,10 +60,11 @@ type groupState struct {
 	defaultMembers []MemberRef
 
 	// backupMembers / backupSelector mirror the default pair for
-	// the BACKUP sub-pool (BackupOnly=true). Lazily allocated; nil
-	// when the group has no backup member (a backup-less group's
-	// PickBackupMember returns ErrNoMembers — clean, never a
-	// silent default-pool passthrough).
+	// the BACKUP sub-pool (BackupOnly=true). Both are REBUILT on
+	// every applyRefsLocked (NOT lazily allocated); the selector is
+	// nil when the group has no backup member (a backup-less
+	// group's PickBackupMember returns ErrNoMembers — clean, never
+	// a silent default-pool passthrough).
 	backupMembers  []MemberRef
 	backupSelector *weightedSelector
 

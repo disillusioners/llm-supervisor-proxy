@@ -1,5 +1,20 @@
 package grouplb
 
+// This file's test clusters:
+//
+//  1. The v1 engine contract — lazy state, sticky binding, the
+//     exclude-and-reselect modes, the janitor sweep, the survivor
+//     filter, nil-receiver safety, and the zero-credential import
+//     guard (TestEngine_*).
+//  2. The two-pool contract — backup members never picked while a
+//     default can serve, weights + sticky within the backup pool,
+//     multi-backup exclusion chains, and the counter / sticky-refresh
+//     semantics (TestEngine_Backup_*).
+//  3. The D8 selection-time repair — stale-binding re-picks, the
+//     reclassification grandfathering, the added-member case, the
+//     empty-default defensive path, and the no-double-drop counter
+//     invariant (TestEngine_D8_*).
+
 import (
 	"fmt"
 	"os"
@@ -469,7 +484,7 @@ func onlyBackupsRefs() []MemberRef {
 // backup pool's `backupSelector` is built and HasBackupPool is
 // true, but GetOrSelect never touches it. PickBackupMember works
 // independently because the backup pool exists.
-func TestBackup_NeverPickedWhileDefaultCanServe(t *testing.T) {
+func TestEngine_Backup_NeverPickedWhileDefaultCanServe(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", defaultPlusBackupRefs())
 	if !e.HasBackupPool("g") {
@@ -511,7 +526,7 @@ func TestBackup_NeverPickedWhileDefaultCanServe(t *testing.T) {
 // More importantly: when ALL defaults are stuck (e.g. degraded + a
 // stale re-validation cycles them through ExcludeAndReselect), the
 // call flow returns the backup via PickBackupMember.
-func TestBackup_PickedWhenDefaultsExhausted(t *testing.T) {
+func TestEngine_Backup_PickedWhenDefaultsExhausted(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", defaultPlusBackupRefs())
 
@@ -575,7 +590,7 @@ func TestBackup_PickedWhenDefaultsExhausted(t *testing.T) {
 // PickBackupMember distributes among backups according to weight
 // (statistical) and pins the same conversation to the picked
 // backup (sticky).
-func TestBackup_WeightAndStickyWithinBackupPool(t *testing.T) {
+func TestEngine_Backup_WeightAndStickyWithinBackupPool(t *testing.T) {
 	refs := []MemberRef{
 		{ModelID: "default-z", Weight: 1, Position: 0},
 		{ModelID: "backup-heavy", Weight: 5, Position: 1, BackupOnly: true},
@@ -626,7 +641,7 @@ func TestBackup_WeightAndStickyWithinBackupPool(t *testing.T) {
 // backup-only configuration (D2 is a write-path concern; the
 // engine is the picker) so this test pins the picker semantics
 // independent of write validation.
-func TestBackup_MultiBackupExclusionChain(t *testing.T) {
+func TestEngine_Backup_MultiBackupExclusionChain(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", onlyBackupsRefs())
 
@@ -671,7 +686,7 @@ func TestBackup_MultiBackupExclusionChain(t *testing.T) {
 // (helper) HasBackupPool negative case — a default-only group
 // returns false even though it has per-group state. Pins the
 // distinction between "configured" and "configured-with-backups".
-func TestBackup_HasBackupPoolFalseForDefaultOnly(t *testing.T) {
+func TestEngine_Backup_HasBackupPoolFalseForDefaultOnly(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", refs2())
 	if e.HasBackupPool("g") {
@@ -681,7 +696,7 @@ func TestBackup_HasBackupPoolFalseForDefaultOnly(t *testing.T) {
 
 // (helper) ExcludeAndBackupReselect on a single-backup group ⇒
 // ReselectNone (no alternative within the backup pool).
-func TestBackup_SingleBackup_NoCooldown(t *testing.T) {
+func TestEngine_Backup_SingleBackup_NoCooldown(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("solo-backup", []MemberRef{
 		{ModelID: "only-backup", Weight: 1, BackupOnly: true},
@@ -696,7 +711,7 @@ func TestBackup_SingleBackup_NoCooldown(t *testing.T) {
 
 // (helper) Orphans a backup binding via OnGroupChanged — proves
 // the survivor filter operates across BOTH binding maps.
-func TestBackup_OnGroupChanged_DropsOrphanedBackupBinding(t *testing.T) {
+func TestEngine_Backup_OnGroupChanged_DropsOrphanedBackupBinding(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", defaultPlusBackupRefs())
 	// Prime a backup binding directly: pickBackup + repeat.
@@ -891,7 +906,7 @@ func staleMemberRefs() []MemberRef {
 //
 // The removed member must NEVER be returned to the caller, and the
 // call must not error.
-func TestD8_StaleBinding_RemovedMemberRepicks(t *testing.T) {
+func TestEngine_D8_StaleBinding_RemovedMemberRepicks(t *testing.T) {
 	// h1 — PULL layer: binding to a member that left the group.
 	e := newTestEngine(t, time.Hour, time.Hour)
 	// The membership changes FIRST (the member is removed), THEN an
@@ -973,7 +988,7 @@ func TestD8_StaleBinding_RemovedMemberRepicks(t *testing.T) {
 // The group is backup-only here (constructed directly at the engine
 // level, bypassing the D2 write-path validation) so the backup pool is
 // the only pool — the same construction the (d) test uses.
-func TestD8_StaleBinding_BackupMemberRemovedRepicks(t *testing.T) {
+func TestEngine_D8_StaleBinding_BackupMemberRemovedRepicks(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", onlyBackupsRefs())
 
@@ -1022,7 +1037,7 @@ func TestD8_StaleBinding_BackupMemberRemovedRepicks(t *testing.T) {
 // on the reclassified member while it is backup-flagged.
 //
 // The flip is a config change ⇒ OnGroupChanged carries the new refs.
-func TestD8_Reclassification_DefaultToBackup_Grandfathered(t *testing.T) {
+func TestEngine_D8_Reclassification_DefaultToBackup_Grandfathered(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", staleMemberRefs())
 
@@ -1079,7 +1094,7 @@ func TestD8_Reclassification_DefaultToBackup_Grandfathered(t *testing.T) {
 // CONTINUES on the member (fully consistent with the default→backup
 // case). The union-scoped existence check in the backup pool is what
 // makes this work — a pool-scoped check would kill the binding.
-func TestD8_Reclassification_BackupToDefault_Grandfathered(t *testing.T) {
+func TestEngine_D8_Reclassification_BackupToDefault_Grandfathered(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	// TWO backups — the backup pool must remain non-empty after the
 	// reclassification, otherwise the backup pool reports "exhausted"
@@ -1121,7 +1136,7 @@ func TestD8_Reclassification_BackupToDefault_Grandfathered(t *testing.T) {
 
 // (k) add a new member → new picks may land on it, existing bindings
 // are unaffected.
-func TestD8_AddMember_NewPicksMayLandOnIt(t *testing.T) {
+func TestEngine_D8_AddMember_NewPicksMayLandOnIt(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", []MemberRef{
 		{ModelID: "default-a", Weight: 1, Position: 0},
@@ -1177,7 +1192,7 @@ func TestD8_AddMember_NewPicksMayLandOnIt(t *testing.T) {
 // handle it: the default pool reports "exhausted" (ErrNoMembers —
 // NOT a wrong member) and the BACKUP pool serves. The engine-level
 // construction bypasses the write-path validation on purpose.
-func TestD8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
+func TestEngine_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	// Backup-only group: the default pool is EMPTY.
 	e.OnGroupChanged("g", []MemberRef{
@@ -1200,7 +1215,7 @@ func TestD8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 	}
 }
 
-// TestD8_NoDoubleDrop_PullLayer pins the D8 two-layer composition's
+// TestEngine_D8_NoDoubleDrop_PullLayer pins the D8 two-layer composition's
 // counter invariant mechanically.
 //
 // The PUSH layer (OnGroupChanged's membership-delta survivor filter)
@@ -1215,7 +1230,7 @@ func TestD8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 // Deterministic: no race harness and no sleeps — the config-change →
 // selection race window is constructed DIRECTLY by injecting the
 // binding after the push layer has already run.
-func TestD8_NoDoubleDrop_PullLayer(t *testing.T) {
+func TestEngine_D8_NoDoubleDrop_PullLayer(t *testing.T) {
 	const key = "conv-d8-nodouble"
 
 	// ── Default-pool map discipline ─────────────────────────────────
@@ -1396,9 +1411,9 @@ func TestD8_NoDoubleDrop_PullLayer(t *testing.T) {
 // re-emit the event on every request. The O(1) binding mirror must also
 // not drift: the increment is guarded by map-existence (C4).
 
-// TestBackup_FastPath_RefreshNotNewlyBoundAndNoCountDrift — the
+// TestEngine_Backup_FastPath_RefreshNotNewlyBoundAndNoCountDrift — the
 // single-backup FAST path (n==1, no cooldowns).
-func TestBackup_FastPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
+func TestEngine_Backup_FastPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", []MemberRef{
 		{ModelID: "default-a", Weight: 1, Position: 0},
@@ -1440,9 +1455,9 @@ func TestBackup_FastPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
 	}
 }
 
-// TestBackup_FullPath_RefreshNotNewlyBoundAndNoCountDrift — the same
+// TestEngine_Backup_FullPath_RefreshNotNewlyBoundAndNoCountDrift — the same
 // C4 contract on the FULL path (2 backups ⇒ no fast path).
-func TestBackup_FullPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
+func TestEngine_Backup_FullPath_RefreshNotNewlyBoundAndNoCountDrift(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g", []MemberRef{
 		{ModelID: "default-a", Weight: 1, Position: 0},

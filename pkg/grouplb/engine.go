@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+// This file owns the ENGINE's two-pool layout (group-backup-members
+// / D1 + D8):
+//
+//   - DEFAULT pool — the members with BackupOnly=false. Weighted
+//     random + sticky binding, the all-cooling availability ruling,
+//     and the exclude-and-reselect terminal-failure seam.
+//   - BACKUP pool — the members with BackupOnly=true. Consulted
+//     only once the default pool is exhausted for the run; it has
+//     its OWN weighted selector and its OWN sticky binding map.
+//
+// The two pools never cross on the read or write paths. The
+// EXISTENCE test that guards a sticky binding is UNION-scoped
+// (default ∪ backup) — a member that merely changed pools keeps its
+// binding (D8 grandfathering), while a REMOVED member's binding is
+// discarded and re-picked.
+
 // ErrNoMembers is returned by GetOrSelect when the group has no
 // members configured (no groupState, empty list, or an invalid ref
 // list that failed the defensive selector build). Sentinel mirrors
@@ -322,6 +338,15 @@ func (e *Engine) DefaultPoolHealthy(groupID string) bool {
 	return false
 }
 
+// GetOrSelect is the LEGACY / test-only shim over
+// GetOrSelectWithRepair: it returns the same (member, newlyBound,
+// error) triple and shares ONE implementation with it (no duplicated
+// logic). Callers that need the D8 selection-time repair signal
+// (staleRepaired) — the manager's two-pool picker — call
+// GetOrSelectWithRepair directly. The shim is kept so the ~25
+// existing call sites and the v1-era tests keep their original
+// signature; do NOT repoint them.
+//
 // GetOrSelect returns the member pinned to (groupID, conversationKey)
 // if a fresh binding exists; otherwise picks a new member via
 // weighted random (among non-cooling, renormalized), persists the
@@ -626,8 +651,13 @@ func (e *Engine) applyRefsLocked(st *groupState, refs []MemberRef) {
 			defaults = append(defaults, r)
 		}
 	}
-	// Defensive copy of the FULL slice (diagnostic / survivor filter
-	// only; the partition's own slices are the read-paths' source).
+	// Defensive copy of the FULL slice — st.members is the D8
+	// UNION (default ∪ backup) and the EXISTENCE source for the
+	// selection-time repair: a bound member is resolved against
+	// this list, NOT against its own pool (so a member that merely
+	// changed pools keeps its binding, and a REMOVED member's
+	// binding is discarded). The per-pool slices below are the
+	// read-paths' source.
 	st.members = append([]MemberRef(nil), refs...)
 	st.defaultMembers = append([]MemberRef(nil), defaults...)
 	st.selector = newWeightedSelector(defaults)
