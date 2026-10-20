@@ -533,3 +533,64 @@ export interface MCPServerTestResult {
   transport: string;
   error?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Decision-model TEST button (decision commission follow-up).
+//
+// The wire shape mirrors the Go DecisionTestResponse
+// (pkg/ui/handlers_decision.go). ONE shape carries every outcome —
+// the FE classifies a failure from `status` and never renders a raw
+// upstream body.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DecisionTestAnswer is one answer of a decision test result. It
+// mirrors the Go decision.Answer wire shape (pkg/decision/types.go):
+// the `type` discriminator picks the populated fields — a predicate
+// carries `probability`, while choice and score answers share the
+// `probabilities` wire key (the choice entries carry `value`, the
+// score entries carry `value` + `label`).
+export interface DecisionTestAnswer {
+  type: 'predicate' | 'choice' | 'score' | 'refusal';
+  name?: string;
+  // Predicate.
+  probability?: number;
+  // Choice.
+  choice?: string;
+  probabilities?: Array<{ value: unknown; probability: number; label?: string }>;
+  confidence?: number;
+  // Score.
+  score?: number;
+  // Refusal.
+  refusal?: string;
+}
+
+// DecisionTestUsage is the typed usage block of a decision test.
+export interface DecisionTestUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+// DecisionTestResult is the result of ONE decision-model test probe.
+//
+//   - success: the decision answered — `model` + `answers` (+ usage).
+//   - failure: `status` is the classification status (the UPSTREAM
+//     status when the upstream answered with an error status — 402
+//     insufficient funds / 429 rate limited / 401 auth / 422 endpoint
+//     unavailable), `error` carries the upstream's own short message
+//     (never a raw body dump). `relay_status` preserves the decision
+//     adapter's Outcome.RelayStatus verbatim and `upstream_status`
+//     the raw upstream status.
+export interface DecisionTestResult {
+  success: boolean;
+  model?: string;
+  provider?: string;
+  credential_id?: string;
+  answers?: DecisionTestAnswer[];
+  usage?: DecisionTestUsage;
+  status: number;
+  relay_status?: number;
+  upstream_status?: number;
+  error?: string;
+  reason?: string;
+}

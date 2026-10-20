@@ -165,6 +165,12 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
 	mux.HandleFunc("/fe/api/models/validate", s.handleValidateModel)
 	mux.HandleFunc("/fe/api/models/test", s.handleTestModel)
+	// Decision-model TEST button — NEW sibling of the chat test
+	// route above (the chat path cannot serve decisions: the
+	// "typesafe" decision adapter is not a chat provider and the
+	// chat body is not a legal decision body). See
+	// pkg/ui/handlers_decision_test.go.
+	mux.HandleFunc("/fe/api/decisions/test", s.handleDecisionTest)
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	// /fe/api/requests/{id} and /fe/api/requests/{id}/summary share a
