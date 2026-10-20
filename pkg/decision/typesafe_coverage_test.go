@@ -407,6 +407,76 @@ func TestSynthesizeAnswer_ChoiceBareString_RealFixture(t *testing.T) {
 	}
 }
 
+// TestSynthesizeAnswer_ChoiceSpecialCharProbabilityKeys —
+// regression guard for the special-character probability KEY
+// escaping fix in synthesizeChoiceAnswer. Pre-fix, the
+// probability-map key was wrapped by quote concatenation and
+// then JSON-parsed, so a key containing `"` or `\` produced
+// INVALID JSON: the parse failed and the option VALUE came
+// back nil (the probability was preserved, the value was
+// lost). The fix JSON-encodes the key, so the value survives
+// intact. Case 1 is the regression case; case 2 is the
+// ordinary-key baseline (control).
+func TestSynthesizeAnswer_ChoiceSpecialCharProbabilityKeys(t *testing.T) {
+	q := &Question{Type: QuestionTypeChoice, Name: "department",
+		Choices: []ChoiceOption{{Value: `a"b`}, {Value: `c\d`}, {Value: "billing"}}}
+
+	// CASE 1 — the chosen value carries a double-quote; one
+	// probability key carries a double-quote, the other a
+	// backslash.
+	a := synthesizeAnswer(q, json.RawMessage(`{"type":"choice","choice":"a\"b","probabilities":{"a\"b":0.6,"c\\d":0.4},"confidence":0.7}`))
+	if a.Type != QuestionTypeChoice {
+		t.Fatalf("type = %q, want choice (special-char key fix: must NOT be a refusal)", a.Type)
+	}
+	if a.Refusal != "" {
+		t.Errorf("refusal = %q, want empty (special-char key fix: must NOT be a refusal)", a.Refusal)
+	}
+	if a.Choice != `a"b` {
+		t.Errorf("choice = %q, want %q (special-char key fix: chosen value must survive)", a.Choice, `a"b`)
+	}
+	if len(a.Probabilities) != 2 {
+		t.Fatalf("probabilities = %+v, want 2 entries (special-char key fix)", a.Probabilities)
+	}
+	byValue := make(map[string]float64, len(a.Probabilities))
+	for _, p := range a.Probabilities {
+		s, ok := p.Value.(string)
+		if !ok {
+			t.Errorf("probabilities entry value = %#v, want a string (special-char key fix: nil/non-string value regressed)", p.Value)
+			continue
+		}
+		byValue[s] = p.Probability
+	}
+	for wantKey, wantProb := range map[string]float64{`a"b`: 0.6, `c\d`: 0.4} {
+		got, ok := byValue[wantKey]
+		if !ok {
+			t.Errorf("probabilities entry for value %q missing (special-char key fix)", wantKey)
+			continue
+		}
+		if math.Abs(got-wantProb) > 1e-9 {
+			t.Errorf("probabilities[%q] = %v, want %v (special-char key fix)", wantKey, got, wantProb)
+		}
+	}
+	if a.Confidence == nil || math.Abs(*a.Confidence-0.7) > 1e-9 {
+		t.Errorf("confidence = %v, want 0.7 (special-char key fix)", a.Confidence)
+	}
+
+	// CASE 2 — ordinary-key baseline (control): the fix must
+	// not disturb the common path.
+	b := synthesizeAnswer(q, json.RawMessage(`{"type":"choice","choice":"billing","probabilities":{"billing":0.88},"confidence":0.81}`))
+	if b.Choice != "billing" {
+		t.Errorf("baseline choice = %q, want %q", b.Choice, "billing")
+	}
+	if len(b.Probabilities) != 1 {
+		t.Fatalf("baseline probabilities = %+v, want 1 entry", b.Probabilities)
+	}
+	if s, ok := b.Probabilities[0].Value.(string); !ok || s != "billing" {
+		t.Errorf("baseline probability value = %#v, want %q", b.Probabilities[0].Value, "billing")
+	}
+	if math.Abs(b.Probabilities[0].Probability-0.88) > 1e-9 {
+		t.Errorf("baseline probability = %v, want 0.88", b.Probabilities[0].Probability)
+	}
+}
+
 // TestSynthesizeAnswer_ChoiceNestedObject_LegacyFixture — the
 // nested-object `choice` variant is tolerated defensively.
 // Sibling probabilities/confidence WIN over the nested ones;
