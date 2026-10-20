@@ -1,6 +1,11 @@
 name: Docker CI/CD
 
 on:
+  # Manual re-run without a push: the push trigger below is paths-filtered, so a
+  # zero-delta push (empty commit / --no-ff merge with an identical tree) emits no
+  # workflow event at all. workflow_dispatch lets an operator recover from a
+  # transient runner failure (e.g. actions/setup-go provisioning) via the Actions tab.
+  workflow_dispatch:
   push:
     branches:
       - main
