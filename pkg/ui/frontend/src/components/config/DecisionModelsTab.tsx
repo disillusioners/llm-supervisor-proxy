@@ -3,6 +3,7 @@ import type { Model, DecisionModel, DecisionTestResult } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { testDecisionModel } from '../../hooks/useApi';
 import { DecisionModelForm, type DecisionModelPayload } from './DecisionModelForm';
+import { classifyProbeError, truncateProbeTestMessage } from './probeErrorClasses';
 
 interface DecisionModelsTabProps {
   // Server-side pre-filtered to kind: 'decision' by the parent hook
@@ -50,47 +51,26 @@ const TOAST = {
 // own error status when it answered with one).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// DECISION_ERROR_CLASSES maps the classified status to a short,
-// operator-facing label. Anything unmapped falls back to
-// classifyDecisionTestError's default branch.
-const DECISION_ERROR_CLASSES: Record<number, string> = {
-  0: 'Test request failed — the proxy did not answer',
-  400: 'Request rejected by the decision adapter',
-  401: 'Authentication failed — check the credential API key',
-  402: 'Insufficient funds — top up the provider account',
-  403: 'Access denied — the credential may not use this model',
-  404: 'Not found — check the upstream base URL',
-  408: 'Upstream timeout',
-  422: 'Endpoint unavailable',
-  429: 'Rate limited — retry later',
-  500: 'Upstream error',
-  502: 'Upstream error',
-  503: 'Upstream unavailable — retry later',
-  504: 'Upstream timed out',
-};
-
-// classifyDecisionTestError maps a classified status to its label.
+// The classified status → label map and the message cap live in the
+// SHARED probe-error module (probeErrorClasses.ts) — the image-gen
+// probe classifies its outcomes with the same vocabulary. Both
+// helpers below DELEGATE to the shared module (the behavior is
+// byte-identical — the decision lane's labels must not move, and the
+// shared module is now the single source of truth).
 export function classifyDecisionTestError(status: number): string {
-  const mapped = DECISION_ERROR_CLASSES[status];
-  if (mapped) return mapped;
-  if (status >= 500) return 'Upstream error';
-  return 'Unexpected error';
+  return classifyProbeError(status);
 }
-
-// DECISION_TEST_MAX_MESSAGE caps the upstream message rendered in the
-// row (the BE already caps it — this is the belt-and-suspenders
-// guard on the FE side).
-const DECISION_TEST_MAX_MESSAGE = 300;
 
 // formatProbability renders a 0..1 probability as a percentage.
 function formatProbability(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-// truncateDecisionTestMessage caps the upstream message.
+// truncateDecisionTestMessage caps the upstream message (the shared
+// PROBE_TEST_MAX_MESSAGE cap — the BE already caps it, this is the
+// belt-and-suspenders guard on the FE side).
 function truncateDecisionTestMessage(message: string): string {
-  if (message.length <= DECISION_TEST_MAX_MESSAGE) return message;
-  return `${message.slice(0, DECISION_TEST_MAX_MESSAGE)}…`;
+  return truncateProbeTestMessage(message);
 }
 
 export function DecisionModelsTab({

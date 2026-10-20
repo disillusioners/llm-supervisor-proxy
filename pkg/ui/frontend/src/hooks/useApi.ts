@@ -1,5 +1,19 @@
+// useApi — the UI's API layer.
+//
+// SCOPE: this module wraps the WHOLE /fe/api surface the UI talks
+// to: the request log (list + detail), the config, the models (chat /
+// image-gen / decision / group), the credentials, the tokens, the
+// providers, the usage reports, the MCP servers and the two probe
+// endpoints (the decision test + the image-generation test). It is the
+// single place where the FE calls the proxy's admin API — the
+// components never fetch directly.
+//
+// FILE SIZE: the file sits in the 1000+ band because every endpoint
+// gets its own hook (the list + the actions + the cache
+// invalidation). Splitting it per domain is a known follow-up — the
+// probe helpers move with it; it is deliberately NOT done here.
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult } from '../types';
+import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -1222,6 +1236,25 @@ export async function testMCPServerDirect(upstreamUrl: string, transportType: st
 // path + JSON headers stay consistent with every other call.
 export async function testDecisionModel(modelId: string): Promise<DecisionTestResult> {
   return apiFetch<DecisionTestResult>('/decisions/test', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId }),
+  });
+}
+
+// testImgGenModel fires ONE real image-generation request through the
+// proxy's image-gen path for the given image-gen model ROW id.
+//
+// The FE sends only the row id — the BE owns the canned generation
+// body (model / prompt / aspect_ratio / n / response_format). The
+// response is ONE shape for every outcome: a success carries the
+// upstream's image URLs, a failure carries the classified `status` +
+// `code` + a short upstream message.
+//
+// NOTE: a test probe is a REAL, billable generation — the button is
+// disabled while the probe is in flight and the BE runs ONE probe at
+// a time (a concurrent probe is rejected with code "busy").
+export async function testImgGenModel(modelId: string): Promise<ImgGenTestResult> {
+  return apiFetch<ImgGenTestResult>('/image_generation/test', {
     method: 'POST',
     body: JSON.stringify({ model_id: modelId }),
   });
