@@ -344,7 +344,7 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 		UpstreamStatus: result.UpstreamStatus,
 		Code:           result.Code,
 		Error:          truncateImgGenTestMessage(result.Error),
-		Reason:         result.Reason,
+		Reason:         truncateImgGenTestMessage(result.Reason),
 		DurationMS:     durationMS,
 	}
 
@@ -368,10 +368,13 @@ func buildImgGenTestBody(modelID string) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-// truncateImgGenTestMessage caps the upstream message the FE
-// receives. The upstream message is a SHORT human-readable string;
+// truncateImgGenTestMessage caps the upstream message AND the
+// adapter reason the FE receives. The upstream message is a SHORT
+// human-readable string and the reason is normally a short slug;
 // the cap is the belt-and-suspenders guard on the BE side (the FE
-// caps again at 300).
+// caps again at 300). The reason is upstream-INFLUENCED (the
+// adapter quotes an upstream-controlled token into it), so it MUST
+// be capped at this boundary too.
 func truncateImgGenTestMessage(msg string) string {
 	msg = strings.TrimSpace(msg)
 	if len(msg) <= imgGenTestMaxMessageLen {

@@ -36,8 +36,12 @@
 //     upstream-call discipline as the handler (ONE Content-Type, no
 //     client headers, the 64 MB cap, a ctx-owned timeout) but is NOT
 //     a handler: no auth, no metering, no events, no HTTP write.
-//     Its classifier branches on the adapter Outcome BEFORE the
-//     upstream HTTP status — MiniMax reports business failures
-//     INSIDE an HTTP 200, so an HTTP-status-only classifier would
-//     report every MiniMax rejection as a success (the green lie).
+//     Its classifier is STATUS-FIRST: an upstream status >= 400
+//     keeps that status as the operator class (401 auth / 402 funds
+//     / 429 rate limit are the most actionable classes), and a
+//     MiniMax BUSINESS failure reported INSIDE an HTTP 200
+//     (base_resp.status_code != 0) stays a failure (502). The green
+//     lie is prevented by the SUCCESS GATE: a success needs the
+//     adapter's own evidence (Code == ok) AND at least one image
+//     URL, so an HTTP 200 alone never becomes a success.
 package imggen

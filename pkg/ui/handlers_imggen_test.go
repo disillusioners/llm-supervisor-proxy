@@ -922,3 +922,28 @@ func TestHandleImgGenTest_ErrorMessageIsCapped(t *testing.T) {
 		t.Errorf("error length = %d, want <= %d", len(resp.Error), imgGenTestMaxMessageLen+len("…"))
 	}
 }
+
+// TestHandleImgGenTest_AdapterReasonIsCapped — the adapter reason
+// the FE receives is capped as well: the reason quotes an upstream-
+// controlled token (the adapter's "unparseable
+// base_resp.status_code %q"), so an upstream that answers with a
+// pathological status_code must not flood the operator panel.
+//
+// The cap is the SAME bound + the SAME helper the upstream message
+// uses (byte-based, house convention), and the head of the reason
+// is preserved (the class prefix stays readable).
+func TestHandleImgGenTest_AdapterReasonIsCapped(t *testing.T) {
+	longToken := strings.Repeat("z", 900)
+	upstream, _ := newImgGenUpstream(t, http.StatusOK,
+		fmt.Sprintf(`{"data":null,"base_resp":{"status_code":%q}}`, longToken))
+
+	s := newImgGenProbeServer(t, upstream.URL)
+	_, resp := postImgGenTest(t, s, "minimax-image-01")
+
+	if !strings.HasPrefix(resp.Reason, "unparseable base_resp.status_code ") {
+		t.Fatalf("reason = %q, want the adapter's reason prefix", resp.Reason)
+	}
+	if len(resp.Reason) > imgGenTestMaxMessageLen+len("…") {
+		t.Errorf("reason length = %d, want <= %d", len(resp.Reason), imgGenTestMaxMessageLen+len("…"))
+	}
+}
