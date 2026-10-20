@@ -171,6 +171,12 @@ func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	// chat body is not a legal decision body). See
 	// pkg/ui/handlers_decision_test.go.
 	mux.HandleFunc("/fe/api/decisions/test", s.handleDecisionTest)
+	// Image-generation TEST button — NEW sibling of the chat test
+	// route above. The chat path CANNOT serve image-gen rows: the
+	// "minimax" chat provider posts to /chat/completions and never
+	// touches /image_generation, so the failure would be SILENT (a
+	// wrong upstream, not an error). See pkg/ui/handlers_imggen.go.
+	mux.HandleFunc("/fe/api/image_generation/test", s.handleImgGenTest)
 	mux.HandleFunc("/fe/api/events", s.handleEvents)
 	mux.HandleFunc("/fe/api/requests", s.handleRequests)
 	// /fe/api/requests/{id} and /fe/api/requests/{id}/summary share a
