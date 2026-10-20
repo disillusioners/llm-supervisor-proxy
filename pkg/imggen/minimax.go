@@ -87,6 +87,19 @@ func (p *minimaxProvider) BuildUpstream(cred models.ResolvedCredential, clientBo
 //   - failed_count > 0 with status_code == 0 ⇒ 200 success
 //     (partial success is MiniMax-native; RelayStatus: 0).
 //
+// The returned Outcome carries the discriminants the probe seam
+// classifies on:
+//
+//   - base_resp.status_code != 0 ⇒ Code: CodeUpstreamBusinessError
+//     ("upstream_business_error"), Message: base_resp.status_msg
+//     (the upstream's own human-readable business message — "" when
+//     the key is absent or not a string) and RelayStatus: 502. The
+//     NUMERIC upstream code stays in Reason
+//     ("base_resp.status_code=2013"), never in Code.
+//   - base_resp.status_code == 0 ⇒ Code: CodeOK ("ok") and
+//     RelayStatus: 0 — the pass-through verdict the probe seam's
+//     SUCCESS GATE consults.
+//
 // Coerces status_code from number OR string (live: the value is
 // typically a JSON number; the string form is tolerated for
 // future API drift).
@@ -94,7 +107,7 @@ func (p *minimaxProvider) InspectResponse(upstreamStatus int, body []byte) Outco
 	// Empty body is a fail-closed 502 with a distinct log
 	// (Amendment 11). Relays the empty body verbatim.
 	if len(body) == 0 {
-		return Outcome{RelayStatus: 502, Reason: "empty body"}
+		return Outcome{RelayStatus: 502, Reason: "empty body", Code: CodeUpstreamMalformed}
 	}
 
 	// Unparseable JSON is a fail-closed 502. The upstream body is
@@ -103,14 +116,14 @@ func (p *minimaxProvider) InspectResponse(upstreamStatus int, body []byte) Outco
 	// stream, etc.).
 	var resp map[string]interface{}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return Outcome{RelayStatus: 502, Reason: "unparseable JSON"}
+		return Outcome{RelayStatus: 502, Reason: "unparseable JSON", Code: CodeUpstreamMalformed}
 	}
 
 	// Missing base_resp key is a fail-closed 502 (API-drift
 	// signal — the field this guard exists to catch).
 	baseResp, ok := resp["base_resp"].(map[string]interface{})
 	if !ok {
-		return Outcome{RelayStatus: 502, Reason: "missing base_resp key"}
+		return Outcome{RelayStatus: 502, Reason: "missing base_resp key", Code: CodeUpstreamMalformed}
 	}
 
 	// status_code == 0 is the ONLY success signal (BE-T3).
@@ -132,21 +145,44 @@ func (p *minimaxProvider) InspectResponse(upstreamStatus int, body []byte) Outco
 		var n int
 		_, err := fmt.Sscanf(v, "%d", &n)
 		if err != nil {
-			return Outcome{RelayStatus: 502, Reason: fmt.Sprintf("unparseable base_resp.status_code %q", v)}
+			return Outcome{RelayStatus: 502, Reason: fmt.Sprintf("unparseable base_resp.status_code %q", v), Code: CodeUpstreamMalformed}
 		}
 		statusCode = n
 	default:
-		return Outcome{RelayStatus: 502, Reason: "missing base_resp.status_code"}
+		return Outcome{RelayStatus: 502, Reason: "missing base_resp.status_code", Code: CodeUpstreamMalformed}
 	}
 	if statusCode != 0 {
-		return Outcome{RelayStatus: 502, Reason: fmt.Sprintf("base_resp.status_code=%d", statusCode)}
+		// A BUSINESS failure reported INSIDE an HTTP 200 (the live
+		// 2013 fixture). The Code slug marks the class; the numeric
+		// upstream code stays in Reason (never parsed downstream);
+		// the upstream's own message travels in Message.
+		return Outcome{
+			RelayStatus: 502,
+			Reason:      fmt.Sprintf("base_resp.status_code=%d", statusCode),
+			Code:        CodeUpstreamBusinessError,
+			Message:     baseRespMessage(baseResp),
+		}
 	}
 
 	// success (status_code == 0). failed_count > 0 is the partial-
 	// success case (MiniMax-native) — RelayStatus stays 0; the
 	// BillableImages call at the handler decides the billable
 	// count from metadata.success_count.
-	return Outcome{RelayStatus: 0, Reason: ""}
+	return Outcome{RelayStatus: 0, Reason: "", Code: CodeOK}
+}
+
+// baseRespMessage extracts base_resp.status_msg (the upstream's own
+// human-readable business message). Returns "" when the key is
+// absent or not a string. It is the imggen counterpart of the
+// decision lane's OpenAI-envelope message extractor: the shape is
+// probed HERE (at the adapter, where the shape is known) so the UI
+// layer never has to parse the upstream body.
+func baseRespMessage(baseResp map[string]interface{}) string {
+	if baseResp == nil {
+		return ""
+	}
+	msg, _ := baseResp["status_msg"].(string)
+	return strings.TrimSpace(msg)
 }
 
 // BillableImages returns the count of billable images in the
