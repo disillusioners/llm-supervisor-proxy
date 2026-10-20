@@ -3,6 +3,7 @@ import type { Model, DecisionModel, DecisionTestResult } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { testDecisionModel } from '../../hooks/useApi';
 import { DecisionModelForm, type DecisionModelPayload } from './DecisionModelForm';
+import { PROBE_ERROR_CLASSES } from './probeErrorClasses';
 
 interface DecisionModelsTabProps {
   // Server-side pre-filtered to kind: 'decision' by the parent hook
@@ -50,24 +51,12 @@ const TOAST = {
 // own error status when it answered with one).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// DECISION_ERROR_CLASSES maps the classified status to a short,
-// operator-facing label. Anything unmapped falls back to
-// classifyDecisionTestError's default branch.
-const DECISION_ERROR_CLASSES: Record<number, string> = {
-  0: 'Test request failed — the proxy did not answer',
-  400: 'Request rejected by the decision adapter',
-  401: 'Authentication failed — check the credential API key',
-  402: 'Insufficient funds — top up the provider account',
-  403: 'Access denied — the credential may not use this model',
-  404: 'Not found — check the upstream base URL',
-  408: 'Upstream timeout',
-  422: 'Endpoint unavailable',
-  429: 'Rate limited — retry later',
-  500: 'Upstream error',
-  502: 'Upstream error',
-  503: 'Upstream unavailable — retry later',
-  504: 'Upstream timed out',
-};
+// The classified status → label map now lives in the SHARED
+// probe-error module (probeErrorClasses.ts) — the image-gen probe
+// classifies its outcomes with the same vocabulary. The map and the
+// labels below are UNCHANGED (verbatim extraction): the decision
+// lane's behavior must not move.
+const DECISION_ERROR_CLASSES: Record<number, string> = PROBE_ERROR_CLASSES;
 
 // classifyDecisionTestError maps a classified status to its label.
 export function classifyDecisionTestError(status: number): string {

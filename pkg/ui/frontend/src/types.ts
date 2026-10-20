@@ -594,3 +594,36 @@ export interface DecisionTestResult {
   error?: string;
   reason?: string;
 }
+
+// ImgGenTestResult is the result of ONE image-generation test probe.
+//
+//   - success: the upstream produced at least one image —
+//     `image_urls` carries the upstream's CDN URLs verbatim (the FE
+//     renders them directly: no second proxy hop, no base64) and
+//     `image_count` / `success_count` / `failed_count` carry the
+//     upstream's counters.
+//   - failure: `status` is the classification status (the UPSTREAM
+//     status when the upstream answered with an error status — 401
+//     auth / 402 funds / 429 rate limited), `code` is the stable
+//     machine-readable slug of the class (the FE prefers it over the
+//     status label when it knows it), and `error` carries the
+//     upstream's own short message (never a raw body dump).
+//     `relay_status` preserves the adapter's Outcome.RelayStatus
+//     verbatim and `upstream_status` the raw upstream status.
+export interface ImgGenTestResult {
+  success: boolean;
+  model?: string;
+  provider?: string;
+  credential_id?: string;
+  image_urls?: string[];
+  image_count?: number;
+  success_count?: number;
+  failed_count?: number;
+  status: number;
+  relay_status?: number;
+  upstream_status?: number;
+  code?: string;
+  error?: string;
+  reason?: string;
+  duration_ms?: number;
+}

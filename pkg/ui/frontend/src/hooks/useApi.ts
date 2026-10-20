@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult } from '../types';
+import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -1222,6 +1222,25 @@ export async function testMCPServerDirect(upstreamUrl: string, transportType: st
 // path + JSON headers stay consistent with every other call.
 export async function testDecisionModel(modelId: string): Promise<DecisionTestResult> {
   return apiFetch<DecisionTestResult>('/decisions/test', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId }),
+  });
+}
+
+// testImgGenModel fires ONE real image-generation request through the
+// proxy's image-gen path for the given image-gen model ROW id.
+//
+// The FE sends only the row id — the BE owns the canned generation
+// body (model / prompt / aspect_ratio / n / response_format). The
+// response is ONE shape for every outcome: a success carries the
+// upstream's image URLs, a failure carries the classified `status` +
+// `code` + a short upstream message.
+//
+// NOTE: a test probe is a REAL, billable generation — the button is
+// disabled while the probe is in flight and the BE runs ONE probe at
+// a time (a concurrent probe is rejected with code "busy").
+export async function testImgGenModel(modelId: string): Promise<ImgGenTestResult> {
+  return apiFetch<ImgGenTestResult>('/image_generation/test', {
     method: 'POST',
     body: JSON.stringify({ model_id: modelId }),
   });
