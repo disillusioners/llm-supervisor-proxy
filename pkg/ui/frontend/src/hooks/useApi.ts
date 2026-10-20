@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest } from '../types';
+import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -1208,5 +1208,21 @@ export async function testMCPServerDirect(upstreamUrl: string, transportType: st
       auth_type: authType,
       auth_token: authToken,
     }),
+  });
+}
+
+// testDecisionModel fires ONE real decision request through the
+// proxy's decision path for the given decision-model ROW id.
+//
+// The FE sends only the row id — the BE owns the canned decision
+// body (and its safety_identifier-free shape). The response is ONE
+// shape for every outcome: a success carries the model + answers, a
+// failure carries the classified `status` + a short upstream message.
+// Routed through apiFetch (never a raw fetch) so the /fe/api base
+// path + JSON headers stay consistent with every other call.
+export async function testDecisionModel(modelId: string): Promise<DecisionTestResult> {
+  return apiFetch<DecisionTestResult>('/decisions/test', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId }),
   });
 }
