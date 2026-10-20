@@ -161,7 +161,9 @@ describe('ImgGenModelsTab — per-row Test button (image-gen probe)', () => {
       const meta = container.querySelector('[data-testid="imggen-test-meta"]');
       expect(meta?.textContent).toContain('minimax');
       expect(meta?.textContent).toContain('imggen-mini-v1');
-      expect(meta?.textContent).toContain('1 image(s)');
+      expect(meta?.textContent).toContain('1 image');
+      // The count is pluralized like the headline (never "1 image(s)").
+      expect(meta?.textContent).not.toContain('image(s)');
       expect(meta?.textContent).toContain('1234 ms');
       expect(meta?.textContent).toContain('png');
 
@@ -185,6 +187,7 @@ describe('ImgGenModelsTab — per-row Test button (image-gen probe)', () => {
 
   describe('error classification', () => {
     const statusCases: Array<{ status: number; label: string }> = [
+      { status: 400, label: 'Request rejected by the image-gen adapter' },
       { status: 401, label: 'Authentication failed — check the credential API key' },
       { status: 402, label: 'Insufficient funds — top up the provider account' },
       { status: 403, label: 'Access denied — the credential may not use this model' },
@@ -247,11 +250,6 @@ describe('ImgGenModelsTab — per-row Test button (image-gen probe)', () => {
         code: 'response_too_large',
         status: 502,
         label: 'Upstream response too large — the image payload exceeded the cap',
-      },
-      {
-        code: 'request_too_large',
-        status: 413,
-        label: 'Request too large — the image payload exceeded the cap',
       },
       {
         code: 'busy',

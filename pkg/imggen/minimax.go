@@ -87,6 +87,19 @@ func (p *minimaxProvider) BuildUpstream(cred models.ResolvedCredential, clientBo
 //   - failed_count > 0 with status_code == 0 ⇒ 200 success
 //     (partial success is MiniMax-native; RelayStatus: 0).
 //
+// The returned Outcome carries the discriminants the probe seam
+// classifies on:
+//
+//   - base_resp.status_code != 0 ⇒ Code: CodeUpstreamBusinessError
+//     ("upstream_business_error"), Message: base_resp.status_msg
+//     (the upstream's own human-readable business message — "" when
+//     the key is absent or not a string) and RelayStatus: 502. The
+//     NUMERIC upstream code stays in Reason
+//     ("base_resp.status_code=2013"), never in Code.
+//   - base_resp.status_code == 0 ⇒ Code: CodeOK ("ok") and
+//     RelayStatus: 0 — the pass-through verdict the probe seam's
+//     SUCCESS GATE consults.
+//
 // Coerces status_code from number OR string (live: the value is
 // typically a JSON number; the string form is tolerated for
 // future API drift).

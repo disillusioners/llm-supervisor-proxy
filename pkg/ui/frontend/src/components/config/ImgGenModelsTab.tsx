@@ -59,10 +59,10 @@ const TOAST = {
 
 // IMGGEN_TEST_COST_HINT is the tooltip on the Test button.
 //
-// A probe is a REAL, provider-billed generation. The figure is an
-// APPROXIMATE MiniMax rate (it is a hint, not a quote — no pricing is
-// recorded in this repo).
-const IMGGEN_TEST_COST_HINT = 'Generate one real image (~$0.0035 per test)';
+// A probe is a REAL, provider-billed generation. No pricing is
+// recorded in this repo, so the hint states the FACT (the provider
+// bills it) and never a number.
+const IMGGEN_TEST_COST_HINT = 'Generate one real image — billed by the provider';
 
 // imageFormatFromUrl derives the image format from the CDN URL's
 // extension (the upstream returns URLs, not bytes — the byte size is
@@ -393,7 +393,7 @@ export function ImgGenModelsTab({
                                   class="text-gray-400 mt-1 break-words"
                                   data-testid="imggen-test-meta"
                                 >
-                                  {testResult.provider || 'unknown provider'} · {testResult.model || model.id} · {testResult.image_count ?? 0} image(s) · {testResult.duration_ms ?? 0} ms
+                                  {testResult.provider || 'unknown provider'} · {testResult.model || model.id} · {testResult.image_count ?? 0} image{(testResult.image_count ?? 0) === 1 ? '' : 's'} · {testResult.duration_ms ?? 0} ms
                                   {imageFormat ? ` · ${imageFormat}` : ''}
                                 </p>
                               </>

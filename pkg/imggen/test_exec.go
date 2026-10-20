@@ -10,8 +10,10 @@
 // production handler (pkg/imggen/handler.go) already owns —
 //
 //   - exactly ONE Content-Type on the upstream request (the
-//     duplicate-CT bug class; a duplicated Content-Type is rejected
-//     by the upstream),
+//     duplicate-CT bug class): the probe builds a FRESH request and
+//     uses Header.Set (never Header.Add), and it copies NO client
+//     header at all — a client-supplied Content-Type can therefore
+//     never reach the upstream,
 //   - the client Accept-Encoding is NOT copied (Go's transport only
 //     transparently decompresses a gzip response when IT added
 //     Accept-Encoding itself — a copied header disables
@@ -29,13 +31,16 @@
 // the resolved credential + the canned body to ExecuteTest, which
 // runs the SAME steps the handler runs.
 //
-// THE CLASSIFIER IS DELIBERATELY DIFFERENT FROM THE DECISION LANE.
-// MiniMax reports BUSINESS failures INSIDE an HTTP 200
-// (base_resp.status_code != 0 — the live 2013 fixture). A classifier
-// that trusts the HTTP status alone reports every MiniMax rejection
-// as a SUCCESS: the green lie. ExecuteTest therefore consults the
-// adapter's Outcome (which carries base_resp.status_code) and never
-// treats an HTTP 200 as success on its own.
+// THE CLASSIFIER IS STATUS-FIRST, LIKE THE DECISION LANE. An upstream
+// status >= 400 keeps that status as the operator class (401 auth /
+// 402 funds / 429 rate limit are the most actionable classes). It
+// differs from the decision lane in TWO places: the
+// outcome.Code == CodeUpstreamBusinessError branch (a MiniMax
+// BUSINESS failure reported INSIDE an HTTP 200 — base_resp.
+// status_code != 0, the live 2013 fixture — is a FAILURE, never a
+// success) and the SUCCESS GATE (a success needs the adapter's
+// pass-through verdict AND at least one image URL, so an HTTP 200
+// alone never becomes a success — the green lie).
 //
 // ExecuteTest is NOT a handler: it does NOT authenticate, does NOT
 // meter, does NOT publish events, and does NOT write an HTTP
@@ -50,6 +55,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -67,7 +73,7 @@ import (
 //     error status (401 / 402 / 429 / 5xx ... — the classes the FE
 //     renders), the adapter's RelayStatus when the upstream answered
 //     2xx with an unusable body (502), and a local status (400 /
-//     502 / 504) for the pre-upstream failure modes.
+//     500 / 502 / 504) for the pre-upstream failure modes.
 //
 //   - RelayStatus is the adapter's Outcome.RelayStatus VERBATIM
 //     (0 ⇒ PassAsIs). The MiniMax adapter promotes every business
@@ -94,16 +100,14 @@ type TestResult struct {
 	// upstream never answered).
 	UpstreamStatus int
 	// Body is the upstream body VERBATIM (empty when the upstream
-	// never answered). The caller extracts the human-readable
-	// message from it — the body is NEVER dumped raw to the FE.
+	// never answered). It is retained for DIAGNOSTICS ONLY: the
+	// image-gen caller never reads it, the FE-facing message is
+	// composed by the seam from Outcome.Message / Outcome.Reason,
+	// and the raw body is NEVER relayed to the FE.
 	Body []byte
 	// Error is a short human-readable failure message ("" on
 	// success).
 	Error string
-	// Message is the upstream's own business message
-	// (base_resp.status_msg) — the human-readable half of a
-	// business failure ("" when the upstream said nothing).
-	Message string
 	// ImageURLs are the upstream's image URLs, extracted from the
 	// response body (the FE renders them directly — no second
 	// proxy hop, no base64).
@@ -121,7 +125,7 @@ type TestResult struct {
 // and returns the classified outcome.
 //
 // It mirrors the essentials of the /v1/image_generation handler
-// (pkg/imggen/handler.go steps 6-12):
+// (pkg/imggen/handler.go — the numbered phases 6) through 12)):
 //
 //  1. adapter lookup on the credential's provider (the private
 //     registry — the image-gen path deliberately does NOT go through
@@ -230,7 +234,6 @@ func ExecuteTest(cred models.ResolvedCredential, rawBody []byte, timeout time.Du
 	outcome := provider.InspectResponse(resp.StatusCode, respBody)
 	res.RelayStatus = outcome.RelayStatus
 	res.Reason = outcome.Reason
-	res.Message = outcome.Message
 	if outcome.Code != "" {
 		res.Code = outcome.Code
 	}
@@ -285,6 +288,8 @@ func ExecuteTest(cred models.ResolvedCredential, rawBody []byte, timeout time.Du
 		res.ImageCount = len(res.ImageURLs)
 		if n, err := provider.BillableImages(respBody); err == nil {
 			res.SuccessCount = n
+		} else {
+			log.Printf("[imggen-test] BillableImages failed: %v (credential=%s)", err, cred.CredentialID)
 		}
 		res.FailedCount = failedCountFromBody(respBody)
 		if res.ImageCount == 0 {

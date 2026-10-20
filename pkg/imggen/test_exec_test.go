@@ -18,8 +18,11 @@ import (
 //
 //   - the GREEN-LIE GUARD: a MiniMax BUSINESS failure reported INSIDE
 //     an HTTP 200 (base_resp.status_code != 0) is a FAILURE, never a
-//     success. A decision-lane-style classifier (HTTP status first)
-//     would report every MiniMax rejection as a success.
+//     success. The decision lane's classifier consults
+//     outcome.RelayStatus != 0 for its verdict, and the minimax
+//     adapter promotes the business error to RelayStatus 502 — so the
+//     business failure is a failure there too, via the adapter's
+//     promoted relay status.
 //   - the upstream's own error status (401 / 402 / 429 / 5xx) stays
 //     the operator-facing classification status,
 //   - a 200 with base_resp.status_code == 0 but NO image is the

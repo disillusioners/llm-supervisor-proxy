@@ -3,7 +3,7 @@ import type { Model, DecisionModel, DecisionTestResult } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { testDecisionModel } from '../../hooks/useApi';
 import { DecisionModelForm, type DecisionModelPayload } from './DecisionModelForm';
-import { PROBE_ERROR_CLASSES } from './probeErrorClasses';
+import { classifyProbeError, truncateProbeTestMessage } from './probeErrorClasses';
 
 interface DecisionModelsTabProps {
   // Server-side pre-filtered to kind: 'decision' by the parent hook
@@ -51,35 +51,26 @@ const TOAST = {
 // own error status when it answered with one).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The classified status → label map now lives in the SHARED
-// probe-error module (probeErrorClasses.ts) — the image-gen probe
-// classifies its outcomes with the same vocabulary. The map and the
-// labels below are UNCHANGED (verbatim extraction): the decision
-// lane's behavior must not move.
-const DECISION_ERROR_CLASSES: Record<number, string> = PROBE_ERROR_CLASSES;
-
-// classifyDecisionTestError maps a classified status to its label.
+// The classified status → label map and the message cap live in the
+// SHARED probe-error module (probeErrorClasses.ts) — the image-gen
+// probe classifies its outcomes with the same vocabulary. Both
+// helpers below DELEGATE to the shared module (the behavior is
+// byte-identical — the decision lane's labels must not move, and the
+// shared module is now the single source of truth).
 export function classifyDecisionTestError(status: number): string {
-  const mapped = DECISION_ERROR_CLASSES[status];
-  if (mapped) return mapped;
-  if (status >= 500) return 'Upstream error';
-  return 'Unexpected error';
+  return classifyProbeError(status);
 }
-
-// DECISION_TEST_MAX_MESSAGE caps the upstream message rendered in the
-// row (the BE already caps it — this is the belt-and-suspenders
-// guard on the FE side).
-const DECISION_TEST_MAX_MESSAGE = 300;
 
 // formatProbability renders a 0..1 probability as a percentage.
 function formatProbability(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-// truncateDecisionTestMessage caps the upstream message.
+// truncateDecisionTestMessage caps the upstream message (the shared
+// PROBE_TEST_MAX_MESSAGE cap — the BE already caps it, this is the
+// belt-and-suspenders guard on the FE side).
 function truncateDecisionTestMessage(message: string): string {
-  if (message.length <= DECISION_TEST_MAX_MESSAGE) return message;
-  return `${message.slice(0, DECISION_TEST_MAX_MESSAGE)}…`;
+  return truncateProbeTestMessage(message);
 }
 
 export function DecisionModelsTab({

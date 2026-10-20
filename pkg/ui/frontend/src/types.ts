@@ -600,30 +600,40 @@ export interface DecisionTestResult {
 //   - success: the upstream produced at least one image —
 //     `image_urls` carries the upstream's CDN URLs verbatim (the FE
 //     renders them directly: no second proxy hop, no base64) and
-//     `image_count` / `success_count` / `failed_count` carry the
-//     upstream's counters.
+//     `image_count` carries the number of rendered images.
 //   - failure: `status` is the classification status (the UPSTREAM
 //     status when the upstream answered with an error status — 401
 //     auth / 402 funds / 429 rate limited), `code` is the stable
 //     machine-readable slug of the class (the FE prefers it over the
 //     status label when it knows it), and `error` carries the
 //     upstream's own short message (never a raw body dump).
-//     `relay_status` preserves the adapter's Outcome.RelayStatus
-//     verbatim and `upstream_status` the raw upstream status.
+//
+// WIRE-ONLY / DIAGNOSTIC members (present on the wire, NOT rendered
+// by the image-gen tab): `credential_id`, `success_count`,
+// `failed_count`, `relay_status`, `upstream_status` and `reason`.
+// `success_count` / `failed_count` carry the upstream's counters — the
+// tab renders only `image_count`.
 export interface ImgGenTestResult {
   success: boolean;
   model?: string;
   provider?: string;
+  /** WIRE-ONLY / diagnostic — not rendered by the tab. */
   credential_id?: string;
   image_urls?: string[];
+  /** The operator-visible counter (the tab renders this one). */
   image_count?: number;
+  /** WIRE-ONLY / diagnostic — the upstream's counter, not rendered. */
   success_count?: number;
+  /** WIRE-ONLY / diagnostic — the upstream's counter, not rendered. */
   failed_count?: number;
   status: number;
+  /** WIRE-ONLY / diagnostic — the adapter's relay status, not rendered. */
   relay_status?: number;
+  /** WIRE-ONLY / diagnostic — the raw upstream status, not rendered. */
   upstream_status?: number;
   code?: string;
   error?: string;
+  /** WIRE-ONLY / diagnostic — the adapter's reason, not rendered. */
   reason?: string;
   duration_ms?: number;
 }

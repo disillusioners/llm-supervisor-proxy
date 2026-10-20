@@ -9,11 +9,15 @@
 // Architectural rules (binding on the package):
 //
 //   - Import direction: pkg/imggen → {pkg/models, pkg/auth,
-//     pkg/usage, pkg/events} ONLY; never pkg/proxy. The import
+//     pkg/usage, pkg/events} ONLY; never pkg/proxy, never
+//     pkg/decision (the parent → child inversion: the decision
+//     adapters were built FROM the image-gen template). The import
 //     guard (task 1.8.2) is mechanical: a grep gate in the
-//     `make test` target, mirrored by the in-package
-//     TestPackage_ImportGuard_NoProxyImports test, fails the
-//     build on any pkg/proxy import.
+//     `make test` target, mirrored by the in-package guards
+//     TestPackage_ImportGuard_NoProxyImports +
+//     TestPackage_ImportGuard_NoDecisionImports +
+//     TestPackage_ImportGuard_TransitiveClosure, fails the build on
+//     any pkg/proxy / pkg/decision import (direct OR transitive).
 //
 //   - One upstream attempt per request (no retry, no fallback, no
 //     MonitoredReader idle wrap; the live 17-60s silent generation
@@ -42,6 +46,7 @@
 //     MiniMax BUSINESS failure reported INSIDE an HTTP 200
 //     (base_resp.status_code != 0) stays a failure (502). The green
 //     lie is prevented by the SUCCESS GATE: a success needs the
-//     adapter's own evidence (Code == ok) AND at least one image
-//     URL, so an HTTP 200 alone never becomes a success.
+//     adapter's pass-through verdict (Outcome.RelayStatus == 0 —
+//     which the minimax adapter reports as Code == ok) AND at least
+//     one image URL, so an HTTP 200 alone never becomes a success.
 package imggen

@@ -155,22 +155,44 @@ type ImgGenTestRequest struct {
 // proxy hop, no base64, no server-side image fetch. Their lifetime
 // is not recorded anywhere in the repo: the FE renders them
 // immediately.
+//
+// WIRE-ONLY / DIAGNOSTIC members: credential_id, success_count,
+// failed_count, relay_status, upstream_status and reason are carried
+// for diagnostics — the image-gen tab renders NONE of them (it
+// renders image_count, the classified status / code / error and the
+// image URLs).
 type ImgGenTestResponse struct {
-	Success        bool     `json:"success"`
-	Model          string   `json:"model,omitempty"`
-	Provider       string   `json:"provider,omitempty"`
-	CredentialID   string   `json:"credential_id,omitempty"`
-	ImageURLs      []string `json:"image_urls,omitempty"`
-	ImageCount     int      `json:"image_count,omitempty"`
-	SuccessCount   int      `json:"success_count,omitempty"`
-	FailedCount    int      `json:"failed_count,omitempty"`
-	Status         int      `json:"status"`
-	RelayStatus    int      `json:"relay_status,omitempty"`
-	UpstreamStatus int      `json:"upstream_status,omitempty"`
-	Code           string   `json:"code,omitempty"`
-	Error          string   `json:"error,omitempty"`
-	Reason         string   `json:"reason,omitempty"`
-	DurationMS     int64    `json:"duration_ms,omitempty"`
+	Success  bool   `json:"success"`
+	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	// CredentialID is WIRE-ONLY / diagnostic (the tab does not render
+	// it — the operator sees the row's own credential).
+	CredentialID string   `json:"credential_id,omitempty"`
+	ImageURLs    []string `json:"image_urls,omitempty"`
+	// ImageCount is the operator-visible counter (the tab renders it).
+	ImageCount int `json:"image_count,omitempty"`
+	// SuccessCount / FailedCount are the upstream's counters — WIRE-ONLY
+	// / diagnostic (the tab renders neither).
+	SuccessCount int `json:"success_count,omitempty"`
+	FailedCount  int `json:"failed_count,omitempty"`
+	// Status is the classification status the FE maps to a label.
+	Status int `json:"status"`
+	// RelayStatus / UpstreamStatus preserve the adapter's relay status
+	// and the raw upstream status — WIRE-ONLY / diagnostic (the tab
+	// renders neither).
+	RelayStatus    int `json:"relay_status,omitempty"`
+	UpstreamStatus int `json:"upstream_status,omitempty"`
+	// Code is the machine-readable slug of the class (the FE prefers
+	// it over the status label when it knows it).
+	Code string `json:"code,omitempty"`
+	// Error is the operator-facing message — composed by the seam,
+	// NEVER a raw body dump.
+	Error string `json:"error,omitempty"`
+	// Reason is the adapter's classification reason — WIRE-ONLY /
+	// diagnostic (the tab does not render it).
+	Reason string `json:"reason,omitempty"`
+	// DurationMS is the probe's wall-clock duration (rendered).
+	DurationMS int64 `json:"duration_ms,omitempty"`
 }
 
 // imgGenTestBody is the canned minimal image-generation request.
@@ -298,12 +320,7 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- Canned body ------------------------------------------------
-	rawBody, err := buildImgGenTestBody(modelID)
-	if err != nil {
-		writeFEError(w, http.StatusInternalServerError,
-			fmt.Sprintf("failed to build the image-gen test request: %v", err))
-		return
-	}
+	rawBody := buildImgGenTestBody(modelID)
 
 	// ---- Single-flight guard -----------------------------------------
 	// One probe at a time, process-wide. The loser is rejected
@@ -318,8 +335,13 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 			Code:         imggen.CodeBusy,
 			Error:        "another image-generation test is already running — wait for it to finish",
 		}
-		log.Printf("[imggen-test] model=%s credential=%s provider=%s status=%d code=%s success=%t err=%q",
-			modelID, cred.ID, cred.Provider, resp.Status, resp.Code, resp.Success, resp.Error)
+		// The busy path logs with the SAME key set as the probe path
+		// (below): a prefix-keyed scraper sees ONE schema under
+		// [imggen-test]. The probe never ran, so the upstream-facing
+		// counters are their zero values.
+		log.Printf("[imggen-test] model=%s credential=%s provider=%s status=%d relay_status=%d upstream_status=%d code=%s images=%d duration_ms=%d success=%t err=%q",
+			modelID, cred.ID, cred.Provider, resp.Status, resp.RelayStatus, resp.UpstreamStatus, resp.Code,
+			resp.ImageCount, resp.DurationMS, resp.Success, resp.Error)
 		writeImgGenTestJSON(w, resp)
 		return
 	}
@@ -357,7 +379,10 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 
 // buildImgGenTestBody builds the canned minimal image-generation
 // request for the given proxy row id.
-func buildImgGenTestBody(modelID string) ([]byte, error) {
+//
+// The struct holds only string/int fields, so json.Marshal cannot
+// fail — the body is returned as bytes with no error path.
+func buildImgGenTestBody(modelID string) []byte {
 	body := imgGenTestBody{
 		Model:          modelID,
 		Prompt:         imgGenTestPrompt,
@@ -365,7 +390,8 @@ func buildImgGenTestBody(modelID string) ([]byte, error) {
 		N:              1,
 		ResponseFormat: "url",
 	}
-	return json.Marshal(body)
+	raw, _ := json.Marshal(body)
+	return raw
 }
 
 // truncateImgGenTestMessage caps the upstream message AND the

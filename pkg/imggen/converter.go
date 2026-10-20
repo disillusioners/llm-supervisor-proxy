@@ -37,9 +37,12 @@ import (
 //     — Code is a slug, never a number.
 //
 //   - Message is the upstream's own human-readable business message
-//     (MiniMax: base_resp.status_msg). It is carried SEPARATELY
-//     from Reason so the UI can show the operator-readable message
-//     without string-parsing Reason.
+//     (MiniMax: base_resp.status_msg). It is kept SEPARATELY from
+//     Reason so the seam can compose the operator-facing message
+//     without string-parsing Reason (composeTestError in
+//     test_exec.go). NO message field crosses the wire: the FE-facing
+//     `error` is composed inside the seam, and the FE DTO carries no
+//     message member at all.
 type Outcome struct {
 	RelayStatus int
 	Reason      string
@@ -49,18 +52,24 @@ type Outcome struct {
 	Message string
 }
 
-// Outcome code slugs — the STABLE machine-readable vocabulary shared
-// by the BE classifier (pkg/imggen/test_exec.go) and the operator-
-// facing FE label overlay (pkg/ui/frontend/src/components/config/
-// probeErrorClasses.ts).
+// Outcome code slugs — the machine-readable vocabulary the CLASSIFIER
+// emits (pkg/imggen/test_exec.go). The operator-facing FE overlay
+// (pkg/ui/frontend/src/components/config/probeErrorClasses.ts) labels
+// the slugs it knows.
+//
+// NOTE: these are CLASSIFIER slugs only. Route-level client rejections
+// (the kind gate / no credential / no API key in
+// pkg/ui/handlers_imggen.go) are bare {"error": "..."} envelopes —
+// they never reach a code.
 //
 // The slugs are deliberately generic enough to survive upstream API
 // drift: they describe the CLASS of failure, never a provider's
 // internal numbering. The upstream's own numeric code (MiniMax's
 // base_resp.status_code) travels in Outcome.Reason, never here.
 const (
-	// CodeOK is a successful generation (base_resp.status_code == 0
-	// AND at least one image URL).
+	// CodeOK is an upstream that ACCEPTED the generation
+	// (base_resp.status_code == 0). The probe layer downgrades it to
+	// CodeEmptyImage when the body carries no image URL.
 	CodeOK = "ok"
 	// CodeEmptyImage is a 200 with base_resp.status_code == 0 but
 	// NO image URLs — the upstream accepted the request and produced
@@ -89,24 +98,17 @@ const (
 	CodeTimeout = "timeout"
 	// CodeResponseTooLarge is an upstream body over the 64 MB cap.
 	CodeResponseTooLarge = "response_too_large"
-	// CodeRequestTooLarge is a request payload over the cap.
-	CodeRequestTooLarge = "request_too_large"
 	// CodeNoAdapter is a credential provider with no registered
 	// image-generation adapter (no upstream call was made).
 	CodeNoAdapter = "no_adapter"
 	// CodePreflightRejected is an adapter that refused to build the
 	// upstream request.
 	CodePreflightRejected = "preflight_rejected"
-	// CodeNoCredential is a model row with no usable credential.
-	CodeNoCredential = "no_credential"
 	// CodeCooldown is an upstream rate-limit answer (HTTP 429).
 	CodeCooldown = "cooldown"
 	// CodeBusy is the test-probe single-flight rejection: another
 	// probe is already in flight (the probe is never queued).
 	CodeBusy = "busy"
-	// CodeInvalidModelKind is a model row that is not an image-gen
-	// model (the kind gate).
-	CodeInvalidModelKind = "invalid_model_kind"
 )
 
 // UpstreamProvider is the per-image-provider seam (BE-R2 / T1.4.1).

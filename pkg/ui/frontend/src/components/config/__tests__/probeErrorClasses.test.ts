@@ -3,6 +3,7 @@ import {
   PROBE_ERROR_CLASSES,
   PROBE_TEST_MAX_MESSAGE,
   IMGGEN_PROBE_ERROR_CLASSES,
+  IMGGEN_PROBE_STATUS_CLASSES,
   classifyProbeError,
   classifyImgGenProbeError,
   truncateProbeTestMessage,
@@ -17,8 +18,8 @@ import {
 // The contract pinned here:
 //   - the STATUS map is the decision lane's map, verbatim (the
 //     decision tab's labels must not move),
-//   - the CODE overlay only carries labels that are STRICTLY more
-//     specific than the status label (a code label must never make
+//   - the CODE overlay only carries labels that are never LESS
+//     actionable than the status label (a code label must never make
 //     the operator's message less actionable),
 //   - the resolution order is code → status → default.
 
@@ -48,17 +49,17 @@ describe('probeErrorClasses — the shared probe vocabulary', () => {
   });
 
   describe('the image-gen code overlay', () => {
-    it('carries a label for every code the BE can emit', () => {
+    it('the overlay labels every code listed here — the list mirrors pkg/imggen/converter.go\'s Code* block', () => {
       const expected = [
         'upstream_business_error',
         'empty_image',
         'cooldown',
         'response_too_large',
-        'request_too_large',
         'busy',
         'timeout',
         'upstream_transport_error',
         'upstream_malformed',
+        'upstream_read_failed',
         'no_adapter',
         'preflight_rejected',
       ];
@@ -76,6 +77,18 @@ describe('probeErrorClasses — the shared probe vocabulary', () => {
       expect(classifyImgGenProbeError(401, 'upstream_http_error')).toBe(
         'Authentication failed — check the credential API key',
       );
+    });
+
+    it('overrides the shared 400 wording with the image-gen lane\'s own', () => {
+      // The shared status map carries the DECISION lane's wording —
+      // an image-gen row must never render "decision adapter".
+      expect(IMGGEN_PROBE_STATUS_CLASSES[400]).toBe('Request rejected by the image-gen adapter');
+      expect(classifyImgGenProbeError(400)).toBe('Request rejected by the image-gen adapter');
+      expect(classifyImgGenProbeError(400, 'upstream_http_error')).toBe(
+        'Request rejected by the image-gen adapter',
+      );
+      // The decision lane keeps its own wording.
+      expect(classifyProbeError(400)).toBe('Request rejected by the decision adapter');
     });
 
     it('prefers the code label over the status label', () => {

@@ -1,3 +1,17 @@
+// useApi — the UI's API layer.
+//
+// SCOPE: this module wraps the WHOLE /fe/api surface the UI talks
+// to: the request log (list + detail), the config, the models (chat /
+// image-gen / decision / group), the credentials, the tokens, the
+// providers, the usage reports, the MCP servers and the two probe
+// endpoints (the decision test + the image-generation test). It is the
+// single place where the FE calls the proxy's admin API — the
+// components never fetch directly.
+//
+// FILE SIZE: the file sits in the 1000+ band because every endpoint
+// gets its own hook (the list + the actions + the cache
+// invalidation). Splitting it per domain is a known follow-up — the
+// probe helpers move with it; it is deliberately NOT done here.
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
