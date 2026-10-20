@@ -78,6 +78,13 @@ function imageFormatFromUrl(url: string): string {
   return '';
 }
 
+// isRenderableImageURL guards the <img src>: the URL is UPSTREAM-
+// provided, so only http(s) URLs are rendered (a `javascript:` or
+// `data:` URL must never reach the DOM).
+function isRenderableImageURL(url: string): boolean {
+  return url.startsWith('https://') || url.startsWith('http://');
+}
+
 export function ImgGenModelsTab({
   models,
   onAddModel,
@@ -286,7 +293,7 @@ export function ImgGenModelsTab({
                 const credCount = model.credentials?.length ?? 0;
                 const testResult = testResults[model.id];
                 const isTesting = testingIds.includes(model.id);
-                const firstImageUrl = testResult?.image_urls?.[0];
+                const firstImageUrl = testResult?.image_urls?.find(isRenderableImageURL);
                 const imageFormat = firstImageUrl ? imageFormatFromUrl(firstImageUrl) : '';
                 return (
                   <div

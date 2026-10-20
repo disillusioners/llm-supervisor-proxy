@@ -312,6 +312,24 @@ describe('ImgGenModelsTab — per-row Test button (image-gen probe)', () => {
       expect(container.textContent).toContain('Network down');
     });
 
+    it('does not render a non-http(s) image URL (the URL is upstream-provided)', async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse({
+          ...successDTO,
+          image_urls: ['javascript:alert(1)'],
+        }),
+      );
+
+      const { container } = renderTab([makeImgGenRow()]);
+      await clickTest(container, 'imggen-mini-v1');
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="imggen-test-success"]')).not.toBeNull();
+      });
+      // The upstream-provided URL never reaches the DOM as an <img src>.
+      expect(container.querySelector('[data-testid="imggen-test-image"]')).toBeNull();
+    });
+
     it('never renders a raw JSON body dump', async () => {
       fetchMock.mockResolvedValue(
         jsonResponse({
