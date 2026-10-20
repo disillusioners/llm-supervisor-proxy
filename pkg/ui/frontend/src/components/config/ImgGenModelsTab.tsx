@@ -59,10 +59,12 @@ const TOAST = {
 
 // IMGGEN_TEST_COST_HINT is the tooltip on the Test button.
 //
-// A probe is a REAL, provider-billed generation. No pricing is
-// recorded in this repo, so the hint states the FACT (the provider
-// bills it) and never a number.
-const IMGGEN_TEST_COST_HINT = 'Generate one real image — billed by the provider';
+// A probe is a REAL, provider-billed generation. The figure below is
+// sourced: rate measured 2026-10-06 prod E2E — 3 images / $0.0105
+// on the MiniMax credential (≈ $0.0035 per image). It is
+// APPROXIMATE — a hint, not a quote; the provider's rate card is
+// the authority.
+const IMGGEN_TEST_COST_HINT = 'Generate one real image via MiniMax — costs real money, about $0.0035 per test';
 
 // imageFormatFromUrl derives the image format from the CDN URL's
 // extension (the upstream returns URLs, not bytes — the byte size is

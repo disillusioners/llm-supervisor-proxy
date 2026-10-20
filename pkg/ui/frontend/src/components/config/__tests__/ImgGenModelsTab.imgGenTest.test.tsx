@@ -432,7 +432,10 @@ describe('ImgGenModelsTab — per-row Test button (image-gen probe)', () => {
     it('labels the button with the (approximate) cost hint — a probe is billable', async () => {
       const { container } = renderTab([makeImgGenRow()]);
       const btn = container.querySelector('[data-testid="imggen-test-button-imggen-mini-v1"]') as HTMLButtonElement;
-      expect(btn.getAttribute('title')).toContain('Generate one real image');
+      const title = btn.getAttribute('title') ?? '';
+      expect(title).toContain('Generate one real image');
+      expect(title).toContain('0.0035');
+      expect(title.toLowerCase()).toMatch(/cost|billed|real money/);
     });
   });
 });
