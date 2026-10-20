@@ -116,8 +116,8 @@ type decisionTestQuestionBody struct {
 // carrying it with a 400 (pkg/decision/validators.go:248) — a
 // canned body with it would hard-fail the zen/typesafe arm.
 type decisionTestBody struct {
-	Model     string                    `json:"model"`
-	Input     string                    `json:"input"`
+	Model     string                     `json:"model"`
+	Input     string                     `json:"input"`
 	Questions []decisionTestQuestionBody `json:"questions"`
 }
 

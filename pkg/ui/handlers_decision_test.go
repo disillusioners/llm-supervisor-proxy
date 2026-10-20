@@ -83,12 +83,12 @@ func newDecisionTestServer(t *testing.T, upstreamURL string) *Server {
 		t.Fatalf("add credential: %v", err)
 	}
 	if err := mock.AddModel(models.ModelConfig{
-		ID:                       "decision-router-v1",
-		Name:                     "Decision Router v1",
-		Enabled:                  true,
-		Kind:                     models.KindDecision,
-		Internal:                 true,
-		InternalModel:            "gpt-6-luna",
+		ID:                           "decision-router-v1",
+		Name:                         "Decision Router v1",
+		Enabled:                      true,
+		Kind:                         models.KindDecision,
+		Internal:                     true,
+		InternalModel:                "gpt-6-luna",
 		ExcludeFromUltimateSwitching: true,
 		Credentials: []models.CredentialRef{
 			{CredentialID: "cred-dec-1", Weight: 1, Position: 0},
@@ -457,7 +457,7 @@ func TestHandleDecisionTest_TypesafeArmReachesSystemOne(t *testing.T) {
 		ID: "decision-router-v1", Name: "Decision Router v1", Enabled: true,
 		Kind: models.KindDecision, Internal: true, InternalModel: "jev-1.13",
 		ExcludeFromUltimateSwitching: true,
-		Credentials: []models.CredentialRef{{CredentialID: "cred-ts", Weight: 1, Position: 0}},
+		Credentials:                  []models.CredentialRef{{CredentialID: "cred-ts", Weight: 1, Position: 0}},
 	}); err != nil {
 		t.Fatalf("add model: %v", err)
 	}
