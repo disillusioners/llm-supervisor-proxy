@@ -254,15 +254,30 @@ func (s *Server) handleDecisionTest(w http.ResponseWriter, r *http.Request) {
 		usage := result.Response.Usage
 		resp.Usage = &usage
 	}
-	if resp.Error == "" && !resp.Success {
-		// No upstream message (or no upstream body at all) — fall
-		// back to the adapter's reason so the FE always has
-		// something to show next to the classification.
-		resp.Error = result.Reason
+	if !resp.Success && resp.Error == "" {
+		// ERROR PRECEDENCE: upstream-extracted message (above) →
+		// result.Error (the LOCAL failure cause) → result.Reason (the
+		// adapter's classification reason).
+		//
+		// result.Error is what carries the cause of every LOCAL
+		// failure mode — an unreachable upstream, no adapter
+		// registered for the provider, an upstream request build
+		// failure, a read failure, the response size cap, an inspect
+		// error. Without it the FE rendered a bare "Upstream error
+		// (HTTP 502)" with no cause at all (and the log line below
+		// carried none either).
+		//
+		// The upstream-extracted message is never blanked — it is
+		// already set at this point, so this branch only runs when
+		// the upstream said nothing.
+		resp.Error = result.Error
+		if resp.Error == "" {
+			resp.Error = result.Reason
+		}
 	}
 
-	log.Printf("[decision-test] model=%s credential=%s provider=%s status=%d relay_status=%d upstream_status=%d success=%t",
-		modelID, cred.ID, cred.Provider, resp.Status, resp.RelayStatus, resp.UpstreamStatus, resp.Success)
+	log.Printf("[decision-test] model=%s credential=%s provider=%s status=%d relay_status=%d upstream_status=%d success=%t err=%q",
+		modelID, cred.ID, cred.Provider, resp.Status, resp.RelayStatus, resp.UpstreamStatus, resp.Success, resp.Error)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

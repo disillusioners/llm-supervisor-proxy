@@ -75,6 +75,16 @@ async function clickTest(container: Element, modelId: string) {
   });
 }
 
+// deferred returns a promise plus its resolver — the probe's
+// in-flight state is driven by WHEN the fetch promise settles.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe('DecisionModelsTab — per-row Test button (decision test probe)', () => {
   describe('wire shape', () => {
     it('POSTs the row id to /fe/api/decisions/test and sends no safety_identifier', async () => {
@@ -276,6 +286,63 @@ describe('DecisionModelsTab — per-row Test button (decision test probe)', () =
       ) as HTMLButtonElement;
       expect(busy.textContent).toBe('Testing...');
       expect(busy.disabled).toBe(true);
+    });
+
+    it('keeps each row busy independently when two rows probe concurrently', async () => {
+      // Two deferred probes: row-a settles first, row-b stays in flight.
+      const probeA = deferred<Response>();
+      const probeB = deferred<Response>();
+      fetchMock
+        .mockImplementationOnce(() => probeA.promise)
+        .mockImplementationOnce(() => probeB.promise);
+
+      const { container } = renderTab([
+        makeDecisionRow({ id: 'row-a', name: 'Alpha' }),
+        makeDecisionRow({ id: 'row-b', name: 'Bravo' }),
+      ]);
+
+      const buttonOf = (id: string) =>
+        container.querySelector(`[data-testid="decision-test-button-${id}"]`) as HTMLButtonElement;
+
+      // Probe row-a, then probe row-b while row-a is still in flight.
+      await act(async () => {
+        fireEvent.click(buttonOf('row-a'));
+      });
+      await act(async () => {
+        fireEvent.click(buttonOf('row-b'));
+      });
+
+      // BOTH rows are busy — the busy state is per row, not a single
+      // global slot.
+      expect(buttonOf('row-a').textContent).toBe('Testing...');
+      expect(buttonOf('row-a').disabled).toBe(true);
+      expect(buttonOf('row-b').textContent).toBe('Testing...');
+      expect(buttonOf('row-b').disabled).toBe(true);
+
+      // Row-a settles → row-a re-enables, but row-b MUST stay busy
+      // (its own probe is still in flight).
+      await act(async () => {
+        probeA.resolve(jsonResponse({ success: true, model: 'gpt-6-luna', status: 200, answers: [] }));
+        await probeA.promise;
+      });
+
+      await waitFor(() => {
+        expect(buttonOf('row-a').textContent).toBe('Test');
+        expect(buttonOf('row-a').disabled).toBe(false);
+      });
+      expect(buttonOf('row-b').textContent).toBe('Testing...');
+      expect(buttonOf('row-b').disabled).toBe(true);
+
+      // Row-b settles → row-b re-enables too.
+      await act(async () => {
+        probeB.resolve(jsonResponse({ success: true, model: 'gpt-6-luna', status: 200, answers: [] }));
+        await probeB.promise;
+      });
+
+      await waitFor(() => {
+        expect(buttonOf('row-b').textContent).toBe('Test');
+        expect(buttonOf('row-b').disabled).toBe(false);
+      });
     });
   });
 });

@@ -531,3 +531,53 @@ func TestHandleDecisionTest_RejectsNonPost(t *testing.T) {
 		t.Errorf("status = %d, want 405", w.Code)
 	}
 }
+
+// TestHandleDecisionTest_TransportFailureCarriesTheCause — the
+// LOCAL failure mode: the upstream is unreachable (the fake server
+// was closed), so the probe never produced a response.
+//
+// The DTO must still be the STRUCTURED CLASSIFIED SHAPE (a 200 + the
+// classification status) AND its error field must carry the CAUSE.
+// Before the fix the error field was EMPTY (the route read only the
+// upstream body — empty here — and then the adapter's reason — also
+// empty here, because a transport failure never reaches the
+// adapter), so the FE rendered a bare "Upstream error (HTTP 502)"
+// and the [decision-test] log line carried no cause either.
+func TestHandleDecisionTest_TransportFailureCarriesTheCause(t *testing.T) {
+	// Spin an upstream up, take its URL, then CLOSE it — the port is
+	// closed, so the probe's upstream call fails locally (connection
+	// refused) instead of getting an upstream answer.
+	dead, _ := newDecisionTestUpstream(t, http.StatusOK, `{}`)
+	deadURL := dead.URL
+	dead.Close()
+
+	s := newDecisionTestServer(t, deadURL)
+	code, resp := postDecisionTest(t, s, "decision-router-v1")
+
+	// The classified result still travels in a 200 (the FE routes
+	// this call through apiFetch, which throws on a non-2xx status).
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the classified result travels in the body)", code)
+	}
+	if resp.Success {
+		t.Fatalf("success = true, want false for an unreachable upstream (resp=%+v)", resp)
+	}
+	if resp.UpstreamStatus != 0 {
+		t.Errorf("upstream_status = %d, want 0 (the upstream never answered)", resp.UpstreamStatus)
+	}
+	if resp.Status != http.StatusBadGateway && resp.Status != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 502 (bad gateway) or 504 (timeout)", resp.Status)
+	}
+	// THE regression assertion: the error field carries the cause.
+	if strings.TrimSpace(resp.Error) == "" {
+		t.Fatalf("error = %q, want it to carry the local failure cause (resp=%+v)", resp.Error, resp)
+	}
+	if !strings.Contains(strings.ToLower(resp.Error), "upstream") {
+		t.Errorf("error = %q, want it to mention the upstream failure", resp.Error)
+	}
+	// The cause came from result.Error, NOT from the adapter's reason
+	// (a transport failure never produces an adapter outcome).
+	if resp.Reason != "" {
+		t.Errorf("reason = %q, want empty (a transport failure never reaches the adapter)", resp.Reason)
+	}
+}

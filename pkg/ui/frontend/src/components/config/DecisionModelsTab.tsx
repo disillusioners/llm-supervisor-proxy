@@ -109,10 +109,11 @@ export function DecisionModelsTab({
   const [modelToEdit, setModelToEdit] = useState<DecisionModel | undefined>(undefined);
   const [modelToDelete, setModelToDelete] = useState<Model | null>(null);
   const [deleting, setDeleting] = useState(false);
-  // Per-row TEST state: the row id currently in flight (one probe at
-  // a time) + the last result per row id (the panel stays until the
-  // next probe on that row replaces it).
-  const [testingId, setTestingId] = useState<string | null>(null);
+  // Per-row TEST state: the ids of the rows whose probe is currently
+  // in flight (SEVERAL rows may probe concurrently — each row owns
+  // its own busy flag) + the last result per row id (the panel stays
+  // until the next probe on that row replaces it).
+  const [testingIds, setTestingIds] = useState<string[]>([]);
   const [testResults, setTestResults] = useState<Record<string, DecisionTestResult>>({});
 
   const handleOpenAdd = () => {
@@ -199,8 +200,14 @@ export function DecisionModelsTab({
   // handleTest fires ONE real decision request for the row and stores
   // the classified result under the row id (per-row state — a probe
   // on one row never touches another row's panel).
+  //
+  // The busy flag is PER ROW: two rows may probe concurrently and
+  // each keeps its own "Testing..." state. A single global slot
+  // would re-enable the first row's button while its probe was still
+  // in flight (a second click = a duplicate billed call) and the
+  // first row's finally{} would clear the second row's busy state.
   const handleTest = async (model: Model) => {
-    setTestingId(model.id);
+    setTestingIds((prev) => [...prev, model.id]);
     // Drop the previous result for this row so the panel cannot show
     // a stale outcome while the new probe is in flight.
     setTestResults((prev) => {
@@ -223,7 +230,9 @@ export function DecisionModelsTab({
         },
       }));
     } finally {
-      setTestingId(null);
+      // Drop ONLY this row's busy flag — another row's in-flight
+      // probe must keep its own "Testing..." state.
+      setTestingIds((prev) => prev.filter((id) => id !== model.id));
     }
   };
 
@@ -286,7 +295,7 @@ export function DecisionModelsTab({
               models.map((model) => {
                 const credCount = model.credentials?.length ?? 0;
                 const testResult = testResults[model.id];
-                const isTesting = testingId === model.id;
+                const isTesting = testingIds.includes(model.id);
                 return (
                   <div
                     key={model.id}

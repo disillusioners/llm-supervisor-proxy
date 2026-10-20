@@ -104,6 +104,11 @@ type TestResult struct {
 //  4. a single upstream call under the caller-supplied timeout,
 //  5. adapter.InspectResponse → typed response + Outcome.
 //
+// The general typed validators (validateFirstFailed — the handler's
+// step-5 chain) are intentionally SKIPPED here: the probe body is
+// server-generated and therefore valid by construction — only the
+// typesafe preflight runs.
+//
 // The credential is supplied by the caller (the UI route resolves
 // it), so the credential-selection policy stays with the caller.
 // The timeout is supplied by the caller too (the UI route reuses
