@@ -438,6 +438,77 @@ func TestHandleDecisionTest_NoCredentialsIsRejected(t *testing.T) {
 	}
 }
 
+// TestHandleDecisionTest_TypesafeArmReachesSystemOne — the zen /
+// typesafe arm: the canned body passes the typesafe pre-flight (it
+// carries NO safety_identifier), is translated to the System One
+// shape, and the predicate answer comes back with its probability.
+func TestHandleDecisionTest_TypesafeArmReachesSystemOne(t *testing.T) {
+	upstream, cap := newDecisionTestUpstream(t, http.StatusOK,
+		`{"model":"jev-1.13","answers":{"is_refund_request":{"noul":0.88}},"usage":{"input_tokens":11,"output_tokens":3}}`)
+	defer upstream.Close()
+
+	mock := newMockModelsConfigForHandlers()
+	if err := mock.AddCredential(models.CredentialConfig{
+		ID: "cred-ts", Provider: "typesafe", APIKey: "sk-typesafe", BaseURL: upstream.URL,
+	}); err != nil {
+		t.Fatalf("add credential: %v", err)
+	}
+	if err := mock.AddModel(models.ModelConfig{
+		ID: "decision-router-v1", Name: "Decision Router v1", Enabled: true,
+		Kind: models.KindDecision, Internal: true, InternalModel: "jev-1.13",
+		ExcludeFromUltimateSwitching: true,
+		Credentials: []models.CredentialRef{{CredentialID: "cred-ts", Weight: 1, Position: 0}},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+	s := &Server{modelsConfig: mock}
+
+	code, resp := postDecisionTest(t, s, "decision-router-v1")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, want true (resp=%+v)", resp)
+	}
+	if resp.Provider != "typesafe" {
+		t.Errorf("provider = %q, want typesafe", resp.Provider)
+	}
+	if len(resp.Answers) != 1 {
+		t.Fatalf("answers = %d, want 1", len(resp.Answers))
+	}
+	if resp.Answers[0].Probability == nil || *resp.Answers[0].Probability < 0.87 || *resp.Answers[0].Probability > 0.89 {
+		t.Errorf("answer probability = %v, want ~0.88", resp.Answers[0].Probability)
+	}
+
+	if cap.Path != "/v1/systemone" {
+		t.Errorf("path = %q, want /v1/systemone", cap.Path)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(cap.Body, &sent); err != nil {
+		t.Fatalf("decode upstream body: %v (body=%s)", err, string(cap.Body))
+	}
+	if got := sent["model"]; got != "jev-1.13" {
+		t.Errorf("model = %v, want jev-1.13 (the upstream model name)", got)
+	}
+	if got := sent["state"]; got != "Customer wrote: I was charged twice for order #4411 and want a refund." {
+		t.Errorf("state = %v, want the canned input translated to the System One state", got)
+	}
+	if _, present := sent["safety_identifier"]; present {
+		t.Errorf("safety_identifier present in the upstream body — the typesafe arm hard-rejects it")
+	}
+	questions, ok := sent["questions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("questions = %v, want a map keyed by the question name", sent["questions"])
+	}
+	q, ok := questions["is_refund_request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("questions[is_refund_request] = %v, want an object", questions["is_refund_request"])
+	}
+	if q["type"] != "noul" {
+		t.Errorf("question type = %v, want noul (the System One predicate discriminator)", q["type"])
+	}
+}
+
 // TestHandleDecisionTest_MissingModelIDIsBadRequest — the FE must
 // send the row id.
 func TestHandleDecisionTest_MissingModelIDIsBadRequest(t *testing.T) {
