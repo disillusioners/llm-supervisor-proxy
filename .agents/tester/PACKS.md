@@ -259,3 +259,19 @@ blocked ✅
 | race_e2e_anthropic | `./test/e2e_anthropic_thinking_leak/` | **PASS 4/4** — S3 FIXED on this branch (see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md) |
 | race_repo_root | `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |
 | `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |
+
+## Ad-hoc gate packs — 2026-10-23 auto-build-version functional gate (wt feature/auto-build-version @ e12c52b)
+
+All packs: go1.26.0 toolchain on PATH + `GOTOOLCHAIN=local` + `GOMODCACHE/GOCACHE/GOPATH` pinned + **isolated HOME** (`/tmp/gate-*`); Go packs carry `-skip TestB1_UltimateModelAllowed` (QUARANTINE.md 2026-10-18, mirrors testroot wiring). Full report: `RESULTS/2026-10-23-auto-build-version-functional.md`.
+
+| Pack | Command (inline) | Scope | Timeout | Last Run | Status |
+|------|------------------|-------|---------|----------|--------|
+| gate_go_g1 | `timeout 300 go test ./pkg/proxy/... -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | proxy, normalizers, token, translator (4/41) | 300s/240s | 2026-10-23 | PASS (4/4 ok, 92s; @ e12c52b) |
+| gate_go_g2 | `timeout 300 go test ./pkg/store/... ./pkg/credentiallb ./pkg/grouplb ./pkg/modelscache ./pkg/auth ./pkg/crypto ./pkg/config ./pkg/models -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | persistence/LB lane (9/41) | 300s/240s | 2026-10-23 | PASS (9/9 ok, 45s; TOCTOU green run-1) |
+| gate_go_g3 | `timeout 300 go test . ./scripts ./pkg/providers ./pkg/mcp ./pkg/ultimatemodel ./pkg/toolcall ./pkg/toolrepair ./pkg/supervisor ./pkg/bufferstore ./pkg/events ./pkg/usage ./pkg/memlimit ./pkg/middleware/... ./pkg/proxyheader ./pkg/loopdetection/... ./pkg/logger -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | infra/misc lane (17/41; 3 no-test pkgs) | 300s/240s | 2026-10-23 | PASS (17/17 ok, ~50s; usage-stress + httpbin + SSRF all clean run-1) |
+| gate_go_g4 | `timeout 300 go test ./cmd ./pkg/ui ./pkg/imggen ./pkg/decision/... ./test/... -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | kinds + cmd + ui + test-root (11/41; B1 skip verified `no tests to run`) | 300s/240s | 2026-10-23 | PASS (11/11 ok, 31s; NEW version guards green) |
+| gate_fe_vitest | `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE full suite incl. tsc-baseline comparator + NEW Header.test.tsx | 300s | 2026-10-23 | PASS (23 files / 237 tests / 0F / 0S; comparator 5/5; 19s) |
+| gate_e2e_version_injection | 3× `go build` (default / `-X main.Version=424242 -s -w` / `-X main.Version= -s -w`) → serve (isolated HOME, `APPLY_ENV_OVERRIDES=1 PORT=1812x/1813x/1814x`) → curl `/fe/api/version` + banner grep → kill | version-injection closure proof (v150 symptom) | 290s outer / 240s per build | 2026-10-23 | PASS 3/3 (dev / 424242 / dev-on-empty; banners match; ports verified freed; 36s) |
+| gate_version_guards | `timeout 120 go test ./cmd ./pkg/ui -run Version -count=1 -v` + `timeout 240 npx vitest run src/components/__tests__/Header.test.tsx` | fresh version-guard re-runs | 120s/240s | 2026-10-23 | PASS (4 tests + 3 subtests; Header 1/1; 7s) |
+
+Partition audit fact: G1(4)+G2(9)+G3(17)+G4(11) = 41 = `go list ./...` count — union-proven full-suite coverage.
