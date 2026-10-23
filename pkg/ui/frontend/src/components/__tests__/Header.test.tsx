@@ -23,7 +23,7 @@ describe('Header version badge', () => {
   });
 
   it('renders v<version> from the /fe/api/version payload', async () => {
-    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : (input as Request).url;
       if (url.includes('/fe/api/version')) {
         return jsonResponse({ version: '151' });
@@ -32,11 +32,21 @@ describe('Header version badge', () => {
         return jsonResponse({ alloc_bytes: 0, alloc_mb: 0 });
       }
       return jsonResponse({});
-    }) as unknown as typeof fetch;
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const { container } = render(<Header />);
     await waitFor(() => {
       expect(container.textContent).toContain('v151');
     });
+    // The badge must come from the version fetch, not a hardcoded literal:
+    // if Header stopped calling useVersion (e.g. a re-hardcoded "v151"),
+    // this assertion fails because the mock was never invoked with the
+    // version URL, even though the badge text still matches.
+    const calledVersionUrl = fetchMock.mock.calls.some(([u]) => {
+      const url = typeof u === 'string' ? u : u instanceof Request ? u.url : String(u);
+      return url.includes('/fe/api/version');
+    });
+    expect(calledVersionUrl).toBe(true);
   });
 });

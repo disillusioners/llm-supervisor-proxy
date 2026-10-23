@@ -50,6 +50,8 @@ go test ./pkg/config/...
 make run
 ```
 
+The UI version badge shows the docker-ci workflow run number: it increments with every CI build (monotonic but non-contiguous — pull_request and workflow_dispatch runs also consume run numbers, so gaps are normal, not lost builds). `dev` means the binary was built without CI version injection.
+
 ### Frontend
 
 ```bash

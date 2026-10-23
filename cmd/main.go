@@ -435,7 +435,7 @@ func main() {
 
 	// Graceful Shutdown
 	go func() {
-		log.Printf("LLM Supervisor Proxy (build %s) starting on port %d", Version, cfg.Port)
+		log.Printf("LLM Supervisor Proxy (build %s) starting on port %d", resolvedVersion(), cfg.Port)
 		configJSON, _ := json.MarshalIndent(cfg, "", "  ")
 		log.Printf("Current Configuration:\n%s", string(configJSON))
 
