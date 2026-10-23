@@ -23,7 +23,7 @@ This document provides essential information for AI coding agents working in thi
 # Build everything (frontend + backend)
 make all
 
-# Build backend only (auto-increments VERSION)
+# Build backend only (version defaults to dev; override: make build VERSION=<v>)
 make build
 
 # Build frontend only
@@ -49,6 +49,8 @@ go test ./pkg/config/...
 # Build and run locally
 make run
 ```
+
+The UI version badge shows the docker-ci workflow run number: it increments with every CI build (monotonic but non-contiguous — pull_request and workflow_dispatch runs also consume run numbers, so gaps are normal, not lost builds). `dev` means the binary was built without CI version injection.
 
 ### Frontend
 
