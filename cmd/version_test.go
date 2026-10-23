@@ -12,7 +12,7 @@ import (
 // fails.
 func TestVersionDefaultIsDev(t *testing.T) {
 	if Version != "dev" {
-		t.Fatalf("default Version = %q, want %q (a hardcoded build number must never return)", Version, "dev")
+		t.Fatalf("default Version = %q, want %q (the version must never be hardcoded to a build number)", Version, "dev")
 	}
 }
 

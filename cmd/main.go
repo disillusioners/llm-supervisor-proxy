@@ -42,8 +42,8 @@ var Version = "dev"
 // resolvedVersion guards the UI badge against an empty build-time
 // injection: an ldflags build whose -X value is empty or whitespace
 // (e.g. a CI variable that failed to populate) must degrade to "dev",
-// never render a bare "v". It lives at the single hand-off where the
-// build-time value enters the runtime (the ui.SetVersion call below);
+// never render a bare "v". It lives at the hand-offs where the build-time
+// value enters the runtime (the ui.SetVersion call and the startup log below);
 // the ldflags-target var itself stays unmodified so tests can pin the
 // true no-ldflags default.
 func resolvedVersion() string {
