@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,8 +33,25 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
-// Version is set at build time via -ldflags
+// Version is set at build time via -ldflags (-X main.Version=<CI run
+// number>). The committed VERSION file this used to be read from is
+// deleted — a mutable version file and CI-injected versions cannot
+// coexist (the file would silently freeze the badge).
 var Version = "dev"
+
+// resolvedVersion guards the UI badge against an empty build-time
+// injection: an ldflags build whose -X value is empty or whitespace
+// (e.g. a CI variable that failed to populate) must degrade to "dev",
+// never render a bare "v". It lives at the single hand-off where the
+// build-time value enters the runtime (the ui.SetVersion call below);
+// the ldflags-target var itself stays unmodified so tests can pin the
+// true no-ldflags default.
+func resolvedVersion() string {
+	if strings.TrimSpace(Version) == "" {
+		return "dev"
+	}
+	return Version
+}
 
 func main() {
 	ctx := context.Background()
@@ -221,7 +239,7 @@ func main() {
 
 	// Initialize UI Server
 	uiServer := ui.NewServer(bus, configMgr, proxyConfig, modelsConfig, reqStore, bufferStore, tokenStore, dbStore)
-	ui.SetVersion(Version)
+	ui.SetVersion(resolvedVersion())
 
 	// Initialize Proxy Handler (Phase 3 / Task 12) — the engine is the 7th
 	// positional arg. Pass nil for legacy / test paths; the seam is

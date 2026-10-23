@@ -45,10 +45,27 @@ jobs:
     defaults:
       run:
         working-directory: .
+    env:
+      # Single source of truth for the UI version badge: the CI build
+      # number of THIS workflow. Defined once here and consumed by BOTH
+      # the compile-verify go build (shell ${APP_VERSION}) and the
+      # Docker image build (build-arg via ${{ env.APP_VERSION }} —
+      # build-push-action inputs are NOT shell-evaluated, so the raw
+      # ${{ }} form is required there). The Dockerfile defaults the
+      # APP_VERSION ARG to "dev" when the arg is absent (local builds).
+      APP_VERSION: ${{ github.run_number }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Fail fast if APP_VERSION is empty
+        run: |
+          if [ -z "${APP_VERSION}" ]; then
+            echo "::error::APP_VERSION is empty — refusing to build: the version badge would silently degrade to 'dev'"
+            exit 1
+          fi
+          echo "Building version ${APP_VERSION}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -77,9 +94,8 @@ jobs:
 
       - name: Build server (verify compilation)
         run: |
-          echo "Building server to verify compilation..."
-          VERSION=$(cat VERSION)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-X main.Version=${VERSION} -s -w" -o /tmp/llm-supervisor-proxy ./cmd
+          echo "Building server to verify compilation (version ${APP_VERSION})..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-X main.Version=${APP_VERSION} -s -w" -o /tmp/llm-supervisor-proxy ./cmd
           ls -lh /tmp/llm-supervisor-proxy
 
       - name: Run Go tests (if any exist)
@@ -127,6 +143,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
+          build-args: |
+            APP_VERSION=${{ env.APP_VERSION }}
 
   scan:
     name: Security Scan
