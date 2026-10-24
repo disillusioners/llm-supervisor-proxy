@@ -45,6 +45,18 @@ func TestIsQuotaError(t *testing.T) {
 		{"message quota exceeded", &ProviderError{StatusCode: 400, Message: "quota exceeded for project"}, true},
 		{"message payment required", &ProviderError{StatusCode: 400, Message: "Payment required for this organization"}, true},
 
+		// W1 (pre-merge review) — the bare "usage limit" phrase was
+		// removed: a PLAIN rate-limit body uses it for per-minute
+		// throttling and must NOT classify as quota (it would bench the
+		// credential for the quota cooldown instead of a 60s pause).
+		{"429 plain per-minute usage limit body", &ProviderError{StatusCode: 429, ErrorType: "rate_limit", Message: "you have reached your usage limit for this minute"}, false},
+		// …while "token plan" remains its own status-agnostic phrase BY
+		// DESIGN: the plan is exhausted at ANY status, 429 included.
+		{"429 token plan body stays quota (status-agnostic by design)", &ProviderError{StatusCode: 429, Message: "Token Plan usage limit"}, true},
+		// W1 (ii): 402 + the token-plan body ⇒ quota (status path and
+		// message path agree).
+		{"402 token plan usage limit", &ProviderError{StatusCode: 402, Message: "Token Plan usage limit"}, true},
+
 		// Raw-body fallback shape: a non-OpenAI body lands WHOLESALE in
 		// Message (openai.go:handleError msg = string(body)) — the quota
 		// phrase inside it still classifies.

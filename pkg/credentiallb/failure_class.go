@@ -50,16 +50,23 @@ const DefaultQuotaCooldown = 15 * time.Minute
 // config_json row loads verbatim — so the engine seam re-enforces the
 // same bounds defensively. The floor matters in exactly the direction
 // the feature cares about: quota cooldowns must be LONG, not short.
+//
+// Exported so pkg/config's Validate() references this single source of
+// truth instead of duplicating the literals.
 const (
-	quotaCooldownFloor   = time.Minute
-	quotaCooldownCeiling = 24 * time.Hour
+	// QuotaCooldownFloor is the minimum quota-class cooldown (1m).
+	QuotaCooldownFloor = time.Minute
+	// QuotaCooldownCeiling is the maximum quota-class cooldown (24h) —
+	// also the ceiling an upstream Retry-After cannot exceed on the
+	// quota branch.
+	QuotaCooldownCeiling = 24 * time.Hour
 )
 
 // SetQuotaCooldown installs the engine's quota-class cooldown. Nil-safe.
 // Values <= 0 reset to DefaultQuotaCooldown (a mis-wired or hand-edited
 // config degrades to sane behavior — same discipline as NewEngine).
-// Non-zero values are clamped to [quotaCooldownFloor,
-// quotaCooldownCeiling] so a verbatim hand-edited config value (the
+// Non-zero values are clamped to [QuotaCooldownFloor,
+// QuotaCooldownCeiling] so a verbatim hand-edited config value (the
 // Save()-only Validate() clamp never saw it) cannot seed a cooldown
 // below the documented 1m floor or above 24h. Safe for concurrent use.
 func (e *Engine) SetQuotaCooldown(d time.Duration) {
@@ -69,11 +76,11 @@ func (e *Engine) SetQuotaCooldown(d time.Duration) {
 	if d <= 0 {
 		d = DefaultQuotaCooldown
 	}
-	if d < quotaCooldownFloor {
-		d = quotaCooldownFloor
+	if d < QuotaCooldownFloor {
+		d = QuotaCooldownFloor
 	}
-	if d > quotaCooldownCeiling {
-		d = quotaCooldownCeiling
+	if d > QuotaCooldownCeiling {
+		d = QuotaCooldownCeiling
 	}
 	e.mu.Lock()
 	e.quotaCooldown = d
@@ -97,9 +104,15 @@ func (e *Engine) QuotaCooldown() time.Duration {
 // CooldownFor returns the cooldown the engine seeds for a credential
 // that failed with the given class and upstream Retry-After:
 //
-//	rate-limit  — retryAfter when > 0, else defaultCooldown.
+//	rate-limit  — retryAfter when > 0, else defaultCooldown. An
+//	              upstream instruction is honored VERBATIM (no ceiling —
+//	              upstream said wait; only the quota class is clamped).
 //	quota       — quotaCooldown, raised to retryAfter when the upstream
-//	              asked for LONGER (max()).
+//	              asked for LONGER (max()). retryAfter is first clamped
+//	              to QuotaCooldownCeiling so a hostile/typo'd quota
+//	              Retry-After cannot bench a credential past the
+//	              documented [QuotaCooldownFloor, QuotaCooldownCeiling]
+//	              window.
 //
 // Pure function of (class, retryAfter, engine config) — no state
 // mutation, no lock side effects beyond the config read. Nil-safe.
@@ -108,6 +121,9 @@ func (e *Engine) CooldownFor(class FailureClass, retryAfter time.Duration) time.
 		retryAfter = 0
 	}
 	if class == FailureClassQuota {
+		if retryAfter > QuotaCooldownCeiling {
+			retryAfter = QuotaCooldownCeiling
+		}
 		q := e.QuotaCooldown()
 		if retryAfter > q {
 			return retryAfter

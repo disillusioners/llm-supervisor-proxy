@@ -284,7 +284,14 @@ var (
 		"credit exhausted",
 		"credits exhausted",
 		"out of credit",
-		"usage limit",
+		// W1 (pre-merge review): the former bare "usage limit" phrase was
+		// removed — a PLAIN rate-limit body uses it for per-minute
+		// throttling ("you have reached your usage limit for this
+		// minute"), which must classify rate_limit (60s/Retry-After),
+		// NOT quota. The specific observed live shape replaces it.
+		"token plan usage limit",
+		// "token plan" stays its own status-agnostic phrase BY DESIGN: a
+		// token-plan body means the plan is exhausted at ANY status.
 		"token plan",
 		"payment required",
 	}
@@ -314,8 +321,8 @@ func containsAny(lowered string, vocabulary []string) bool {
 //     (case-insensitive), OR
 //   - error message carries one of the bounded quota phrases
 //     (case-insensitive) — "insufficient credit", "insufficient
-//     balance", "quota exceeded", "usage limit", "token plan",
-//     "payment required", …
+//     balance", "quota exceeded", "token plan usage limit", "token
+//     plan", "payment required", …
 //
 // Why a message vocabulary at all: quota rejections arrive in
 // non-OpenAI body shapes from gateway upstreams, and the quota code is
@@ -327,9 +334,12 @@ func containsAny(lowered string, vocabulary []string) bool {
 // Precedence note for callers: a 429 whose BODY carries quota
 // vocabulary classifies as QUOTA, not rate-limit — the account is out
 // of credit, and the recovery is a TOP-UP (hours/days), not a 60s
-// pause. Callers that must keep a bare-429 meaning "slow down" check
-// IsRateLimitError on the status path before consulting this
-// classifier (pkg/proxy/classifyCredFailure does exactly that).
+// pause. This quota-FIRST precedence is INTENTIONAL: callers resolve
+// the overlap by consulting this classifier BEFORE IsRateLimitError
+// (pkg/proxy/classifyCredFailure does exactly that — pinned at
+// interface_quota_test.go). A PLAIN 429 — one whose body carries no
+// quota vocabulary — still classifies as rate-limit and keeps the
+// 60s/Retry-After policy.
 //
 // Returns false for nil errors and for non-*ProviderError errors.
 // 401/auth-class errors carry none of the vocabulary — the classifier

@@ -65,6 +65,40 @@ func TestCooldownFor_QuotaPolicy(t *testing.T) {
 	}
 }
 
+// TestCooldownFor_QuotaRetryAfterCeiling pins W5 (pre-merge review):
+// on the QUOTA branch an upstream Retry-After beyond the documented 24h
+// ceiling is clamped to QuotaCooldownCeiling BEFORE the max(), so a
+// hostile/typo'd hint cannot bench a credential for 48h past the
+// documented [1m, 24h] window. The rate-limit branch keeps its existing
+// semantics UNCHANGED — an upstream 48h instruction stays 48h there.
+func TestCooldownFor_QuotaRetryAfterCeiling(t *testing.T) {
+	e := newClassPolicyEngine(t)
+	e.SetQuotaCooldown(15 * time.Minute)
+
+	// Over-ceiling upstream hint → clamped to the ceiling.
+	if got := e.CooldownFor(FailureClassQuota, 48*time.Hour); got != QuotaCooldownCeiling {
+		t.Errorf("quota + 48h Retry-After = %v, want %v (upward-escape clamp)", got, QuotaCooldownCeiling)
+	}
+	// Exactly at the ceiling → unchanged.
+	if got := e.CooldownFor(FailureClassQuota, QuotaCooldownCeiling); got != QuotaCooldownCeiling {
+		t.Errorf("quota + exactly-24h Retry-After = %v, want %v", got, QuotaCooldownCeiling)
+	}
+	// Above the configured value but under the ceiling → honored upward
+	// (the clamp must not perturb legitimate hints).
+	if got := e.CooldownFor(FailureClassQuota, 2*time.Hour); got != 2*time.Hour {
+		t.Errorf("quota + 2h Retry-After = %v, want 2h (honored upward, under ceiling)", got)
+	}
+	// Nil engine + over-ceiling hint → still clamped (nil-safe path).
+	var nilEngine *Engine
+	if got := nilEngine.CooldownFor(FailureClassQuota, 48*time.Hour); got != QuotaCooldownCeiling {
+		t.Errorf("nil-engine quota + 48h Retry-After = %v, want %v", got, QuotaCooldownCeiling)
+	}
+	// Rate-limit branch UNCHANGED: upstream 48h stays 48h.
+	if got := e.CooldownFor(FailureClassRateLimit, 48*time.Hour); got != 48*time.Hour {
+		t.Errorf("rate-limit + 48h Retry-After = %v, want 48h (rate-limit semantics unchanged — no ceiling)", got)
+	}
+}
+
 func TestSetQuotaCooldown_ResetSemantics(t *testing.T) {
 	e := newClassPolicyEngine(t)
 

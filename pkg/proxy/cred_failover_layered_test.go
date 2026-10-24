@@ -663,3 +663,47 @@ func TestCoordinator_QuotaFailover_SpawnRowCarriesCredentialID(t *testing.T) {
 		t.Fatalf("cred_failover race_spawn rows = %d, want 1", spawnRows)
 	}
 }
+
+// W1 (pre-merge review) — classifier boundary pin at the PROXY level:
+// a plain 429 whose body uses the bare "usage limit" phrase for
+// per-minute throttling classifies rate_limit and seeds the
+// 60s/Retry-After cooldown, NOT the quota cooldown. A "token plan"
+// body stays quota at ANY status by design; a bare 402 stays quota via
+// the status path (unchanged).
+func TestClassifyCredFailure_PlainUsageLimit429IsRateLimit(t *testing.T) {
+	plain := &providers.ProviderError{
+		StatusCode: 429,
+		ErrorType:  "rate_limit",
+		Message:    "you have reached your usage limit for this minute",
+	}
+	if providers.IsQuotaError(plain) {
+		t.Fatalf("plain usage-limit 429 classified as quota — a throttled credential would be benched for the quota cooldown")
+	}
+	if got := classifyCredFailure(plain); got != credFailoverRateLimit {
+		t.Errorf("classifyCredFailure(plain usage-limit 429) = %v, want rate_limit", got)
+	}
+
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 7, 60*time.Second)
+	t.Cleanup(engine.Stop)
+	if got := effectiveCooldown(engine, credFailoverRateLimit, 0); got != 60*time.Second {
+		t.Errorf("rate-limit cooldown = %v, want 60s (NOT the quota cooldown %v)", got, credentiallb.DefaultQuotaCooldown)
+	}
+	if got := effectiveCooldown(engine, credFailoverRateLimit, 90*time.Second); got != 90*time.Second {
+		t.Errorf("rate-limit cooldown with Retry-After = %v, want 90s (upstream hint honored)", got)
+	}
+
+	// Deliberate status-agnostic intent: a TOKEN-PLAN body is quota even
+	// on a 429 (the plan is exhausted, not momentarily throttled).
+	tokenPlan := &providers.ProviderError{StatusCode: 429, Message: "Token Plan usage limit"}
+	if got := classifyCredFailure(tokenPlan); got != credFailoverQuota {
+		t.Errorf("classifyCredFailure(429 token-plan body) = %v, want quota (status-agnostic by design)", got)
+	}
+	if got := effectiveCooldown(engine, credFailoverQuota, 0); got != credentiallb.DefaultQuotaCooldown {
+		t.Errorf("quota cooldown = %v, want %v (the 15m quota default, not 60s)", got, credentiallb.DefaultQuotaCooldown)
+	}
+
+	// 402 alone (no quota vocabulary) ⇒ quota (status path unchanged).
+	if got := classifyCredFailure(&providers.ProviderError{StatusCode: 402}); got != credFailoverQuota {
+		t.Errorf("classifyCredFailure(bare 402) = %v, want quota (status path unchanged)", got)
+	}
+}

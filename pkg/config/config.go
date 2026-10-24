@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -239,11 +240,12 @@ var Defaults = Config{
 	ToolCallBufferDisabled: false,       // Buffering ENABLED by default
 	ToolCallBufferMaxSize:  1024 * 1024, // 1MB default
 
-	// Layered credential fallback: quota-class cooldown default 15m.
+	// Layered credential fallback: quota-class cooldown default 15m
+	// (credentiallb.DefaultQuotaCooldown — single source of truth).
 	// Clamp [1m, 24h] enforced in Validate. 0 in a stored config means
-	// "use the engine default" (credentiallb.DefaultQuotaCooldown) —
-	// same fallback-at-the-seam contract as ImageGenTimeout.
-	CredentialQuotaCooldown: Duration(15 * time.Minute),
+	// "use the engine default" — same fallback-at-the-seam contract as
+	// ImageGenTimeout.
+	CredentialQuotaCooldown: Duration(credentiallb.DefaultQuotaCooldown),
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -320,12 +322,13 @@ func (c *Config) Validate() error {
 	// hand-edited 0-second cooldown from defeating the whole point
 	// (the credential would re-enter the pool per request); the upper
 	// bound keeps a typo'd value from semi-permanently benching a
-	// credential.
+	// credential. Bounds come from credentiallb (single source of
+	// truth, also re-enforced at the engine seam SetQuotaCooldown).
 	if c.CredentialQuotaCooldown > 0 {
-		if c.CredentialQuotaCooldown < Duration(time.Minute) {
+		if c.CredentialQuotaCooldown < Duration(credentiallb.QuotaCooldownFloor) {
 			return errors.New("credential_quota_cooldown must be at least 1m when set")
 		}
-		if c.CredentialQuotaCooldown > Duration(24*time.Hour) {
+		if c.CredentialQuotaCooldown > Duration(credentiallb.QuotaCooldownCeiling) {
 			return errors.New("credential_quota_cooldown must be at most 24h when set")
 		}
 	}
