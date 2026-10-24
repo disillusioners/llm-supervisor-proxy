@@ -464,6 +464,70 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantError: false,
 		},
+		// Layered credential fallback — credential_quota_cooldown clamp
+		// [1m, 24h] when set (0 = engine default, always valid).
+		{
+			name: "credential quota cooldown below floor",
+			cfg: Config{
+				Port:                    8089,
+				IdleTimeout:             Duration(10 * time.Second),
+				StreamDeadline:          Duration(110 * time.Second),
+				MaxGenerationTime:       Duration(180 * time.Second),
+				RaceMaxParallel:         3,
+				CredentialQuotaCooldown: Duration(30 * time.Second),
+			},
+			wantError: true,
+			errorMsg:  "credential_quota_cooldown must be at least 1m when set",
+		},
+		{
+			name: "credential quota cooldown above ceiling",
+			cfg: Config{
+				Port:                    8089,
+				IdleTimeout:             Duration(10 * time.Second),
+				StreamDeadline:          Duration(110 * time.Second),
+				MaxGenerationTime:       Duration(180 * time.Second),
+				RaceMaxParallel:         3,
+				CredentialQuotaCooldown: Duration(25 * time.Hour),
+			},
+			wantError: true,
+			errorMsg:  "credential_quota_cooldown must be at most 24h when set",
+		},
+		{
+			name: "credential quota cooldown in range",
+			cfg: Config{
+				Port:                    8089,
+				IdleTimeout:             Duration(10 * time.Second),
+				StreamDeadline:          Duration(110 * time.Second),
+				MaxGenerationTime:       Duration(180 * time.Second),
+				RaceMaxParallel:         3,
+				CredentialQuotaCooldown: Duration(2 * time.Hour),
+			},
+			wantError: false,
+		},
+		{
+			name: "credential quota cooldown exact floor",
+			cfg: Config{
+				Port:                    8089,
+				IdleTimeout:             Duration(10 * time.Second),
+				StreamDeadline:          Duration(110 * time.Second),
+				MaxGenerationTime:       Duration(180 * time.Second),
+				RaceMaxParallel:         3,
+				CredentialQuotaCooldown: Duration(time.Minute),
+			},
+			wantError: false,
+		},
+		{
+			name: "credential quota cooldown exact ceiling",
+			cfg: Config{
+				Port:                    8089,
+				IdleTimeout:             Duration(10 * time.Second),
+				StreamDeadline:          Duration(110 * time.Second),
+				MaxGenerationTime:       Duration(180 * time.Second),
+				RaceMaxParallel:         3,
+				CredentialQuotaCooldown: Duration(24 * time.Hour),
+			},
+			wantError: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -517,6 +581,11 @@ func TestDefaults(t *testing.T) {
 	}
 	if Defaults.IdleTerminationTimeout != Duration(120*time.Second) {
 		t.Errorf("Defaults.IdleTerminationTimeout = %v, want 120s", Defaults.IdleTerminationTimeout)
+	}
+	// Layered credential fallback: the quota-class cooldown default is
+	// 15m — sourced from credentiallb.DefaultQuotaCooldown.
+	if Defaults.CredentialQuotaCooldown != Duration(15*time.Minute) {
+		t.Errorf("Defaults.CredentialQuotaCooldown = %v, want 15m", Defaults.CredentialQuotaCooldown)
 	}
 }
 
@@ -680,6 +749,62 @@ func TestManager_Load_EnvOverrides(t *testing.T) {
 	}
 	if cfg.IdleTerminationTimeout != Duration(30*time.Second) {
 		t.Errorf("IdleTerminationTimeout = %v, want 30s", cfg.IdleTerminationTimeout)
+	}
+}
+
+// TestManager_Load_EnvOverride_CredentialQuotaCooldown pins the
+// CREDENTIAL_QUOTA_COOLDOWN env override (duration form, e.g. "45m").
+// Like every env knob in this package it is only read when
+// APPLY_ENV_OVERRIDES is set — and ignored when unset.
+func TestManager_Load_EnvOverride_CredentialQuotaCooldown(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	os.Setenv("APPLY_ENV_OVERRIDES", "1")
+	os.Setenv("CREDENTIAL_QUOTA_COOLDOWN", "45m")
+	defer func() {
+		os.Unsetenv("APPLY_ENV_OVERRIDES")
+		os.Unsetenv("CREDENTIAL_QUOTA_COOLDOWN")
+	}()
+
+	m := &Manager{
+		filePath: configPath,
+	}
+
+	if err := m.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	cfg := m.Get()
+	if cfg.CredentialQuotaCooldown != Duration(45*time.Minute) {
+		t.Errorf("CredentialQuotaCooldown = %v, want 45m (env override applied)", cfg.CredentialQuotaCooldown)
+	}
+}
+
+// TestManager_Load_EnvOverride_CredentialQuotaCooldown_Gated pins the
+// gate: WITHOUT APPLY_ENV_OVERRIDES the same env value is ignored and
+// the config/default value survives.
+func TestManager_Load_EnvOverride_CredentialQuotaCooldown_Gated(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	os.Setenv("CREDENTIAL_QUOTA_COOLDOWN", "45m")
+	defer func() {
+		os.Unsetenv("CREDENTIAL_QUOTA_COOLDOWN")
+	}()
+
+	m := &Manager{
+		filePath: configPath,
+	}
+
+	if err := m.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	cfg := m.Get()
+	if cfg.CredentialQuotaCooldown != Defaults.CredentialQuotaCooldown {
+		t.Errorf("CredentialQuotaCooldown = %v, want the %v default (env ignored without APPLY_ENV_OVERRIDES)",
+			cfg.CredentialQuotaCooldown, Defaults.CredentialQuotaCooldown)
 	}
 }
 
