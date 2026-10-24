@@ -122,6 +122,21 @@ describe('EventLog layered credential fallback renderers', () => {
     );
   });
 
+  it('race_spawn cred_failover rows render the rate-limit class label', () => {
+    const root = renderEvents([
+      evt('race_spawn', {
+        type: 'cred_failover',
+        request_index: 2,
+        model: 'coding4',
+        trigger: 'rate_limit',
+        credential_id: 'cred-B',
+      }),
+    ]);
+    expect(root.textContent).toContain(
+      'Spawned cred_failover request #2: coding4 (rate limit) → cred-B',
+    );
+  });
+
   it('race_spawn non-failover rows keep the legacy raw trigger token (no credential suffix)', () => {
     const root = renderEvents([
       evt('race_spawn', {

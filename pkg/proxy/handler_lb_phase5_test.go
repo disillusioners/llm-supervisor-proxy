@@ -93,6 +93,13 @@ type recordingUpstream struct {
 	// status and the message text (the realistic wire shape).
 	failQuota bool
 
+	// fail401 forces every call to return HTTP 401 with an auth-error
+	// body — the INELIGIBLE-class control for the credential-failover
+	// gate (401/auth matches neither the quota nor the rate-limit
+	// classifier ⇒ zero failover, zero cooldowns, straight to model
+	// fallback / terminal).
+	fail401 bool
+
 	// delay is the pre-response sleep applied to every call (used by
 	// TestHandler_Case2Idle to push the main past the idle-timeout).
 	delay time.Duration
@@ -150,6 +157,7 @@ func (u *recordingUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	failAll := u.failAll
 	fail500 := u.fail500
 	failQuota := u.failQuota
+	fail401 := u.fail401
 	failN := u.failFirstN
 	retryAfter := u.failAllRetryAfter
 	alreadyFailed := u.failedKeys[key]
@@ -164,6 +172,11 @@ func (u *recordingUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case fail401:
+		// Auth error: matches NEITHER classifier (no rate-limit
+		// vocabulary, no quota vocabulary, status ∉ {402, 429}).
+		writeError(w, http.StatusUnauthorized, "invalid api key", "authentication_error", "")
+		return
 	case failQuota:
 		// Observed live quota shape: HTTP 402 + NUMERIC code 2067 +
 		// "Token Plan usage limit". IsQuotaError classifies via the
@@ -1171,6 +1184,77 @@ func TestHandler_QuotaError_SpawnsCredFailover_SameModel(t *testing.T) {
 	}
 	if got, want := asInt64(data["cooldown_ms"]), (15 * time.Minute).Milliseconds(); got != want {
 		t.Errorf("failover cooldown_ms = %d, want %d (credentiallb.DefaultQuotaCooldown)", got, want)
+	}
+}
+
+// Fix 1 eligibility boundary — 401/auth is INELIGIBLE for credential
+// failover (the classifier's terminal class). A multi-credential
+// failover-ELIGIBLE model whose upstream 401s every call must produce:
+// ZERO cred-failover rows, ZERO model_credential_failover events, ZERO
+// engine cooldowns/failovers, and EXACTLY ONE upstream call — the main
+// attempt fails the class check, no plan is built, and the request goes
+// straight to model fallback (for this single-model chain: terminal).
+// This test is the real pin for the "401/auth stays terminal at the
+// proxy seam" claim (the always-402 exhaust pin in
+// cred_failover_layered_test.go exercises ONLY the quota class).
+func TestHandler_NonRateLimitError_401StraightToTerminal(t *testing.T) {
+	mock := &mockModelsConfig{}
+	for _, id := range []string{"cred-A", "cred-B"} {
+		mock.AddCredential(models.CredentialConfig{
+			ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "https://example.invalid",
+		})
+	}
+	mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true,
+		InternalModel: "up-m1", Credentials: models.TestRefs("cred-A", "cred-B"),
+	})
+
+	upstream := newRecordingUpstream()
+	srv := httptest.NewServer(upstream)
+	defer srv.Close()
+	upstream.mu.Lock()
+	upstream.fail401 = true
+	upstream.mu.Unlock()
+	// Point BOTH credentials at the 401 upstream (either first pick —
+	// seed-7 driven — must behave identically: no failover for either).
+	mock.credentials[0].BaseURL = srv.URL
+	mock.credentials[1].BaseURL = srv.URL
+
+	env := buildHandlerStack(t, mock, []string{"m1"})
+
+	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test 401-ineligible")
+
+	// EXACTLY ONE upstream call: the main attempt. 401 must not buy a
+	// same-model retry (the quota/rate-limit classes are the only
+	// eligible classes).
+	if got := upstream.callCount(); got != 1 {
+		t.Errorf("upstream calls = %d, want exactly 1 (401 is ineligible — no same-model retry)", got)
+	}
+
+	// Engine state UNTOUCHED: no cooldowns, no failover counter advance.
+	stats := env.credLB.Stats()
+	if st, ok := stats["m1"]; ok {
+		if st.Failovers != 0 {
+			t.Errorf("engine stats[m1].Failovers = %d, want 0 (401 must not trigger credential failover)", st.Failovers)
+		}
+		if st.Cooldowns != 0 {
+			t.Errorf("engine stats[m1].Cooldowns = %d, want 0 (401 must not seed ANY cooldown)", st.Cooldowns)
+		}
+	}
+
+	// Zero model_credential_failover events.
+	failoverEvents := drainEventsOfType(env.bus, credentiallb.EventCredentialFailover)
+	if len(failoverEvents) != 0 {
+		t.Errorf("model_credential_failover events = %d, want 0 (401 must not publish)", len(failoverEvents))
+	}
+
+	// Zero cred-failover spawn rows.
+	allSpawns := recordSpawns(drainAllEvents(env.bus))
+	if n := countByType(allSpawns, "cred_failover"); n != 0 {
+		t.Errorf("modelTypeCredFailover spawn rows = %d, want 0 (401 is ineligible); full: %v", n, allSpawns)
+	}
+	if n := countByType(allSpawns, "main"); n != 1 {
+		t.Errorf("modelTypeMain spawn rows = %d, want exactly 1", n)
 	}
 }
 

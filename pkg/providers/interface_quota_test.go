@@ -3,6 +3,9 @@ package providers
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -111,5 +114,48 @@ func TestIsQuotaError_DoesNotShadowRateLimit(t *testing.T) {
 		// IsRateLimitError is status-429-first — both classifiers fire;
 		// the proxy resolves the overlap quota-first.
 		t.Errorf("429 status must still classify as rate-limit for the fallback classifier")
+	}
+}
+
+// TestHandleError_Quota402NumericCodeLeavesCodeEmpty pins the PARSE
+// behavior the layered-fallback classifier relies on at the provider
+// seam: the observed live 402 body carries its code as a JSON NUMBER
+// (2067), which cannot unmarshal into the string-typed
+// ProviderError.ErrorCode field — the field stays "" and the MESSAGE
+// carries the class. Quota classification must therefore succeed from
+// the 402 status + message text ALONE (mirrored at the coordinator
+// seam by cred_failover_layered_test.go's quotaScriptedProvider, whose
+// ErrorCode is deliberately wire-faithful-empty).
+func TestHandleError_Quota402NumericCodeLeavesCodeEmpty(t *testing.T) {
+	p := &OpenAIProvider{}
+	resp := &http.Response{
+		StatusCode: http.StatusPaymentRequired,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Token Plan usage limit","code":2067}}`)),
+	}
+	perr := p.handleError(resp, nil)
+	if perr == nil {
+		t.Fatal("handleError returned nil")
+	}
+	if perr.ErrorCode != "" {
+		t.Errorf("ErrorCode = %q, want \"\" — the numeric 2067 cannot unmarshal into the string-typed field", perr.ErrorCode)
+	}
+	if perr.ErrorType != "" {
+		t.Errorf("ErrorType = %q, want \"\" (the live body carries no type)", perr.ErrorType)
+	}
+	if perr.Message != "Token Plan usage limit" {
+		t.Errorf("Message = %q, want \"Token Plan usage limit\" (the message survives the partial decode and carries the class)", perr.Message)
+	}
+	if perr.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("StatusCode = %d, want 402", perr.StatusCode)
+	}
+	if !IsQuotaError(perr) {
+		t.Error("IsQuotaError = false — classification must succeed from the 402 status + message alone")
+	}
+	if IsRateLimitError(perr) {
+		t.Error("IsRateLimitError = true on a 402 — the quota class must not shadow into rate-limit")
+	}
+	if perr.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0 (Retry-After parsing is 429-only)", perr.RetryAfter)
 	}
 }

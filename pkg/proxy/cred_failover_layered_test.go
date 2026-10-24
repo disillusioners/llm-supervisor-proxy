@@ -36,6 +36,17 @@ import (
 // QUOTA-class error in the observed live shape (HTTP 402 + code 2067 +
 // "Token Plan usage limit"), then succeeds. Mirrors scriptedProvider
 // (race_coordinator_credfailover_test.go) with the class swapped.
+//
+// Wire fidelity: ErrorCode is deliberately LEFT EMPTY. On the live wire
+// the quota code arrives as a NUMBER (2067) that cannot unmarshal into
+// the string-typed ProviderError.ErrorCode field (openai.go handleError)
+// — the literal "quota_exceeded" string this mock used to carry is
+// wire-impossible. Every assertion below therefore proves quota
+// classification from the 402 status + message text ALONE (the same
+// shape the parse pin in pkg/providers/interface_quota_test.go pins at
+// the handleError seam). The "quota_exceeded" strings asserted in these
+// tests are the CLASSIFIER's vocabulary (credFailoverClass.String()),
+// never a pass-through of this field.
 type quotaScriptedProvider struct {
 	mu    sync.Mutex
 	failN int
@@ -55,7 +66,7 @@ func (p *quotaScriptedProvider) ChatCompletion(ctx context.Context, req *provide
 			Provider:   "quota-scripted",
 			StatusCode: 402,
 			Message:    "Token Plan usage limit",
-			ErrorCode:  "quota_exceeded",
+			ErrorCode:  "",
 			Retryable:  false,
 		}
 	}
@@ -72,7 +83,7 @@ func (p *quotaScriptedProvider) ChatCompletion(ctx context.Context, req *provide
 }
 
 func (p *quotaScriptedProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
-	return nil, &providers.ProviderError{StatusCode: 402, Message: "Token Plan usage limit", ErrorCode: "quota_exceeded"}
+	return nil, &providers.ProviderError{StatusCode: 402, Message: "Token Plan usage limit", ErrorCode: ""}
 }
 
 func (p *quotaScriptedProvider) IsRetryable(err error) bool { return true }
@@ -375,6 +386,73 @@ func TestCoordinator_LayeredChain_AttemptCapTerminates(t *testing.T) {
 	}
 }
 
+// (f) The spec's literal acceptance example, pinned ELEMENT-FOR-ELEMENT:
+// a 2/2/1-credential chain under PERSISTENT quota failure must walk
+//
+//	models[0]/cred1 → models[0]/cred2 → models[1]/cred1 →
+//	models[1]/cred2 → models[2]/cred1 → cap termination
+//
+// — each model's Layer-1 credential rotation (budget len(creds)−1)
+// completes BEFORE the chain advances past it, the single-credential
+// tail model contributes NO cred-failover row (budget 1−1 = 0), and the
+// chain end is terminal (no advance target exists past models[2]).
+func TestCoordinator_LayeredChain_AcceptanceOrder_221Creds(t *testing.T) {
+	coord, provider, _, _ := newLayeredChainEnv(
+		t,
+		[]layeredChainModel{{id: "m1", credCount: 2}, {id: "m2", credCount: 2}, {id: "m3", credCount: 1}},
+		99, // every call fails — the acceptance example is a FULL walk
+		"conv-acceptance-221",
+	)
+
+	coord.Start()
+	if winner := coord.WaitForWinner(); winner != nil {
+		t.Fatalf("expected terminal all-failed (no advance target past models[2]), got winner on %s", winner.modelID)
+	}
+
+	// THE EXACT ACCEPTANCE ORDER.
+	assertSpawnOrder(t, spawnOrderSnapshot(coord), []string{
+		"main:m1",          // models[0]/cred1
+		"cred_failover:m1", // models[0]/cred2 — Layer 1 on models[0]
+		"fallback:m2",      // models[1]/cred1 — advance only after m1's pool exhausted
+		"cred_failover:m2", // models[1]/cred2 — Layer 1 on models[1]
+		"fallback:m3",      // models[2]/cred1 — advance only after m2's pool exhausted
+		// models[2] holds ONE credential ⇒ budget 1−1 = 0 ⇒ NO
+		// cred_failover:m3 row. Chain end ⇒ terminal: no fallback:m1
+		// re-entry, no further wave.
+	})
+
+	// Per-model rotation budget: exactly one credFailover row per
+	// 2-cred model (len(creds)−1 = 1), ZERO for the 1-cred tail, each
+	// drawn from its own model's pool.
+	pools := map[string]map[string]bool{
+		"m1": {"cred-m1-A": true, "cred-m1-B": true},
+		"m2": {"cred-m2-A": true, "cred-m2-B": true},
+		"m3": {"cred-m3-A": true},
+	}
+	perModel := map[string]int{}
+	for _, r := range coord.requests {
+		if r.modelType != modelTypeCredFailover {
+			continue
+		}
+		perModel[r.modelID]++
+		if !pools[r.modelID][r.resolved.CredentialID] {
+			t.Errorf("credFailover on %s resolved credential %q — cross-model pool leak", r.modelID, r.resolved.CredentialID)
+		}
+	}
+	if perModel["m1"] != 1 || perModel["m2"] != 1 {
+		t.Errorf("per-model credFailover rows = %v, want m1:1 m2:1 (len(creds)−1 budgets)", perModel)
+	}
+	if got := perModel["m3"]; got != 0 {
+		t.Errorf("credFailover rows on m3 = %d, want 0 (single credential ⇒ nothing to rotate)", got)
+	}
+
+	// The exact chain costs exactly 5 upstream calls: 2 on m1 (main +
+	// its rotation), 2 on m2, 1 on m3 — then the cap terminates.
+	if got := provider.callCount(); got != 5 {
+		t.Errorf("upstream calls = %d, want 5 (2+2+1 — the acceptance chain, exactly)", got)
+	}
+}
+
 // (b-companion) The advance target skips an exhausted-model re-entry:
 // a chain whose MIDDLE model has a single credential (no Layer-1 to
 // rotate) still advances 0 → 1 → 2 with no credFailover row on it.
@@ -581,8 +659,11 @@ func TestInternalHandler_QuotaFailover_ConfiguredCooldown(t *testing.T) {
 
 // TestInternalHandler_QuotaFailover_ExhaustsAndPropagates pins the
 // non-race hook's single-retry budget against a quota error: BOTH
-// credentials 402 → exactly 2 calls, the failure propagates, and the
-// 401/auth class stays terminal (ineligible) at the same seam.
+// credentials 402 → exactly 2 calls, the failure propagates. (The
+// 401/auth class's terminal-at-the-proxy-seam behavior is pinned
+// separately by TestHandler_NonRateLimitError_401StraightToTerminal
+// in handler_lb_phase5_test.go — this test exercises ONLY the quota
+// class.)
 func TestInternalHandler_QuotaFailover_ExhaustsAndPropagates(t *testing.T) {
 	// Always-402 upstream.
 	upstream := alwaysQuotaUpstream{}
@@ -750,9 +831,10 @@ func TestClassifyCredFailure_PlainUsageLimit429IsRateLimit(t *testing.T) {
 //	and the soonest-expiry pick is A itself — reselected == fromCred
 //	⇒ plan nil — while m3's rotation budget (0 of 1 spent) keeps the
 //	Case-1 gate OPEN. Pre-fix, the legacy empty ⇒ c.models[1] mapping
-//	then re-spawned the already-exhausted m2 (+2 upstream calls, a
-//	wrong-model retry in the C1 family). Post-fix the race resolves as
-//	failed with NO additional spawn.
+//	then re-spawned the already-exhausted m2 (+1 upstream call — m2 is
+//	single-credential, so the wrong-model re-entry costs exactly one
+//	attempt — a wrong-model retry in the C1 family). Post-fix the race
+//	resolves as failed with NO additional spawn.
 func TestCoordinator_ChainEnd_WithNilCredPlan_IsTerminal(t *testing.T) {
 	mock := &mockModelsConfig{}
 	engine := credentiallb.NewEngine(time.Hour, time.Hour, 42, 60*time.Second)
@@ -822,4 +904,141 @@ func TestCoordinator_ChainEnd_WithNilCredPlan_IsTerminal(t *testing.T) {
 	if got := provider.callCount(); got != 3 {
 		t.Errorf("upstream calls = %d, want 3 (no re-entry of models[1] after the chain end)", got)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idle-timeout legacy mapping pin (Fix 2 deliberately PRESERVED behavior).
+//
+// fallbackAdvanceTargetLocked's next-model advance serves ERROR-path
+// fallback rows only. The IDLE-TIMEOUT path (Case 2) never classifies a
+// failure — its triggerInfo legitimately carries NO modelID — and
+// spawn()'s modelTypeFallback arm deliberately keeps the LEGACY
+// empty ⇒ c.models[1] mapping there ("pre-Fix-2 behavior preserved
+// verbatim"). This pins the OBSERVABLE behavior of that seam: on idle,
+// BOTH Case-2 rows spawn — second (same-model retry) AND fallback —
+// and the fallback row targets models[1].
+// ─────────────────────────────────────────────────────────────────────────────
+
+// idleStallProvider stalls every call for one internal model (the
+// no-first-byte shape that trips Case 2) and answers every other model
+// immediately. Stalled calls unwind on the attempt context (winner
+// selection cancels the losers); the release channel is the no-winner
+// backstop for assertion-failure paths.
+type idleStallProvider struct {
+	mu          sync.Mutex
+	calls       int
+	stallModels []string
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func (p *idleStallProvider) Name() string { return "idle-stall" }
+
+func (p *idleStallProvider) stalls(model string) bool {
+	for _, m := range p.stallModels {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *idleStallProvider) releaseAll() { p.releaseOnce.Do(func() { close(p.release) }) }
+
+func (p *idleStallProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	if p.stalls(req.Model) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-p.release:
+			return nil, fmt.Errorf("idle-stall: released after winner selection")
+		}
+	}
+	return &providers.ChatCompletionResponse{
+		ID:      "chatcmpl-idle-stall",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   req.Model,
+		Choices: []providers.Choice{
+			{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+		},
+		Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}, nil
+}
+
+func (p *idleStallProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	return nil, fmt.Errorf("idle-stall: streaming not exercised by this test")
+}
+
+func (p *idleStallProvider) IsRetryable(err error) bool { return false }
+
+// TestCoordinator_LayeredChain_IdleTimeout_PreservesLegacyAdvanceTarget
+// pins the idle-timeout seam's LEGACY advance mapping: an EMPTY advance
+// target on the idle path still lands the fallback row on models[1]
+// (in contrast to the error path, where an empty advance target is
+// terminal — TestCoordinator_ChainEnd_WithNilCredPlan_IsTerminal).
+func TestCoordinator_LayeredChain_IdleTimeout_PreservesLegacyAdvanceTarget(t *testing.T) {
+	mock := &mockModelsConfig{}
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 42, 60*time.Second)
+	t.Cleanup(engine.Stop)
+
+	// Two models, one credential each — the idle path never classifies
+	// an error, so credential counts are irrelevant; what matters is
+	// that the fallback row lands on models[1], not models[0].
+	for _, m := range []string{"m1", "m2"} {
+		id := "cred-" + m + "-A"
+		mock.AddCredential(models.CredentialConfig{
+			ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id,
+		})
+		mock.AddModel(models.ModelConfig{
+			ID: m, Name: m, Enabled: true, Internal: true,
+			InternalModel: "internal-" + m,
+			Credentials:   models.TestRefs(id),
+		})
+		engine.RebindFromStore(m, models.TestRefs(id))
+	}
+
+	provider := &idleStallProvider{stallModels: []string{"internal-m1"}, release: make(chan struct{})}
+	t.Cleanup(provider.releaseAll) // no-winner backstop
+	origNew := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return provider, nil
+	}
+	t.Cleanup(func() { newProviderClient = origNew })
+
+	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
+	bus := events.NewBus()
+	cfg := newTestConfigSnapshot("m1")
+	cfg.ModelsConfig = resolver
+	cfg.IdleTimeout = 100 * time.Millisecond // Case-2 idle spawn fires while main stalls
+	cfg.StreamDeadline = 5 * time.Second
+	cfg.MaxGenerationTime = 10 * time.Second
+	// RaceParallelOnIdle is already true in newTestConfigSnapshot.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	coord := newRaceCoordinatorWithEvents(ctx, cfg, newTestRequest(), rawBody, []string{"m1", "m2"}, bus, "idle-legacy-advance", false, engine, "conv-idle-legacy", false)
+
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatal("expected a winner (fallback:m2 serves while m1 stalls past the idle timeout)")
+	}
+	if winner.modelID != "m2" {
+		t.Errorf("winner model = %q, want m2 (models[1] — the LEGACY idle advance target)", winner.modelID)
+	}
+
+	// THE PIN: the idle triggerInfo carries no modelID, and the
+	// fallback row STILL targets models[1] — the legacy mapping, alive
+	// only on this path.
+	assertSpawnOrder(t, spawnOrderSnapshot(coord), []string{
+		"main:m1",
+		"second:m1",   // Case 2 spawns the same-model retry first…
+		"fallback:m2", // …and the fallback row — empty triggerInfo.modelID ⇒ legacy c.models[1]
+	})
 }
