@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
@@ -80,6 +81,18 @@ type Config struct {
 	RaceParallelOnIdle bool `json:"race_parallel_on_idle"`
 	RaceMaxParallel    int  `json:"race_max_parallel"`
 	RaceMaxBufferBytes int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
+
+	// Layered credential fallback (Fix 1): CredentialQuotaCooldown is
+	// the cooldown seeded on a credential that failed with a
+	// QUOTA-class error (HTTP 402 / code 2067 / "Token Plan usage
+	// limit" — providers.IsQuotaError). Quota exhaustion lasts
+	// hours/days, so the 60s rate-limit cooldown would put a dead
+	// credential straight back into the weighted pool (the cooldown
+	// trap); 15m keeps it out per-request while a topped-up credential
+	// recovers within the window. Rate-limit failures keep the
+	// 60s/Retry-After policy unchanged. 0 ⇒ package default
+	// (credentiallb.DefaultQuotaCooldown, applied at the engine seam).
+	CredentialQuotaCooldown Duration `json:"credential_quota_cooldown,omitempty"`
 
 	// Idle Termination
 	IdleTerminationEnabled bool     `json:"idle_termination_enabled"`
@@ -226,6 +239,13 @@ var Defaults = Config{
 	RaceMaxBufferBytes:     5242880,     // 5MB limit
 	ToolCallBufferDisabled: false,       // Buffering ENABLED by default
 	ToolCallBufferMaxSize:  1024 * 1024, // 1MB default
+
+	// Layered credential fallback: quota-class cooldown default 15m
+	// (credentiallb.DefaultQuotaCooldown — single source of truth).
+	// Clamp [1m, 24h] enforced in Validate. 0 in a stored config means
+	// "use the engine default" — same fallback-at-the-seam contract as
+	// ImageGenTimeout.
+	CredentialQuotaCooldown: Duration(credentiallb.DefaultQuotaCooldown),
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -294,6 +314,26 @@ func (c *Config) Validate() error {
 		}
 		if c.DecisionTimeout > Duration(60*time.Second) {
 			return errors.New("decision_timeout must be at most 60s when set")
+		}
+	}
+	// Layered credential fallback: quota-class cooldown clamp [1m, 24h]
+	// when set. 0 falls back to the engine default (15m) — a stored
+	// config predating the knob boots cleanly. The lower bound keeps a
+	// hand-edited 0-second cooldown from defeating the whole point
+	// (the credential would re-enter the pool per request); the upper
+	// bound keeps a typo'd value from semi-permanently benching a
+	// credential. Bounds are credentiallb.QuotaCooldownFloor (1m) and
+	// credentiallb.QuotaCooldownCeiling (24h) — single source of truth,
+	// also re-enforced at the engine seam SetQuotaCooldown. The message
+	// strings keep the human-readable "1m"/"24h" wording pinned by
+	// TestConfig_Validate (Go duration formatting would render the
+	// consts as "1m0s"/"24h0m0s").
+	if c.CredentialQuotaCooldown > 0 {
+		if c.CredentialQuotaCooldown < Duration(credentiallb.QuotaCooldownFloor) {
+			return errors.New("credential_quota_cooldown must be at least 1m when set")
+		}
+		if c.CredentialQuotaCooldown > Duration(credentiallb.QuotaCooldownCeiling) {
+			return errors.New("credential_quota_cooldown must be at most 24h when set")
 		}
 	}
 	if c.MaxStreamBufferSize < 0 {
@@ -461,6 +501,14 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("RACE_MAX_BUFFER_BYTES"); v != "" {
 		if r, err := strconv.ParseInt(v, 10, 64); err == nil && r >= 0 {
 			cfg.RaceMaxBufferBytes = int(r)
+		}
+	}
+	// Layered credential fallback: quota-class cooldown (duration form,
+	// e.g. "15m", "1h"). Positive parsed values only — an unparsable or
+	// non-positive value leaves the config/Defaults value in place.
+	if v := os.Getenv("CREDENTIAL_QUOTA_COOLDOWN"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.CredentialQuotaCooldown = Duration(d)
 		}
 	}
 	// Buffer storage configuration

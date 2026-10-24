@@ -319,6 +319,8 @@ export type EventType =
   | 'race_all_failed'
   | 'race_request_failed'
   | 'race_secondary_model_used'
+  // Model credential failover (multi-credential load balancing + layered credential fallback)
+  | 'model_credential_failover'
   // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
   | 'shadow_retry_won'
@@ -338,6 +340,10 @@ export interface EventData {
   // Fallback fields
   from_model?: string;
   to_model?: string;
+  // Error/failure reason. On model_credential_failover events (layered
+  // credential fallback) this carries the failure CLASS vocabulary:
+  // 'rate_limit' (429-style) | 'quota_exceeded' (402 / insufficient
+  // credit); on race_spawn cred_failover rows see `trigger` instead.
   reason?: string;
   // Loop detection fields
   request_id?: string;
@@ -383,7 +389,7 @@ export interface EventData {
   models?: string[];           // For race_started
   request_index?: number;      // For race_spawn
   type?: string;               // Request type: main, second, fallback
-  trigger?: string;            // Spawn trigger: idle_timeout, main_error
+  trigger?: string;            // Spawn trigger: 'main_error' | 'idle_timeout' | 'rate_limit' | 'quota_exceeded' (the last two on cred_failover rows)
   reason_class?: string;       // Classification token (race-error-reason-classification)
   reason_status?: number;      // Upstream HTTP status when attributable
   winner_index?: number;       // For race_winner_selected
@@ -392,6 +398,14 @@ export interface EventData {
   duration_ms?: number;        // Race duration in milliseconds
   buffer_bytes?: number;       // Winner's buffer size
   total_attempts?: number;     // For race_all_failed
+  // Model credential failover fields (layered credential fallback)
+  model_id?: string;           // The model whose credential pool rotated
+  from_credential_id?: string; // The credential that failed
+  to_credential_id?: string;   // The reselected credential
+  retry_after_ms?: number;     // Upstream Retry-After (0 when absent)
+  cooldown_ms?: number;        // Seeded cooldown for the class
+  attempt_index?: number;      // GLOBAL attempt count across the whole request (all models + credential rotations, 1-based) — not a per-model rotation index
+  credential_id?: string;      // For race_spawn cred_failover rows: the pre-resolved reselected credential (rate_limit AND quota_exceeded rows)
 }
 
 // Repair detail for tool repair events

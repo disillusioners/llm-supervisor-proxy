@@ -10,6 +10,26 @@ interface EventLogProps {
   containerRef: Ref<HTMLDivElement>;
 }
 
+// formatCooldown renders a millisecond cooldown readably (layered
+// credential fallback): 15000 → "15s", 900000 → "15m", 7200000 → "2h".
+// Sub-second values keep millisecond precision (test engines).
+function formatCooldown(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms >= 3600000 && ms % 3600000 === 0) return `${ms / 3600000}h`;
+  if (ms >= 60000 && ms % 60000 === 0) return `${ms / 60000}m`;
+  if (ms >= 1000 && ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
+}
+
+// SPAWN_TRIGGER_LABELS renders the cred_failover spawn triggers
+// readably (layered credential fallback): the backend's failure-class
+// vocabulary maps onto operator-friendly labels. Triggers without an
+// entry (main_error, idle_timeout) keep their raw token.
+const SPAWN_TRIGGER_LABELS: Record<string, string> = {
+  rate_limit: 'rate limit',
+  quota_exceeded: 'quota exceeded',
+};
+
 // Pre-computed maps for O(1) lookups instead of O(n) switch evaluation on every render
 const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   request_started: () => 'Processing new request...',
@@ -79,10 +99,22 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     // rides INSIDE the trigger paren (` (main_error · upstream_5xx
     // status=502)`) when the backend enrichment is present; without it
     // the line is byte-identical to the pre-enrichment shape.
-    const trigger = e.data?.trigger
-      ? ` (${e.data.trigger}${e.data.reason_class ? ` · ${e.data.reason_class}` : ''}${e.data.reason_status ? ` status=${e.data.reason_status}` : ''})`
+    //
+    // Layered credential fallback: cred_failover rows render the
+    // failure class READABLY (rate limit | quota exceeded) plus the
+    // reselected credential; every other row keeps the legacy raw
+    // trigger token (pinned by EventLog.test.tsx).
+    const d = e.data;
+    const isCredFailover = d?.type === 'cred_failover';
+    const triggerToken = d?.trigger;
+    const triggerLabel = isCredFailover && triggerToken
+      ? (SPAWN_TRIGGER_LABELS[triggerToken] || triggerToken)
+      : triggerToken;
+    const trigger = triggerLabel
+      ? ` (${triggerLabel}${d?.reason_class ? ` · ${d.reason_class}` : ''}${d?.reason_status ? ` status=${d.reason_status}` : ''})`
       : '';
-    return `Spawned ${e.data?.type || '?'} request #${e.data?.request_index ?? '?'}: ${e.data?.model || '?'}${trigger}`;
+    const credential = isCredFailover && d?.credential_id ? ` → ${d.credential_id}` : '';
+    return `Spawned ${d?.type || '?'} request #${d?.request_index ?? '?'}: ${d?.model || '?'}${trigger}${credential}`;
   },
   race_request_failed: (e) => {
     const reason = e.data?.reason_class
@@ -98,6 +130,21 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   },
   race_all_failed: (e) => `All ${e.data?.total_attempts || '?'} race requests failed after ${e.data?.duration_ms || '?'}ms`,
   race_secondary_model_used: (e) => `Switched to secondary upstream model: ${e.data?.secondary_model || '?'}`,
+  model_credential_failover: (e) => {
+    // Layered credential fallback — the failure CLASS is rendered
+    // readably: "rate limit" (429-style, 60s/Retry-After cooldown) vs
+    // "quota exceeded" (402 / insufficient credit, long cooldown).
+    // Same label map as the cred_failover spawn triggers — the reason
+    // field carries the same backend class vocabulary.
+    const d = e.data;
+    if (!d) return 'Credential failover';
+    // Known class token → friendly label; unknown token → raw reason;
+    // absent → 'failure'. (The truthy guard narrows `d.reason` to
+    // string for the Record index and preserves the old || fallback.)
+    const cls = d.reason ? (SPAWN_TRIGGER_LABELS[d.reason] ?? d.reason) : 'failure';
+    const cooldown = d.cooldown_ms ? ` (cooldown ${formatCooldown(d.cooldown_ms)})` : '';
+    return `Credential failover [${cls}]: ${d.model_id || '?'} ${d.from_credential_id || '?'} → ${d.to_credential_id || '?'}${cooldown}`;
+  },
   tool_repair: (e) => {
     const d = e.data;
     const repaired = d?.repaired ?? 0;
@@ -154,6 +201,7 @@ const EVENT_COLORS: Record<EventType, string> = {
   race_all_failed: 'text-red-400',
   race_request_failed: 'text-red-400',
   race_secondary_model_used: 'text-purple-400',
+  model_credential_failover: 'text-amber-300',
   tool_repair: 'text-amber-400',
   ultimate_model_retry_exhausted: 'text-red-400',
   internal_error: 'text-red-400',
@@ -200,6 +248,7 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   race_all_failed: 'RACE_ALL_FAILED',
   race_request_failed: 'RACE_REQUEST_FAILED',
   race_secondary_model_used: 'SECONDARY_MODEL_USED',
+  model_credential_failover: 'CRED_FAILOVER',
   tool_repair: 'TOOL_REPAIR',
   ultimate_model_retry_exhausted: 'ULTIMATE_ATTEMPTS_EXHAUSTED',
   internal_error: 'INTERNAL_ERROR',

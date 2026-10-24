@@ -247,3 +247,123 @@ func IsRateLimitError(err error) bool {
 	}
 	return false
 }
+
+// quotaTypeVocabulary / quotaCodeVocabulary / quotaMessageVocabulary are
+// the quota-class (credit/plan exhaustion) vocabularies consumed by
+// IsQuotaError. Split by FIELD so each field's precision can differ:
+// type/code are structured (low noise ⇒ substring-safe), the message is
+// free text (higher noise ⇒ bounded phrases only).
+//
+// Observed live vocabulary (job 8d852270): HTTP 402 / code 2067 /
+// "Token Plan usage limit" — the code arrives as a NUMBER on the wire
+// (unparseable into the string-typed ErrorCode field), but the message
+// text survives into ProviderError.Message in BOTH wire shapes:
+// OpenAI-shaped bodies decode Message directly; non-OpenAI-shaped bodies
+// fall back to msg = raw body (openai.go:handleError), which still
+// contains the message text. The message vocabulary is therefore the
+// workhorse for numeric-code upstreams.
+var (
+	quotaTypeVocabulary = []string{
+		"quota",
+		"insufficient_credit",
+		"insufficient_quota",
+		"insufficient_balance",
+		"payment_required",
+		"credit_exhausted",
+		"billing",
+	}
+	quotaCodeVocabulary    = quotaTypeVocabulary // structured fields share the set
+	quotaMessageVocabulary = []string{
+		"insufficient credit",
+		"insufficient credits",
+		"insufficient balance",
+		"insufficient quota",
+		"quota exceeded",
+		"quota exhausted",
+		"exceeded your quota",
+		"credit exhausted",
+		"credits exhausted",
+		"out of credit",
+		// W1 (pre-merge review): the former bare "usage limit" phrase was
+		// removed — a PLAIN rate-limit body uses it for per-minute
+		// throttling ("you have reached your usage limit for this
+		// minute"), which must classify rate_limit (60s/Retry-After),
+		// NOT quota. The specific observed live shape replaces it.
+		"token plan usage limit",
+		// "token plan" stays its own status-agnostic phrase BY DESIGN: a
+		// token-plan body means the plan is exhausted at ANY status.
+		"token plan",
+		"payment required",
+	}
+)
+
+// containsAny reports whether the lowercased haystack contains any of the
+// (already-lowercase) vocabulary entries.
+func containsAny(lowered string, vocabulary []string) bool {
+	for _, v := range vocabulary {
+		if strings.Contains(lowered, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsQuotaError (layered credential fallback — Fix 1) classifies an error
+// as a QUOTA-class condition: the credential's credit / plan / balance is
+// exhausted. This is the second credential-failover class, alongside
+// IsRateLimitError (429-style "slow down").
+//
+// True when the error wraps a *ProviderError whose:
+//   - HTTP status is 402 (Payment Required), OR
+//   - error-body type contains the quota vocabulary substring
+//     (case-insensitive), OR
+//   - error-body code matches the quota vocabulary substring
+//     (case-insensitive), OR
+//   - error message carries one of the bounded quota phrases
+//     (case-insensitive) — "insufficient credit", "insufficient
+//     balance", "quota exceeded", "token plan usage limit", "token
+//     plan", "payment required", …
+//
+// Why a message vocabulary at all: quota rejections arrive in
+// non-OpenAI body shapes from gateway upstreams, and the quota code is
+// often numeric (code 2067) — invisible to the string-typed ErrorCode
+// field. The message (or the raw-body fallback that lands in Message)
+// is the only carrier that survives every shape (see
+// quotaMessageVocabulary above).
+//
+// Precedence note for callers: a 429 whose BODY carries quota
+// vocabulary classifies as QUOTA, not rate-limit — the account is out
+// of credit, and the recovery is a TOP-UP (hours/days), not a 60s
+// pause. This quota-FIRST precedence is INTENTIONAL: callers resolve
+// the overlap by consulting this classifier BEFORE IsRateLimitError
+// (pkg/proxy/classifyCredFailure does exactly that — pinned at
+// interface_quota_test.go). A PLAIN 429 — one whose body carries no
+// quota vocabulary — still classifies as rate-limit and keeps the
+// 60s/Retry-After policy.
+//
+// Returns false for nil errors and for non-*ProviderError errors.
+// 401/auth-class errors carry none of the vocabulary — the classifier
+// is silent on them (auth stays terminal; eligibility is never widened
+// to it). Safe to call from any goroutine.
+func IsQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// errors.As (not a direct type assertion): callers up the stack may
+	// wrap the *ProviderError — the classifier must see through the
+	// wrapping (same discipline as IsRateLimitError above).
+	var pe *ProviderError
+	if !errors.As(err, &pe) || pe == nil {
+		return false
+	}
+	if pe.StatusCode == 402 {
+		return true
+	}
+	if containsAny(strings.ToLower(pe.ErrorType), quotaTypeVocabulary) {
+		return true
+	}
+	if containsAny(strings.ToLower(pe.ErrorCode), quotaCodeVocabulary) {
+		return true
+	}
+	return containsAny(strings.ToLower(pe.Message), quotaMessageVocabulary)
+}
