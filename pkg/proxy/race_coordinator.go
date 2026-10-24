@@ -203,14 +203,14 @@ type raceCoordinator struct {
 	// stateless about retries; the coordinator is the single owner of
 	// the per-race budget and is constructed fresh per race). Mutated
 	// only from manage() under c.mu.
-	//
+	triedCredIDs map[string]bool // mutated only from manage() under c.mu — race-free by construction
+
 	// failoverAttempts is the GLOBAL rotation count (kept for the
 	// model_credential_failover attempt_index payload); the rotation
 	// BUDGET itself is per-model since the layered-credential-fallback
 	// fix (failoverAttemptsByModel below) — the global counter cannot
 	// express "m2 still has a rotation left after m1 spent its two".
-	triedCredIDs     map[string]bool // mutated only from manage() under c.mu — race-free by construction
-	failoverAttempts int             // mutated only from manage() under c.mu — race-free by construction
+	failoverAttempts int // mutated only from manage() under c.mu — race-free by construction
 
 	// Layered credential fallback (Fix 2) — PER-MODEL credential
 	// rotation state. The chain advances model-by-model
@@ -819,7 +819,10 @@ func (c *raceCoordinator) manage() {
 			// (modelTypeCredFailover rows are exempt). Terminal fires when every
 			// request has failed AND no credFailover row was just spawned (that
 			// row is still running); after credential exhaustion the flow falls
-			// through to the model-fallback spawn above when c.models[1] exists.
+			// through to the model-fallback spawn above when len(c.models) > 1
+			// — the spawn advances to the next model in the chain (see
+			// fallbackAdvanceTargetLocked), with the legacy c.models[1] kept
+			// as the defensive fallback when no advance target exists.
 			if c.winner == nil && !spawnedCredFailover && modelAttempts >= len(c.models) {
 				allFailed := true
 				for _, r := range c.requests {
