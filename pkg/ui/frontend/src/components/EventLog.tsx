@@ -134,11 +134,14 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     // Layered credential fallback — the failure CLASS is rendered
     // readably: "rate limit" (429-style, 60s/Retry-After cooldown) vs
     // "quota exceeded" (402 / insufficient credit, long cooldown).
+    // Same label map as the cred_failover spawn triggers — the reason
+    // field carries the same backend class vocabulary.
     const d = e.data;
     if (!d) return 'Credential failover';
-    const cls = d.reason === 'quota_exceeded'
-      ? 'quota exceeded'
-      : d.reason === 'rate_limit' ? 'rate limit' : (d.reason || 'failure');
+    // Known class token → friendly label; unknown token → raw reason;
+    // absent → 'failure'. (The truthy guard narrows `d.reason` to
+    // string for the Record index and preserves the old || fallback.)
+    const cls = d.reason ? (SPAWN_TRIGGER_LABELS[d.reason] ?? d.reason) : 'failure';
     const cooldown = d.cooldown_ms ? ` (cooldown ${formatCooldown(d.cooldown_ms)})` : '';
     return `Credential failover [${cls}]: ${d.model_id || '?'} ${d.from_credential_id || '?'} → ${d.to_credential_id || '?'}${cooldown}`;
   },

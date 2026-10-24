@@ -223,8 +223,11 @@ func TestCoordinator_QuotaFailover_SameModelBeforeModelSwitch(t *testing.T) {
 	//   model_credential_failover.reason == "quota_exceeded"
 	//   cooldown_ms == the 15m DEFAULT quota cooldown (no Retry-After on 402).
 	for _, evt := range drainEvents(bus, "race_spawn") {
-		data, _ := evt.Data.(map[string]interface{})
-		if data == nil || asString(data["type"]) != "cred_failover" {
+		data, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("race_spawn payload not a map: %T", evt.Data)
+		}
+		if asString(data["type"]) != "cred_failover" {
 			continue
 		}
 		if got := asString(data["trigger"]); got != "quota_exceeded" {
@@ -235,7 +238,10 @@ func TestCoordinator_QuotaFailover_SameModelBeforeModelSwitch(t *testing.T) {
 	if len(failovers) != 1 {
 		t.Fatalf("model_credential_failover events = %d, want 1", len(failovers))
 	}
-	data, _ := failovers[0].Data.(map[string]interface{})
+	data, ok := failovers[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("model_credential_failover payload not a map: %T", failovers[0].Data)
+	}
 	if got := asString(data["reason"]); got != "quota_exceeded" {
 		t.Errorf("failover reason = %q, want quota_exceeded", got)
 	}
@@ -314,7 +320,10 @@ func TestCoordinator_LayeredChain_ThreeModels_ReachesThirdModel(t *testing.T) {
 	// All failover events carry the quota vocabulary (the whole chain
 	// is quota-driven).
 	for i, evt := range drainEvents(bus, credentiallb.EventCredentialFailover) {
-		data, _ := evt.Data.(map[string]interface{})
+		data, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("failover[%d] payload not a map: %T", i, evt.Data)
+		}
 		if got := asString(data["reason"]); got != "quota_exceeded" {
 			t.Errorf("failover[%d] reason = %q, want quota_exceeded", i, got)
 		}
@@ -507,7 +516,10 @@ func TestInternalHandler_QuotaFailover_SingleModel(t *testing.T) {
 	if len(failovers) != 1 {
 		t.Fatalf("failover events = %d, want 1", len(failovers))
 	}
-	data, _ := failovers[0].Data.(map[string]interface{})
+	data, ok := failovers[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("failover payload not a map: %T", failovers[0].Data)
+	}
 	if got := asString(data["reason"]); got != "quota_exceeded" {
 		t.Errorf("failover reason = %q, want quota_exceeded", got)
 	}
@@ -537,7 +549,8 @@ func TestInternalHandler_QuotaFailover_ConfiguredCooldown(t *testing.T) {
 	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
 
 	ih := NewInternalHandler(mc, resolver)
-	ih.SetCredentialFailover(engine, events.NewBus())
+	bus := events.NewBus()
+	ih.SetCredentialFailover(engine, bus)
 
 	w := httptest.NewRecorder()
 	if err := ih.HandleRequest(context.Background(), map[string]interface{}{
@@ -548,6 +561,21 @@ func TestInternalHandler_QuotaFailover_ConfiguredCooldown(t *testing.T) {
 	}
 	if got := upstream.callCount(); got != 2 {
 		t.Errorf("upstream calls = %d, want 2", got)
+	}
+
+	// M3 — the doc's claim, now actually pinned: the failover event on
+	// the bus carries cooldown_ms == the CONFIGURED 2h quota cooldown
+	// (not the 15m package default).
+	failovers := drainEvents(bus, credentiallb.EventCredentialFailover)
+	if len(failovers) != 1 {
+		t.Fatalf("model_credential_failover events = %d, want 1", len(failovers))
+	}
+	data, ok := failovers[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("failover payload not a map: %T", failovers[0].Data)
+	}
+	if got, want := asInt64(data["cooldown_ms"]), (2 * time.Hour).Milliseconds(); got != want {
+		t.Errorf("failover cooldown_ms = %d, want %d (SetQuotaCooldown(2h) must drive the event)", got, want)
 	}
 }
 
@@ -635,8 +663,11 @@ func TestCoordinator_QuotaFailover_SpawnRowCarriesCredentialID(t *testing.T) {
 	m1Pool := map[string]bool{"cred-m1-A": true, "cred-m1-B": true}
 	spawnRows := 0
 	for _, evt := range drainEvents(bus, "race_spawn") {
-		data, _ := evt.Data.(map[string]interface{})
-		if data == nil || asString(data["type"]) != "cred_failover" {
+		data, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("race_spawn payload not a map: %T", evt.Data)
+		}
+		if asString(data["type"]) != "cred_failover" {
 			continue
 		}
 		spawnRows++
@@ -705,5 +736,90 @@ func TestClassifyCredFailure_PlainUsageLimit429IsRateLimit(t *testing.T) {
 	// 402 alone (no quota vocabulary) ⇒ quota (status path unchanged).
 	if got := classifyCredFailure(&providers.ProviderError{StatusCode: 402}); got != credFailoverQuota {
 		t.Errorf("classifyCredFailure(bare 402) = %v, want quota (status path unchanged)", got)
+	}
+}
+
+// Final review A — the empty advance target is genuinely TERMINAL.
+//
+// Deterministic construction of the plan-nil-while-eligible corner (the
+// only arrangement where the gate is OPEN at a chain-end failure):
+//
+//	chain [m1(1 cred), m2(1 cred), m3(2 creds A,B)], everything 402s.
+//	m3/cred-B is PRE-COOLED with a 24h Retry-After, so when m3/cred-A
+//	fails and the plan excludes A (seeded 15m), ALL of m3 is cooling
+//	and the soonest-expiry pick is A itself — reselected == fromCred
+//	⇒ plan nil — while m3's rotation budget (0 of 1 spent) keeps the
+//	Case-1 gate OPEN. Pre-fix, the legacy empty ⇒ c.models[1] mapping
+//	then re-spawned the already-exhausted m2 (+2 upstream calls, a
+//	wrong-model retry in the C1 family). Post-fix the race resolves as
+//	failed with NO additional spawn.
+func TestCoordinator_ChainEnd_WithNilCredPlan_IsTerminal(t *testing.T) {
+	mock := &mockModelsConfig{}
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 42, 60*time.Second)
+	t.Cleanup(engine.Stop)
+
+	type chainModel struct {
+		id        string
+		credCount int
+	}
+	chain := []chainModel{{id: "m1", credCount: 1}, {id: "m2", credCount: 1}, {id: "m3", credCount: 2}}
+	idsByModel := make(map[string][]string, len(chain))
+	modelIDs := make([]string, 0, len(chain))
+	for _, m := range chain {
+		ids := make([]string, 0, m.credCount)
+		for i := 0; i < m.credCount; i++ {
+			id := "cred-" + m.id + "-" + string(rune('A'+i))
+			ids = append(ids, id)
+			mock.AddCredential(models.CredentialConfig{
+				ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id,
+			})
+		}
+		idsByModel[m.id] = ids
+		modelIDs = append(modelIDs, m.id)
+		mock.AddModel(models.ModelConfig{
+			ID: m.id, Name: m.id, Enabled: true, Internal: true,
+			InternalModel: "internal-" + m.id,
+			Credentials:   models.TestRefs(ids...),
+		})
+		engine.RebindFromStore(m.id, models.TestRefs(idsByModel[m.id]...))
+	}
+
+	// Pre-cool m3/cred-B with a 24h quota cooldown (Retry-After-driven,
+	// clamped to the ceiling): A (15m) then expires SOONER than B, so
+	// the SoonestExpiry pick on A's failure is A == fromCred ⇒ nil plan.
+	if _, mode := engine.ExcludeAndReselectForClass("m3", "conv-pre-cool", "cred-m3-B", credentiallb.FailureClassQuota, 24*time.Hour); mode != credentiallb.ReselectHealthy {
+		t.Fatalf("pre-cool setup: mode = %v, want ReselectHealthy (cred-A must remain healthy)", mode)
+	}
+
+	provider := &quotaScriptedProvider{failN: 99} // every call quota-fails
+	origNew := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		return provider, nil
+	}
+	t.Cleanup(func() { newProviderClient = origNew })
+
+	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
+	bus := events.NewBus()
+	cfg := newTestConfigSnapshot(modelIDs[0])
+	cfg.ModelsConfig = resolver
+	cfg.StreamDeadline = 5 * time.Second
+	cfg.MaxGenerationTime = 10 * time.Second
+
+	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, modelIDs, bus, "terminal-chain-end", false, engine, "conv-terminal-end", false)
+
+	coord.Start()
+	if winner := coord.WaitForWinner(); winner != nil {
+		t.Fatalf("expected failed resolution (chain end is terminal), got winner on %s", winner.modelID)
+	}
+
+	assertSpawnOrder(t, spawnOrderSnapshot(coord), []string{
+		"main:m1",
+		"fallback:m2", // advance target exists
+		"fallback:m3", // advance target exists
+		// NO fallback:m2 re-entry — chain end + nil plan is terminal.
+	})
+	if got := provider.callCount(); got != 3 {
+		t.Errorf("upstream calls = %d, want 3 (no re-entry of models[1] after the chain end)", got)
 	}
 }

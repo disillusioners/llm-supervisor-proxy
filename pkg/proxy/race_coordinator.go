@@ -144,9 +144,11 @@ type spawnTriggerInfo struct {
 	// made spawn()'s modelTypeFallback arm a SECOND reader of the
 	// field: the Case-1 classification site rides the ADVANCE TARGET
 	// (models[i+1]) on it so the chain advances past models[1].
-	// Empty modelID on either reader path keeps the legacy defensive
-	// fallback (credFailover → c.models[0], modelTypeFallback →
-	// c.models[1]).
+	// Final review A: error-path fallback rows ALWAYS carry the
+	// advance target now — chain end schedules NO spawn (terminal).
+	// Empty modelID reaches the modelTypeFallback arm only from the
+	// idle-timeout path, which keeps the legacy defensive fallback
+	// (credFailover → c.models[0], modelTypeFallback → c.models[1]).
 	modelID string
 
 	// reason (race-error-reason-classification) is the classified,
@@ -402,8 +404,12 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		// Case-1 classification site (fallbackAdvanceTargetLocked) and
 		// rides triggerInfo.modelID — the same mechanism as the C1 fix
 		// for credFailover rows (spawn never re-derives the model).
-		// Empty (idle-timeout spawns, legacy callers) ⇒ c.models[1],
-		// the pre-Fix-2 behavior, preserved verbatim.
+		// Final review A: error-path rows ALWAYS carry the advance
+		// target — the Case-1 dispatch skips the spawn entirely when
+		// none exists (chain end ⇒ terminal, no re-spawn). The legacy
+		// empty ⇒ c.models[1] mapping below now serves only the
+		// idle-timeout path, whose triggerInfo legitimately carries no
+		// modelID (pre-Fix-2 behavior preserved verbatim there).
 		if triggerInfo.modelID != "" {
 			modelID = triggerInfo.modelID
 		} else {
@@ -731,20 +737,30 @@ func (c *raceCoordinator) manage() {
 							// (which can embed a whole upstream error body
 							// on the context-overflow path) stays out of
 							// the server log.
-							log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
-							shouldSpawn = true
-							triggerInfo = spawnTriggerInfo{
-								trigger:       triggerMainError,
-								failedRequest: latestReq.id,
-								reason:        failReason,
-								// Layered credential fallback (Fix 2) —
-								// the chain advances to the NEXT model
-								// after the failed one, so every model in
-								// the chain gets its Layer-1 credential
-								// rotation. Unset when the failed model is
-								// the last in the chain (⇒ terminal, no
-								// advance) or the model isn't in the chain.
-								modelID: c.fallbackAdvanceTargetLocked(latestReq.modelID),
+							// Layered credential fallback (Fix 2) — the
+							// chain advances to the NEXT model after the
+							// failed one, so every model in the chain gets
+							// its Layer-1 credential rotation.
+							// Final review A: hasAdvance distinguishes a
+							// real advance target from chain-end /
+							// not-in-chain. NO advance target ⇒ genuinely
+							// TERMINAL — no spawn is scheduled (the
+							// legacy empty ⇒ c.models[1] mapping would
+							// re-spawn an already-exhausted model, a
+							// wrong-model retry in the C1 family); the
+							// race resolves as failed for this path.
+							advanceTarget, hasAdvance := c.fallbackAdvanceTargetLocked(latestReq.modelID)
+							if hasAdvance {
+								log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
+								shouldSpawn = true
+								triggerInfo = spawnTriggerInfo{
+									trigger:       triggerMainError,
+									failedRequest: latestReq.id,
+									reason:        failReason,
+									modelID:       advanceTarget,
+								}
+							} else {
+								log.Printf("[RACE] Latest request %d failed: %s; no advance target — chain end, terminal", latestReq.id, failReason)
 							}
 						}
 					}
@@ -821,8 +837,11 @@ func (c *raceCoordinator) manage() {
 			// row is still running); after credential exhaustion the flow falls
 			// through to the model-fallback spawn above when len(c.models) > 1
 			// — the spawn advances to the next model in the chain (see
-			// fallbackAdvanceTargetLocked), with the legacy c.models[1] kept
-			// as the defensive fallback when no advance target exists.
+			// fallbackAdvanceTargetLocked). Final review A: an error-path
+			// tick with NO advance target (failed model is the chain's
+			// last) is TERMINAL — no spawn is scheduled and the
+			// all-failed resolution below fires; the legacy c.models[1]
+			// mapping survives only on the idle-timeout path.
 			if c.winner == nil && !spawnedCredFailover && modelAttempts >= len(c.models) {
 				allFailed := true
 				for _, r := range c.requests {
@@ -1689,28 +1708,32 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 // fallbackAdvanceTargetLocked (layered credential fallback — Fix 2)
 // returns the NEXT model in the chain after failedModelID — the model a
 // modelTypeFallback row must target once failedModelID's Layer-1
-// credential rotation is exhausted. Empty string ⇒ no advance target
-// (the failed model is the chain's last, or isn't in the chain) — the
-// spawn arm then keeps the legacy c.models[1] defensive fallback.
+// credential rotation is exhausted. The bool reports whether an advance
+// target exists at all: false ⇒ the failed model is the chain's LAST
+// (or isn't in the chain) and the error path is genuinely TERMINAL —
+// the Case-1 site schedules no spawn (final review A; the legacy
+// empty ⇒ c.models[1] mapping would re-spawn an already-exhausted
+// model). The legacy default survives ONLY on the idle-timeout path,
+// whose triggerInfo legitimately carries no modelID.
 //
 // Derived from the chain (index-of-failed + 1), not stored: the failed
 // attempt's own modelID is the single source of truth, so the order is
 // exactly the layered spec (models[0] → models[1] → models[2] → …)
 // with no drift between a tracked index and the requests actually
 // spawned. Runs under c.mu from the manage() loop.
-func (c *raceCoordinator) fallbackAdvanceTargetLocked(failedModelID string) string {
+func (c *raceCoordinator) fallbackAdvanceTargetLocked(failedModelID string) (target string, hasAdvance bool) {
 	if len(c.models) < 2 {
-		return ""
+		return "", false
 	}
 	for i, m := range c.models {
 		if m == failedModelID {
 			if i+1 < len(c.models) {
-				return c.models[i+1]
+				return c.models[i+1], true
 			}
-			return ""
+			return "", false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // credFailoverPlanLocked runs the full Round-3b/3c decision chain for

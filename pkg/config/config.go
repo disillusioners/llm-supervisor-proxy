@@ -322,8 +322,12 @@ func (c *Config) Validate() error {
 	// hand-edited 0-second cooldown from defeating the whole point
 	// (the credential would re-enter the pool per request); the upper
 	// bound keeps a typo'd value from semi-permanently benching a
-	// credential. Bounds come from credentiallb (single source of
-	// truth, also re-enforced at the engine seam SetQuotaCooldown).
+	// credential. Bounds are credentiallb.QuotaCooldownFloor (1m) and
+	// credentiallb.QuotaCooldownCeiling (24h) — single source of truth,
+	// also re-enforced at the engine seam SetQuotaCooldown. The message
+	// strings keep the human-readable "1m"/"24h" wording pinned by
+	// TestConfig_Validate (Go duration formatting would render the
+	// consts as "1m0s"/"24h0m0s").
 	if c.CredentialQuotaCooldown > 0 {
 		if c.CredentialQuotaCooldown < Duration(credentiallb.QuotaCooldownFloor) {
 			return errors.New("credential_quota_cooldown must be at least 1m when set")

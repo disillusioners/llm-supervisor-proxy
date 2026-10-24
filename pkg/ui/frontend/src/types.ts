@@ -340,6 +340,10 @@ export interface EventData {
   // Fallback fields
   from_model?: string;
   to_model?: string;
+  // Error/failure reason. On model_credential_failover events (layered
+  // credential fallback) this carries the failure CLASS vocabulary:
+  // 'rate_limit' (429-style) | 'quota_exceeded' (402 / insufficient
+  // credit); on race_spawn cred_failover rows see `trigger` instead.
   reason?: string;
   // Loop detection fields
   request_id?: string;
@@ -385,7 +389,7 @@ export interface EventData {
   models?: string[];           // For race_started
   request_index?: number;      // For race_spawn
   type?: string;               // Request type: main, second, fallback
-  trigger?: string;            // Spawn trigger: idle_timeout, main_error
+  trigger?: string;            // Spawn trigger: 'main_error' | 'idle_timeout' | 'rate_limit' | 'quota_exceeded' (the last two on cred_failover rows)
   reason_class?: string;       // Classification token (race-error-reason-classification)
   reason_status?: number;      // Upstream HTTP status when attributable
   winner_index?: number;       // For race_winner_selected
@@ -400,8 +404,8 @@ export interface EventData {
   to_credential_id?: string;   // The reselected credential
   retry_after_ms?: number;     // Upstream Retry-After (0 when absent)
   cooldown_ms?: number;        // Seeded cooldown for the class
-  attempt_index?: number;      // Rotation index (1-based)
-  credential_id?: string;      // For race_spawn cred_failover rows
+  attempt_index?: number;      // GLOBAL attempt count across the whole request (all models + credential rotations, 1-based) — not a per-model rotation index
+  credential_id?: string;      // For race_spawn cred_failover rows: the pre-resolved reselected credential (rate_limit AND quota_exceeded rows)
 }
 
 // Repair detail for tool repair events

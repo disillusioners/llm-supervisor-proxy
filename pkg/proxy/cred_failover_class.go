@@ -104,25 +104,26 @@ func classifyCredFailure(err error) credFailoverClass {
 }
 
 // effectiveCooldown returns the cooldown duration the engine will seed
-// for the class + upstream Retry-After pair:
+// for the class + upstream Retry-After pair. It is a thin delegate to
+// the nil-safe Engine.CooldownFor (pkg/credentiallb/failure_class.go —
+// the single source of the per-class policy, pinned by
+// TestCooldownFor_*):
 //
 //	rate_limit  — Retry-After when > 0, else the engine's default (60s).
 //	quota       — the configured quota cooldown, raised to Retry-After
 //	              when the upstream asked for LONGER (the configured
 //	              value is the floor; an explicit upstream hint is
-//	              honored upward only).
+//	              honored upward only) — with the hint CLAMPED to the
+//	              24h quota ceiling (credentiallb.QuotaCooldownCeiling),
+//	              so a hostile/typo'd "Retry-After: 172800" cannot bench
+//	              a credential past the documented [1m, 24h] window.
 //
-// A nil engine yields the package defaults (60s / DefaultQuotaCooldown)
-// so the event payload stays meaningful even without an engine wired.
+// Both production call sites wire a non-nil engine and bail on nil
+// BEFORE reaching this helper (internal_handler.go: "err == nil ||
+// h.credEngine == nil → return err"; race_coordinator.go:
+// credFailoverEligibleLocked → "c.engine == nil → false"), so the
+// delegation is unconditional — a nil engine still behaves sanely via
+// CooldownFor's own nil-safe package defaults.
 func effectiveCooldown(engine *credentiallb.Engine, class credFailoverClass, retryAfter time.Duration) time.Duration {
-	if engine == nil {
-		if retryAfter > 0 && class != credFailoverQuota {
-			return retryAfter
-		}
-		if class == credFailoverQuota {
-			return credentiallb.DefaultQuotaCooldown
-		}
-		return credentiallb.DefaultCooldown
-	}
 	return engine.CooldownFor(class.toEngineClass(), retryAfter)
 }

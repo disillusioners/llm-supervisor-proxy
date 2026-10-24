@@ -210,7 +210,8 @@ func TestExcludeAndReselectForClass_QuotaSeedsLongCooldown(t *testing.T) {
 		t.Errorf("quota exclusion seeded cooldown until %v — want ≈15m out (got %v remaining)", until, time.Until(until))
 	}
 
-	// Rate-limit exclusion under the SAME engine keeps the legacy
+	// Rate-limit exclusion (fresh engine — the quota configuration
+	// above must not leak into the rate-limit policy) keeps the legacy
 	// 60s/default policy.
 	e2 := NewEngine(time.Hour, time.Hour, 11, 60*time.Second)
 	t.Cleanup(e2.Stop)

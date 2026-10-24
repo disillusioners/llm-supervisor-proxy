@@ -141,6 +141,7 @@ func main() {
 	// env CREDENTIAL_QUOTA_COOLDOWN, 0 ⇒ engine default 15m). Both
 	// failover call sites (race coordinator + non-race hook) inherit
 	// the value through the engine — no second plumbing path.
+	// The knob is captured at BOOT — restart to apply.
 	if credLB != nil {
 		credLB.SetQuotaCooldown(configMgr.Get().CredentialQuotaCooldown.Duration())
 	}
