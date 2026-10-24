@@ -486,7 +486,11 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 	}
 	// Phase 3 / Task 18 — surface the reselected credential on
 	// credFailover spawns (operator observability via the SSE feed).
-	if triggerInfo.trigger == triggerRateLimit && triggerInfo.credentialID != "" {
+	// Layered credential fallback Fix 1: the quota class spawns the
+	// same modelTypeCredFailover rows, so quota_exceeded spawns carry
+	// the identical credential_id + failed_request_index payload shape
+	// as rate_limit spawns.
+	if (triggerInfo.trigger == triggerRateLimit || triggerInfo.trigger == triggerQuota) && triggerInfo.credentialID != "" {
 		eventData["credential_id"] = triggerInfo.credentialID
 		eventData["failed_request_index"] = triggerInfo.failedRequest
 	}

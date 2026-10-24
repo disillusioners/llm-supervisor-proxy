@@ -604,3 +604,62 @@ func (u *alwaysQuotaUpstream) callCount() int {
 	defer u.mu.Unlock()
 	return u.calls
 }
+
+// (e) Layered fallback review fix — observability pin: quota-class
+// credFailover spawn rows must carry credential_id +
+// failed_request_index in exactly the same payload shape as
+// rate_limit rows (the emit gate covers BOTH classes). Fails against
+// the unfixed gate: credential_id is omitted entirely, so the
+// non-empty assertions below fire.
+//
+// Chain: m1 (2 creds) → m2 (2 creds); the provider quota-fails only
+// the FIRST call, so the flow is main(m1/cred-A) → 402 →
+// cred_failover(m1/cred-B) → 200 (single rotation, winner on m1).
+func TestCoordinator_QuotaFailover_SpawnRowCarriesCredentialID(t *testing.T) {
+	coord, _, bus, _ := newLayeredChainEnv(
+		t,
+		[]layeredChainModel{{id: "m1", credCount: 2}, {id: "m2", credCount: 2}},
+		1, // only the first call quota-fails
+		"conv-quota-spawn-pin",
+	)
+
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatal("expected a winner (m1's second credential serves)")
+	}
+	if winner.modelID != "m1" {
+		t.Errorf("winner model = %q, want m1 (a single rotation suffices with failN=1)", winner.modelID)
+	}
+
+	m1Pool := map[string]bool{"cred-m1-A": true, "cred-m1-B": true}
+	spawnRows := 0
+	for _, evt := range drainEvents(bus, "race_spawn") {
+		data, _ := evt.Data.(map[string]interface{})
+		if data == nil || asString(data["type"]) != "cred_failover" {
+			continue
+		}
+		spawnRows++
+		if got := asString(data["trigger"]); got != "quota_exceeded" {
+			t.Errorf("cred_failover race_spawn trigger = %q, want quota_exceeded", got)
+		}
+		cid := asString(data["credential_id"])
+		if cid == "" {
+			t.Errorf("quota_exceeded cred_failover race_spawn missing credential_id — emit gate not widened to the quota class")
+			continue
+		}
+		if !m1Pool[cid] {
+			t.Errorf("cred_failover race_spawn credential_id = %q — not in m1's pool (wrong-account billing shape)", cid)
+		}
+		rawIdx, present := data["failed_request_index"]
+		if !present {
+			t.Fatalf("quota_exceeded cred_failover race_spawn missing failed_request_index — emit gate not widened to the quota class")
+		}
+		if got := asInt64(rawIdx); got != 0 {
+			t.Errorf("cred_failover race_spawn failed_request_index = %d, want 0 (the failed main row)", got)
+		}
+	}
+	if spawnRows != 1 {
+		t.Fatalf("cred_failover race_spawn rows = %d, want 1", spawnRows)
+	}
+}

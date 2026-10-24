@@ -44,16 +44,36 @@ const (
 // Engine.SetQuotaCooldown.
 const DefaultQuotaCooldown = 15 * time.Minute
 
+// Quota-cooldown clamp bounds, mirroring the config-side Validate()
+// rules for credential_quota_cooldown ([1m, 24h] when set). The config
+// clamp only fires on the Save() path — a hand-edited config.json / DB
+// config_json row loads verbatim — so the engine seam re-enforces the
+// same bounds defensively. The floor matters in exactly the direction
+// the feature cares about: quota cooldowns must be LONG, not short.
+const (
+	quotaCooldownFloor   = time.Minute
+	quotaCooldownCeiling = 24 * time.Hour
+)
+
 // SetQuotaCooldown installs the engine's quota-class cooldown. Nil-safe.
 // Values <= 0 reset to DefaultQuotaCooldown (a mis-wired or hand-edited
 // config degrades to sane behavior — same discipline as NewEngine).
-// Safe for concurrent use.
+// Non-zero values are clamped to [quotaCooldownFloor,
+// quotaCooldownCeiling] so a verbatim hand-edited config value (the
+// Save()-only Validate() clamp never saw it) cannot seed a cooldown
+// below the documented 1m floor or above 24h. Safe for concurrent use.
 func (e *Engine) SetQuotaCooldown(d time.Duration) {
 	if e == nil {
 		return
 	}
 	if d <= 0 {
 		d = DefaultQuotaCooldown
+	}
+	if d < quotaCooldownFloor {
+		d = quotaCooldownFloor
+	}
+	if d > quotaCooldownCeiling {
+		d = quotaCooldownCeiling
 	}
 	e.mu.Lock()
 	e.quotaCooldown = d

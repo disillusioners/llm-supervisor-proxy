@@ -95,6 +95,64 @@ func TestSetQuotaCooldown_ResetSemantics(t *testing.T) {
 	}
 }
 
+// TestSetQuotaCooldown_ClampBounds pins the defensive engine-seam
+// clamp: the [1m, 24h] bounds are enforced by Validate() only on the
+// config Save() path, so a value hand-edited into config.json / the DB
+// config_json row (e.g. "30s") loads verbatim and would otherwise seed
+// a sub-floor quota cooldown — silently below the documented 1m floor,
+// in exactly the direction the feature cares about (quota cooldowns
+// must be LONG, not short). The seam re-enforces the bounds: below 1m
+// clamps UP to 1m, above 24h clamps DOWN to 24h, and 0/negative keep
+// the "0 ⇒ engine default" semantics (unclamped, resets to the
+// package default).
+func TestSetQuotaCooldown_ClampBounds(t *testing.T) {
+	e := newClassPolicyEngine(t)
+
+	// Sub-floor hand-edited value → clamped UP to the 1m floor.
+	e.SetQuotaCooldown(30 * time.Second)
+	if got := e.QuotaCooldown(); got != time.Minute {
+		t.Errorf("SetQuotaCooldown(30s) → QuotaCooldown = %v, want 1m (floor clamp)", got)
+	}
+	if got := e.CooldownFor(FailureClassQuota, 0); got < time.Minute {
+		t.Errorf("CooldownFor(quota) after 30s set = %v, want ≥ 1m (the configured value is the floor)", got)
+	}
+
+	// Sub-floor by a hair → still clamped (boundary is inclusive 1m).
+	e.SetQuotaCooldown(59 * time.Second)
+	if got := e.QuotaCooldown(); got != time.Minute {
+		t.Errorf("SetQuotaCooldown(59s) → QuotaCooldown = %v, want 1m (floor clamp)", got)
+	}
+
+	// The floor itself passes through unchanged.
+	e.SetQuotaCooldown(time.Minute)
+	if got := e.QuotaCooldown(); got != time.Minute {
+		t.Errorf("SetQuotaCooldown(1m) → QuotaCooldown = %v, want 1m (exact floor honored)", got)
+	}
+
+	// Over-ceiling hand-edited value → clamped DOWN to 24h.
+	e.SetQuotaCooldown(48 * time.Hour)
+	if got := e.QuotaCooldown(); got != 24*time.Hour {
+		t.Errorf("SetQuotaCooldown(48h) → QuotaCooldown = %v, want 24h (ceiling clamp)", got)
+	}
+
+	// In-bounds values still honored verbatim (clamp is defensive
+	// only — it must not perturb legitimate tuning).
+	e.SetQuotaCooldown(2 * time.Hour)
+	if got := e.QuotaCooldown(); got != 2*time.Hour {
+		t.Errorf("SetQuotaCooldown(2h) → QuotaCooldown = %v, want 2h (in-bounds verbatim)", got)
+	}
+
+	// "0 ⇒ engine default" semantics preserved (NOT clamped to 1m).
+	e.SetQuotaCooldown(0)
+	if got := e.QuotaCooldown(); got != DefaultQuotaCooldown {
+		t.Errorf("SetQuotaCooldown(0) → QuotaCooldown = %v, want %v (zero ⇒ engine default)", got, DefaultQuotaCooldown)
+	}
+	e.SetQuotaCooldown(-1 * time.Second)
+	if got := e.QuotaCooldown(); got != DefaultQuotaCooldown {
+		t.Errorf("SetQuotaCooldown(-1s) → QuotaCooldown = %v, want %v (negative ⇒ engine default)", got, DefaultQuotaCooldown)
+	}
+}
+
 // TestExcludeAndReselectForClass_QuotaSeedsLongCooldown pins the
 // cooldown TRAP fix end-to-end at the engine: a quota-class exclusion
 // seeds the QUOTA cooldown (not the 60s rate-limit default), so the
@@ -139,7 +197,13 @@ func TestExcludeAndReselectForClass_QuotaSeedsLongCooldown(t *testing.T) {
 func TestExcludeAndReselectForClass_QuotaCooldownExpiry(t *testing.T) {
 	e := NewEngine(time.Hour, time.Hour, 11, 50*time.Millisecond)
 	t.Cleanup(e.Stop)
-	e.SetQuotaCooldown(80 * time.Millisecond)
+	// Seed a sub-floor cooldown directly on the engine (same-package
+	// white-box write): the public seam clamps to the 1m floor since
+	// the defensive-clamp fix, and this test exercises expiry/recovery
+	// — not the seam — so it needs a fast window.
+	e.mu.Lock()
+	e.quotaCooldown = 80 * time.Millisecond
+	e.mu.Unlock()
 	ids := []string{"cred-A", "cred-B"}
 	e.RebindFromStore("m1", models.TestRefs(ids...))
 
