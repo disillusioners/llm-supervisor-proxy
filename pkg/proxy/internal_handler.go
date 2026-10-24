@@ -229,7 +229,8 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	// ── Task 22 hook guards ──
 	// (1) initial-call *ProviderError (pre-first-byte guard: ChatCompletion/
 	//     StreamChatCompletion errors return before any write to `w`);
-	// (2) rate-limit classification (Task 17 vocabulary);
+	// (2) eligible-class classification — rate-limit AND quota-class
+	//     (layered credential fallback Fix 1; 401/auth stays terminal);
 	// (3) multi-credential model (single-cred ⇒ ReselectNone anyway);
 	// (4) budget: this hook retries at most ONCE — structurally within
 	//     the R3-5 budget (≤ len(credentials)−1) given (3).
@@ -237,32 +238,39 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	if !errors.As(err, &providerErr) {
 		return err
 	}
-	if !providers.IsRateLimitError(providerErr) {
+	class := classifyCredFailure(providerErr)
+	if class == credFailoverNone {
 		return err
 	}
 	if len(h.config.Credentials) <= 1 {
 		return err
 	}
 
-	reselected, mode := h.credEngine.ExcludeAndReselect(
+	// Fix 1 — the cooldown policy is per CLASS: rate-limit keeps the
+	// 60s/Retry-After shape; quota seeds the engine's long configured
+	// quota cooldown (config credential_quota_cooldown, default 15m).
+	cooldown := effectiveCooldown(h.credEngine, class, providerErr.RetryAfter)
+
+	reselected, mode := h.credEngine.ExcludeAndReselectForClass(
 		h.config.ID,
 		conversationKey,
 		resolved.CredentialID,
+		class.toEngineClass(),
 		providerErr.RetryAfter,
 	)
 
 	switch mode {
 	case credentiallb.ReselectNone:
 		// C2 narrowing: no credential available. Propagate.
-		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s no reselectable credential (mode=%v); propagating failure", h.config.ID, mode)
+		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s no reselectable credential (mode=%v, class=%s); propagating failure", h.config.ID, mode, class)
 		return err
 	case credentiallb.ReselectSoonestExpiry:
 		// 0-of-N healthy: single attempt with the soonest-expiring
 		// credential, then propagate (F.4 single-attempt-then-fall-through).
-		log.Printf("[WARN] [LB-FAILOVER] /v1/messages internal: model=%s all credentials cooling; single attempt with soonest-expiring cred=%s", h.config.ID, reselected)
+		log.Printf("[WARN] [LB-FAILOVER] /v1/messages internal: model=%s all credentials cooling (%s); single attempt with soonest-expiring cred=%s", h.config.ID, class, reselected)
 	default:
 		// ReselectHealthy (incl. B2 no-op + empty-key fresh pick per C2).
-		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s rate-limited on cred=%s; failing over to cred=%s", h.config.ID, resolved.CredentialID, reselected)
+		log.Printf("[LB-FAILOVER] /v1/messages internal: model=%s %s on cred=%s; failing over to cred=%s (class=%s, cooldown=%s)", h.config.ID, class.readable(), resolved.CredentialID, reselected, class, cooldown)
 	}
 
 	if reselected == "" || reselected == resolved.CredentialID {
@@ -297,17 +305,15 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 
 	// Task 20 observability: model_credential_failover event
 	// ({model_id, from_credential_id, to_credential_id, reason,
-	// retry_after_ms, cooldown_ms, attempt_index}).
+	// retry_after_ms, cooldown_ms, attempt_index}). Fix 1: reason
+	// carries the FAILURE CLASS vocabulary and cooldown_ms the class's
+	// effective seed (not the flat 60s default).
 	if h.eventBus != nil {
-		cooldown := credentiallb.DefaultCooldown
-		if providerErr.RetryAfter > 0 {
-			cooldown = providerErr.RetryAfter
-		}
 		data := map[string]interface{}{
 			"model_id":           h.config.ID,
 			"from_credential_id": resolved.CredentialID,
 			"to_credential_id":   reselected,
-			"reason":             "rate_limit",
+			"reason":             class.String(),
 			"retry_after_ms":     providerErr.RetryAfter.Milliseconds(),
 			"cooldown_ms":        cooldown.Milliseconds(),
 			"attempt_index":      1,

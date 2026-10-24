@@ -85,6 +85,14 @@ type recordingUpstream struct {
 	// fail500 forces every call to return 500 with a non-rate-limit body.
 	fail500 bool
 
+	// failQuota forces every call to return HTTP 402 with the observed
+	// live quota vocabulary (code 2067 numeric + "Token Plan usage
+	// limit" — layered credential fallback Fix 1). The numeric code is
+	// deliberate: it is unparseable into the string-typed ErrorCode
+	// field, so the classifier must see the quota class via the 402
+	// status and the message text (the realistic wire shape).
+	failQuota bool
+
 	// delay is the pre-response sleep applied to every call (used by
 	// TestHandler_Case2Idle to push the main past the idle-timeout).
 	delay time.Duration
@@ -141,6 +149,7 @@ func (u *recordingUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	delay := callDelay
 	failAll := u.failAll
 	fail500 := u.fail500
+	failQuota := u.failQuota
 	failN := u.failFirstN
 	retryAfter := u.failAllRetryAfter
 	alreadyFailed := u.failedKeys[key]
@@ -155,6 +164,15 @@ func (u *recordingUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case failQuota:
+		// Observed live quota shape: HTTP 402 + NUMERIC code 2067 +
+		// "Token Plan usage limit". IsQuotaError classifies via the
+		// 402 status AND the message vocabulary (the numeric code
+		// cannot land in the string-typed ErrorCode field).
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":{"message":"Token Plan usage limit","code":2067}}`))
+		return
 	case fail500:
 		writeError(w, http.StatusInternalServerError, "internal server error", "server_error", "")
 		return
@@ -992,10 +1010,17 @@ done:
 // ─────────────────────────────────────────────────────────────────────────
 
 func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
-	// Multi-credential model (failover eligible) but upstream returns
-	// HTTP 500 with a non-rate-limit body. The classifier (Task 17)
-	// returns false → Case 1 has no plan → request falls through to
-	// model fallback. Single-model chain means model fallback = terminal.
+	// Layered credential fallback (Fix 1) REFRAMES this pin: the
+	// credential-failover gate keys on the ERROR CLASS
+	// (rate_limit | quota_exceeded) — NOT on "rate limit vs everything
+	// else". Quota-class failures DO spawn credFailover rows now
+	// (TestHandler_QuotaError_SpawnsCredFailover_SameModel); this test
+	// keeps the genuinely-INELIGIBLE negative case pinned: a multi-
+	// credential model (failover-eligible shape) whose upstream returns
+	// a plain HTTP 500 with a non-rate-limit, non-quota body. The
+	// classifier returns none → Case 1 has no plan → the request falls
+	// through to model fallback. Single-model chain means model
+	// fallback = terminal.
 	mock := &mockModelsConfig{}
 	for _, id := range []string{"cred-A", "cred-B"} {
 		mock.AddCredential(models.CredentialConfig{
@@ -1062,6 +1087,90 @@ func TestHandler_NonRateLimitError_StraightToModelFallback(t *testing.T) {
 	}
 	if n := countByType(allSpawns, "main"); n != 1 {
 		t.Errorf("modelTypeMain spawn rows = %d, want exactly 1", n)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fix 1 positive pin (companion to the 500 negative pin above): a
+// QUOTA-class failure on a failover-eligible model DOES spawn
+// credFailover rows now, with the quota vocabulary end-to-end and the
+// engine's quota-class cooldown seeded.
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestHandler_QuotaError_SpawnsCredFailover_SameModel(t *testing.T) {
+	// Single-model chain (no fallback): m1 with 2 credentials, upstream
+	// 402s everything in the observed live shape (numeric code 2067 +
+	// "Token Plan usage limit"). Expected: main → 1 credFailover row on
+	// m1 (per-model budget 2−1) → terminal.
+	mock := &mockModelsConfig{}
+	for _, id := range []string{"cred-A", "cred-B"} {
+		mock.AddCredential(models.CredentialConfig{
+			ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "https://example.invalid",
+		})
+	}
+	mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true,
+		InternalModel: "up-m1", Credentials: models.TestRefs("cred-A", "cred-B"),
+	})
+
+	upstream := newRecordingUpstream()
+	srv := httptest.NewServer(upstream)
+	defer srv.Close()
+	upstream.mu.Lock()
+	upstream.failQuota = true
+	upstream.mu.Unlock()
+	// Point BOTH credentials at the 402 upstream (mirrors the 500 pin —
+	// index assignment; range-copy would not mutate the mock).
+	mock.credentials[0].BaseURL = srv.URL
+	mock.credentials[1].BaseURL = srv.URL
+
+	env := buildHandlerStack(t, mock, []string{"m1"})
+
+	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test quota-402")
+
+	// Spawn history: exactly 1 credFailover row on m1, carrying the
+	// quota trigger vocabulary.
+	allSpawns := recordSpawns(drainAllEvents(env.bus))
+	if n := countByType(allSpawns, "cred_failover"); n != 1 {
+		t.Errorf("modelTypeCredFailover spawn rows = %d, want 1 (quota-class now eligible); full: %v", n, allSpawns)
+	}
+	for _, r := range allSpawns {
+		if r.modelType == "cred_failover" {
+			if r.modelID != "m1" {
+				t.Errorf("credFailover row modelID = %q, want m1 (same-model rotation BEFORE any model switch)", r.modelID)
+			}
+			if r.trigger != "quota_exceeded" {
+				t.Errorf("credFailover row trigger = %q, want quota_exceeded", r.trigger)
+			}
+		}
+	}
+
+	// Engine state: the quota exclusion SEEDED a cooldown (the trap fix
+	// — quota-exhausted credentials cool down instead of being re-picked
+	// immediately).
+	stats := env.credLB.Stats()
+	if st, ok := stats["m1"]; ok {
+		if st.Cooldowns != 1 {
+			t.Errorf("engine stats[m1].Cooldowns = %d, want 1 (quota exclusion seeds the quota cooldown)", st.Cooldowns)
+		}
+		if st.Failovers != 1 {
+			t.Errorf("engine stats[m1].Failovers = %d, want 1", st.Failovers)
+		}
+	}
+
+	// The failover event carries the quota class + the 15m default
+	// quota cooldown (the engine in this harness is built with the
+	// package defaults).
+	failoverEvents := drainEventsOfType(env.bus, credentiallb.EventCredentialFailover)
+	if len(failoverEvents) != 1 {
+		t.Fatalf("model_credential_failover events = %d, want 1", len(failoverEvents))
+	}
+	data, _ := failoverEvents[0].Data.(map[string]interface{})
+	if got := asString(data["reason"]); got != "quota_exceeded" {
+		t.Errorf("failover reason = %q, want quota_exceeded", got)
+	}
+	if got, want := asInt64(data["cooldown_ms"]), (15 * time.Minute).Milliseconds(); got != want {
+		t.Errorf("failover cooldown_ms = %d, want %d (credentiallb.DefaultQuotaCooldown)", got, want)
 	}
 }
 
@@ -1293,20 +1402,12 @@ func TestHandler_TwoModelFallback429_WrongModelRegression(t *testing.T) {
 	// m1 with modelID=m1 and credentials ∈ {A,B,C}), then m2 spawned
 	// as modelTypeFallback with modelID=m2.
 	//
-	// KNOWN WIP LIMITATION — global failoverAttempts budget:
-	//   The WIP's `failoverAttempts < len(modelCfg.Credentials)-1`
-	//   check (race_coordinator.go:credFailoverEligibleLocked) uses
-	//   the GLOBAL failoverAttempts counter. After m1's 2 credFailover
-	//   spawns the counter is 2; m2's modelCfg budget is 1; the
-	//   comparison is `2 < 1` = false. Case 1 therefore does NOT
-	//   fire for m2's fallback-row 429, and the request terminates.
-	//   The Round 3j C1 fix that the spec wants us to verify (= the
-	//   spawn() layer rides triggerInfo.modelID) is observed indirectly
-	//   via the spawn history of m1's credFailover rows (modelID=m1,
-	//   not c.models[0]=m1 anyway here, but the invariant is correct).
-	//   A future per-model budget implementation would unlock the
-	//   "Case 1 fires on m2" assertion the spec literally asks for;
-	//   this test documents the current behavior.
+	// Layered credential fallback (Fix 2) REMOVES the WIP's global-
+	// budget limitation documented here previously: the rotation
+	// budget is now PER MODEL (failoverAttemptsByModel), so after m1
+	// burns its 2 rotations, m2's fallback-row 429 gets its OWN
+	// len(m2.Creds)-1 = 1 rotation from m2's pool — the "Case 1 fires
+	// on m2" behavior the original spec asked for is asserted below.
 	mock := &mockModelsConfig{}
 
 	// Single shared upstream — every credential points here; the
@@ -1422,20 +1523,20 @@ func TestHandler_TwoModelFallback429_WrongModelRegression(t *testing.T) {
 	// (race_executor.go:185-198), which is covered indirectly by the
 	// terminal-error path below.
 
-	// Document the WIP's global-budget limitation: m2's fallback-row
-	// 429 does NOT trigger Case 1 (the global failoverAttempts counter
-	// is already 2 from m1's chain, exceeding m2's per-model budget of
-	// 1). This is observed behavior — the test asserts the OBSERVED
-	// value (zero credFailovers on m2) and documents the gap so the
-	// next phase can address it via a per-model budget implementation.
+	// Layered credential fallback (Fix 2) — the per-model rotation
+	// budget UNLOCKED m2's Layer-1: m2's fallback-row 429 now gets its
+	// own len(m2.Credentials)-1 = 1 credFailover row, with the
+	// credential drawn from m2's pool (pool-membership asserted in the
+	// loop above — the wrong-model guard). Exactly 1, not 2: m2's
+	// budget is its own, and the chain advances/terminates after it.
 	m2CredFailovers := 0
 	for _, r := range recs {
 		if r.modelType == "cred_failover" && r.modelID == "m2" {
 			m2CredFailovers++
 		}
 	}
-	if m2CredFailovers != 0 {
-		t.Logf("NOTE: spec wanted m2 credFailover rows >= 1 but WIP global-budget yielded %d — see test comment", m2CredFailovers)
+	if m2CredFailovers != 1 {
+		t.Errorf("m2 credFailover rows = %d, want 1 (per-model budget: len(m2.Creds)-1); full: %v", m2CredFailovers, recs)
 	}
 
 	// Engine.Stats().Failovers > 0 (m1's chain fired real rebinds).

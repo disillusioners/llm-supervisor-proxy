@@ -39,7 +39,12 @@ type Engine struct {
 	ttl             time.Duration // sliding IDLE TTL per binding (#10)
 	sweepInt        time.Duration // janitor cadence
 	defaultCooldown time.Duration // fallback cooldown when retryAfter <= 0 (Round 3)
-	rngSeed         int64
+	// quotaCooldown is the per-class cooldown for the quota
+	// (credit/plan-exhaustion) class — failure_class.go. Guarded by mu
+	// (SetQuotaCooldown may run while requests are in flight); zero means
+	// "unset" and reads as DefaultQuotaCooldown.
+	quotaCooldown time.Duration
+	rngSeed       int64
 
 	stopCh    chan struct{} // janitor shutdown
 	sweepDone chan struct{} // janitor exit ack
@@ -93,6 +98,7 @@ func NewEngine(ttl, sweepInterval time.Duration, rngSeed int64, defaultCooldown 
 		ttl:             ttl,
 		sweepInt:        sweepInterval,
 		defaultCooldown: defaultCooldown,
+		quotaCooldown:   DefaultQuotaCooldown,
 		rngSeed:         rngSeed,
 		stopCh:          make(chan struct{}),
 		sweepDone:       make(chan struct{}),
@@ -610,6 +616,44 @@ func (e *Engine) ExcludeAndReselect(
 	modelID, conversationKey, excludedCredID string,
 	retryAfter time.Duration,
 ) (credentialID string, mode ReselectMode) {
+	return e.ExcludeAndReselectForClass(
+		modelID, conversationKey, excludedCredID,
+		FailureClassRateLimit, retryAfter,
+	)
+}
+
+// ExcludeAndReselectForClass is the class-aware form of
+// ExcludeAndReselect (layered credential fallback — Fix 1): identical
+// semantics, but the seeded cooldown follows the failure CLASS's
+// policy (CooldownFor) instead of the flat rate-limit policy:
+//
+//	FailureClassRateLimit — retryAfter when > 0, else defaultCooldown.
+//	FailureClassQuota     — quotaCooldown (config-driven, default 15m),
+//	                        raised to retryAfter when the upstream asked
+//	                        for LONGER.
+//
+// ExcludeAndReselect delegates here with FailureClassRateLimit — the
+// rate-limit path is byte-identical to the pre-class behavior.
+func (e *Engine) ExcludeAndReselectForClass(
+	modelID, conversationKey, excludedCredID string,
+	class FailureClass,
+	retryAfter time.Duration,
+) (credentialID string, mode ReselectMode) {
+	if e == nil {
+		return "", ReselectNone
+	}
+	cooldown := e.CooldownFor(class, retryAfter)
+	return e.excludeAndReselectWithCooldown(modelID, conversationKey, excludedCredID, cooldown)
+}
+
+// excludeAndReselectWithCooldown is the shared implementation body: the
+// caller has already resolved the cooldown policy (CooldownFor); this
+// marks the excluded credential cooling with EXACTLY that duration and
+// rebinds per the B2/B3/C2 contract.
+func (e *Engine) excludeAndReselectWithCooldown(
+	modelID, conversationKey, excludedCredID string,
+	cooldown time.Duration,
+) (credentialID string, mode ReselectMode) {
 	if e == nil {
 		return "", ReselectNone
 	}
@@ -634,7 +678,9 @@ func (e *Engine) ExcludeAndReselect(
 		return "", ReselectNone
 	}
 
-	cooldown := retryAfter
+	// The caller-resolved cooldown (CooldownFor) is authoritative: the
+	// rate-limit path seeds retryAfter/defaultCooldown exactly as before;
+	// the quota path seeds the long per-class cooldown.
 	if cooldown <= 0 {
 		cooldown = e.defaultCooldown
 	}

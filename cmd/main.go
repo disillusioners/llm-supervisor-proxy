@@ -134,6 +134,17 @@ func main() {
 	// acceptance describes. main.go deliberately does NOT subscribe.
 	credLB := modelsMgr.Engine()
 
+	// Layered credential fallback (Fix 1) — push the configured
+	// quota-class cooldown into the engine. The engine owns the
+	// cooldown POLICY (it already owns the 60s rate-limit default); the
+	// config owns the VALUE (config.json credential_quota_cooldown /
+	// env CREDENTIAL_QUOTA_COOLDOWN, 0 ⇒ engine default 15m). Both
+	// failover call sites (race coordinator + non-race hook) inherit
+	// the value through the engine — no second plumbing path.
+	if credLB != nil {
+		credLB.SetQuotaCooldown(configMgr.Get().CredentialQuotaCooldown.Duration())
+	}
+
 	// Phase 3 — the interface-typed modelsConfig used by proxyConfig +
 	// uiServer points at the same concrete *ModelsManager.
 	//

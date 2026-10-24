@@ -93,7 +93,28 @@ const (
 	// fallback. triggerMainError continues to identify the plain
 	// Case-1 model-fallback trigger.
 	triggerRateLimit spawnTrigger = "rate_limit"
+
+	// triggerQuota (layered credential fallback — Fix 1) identifies the
+	// QUOTA-class Case-1 trigger: the same same-model reselect-and-retry
+	// shape as triggerRateLimit, driven by a quota/credit-exhaustion
+	// failure (HTTP 402 / code 2067 / "Token Plan usage limit") instead
+	// of a 429. The two classes share the mechanics and differ in the
+	// cooldown policy (60s vs the configured quota cooldown) and in this
+	// trigger vocabulary — the race_spawn payload and the FE EventLog
+	// distinguish the classes by this field.
+	triggerQuota spawnTrigger = "quota_exceeded"
 )
+
+// triggerForClass maps a credential-failover class onto its spawn
+// trigger vocabulary. The zero-value class maps to triggerRateLimit —
+// the legacy trigger — because every call site has already narrowed the
+// class to an eligible one before consulting this mapping.
+func triggerForClass(class credFailoverClass) spawnTrigger {
+	if class == credFailoverQuota {
+		return triggerQuota
+	}
+	return triggerRateLimit
+}
 
 // spawnTriggerInfo contains detailed information about why a spawn was triggered
 type spawnTriggerInfo struct {
@@ -116,13 +137,16 @@ type spawnTriggerInfo struct {
 	// modelID). It is populated at the Case-1 classification site from
 	// latestReq.modelID for the rate-limit path.
 	//
-	// The modelTypeFallback / modelTypeMain / modelTypeSecond spawn
-	// paths do NOT consume this field — they read c.models[0] /
-	// c.models[1] directly in spawn(). triggerMainError-driven
-	// modelTypeFallback rows therefore leave modelID empty (no need to
-	// populate); spawn()'s case modelTypeCredFailover is the sole
-	// reader, and if the field is empty for that path it defensively
-	// falls back to c.models[0] (single-model chain safety).
+	// The modelTypeMain / modelTypeSecond spawn paths do NOT consume
+	// this field — they read c.models[0] directly in spawn().
+	// triggerMainError-driven modelTypeFallback rows left modelID
+	// empty until the layered-credential-fallback fix (Fix 2), which
+	// made spawn()'s modelTypeFallback arm a SECOND reader of the
+	// field: the Case-1 classification site rides the ADVANCE TARGET
+	// (models[i+1]) on it so the chain advances past models[1].
+	// Empty modelID on either reader path keeps the legacy defensive
+	// fallback (credFailover → c.models[0], modelTypeFallback →
+	// c.models[1]).
 	modelID string
 
 	// reason (race-error-reason-classification) is the classified,
@@ -179,9 +203,46 @@ type raceCoordinator struct {
 	// stateless about retries; the coordinator is the single owner of
 	// the per-race budget and is constructed fresh per race). Mutated
 	// only from manage() under c.mu.
-	triedCredIDs                       map[string]bool // mutated only from manage() under c.mu — race-free by construction
-	failoverAttempts                   int             // mutated only from manage() under c.mu — race-free by construction
-	credFailoverSoonestExpiryAttempted bool            // mutated only from manage() under c.mu — race-free by construction
+	//
+	// failoverAttempts is the GLOBAL rotation count (kept for the
+	// model_credential_failover attempt_index payload); the rotation
+	// BUDGET itself is per-model since the layered-credential-fallback
+	// fix (failoverAttemptsByModel below) — the global counter cannot
+	// express "m2 still has a rotation left after m1 spent its two".
+	triedCredIDs     map[string]bool // mutated only from manage() under c.mu — race-free by construction
+	failoverAttempts int             // mutated only from manage() under c.mu — race-free by construction
+
+	// Layered credential fallback (Fix 2) — PER-MODEL credential
+	// rotation state. The chain advances model-by-model
+	// (models[0] → models[1] → …), and EACH model gets its own full
+	// Layer-1 treatment, so the rotation budget and the W3
+	// soonest-expiry single-shot must be tracked per model — the
+	// global failoverAttempts counter (kept for the event
+	// attempt_index) cannot express "m2 still has 1 rotation left
+	// after m1 spent its 2".
+	//
+	//   failoverAttemptsByModel[m]      — rotations spent against model
+	//                                     m's credential pool this
+	//                                     request (budget: len(m's
+	//                                     credentials)−1).
+	//   soonestExpiryAttemptedByModel[m] — the W3 single-shot flag for
+	//                                     m (once spent, m's next
+	//                                     eligible failure routes
+	//                                     straight to model advance).
+	//
+	// A NEW model entering the chain needs no explicit reset: both maps
+	// read missing keys as zero (no rotations spent / single-shot
+	// unspent) — "reset appropriately for the new model's credentials"
+	// is the zero-value read, not a state mutation.
+	//
+	// triedCredIDs stays GLOBAL (credential-ID-keyed): a credential
+	// already tried this request is the same account everywhere it
+	// appears, so not re-rolling it on a later model is correct, and
+	// the R3-5 no-double-try invariant stays one set.
+	//
+	// Mutated only from manage() under c.mu — race-free by construction.
+	failoverAttemptsByModel       map[string]int
+	soonestExpiryAttemptedByModel map[string]bool
 
 	// Event publishing
 	eventBus  *events.Bus
@@ -264,8 +325,12 @@ func newRaceCoordinatorWithEvents(
 		// context, NOT engine state). Initialized here so manage()'s
 		// first mutation never sees a nil map.
 		triedCredIDs: make(map[string]bool),
-		eventBus:     eventBus,
-		requestID:    requestID,
+		// Layered credential fallback (Fix 2) — per-model rotation
+		// state maps (see the field docs above).
+		failoverAttemptsByModel:       make(map[string]int),
+		soonestExpiryAttemptedByModel: make(map[string]bool),
+		eventBus:                      eventBus,
+		requestID:                     requestID,
 	}
 }
 
@@ -330,7 +395,20 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 			log.Printf("[RACE] Cannot spawn fallback: only %d model(s) available", len(c.models))
 			return
 		}
-		modelID = c.models[1]
+		// Layered credential fallback (Fix 2) — the fallback row targets
+		// the NEXT model in the chain (models[i+1] for the model that
+		// just exhausted its Layer-1 credential rotation), not the
+		// hard-coded c.models[1]. The advance target is computed at the
+		// Case-1 classification site (fallbackAdvanceTargetLocked) and
+		// rides triggerInfo.modelID — the same mechanism as the C1 fix
+		// for credFailover rows (spawn never re-derives the model).
+		// Empty (idle-timeout spawns, legacy callers) ⇒ c.models[1],
+		// the pre-Fix-2 behavior, preserved verbatim.
+		if triggerInfo.modelID != "" {
+			modelID = triggerInfo.modelID
+		} else {
+			modelID = c.models[1]
+		}
 	case modelTypeCredFailover:
 		// Phase 3 / Round 3j C1 critical fix — the credFailover row MUST
 		// target the SAME model that just 429'd, NOT c.models[0]. The
@@ -597,28 +675,32 @@ func (c *raceCoordinator) manage() {
 						failReason := classifyRequestFailure(latestReq)
 
 						// ── HOISTED CRED-FAILOVER BRANCH (Round 3c C1;
-						// Tasks 18-20) ── rate-limit classified AND internal
-						// multi-credential model AND pre-first-byte (race guard:
-						// c.winner == nil per Task 23 — framing headers +
-						// ": connected" carry no model content) AND retry budget
-						// remaining ⇒ ExcludeAndReselect + same-model
-						// modelTypeCredFailover spawn INSTEAD of model fallback.
-						// Precedence: credential failover BEFORE model switching.
+						// Tasks 18-20; layered credential fallback Fix 1) ──
+						// rate-limit OR quota-class failure AND internal
+						// multi-credential model AND pre-first-byte (race
+						// guard: c.winner == nil per Task 23 — framing
+						// headers + ": connected" carry no model content)
+						// AND per-model retry budget remaining ⇒
+						// ExcludeAndReselect + same-model
+						// modelTypeCredFailover spawn INSTEAD of model
+						// fallback. Precedence: credential failover
+						// BEFORE model switching — per model, not just
+						// for models[0] (Fix 2).
 						plan := c.credFailoverPlanLocked(latestReq)
 						if plan != nil {
 							c.mu.Unlock()
-							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan.retryAfter)
+							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan)
 							c.spawn(modelTypeCredFailover, spawnTriggerInfo{
-								trigger:       triggerRateLimit,
+								trigger:       triggerForClass(plan.class),
 								failedRequest: latestReq.id,
 								credentialID:  plan.credentialID,
 								// Phase 3 / Round 3j C1 critical fix —
 								// ride the source modelID on the trigger
 								// info so spawn() targets the SAME model
-								// that just 429'd (not c.models[0]).
+								// that failed (not c.models[0]).
 								modelID: latestReq.modelID,
 								// race-error-reason-classification — the
-								// classified 429 reason rides the trigger
+								// classified reason rides the trigger
 								// info into the race_spawn payload.
 								reason: failReason,
 							})
@@ -627,11 +709,15 @@ func (c *raceCoordinator) manage() {
 							// from manage() under c.mu — race-free by construction).
 							c.failoverAttempts++
 							c.triedCredIDs[plan.credentialID] = true
+							c.failoverAttemptsByModel[latestReq.modelID]++
 							if plan.soonestExpiry {
 								// W3 single-shot: the SoonestExpiry attempt is
-								// spent; the NEXT 429 routes straight to model
-								// fallback (no double spawn, no loop).
-								c.credFailoverSoonestExpiryAttempted = true
+								// spent for THIS model; the NEXT eligible
+								// failure of the same model routes straight to
+								// model advance (no double spawn, no loop).
+								// Fix 2: per-model flag — a later model in the
+								// chain starts with its own unspent single-shot.
+								c.soonestExpiryAttemptedByModel[latestReq.modelID] = true
 							}
 							spawnedCredFailover = true
 							// Skip the model-fallback spawn this tick — the
@@ -647,6 +733,14 @@ func (c *raceCoordinator) manage() {
 								trigger:       triggerMainError,
 								failedRequest: latestReq.id,
 								reason:        failReason,
+								// Layered credential fallback (Fix 2) —
+								// the chain advances to the NEXT model
+								// after the failed one, so every model in
+								// the chain gets its Layer-1 credential
+								// rotation. Unset when the failed model is
+								// the last in the chain (⇒ terminal, no
+								// advance) or the model isn't in the chain.
+								modelID: c.fallbackAdvanceTargetLocked(latestReq.modelID),
 							}
 						}
 					}
@@ -1489,10 +1583,15 @@ func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 // credFailoverPlan is the decision output of credFailoverPlanLocked: the
 // spawn the Case-1 branch should perform INSTEAD of a model fallback.
 type credFailoverPlan struct {
-	credentialID     string        // reselected credential (engine output) — rides spawnTriggerInfo.credentialID
-	fromCredentialID string        // the credential that 429'd
-	retryAfter       time.Duration // from the upstream Retry-After header (0 ⇒ engine default cooldown)
-	soonestExpiry    bool          // W3: single-shot SoonestExpiry attempt
+	credentialID     string            // reselected credential (engine output) — rides spawnTriggerInfo.credentialID
+	fromCredentialID string            // the credential that 429'd / quota-failed
+	class            credFailoverClass // failure class — drives the trigger vocabulary + event reason + cooldown policy
+	retryAfter       time.Duration     // from the upstream Retry-After header (0 ⇒ class default cooldown)
+	// cooldown is the EFFECTIVE seed the engine applied for this
+	// failover (CooldownFor(class, retryAfter)) — mirrors
+	// model_credential_failover's cooldown_ms payload key.
+	cooldown      time.Duration
+	soonestExpiry bool // W3: single-shot SoonestExpiry attempt
 }
 
 // modelAttemptCountLocked returns the B1 separate-accounting count of
@@ -1514,6 +1613,12 @@ func (c *raceCoordinator) modelAttemptCountLocked() int {
 // credFailoverEligibleWithBudget() used by the C1-hoisted admission
 // gate. It performs NO engine calls (ExcludeAndReselect has cooldown
 // side effects and must run at most once per Case-1 decision).
+//
+// Layered credential fallback (Fix 1) widens the error class from
+// rate-limit-only to rate-limit + quota (classifyCredFailure), and
+// (Fix 2) moves the rotation budget from the GLOBAL failoverAttempts
+// counter to a PER-MODEL counter — every model in the chain gets its
+// own full len(credentials)−1 Layer-1 budget.
 func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	if c.engine == nil || c.cfg == nil || c.cfg.ModelsConfig == nil || len(c.requests) == 0 {
 		return false
@@ -1522,7 +1627,11 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	if !latest.IsDone() || latest.GetError() == nil {
 		return false
 	}
-	if !providers.IsRateLimitError(latest.GetError()) {
+	// Fix 1 — BOTH eligible classes gate here: rate_limit (429-style)
+	// and quota_exceeded (402 / insufficient credit). Everything else
+	// (401/auth, 5xx, timeouts) stays ineligible — eligibility is
+	// never widened beyond these two classes.
+	if classifyCredFailure(latest.GetError()) == credFailoverNone {
 		return false
 	}
 	// Task 23 pre-first-byte guard (race path): c.winner == nil. Framing
@@ -1552,20 +1661,57 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	if modelCfg == nil || len(modelCfg.Credentials) <= 1 {
 		return false
 	}
-	// W3: once the single SoonestExpiry attempt is spent, the next 429
-	// routes straight to model fallback.
-	if c.credFailoverSoonestExpiryAttempted {
+	// W3: once the single SoonestExpiry attempt is spent FOR THIS
+	// MODEL, the next eligible failure routes straight to model
+	// advance. Fix 2: per-model flag — a later model in the chain
+	// starts with its own unspent single-shot.
+	if c.soonestExpiryAttemptedByModel[latest.modelID] {
 		return false
 	}
-	// R3-5 budget: each remaining credential at most once per request;
-	// total failover attempts ≤ len(credentials)−1.
-	return c.failoverAttempts < len(modelCfg.Credentials)-1
+	// R3-5 budget, per model (Fix 2): each remaining credential of THE
+	// FAILED MODEL at most once per request; the model's total
+	// failover attempts ≤ len(its credentials)−1. The legacy global
+	// failoverAttempts counter (kept for the event attempt_index) no
+	// longer bounds eligibility — under it, a second model in the
+	// chain inherited the first model's spend and got ZERO rotations
+	// (the documented WIP limitation in
+	// TestHandler_TwoModelFallback429_WrongModelRegression).
+	return c.failoverAttemptsByModel[latest.modelID] < len(modelCfg.Credentials)-1
+}
+
+// fallbackAdvanceTargetLocked (layered credential fallback — Fix 2)
+// returns the NEXT model in the chain after failedModelID — the model a
+// modelTypeFallback row must target once failedModelID's Layer-1
+// credential rotation is exhausted. Empty string ⇒ no advance target
+// (the failed model is the chain's last, or isn't in the chain) — the
+// spawn arm then keeps the legacy c.models[1] defensive fallback.
+//
+// Derived from the chain (index-of-failed + 1), not stored: the failed
+// attempt's own modelID is the single source of truth, so the order is
+// exactly the layered spec (models[0] → models[1] → models[2] → …)
+// with no drift between a tracked index and the requests actually
+// spawned. Runs under c.mu from the manage() loop.
+func (c *raceCoordinator) fallbackAdvanceTargetLocked(failedModelID string) string {
+	if len(c.models) < 2 {
+		return ""
+	}
+	for i, m := range c.models {
+		if m == failedModelID {
+			if i+1 < len(c.models) {
+				return c.models[i+1]
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // credFailoverPlanLocked runs the full Round-3b/3c decision chain for
-// the failed latestReq: extract Retry-After (errors.As — the executor
-// propagates the raw *ProviderError up to the coordinator), call
-// engine.ExcludeAndReselect (mode-aware per B3/C2), and map the mode:
+// the failed latestReq: classify the failure class (rate-limit vs
+// quota — Fix 1), extract Retry-After (errors.As — the executor
+// propagates the raw *ProviderError up to the coordinator), resolve the
+// class's effective cooldown (CooldownFor), call
+// engine.ExcludeAndReselectForClass (mode-aware per B3/C2), and map the mode:
 //
 //   - ReselectHealthy (incl. B2 no-op + empty-key fresh pick) → proceed
 //     with the returned credential (spawn below).
@@ -1582,20 +1728,25 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 
 	err := latestReq.GetError()
 
+	// Fix 1 — classify ONCE here: the class drives the trigger
+	// vocabulary, the event reason, AND the cooldown policy.
+	class := classifyCredFailure(err)
+
 	// Retry-After from the extended ProviderError (Task 17 — survives
 	// wrapping; errors.As sees through fmt.Errorf("%w", ...) up the
-	// executor's return path). Zero ⇒ the engine seeds its
-	// DefaultCooldown (60s) — the classifier itself does NOT default.
+	// executor's return path). Zero ⇒ the class default applies (the
+	// classifier itself does NOT default).
 	var retryAfter time.Duration
 	var providerErr *providers.ProviderError
 	if errors.As(err, &providerErr) {
 		retryAfter = providerErr.RetryAfter
 	}
+	cooldown := effectiveCooldown(c.engine, class, retryAfter)
 
-	// The credential that 429'd: the attempt's resolved credential.
+	// The credential that failed: the attempt's resolved credential.
 	// modelTypeSecond rows resolve the PRIMARY credential at the
-	// executor layer (race_executor.go secondary branch) — a 429 there
-	// re-keys failover to the primary credential of c.models[0]
+	// executor layer (race_executor.go secondary branch) — a failure
+	// there re-keys failover to the primary credential of c.models[0]
 	// (specified behavior per Round 3b, not an accident).
 	fromCred := latestReq.resolved.CredentialID
 	if fromCred == "" {
@@ -1604,10 +1755,11 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 		return nil
 	}
 
-	reselected, mode := c.engine.ExcludeAndReselect(
+	reselected, mode := c.engine.ExcludeAndReselectForClass(
 		latestReq.modelID,
 		c.conversationKey, // Round 3c C3(3): injected via constructor
 		fromCred,
+		class.toEngineClass(),
 		retryAfter,
 	)
 
@@ -1616,17 +1768,20 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 		if reselected == "" || reselected == fromCred || c.triedCredIDs[reselected] {
 			// Engine returned nothing new (or a credential this request
 			// already tried — belt-and-braces on top of the engine's
-			// cooldown skip): fall through to model fallback.
-			log.Printf("[LB-FAILOVER] model=%s no healthy untried credential (reselected=%q); falling through to model fallback",
-				latestReq.modelID, reselected)
+			// cooldown skip): fall through to model advance.
+			log.Printf("[LB-FAILOVER] model=%s %s on cred=%s but no healthy untried credential (reselected=%q); advancing to next model",
+				latestReq.modelID, class.readable(), fromCred, reselected)
 			return nil
 		}
-		log.Printf("[LB-FAILOVER] model=%s rate-limited on cred=%s; failing over to cred=%s (attempt %d/%d)",
-			latestReq.modelID, fromCred, reselected, c.failoverAttempts+1, modelBudget(c, latestReq.modelID))
+		log.Printf("[LB-FAILOVER] model=%s %s on cred=%s; failing over to cred=%s (class=%s, cooldown=%s, rotation %d/%d)",
+			latestReq.modelID, class.readable(), fromCred, reselected, class, cooldown,
+			c.failoverAttemptsByModel[latestReq.modelID]+1, modelBudget(c, latestReq.modelID))
 		return &credFailoverPlan{
 			credentialID:     reselected,
 			fromCredentialID: fromCred,
+			class:            class,
 			retryAfter:       retryAfter,
+			cooldown:         cooldown,
 		}
 
 	case credentiallb.ReselectSoonestExpiry:
@@ -1636,20 +1791,22 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 		if reselected == "" || reselected == fromCred || c.triedCredIDs[reselected] {
 			return nil
 		}
-		log.Printf("[WARN] [LB-FAILOVER] model=%s all credentials cooling; single attempt with soonest-expiring cred=%s then model fallback",
-			latestReq.modelID, reselected)
+		log.Printf("[WARN] [LB-FAILOVER] model=%s all credentials cooling (%s); single attempt with soonest-expiring cred=%s then model advance",
+			latestReq.modelID, class, reselected)
 		return &credFailoverPlan{
 			credentialID:     reselected,
 			fromCredentialID: fromCred,
+			class:            class,
 			retryAfter:       retryAfter,
+			cooldown:         cooldown,
 			soonestExpiry:    true,
 		}
 
 	default: // credentiallb.ReselectNone — no credential available
 		// (single-credential model or 0 valid credentials; B2 no-op and
 		// empty-key are ReselectHealthy per the C2 unified enum).
-		log.Printf("[LB-FAILOVER] model=%s no reselectable credential (mode=%v); falling through to model fallback",
-			latestReq.modelID, mode)
+		log.Printf("[LB-FAILOVER] model=%s no reselectable credential (mode=%v, class=%s); advancing to next model",
+			latestReq.modelID, mode, class)
 		return nil
 	}
 }
@@ -1675,23 +1832,33 @@ func modelBudget(c *raceCoordinator, modelID string) int {
 // publishCredentialFailover (Task 20 / R3-8) emits the canonical
 // model_credential_failover event with the payload
 // {model_id, from_credential_id, to_credential_id, reason,
-// retry_after_ms, cooldown_ms, attempt_index}. cooldown_ms mirrors the
-// engine's effective seed (retryAfter when the upstream supplied it,
-// else credentiallb.DefaultCooldown) — the engine itself never
-// publishes (it must not import pkg/events).
-func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string, retryAfter time.Duration) {
+// retry_after_ms, cooldown_ms, attempt_index}. reason carries the
+// FAILURE CLASS vocabulary ("rate_limit" | "quota_exceeded" — Fix 1);
+// cooldown_ms mirrors the engine's effective seed for that class
+// (plan.cooldown — CooldownFor output: retryAfter when the upstream
+// supplied it [rate-limit], the configured quota cooldown otherwise
+// [quota]) — the engine itself never publishes (it must not import
+// pkg/events).
+func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string, plan *credFailoverPlan) {
 	if c.eventBus == nil {
 		return
 	}
+	class := credFailoverNone
+	retryAfter := time.Duration(0)
 	cooldown := credentiallb.DefaultCooldown
-	if retryAfter > 0 {
-		cooldown = retryAfter
+	if plan != nil {
+		class = plan.class
+		retryAfter = plan.retryAfter
+		cooldown = plan.cooldown
+		if cooldown <= 0 {
+			cooldown = credentiallb.DefaultCooldown
+		}
 	}
 	data := map[string]interface{}{
 		"model_id":           modelID,
 		"from_credential_id": fromID,
 		"to_credential_id":   toID,
-		"reason":             "rate_limit",
+		"reason":             class.String(),
 		"retry_after_ms":     retryAfter.Milliseconds(),
 		"cooldown_ms":        cooldown.Milliseconds(),
 		"attempt_index":      c.failoverAttempts + 1,
