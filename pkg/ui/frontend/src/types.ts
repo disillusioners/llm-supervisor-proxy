@@ -319,6 +319,8 @@ export type EventType =
   | 'race_all_failed'
   | 'race_request_failed'
   | 'race_secondary_model_used'
+  // Model credential failover (multi-credential load balancing + layered credential fallback)
+  | 'model_credential_failover'
   // Shadow retry events (deprecated - kept for backward compatibility)
   | 'shadow_retry_started'
   | 'shadow_retry_won'
@@ -392,6 +394,14 @@ export interface EventData {
   duration_ms?: number;        // Race duration in milliseconds
   buffer_bytes?: number;       // Winner's buffer size
   total_attempts?: number;     // For race_all_failed
+  // Model credential failover fields (layered credential fallback)
+  model_id?: string;           // The model whose credential pool rotated
+  from_credential_id?: string; // The credential that failed
+  to_credential_id?: string;   // The reselected credential
+  retry_after_ms?: number;     // Upstream Retry-After (0 when absent)
+  cooldown_ms?: number;        // Seeded cooldown for the class
+  attempt_index?: number;      // Rotation index (1-based)
+  credential_id?: string;      // For race_spawn cred_failover rows
 }
 
 // Repair detail for tool repair events

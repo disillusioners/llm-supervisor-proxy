@@ -71,3 +71,67 @@ describe('EventLog race reason classification (additive renderers)', () => {
     );
   });
 });
+
+describe('EventLog layered credential fallback renderers', () => {
+  it('model_credential_failover renders the quota class readably with the cooldown', () => {
+    const root = renderEvents([
+      evt('model_credential_failover', {
+        model_id: 'coding4',
+        from_credential_id: 'cred-A',
+        to_credential_id: 'cred-B',
+        reason: 'quota_exceeded',
+        retry_after_ms: 0,
+        cooldown_ms: 900000,
+        attempt_index: 1,
+      }),
+    ]);
+    expect(root.textContent).toContain(
+      'Credential failover [quota exceeded]: coding4 cred-A → cred-B (cooldown 15m)',
+    );
+  });
+
+  it('model_credential_failover renders the rate-limit class readably', () => {
+    const root = renderEvents([
+      evt('model_credential_failover', {
+        model_id: 'coding4',
+        from_credential_id: 'cred-A',
+        to_credential_id: 'cred-B',
+        reason: 'rate_limit',
+        retry_after_ms: 7000,
+        cooldown_ms: 7000,
+        attempt_index: 1,
+      }),
+    ]);
+    expect(root.textContent).toContain(
+      'Credential failover [rate limit]: coding4 cred-A → cred-B (cooldown 7s)',
+    );
+  });
+
+  it('race_spawn cred_failover rows render the readable class and the reselected credential', () => {
+    const root = renderEvents([
+      evt('race_spawn', {
+        type: 'cred_failover',
+        request_index: 2,
+        model: 'coding4',
+        trigger: 'quota_exceeded',
+        credential_id: 'cred-B',
+      }),
+    ]);
+    expect(root.textContent).toContain(
+      'Spawned cred_failover request #2: coding4 (quota exceeded) → cred-B',
+    );
+  });
+
+  it('race_spawn non-failover rows keep the legacy raw trigger token (no credential suffix)', () => {
+    const root = renderEvents([
+      evt('race_spawn', {
+        type: 'fallback',
+        request_index: 1,
+        model: 'coding2',
+        trigger: 'rate_limit',
+      }),
+    ]);
+    expect(root.textContent).toContain('Spawned fallback request #1: coding2 (rate_limit)');
+    expect(root.textContent).not.toContain('→');
+  });
+});
