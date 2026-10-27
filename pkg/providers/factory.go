@@ -38,6 +38,13 @@ const (
 	// the retired global upstream default), overridable via credential.base_url.
 	// SCOPE: chat only.
 	ProviderLightLLM ProviderType = "lightllm"
+	// ProviderOpenRouter is the identity for OpenRouter
+	// (https://openrouter.ai) — a REGULAR OpenAI-compatible chat
+	// provider. No migration / DB schema change required; the
+	// provider layer routes OpenAIProvider at the default base URL
+	// https://openrouter.ai/api/v1, overridable via
+	// credential.base_url. SCOPE: chat only.
+	ProviderOpenRouter ProviderType = "openrouter"
 )
 
 // NewProvider creates a new provider based on the provider type
@@ -131,6 +138,14 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "http://localhost:4001"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderOpenRouter:
+		// OpenRouter uses the OpenAI-compatible API. Default base
+		// URL is the public OpenRouter gateway; override via
+		// credential.base_url for a self-hosted / proxied route.
+		if baseURL == "" {
+			baseURL = "https://openrouter.ai/api/v1"
+		}
+		return NewOpenAIProvider(apiKey, baseURL), nil
 	case ProviderTypesafe:
 		// Decision Models / §5.5 — the chat provider layer does
 		// NOT speak System One (TypeSafe / Jev's wire shape).
@@ -147,7 +162,7 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 // IsProviderSupported checks if a provider type is supported
 func IsProviderSupported(providerType string) bool {
 	switch ProviderType(providerType) {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderOpencodeGo, ProviderLightLLM, ProviderTypesafe:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGemini, ProviderZhipu, ProviderAzure, ProviderZAI, ProviderMiniMax, ProviderGrok, ProviderDeepSeek, ProviderOpencode, ProviderOpencodeGo, ProviderLightLLM, ProviderOpenRouter, ProviderTypesafe:
 		return true
 	default:
 		return false
@@ -259,6 +274,17 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "sky",
 		description: "LightLLM (self-hosted LiteLLM gateway — OpenAI-compatible, chat-only; default expects a local LiteLLM proxy on :4001, override base_url for remote hosts)",
 	},
+	ProviderOpenRouter: {
+		// OpenRouter (https://openrouter.ai) — a regular
+		// OpenAI-compatible chat-completions provider (multi-vendor
+		// model router). Default base URL is the public OpenRouter
+		// gateway; override via credential.base_url for a
+		// self-hosted / proxied route.
+		name:        "OpenRouter",
+		baseURL:     "https://openrouter.ai/api/v1",
+		color:       "purple",
+		description: "OpenRouter (OpenAI-compatible chat-completions; multi-vendor model router; default base URL https://openrouter.ai/api/v1)",
+	},
 	ProviderTypesafe: {
 		// Decision Models / §5.1 — the "TypeSafe (Jev)" identity
 		// shows up verbatim in the FE /fe/api/providers dropdown.
@@ -308,6 +334,10 @@ func GetProviderTypes() []ProviderType {
 		// OpenAI-compatible chat provider; appears in the
 		// GET /fe/api/providers FE dropdown.
 		ProviderLightLLM,
+		// openrouter commission — a regular OpenAI-compatible chat
+		// provider (multi-vendor model router); appears in the
+		// GET /fe/api/providers FE dropdown.
+		ProviderOpenRouter,
 		// Decision Models / §5.2 — typesafe is auto-included via
 		// providerMetadataMap; the inclusion here makes it
 		// appear in the GET /fe/api/providers FE dropdown (used
