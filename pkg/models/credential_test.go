@@ -40,6 +40,7 @@ func TestIsValidProvider(t *testing.T) {
 		{"opencode valid", "opencode", true},
 		{"opencode-go valid", "opencode-go", true},
 		{"lightllm valid", "lightllm", true},
+		{"openrouter valid", "openrouter", true},
 
 		// Case sensitivity - should be lowercase
 		{"OpenAI uppercase", "OpenAI", false},
@@ -82,6 +83,26 @@ func TestValidProviderNames_IncludesLightLLM(t *testing.T) {
 	}
 	if !found {
 		t.Errorf(`ValidProviderNames() missing "lightllm" — the validProviders map entry was removed or renamed`)
+	}
+}
+
+// TestValidProviderNames_IncludesOpenRouter pins the openrouter
+// enrollment in the derived provider vocabulary (openrouter
+// commission, 2026-10-27). ValidProviderNames() is a sorted
+// snapshot of the validProviders map, so this assertion fails if the
+// map entry is ever removed — guarding the enrollment against
+// accidental deletion, the same way the providers package's
+// no-attribution-leak guard consumes the derived list.
+func TestValidProviderNames_IncludesOpenRouter(t *testing.T) {
+	found := false
+	for _, name := range ValidProviderNames() {
+		if name == "openrouter" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf(`ValidProviderNames() missing "openrouter" — the validProviders map entry was removed or renamed`)
 	}
 }
 
@@ -264,6 +285,16 @@ func TestCredentialConfigValidate(t *testing.T) {
 				ID:       "lightllm-creds",
 				Provider: "lightllm",
 				APIKey:   "sk-litellm-test",
+			},
+			wantErr:    false,
+			errContain: "",
+		},
+		{
+			name: "valid openrouter credential",
+			cred: CredentialConfig{
+				ID:       "openrouter-creds",
+				Provider: "openrouter",
+				APIKey:   "sk-or-test",
 			},
 			wantErr:    false,
 			errContain: "",

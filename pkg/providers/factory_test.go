@@ -20,6 +20,7 @@ func TestNewProvider(t *testing.T) {
 		{"opencode", "opencode", false},
 		{"opencode-go", "opencode-go", false},
 		{"lightllm", "lightllm", false},
+		{"openrouter", "openrouter", false},
 		{"unknown", "unknown", true},
 	}
 
@@ -43,7 +44,7 @@ func TestNewProvider(t *testing.T) {
 }
 
 func TestIsProviderSupported(t *testing.T) {
-	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go", "lightllm"}
+	supported := []string{"openai", "anthropic", "gemini", "zhipu", "azure", "zai", "minimax", "grok", "deepseek", "opencode", "opencode-go", "lightllm", "openrouter"}
 	for _, p := range supported {
 		if !IsProviderSupported(p) {
 			t.Errorf("expected %s to be supported", p)
@@ -57,11 +58,15 @@ func TestIsProviderSupported(t *testing.T) {
 
 func TestGetProviderTypes(t *testing.T) {
 	types := GetProviderTypes()
-	// 13 types post-lightllm commission (remove-external-upstream
+	// 14 types post-openrouter commission — OpenRouter becomes a
+	// REGULAR OpenAI-compatible chat provider (multi-vendor model
+	// router), default base URL https://openrouter.ai/api/v1; see
+	// factory.go:ProviderOpenRouter. Prior lineage: 13 post-lightllm
+	// commission (remove-external-upstream
 	// phase 2 — LightLLM becomes a REGULAR OpenAI-compatible chat
 	// provider, default base URL http://localhost:4001 inherited
 	// from the retired external-upstream config default; see
-	// factory.go:ProviderLightLLM). Prior lineage: 12 post-opencode-go
+	// factory.go:ProviderLightLLM), 12 post-opencode-go
 	// commission (OpenCode Go is a DISTINCT provider from OpenCode
 	// Zen — subscription realm, default base URL
 	// https://opencode.ai/inference/go/openai/v1, provider-native
@@ -72,8 +77,8 @@ func TestGetProviderTypes(t *testing.T) {
 	// implemented" from NewProvider, but the id is registered so
 	// /fe/api/providers and the FE DecisionModelForm provider
 	// dropdown can see it.
-	if len(types) != 13 {
-		t.Errorf("expected 13 provider types, got %d", len(types))
+	if len(types) != 14 {
+		t.Errorf("expected 14 provider types, got %d", len(types))
 	}
 	// Spot-check the typesafe addition.
 	foundTypesafe := false
@@ -107,6 +112,17 @@ func TestGetProviderTypes(t *testing.T) {
 	}
 	if !foundLightLLM {
 		t.Errorf("ProviderLightLLM missing from GetProviderTypes()")
+	}
+	// Spot-check the openrouter addition (regular OpenAI-compatible chat provider).
+	foundOpenRouter := false
+	for _, t := range types {
+		if t == ProviderOpenRouter {
+			foundOpenRouter = true
+			break
+		}
+	}
+	if !foundOpenRouter {
+		t.Errorf("ProviderOpenRouter missing from GetProviderTypes()")
 	}
 }
 

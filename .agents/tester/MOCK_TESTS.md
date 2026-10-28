@@ -694,3 +694,56 @@ zero behavior change. NO response compression was added.
 
 ### Last Run
 - **Date**: 2026-08-29 (formal, W6 worker dbcache-packB-run) | **Result**: **PASS** (exit 0; smoke + formal identical) — B1 flag-off ✓, B2 no CSU-503 (known-model reads survive via page cache on SQLite; recorded), B3 unknown-model 8/8 sentinel misroute repro (original bug with cache off) ✓, B5 UI/FE-API healthy under cache-on ✓, B6.1/B6.4/B6.5 immediate write-through ✓, B6.2 attach-rejected-until-tick (F2) + B6.3 rotation ~55s (F3) reproduced with zero stale-key leakage, B7 sentinel 0 during boot 2 ✓ | **Report**: RESULTS/2026-08-29-dbcache-layer-gate.md
+
+
+---
+
+# Mock Test: Provider Registration Runtime Smoke (parameterized brand gate)
+
+### Metadata
+- **Created**: 2026-10-27
+- **Script**: `test/test_provider_registration_smoke.sh` (committed @ 815a9ff, 526 lines, executable)
+- **Language**: Bash (real binary boot; curl + jq probes)
+- **Status**: ACTIVE — 18/18 PASS; brand-generic (proven on openrouter AND deepseek)
+
+### Configuration
+- **Timeout**: dual-layer — outer `timeout 300 bash test/test_provider_registration_smoke.sh`; internal 280s watchdog (kills server PID, exit 124)
+- **Service Port**: argv[4], default 18240 (range 10000–19999 enforced; hard abort on 8088 and on any port <10000; aborts if a foreign process holds the port — never kills it)
+- **Isolation**: `HOME` + `XDG_CONFIG_HOME` → mktemp scratch; `env -u DATABASE_URL`; `GOPROXY=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local` (zero network egress — no key, no registry, no upstream call)
+- **Cleanup**: trap kills ONLY `$SERVER_PID`; watchdog fds → /dev/null (pipe-hold bug fixed); port-freed verification; artifacts auto-deleted on PASS, kept on FAIL
+
+### What It Tests
+That a provider brand is actually USABLE at runtime, not merely compile-time registered — the exact gap the DeepSeek-class bug shipped through (validProviders stale → credential-create 400'd while all unit tests passed). Proves the full chain: binary boot → FE API (the React credential dropdown's data source) → credential allowlist → model shared-provider validation.
+
+### Mock Services Required
+- NONE. Credential-create and model-validate are offline allowlist/schema checks (verified: `pkg/models` + `pkg/store/database` contain zero outbound HTTP). Upstream-dialing endpoints (`/fe/api/models/test`, `/v1/chat/completions`) are never called. This is deliberate: registration is config-only and must be provable with no key and no egress.
+
+### Test Scenarios
+1. Build (offline) + boot (`APPLY_ENV_OVERRIDES=1 PORT=<argv4>`), `/healthz` → 200, config.db lands under scratch HOME (platform-agnostic discovery; macOS = `~/Library/Application Support/...`, NOT `~/.config` — blueprint is wrong on macOS)
+2. `GET /fe/api/providers` → brand entry with exact display name + default base URL
+3. Credential create `{"id","provider":"<brand>","api_key":"sk-smoke-*"}` → 2xx + persisted provider echoes brand
+4. Model validate (brand-bound) → `{"valid":true}`; model create → 2xx
+5. NEG: `<brand> ` (trailing space) → 4xx; `<BrandTitleCase>` (wrong case) → 4xx (brand strings are lowercase-exact)
+6. NEG: mixed-provider model (brand credential + other-brand credential) → 4xx (shared-provider rule; the "other" brand auto-flips to a brand ≠ the one under test)
+7. `GET /ui/` → 200 `text/html` (embedded UI serves)
+8. SIGTERM → graceful exit code 0, port freed, real config dir mtime unchanged
+
+### Success Criteria
+- [x] 18/18 assertions PASS; final line `RESULT: PASS`; exit 0
+- [x] ~2–3s wall; no process/port leaks; port 8088 never touched
+- [x] Defensive aborts proven live (8088 guard, <10000 guard, foreign-holder guard with the foreign process verified alive after)
+
+### Implementation Notes
+- **Usage**: `timeout 300 bash test/test_provider_registration_smoke.sh [brand] ["Display Name"] [base_url] [port]` — defaults openrouter / OpenRouter / https://openrouter.ai/api/v1 / 18240. Take the three registry values verbatim from `pkg/providers/factory.go` `providerMetadata`.
+- Concurrent runs need distinct ports (second run aborts loudly).
+- Cold module cache → build fails fast; run `go mod download` once outside the pack.
+- Preflight requires `curl jq lsof ps go` on PATH (jq is already a house dependency of 3 packs).
+- NOT run by CI (verified: no workflow/Makefile/script globs `test/*.sh`) — manual gate, same as every other shell pack in this repo.
+- First-run harness lessons (fixed in-commit): macOS SQLite path ≠ `~/.config`; background watchdog holding the `| tee` pipe open (redirect fds to /dev/null); 8088 guard was unreachable dead code behind the generic <10000 branch (reordered so the specific message wins).
+
+### Last Run
+- **Date**: 2026-10-27 (01:26–01:31 UTC)
+- **Worker Instance**: a81466d5-2f2e-4931-ad15-6218ebab94dd (or-gate-runtimesmoke)
+- **Result**: **PASS 18/18** — pre-commit proof 1.3s; re-verified from repo path 3.0s @ 815a9ff (defaults) + 2.0s (explicit args) + cross-brand deepseek 18/18
+- **Quick Fixes**: 2 script-own fixes (macOS DB path, watchdog pipe-hold) — no repo source touched
+- **Report**: RESULTS/2026-10-27-openrouter-provider-registration-gate.md

@@ -44,6 +44,13 @@ var validProviders = map[string]bool{
 	// from the retired external-upstream default (config.go
 	// the retired global upstream default); override via credential.base_url for remote hosts.
 	"lightllm": true,
+	// OpenRouter (https://openrouter.ai) — a REGULAR
+	// OpenAI-compatible chat-completions provider (multi-vendor model
+	// router), commissioned 2026-10-27. No migration / DB schema
+	// change; the provider layer routes OpenAIProvider at the default
+	// base URL https://openrouter.ai/api/v1 — override via
+	// credential.base_url for a self-hosted / proxied route.
+	"openrouter": true,
 	// Decision Models / §5.2 — "typesafe" is the new identity
 	// for /v1/decisions upstream. The D4 provider-gate
 	// (validateDecisionRules) only accepts {"openai","typesafe"}
