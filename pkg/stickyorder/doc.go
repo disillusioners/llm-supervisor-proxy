@@ -36,10 +36,18 @@
 //     run to completion afterwards (upstreamRequest.deadlinePick gates
 //     the record sites).
 //   - race_winner_selected: first-byte eligibility, not delivery.
-//   - client write failure, BOTH lanes and symmetric: the stream
-//     lane returns before its record site when relaying to the client
-//     fails; the non-stream lane captures w.Write's error and skips the
-//     record on the same condition.
+//   - client write failure, BOTH lanes, symmetric: the last client
+//     write's outcome gates the record — the OpenAI stream lane
+//     returns before its record site; the OpenAI non-stream lane and
+//     finalizeAnthropicSuccess capture the last write's outcome and
+//     skip the record when it failed.
+//   - Anthropic truncated terminals (missing upstream [DONE] on the
+//     live path, scanner read error, client disconnect): closed with
+//     an error event, never recorded — mirrors the buffered path's
+//     existing skip. Known residual: the internal-live path's write
+//     outcomes are not surfaced and are not gated; truncated
+//     terminals do not fire winner-matched invalidation (stale pins
+//     self-heal on the next failed attempt).
 //   - idle-terminated partial: an idle-terminated stream is closed with
 //     an error/termination marker before any completed publish, so no
 //     record fires.

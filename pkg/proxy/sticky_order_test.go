@@ -1154,6 +1154,239 @@ func TestStickyOrder_ClientWriteFail_NoRecord(t *testing.T) {
 	})
 }
 
+// ─── M1 ruling: Anthropic delivery gate (FULL SYMMETRY) ────────────────────
+
+// seedAnthropicPassthroughModel registers an ANTHROPIC-provider credential +
+// internal model pointed at the stub, so the Anthropic lane takes the raw
+// passthrough path (doAnthropicRequest → handlePassthrough*Response) instead
+// of the internal OpenAI translator.
+func seedAnthropicPassthroughModel(t *testing.T, h *stickyHarness, modelID string) {
+	t.Helper()
+	const credID = "anthropic-passthrough-cred"
+	if err := h.mgr.AddCredential(models.CredentialConfig{
+		ID: credID, Provider: "anthropic", APIKey: "sk-anthropic-test", BaseURL: h.up.URL,
+	}); err != nil {
+		t.Fatalf("AddCredential(%s): %v", credID, err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: modelID, Name: modelID, Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: upstreamModelName(modelID),
+		InternalBaseURL: h.up.URL,
+		Credentials:     models.TestRefs(credID),
+	}); err != nil {
+		t.Fatalf("AddModel(%s): %v", modelID, err)
+	}
+}
+
+// anthropicSSEEvent renders one Anthropic-shape SSE event.
+func anthropicSSEEvent(t *testing.T, payload map[string]interface{}) string {
+	t.Helper()
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal SSE payload: %v", err)
+	}
+	return "data: " + string(b) + "\n\n"
+}
+
+// anthropicMessageStart is the minimal well-formed start event for the
+// passthrough relay.
+func anthropicMessageStart(model string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id": "msg_sticky", "type": "message", "role": "assistant",
+			"model": model, "content": []interface{}{},
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 0},
+		},
+	}
+}
+
+// TestStickyOrder_AnthropicClientWriteFail_NoRecord is the M1 sibling of the
+// OpenAI client-write-fail fixture: on the Anthropic lane the finalize funnel
+// runs even when the client never received the body, so the delivery gate
+// (arc.clientWriteErr) is what suppresses the record. FULL SYMMETRY: a failed
+// last write means the same thing on both lanes.
+func TestStickyOrder_AnthropicClientWriteFail_NoRecord(t *testing.T) {
+	// (1) PASSTHROUGH NON-STREAM — the PRIMARY case: the last write is the
+	// body write this lane makes itself, so pre-fix finalize RECORDED a
+	// winner even though the client received nothing.
+	//
+	// (The TRANSLATED non-stream internal path is NOT used here: its body
+	// write happens inside internal_handler.go and surfaces as an attempt
+	// FAILURE, not as an arc-visible write — that is the named residual.)
+	t.Run("passthrough-non-stream", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"up-p",` +
+				`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",` +
+				`"usage":{"input_tokens":1,"output_tokens":1}}`))
+		})
+		seedAnthropicPassthroughModel(t, h, "claude-p")
+
+		key := stickyKeyFor("claude-p", stickyMessages())
+		w := &failWriteResponseWriter{}
+		h.h.HandleAnthropicMessages(w, makeStickyAnthropicRequest(t, "claude-p", stickyMessages()))
+
+		if w.writeErrs == 0 {
+			t.Fatal("fixture did not exercise a failing body write")
+		}
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("anthropic non-stream client-write failure recorded a winner: %q", v)
+		}
+		// Non-vacuous + sticky-only: the request itself still finalized.
+		if rl := h.lastRequestLog(t); rl.Status != "completed" {
+			t.Fatalf("request log status = %q, want completed (the gate must be sticky-only)", rl.Status)
+		}
+	})
+
+	// (2) TRANSLATED BUFFERED STREAM — a single write of the translated
+	// event blob; [DONE] present so this is NOT a truncated terminal.
+	t.Run("buffered-stream", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("hello"))
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		})
+		h.seedChatModel(t, "m-a")
+
+		key := stickyKeyFor("m-a", stickyMessages())
+		w := &failWriteResponseWriter{}
+		req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+			"model":      "m-a",
+			"max_tokens": 16,
+			"stream":     true,
+			"messages":   stickyMessages(),
+		})
+		req.Header.Set("X-LLMProxy-Buffer-Response", "true")
+		h.h.HandleAnthropicMessages(w, req)
+
+		if w.writeErrs == 0 {
+			t.Fatal("fixture did not exercise a failing stream write")
+		}
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("anthropic buffered-stream client-write failure recorded a winner: %q", v)
+		}
+	})
+
+	// (3) PASSTHROUGH STREAM — upstream speaks Anthropic SSE, relayed
+	// line-by-line; the last line write's outcome gates the record.
+	t.Run("passthrough-stream", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, anthropicSSEEvent(t, anthropicMessageStart("up-p")))
+			fmt.Fprint(w, anthropicSSEEvent(t, map[string]interface{}{
+				"type": "content_block_delta", "index": 0,
+				"delta": map[string]interface{}{"type": "text_delta", "text": "hello"},
+			}))
+			fmt.Fprint(w, anthropicSSEEvent(t, map[string]interface{}{
+				"type": "message_stop",
+			}))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		})
+		seedAnthropicPassthroughModel(t, h, "claude-p")
+
+		key := stickyKeyFor("claude-p", stickyMessages())
+		w := &failWriteResponseWriter{}
+		req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+			"model":      "claude-p",
+			"max_tokens": 16,
+			"stream":     true,
+			"messages":   stickyMessages(),
+		})
+		h.h.HandleAnthropicMessages(w, req)
+
+		if w.writeErrs == 0 {
+			t.Fatal("fixture did not exercise a failing passthrough write")
+		}
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("anthropic passthrough-stream client-write failure recorded a winner: %q", v)
+		}
+	})
+}
+
+// TestStickyOrder_AnthropicTruncated_NoRecord pins the TRUNCATION conjunct:
+// a healthy client writer and an upstream that ends without the terminating
+// event. Pre-fix these RECORDED (finalize ran, nothing tracked truncation).
+func TestStickyOrder_AnthropicTruncated_NoRecord(t *testing.T) {
+	// (1) TRANSLATED LIVE STREAM ending WITHOUT [DONE].
+	t.Run("live-missing-done", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("partial"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// NO [DONE]: connection ends cleanly, stream is truncated.
+		})
+		h.seedChatModel(t, "m-a")
+
+		key := stickyKeyFor("m-a", stickyMessages())
+		req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+			"model":      "m-a",
+			"max_tokens": 16,
+			"stream":     true,
+			"messages":   stickyMessages(),
+		})
+		rec := httptest.NewRecorder()
+		h.h.HandleAnthropicMessages(rec, req)
+
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("truncated live stream recorded a winner: %q", v)
+		}
+	})
+
+	// (2) PASSTHROUGH STREAM whose upstream ABORTS mid-stream: the relay's
+	// scanner reports a read error (unexpected EOF) — a truncated terminal.
+	t.Run("passthrough-abortive-close", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, anthropicSSEEvent(t, anthropicMessageStart("up-p")))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// Abort the connection BEFORE message_stop: the proxy's scanner
+			// sees an unexpected EOF (a clean handler return would be a
+			// normal EOF and no truncation signal).
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+		})
+		seedAnthropicPassthroughModel(t, h, "claude-p")
+
+		key := stickyKeyFor("claude-p", stickyMessages())
+		req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+			"model":      "claude-p",
+			"max_tokens": 16,
+			"stream":     true,
+			"messages":   stickyMessages(),
+		})
+		rec := httptest.NewRecorder()
+		h.h.HandleAnthropicMessages(rec, req)
+
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("truncated passthrough stream recorded a winner: %q", v)
+		}
+	})
+}
+
 // ─── §9 fixture: Anthropic BACKUP-POOL re-entry variant ─────────────────────
 
 // TestStickyOrder_AnthropicBackupPoolReEntry_Reorder pins §8.8 on the

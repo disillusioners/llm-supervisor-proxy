@@ -334,6 +334,7 @@ The reviewer's evidence makes the FE delta load-bearing: every FE proxy-Apply (`
 - **Cred-failover exhaustion counts** — implicitly and correctly: each failover attempt of the winner is an attempt failure that already invalidated; an exhaustion-specific hook would be a redundant no-op (R8).
 - **False-positive risk — accepted:** a single transient 429 unpins a good winner; the next request races unpromoted and, on success, re-pins. Cost of a false unpin = one request without promotion = **exactly today's behavior**. No debounce, no failure counters — that bookkeeping would outgrow the feature's value.
 - **Non-coupling (explicit, leader lock 5c):** the reorder does NOT consult credential cooldown tables — they are credential-ID-keyed inside per-model state (`engine.go:695-698`, R20); sticky is conversation-keyed. Disjoint keyspaces by construction; failure-driven invalidation is the sole dead-winner correction path.
+- **Residual (accepted, M1 ruling):** Anthropic truncated terminals (missing upstream `[DONE]`, scanner read error, client disconnect) are never RECORDED (the delivery gate skips them) but do NOT fire winner-matched invalidation — stale pins self-heal on the next failed attempt of the recorded winner.
 
 ### 7.3 grouplb interplay (documented interaction, no coupling)
 
