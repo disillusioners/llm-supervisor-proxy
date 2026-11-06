@@ -176,7 +176,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Execute: Make a request through the handler with the valid API key
 	reqBody := map[string]interface{}{
@@ -335,7 +335,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Make 3 requests
 	for i := 0; i < 3; i++ {
@@ -564,7 +564,7 @@ func TestPerTokenUltimateModelOverride_Resolution(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(conf, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Drive the hash attempt counter to just below the first milestone:
 	// under the fixed 5/10/20/30/40 schedule the 5th total request with
@@ -737,7 +737,7 @@ func TestPerTokenUltimateModelDisabled_UsesGlobal(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Make a regular request (not triggering ultimate model because it's disabled)
 	reqBody := map[string]interface{}{
@@ -860,7 +860,7 @@ func TestUltimateModel_ExcludedModel_DuplicateContinuesNormalFlow(t *testing.T) 
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Prepare messages for duplicate detection
 	messages := []map[string]interface{}{
@@ -1065,7 +1065,7 @@ func TestUltimateModel_ExcludedModel_ForceTriggerBypassesExclusion(t *testing.T)
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Subscribe to events to verify exclusion event is NOT published
 	eventCh, _ := bus.Subscribe()
@@ -1196,7 +1196,7 @@ func TestUltimateModel_ExcludedModel_RetryExhaustedNoError(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// Send the same request 42 times: under the fixed schedule attempts
 	// 41 and 42 are past the 40 cap (exhausted) — exclusion must still
@@ -1353,7 +1353,7 @@ func TestUltimateModel_ExcludedModel_CrossModelDetection(t *testing.T) {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	// The key test messages
 	testMessages := []map[string]interface{}{

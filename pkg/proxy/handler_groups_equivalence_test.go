@@ -199,7 +199,7 @@ func newAm29Harness(t *testing.T) *am29Harness {
 	}); err != nil {
 		t.Fatalf("AddCredential(%s): %v", p5FixtureCredID, err)
 	}
-	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine())
+	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine(), nil)
 	clean := func() {
 		up.Close()
 		mgr.Close()

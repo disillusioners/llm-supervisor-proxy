@@ -129,7 +129,7 @@ func TestAnthropic_ConversationKeyPerTokenSalting(t *testing.T) {
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil, nil)
 
 	const firstUserMsg = "Hello, world"
 	body := anthropicBody("anthropic-test-model", false, []map[string]interface{}{

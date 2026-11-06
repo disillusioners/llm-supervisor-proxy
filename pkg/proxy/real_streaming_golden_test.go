@@ -120,7 +120,7 @@ func genAnthropicPassthrough(t *testing.T, variant string) (string, string) {
 	}); err != nil {
 		t.Fatalf("AddModel: %v", err)
 	}
-	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -150,7 +150,7 @@ func genAnthropicTranslation(t *testing.T, variant string) (string, string) {
 	mgr, _ := config.NewManager()
 	modelsCfg := models.NewModelsConfig()
 	seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
-	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -458,7 +458,7 @@ func TestRealStreaming_Events_BufferedEqualsLive(t *testing.T) {
 		// remove-external-upstream P5: internal openai fixture (the
 		// deleted external passthrough resolved nothing).
 		seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
-		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 		rec := newEventRecorder(h.bus)
 		defer rec.close()

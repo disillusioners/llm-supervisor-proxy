@@ -520,6 +520,7 @@ func TestRaceFailureReason_FailingUpstreamEndToEnd(t *testing.T) {
 		context.Background(), cfg, newTestRequest(),
 		[]byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}]}`),
 		[]string{"m1"}, bus, "req-reason-e2e", false, nil, "", false,
+		nil,
 	)
 
 	coord.Start()
@@ -605,6 +606,7 @@ func TestRaceSpawnEvent_ReasonAdditiveOnly(t *testing.T) {
 	coord := newRaceCoordinatorWithEvents(
 		context.Background(), cfg, newTestRequest(), []byte("{}"),
 		[]string{"m1", "fallback"}, bus, "req-reason-spawn", false, nil, "", false,
+		nil,
 	)
 
 	// Idle-timeout spawn (no error to classify — W4).

@@ -1,5 +1,47 @@
 package proxy
 
+// ─────────────────────────────────────────────────────────────────────────────
+// handler_anthropic.go — the Anthropic-wire request lifecycle (/v1/messages)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - Request lifecycle ................ HandleAnthropicMessages: auth,
+//                                         model resolution, the group rewrite,
+//                                         the sticky order, and the SEQUENTIAL
+//                                         fallback walk (there is no race
+//                                         coordinator on this lane).
+//   - Attempt execution ............... attemptAnthropicModel +
+//                                         doAnthropicRequest (the credential's
+//                                         provider decides raw passthrough vs
+//                                         the internal OpenAI translator) and
+//                                         doAnthropicInternalRequest.
+//   - Response shaping ................ handleAnthropicNonStreamResponse, the
+//                                         buffered stream translator, and the
+//                                         live IncrementalStreamTranslator.
+//   - Delivered-success funnel ........ finalizeAnthropicSuccess (the only
+//                                         site that sets Status="completed").
+//
+// Companion files:
+//
+//   - handler.go: the OpenAI lane. Protocol-neutral pieces (group rewrite,
+//     sticky orchestrator, masking) live in handler_groups.go; the
+//     request-context shape is in handler_helpers.go.
+//   - adapter_anthropic.go / translator/: wire translation only.
+//   - internal_handler.go: the internal provider attempt (this file only
+//     orchestrates WHEN to call it).
+//
+// Size rationale: this file sits in the 2000-line band because ONE Anthropic
+// request's lifecycle — buffered vs live stream, the passthrough/internal
+// split, the per-attempt credential failover hook, and the group re-entry —
+// shares one arc state machine whose fields are mutated and restored per
+// attempt. Splitting the response-shaping arms into another file would
+// separate the state restoration from the mutation sites that need it, which
+// is exactly the coupling that makes an attempt-failure rollback auditable.
+// TRIPWIRE: if this file passes ~2600 lines, split the LIVE stream translator
+// driver out FIRST — it is the most self-contained block.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"bufio"
 	"bytes"
@@ -385,6 +427,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
 	}
 
+	// Sticky last-success race ORDER (design site (b)): post-group-
+	// rewrite, pre-walk. The Anthropic lane has no race coordinator —
+	// reordering changes walk ATTEMPT order only (index 0 = first
+	// attempt), preserving sequential-fallback semantics.
+	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
+
 	// Outer loop: iterate through models (original + fallbacks).
 	// load-balance-groups / Am24 re-entry: a terminal member-pipeline
 	// failure (all models failed, no byte sent) lets the group
@@ -454,6 +502,18 @@ loop:
 				arc.requestBody = newBody
 			}
 
+			// Sticky last-success served identity: set BEFORE the
+			// attempt — finalizeAnthropicSuccess runs from inside
+			// attemptAnthropicModel, so a post-success set would still
+			// be empty at record time (design §4.4 ordering trap).
+			//
+			// The delivery gate is ATTEMPT-SCOPED: reset both fields here
+			// so a previous attempt's write failure / truncation cannot
+			// suppress (or admit) this attempt's record.
+			arc.servedModel = currentModel
+			arc.clientWriteErr = nil
+			arc.deliveryTruncated = false
+
 			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 			if success {
 				return
@@ -476,6 +536,15 @@ loop:
 
 			arc.reqLog.Status = "failed"
 			arc.reqLog.Error = "Model failed"
+
+			// Sticky last-success failure invalidation (winner-matched
+			// inside the engine): only a failure of the RECORDED winner
+			// unpins the slot. Between-attempt loop aborts (client
+			// disconnect / headersSent `break loop`) are NOT model
+			// failures and never reach this arm.
+			if arc.conf.stickyActive(arc.conversationKey) {
+				h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
+			}
 		}
 
 		// All models failed (loop body ended without success). Am24
@@ -504,7 +573,7 @@ loop:
 		}
 	} else {
 		// Headers already sent (streaming) - send SSE error event
-		h.sendAnthropicSSEError(w, "api_error", "All models failed after retries")
+		_ = h.sendAnthropicSSEError(w, "api_error", "All models failed after retries")
 	}
 }
 
@@ -1022,10 +1091,11 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	debugLog("=== ANTHROPIC RESPONSE ===")
 	debugLog("Anthropic Body: %s", string(anthropicResp))
 
-	// Send response
+	// Send response. Capture the write outcome: finalize below uses it to
+	// gate the sticky record (a dropped body is not a delivered success).
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(anthropicResp)
+	_, arc.clientWriteErr = w.Write(anthropicResp)
 
 	// Finalize with assistant message
 	h.finalizeAnthropicSuccess(arc)
@@ -1045,7 +1115,7 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 	anthropicEvents, err := translator.TranslateBufferedStream(openaiBody, arc.originalModel)
 	if err != nil {
 		log.Printf("Failed to translate Anthropic internal stream: %v", err)
-		h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
+		_ = h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
 		return true // Don't retry after headers sent
 	}
 
@@ -1065,8 +1135,8 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 		}
 	}
 
-	// Write translated events
-	w.Write(anthropicEvents)
+	// Write translated events (last-write outcome gates the sticky record)
+	_, arc.clientWriteErr = w.Write(anthropicEvents)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -1098,10 +1168,10 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 		return false
 	}
 
-	// Send response
+	// Send response (last-write outcome gates the sticky record)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(anthropicResp)
+	_, arc.clientWriteErr = w.Write(anthropicResp)
 
 	// Finalize with assistant message
 	h.finalizeAnthropicSuccess(arc)
@@ -1148,6 +1218,9 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 	for scanner.Scan() {
 		if arc.baseCtx.Err() != nil {
 			log.Printf("Client disconnected during live stream")
+			// Client-disconnect terminal: the stream was cut mid-flight, so
+			// this attempt is not a delivered success.
+			arc.deliveryTruncated = true
 			break
 		}
 
@@ -1230,6 +1303,8 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Live stream scanner error: %v", err)
+		// Scanner read error: truncated upstream terminal.
+		arc.deliveryTruncated = true
 	}
 
 	// Finalize — emit block-stops + message_delta + message_stop on
@@ -1244,8 +1319,13 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 		}
 		for _, ev := range finalEvents {
 			mirrorTranslatorEventIntoArc(ev, arc)
-			if _, err := w.Write([]byte(ev)); err != nil {
-				log.Printf("Live stream final wire write failed: %v", err)
+			// Last-write outcome for the live path: recorded on BOTH the
+			// success path and the existing break so finalize sees the
+			// last write the attempt actually performed.
+			_, werr := w.Write([]byte(ev))
+			arc.clientWriteErr = werr
+			if werr != nil {
+				log.Printf("Live stream final wire write failed: %v", werr)
 				break
 			}
 			if f, ok := w.(http.Flusher); ok {
@@ -1259,7 +1339,10 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 	// (handler_anthropic.go:880-886 baseline). This matches the
 	// buffered path's error envelope shape.
 	if !doneSeen {
-		h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
+		// Missing upstream [DONE]: truncated terminal — closed with an
+		// error event and never recorded (the sticky gate reads this).
+		arc.deliveryTruncated = true
+		arc.clientWriteErr = h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
 	}
 
 	// Persist the assistant message and publish completion.
@@ -1460,7 +1543,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			anthropicEvents, err := translator.TranslateBufferedStream(buffer.Bytes(), arc.originalModel)
 			if err != nil {
 				log.Printf("Failed to translate Anthropic stream: %v", err)
-				h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
+				_ = h.sendAnthropicSSEError(w, "api_error", "Stream translation failed")
 				return true // Don't retry after headers sent
 			}
 
@@ -1473,7 +1556,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 				}
 			}
 
-			w.Write(anthropicEvents)
+			_, arc.clientWriteErr = w.Write(anthropicEvents)
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -1491,7 +1574,7 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 		log.Printf("Anthropic stream error: %v", err)
 	}
 
-	h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
+	_ = h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
 	return true // Don't retry after headers sent
 }
 
@@ -1559,6 +1642,41 @@ type anthropicRequestContext struct {
 	conversationKey string
 	retryAfter      time.Duration
 
+	// servedModel is the CONCRETE model id the walk is about to attempt
+	// — set at walk-top, immediately BEFORE the attempt (design §4.4
+	// ordering trap: setting it post-success would be too late, because
+	// finalizeAnthropicSuccess runs from INSIDE attemptAnthropicModel).
+	// On a delivered success the last pre-attempt set is exactly the
+	// serving model (a group MEMBER id — keyspace-consistent with the
+	// sticky choke-point lists); on failure it is never read (no
+	// finalize runs); marshal-failure `continue`s skip the set for
+	// never-attempted models; group re-entry overwrites it on the
+	// rebuilt walk.
+	servedModel string
+
+	// clientWriteErr / deliveryTruncated are the DELIVERY GATE for the
+	// sticky last-success record (reviewer ruling: FULL SYMMETRY with the
+	// OpenAI lanes). They describe the LAST attempt only — both are RESET
+	// at walk-top beside servedModel so nothing leaks across attempts.
+	//
+	//   clientWriteErr      — the outcome of the last client write this
+	//                         attempt performed before finalize (nil when
+	//                         every write succeeded). A failed last write
+	//                         means the response did not fully reach the
+	//                         client, so the record is skipped.
+	//   deliveryTruncated   — the attempt ended in a TRUNCATED terminal:
+	//                         missing upstream [DONE] on the live path,
+	//                         a scanner read error, or a client
+	//                         disconnect. These are closed with an error
+	//                         event, never recorded (mirrors the buffered
+	//                         path's existing skip).
+	//
+	// NOT gated (documented residual, pkg/stickyorder doc.go): the
+	// internal-LIVE path — its writes happen inside internal_handler.go
+	// and are not surfaced here.
+	clientWriteErr    error
+	deliveryTruncated bool
+
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder
@@ -1616,6 +1734,22 @@ func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
 	arc.reqLog.Duration = time.Since(arc.startTime).String()
 	h.store.Add(arc.reqLog)
 	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+
+	// Sticky last-success: this finalize funnel is the ONLY site on the
+	// Anthropic lane that reaches completion, but "finalize ran" is not
+	// the same as "the client received the response". Mirror the OpenAI
+	// shape: the shared predicate + the attempt's DELIVERY outcome.
+	//   - clientWriteErr   — the last client write failed (did not reach
+	//                        the client);
+	//   - deliveryTruncated — truncated terminal (no [DONE], scanner
+	//                        error, client disconnect) closed with an
+	//                        error event.
+	// Status codes, envelopes, store.Add, logging and the return value
+	// are untouched — this gate applies to the sticky record ONLY.
+	if arc.conf.stickyActive(arc.conversationKey) && arc.servedModel != "" &&
+		arc.clientWriteErr == nil && !arc.deliveryTruncated {
+		h.stickyEngine.RecordSuccess(arc.conversationKey, arc.servedModel)
+	}
 }
 
 // extractOpenAIResponseContent extracts content, thinking, and tool calls from OpenAI response.
@@ -1761,8 +1895,12 @@ func getStringVal(m map[string]interface{}, key string) string {
 	return ""
 }
 
-// sendAnthropicSSEError sends an error as an SSE event in Anthropic format
-func (h *Handler) sendAnthropicSSEError(w http.ResponseWriter, errorType, message string) {
+// sendAnthropicSSEError sends an error as an SSE event in Anthropic format.
+// It RETURNS the error-event write outcome so callers on the delivered-
+// success path can feed it into the sticky delivery gate (the error event
+// is the LAST client write of a truncated attempt). Callers that never
+// finalize simply ignore the return value.
+func (h *Handler) sendAnthropicSSEError(w http.ResponseWriter, errorType, message string) error {
 	errorEvent := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{
@@ -1773,12 +1911,15 @@ func (h *Handler) sendAnthropicSSEError(w http.ResponseWriter, errorType, messag
 	eventBytes, err := json.Marshal(errorEvent)
 	if err != nil {
 		log.Printf("failed to marshal error response: %v", err)
-		return
+		return err
 	}
-	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(eventBytes))
+	// The error event is itself a client write: its outcome is the last
+	// write of the attempt, so it is returned for the sticky gate.
+	_, werr := fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(eventBytes))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+	return werr
 }
 
 // validateAnthropicRequest validates an Anthropic request
@@ -1846,10 +1987,10 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 		}
 	}
 
-	// Forward response as-is
+	// Forward response as-is (last-write outcome gates the sticky record)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(bodyBytes)
+	_, arc.clientWriteErr = w.Write(bodyBytes)
 
 	h.finalizeAnthropicSuccess(arc)
 	return true
@@ -1914,9 +2055,16 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 			}
 		}
 
-		// Forward the line as-is
-		w.Write(line)
-		w.Write([]byte("\n"))
+		// Forward the line as-is. `werr` is the per-line local: the line
+		// write and its newline write are assigned AFTER the pair so the
+		// LAST outcome of the pair is what finalize sees.
+		_, werr := w.Write(line)
+		if _, nerr := w.Write([]byte("\n")); nerr != nil {
+			werr = nerr
+		}
+		if werr != nil {
+			arc.clientWriteErr = werr
+		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -1924,6 +2072,7 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Passthrough stream scanner error: %v", err)
+		arc.deliveryTruncated = true
 	}
 
 	h.finalizeAnthropicSuccess(arc)

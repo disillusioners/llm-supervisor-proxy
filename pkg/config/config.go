@@ -82,6 +82,18 @@ type Config struct {
 	RaceMaxParallel    int  `json:"race_max_parallel"`
 	RaceMaxBufferBytes int  `json:"race_max_buffer_bytes"` // Max bytes per request buffer (5MB default)
 
+	// StickyLastSuccessEnabled enables sticky last-success race
+	// ORDER: at race start (and at each Anthropic walk start) the
+	// model that last DELIVERED a success for this request's
+	// conversation key is promoted to index 0. Order only — chain
+	// membership and group-LB behavior are untouched. Default OFF;
+	// off means the request path is byte-identical to pre-feature
+	// behavior. The DB merge keeps this field OUT of
+	// isRaceRetryProvided: a sticky-only API PUT can enable the flag
+	// but never fires the race-family block (zero-clobbering the
+	// siblings would be a silent behavior regression).
+	StickyLastSuccessEnabled bool `json:"sticky_last_success_enabled"`
+
 	// Layered credential fallback (Fix 1): CredentialQuotaCooldown is
 	// the cooldown seeded on a credential that failed with a
 	// QUOTA-class error (HTTP 402 / code 2067 / "Token Plan usage
@@ -144,6 +156,7 @@ type ManagerInterface interface {
 	GetRaceParallelOnIdle() bool
 	GetRaceMaxParallel() int
 	GetRaceMaxBufferBytes() int
+	GetStickyLastSuccessEnabled() bool
 	GetToolCallBufferDisabled() bool
 	GetToolCallBufferMaxSize() int64
 	GetLogRawUpstreamResponse() bool
@@ -233,12 +246,13 @@ var Defaults = Config{
 		ModelID: "",
 		MaxHash: 100,
 	},
-	RaceRetryEnabled:       false,
-	RaceParallelOnIdle:     true,
-	RaceMaxParallel:        3,
-	RaceMaxBufferBytes:     5242880,     // 5MB limit
-	ToolCallBufferDisabled: false,       // Buffering ENABLED by default
-	ToolCallBufferMaxSize:  1024 * 1024, // 1MB default
+	RaceRetryEnabled:         false,
+	StickyLastSuccessEnabled: false,
+	RaceParallelOnIdle:       true,
+	RaceMaxParallel:          3,
+	RaceMaxBufferBytes:       5242880,     // 5MB limit
+	ToolCallBufferDisabled:   false,       // Buffering ENABLED by default
+	ToolCallBufferMaxSize:    1024 * 1024, // 1MB default
 
 	// Layered credential fallback: quota-class cooldown default 15m
 	// (credentiallb.DefaultQuotaCooldown — single source of truth).
@@ -489,6 +503,10 @@ func applyEnvOverrides(cfg Config) Config {
 	}
 	if v := os.Getenv("RACE_RETRY_ENABLED"); v != "" {
 		cfg.RaceRetryEnabled = v == "true" || v == "1"
+	}
+	// Sticky last-success race ordering — default OFF; "true"/"1" enable.
+	if v := os.Getenv("STICKY_LAST_SUCCESS_ENABLED"); v != "" {
+		cfg.StickyLastSuccessEnabled = v == "true" || v == "1"
 	}
 	if v := os.Getenv("RACE_PARALLEL_ON_IDLE"); v != "" {
 		cfg.RaceParallelOnIdle = v == "true" || v == "1"
@@ -750,6 +768,14 @@ func (m *Manager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.config.RaceRetryEnabled
+}
+
+// GetStickyLastSuccessEnabled returns whether sticky last-success race
+// ordering is enabled
+func (m *Manager) GetStickyLastSuccessEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.StickyLastSuccessEnabled
 }
 
 // GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout

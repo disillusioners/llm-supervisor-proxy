@@ -120,7 +120,7 @@ func newMeteringHarness(t *testing.T, upstream http.HandlerFunc) (*groupHarness,
 	}); err != nil {
 		t.Fatalf("AddCredential(%s): %v", p5FixtureCredID, err)
 	}
-	g := &groupHarness{mgr: mgr, h: NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine()), up: up, bus: bus}
+	g := &groupHarness{mgr: mgr, h: NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, counter, mgr.Engine(), nil), up: up, bus: bus}
 	g.clean = func() {
 		up.Close()
 		mgr.Close()

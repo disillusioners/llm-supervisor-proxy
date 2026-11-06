@@ -347,6 +347,7 @@ func TestRaceMinimaxFallback_E2E_Primary429_FallbackTranslated(t *testing.T) {
 		nil,   // engine — nil-safe (no cred failover path needed)
 		"conv-key-fallback-e2e",
 		true, // liveFirstByteGate — matches live mode (no buffer header)
+		nil,
 	)
 	coord.Start()
 
@@ -503,6 +504,7 @@ func TestRaceMinimaxFallback_E2E_NonMiniMaxFallback_NotTranslated(t *testing.T) 
 		nil,   // engine
 		"conv-key-fallback-e2e-guard",
 		true, // liveFirstByteGate
+		nil,
 	)
 	coord.Start()
 
