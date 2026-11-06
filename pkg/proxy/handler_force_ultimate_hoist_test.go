@@ -125,7 +125,7 @@ func setupHoistTest(t *testing.T, ultimateModelEnabled bool) *hoistTestEnv {
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsConfig}, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsConfig}, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	return &hoistTestEnv{h: h, reqStore: reqStore, plaintextToken: plaintextToken}
 }

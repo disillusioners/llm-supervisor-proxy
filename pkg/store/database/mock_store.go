@@ -153,6 +153,14 @@ func (m *MockConfigManager) GetRaceRetryEnabled() bool {
 	return m.Config.RaceRetryEnabled
 }
 
+// GetStickyLastSuccessEnabled returns whether sticky last-success race
+// ordering is enabled.
+func (m *MockConfigManager) GetStickyLastSuccessEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Config.StickyLastSuccessEnabled
+}
+
 // GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout.
 func (m *MockConfigManager) GetRaceParallelOnIdle() bool {
 	m.mu.RLock()
@@ -211,6 +219,11 @@ func (m *MockConfigManager) GetLogRawUpstreamMaxKB() int {
 
 // Save stores the configuration and updates the mock's state.
 // Returns SaveErr if set, otherwise updates Config and records the call.
+// Save stores the incoming config VERBATIM — deliberately no mergeConfig
+// call: this mock returns exactly what the caller saved, so a test can
+// assert the persisted shape without the production partial-PUT merge
+// rewriting it. Merge behaviour is covered against mergeConfig directly
+// (see the config-merge tests), never through this mock.
 func (m *MockConfigManager) Save(cfg config.Config) (*config.SaveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

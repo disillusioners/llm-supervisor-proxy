@@ -179,7 +179,7 @@ func newShadowFixHarness(t *testing.T) *shadowFixHarness {
 	mgrCfg := newTestManagerWithConfig(t, up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	counter := newAm29Counter(t)
-	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: cache}, bus, reqStore, nil, nil, counter, mgr.Engine())
+	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: cache}, bus, reqStore, nil, nil, counter, mgr.Engine(), nil)
 	hh.mgr = mgr
 	hh.cache = cache
 	hh.h = h

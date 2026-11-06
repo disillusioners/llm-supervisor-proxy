@@ -129,7 +129,7 @@ func TestLiveRelay_FirstByteWinner(t *testing.T) {
 
 	// Live mode: pass liveFirstByteGate=true
 	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-		[]string{"test-model"}, nil, "test-live-fbw", false, nil, "", true)
+		[]string{"test-model"}, nil, "test-live-fbw", false, nil, "", true, nil)
 	coord.Start()
 
 	startTime := time.Now()
@@ -194,7 +194,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-role-only", false, nil, "", true)
+			[]string{"m"}, nil, "test-role-only", false, nil, "", true, nil)
 		coord.Start()
 
 		start := time.Now()
@@ -234,7 +234,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-thinking-first", false, nil, "", true)
+			[]string{"m"}, nil, "test-thinking-first", false, nil, "", true, nil)
 		coord.Start()
 
 		start := time.Now()
@@ -277,7 +277,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":true}`)
 
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-err-only", false, nil, "", true)
+			[]string{"m"}, nil, "test-err-only", false, nil, "", true, nil)
 		coord.Start()
 
 		// Either the coordinator returns nil (no winner, executor returned
@@ -310,7 +310,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		cfg.MaxGenerationTime = 10 * time.Second
 		cfg.RaceParallelOnIdle = false
 		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
-			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-2a", false, nil, "", true)
+			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-2a", false, nil, "", true, nil)
 
 		a := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		a.MarkStarted()
@@ -348,7 +348,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		cfg := liveTestCfg("http://127.0.0.1:0", 5*time.Second)
 		cfg.MaxGenerationTime = 10 * time.Second
 		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
-			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-empty1", false, nil, "", true)
+			[]byte(`{"model":"mA","stream":true}`), []string{"mA", "mB"}, nil, "crafted-empty1", false, nil, "", true, nil)
 
 		empty := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		empty.MarkStarted()
@@ -382,7 +382,7 @@ func TestLiveRelay_PredicateVariants(t *testing.T) {
 		cfg := liveTestCfg("http://127.0.0.1:0", 300*time.Millisecond)
 		cfg.MaxGenerationTime = 10 * time.Second
 		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
-			[]byte(`{"model":"mA","stream":true}`), []string{"mA"}, nil, "crafted-empty2", false, nil, "", true)
+			[]byte(`{"model":"mA","stream":true}`), []string{"mA"}, nil, "crafted-empty2", false, nil, "", true, nil)
 
 		empty := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		empty.MarkStarted()
@@ -439,7 +439,7 @@ func TestLiveRelay_StreamDeadlineZeroByte(t *testing.T) {
 	rawBody := []byte(`{"model":"m","stream":true}`)
 
 	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-		[]string{"m"}, nil, "test-deadline-zero", false, nil, "", true)
+		[]string{"m"}, nil, "test-deadline-zero", false, nil, "", true, nil)
 	coord.Start()
 
 	// Wait for the deadline to fire. handleStreamingDeadline in live mode
@@ -540,7 +540,7 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 
 		// Production scoping for isStream=false: liveFirstByteGate=false.
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-non-stream", false, nil, "", false)
+			[]string{"m"}, nil, "test-non-stream", false, nil, "", false, nil)
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -579,7 +579,7 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-non-stream-dl", false, nil, "", false)
+			[]string{"m"}, nil, "test-non-stream-dl", false, nil, "", false, nil)
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -622,7 +622,7 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 		rawBody := []byte(`{"model":"m","stream":false}`)
 
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-non-stream-hdr", false, nil, "", false)
+			[]string{"m"}, nil, "test-non-stream-hdr", false, nil, "", false, nil)
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -675,7 +675,7 @@ func TestLiveRelay_NonStreamUnaffected(t *testing.T) {
 
 		// The MIS-SCOPED form: gate=true despite isStream=false.
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-non-stream-mis", false, nil, "", true)
+			[]string{"m"}, nil, "test-non-stream-mis", false, nil, "", true, nil)
 		coord.Start()
 
 		winner := coord.WaitForWinner()
@@ -734,7 +734,7 @@ func TestLiveRelay_HeaderDispatch(t *testing.T) {
 		ctxL, cancelL := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelL()
 		coord := newRaceCoordinatorWithEvents(ctxL, cfg, req, rawBody,
-			[]string{"m"}, nil, "test-dispatch-live", false, nil, "", true)
+			[]string{"m"}, nil, "test-dispatch-live", false, nil, "", true, nil)
 		coord.Start()
 		start := time.Now()
 		_ = coord.WaitForWinner()
@@ -899,7 +899,7 @@ func TestLiveRelay_MidStreamLoserCancel(t *testing.T) {
 	rawBody := []byte(`{"model":"mA","stream":true}`)
 
 	coord := newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody,
-		[]string{"mA", "mB"}, nil, "test-loser-cancel", false, nil, "", true)
+		[]string{"mA", "mB"}, nil, "test-loser-cancel", false, nil, "", true, nil)
 	coord.Start()
 
 	// Snapshot the fallback attempt's (index 2, server B) buffer BEFORE
@@ -1128,7 +1128,7 @@ func newLiveRelayHandler(t *testing.T, upstreamHandler http.HandlerFunc, modelsC
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, bufStore, nil, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, nil, nil, nil, nil)
 	return h, upstream, bus, reqStore
 }
 
@@ -1272,7 +1272,7 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 
 		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 		coord := newRaceCoordinatorWithEvents(ctx, cfg, req,
-			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-boundary", false, nil, "", true)
+			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-boundary", false, nil, "", true, nil)
 		coord.Start()
 
 		// Whichever arm wins the race (ticker selects the first-byte
@@ -1301,7 +1301,7 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 		// return (race_coordinator.go handleStreamingDeadline head).
 		cfg := liveTestCfg("http://127.0.0.1:0", 5*time.Second)
 		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(),
-			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl", false, nil, "", true)
+			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl", false, nil, "", true, nil)
 
 		a := newUpstreamRequest(0, modelTypeMain, "mA", 1<<20)
 		a.MarkStarted()
@@ -1347,7 +1347,7 @@ func TestLiveRelay_StreamDeadlineInLiveMode(t *testing.T) {
 
 		req2, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
 		coord2 := newRaceCoordinatorWithEvents(ctx2, cfg2, req2,
-			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl-2", false, nil, "", true)
+			[]byte(`{"model":"m","stream":true}`), []string{"m"}, nil, "test-late-dl-2", false, nil, "", true, nil)
 		coord2.Start()
 
 		winner := coord2.WaitForWinner()

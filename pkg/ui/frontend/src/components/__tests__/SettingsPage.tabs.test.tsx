@@ -45,6 +45,7 @@ function makeProps(overrides: Partial<{
     race_parallel_on_idle: true,
     race_max_parallel: 3,
     race_max_buffer_bytes: 5242880,
+    sticky_last_success_enabled: false,
     loop_detection: {
       enabled: false,
       shadow_mode: false,
@@ -327,5 +328,74 @@ describe('SettingsPage — tab mechanism (ImgGen Commission C-17, T2.5.1; Decisi
     const groupEmoji = container.querySelector('[data-tab-id="group_models"] span[aria-hidden="true"]');
     expect(groupEmoji).not.toBeNull();
     expect((groupEmoji as HTMLElement).textContent).toBe('🔀');
+  });
+});
+
+// ─── sticky last-success ordering (FE delta, design §5.3) ───────────────────
+
+function findStickyToggle(container: Element): HTMLButtonElement {
+  const label = Array.from(container.querySelectorAll('label')).find(
+    (l) => (l.textContent || '').trim() === 'Sticky Last-Success Ordering',
+  );
+  expect(label).toBeTruthy();
+  const toggle = label!.parentElement!.querySelector('button') as HTMLButtonElement;
+  expect(toggle).not.toBeNull();
+  return toggle;
+}
+
+describe('SettingsPage — sticky last-success race ordering', () => {
+  it('loads the flag from config (true ⇒ Enabled)', () => {
+    const props = makeProps();
+    props.config = { ...props.config!, sticky_last_success_enabled: true };
+    const { container } = render(<SettingsPage {...props} />);
+
+    const toggle = findStickyToggle(container);
+    // The pill's sibling copy is the Enabled/Disabled label.
+    expect(toggle.parentElement!.textContent).toContain('Enabled');
+  });
+
+  it('toggle round-trips into the proxy-Apply payload (and preserves the race siblings)', async () => {
+    const props = makeProps();
+    const { container } = render(<SettingsPage {...props} />);
+
+    const toggle = findStickyToggle(container);
+    expect(toggle.parentElement!.textContent).toContain('Disabled');
+    fireEvent.click(toggle);
+    expect(toggle.parentElement!.textContent).toContain('Enabled');
+
+    const apply = Array.from(container.querySelectorAll('button')).find(
+      (b) => (b.textContent || '').includes('Apply Changes'),
+    ) as HTMLButtonElement;
+    expect(apply).toBeDefined();
+    fireEvent.click(apply);
+
+    await waitFor(() => expect(props.onUpdateConfig).toHaveBeenCalled());
+    const payload = (props.onUpdateConfig as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as Record<string, unknown>;
+    // The flag rides the proxy-Apply payload — mandatory, because the BE
+    // family merge is authoritative for set AND clear when the family is
+    // present (omitting it would silently clear the flag).
+    expect(payload.sticky_last_success_enabled).toBe(true);
+    // Race siblings keep their loaded values (no zero-clobber).
+    expect(payload.race_retry_enabled).toBe(false);
+    expect(payload.race_max_parallel).toBe(3);
+    expect(payload.race_max_buffer_bytes).toBe(5242880);
+  });
+
+  it('a family-bearing Apply sends sticky=false when the toggle is off (clear path)', async () => {
+    const props = makeProps();
+    props.config = { ...props.config!, sticky_last_success_enabled: true };
+    const { container } = render(<SettingsPage {...props} />);
+
+    const toggle = findStickyToggle(container);
+    fireEvent.click(toggle); // true → false
+
+    const apply = Array.from(container.querySelectorAll('button')).find(
+      (b) => (b.textContent || '').includes('Apply Changes'),
+    ) as HTMLButtonElement;
+    fireEvent.click(apply);
+
+    await waitFor(() => expect(props.onUpdateConfig).toHaveBeenCalled());
+    const payload = (props.onUpdateConfig as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.sticky_last_success_enabled).toBe(false);
   });
 });

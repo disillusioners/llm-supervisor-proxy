@@ -170,7 +170,7 @@ func newCredFailoverTestEnv(t *testing.T, credCount int, failN int, conversation
 	cfg.MaxGenerationTime = 10 * time.Second
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
-	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, conversationKey, false)
+	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, conversationKey, false, nil)
 	return coord, resolver, provider, bus
 }
 
@@ -357,7 +357,7 @@ func TestCoordinator_ModelCredentialSelected_OncePerFirstBinding(t *testing.T) {
 		cfg.StreamDeadline = 5 * time.Second
 		cfg.MaxGenerationTime = 10 * time.Second
 		rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, key, false)
+		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, key, false, nil)
 		coord.Start()
 		if w := coord.WaitForWinner(); w == nil {
 			t.Fatalf("no winner for key=%q", key)
@@ -423,7 +423,7 @@ func TestCoordinator_ModelCredentialSelected_EmptyKey_NeverFires(t *testing.T) {
 		cfg.StreamDeadline = 5 * time.Second
 		cfg.MaxGenerationTime = 10 * time.Second
 		rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}`)
-		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, "", false)
+		coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody, []string{"m1"}, bus, "test-req", false, engine, "", false, nil)
 		coord.Start()
 		if w := coord.WaitForWinner(); w == nil {
 			t.Fatalf("run %d: no winner (empty-key requests must still be served)", i)
@@ -570,7 +570,7 @@ func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":false}`)
 	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
-		[]string{"m1", "m2"}, bus, "test-req", false, engine, "conv-key-2model", false)
+		[]string{"m1", "m2"}, bus, "test-req", false, engine, "conv-key-2model", false, nil)
 
 	// ── Layer 1 — spawn() targets triggerInfo.modelID (the C1 fix) ──
 	// Simulate the Case-1 classification site: the fallback row just
@@ -629,7 +629,7 @@ func TestCoordinator_CredFailover_TwoModelChain_WrongModelFix(t *testing.T) {
 	// (the existing single-model chain) so unit tests that omit
 	// modelID don't silently misfire.
 	coord2 := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
-		[]string{"m1", "m2"}, bus, "test-req-2", false, engine, "conv-key-2model-neg", false)
+		[]string{"m1", "m2"}, bus, "test-req-2", false, engine, "conv-key-2model-neg", false, nil)
 	coord2.spawn(modelTypeCredFailover, spawnTriggerInfo{
 		trigger:       triggerRateLimit,
 		credentialID:  "cred-Y",
@@ -808,7 +808,7 @@ func newLiveCredFailoverEnv(t *testing.T, mode string) (*raceCoordinator, *liveS
 
 	rawBody := []byte(`{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":true}`)
 	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), rawBody,
-		[]string{"m1"}, bus, "live-failover-req", false, engine, "conv-live-failover", true /* liveFirstByteGate */)
+		[]string{"m1"}, bus, "live-failover-req", false, engine, "conv-live-failover", true /* liveFirstByteGate */, nil)
 	return coord, provider, bus
 }
 

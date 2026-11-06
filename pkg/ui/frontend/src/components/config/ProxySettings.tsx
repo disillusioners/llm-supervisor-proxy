@@ -15,6 +15,7 @@ interface ProxySettingsProps {
   raceParallelOnIdle: boolean;
   raceMaxParallel: number;
   raceMaxBufferBytes: number;
+  stickyLastSuccessEnabled: boolean;
   // Ultimate model fields
   ultimateModelId: string;
   ultimateModelMaxHash: number;
@@ -31,6 +32,7 @@ interface ProxySettingsProps {
   onRaceParallelOnIdleChange: (value: boolean) => void;
   onRaceMaxParallelChange: (value: number) => void;
   onRaceMaxBufferBytesChange: (value: number) => void;
+  onStickyLastSuccessEnabledChange: (value: boolean) => void;
   onUltimateModelIdChange: (value: string) => void;
   onUltimateModelMaxHashChange: (value: number) => void;
   onLogRawUpstreamResponseChange: (value: boolean) => void;
@@ -55,6 +57,7 @@ export function ProxySettings({
   raceParallelOnIdle,
   raceMaxParallel,
   raceMaxBufferBytes,
+  stickyLastSuccessEnabled,
   ultimateModelId,
   ultimateModelMaxHash,
   logRawUpstreamResponse,
@@ -68,6 +71,7 @@ export function ProxySettings({
   onRaceParallelOnIdleChange,
   onRaceMaxParallelChange,
   onRaceMaxBufferBytesChange,
+  onStickyLastSuccessEnabledChange,
   onUltimateModelIdChange,
   onUltimateModelMaxHashChange,
   onLogRawUpstreamResponseChange,
@@ -302,6 +306,30 @@ export function ProxySettings({
           />
           <p class="text-xs text-gray-500 mt-1">
             Maximum bytes to buffer per request. Default: 5MB
+          </p>
+        </div>
+
+        {/* Sticky Last-Success Ordering */}
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-300 mb-1">Sticky Last-Success Ordering</label>
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onStickyLastSuccessEnabledChange(!stickyLastSuccessEnabled)}
+              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                stickyLastSuccessEnabled ? 'bg-blue-600' : 'bg-gray-600'
+              }`}
+            >
+              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                stickyLastSuccessEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+            <span class="text-sm text-gray-400">
+              {stickyLastSuccessEnabled ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">
+            Promote the model that last delivered a success for this conversation to the front of the race chain.
           </p>
         </div>
       </div>

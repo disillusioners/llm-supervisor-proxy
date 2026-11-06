@@ -161,7 +161,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_Internal(t *testing.T
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",
@@ -310,7 +310,7 @@ func TestUltimateModel_PersistsAssistantContentAndThinking_InternalStream(t *tes
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",
@@ -462,7 +462,7 @@ func newUltimateCaptureParityEnv(t *testing.T, internal bool, upstreamURL string
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 	return h, reqStore, plaintextToken
 }
 

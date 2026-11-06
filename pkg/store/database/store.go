@@ -1,5 +1,41 @@
 package database
 
+// ─────────────────────────────────────────────────────────────────────────────
+// store.go — the database-backed configuration manager (config.ManagerInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - ConfigManager ................... the DB twin of pkg/config.Manager:
+//                                         Get / Save / Load / validation and
+//                                         the event-bus publishes on change.
+//   - Partial-PUT merging ............. mergeConfig + the isXProvided family
+//                                         probes. The FE/API decodes into a
+//                                         FRESH zero-filled config.Config, so
+//                                         a bool false is indistinguishable
+//                                         from "not sent" — that asymmetry is
+//                                         the whole reason these probes exist.
+//   - Getters ......................... the ManagerInterface accessor set, one
+//                                         RLock-guarded read each.
+//
+// Companion files:
+//
+//   - init.go / migrate.go / sqlc/: schema + migration registry.
+//   - models_manager.go, store_group*.go: the models + group engines (the
+//     ConfigManager itself never resolves credentials or members).
+//   - mock_store.go: the MockConfigManager twin used by tests.
+//
+// Size rationale: this file sits in the 2000-line band because the config
+// surface is ONE contract: every accessor, every merge probe, and every
+// validation rule has to agree on the same field semantics, and the merge
+// probes are only correct in relation to each other (a new bool that joins
+// the wrong probe silently clobbers its siblings). Splitting by field family
+// would put those mutually-dependent probes in different files and make the
+// clobber reasoning much weaker than the line count saves.
+// TRIPWIRE: if this file passes ~3200 lines, split the GETTER block out
+// FIRST — it is mechanical and carries no merge semantics.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"context"
 	"database/sql"
@@ -117,9 +153,29 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// We check multiple fields to detect if race_retry was intentionally sent
 	if isRaceRetryProvided(incoming) {
 		result.RaceRetryEnabled = incoming.RaceRetryEnabled
+		// Sticky last-success rides the FAMILY block: a family-bearing
+		// PUT (the FE proxy-Apply payload, which is mandatory-complete
+		// since the sticky FE delta) is authoritative for BOTH setting
+		// and clearing sticky, exactly like its race siblings.
+		result.StickyLastSuccessEnabled = incoming.StickyLastSuccessEnabled
 		result.RaceParallelOnIdle = incoming.RaceParallelOnIdle
 		result.RaceMaxParallel = incoming.RaceMaxParallel
 		result.RaceMaxBufferBytes = incoming.RaceMaxBufferBytes
+	}
+
+	// Sticky last-success STANDALONE true-only enable, DELIBERATELY
+	// OUTSIDE the family block (B1 clobber guard): an API-only PUT of
+	// {"sticky_last_success_enabled": true} turns the flag ON without
+	// firing the family merge, so the zero-filled incoming config can
+	// never zero RaceMaxParallel / RaceMaxBufferBytes or clear
+	// RaceRetryEnabled / RaceParallelOnIdle as a side effect.
+	// isRaceRetryProvided stays untouched: a false value is
+	// indistinguishable from "not sent" for booleans, so a
+	// sticky-only false is dropped (documented residual, identical to
+	// {"race_retry_enabled": false}-alone today; the FE path is the
+	// supported clear).
+	if incoming.StickyLastSuccessEnabled {
+		result.StickyLastSuccessEnabled = true
 	}
 
 	// Idle termination: check if idle termination config was provided
@@ -321,6 +377,14 @@ func (m *ConfigManager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.RaceRetryEnabled
+}
+
+// GetStickyLastSuccessEnabled returns whether sticky last-success race
+// ordering is enabled
+func (m *ConfigManager) GetStickyLastSuccessEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.StickyLastSuccessEnabled
 }
 
 // GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout
