@@ -123,19 +123,9 @@ func (h *Handler) applyStickyOrder(conf *ConfigSnapshot, list []string, conversa
 		// The key prefix is length-guarded (production keys are
 		// 64-hex; short keys must never panic a log line).
 		log.Printf("[STICKY] request %s: promoted last-success model=%s to index 0 key=%s from=%v to=%v",
-			reqID, last, conversationKeyPrefix(conversationKey), list, out)
+			reqID, last, stickyorder.KeyPrefix(conversationKey), list, out)
 	}
 	return out
-}
-
-// conversationKeyPrefix renders a conversation key for [STICKY] log
-// lines: the 8-char prefix precedent from the [LB] lines, with the whole
-// key when it is shorter.
-func conversationKeyPrefix(key string) string {
-	if len(key) <= 8 {
-		return key + "…"
-	}
-	return key[:8] + "…"
 }
 
 // ─── Am26 masking ────────────────────────────────────────────────────────────

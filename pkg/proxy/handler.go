@@ -1792,7 +1792,10 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// above and never reaches here). The winner's model ID is a
 			// concrete raced member id, matching the choke-point list
 			// keyspace. Never recorded on race_winner_selected
-			// (first-byte) or race_deadline_pick (best-partial).
+			// (first-byte) or race_deadline_pick (best-partial;
+			// winner.deadlinePick is written at
+			// race_coordinator.go:990, handleStreamingDeadline — NOT in
+			// race_executor.go).
 			if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick {
 				h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
 			}
@@ -1912,7 +1915,13 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 			finalBody = patched
 		}
 	}
-	w.Write(finalBody)
+	// Capture the client-write outcome: a failed body write means the
+	// response was NOT delivered, so the sticky last-success record
+	// below must be skipped — the stream lane already returns before
+	// its record site on a client write failure; this makes the two
+	// lanes symmetric. STRICTLY SCOPED: the error gates ONLY the sticky
+	// record. Status code, envelopes and logging are unchanged.
+	_, writeErr := w.Write(finalBody)
 
 	// Extract content AND thinking for logging. The helper handles
 	// reasoning_content / reasoning / thinking / provider_specific_fields.reasoning_content
@@ -2042,9 +2051,11 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 
 	// Sticky last-success: record ONLY a DELIVERED success — this is
 	// the non-stream completion site, reached after the winner's
-	// response body was written. Ultimate-path completion and
-	// first-byte/deadline picks never reach here (see design §4.2).
-	if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick {
+	// response body was written. The writeErr gate is the non-stream
+	// mirror of the stream lane's client-write-fail early return: a
+	// dropped body is not a delivered success. Ultimate-path completion
+	// and first-byte/deadline picks never reach here (design §4.2).
+	if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick && writeErr == nil {
 		h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
 	}
 

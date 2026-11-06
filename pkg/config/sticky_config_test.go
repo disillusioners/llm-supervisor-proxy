@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,7 +55,7 @@ func TestStickyLastSuccess_EnvOverride(t *testing.T) {
 func TestStickyLastSuccess_JSONRoundTrip(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.json")
-	os.Unsetenv("STICKY_LAST_SUCCESS_ENABLED")
+	t.Setenv("STICKY_LAST_SUCCESS_ENABLED", "")
 
 	m := &Manager{filePath: configPath}
 	if err := m.Load(); err != nil {
@@ -78,16 +79,7 @@ func TestStickyLastSuccess_JSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config.json: %v", err)
 	}
-	if !containsKey(string(raw), `"sticky_last_success_enabled"`) {
+	if !strings.Contains(string(raw), `"sticky_last_success_enabled"`) {
 		t.Fatalf("json key sticky_last_success_enabled missing: %s", raw)
 	}
-}
-
-func containsKey(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }

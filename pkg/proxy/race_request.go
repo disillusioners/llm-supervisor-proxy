@@ -100,8 +100,15 @@ type upstreamRequest struct {
 	// promoted to winner by handleStreamingDeadline's best-buffer pick
 	// — a BEST-PARTIAL artifact, not a delivered success. The sticky
 	// record sites skip it (design §4.2: never record on
-	// race_deadline_pick). Written once under c.mu before c.done
-	// closes; read by the handler after WaitForWinner.
+	// race_deadline_pick).
+	//
+	// Written under c.mu at race_coordinator.go:990 (the
+	// handleStreamingDeadline promotion site), where the load-bearing
+	// publish is the c.streamCh close (~:1005) — that is what wakes
+	// WaitForWinner's streamCh arm; c.done is closed by the LATER
+	// completion/all-failed path, not by the deadline pick. The write
+	// happens-before the close and the reader takes c.mu in
+	// GetWinner, so the handler observes it without a lock of its own.
 	deadlinePick bool
 
 	// Cancellation state

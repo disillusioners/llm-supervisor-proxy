@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/config"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
@@ -50,7 +52,14 @@ type stickyHarness struct {
 	bus     *events.Bus
 	sticky  *stickyorder.Engine
 	enabled bool
+	store   *store.RequestStore // keeps the handler's store reachable for RouteModel assertions
 	clean   func()
+
+	// tokenStore / cfgMutate are optional seams for the ultimate-path
+	// fixture (auth is required for X-Force-Ultimate-Model entitlement,
+	// and the global ultimate model id comes from config).
+	tokenStore auth.TokenStoreInterface
+	cfgMutate  func(*config.Config)
 }
 
 // newStickyHarness builds the real manager + handler. stickyEnabled sets
@@ -82,6 +91,7 @@ func newStickyHarness(t *testing.T, stickyEnabled, withEngine bool) *stickyHarne
 	}
 
 	h := &stickyHarness{mgr: mgr, up: up, bus: bus, enabled: stickyEnabled}
+	h.store = store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	if withEngine {
 		h.sticky = stickyorder.NewEngine(time.Minute, time.Hour)
 	}
@@ -106,11 +116,23 @@ func newStickyHarness(t *testing.T, stickyEnabled, withEngine bool) *stickyHarne
 func (h *stickyHarness) rebuild(t *testing.T) {
 	t.Helper()
 	cfg := config.Defaults
+	if h.cfgMutate != nil {
+		h.cfgMutate(&cfg)
+	}
 	cfg.StickyLastSuccessEnabled = h.enabled
 	mgrCfg := database.NewMockConfigManagerWithConfig(cfg)
-	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
-	handler := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: h.mgr}, h.bus, reqStore, nil, nil, nil, h.mgr.Engine(), h.sticky)
+	handler := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: h.mgr}, h.bus, h.store, nil, h.tokenStore, nil, h.mgr.Engine(), h.sticky)
 	h.h = handler
+}
+
+// lastRequestLog returns the newest request log in the harness store.
+func (h *stickyHarness) lastRequestLog(t *testing.T) *store.RequestLog {
+	t.Helper()
+	list := h.store.List()
+	if len(list) == 0 {
+		t.Fatal("no request log recorded")
+	}
+	return list[0]
 }
 
 // swapUpstream replaces the stub upstream and re-points the fixture
@@ -934,5 +956,233 @@ func TestStickyOrder_SnapshotCarriesFlag(t *testing.T) {
 	h.config.ConfigMgr = database.NewMockConfigManagerWithConfig(cfg)
 	if h.config.Clone().StickyLastSuccessEnabled {
 		t.Fatal("Config.Clone must follow the live config value")
+	}
+}
+
+// ─── Scope pin: ORDER only — group pick / RouteModel untouched ──────────────
+
+// TestStickyOrder_PromotionDoesNotTouchRouteModel pins the ORDER-only
+// contract (the no-grouplb-coupling ruling): a sticky promotion may serve
+// a model that is NOT the group pick, but arc.reqLog.RouteModel must keep
+// reporting the GROUP-served member and the group's binding is not
+// re-pointed by the reorder.
+func TestStickyOrder_PromotionDoesNotTouchRouteModel(t *testing.T) {
+	h := newStickyHarness(t, true, true)
+	rec := &modelRecorder{}
+	h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		rec.add(rowIDFromUpstream(upstreamBodyModel(r)))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(stubUpstreamBody("stub", "ok")))
+	})
+	// Single-default group: the group pick is deterministic (m-a). m-a's
+	// own fallback chain carries the recorded sticky winner, so the
+	// promoted list is [sticky-w, m-a] and sticky-w SERVES — while the
+	// group pick stays m-a.
+	h.seedChatModel(t, "m-a", "sticky-w")
+	h.seedChatModel(t, "sticky-w")
+	h.seedGroup(t, "g-one", models.GroupMember{ModelID: "m-a", Weight: 1})
+
+	msgs := stickyMessages()
+	key := stickyKeyFor("g-one", msgs)
+	h.sticky.RecordSuccess(key, "sticky-w")
+
+	recorder := httptest.NewRecorder()
+	h.h.HandleAnthropicMessages(recorder, makeStickyAnthropicRequest(t, "g-one", msgs))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	// The promotion really happened: sticky-w was attempted first.
+	if got := rec.snapshot(); len(got) == 0 || got[0] != "sticky-w" {
+		t.Fatalf("sticky promotion did not run: attempts=%v", got)
+	}
+	// ...and the delivered success re-recorded it.
+	if v, ok := h.sticky.Get(key); !ok || v != "sticky-w" {
+		t.Fatalf("recorded winner = (%q,%v), want sticky-w", v, ok)
+	}
+	// ORDER only: the metering/identity stamp still names the GROUP pick.
+	rl := h.lastRequestLog(t)
+	if rl.RouteModel != "m-a" {
+		t.Fatalf("RouteModel = %q, want the group pick %q (promotion must not touch grouplb identity)", rl.RouteModel, "m-a")
+	}
+	if rl.Model != "g-one" {
+		t.Fatalf("RequestLog.Model = %q, want the client-requested group id", rl.Model)
+	}
+}
+
+// ─── §9 fixture: ultimate-path completion records NOTHING ───────────────────
+
+// TestStickyOrder_UltimatePath_NoRecord pins §4.2 exclusion 1: the
+// ultimate-model completion is not a race delivered success, so it must
+// neither record nor disturb an existing record.
+func TestStickyOrder_UltimatePath_NoRecord(t *testing.T) {
+	h := newStickyHarness(t, true, true)
+
+	// Auth is required for the X-Force-Ultimate-Model entitlement.
+	db := setupIntegrationDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	h.tokenStore = auth.NewTokenStore(db, database.SQLite)
+	plaintext, token, err := h.tokenStore.CreateToken(context.Background(), "sticky-ultimate", nil, "test-user", true, "", nil)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	h.seedChatModel(t, "m-a")
+	h.seedChatModel(t, "ultimate-model")
+	h.cfgMutate = func(c *config.Config) { c.UltimateModel.ModelID = "ultimate-model" }
+	h.rebuild(t)
+
+	msgs := stickyMessages()
+	key := stickyKeyFor("m-a", msgs) // tokenID "" — see the token-salted variant below
+	body := map[string]interface{}{
+		"model":    "m-a",
+		"messages": msgs,
+	}
+	req := makeChatRequest(t, body)
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("X-Force-Ultimate-Model", "true")
+
+	rec := httptest.NewRecorder()
+	h.h.HandleChatCompletions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ultimate path did not execute: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Sanity: the ULTIMATE path (not the race) served this request.
+	rl := h.lastRequestLog(t)
+	if !rl.UltimateModelUsed {
+		t.Fatalf("expected the ultimate path to run (UltimateModelUsed=false, model=%q)", rl.Model)
+	}
+
+	// The token-salted key for this authenticated request + the unsalted
+	// key must BOTH be empty: nothing in the engine at all.
+	tokenKey := credentiallb.ComputeConversationKey("m-a", token.ID, credentiallb.ExtractLeadingUserRun(msgs))
+	if v, ok := h.sticky.Get(tokenKey); ok {
+		t.Fatalf("ultimate-path completion recorded a winner: key=%s model=%q", "token", v)
+	}
+	if v, ok := h.sticky.Get(key); ok {
+		t.Fatalf("ultimate-path completion recorded a winner: key=%s model=%q", "unsalted", v)
+	}
+}
+
+// ─── §9 fixture: client-write-fail records NOTHING (BOTH lanes) ─────────────
+
+// failWriteResponseWriter fails ONLY body writes — headers behave
+// normally, so the request runs its full success course and the write
+// error is the single difference from a healthy client.
+type failWriteResponseWriter struct {
+	header    http.Header
+	writeErrs int
+}
+
+func (w *failWriteResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+func (w *failWriteResponseWriter) WriteHeader(int) {}
+func (w *failWriteResponseWriter) Write([]byte) (int, error) {
+	w.writeErrs++
+	return 0, errors.New("write: broken pipe")
+}
+
+// TestStickyOrder_ClientWriteFail_NoRecord pins §4.2 exclusion 2 on both
+// lanes: a response the client never received is not a delivered
+// success. The non-stream lane captures w.Write's error (the asymmetry
+// fix); the stream lane returns from the relay before its record site.
+func TestStickyOrder_ClientWriteFail_NoRecord(t *testing.T) {
+	t.Run("non-stream", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.seedChatModel(t, "m-a")
+
+		key := stickyKeyFor("m-a", stickyMessages())
+		w := &failWriteResponseWriter{}
+		h.h.HandleChatCompletions(w, makeStickyChatRequest(t))
+
+		if w.writeErrs == 0 {
+			t.Fatal("fixture did not exercise a failing body write")
+		}
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("non-stream client-write failure recorded a winner: %q", v)
+		}
+		// Non-vacuous: the request itself still completed normally.
+		if rl := h.lastRequestLog(t); rl.Status != "completed" {
+			t.Fatalf("request log status = %q, want completed (the write failure must gate ONLY the sticky record)", rl.Status)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		h := newStickyHarness(t, true, true)
+		h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: %s\n\n", makeOpenAITextChunk("hello"))
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		})
+		h.seedChatModel(t, "m-a")
+
+		key := stickyKeyFor("m-a", stickyMessages())
+		w := &failWriteResponseWriter{}
+		req := makeChatRequest(t, map[string]interface{}{
+			"model":    "m-a",
+			"stream":   true,
+			"messages": stickyMessages(),
+		})
+		h.h.HandleChatCompletions(w, req)
+
+		if w.writeErrs == 0 {
+			t.Fatal("fixture did not exercise a failing stream write")
+		}
+		if v, ok := h.sticky.Get(key); ok {
+			t.Fatalf("stream client-write failure recorded a winner: %q", v)
+		}
+	})
+}
+
+// ─── §9 fixture: Anthropic BACKUP-POOL re-entry variant ─────────────────────
+
+// TestStickyOrder_AnthropicBackupPoolReEntry_Reorder pins §8.8 on the
+// Anthropic lane: the ExcludeGroupMember backup-pool reselect rebuild
+// (handler_groups.go:437 → :459) lands on the mandatory site (d), so the
+// rebuilt list is re-promoted exactly as on the OpenAI lane.
+func TestStickyOrder_AnthropicBackupPoolReEntry_Reorder(t *testing.T) {
+	h := newStickyHarness(t, true, true)
+	rec := &modelRecorder{}
+	h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		rec.add(rowIDFromUpstream(upstreamBodyModel(r)))
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"boom"}}`))
+	})
+	h.seedChatModel(t, "m-a")             // only default member — fails
+	h.seedChatModel(t, "m-b", "sticky-w") // backup-only member
+	h.seedChatModel(t, "sticky-w")
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "g-pool", Name: "g-pool", Enabled: true, Kind: models.KindGroup,
+		Internal: true, ExcludeFromUltimateSwitching: true,
+		Members: []models.GroupMember{
+			{ModelID: "m-a", Weight: 1},
+			{ModelID: "m-b", Weight: 1, BackupOnly: true},
+		},
+	}); err != nil {
+		t.Fatalf("AddModel(g-pool): %v", err)
+	}
+
+	msgs := stickyMessages()
+	key := stickyKeyFor("g-pool", msgs)
+	h.sticky.RecordSuccess(key, "sticky-w")
+
+	recorder := httptest.NewRecorder()
+	h.h.HandleAnthropicMessages(recorder, makeStickyAnthropicRequest(t, "g-pool", msgs))
+
+	// m-a (default) fails → backup reselect m-b → rebuild [m-b, sticky-w]
+	// → site (d) reorders to [sticky-w, m-b].
+	got := rec.snapshot()
+	if !equalStrings(got, []string{"m-a", "sticky-w", "m-b"}) {
+		t.Fatalf("backup-pool re-entry walk order = %v, want [m-a sticky-w m-b]", got)
 	}
 }

@@ -394,3 +394,38 @@ func TestEngine_ConcurrentStopAndUse(t *testing.T) {
 	wg.Wait()
 	e.Stop() // idempotent
 }
+
+// TestKeyPrefix pins the single canonical key rendering (shared by the
+// engine log lines and the proxy promotion line): ≤8 chars rendered
+// whole, longer keys truncated to 8, always with the ellipsis marker.
+func TestKeyPrefix(t *testing.T) {
+	cases := []struct{ key, want string }{
+		{"", "…"},
+		{"abc", "abc…"},
+		{"12345678", "12345678…"},
+		{"123456789", "12345678…"},
+		{"0123456789abcdef", "01234567…"},
+	}
+	for _, tc := range cases {
+		if got := KeyPrefix(tc.key); got != tc.want {
+			t.Errorf("KeyPrefix(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
+// TestEngine_ZeroValueStop pins the zero-value guard: an Engine whose
+// channels were never initialized (not built by NewEngine) must not block
+// on a nil sweepDone.
+func TestEngine_ZeroValueStop(t *testing.T) {
+	var e Engine // zero value: nil stopCh + nil sweepDone
+	done := make(chan struct{})
+	go func() {
+		e.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop on a zero-value Engine blocked")
+	}
+}

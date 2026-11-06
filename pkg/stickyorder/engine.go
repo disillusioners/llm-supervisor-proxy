@@ -156,7 +156,7 @@ func (e *Engine) RecordSuccess(key, modelID string) {
 	e.mu.Lock()
 	e.winners[key] = winnerEntry{modelID: modelID, updatedAt: e.now()}
 	e.mu.Unlock()
-	log.Printf("[STICKY] success recorded key=%s model=%s", keyPrefix(key), modelID)
+	log.Printf("[STICKY] success recorded key=%s model=%s", KeyPrefix(key), modelID)
 }
 
 // InvalidateOnFailure deletes the record ONLY when modelID equals the
@@ -177,13 +177,16 @@ func (e *Engine) InvalidateOnFailure(key, modelID string) {
 	}
 	delete(e.winners, key)
 	e.mu.Unlock()
-	log.Printf("[STICKY] invalidated key=%s model=%s reason=attempt_failure", keyPrefix(key), modelID)
+	log.Printf("[STICKY] invalidated key=%s model=%s reason=attempt_failure", KeyPrefix(key), modelID)
 }
 
-// Stop terminates the janitor goroutine. Idempotent and nil-safe:
-// repeat calls return immediately (the ack channel is closed).
+// Stop terminates the janitor goroutine. Idempotent, nil-safe and
+// zero-value-safe: repeat calls return immediately (the ack channel is
+// closed), and a ZERO-VALUE Engine (fields never set by NewEngine — its
+// channels are nil) must not block forever on a nil sweepDone, so the
+// nil-channel case returns immediately.
 func (e *Engine) Stop() {
-	if e == nil {
+	if e == nil || e.stopCh == nil || e.sweepDone == nil {
 		return
 	}
 	e.stopOnce.Do(func() {
@@ -192,11 +195,15 @@ func (e *Engine) Stop() {
 	<-e.sweepDone
 }
 
-// keyPrefix shortens a conversation key for logging — the same 8-char
-// prefix precedent as the [LB] conversationKey log lines.
-func keyPrefix(key string) string {
+// KeyPrefix renders a conversation key for [STICKY] log lines: the
+// 8-char prefix precedent from the [LB] conversationKey lines, followed
+// by an ellipsis. A key of 8 characters or fewer is rendered whole, with
+// the same ellipsis marker — the ONE canonical rendering, shared by the
+// engine's own log lines and the proxy handler's promotion line (no
+// divergent short-key handling at the call sites).
+func KeyPrefix(key string) string {
 	if len(key) <= 8 {
-		return key
+		return key + "…"
 	}
 	return key[:8] + "…"
 }

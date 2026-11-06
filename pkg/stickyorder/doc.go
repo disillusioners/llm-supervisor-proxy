@@ -25,6 +25,30 @@
 //   - in-memory only: a restart is a cold start (no rehydration), per
 //     the grouplb no-rehydration ruling
 //
+// # Recording is conservative — delivered success only
+//
+// The proxy records a winner only when the response actually reached the
+// client as a completed completion. These shapes are deliberately NOT
+// recorded (each one would pin a model that did not deliver):
+//
+//   - race_deadline_pick: the best-partial buffer promoted by the stream
+//     deadline is a partial artifact, even when the stream happens to
+//     run to completion afterwards (upstreamRequest.deadlinePick gates
+//     the record sites).
+//   - race_winner_selected: first-byte eligibility, not delivery.
+//   - client write failure, BOTH lanes and now symmetric: the stream
+//     lane returns before its record site when relaying to the client
+//     fails; the non-stream lane captures w.Write's error and skips the
+//     record on the same condition.
+//   - idle-terminated partial: an idle-terminated stream is closed with
+//     an error/termination marker before any completed publish, so no
+//     record fires.
+//   - the ultimate-model path: not a race delivered success at all, and
+//     its model is outside the raced list.
+//
+// An unrecorded conversation is exactly today's behaviour (un-promoted
+// racing), so every exclusion degrades to the pre-feature path.
+//
 // # Deliberate deviation
 //
 // Every exported method is a no-op on a nil receiver (credentiallb's
