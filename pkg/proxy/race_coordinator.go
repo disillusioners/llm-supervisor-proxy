@@ -1183,7 +1183,7 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 		// already flowed through here. Mid-attempt cancels surface as
 		// ctx.Err()/context.Canceled through executeRequest and land
 		// here too (accepted transient unpin, design §8.12).
-		if c.cfg.StickyLastSuccessEnabled {
+		if c.cfg.stickyActive(c.conversationKey) {
 			c.sticky.InvalidateOnFailure(c.conversationKey, req.modelID)
 		}
 		// race-error-reason-classification — the [RACE] log line and the

@@ -15,7 +15,9 @@ func TestPromoteToFront_NoOps(t *testing.T) {
 		target string
 		want   []string
 	}{
-		{name: "nil list", list: nil, target: "a", want: []string{}},
+		// Empty input is returned AS-IS (nil stays nil) — see the doc
+		// comment: there is nothing to alias and nothing to copy.
+		{name: "nil list", list: nil, target: "a", want: nil},
 		{name: "empty list", list: []string{}, target: "a", want: []string{}},
 		{name: "single element match", list: []string{"a"}, target: "a", want: []string{"a"}},
 		{name: "single element miss", list: []string{"a"}, target: "b", want: []string{"a"}},

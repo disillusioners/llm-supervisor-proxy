@@ -1,5 +1,48 @@
 package proxy
 
+// ─────────────────────────────────────────────────────────────────────────────
+// handler.go — the OpenAI-wire request lifecycle (owner: /v1/chat/completions)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - Request lifecycle ................ initRequestContext (config snapshot,
+//                                         model resolution, conversation key,
+//                                         group rewrite, sticky order) and the
+//                                         HandleChatCompletions orchestration
+//                                         that runs the ultimate-model check,
+//                                         the race handoff, and the finalize
+//                                         paths.
+//   - Race handoff .................... the bounded re-entry loop that builds
+//                                         a coordinator per attempt set, waits
+//                                         for a winner, and streams / renders
+//                                         the result.
+//   - Result finalization ............. streamResult + handleNonStreamResult
+//                                         (relay, usage extraction, metering,
+//                                         request_completed, sticky record).
+//
+// Companion files:
+//
+//   - handler_anthropic.go: the /v1/messages lane (sequential fallback walk,
+//     no race coordinator). Anthropic-only behavior belongs THERE, not here.
+//   - handler_functions.go: request-context construction + shared resolve
+//     helpers. handler_groups.go: protocol-neutral group pipeline + the
+//     sticky orchestrator. handler_helpers.go: the per-request context type.
+//   - race_coordinator.go / race_executor.go: the RACE and the per-ATTEMPT
+//     upstream call. If you are adding per-upstream-call behavior, you are in
+//     the wrong file.
+//
+// Size rationale: this file sits in the 2000-line band because one request's
+// lifecycle — ultimate escalation, ultimate/race handoff, the streaming relay
+// with its heartbeat/idle/deadline arms, and the non-stream renderer — is ONE
+// interleaved flow: the same requestContext fields and the same writeMu
+// discipline thread through every arm. Splitting by concern would scatter
+// those state-machine edges across files and make the winner-lock and
+// write-ordering reasoning much weaker than the line count saves.
+// TRIPWIRE: if this file passes ~2600 lines, split streamResult (relay arms)
+// out FIRST — it is the largest self-contained block.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"bytes"
 	"context"
@@ -8,6 +51,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1179,6 +1223,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// winner streams its first byte the flow never returns here
 	// (N9 winner lock). Non-group requests take the loop exactly
 	// once (groupPick == nil) — byte-identical behavior.
+	stickyPromotionLogged := false // log-once per request across re-entry replays
 	for {
 		// Sticky last-success race ORDER (design site (a)): re-apply on
 		// EVERY loop iteration, at the loop top — BEFORE the coordinator
@@ -1187,7 +1232,22 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// rebuilt list is re-promoted by construction (idempotent: an
 		// already-front winner no-ops). Off / empty key / nil engine /
 		// no record ⇒ the list passes through untouched.
-		rc.modelList = h.applyStickyOrder(&rc.conf, rc.modelList, rc.conversationKey, rc.reqID)
+		//
+		// LOG-ONCE: a group re-entry replay passes an empty reqID ONLY when
+		// THIS request already logged a promotion, so the rebuilt list
+		// cannot produce a second "promoted" line for the same request.
+		// When iteration 1 did not move anything (the common re-entry
+		// shape), the rebuilt list's promotion IS the request's first and
+		// only line. The order stays observable in race_started either way.
+		reorderLogID := rc.reqID
+		if rc.groupReentered && stickyPromotionLogged {
+			reorderLogID = ""
+		}
+		beforeStickyOrder := rc.modelList
+		rc.modelList = h.applyStickyOrder(&rc.conf, rc.modelList, rc.conversationKey, reorderLogID)
+		if reorderLogID != "" && !slices.Equal(beforeStickyOrder, rc.modelList) {
+			stickyPromotionLogged = true
+		}
 
 		coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate, h.stickyEngine)
 		// Q15 (plan §3.7): the coordinator carries the group pick so
@@ -1793,10 +1853,10 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 			// concrete raced member id, matching the choke-point list
 			// keyspace. Never recorded on race_winner_selected
 			// (first-byte) or race_deadline_pick (best-partial;
-			// winner.deadlinePick is written at
-			// race_coordinator.go:990, handleStreamingDeadline — NOT in
+			// winner.deadlinePick is written in
+			// (*raceCoordinator).handleStreamingDeadline — NOT in
 			// race_executor.go).
-			if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick {
+			if rc.conf.stickyActive(rc.conversationKey) && !winner.deadlinePick {
 				h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
 			}
 
@@ -1915,13 +1975,14 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 			finalBody = patched
 		}
 	}
-	// Capture the client-write outcome: a failed body write means the
-	// response was NOT delivered, so the sticky last-success record
-	// below must be skipped — the stream lane already returns before
-	// its record site on a client write failure; this makes the two
-	// lanes symmetric. STRICTLY SCOPED: the error gates ONLY the sticky
-	// record. Status code, envelopes and logging are unchanged.
-	_, writeErr := w.Write(finalBody)
+	// Capture the client-write outcome: a failed (or SHORT) body write
+	// means the response was NOT fully delivered, so the sticky
+	// last-success record below must be skipped — the stream lane
+	// already returns before its record site on a client write failure;
+	// this makes the two lanes symmetric. STRICTLY SCOPED: the outcome
+	// gates ONLY the sticky record. Status code, envelopes and logging
+	// are unchanged.
+	n, writeErr := w.Write(finalBody)
 
 	// Extract content AND thinking for logging. The helper handles
 	// reasoning_content / reasoning / thinking / provider_specific_fields.reasoning_content
@@ -2051,11 +2112,12 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 
 	// Sticky last-success: record ONLY a DELIVERED success — this is
 	// the non-stream completion site, reached after the winner's
-	// response body was written. The writeErr gate is the non-stream
-	// mirror of the stream lane's client-write-fail early return: a
-	// dropped body is not a delivered success. Ultimate-path completion
-	// and first-byte/deadline picks never reach here (design §4.2).
-	if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick && writeErr == nil {
+	// response body was written. The writeErr / short-write gate is the
+	// non-stream mirror of the stream lane's client-write-fail early
+	// return: a dropped or truncated body is not a delivered success.
+	// Ultimate-path completion and first-byte/deadline picks never
+	// reach here (design §4.2).
+	if rc.conf.stickyActive(rc.conversationKey) && !winner.deadlinePick && writeErr == nil && n == len(finalBody) {
 		h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
 	}
 

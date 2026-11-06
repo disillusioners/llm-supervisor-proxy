@@ -1,5 +1,47 @@
 package proxy
 
+// ─────────────────────────────────────────────────────────────────────────────
+// handler_anthropic.go — the Anthropic-wire request lifecycle (/v1/messages)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - Request lifecycle ................ HandleAnthropicMessages: auth,
+//                                         model resolution, the group rewrite,
+//                                         the sticky order, and the SEQUENTIAL
+//                                         fallback walk (there is no race
+//                                         coordinator on this lane).
+//   - Attempt execution ............... attemptAnthropicModel +
+//                                         doAnthropicRequest (the credential's
+//                                         provider decides raw passthrough vs
+//                                         the internal OpenAI translator) and
+//                                         doAnthropicInternalRequest.
+//   - Response shaping ................ handleAnthropicNonStreamResponse, the
+//                                         buffered stream translator, and the
+//                                         live IncrementalStreamTranslator.
+//   - Delivered-success funnel ........ finalizeAnthropicSuccess (the only
+//                                         site that sets Status="completed").
+//
+// Companion files:
+//
+//   - handler.go: the OpenAI lane. Protocol-neutral pieces (group rewrite,
+//     sticky orchestrator, masking) live in handler_groups.go; the
+//     request-context shape is in handler_helpers.go.
+//   - adapter_anthropic.go / translator/: wire translation only.
+//   - internal_handler.go: the internal provider attempt (this file only
+//     orchestrates WHEN to call it).
+//
+// Size rationale: this file sits in the 2000-line band because ONE Anthropic
+// request's lifecycle — buffered vs live stream, the passthrough/internal
+// split, the per-attempt credential failover hook, and the group re-entry —
+// shares one arc state machine whose fields are mutated and restored per
+// attempt. Splitting the response-shaping arms into another file would
+// separate the state restoration from the mutation sites that need it, which
+// is exactly the coupling that makes an attempt-failure rollback auditable.
+// TRIPWIRE: if this file passes ~2600 lines, split the LIVE stream translator
+// driver out FIRST — it is the most self-contained block.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"bufio"
 	"bytes"
@@ -494,7 +536,7 @@ loop:
 			// unpins the slot. Between-attempt loop aborts (client
 			// disconnect / headersSent `break loop`) are NOT model
 			// failures and never reach this arm.
-			if arc.conf.StickyLastSuccessEnabled {
+			if arc.conf.stickyActive(arc.conversationKey) {
 				h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
 			}
 		}
@@ -1655,7 +1697,7 @@ func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
 	// nowhere else). success==true paths that never reach finalize
 	// (client disconnect, headers-sent partials) are correctly
 	// excluded.
-	if arc.conf.StickyLastSuccessEnabled && arc.conversationKey != "" && arc.servedModel != "" {
+	if arc.conf.stickyActive(arc.conversationKey) && arc.servedModel != "" {
 		h.stickyEngine.RecordSuccess(arc.conversationKey, arc.servedModel)
 	}
 }

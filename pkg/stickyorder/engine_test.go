@@ -253,17 +253,34 @@ func TestEngine_LogLines(t *testing.T) {
 		t.Fatalf("record log line missing/incorrect: %q", out)
 	}
 
+	// L13: re-recording the SAME winner is a silent TTL refresh (no state
+	// change) — no log line. A DIFFERENT winner is a state change — one.
 	out = captureLog(t, func() {
-		e.InvalidateOnFailure("0123456789abcdef", "model-b")
+		e.RecordSuccess("0123456789abcdef", "model-a")
+	})
+	if strings.Contains(out, "[STICKY] success recorded") {
+		t.Fatalf("identical winner re-record logged (expected silent TTL refresh): %q", out)
+	}
+	out = captureLog(t, func() {
+		e.RecordSuccess("0123456789abcdef", "model-b")
+	})
+	if !strings.Contains(out, "[STICKY] success recorded key=01234567… model=model-b") {
+		t.Fatalf("winner change did not log: %q", out)
+	}
+
+	// A non-winner failure (the recorded winner is model-b after the
+	// winner-change above) is a silent no-op.
+	out = captureLog(t, func() {
+		e.InvalidateOnFailure("0123456789abcdef", "model-c")
 	})
 	if strings.Contains(out, "[STICKY] invalidated") {
 		t.Fatalf("non-winner failure logged an invalidation: %q", out)
 	}
 
 	out = captureLog(t, func() {
-		e.InvalidateOnFailure("0123456789abcdef", "model-a")
+		e.InvalidateOnFailure("0123456789abcdef", "model-b")
 	})
-	if !strings.Contains(out, "[STICKY] invalidated key=01234567… model=model-a reason=attempt_failure") {
+	if !strings.Contains(out, "[STICKY] invalidated key=01234567… model=model-b reason=attempt_failure") {
 		t.Fatalf("invalidation log line missing/incorrect: %q", out)
 	}
 }

@@ -36,7 +36,7 @@
 //     run to completion afterwards (upstreamRequest.deadlinePick gates
 //     the record sites).
 //   - race_winner_selected: first-byte eligibility, not delivery.
-//   - client write failure, BOTH lanes and now symmetric: the stream
+//   - client write failure, BOTH lanes and symmetric: the stream
 //     lane returns before its record site when relaying to the client
 //     fails; the non-stream lane captures w.Write's error and skips the
 //     record on the same condition.

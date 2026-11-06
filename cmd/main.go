@@ -194,9 +194,9 @@ func main() {
 	if credLB != nil {
 		defer credLB.Stop()
 	}
-	if stickyEngine != nil {
-		defer stickyEngine.Stop()
-	}
+	// NewEngine never returns nil; Stop is nil- and zero-value-safe, so no
+	// guard is needed here.
+	defer stickyEngine.Stop()
 
 	// Initialize encryption (required for internal upstream API key storage)
 	if err := crypto.InitEncryption(); err != nil {

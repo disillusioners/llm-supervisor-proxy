@@ -2,6 +2,12 @@ package proxy
 
 // Sticky last-success race ordering — wiring tests (design §9).
 //
+// Size rationale: this file stays whole because every fixture shares ONE
+// harness (real ModelsManager + sticky engine + mock config) and the
+// choke-point assertions are only meaningful as a set — chat vs Anthropic,
+// initial vs re-entry, record vs invalidate — so splitting them up would
+// duplicate the harness that makes them comparable.
+//
 // Harness notes:
 //   - A REAL *database.ModelsManager on an in-process SQLite store (the
 //     same shape as groupHarness) so the group rewrite / re-entry paths
@@ -27,6 +33,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,7 +321,7 @@ func TestStickyOrder_GateOff_NoReorderAndNoRecord(t *testing.T) {
 	}
 
 	got := waitRaceStartedModels(t, evCh, 1, 2*time.Second)
-	if !equalStrings(got, []string{"m-a", "sticky-w"}) {
+	if !slices.Equal(got, []string{"m-a", "sticky-w"}) {
 		t.Fatalf("gate off reordered the race: %v", got)
 	}
 	// Record site is flag-gated: the pre-seeded value survives untouched.
@@ -337,7 +344,7 @@ func TestStickyOrder_NilEngine_NoReorder(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	got := waitRaceStartedModels(t, evCh, 1, 2*time.Second)
-	if !equalStrings(got, []string{"m-a", "sticky-w"}) {
+	if !slices.Equal(got, []string{"m-a", "sticky-w"}) {
 		t.Fatalf("nil engine reordered the race: %v", got)
 	}
 }
@@ -359,7 +366,7 @@ func TestStickyOrder_OpenAIRace_PromotesRecordedWinner(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	got := waitRaceStartedModels(t, evCh, 1, 2*time.Second)
-	if !equalStrings(got, []string{"sticky-w", "m-a"}) {
+	if !slices.Equal(got, []string{"sticky-w", "m-a"}) {
 		t.Fatalf("race order = %v, want [sticky-w m-a]", got)
 	}
 }
@@ -381,7 +388,7 @@ func TestStickyOrder_UnknownWinner_NoReorder(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	got := waitRaceStartedModels(t, evCh, 1, 2*time.Second)
-	if !equalStrings(got, []string{"m-a", "m-b"}) {
+	if !slices.Equal(got, []string{"m-a", "m-b"}) {
 		t.Fatalf("unknown winner reordered the race: %v", got)
 	}
 }
@@ -491,8 +498,14 @@ func TestStickyOrder_DeadlinePick_NoRecord(t *testing.T) {
 	h.seedChatModel(t, "m-a")
 
 	// Short stream deadline, generous hard deadline — and buffered mode
-	// so the first-byte gate does not pre-empt the deadline pick.
-	h.h.config.ConfigMgr = database.NewMockConfigManagerWithConfig(deadlineCfg(200*time.Millisecond, 10*time.Second))
+	// so the first-byte gate does not pre-empt the deadline pick. Set
+	// through the harness's cfgMutate+rebuild seam (no handler surgery).
+	h.cfgMutate = func(c *config.Config) {
+		c.StreamDeadline = config.Duration(200 * time.Millisecond)
+		c.MaxGenerationTime = config.Duration(10 * time.Second)
+		c.IdleTimeout = config.Duration(60 * time.Second)
+	}
+	h.rebuild(t)
 
 	key := stickyKeyFor("m-a", stickyMessages())
 	req := makeChatRequest(t, map[string]interface{}{
@@ -507,15 +520,6 @@ func TestStickyOrder_DeadlinePick_NoRecord(t *testing.T) {
 	if v, ok := h.sticky.Get(key); ok {
 		t.Fatalf("deadline pick recorded a winner: %q", v)
 	}
-}
-
-func deadlineCfg(streamDeadline, maxGen time.Duration) config.Config {
-	cfg := config.Defaults
-	cfg.StickyLastSuccessEnabled = true
-	cfg.StreamDeadline = config.Duration(streamDeadline)
-	cfg.MaxGenerationTime = config.Duration(maxGen)
-	cfg.IdleTimeout = config.Duration(60 * time.Second)
-	return cfg
 }
 
 // ─── invalidation ───────────────────────────────────────────────────────────
@@ -563,18 +567,22 @@ func TestStickyOrder_Invalidate_NonWinnerFailureKeepsPin(t *testing.T) {
 // rotation of the recorded winner still unpins it.
 func TestStickyOrder_Invalidate_AfterCredFailoverExhaustion(t *testing.T) {
 	h := newStickyHarness(t, true, true)
-	var calls int32
+	// EXHAUSTION shape: BOTH credentials rate-limit, so whichever the
+	// weighted picker lands on first, the single rotation budget moves to
+	// the other and that one rate-limits too — the rotation is spent and
+	// the request fails. Counting per credential (not total calls) keeps
+	// the assertion independent of the pick order and of how many times
+	// the engine re-picks on a cooldown edge.
+	var credAAttempts, credBAttempts int32
 	h.swapUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&calls, 1)
 		if strings.Contains(r.Header.Get("Authorization"), "key-A") {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"429"}}`))
-			return
+			atomic.AddInt32(&credAAttempts, 1)
+		} else {
+			atomic.AddInt32(&credBAttempts, 1)
 		}
-		_ = n
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"500"}}`))
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"429"}}`))
 	})
 	for _, c := range []struct{ id, key string }{{"cred-a", "key-A"}, {"cred-b", "key-B"}} {
 		if err := h.mgr.AddCredential(models.CredentialConfig{ID: c.id, Provider: "openai", APIKey: c.key, BaseURL: h.up.URL}); err != nil {
@@ -602,6 +610,12 @@ func TestStickyOrder_Invalidate_AfterCredFailoverExhaustion(t *testing.T) {
 	}
 	if v, ok := h.sticky.Get(key); ok {
 		t.Fatalf("cred-failover exhaustion left the pin: %q", v)
+	}
+	// The test's name claims EXHAUSTION: BOTH credentials must actually
+	// have been attempted before the request gives up (the rotation budget
+	// is len(credentials)-1 = 1).
+	if a, b := atomic.LoadInt32(&credAAttempts), atomic.LoadInt32(&credBAttempts); a < 1 || b < 1 {
+		t.Fatalf("cred-failover exhaustion expected both credentials attempted; cred-a=%d cred-b=%d", a, b)
 	}
 }
 
@@ -717,11 +731,6 @@ func TestStickyOrder_AnthropicWalk_RecordsServedModel(t *testing.T) {
 
 // ─── sites (c)/(d): group re-entry ──────────────────────────────────────────
 
-// seedReentryGroup builds a 2-member group whose FIRST member (the
-// deterministic default-pool pick) has NO chain and always fails, and
-// whose replacement member carries the sticky target in its OWN fallback
-// chain — so the rebuilt list is [replacement, sticky-w] regardless of
-// which member the reselect lands on.
 // seedReentryGroup builds a 2-default-member group and BINDS it to m-a
 // (no chain) for the returned message set: the group rewrite is
 // weighted-random on a fresh conversation, so the test pins the sticky
@@ -743,6 +752,22 @@ func seedReentryGroup(t *testing.T, h *stickyHarness) []interface{} {
 		models.GroupMember{ModelID: "m-b", Weight: 1},
 	)
 	return bindGroupTo(t, h, "g-two", "m-a")
+}
+
+// seedBackupPoolGroup builds the backup-pool fixture shared by the OpenAI
+// and Anthropic re-entry tests: one DEFAULT member (m-a, always fails) and
+// one BACKUP-ONLY member (m-b) whose own chain carries the sticky target.
+// The default pool is exhausted by m-a's failure, so the single reselect
+// lands on m-b deterministically and the rebuilt list is [m-b, sticky-w].
+func seedBackupPoolGroup(t *testing.T, h *stickyHarness) {
+	t.Helper()
+	h.seedChatModel(t, "m-a")             // only default member — fails
+	h.seedChatModel(t, "m-b", "sticky-w") // backup-only member
+	h.seedChatModel(t, "sticky-w")        // the recorded sticky winner
+	h.seedGroup(t, "g-pool",
+		models.GroupMember{ModelID: "m-a", Weight: 1},
+		models.GroupMember{ModelID: "m-b", Weight: 1, BackupOnly: true},
+	)
 }
 
 // bindGroupTo probes message sets until the group's production picker
@@ -773,16 +798,25 @@ func TestStickyOrder_OpenAIReEntry_Reorder(t *testing.T) {
 
 	evCh := collectStickyEvents(t, h.bus)
 	rec := httptest.NewRecorder()
-	h.h.HandleChatCompletions(rec, makeChatRequest(t, map[string]interface{}{
-		"model":    "g-two",
-		"messages": msgs,
-	}))
+	logged := captureStickyLog(t, func() {
+		h.h.HandleChatCompletions(rec, makeChatRequest(t, map[string]interface{}{
+			"model":    "g-two",
+			"messages": msgs,
+		}))
+	})
+
+	// L13: the re-entry replay must NOT emit a second "promoted" line for
+	// the same request (iteration 1's promotion is already logged; the
+	// rebuilt order is observable in race_started).
+	if n := strings.Count(logged, "promoted last-success"); n != 1 {
+		t.Fatalf("promotion log lines = %d, want exactly 1 (re-entry replay must be silent)", n)
+	}
 
 	// Iteration 1 races [m-a] (no chain ⇒ sticky no-op, record survives),
 	// then the group re-entry rebuilds [m-b, sticky-w]; the loop-top
 	// re-application must reorder the REBUILT list.
 	got := waitRaceStartedModels(t, evCh, 2, 5*time.Second)
-	if !equalStrings(got, []string{"sticky-w", "m-b"}) {
+	if !slices.Equal(got, []string{"sticky-w", "m-b"}) {
 		t.Fatalf("re-entry race order = %v, want [sticky-w m-b]", got)
 	}
 }
@@ -806,7 +840,7 @@ func TestStickyOrder_AnthropicReEntry_Reorder(t *testing.T) {
 	// Walk: m-a fails → re-entry rebuilds [m-b, sticky-w] → mandatory
 	// explicit site (d) reorders to [sticky-w, m-b].
 	got := rec.snapshot()
-	if !equalStrings(got, []string{"m-a", "sticky-w", "m-b"}) {
+	if !slices.Equal(got, []string{"m-a", "sticky-w", "m-b"}) {
 		t.Fatalf("re-entry walk order = %v, want [m-a sticky-w m-b]", got)
 	}
 }
@@ -819,19 +853,7 @@ func TestStickyOrder_BackupPoolReEntry_Reorder(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"boom"}}`))
 	})
-	h.seedChatModel(t, "m-a")             // only default member — fails
-	h.seedChatModel(t, "m-b", "sticky-w") // backup-only member
-	h.seedChatModel(t, "sticky-w")
-	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "g-pool", Name: "g-pool", Enabled: true, Kind: models.KindGroup,
-		Internal: true, ExcludeFromUltimateSwitching: true,
-		Members: []models.GroupMember{
-			{ModelID: "m-a", Weight: 1},
-			{ModelID: "m-b", Weight: 1, BackupOnly: true},
-		},
-	}); err != nil {
-		t.Fatalf("AddModel(g-pool): %v", err)
-	}
+	seedBackupPoolGroup(t, h)
 
 	key := stickyKeyFor("g-pool", stickyMessages())
 	h.sticky.RecordSuccess(key, "sticky-w")
@@ -844,7 +866,7 @@ func TestStickyOrder_BackupPoolReEntry_Reorder(t *testing.T) {
 	}))
 
 	got := waitRaceStartedModels(t, evCh, 2, 5*time.Second)
-	if !equalStrings(got, []string{"sticky-w", "m-b"}) {
+	if !slices.Equal(got, []string{"sticky-w", "m-b"}) {
 		t.Fatalf("backup-pool re-entry race order = %v, want [sticky-w m-b]", got)
 	}
 }
@@ -861,24 +883,24 @@ func TestApplyStickyOrder_GatesAndLog(t *testing.T) {
 
 	eng.RecordSuccess("key-1", "c")
 
-	if got := h.applyStickyOrder(off, list, "key-1", "r"); !equalStrings(got, list) {
+	if got := h.applyStickyOrder(off, list, "key-1", "r"); !slices.Equal(got, list) {
 		t.Fatalf("gate off: %v", got)
 	}
-	if got := h.applyStickyOrder(on, list, "", "r"); !equalStrings(got, list) {
+	if got := h.applyStickyOrder(on, list, "", "r"); !slices.Equal(got, list) {
 		t.Fatalf("empty key: %v", got)
 	}
-	if got := h.applyStickyOrder(nil, list, "key-1", "r"); !equalStrings(got, list) {
+	if got := h.applyStickyOrder(nil, list, "key-1", "r"); !slices.Equal(got, list) {
 		t.Fatalf("nil conf: %v", got)
 	}
-	if got := (&Handler{}).applyStickyOrder(on, list, "key-1", "r"); !equalStrings(got, list) {
+	if got := (&Handler{}).applyStickyOrder(on, list, "key-1", "r"); !slices.Equal(got, list) {
 		t.Fatalf("nil engine: %v", got)
 	}
-	if got := h.applyStickyOrder(on, list, "unknown-key", "r"); !equalStrings(got, list) {
+	if got := h.applyStickyOrder(on, list, "unknown-key", "r"); !slices.Equal(got, list) {
 		t.Fatalf("no record: %v", got)
 	}
 
 	out := captureStickyLog(t, func() {
-		if got := h.applyStickyOrder(on, list, "key-1", "req-log"); !equalStrings(got, []string{"c", "a", "b"}) {
+		if got := h.applyStickyOrder(on, list, "key-1", "req-log"); !slices.Equal(got, []string{"c", "a", "b"}) {
 			t.Errorf("promotion: %v", got)
 		}
 	})
@@ -925,18 +947,6 @@ func captureStickyLog(t *testing.T, fn func()) string {
 	}()
 	fn()
 	return buf.String()
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TestStickyOrder_SnapshotCarriesFlag pins R13: the per-request snapshot
@@ -1147,9 +1157,9 @@ func TestStickyOrder_ClientWriteFail_NoRecord(t *testing.T) {
 // ─── §9 fixture: Anthropic BACKUP-POOL re-entry variant ─────────────────────
 
 // TestStickyOrder_AnthropicBackupPoolReEntry_Reorder pins §8.8 on the
-// Anthropic lane: the ExcludeGroupMember backup-pool reselect rebuild
-// (handler_groups.go:437 → :459) lands on the mandatory site (d), so the
-// rebuilt list is re-promoted exactly as on the OpenAI lane.
+// Anthropic lane: the (*Handler).tryGroupReentryAnthropic backup-pool
+// reselect rebuild lands on the mandatory site (d), so the rebuilt list
+// is re-promoted exactly as on the OpenAI lane.
 func TestStickyOrder_AnthropicBackupPoolReEntry_Reorder(t *testing.T) {
 	h := newStickyHarness(t, true, true)
 	rec := &modelRecorder{}
@@ -1158,19 +1168,7 @@ func TestStickyOrder_AnthropicBackupPoolReEntry_Reorder(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"boom"}}`))
 	})
-	h.seedChatModel(t, "m-a")             // only default member — fails
-	h.seedChatModel(t, "m-b", "sticky-w") // backup-only member
-	h.seedChatModel(t, "sticky-w")
-	if err := h.mgr.AddModel(models.ModelConfig{
-		ID: "g-pool", Name: "g-pool", Enabled: true, Kind: models.KindGroup,
-		Internal: true, ExcludeFromUltimateSwitching: true,
-		Members: []models.GroupMember{
-			{ModelID: "m-a", Weight: 1},
-			{ModelID: "m-b", Weight: 1, BackupOnly: true},
-		},
-	}); err != nil {
-		t.Fatalf("AddModel(g-pool): %v", err)
-	}
+	seedBackupPoolGroup(t, h)
 
 	msgs := stickyMessages()
 	key := stickyKeyFor("g-pool", msgs)
@@ -1182,7 +1180,7 @@ func TestStickyOrder_AnthropicBackupPoolReEntry_Reorder(t *testing.T) {
 	// m-a (default) fails → backup reselect m-b → rebuild [m-b, sticky-w]
 	// → site (d) reorders to [sticky-w, m-b].
 	got := rec.snapshot()
-	if !equalStrings(got, []string{"m-a", "sticky-w", "m-b"}) {
+	if !slices.Equal(got, []string{"m-a", "sticky-w", "m-b"}) {
 		t.Fatalf("backup-pool re-entry walk order = %v, want [m-a sticky-w m-b]", got)
 	}
 }

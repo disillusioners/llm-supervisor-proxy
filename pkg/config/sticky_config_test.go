@@ -12,9 +12,6 @@ func TestStickyLastSuccess_DefaultOff(t *testing.T) {
 	if Defaults.StickyLastSuccessEnabled {
 		t.Fatal("StickyLastSuccessEnabled must default to false")
 	}
-	if Defaults.StickyLastSuccessEnabled != false {
-		t.Fatal("Defaults.StickyLastSuccessEnabled must be false")
-	}
 }
 
 // TestStickyLastSuccess_EnvOverride pins STICKY_LAST_SUCCESS_ENABLED.

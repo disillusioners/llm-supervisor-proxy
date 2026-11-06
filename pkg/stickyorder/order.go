@@ -13,16 +13,24 @@ package stickyorder
 // is one small allocation per gated request — noise next to the race
 // itself.
 //
+// The ONE exception is the empty input: a NIL or zero-length list is
+// returned AS-IS (nil stays nil, [] stays the same empty slice). There is
+// no element to alias and no membership to preserve, so materialising an
+// allocation would only make an absent chain look like an empty one.
+//
 // Duplicate handling: only the FIRST occurrence moves; later duplicates
 // keep their relative position. Duplicates are constructible (a
 // self-referencing fallback chain [A, A], or the same id as a direct
 // entry and a group-member chain), so this follows "move the id", not
 // "make index 0 unique".
 func PromoteToFront(list []string, target string) []string {
+	if len(list) == 0 {
+		return list // nil/empty in, same nil/empty out — see the doc above
+	}
 	out := make([]string, len(list))
 	copy(out, list)
 
-	if len(out) <= 1 || target == "" || out[0] == target {
+	if len(out) == 1 || target == "" || out[0] == target {
 		return out
 	}
 	for i := 1; i < len(out); i++ {

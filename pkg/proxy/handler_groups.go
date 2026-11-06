@@ -93,14 +93,32 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 	}, ""
 }
 
+// stickyActive is the ONE feature gate shared by every sticky
+// gate/record/invalidate site: the per-request snapshot must exist, the
+// config flag must be ON, and the conversation key must be non-empty
+// (the SAME gate the LB engines use — no leading user run ⇒ no
+// stickiness). Sites add their OWN local conjuncts on top (deadlinePick,
+// writeErr, servedModel, …); none of them re-derive these three.
+//
+// Nil-receiver-safe: a nil snapshot is inactive.
+func (s *ConfigSnapshot) stickyActive(key string) bool {
+	return s != nil && s.StickyLastSuccessEnabled && key != ""
+}
+
 // applyStickyOrder is the sticky last-success ORDER orchestrator — one
 // call per choke point (design §3.3). Gates, in order:
 //
+//  0. a non-nil per-request snapshot (defensive; the handler always
+//     builds one),
 //  1. the per-request snapshot flag (config.StickyLastSuccessEnabled),
 //  2. a non-empty conversation key (the SAME gate the LB engines use —
 //     no leading user run ⇒ no stickiness),
-//  3. a non-nil engine (legacy/test embeddings),
-//  4. a recorded last-success winner for this key.
+//  3. a recorded last-success winner for this key.
+//
+// (0)–(2) are the shared ConfigSnapshot.stickyActive predicate. A nil
+// engine needs no separate gate: every stickyorder method is
+// nil-receiver-safe, so Get on a nil engine is the ordinary "no record"
+// miss (legacy/test embeddings degrade to today's behaviour).
 //
 // It NEVER computes a conversation hash — the key arrives as an
 // argument from the request context (the existing affinity key,
@@ -108,8 +126,13 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 // no-op paths return the input as-is, and the promotion path returns a
 // fresh copy (stickyorder.PromoteToFront never aliases or mutates its
 // input).
+//
+// An EMPTY reqID suppresses the promotion log line: the OpenAI loop
+// passes one on a group-re-entry replay when that request ALREADY logged
+// its promotion, so the same request cannot emit two "promoted" lines.
+// The gates themselves never depend on reqID.
 func (h *Handler) applyStickyOrder(conf *ConfigSnapshot, list []string, conversationKey, reqID string) []string {
-	if conf == nil || !conf.StickyLastSuccessEnabled || conversationKey == "" || h.stickyEngine == nil {
+	if !conf.stickyActive(conversationKey) {
 		return list
 	}
 	last, ok := h.stickyEngine.Get(conversationKey)
@@ -117,7 +140,7 @@ func (h *Handler) applyStickyOrder(conf *ConfigSnapshot, list []string, conversa
 		return list
 	}
 	out := stickyorder.PromoteToFront(list, last)
-	if !slices.Equal(out, list) {
+	if reqID != "" && !slices.Equal(out, list) {
 		// Moved (target present and not already front). Full short
 		// lists: model IDs are safe to log (never payload content).
 		// The key prefix is length-guarded (production keys are
@@ -432,11 +455,12 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	arc.modelList = newList
 	arc.groupPick = pick
 	// Sticky last-success race ORDER (design site (d) — MANDATORY): the
-	// Anthropic re-entry restarts the inner walk WITHOUT re-passing the
-	// :357 rewrite preamble, so the loop-top site never re-runs. Apply
-	// the orchestrator to the rebuilt list here, after the
-	// ExcludeGroupMember reselect (this covers the backup-pool reselect
-	// variant identically — both rebuild paths land on this line).
+	// Anthropic re-entry restarts the inner walk WITHOUT re-passing
+	// HandleAnthropicMessages' group-rewrite preamble, so that file's
+	// walk-start site never re-runs. Apply the orchestrator to the
+	// rebuilt list here, after the ExcludeGroupMember reselect (this
+	// covers the backup-pool reselect variant identically — both
+	// rebuild paths land on this line).
 	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
 	if pick.MemberID != arc.reqLog.Model {
 		arc.reqLog.RouteModel = pick.MemberID

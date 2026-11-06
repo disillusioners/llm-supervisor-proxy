@@ -1,5 +1,41 @@
 package database
 
+// ─────────────────────────────────────────────────────────────────────────────
+// store.go — the database-backed configuration manager (config.ManagerInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// What this file owns:
+//
+//   - ConfigManager ................... the DB twin of pkg/config.Manager:
+//                                         Get / Save / Load / validation and
+//                                         the event-bus publishes on change.
+//   - Partial-PUT merging ............. mergeConfig + the isXProvided family
+//                                         probes. The FE/API decodes into a
+//                                         FRESH zero-filled config.Config, so
+//                                         a bool false is indistinguishable
+//                                         from "not sent" — that asymmetry is
+//                                         the whole reason these probes exist.
+//   - Getters ......................... the ManagerInterface accessor set, one
+//                                         RLock-guarded read each.
+//
+// Companion files:
+//
+//   - init.go / migrate.go / sqlc/: schema + migration registry.
+//   - models_manager.go, store_group*.go: the models + group engines (the
+//     ConfigManager itself never resolves credentials or members).
+//   - mock_store.go: the MockConfigManager twin used by tests.
+//
+// Size rationale: this file sits in the 2000-line band because the config
+// surface is ONE contract: every accessor, every merge probe, and every
+// validation rule has to agree on the same field semantics, and the merge
+// probes are only correct in relation to each other (a new bool that joins
+// the wrong probe silently clobbers its siblings). Splitting by field family
+// would put those mutually-dependent probes in different files and make the
+// clobber reasoning much weaker than the line count saves.
+// TRIPWIRE: if this file passes ~3200 lines, split the GETTER block out
+// FIRST — it is mechanical and carries no merge semantics.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import (
 	"context"
 	"database/sql"

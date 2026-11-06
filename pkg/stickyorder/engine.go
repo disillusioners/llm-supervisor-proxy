@@ -148,15 +148,24 @@ func (e *Engine) Get(key string) (modelID string, ok bool) {
 // RecordSuccess records modelID as the last DELIVERED success for key
 // and refreshes the record's timestamp (sliding TTL).
 //
+// Logs ONLY on a winner CHANGE (first record for the key, or a different
+// model winning) — mirroring credentiallb's newlyBound precedent: a
+// stable conversation re-recording the same winner every request is a
+// silent TTL refresh, not an interesting state change, and per-success
+// logging would be pure volume.
+//
 // No-op on "" key, "" modelID, or nil receiver.
 func (e *Engine) RecordSuccess(key, modelID string) {
 	if e == nil || key == "" || modelID == "" {
 		return
 	}
 	e.mu.Lock()
+	prev, found := e.winners[key]
 	e.winners[key] = winnerEntry{modelID: modelID, updatedAt: e.now()}
 	e.mu.Unlock()
-	log.Printf("[STICKY] success recorded key=%s model=%s", KeyPrefix(key), modelID)
+	if !found || prev.modelID != modelID {
+		log.Printf("[STICKY] success recorded key=%s model=%s", KeyPrefix(key), modelID)
+	}
 }
 
 // InvalidateOnFailure deletes the record ONLY when modelID equals the
