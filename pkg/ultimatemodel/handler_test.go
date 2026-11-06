@@ -103,6 +103,10 @@ func (m *mockConfigManager) GetRaceRetryEnabled() bool {
 	return m.cfg.RaceRetryEnabled
 }
 
+func (m *mockConfigManager) GetStickyLastSuccessEnabled() bool {
+	return m.cfg.StickyLastSuccessEnabled
+}
+
 func (m *mockConfigManager) GetRaceParallelOnIdle() bool {
 	return m.cfg.RaceParallelOnIdle
 }

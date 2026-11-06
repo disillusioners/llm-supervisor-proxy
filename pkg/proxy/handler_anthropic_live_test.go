@@ -202,7 +202,7 @@ func TestAnthropicLiveStream_ForwardBytesBeforeCompletion(t *testing.T) {
 	modelsCfg := models.NewModelsConfig()
 	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
-	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -401,7 +401,7 @@ func TestAnthropicLiveStream_SequentialFallbackBreak(t *testing.T) {
 	}
 	bus := events.NewBus()
 	reqStore := store.NewRequestStore(100)
-	h := NewHandler(cfg, bus, reqStore, nil, nil, nil, nil)
+	h := NewHandler(cfg, bus, reqStore, nil, nil, nil, nil, nil)
 
 	body := anthropicBody("live-primary", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -442,7 +442,7 @@ func TestAnthropicLiveStream_BufferedModeUnchanged(t *testing.T) {
 	modelsCfg := models.NewModelsConfig()
 	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
-	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -666,7 +666,7 @@ func TestReviewFix3_PreamblePreservedOnParseError(t *testing.T) {
 	modelsCfg := models.NewModelsConfig()
 	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
-	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},
@@ -756,7 +756,7 @@ func TestReviewFix5_NonDataLinesDroppedOnLiveWire(t *testing.T) {
 	modelsCfg := models.NewModelsConfig()
 	seedInternalFixtureNamed(t, modelsCfg, mock.URL, "claude-sonnet-4-5")
 	cfg := &Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}
-	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+	h := NewHandler(cfg, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 	body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 		{"role": "user", "content": "hi"},

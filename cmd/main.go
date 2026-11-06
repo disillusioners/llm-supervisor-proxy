@@ -27,6 +27,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ui"
@@ -134,6 +135,13 @@ func main() {
 	// acceptance describes. main.go deliberately does NOT subscribe.
 	credLB := modelsMgr.Engine()
 
+	// Sticky last-success race ORDER registry — in-memory only
+	// (restart = cold start), sliding 30m idle TTL, 5m janitor. The
+	// feature gate (config.StickyLastSuccessEnabled, default OFF) is
+	// evaluated per request from the config snapshot; the engine is
+	// always constructed so a runtime config flip needs no restart.
+	stickyEngine := stickyorder.NewEngine(stickyorder.DefaultStickyTTL, stickyorder.DefaultSweepInterval)
+
 	// Layered credential fallback (Fix 1) — push the configured
 	// quota-class cooldown into the engine. The engine owns the
 	// cooldown POLICY (it already owns the 60s rate-limit default); the
@@ -185,6 +193,9 @@ func main() {
 	// the signal handler triggers — see below).
 	if credLB != nil {
 		defer credLB.Stop()
+	}
+	if stickyEngine != nil {
+		defer stickyEngine.Stop()
 	}
 
 	// Initialize encryption (required for internal upstream API key storage)
@@ -257,7 +268,7 @@ func main() {
 	// positional arg. Pass nil for legacy / test paths; the seam is
 	// nil-safe and degrades to single-credential resolution via
 	// ResolveInternalConfigWithAffinity's nil-engine branch.
-	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter, credLB)
+	proxyHandler := proxy.NewHandler(proxyConfig, bus, reqStore, bufferStore, tokenStore, usageCounter, credLB, stickyEngine)
 
 	// Initialize ImgGen Handler (ImgGen Models commission / BE-R3 +
 	// T1.4.8). Constructed next to proxyHandler; production wiring

@@ -117,9 +117,29 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	// We check multiple fields to detect if race_retry was intentionally sent
 	if isRaceRetryProvided(incoming) {
 		result.RaceRetryEnabled = incoming.RaceRetryEnabled
+		// Sticky last-success rides the FAMILY block: a family-bearing
+		// PUT (the FE proxy-Apply payload, which is mandatory-complete
+		// since the sticky FE delta) is authoritative for BOTH setting
+		// and clearing sticky, exactly like its race siblings.
+		result.StickyLastSuccessEnabled = incoming.StickyLastSuccessEnabled
 		result.RaceParallelOnIdle = incoming.RaceParallelOnIdle
 		result.RaceMaxParallel = incoming.RaceMaxParallel
 		result.RaceMaxBufferBytes = incoming.RaceMaxBufferBytes
+	}
+
+	// Sticky last-success STANDALONE true-only enable, DELIBERATELY
+	// OUTSIDE the family block (B1 clobber guard): an API-only PUT of
+	// {"sticky_last_success_enabled": true} turns the flag ON without
+	// firing the family merge, so the zero-filled incoming config can
+	// never zero RaceMaxParallel / RaceMaxBufferBytes or clear
+	// RaceRetryEnabled / RaceParallelOnIdle as a side effect.
+	// isRaceRetryProvided stays untouched: a false value is
+	// indistinguishable from "not sent" for booleans, so a
+	// sticky-only false is dropped (documented residual, identical to
+	// {"race_retry_enabled": false}-alone today; the FE path is the
+	// supported clear).
+	if incoming.StickyLastSuccessEnabled {
+		result.StickyLastSuccessEnabled = true
 	}
 
 	// Idle termination: check if idle termination config was provided
@@ -321,6 +341,14 @@ func (m *ConfigManager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.RaceRetryEnabled
+}
+
+// GetStickyLastSuccessEnabled returns whether sticky last-success race
+// ordering is enabled
+func (m *ConfigManager) GetStickyLastSuccessEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.StickyLastSuccessEnabled
 }
 
 // GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout

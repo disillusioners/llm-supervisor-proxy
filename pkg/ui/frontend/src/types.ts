@@ -70,6 +70,8 @@ export interface AppConfig {
   race_parallel_on_idle: boolean;
   race_max_parallel: number;
   race_max_buffer_bytes: number;
+  // Sticky last-success race ordering (default OFF)
+  sticky_last_success_enabled: boolean;
   loop_detection: LoopDetectionConfig;
   tool_repair: ToolRepairConfig;
   ultimate_model: UltimateModelConfig;

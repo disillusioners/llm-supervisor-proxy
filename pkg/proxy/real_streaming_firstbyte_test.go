@@ -283,7 +283,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("AddModel: %v", err)
 		}
-		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 		body := anthropicBody("claude-passthrough", true, []map[string]interface{}{
 			{"role": "user", "content": "hi"},
@@ -315,7 +315,7 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		modelsCfg := models.NewModelsConfig()
 		// remove-external-upstream P5: internal openai fixture.
 		seedInternalFixtureNamed(t, modelsCfg, upstream.URL, "claude-sonnet-4-5")
-		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil)
+		h := NewHandler(&Config{ConfigMgr: mgr, ModelsConfig: modelsCfg}, events.NewBus(), store.NewRequestStore(100), nil, nil, nil, nil, nil)
 
 		body := anthropicBody("claude-sonnet-4-5", true, []map[string]interface{}{
 			{"role": "user", "content": "hi"},

@@ -173,7 +173,7 @@ func bootstrapToolCallUltimateTest(t *testing.T, upstreamURL, wantBody string, s
 	if err != nil {
 		t.Fatalf("NewBufferStore: %v", err)
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, nil, nil)
 
 	body := map[string]interface{}{
 		"model":  "any-model",

@@ -153,6 +153,14 @@ func (m *MockConfigManager) GetRaceRetryEnabled() bool {
 	return m.Config.RaceRetryEnabled
 }
 
+// GetStickyLastSuccessEnabled returns whether sticky last-success race
+// ordering is enabled.
+func (m *MockConfigManager) GetStickyLastSuccessEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Config.StickyLastSuccessEnabled
+}
+
 // GetRaceParallelOnIdle returns whether to spawn parallel requests on idle timeout.
 func (m *MockConfigManager) GetRaceParallelOnIdle() bool {
 	m.mu.RLock()

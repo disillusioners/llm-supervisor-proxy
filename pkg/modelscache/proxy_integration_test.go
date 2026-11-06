@@ -151,7 +151,7 @@ func TestProxyIntegration_UnhealthyDecoratorReturns503EndToEnd(t *testing.T) {
 		ConfigMgr:    configMgr,
 		ModelsConfig: cached,
 		EventBus:     bus,
-	}, bus, reqStore, nil, nil, nil, nil)
+	}, bus, reqStore, nil, nil, nil, nil, nil)
 
 	// Unknown model + DB down → 503, never an upstream hit.
 	postJSON := func(body string) *httptest.ResponseRecorder {

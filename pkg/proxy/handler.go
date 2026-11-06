@@ -22,6 +22,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
@@ -39,25 +40,26 @@ type Config struct {
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
 	return ConfigSnapshot{
-		IdleTimeout:            cfg.IdleTimeout.Duration(),
-		StreamDeadline:         cfg.StreamDeadline.Duration(),
-		MaxGenerationTime:      cfg.MaxGenerationTime.Duration(),
-		MaxStreamBufferSize:    cfg.MaxStreamBufferSize,
-		ModelsConfig:           c.ModelsConfig,
-		LoopDetection:          cfg.LoopDetection,
-		ToolRepair:             cfg.ToolRepair,
-		RaceRetryEnabled:       cfg.RaceRetryEnabled,
-		RaceParallelOnIdle:     cfg.RaceParallelOnIdle,
-		RaceMaxParallel:        cfg.RaceMaxParallel,
-		RaceMaxBufferBytes:     cfg.RaceMaxBufferBytes,
-		ToolCallBufferDisabled: cfg.ToolCallBufferDisabled,
-		ToolCallBufferMaxSize:  cfg.ToolCallBufferMaxSize,
-		LogRawUpstreamResponse: cfg.LogRawUpstreamResponse,
-		LogRawUpstreamOnError:  cfg.LogRawUpstreamOnError,
-		LogRawUpstreamMaxKB:    cfg.LogRawUpstreamMaxKB,
-		IdleTerminationEnabled: cfg.IdleTerminationEnabled,
-		IdleTerminationTimeout: cfg.IdleTerminationTimeout.Duration(),
-		EventBus:               c.EventBus,
+		IdleTimeout:              cfg.IdleTimeout.Duration(),
+		StreamDeadline:           cfg.StreamDeadline.Duration(),
+		MaxGenerationTime:        cfg.MaxGenerationTime.Duration(),
+		MaxStreamBufferSize:      cfg.MaxStreamBufferSize,
+		ModelsConfig:             c.ModelsConfig,
+		LoopDetection:            cfg.LoopDetection,
+		ToolRepair:               cfg.ToolRepair,
+		RaceRetryEnabled:         cfg.RaceRetryEnabled,
+		StickyLastSuccessEnabled: cfg.StickyLastSuccessEnabled,
+		RaceParallelOnIdle:       cfg.RaceParallelOnIdle,
+		RaceMaxParallel:          cfg.RaceMaxParallel,
+		RaceMaxBufferBytes:       cfg.RaceMaxBufferBytes,
+		ToolCallBufferDisabled:   cfg.ToolCallBufferDisabled,
+		ToolCallBufferMaxSize:    cfg.ToolCallBufferMaxSize,
+		LogRawUpstreamResponse:   cfg.LogRawUpstreamResponse,
+		LogRawUpstreamOnError:    cfg.LogRawUpstreamOnError,
+		LogRawUpstreamMaxKB:      cfg.LogRawUpstreamMaxKB,
+		IdleTerminationEnabled:   cfg.IdleTerminationEnabled,
+		IdleTerminationTimeout:   cfg.IdleTerminationTimeout.Duration(),
+		EventBus:                 c.EventBus,
 	}
 }
 
@@ -76,6 +78,13 @@ type ConfigSnapshot struct {
 	RaceMaxParallel    int
 	RaceMaxBufferBytes int
 	ModelID            string // Primary model for this request
+
+	// Sticky last-success race ORDER (snapshot of
+	// config.StickyLastSuccessEnabled, per request). When true the
+	// race chain / Anthropic walk promotes this conversation's last
+	// delivered-success model to index 0 before construction. Off =
+	// byte-identical request path.
+	StickyLastSuccessEnabled bool
 
 	// Tool Call Buffering
 	ToolCallBufferDisabled bool
@@ -114,6 +123,13 @@ type Handler struct {
 	// ResolveInternalConfigWithAffinity seam handles nil-engine by
 	// returning the legacy single-credential resolution (Phase 2).
 	credEngine *credentiallb.Engine
+
+	// stickyEngine is the sticky last-success order registry, injected
+	// at construction exactly like credEngine (constructor-only
+	// injection; no Config field). MAY BE NIL: legacy/test paths pass
+	// nil and every engine method is a nil-receiver no-op, so the
+	// request path degrades to pre-feature behavior exactly.
+	stickyEngine *stickyorder.Engine
 }
 
 // NewHandler (Phase 3 / Task 3 + W-3): 7th constructor parameter is the
@@ -124,7 +140,15 @@ type Handler struct {
 // the legacy single-credential fast path (Phase 2 / E-3); behavior is
 // byte-identical to pre-Phase-3.
 //
+// The 8th constructor parameter (sticky last-success race ordering) is
+// the sticky-engine injection — same constructor-only law. It may be
+// nil: every stickyorder.Engine method is nil-receiver-safe, so a nil
+// engine degrades the request path to pre-feature behavior exactly
+// (tests and legacy embeddings pass nil; cmd/main.go wires the
+// production engine).
+//
 //	credEngine may be nil.
+//	stickyEngine may be nil.
 func NewHandler(
 	config *Config,
 	bus *events.Bus,
@@ -133,12 +157,14 @@ func NewHandler(
 	tokenStore auth.TokenStoreInterface,
 	counter *usage.Counter,
 	credEngine *credentiallb.Engine,
+	stickyEngine *stickyorder.Engine,
 ) *Handler {
 	h := &Handler{
-		config:     config,
-		bus:        bus,
-		store:      store,
-		credEngine: credEngine,
+		config:       config,
+		bus:          bus,
+		store:        store,
+		credEngine:   credEngine,
+		stickyEngine: stickyEngine,
 		client: &http.Client{
 			// IMPORTANT: Timeout is set to 0 for streaming support.
 			// We use context deadlines (attemptCtx) instead of http.Client.Timeout because:
@@ -1154,7 +1180,16 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// (N9 winner lock). Non-group requests take the loop exactly
 	// once (groupPick == nil) — byte-identical behavior.
 	for {
-		coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate)
+		// Sticky last-success race ORDER (design site (a)): re-apply on
+		// EVERY loop iteration, at the loop top — BEFORE the coordinator
+		// aliases the list. The group re-entry rebuild (tryGroupReentry)
+		// mutates rc.modelList and returns into this same loop, so the
+		// rebuilt list is re-promoted by construction (idempotent: an
+		// already-front winner no-ops). Off / empty key / nil engine /
+		// no record ⇒ the list passes through untouched.
+		rc.modelList = h.applyStickyOrder(&rc.conf, rc.modelList, rc.conversationKey, rc.reqID)
+
+		coordinator := newRaceCoordinatorWithEvents(rc.baseCtx, &rc.conf, r, rc.rawBody, rc.modelList, h.bus, rc.reqID, rc.interleavedThinking, h.credEngine, rc.conversationKey, liveFirstByteGate, h.stickyEngine)
 		// Q15 (plan §3.7): the coordinator carries the group pick so
 		// the W-1 publish site (race_executor) can fire
 		// model_member_selected newlyBound-only.
@@ -1750,6 +1785,18 @@ func (h *Handler) streamResult(w http.ResponseWriter, rc *requestContext, winner
 				"race":     true,
 			})
 
+			// Sticky last-success: record ONLY a DELIVERED success —
+			// this publish site is reached after the winner's bytes
+			// were streamed to the client successfully (a client-write
+			// failure returns at the [STREAM] Client write failed arm
+			// above and never reaches here). The winner's model ID is a
+			// concrete raced member id, matching the choke-point list
+			// keyspace. Never recorded on race_winner_selected
+			// (first-byte) or race_deadline_pick (best-partial).
+			if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick {
+				h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
+			}
+
 			// Log raw response on success if enabled - we capture at beginning of streamResult
 			return nil
 		case <-ticker.C:
@@ -1992,6 +2039,14 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 		"duration": rc.reqLog.Duration,
 		"race":     true,
 	})
+
+	// Sticky last-success: record ONLY a DELIVERED success — this is
+	// the non-stream completion site, reached after the winner's
+	// response body was written. Ultimate-path completion and
+	// first-byte/deadline picks never reach here (see design §4.2).
+	if rc.conf.StickyLastSuccessEnabled && rc.conversationKey != "" && !winner.deadlinePick {
+		h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
+	}
 
 	// Log raw response on success if enabled - capture bytes before returning
 	if rc.conf.LogRawUpstreamResponse {

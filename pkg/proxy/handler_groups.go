@@ -16,9 +16,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 )
 
 // groupPickInfo records the (main) group rewrite outcome for the
@@ -89,6 +91,51 @@ func (h *Handler) applyGroupRewrite(conf *ConfigSnapshot, modelList []string, co
 		Pool:         pool,
 		BindingStale: res.BindingStale,
 	}, ""
+}
+
+// applyStickyOrder is the sticky last-success ORDER orchestrator — one
+// call per choke point (design §3.3). Gates, in order:
+//
+//  1. the per-request snapshot flag (config.StickyLastSuccessEnabled),
+//  2. a non-empty conversation key (the SAME gate the LB engines use —
+//     no leading user run ⇒ no stickiness),
+//  3. a non-nil engine (legacy/test embeddings),
+//  4. a recorded last-success winner for this key.
+//
+// It NEVER computes a conversation hash — the key arrives as an
+// argument from the request context (the existing affinity key,
+// verbatim). Every path returns a slice the caller may assign back: the
+// no-op paths return the input as-is, and the promotion path returns a
+// fresh copy (stickyorder.PromoteToFront never aliases or mutates its
+// input).
+func (h *Handler) applyStickyOrder(conf *ConfigSnapshot, list []string, conversationKey, reqID string) []string {
+	if conf == nil || !conf.StickyLastSuccessEnabled || conversationKey == "" || h.stickyEngine == nil {
+		return list
+	}
+	last, ok := h.stickyEngine.Get(conversationKey)
+	if !ok || last == "" {
+		return list
+	}
+	out := stickyorder.PromoteToFront(list, last)
+	if !slices.Equal(out, list) {
+		// Moved (target present and not already front). Full short
+		// lists: model IDs are safe to log (never payload content).
+		// The key prefix is length-guarded (production keys are
+		// 64-hex; short keys must never panic a log line).
+		log.Printf("[STICKY] request %s: promoted last-success model=%s to index 0 key=%s from=%v to=%v",
+			reqID, last, conversationKeyPrefix(conversationKey), list, out)
+	}
+	return out
+}
+
+// conversationKeyPrefix renders a conversation key for [STICKY] log
+// lines: the 8-char prefix precedent from the [LB] lines, with the whole
+// key when it is shorter.
+func conversationKeyPrefix(key string) string {
+	if len(key) <= 8 {
+		return key + "…"
+	}
+	return key[:8] + "…"
 }
 
 // ─── Am26 masking ────────────────────────────────────────────────────────────
@@ -394,6 +441,13 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	}
 	arc.modelList = newList
 	arc.groupPick = pick
+	// Sticky last-success race ORDER (design site (d) — MANDATORY): the
+	// Anthropic re-entry restarts the inner walk WITHOUT re-passing the
+	// :357 rewrite preamble, so the loop-top site never re-runs. Apply
+	// the orchestrator to the rebuilt list here, after the
+	// ExcludeGroupMember reselect (this covers the backup-pool reselect
+	// variant identically — both rebuild paths land on this line).
+	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
 	if pick.MemberID != arc.reqLog.Model {
 		arc.reqLog.RouteModel = pick.MemberID
 	} else {

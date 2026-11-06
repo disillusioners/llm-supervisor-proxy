@@ -389,7 +389,7 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 		ModelsConfig: resolver,
 	}
 
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine, nil)
 
 	return &phase5TestEnv{
 		handler:        h,
@@ -594,7 +594,7 @@ func TestHandler_ShutdownOrder_LIFO(t *testing.T) {
 		ConfigMgr:    mgr,
 		ModelsConfig: modelsConfig,
 	}
-	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine)
+	h := NewHandler(cfg, bus, reqStore, bufStore, tokenStore, counter, engine, nil)
 
 	// http.Server wraps the handler so we have a real srv to call
 	// srv.Shutdown on (handler doesn't expose ServeHTTP — the mux lives

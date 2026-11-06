@@ -385,6 +385,12 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			arc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
 	}
 
+	// Sticky last-success race ORDER (design site (b)): post-group-
+	// rewrite, pre-walk. The Anthropic lane has no race coordinator —
+	// reordering changes walk ATTEMPT order only (index 0 = first
+	// attempt), preserving sequential-fallback semantics.
+	arc.modelList = h.applyStickyOrder(&arc.conf, arc.modelList, arc.conversationKey, arc.reqID)
+
 	// Outer loop: iterate through models (original + fallbacks).
 	// load-balance-groups / Am24 re-entry: a terminal member-pipeline
 	// failure (all models failed, no byte sent) lets the group
@@ -454,6 +460,12 @@ loop:
 				arc.requestBody = newBody
 			}
 
+			// Sticky last-success served identity: set BEFORE the
+			// attempt — finalizeAnthropicSuccess runs from inside
+			// attemptAnthropicModel, so a post-success set would still
+			// be empty at record time (design §4.4 ordering trap).
+			arc.servedModel = currentModel
+
 			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 			if success {
 				return
@@ -476,6 +488,15 @@ loop:
 
 			arc.reqLog.Status = "failed"
 			arc.reqLog.Error = "Model failed"
+
+			// Sticky last-success failure invalidation (winner-matched
+			// inside the engine): only a failure of the RECORDED winner
+			// unpins the slot. Between-attempt loop aborts (client
+			// disconnect / headersSent `break loop`) are NOT model
+			// failures and never reach this arm.
+			if arc.conf.StickyLastSuccessEnabled {
+				h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
+			}
 		}
 
 		// All models failed (loop body ended without success). Am24
@@ -1559,6 +1580,18 @@ type anthropicRequestContext struct {
 	conversationKey string
 	retryAfter      time.Duration
 
+	// servedModel is the CONCRETE model id the walk is about to attempt
+	// — set at walk-top, immediately BEFORE the attempt (design §4.4
+	// ordering trap: setting it post-success would be too late, because
+	// finalizeAnthropicSuccess runs from INSIDE attemptAnthropicModel).
+	// On a delivered success the last pre-attempt set is exactly the
+	// serving model (a group MEMBER id — keyspace-consistent with the
+	// sticky choke-point lists); on failure it is never read (no
+	// finalize runs); marshal-failure `continue`s skip the set for
+	// never-attempted models; group re-entry overwrites it on the
+	// rebuilt walk.
+	servedModel string
+
 	// Response tracking (for storing assistant message)
 	accumulatedResponse  strings.Builder
 	accumulatedThinking  strings.Builder
@@ -1616,6 +1649,15 @@ func (h *Handler) finalizeAnthropicSuccess(arc *anthropicRequestContext) {
 	arc.reqLog.Duration = time.Since(arc.startTime).String()
 	h.store.Add(arc.reqLog)
 	h.publishEvent("request_completed", map[string]interface{}{"id": arc.reqID})
+
+	// Sticky last-success: this finalize funnel is the ONLY delivered-
+	// success site on the Anthropic lane (Status="completed" is set
+	// nowhere else). success==true paths that never reach finalize
+	// (client disconnect, headers-sent partials) are correctly
+	// excluded.
+	if arc.conf.StickyLastSuccessEnabled && arc.conversationKey != "" && arc.servedModel != "" {
+		h.stickyEngine.RecordSuccess(arc.conversationKey, arc.servedModel)
+	}
 }
 
 // extractOpenAIResponseContent extracts content, thinking, and tool calls from OpenAI response.

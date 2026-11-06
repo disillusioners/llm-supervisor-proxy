@@ -79,6 +79,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 )
 
 // spawnTrigger indicates why parallel requests are being spawned
@@ -184,6 +185,12 @@ type raceCoordinator struct {
 	engine          *credentiallb.Engine
 	conversationKey string
 
+	// sticky is the sticky last-success order registry (constructor
+	// injection; nil-safe). Read-only after construction; the attempt
+	// failure funnel uses it to unpin a recorded winner whose own
+	// attempt failed. Nil (tests, legacy paths) ⇒ no-op.
+	sticky *stickyorder.Engine
+
 	requests    []*upstreamRequest
 	models      []string
 	winner      *upstreamRequest
@@ -274,7 +281,7 @@ type raceCoordinator struct {
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
-	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "", false)
+	return newRaceCoordinatorWithEvents(ctx, cfg, req, rawBody, models, nil, "", interleaved, nil, "", false, nil)
 }
 
 // newRaceCoordinatorWithEvents (Phase 3 / Round 3c C3) gains two more
@@ -289,8 +296,14 @@ func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Requ
 // (GetError()==nil && GetBuffer().TotalLen()>0). The 6-arg wrapper
 // (`newRaceCoordinator`) passes false, so direct-constructor test
 // callers stay byte-identical to buffered/legacy semantics. The
-// production call site is handler.go:924, which computes the flag
+// production call site is handler.go, which computes the flag
 // as `!rc.bufferMode && rc.isStream`.
+//
+// Sticky last-success ordering adds the 12th positional parameter:
+// sticky (the stickyorder.Engine; nil-safe — nil means the feature is
+// absent, so the 6-arg wrapper and any direct test construction keep
+// byte-identical semantics). The production call site passes
+// h.stickyEngine.
 func newRaceCoordinatorWithEvents(
 	ctx context.Context,
 	cfg *ConfigSnapshot,
@@ -303,6 +316,7 @@ func newRaceCoordinatorWithEvents(
 	engine *credentiallb.Engine,
 	conversationKey string,
 	liveFirstByteGate bool,
+	sticky *stickyorder.Engine,
 ) *raceCoordinator {
 	if len(models) == 0 {
 		models = []string{cfg.ModelID}
@@ -315,6 +329,7 @@ func newRaceCoordinatorWithEvents(
 		interleaved:       interleaved,
 		engine:            engine,
 		conversationKey:   conversationKey,
+		sticky:            sticky,
 		models:            models,
 		requests:          make([]*upstreamRequest, 0, len(models)),
 		winnerIdx:         -1,
@@ -969,6 +984,10 @@ func (c *raceCoordinator) handleStreamingDeadline() {
 
 		c.winner = best
 		c.winnerIdx = best.id
+		// Sticky last-success: a deadline pick is a best-partial
+		// artifact, never a delivered success — mark it so the
+		// record sites skip it.
+		best.deadlinePick = true
 
 		log.Printf("[RACE] Picked best buffer: request %d (%s, %s) with %d bytes",
 			best.id, best.modelType, best.modelID, bestLen)
@@ -1157,6 +1176,16 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 
 	if err != nil {
 		req.MarkFailed(err)
+		// Sticky last-success invalidation (winner-matched inside the
+		// engine): a failed attempt of the RECORDED winner unpins the
+		// slot; any other model's failure is a no-op. Cred-failover
+		// exhaustion needs no separate hook — every failover attempt
+		// already flowed through here. Mid-attempt cancels surface as
+		// ctx.Err()/context.Canceled through executeRequest and land
+		// here too (accepted transient unpin, design §8.12).
+		if c.cfg.StickyLastSuccessEnabled {
+			c.sticky.InvalidateOnFailure(c.conversationKey, req.modelID)
+		}
 		// race-error-reason-classification — the [RACE] log line and the
 		// event payload carry the classified, bounded reason; the raw
 		// error (which can embed an entire upstream error body on the

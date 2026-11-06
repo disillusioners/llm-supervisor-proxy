@@ -76,7 +76,7 @@ func newGroupHarness(t *testing.T) *groupHarness {
 	}))
 	mgrCfg := newTestManagerWithConfig(t, up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
-	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, nil, mgr.Engine())
+	h := NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: mgr}, bus, reqStore, nil, nil, nil, mgr.Engine(), nil)
 	// remove-external-upstream P5: member chat rows are stamped
 	// Internal=true on write, so they need a credential; point it at
 	// the stub upstream so the internal path reaches it.
@@ -110,7 +110,7 @@ func (h *groupHarness) rebuildHandler(t *testing.T) {
 	}
 	mgrCfg := newTestManagerWithConfig(t, h.up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
-	*h.h = *NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: h.mgr}, h.bus, reqStore, nil, nil, nil, h.mgr.Engine())
+	*h.h = *NewHandler(&Config{ConfigMgr: mgrCfg, ModelsConfig: h.mgr}, h.bus, reqStore, nil, nil, nil, h.mgr.Engine(), nil)
 }
 
 // stubUpstreamBody returns a minimal OpenAI chat-completions

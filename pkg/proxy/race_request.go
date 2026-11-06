@@ -96,6 +96,14 @@ type upstreamRequest struct {
 	// secondary upstream-set call and use this credential directly.
 	reselectedCredentialID string
 
+	// deadlinePick (sticky last-success ordering) marks an attempt
+	// promoted to winner by handleStreamingDeadline's best-buffer pick
+	// — a BEST-PARTIAL artifact, not a delivered success. The sticky
+	// record sites skip it (design §4.2: never record on
+	// race_deadline_pick). Written once under c.mu before c.done
+	// closes; read by the handler after WaitForWinner.
+	deadlinePick bool
+
 	// Cancellation state
 	cancelled  bool      // Set when Cancel() has been called
 	cancelOnce sync.Once // Ensures cleanup is only performed once
