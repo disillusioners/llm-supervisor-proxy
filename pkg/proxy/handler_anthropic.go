@@ -1865,11 +1865,16 @@ func extractOpenAIResponseContentFromSSE(sseBuffer []byte) (content, thinking st
 
 				// Ensure we have enough slots
 				for len(toolCalls) <= index {
-					toolCalls = append(toolCalls, store.ToolCall{})
+					toolCalls = append(toolCalls, store.ToolCall{Type: "function"})
 				}
 
 				if id, ok := tcMap["id"].(string); ok && id != "" {
 					toolCalls[index].ID = id
+				}
+				if t, ok := tcMap["type"].(string); ok && t != "" {
+					toolCalls[index].Type = t
+				} else if toolCalls[index].Type == "" {
+					toolCalls[index].Type = "function"
 				}
 
 				if fn, ok := tcMap["function"].(map[string]interface{}); ok {
@@ -2098,34 +2103,6 @@ func copyAnthropicHeaders(dst *http.Request, src http.Header) {
 		}
 	}
 	dst.Header.Set("Content-Type", "application/json")
-}
-
-// convertAnthropicMessagesToStore converts Anthropic messages to store format
-func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []store.Message {
-	var result []store.Message
-	for _, msg := range messages {
-		content := ""
-		switch c := msg.Content.(type) {
-		case string:
-			content = c
-		case []interface{}:
-			// Extract text from content blocks
-			var sb strings.Builder
-			for _, block := range c {
-				if bm, ok := block.(map[string]interface{}); ok {
-					if t, ok := bm["text"].(string); ok {
-						sb.WriteString(t)
-					}
-				}
-			}
-			content = sb.String()
-		}
-		result = append(result, store.Message{
-			Role:    msg.Role,
-			Content: content,
-		})
-	}
-	return result
 }
 
 // publishAnthropicCredentialFailover (Phase 3 / Task 20 / R3-8) emits

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
 func TestAnthropicAdapter_Protocol(t *testing.T) {
@@ -201,16 +202,20 @@ func TestValidateAnthropicAdapterRequest(t *testing.T) {
 
 func TestConvertAnthropicMessagesToStoreAdapter(t *testing.T) {
 	tests := []struct {
-		name     string
-		messages []translator.AnthropicMessage
-		expected int
+		name              string
+		messages          []translator.AnthropicMessage
+		expected          int
+		expectedContent   string
+		expectedThinking  string
+		expectedToolCalls []store.ToolCall
 	}{
 		{
 			name: "simple string content",
 			messages: []translator.AnthropicMessage{
 				{Role: "user", Content: "Hello"},
 			},
-			expected: 1,
+			expected:        1,
+			expectedContent: "Hello",
 		},
 		{
 			name: "array content with text",
@@ -219,7 +224,8 @@ func TestConvertAnthropicMessagesToStoreAdapter(t *testing.T) {
 					map[string]interface{}{"type": "text", "text": "Hello"},
 				}},
 			},
-			expected: 1,
+			expected:        1,
+			expectedContent: "Hello",
 		},
 		{
 			name: "array content with multiple texts",
@@ -229,7 +235,8 @@ func TestConvertAnthropicMessagesToStoreAdapter(t *testing.T) {
 					map[string]interface{}{"type": "text", "text": " World"},
 				}},
 			},
-			expected: 1,
+			expected:        1,
+			expectedContent: "Hello World",
 		},
 		{
 			name: "mixed content blocks",
@@ -239,7 +246,126 @@ func TestConvertAnthropicMessagesToStoreAdapter(t *testing.T) {
 					map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64"}},
 				}},
 			},
-			expected: 1,
+			expected:        1,
+			expectedContent: "Hello",
+		},
+		{
+			name: "tool_use round trip",
+			messages: []translator.AnthropicMessage{
+				{
+					Role: "assistant",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type":  "tool_use",
+							"id":    "toolu_01A09q90tc1q visual",
+							"name":  "get_weather",
+							"input": map[string]interface{}{"location": "San Francisco, CA"},
+						},
+					},
+				},
+			},
+			expected:        1,
+			expectedContent: "",
+			expectedToolCalls: []store.ToolCall{
+				{
+					ID:   "toolu_01A09q90tc1q visual",
+					Type: "function",
+					Function: store.Function{
+						Name:      "get_weather",
+						Arguments: `{"location":"San Francisco, CA"}`,
+					},
+				},
+			},
+		},
+		{
+			name: "tool_result with string content",
+			messages: []translator.AnthropicMessage{
+				{
+					Role: "user",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_01A09q90tc1q",
+							"content":     "65 degrees and sunny",
+						},
+					},
+				},
+			},
+			expected:        1,
+			expectedContent: "[tool_result toolu_01A09q90tc1q] 65 degrees and sunny",
+		},
+		{
+			name: "tool_result with array of text content",
+			messages: []translator.AnthropicMessage{
+				{
+					Role: "user",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type":        "tool_result",
+							"tool_use_id": "toolu_01A09q90tc1q",
+							"content": []interface{}{
+								map[string]interface{}{"type": "text", "text": "Line 1"},
+								map[string]interface{}{"type": "text", "text": "Line 2"},
+							},
+						},
+					},
+				},
+			},
+			expected:        1,
+			expectedContent: "[tool_result toolu_01A09q90tc1q] Line 1\nLine 2",
+		},
+		{
+			name: "thinking block",
+			messages: []translator.AnthropicMessage{
+				{
+					Role: "assistant",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type":     "thinking",
+							"thinking": "Thinking deeply about the weather...",
+						},
+						map[string]interface{}{
+							"type": "text",
+							"text": "Here is the forecast",
+						},
+					},
+				},
+			},
+			expected:         1,
+			expectedContent:  "Here is the forecast",
+			expectedThinking: "Thinking deeply about the weather...",
+		},
+		{
+			name: "mixed text and tool_use in single message",
+			messages: []translator.AnthropicMessage{
+				{
+					Role: "assistant",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type": "text",
+							"text": "Let me look up the weather for you.",
+						},
+						map[string]interface{}{
+							"type":  "tool_use",
+							"id":    "toolu_weather1",
+							"name":  "get_weather",
+							"input": map[string]interface{}{"city": "Paris"},
+						},
+					},
+				},
+			},
+			expected:        1,
+			expectedContent: "Let me look up the weather for you.",
+			expectedToolCalls: []store.ToolCall{
+				{
+					ID:   "toolu_weather1",
+					Type: "function",
+					Function: store.Function{
+						Name:      "get_weather",
+						Arguments: `{"city":"Paris"}`,
+					},
+				},
+			},
 		},
 	}
 
@@ -247,10 +373,526 @@ func TestConvertAnthropicMessagesToStoreAdapter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := convertAnthropicMessagesToStoreAdapter(tt.messages)
 			if len(result) != tt.expected {
-				t.Errorf("expected %d messages, got %d", tt.expected, len(result))
+				t.Fatalf("expected %d messages, got %d", tt.expected, len(result))
+			}
+			if tt.expected > 0 {
+				msg := result[0]
+				if msg.Content != tt.expectedContent {
+					t.Errorf("expected Content %q, got %q", tt.expectedContent, msg.Content)
+				}
+				if msg.Thinking != tt.expectedThinking {
+					t.Errorf("expected Thinking %q, got %q", tt.expectedThinking, msg.Thinking)
+				}
+				if len(msg.ToolCalls) != len(tt.expectedToolCalls) {
+					t.Fatalf("expected %d tool calls, got %d", len(tt.expectedToolCalls), len(msg.ToolCalls))
+				}
+				for i, wantTC := range tt.expectedToolCalls {
+					gotTC := msg.ToolCalls[i]
+					if gotTC.ID != wantTC.ID {
+						t.Errorf("tool_call[%d].ID = %q, want %q", i, gotTC.ID, wantTC.ID)
+					}
+					if gotTC.Type != wantTC.Type {
+						t.Errorf("tool_call[%d].Type = %q, want %q", i, gotTC.Type, wantTC.Type)
+					}
+					if gotTC.Function.Name != wantTC.Function.Name {
+						t.Errorf("tool_call[%d].Function.Name = %q, want %q", i, gotTC.Function.Name, wantTC.Function.Name)
+					}
+					if gotTC.Function.Arguments != wantTC.Function.Arguments {
+						t.Errorf("tool_call[%d].Function.Arguments = %q, want %q", i, gotTC.Function.Arguments, wantTC.Function.Arguments)
+					}
+				}
 			}
 		})
 	}
+}
+
+func TestConvertAnthropicMessagesToStore_FullFidelity(t *testing.T) {
+	t.Run("tool_use round trip", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "toolu_abc123",
+						"name":  "calculator",
+						"input": map[string]interface{}{"expression": "2+2"},
+					},
+				},
+			},
+		}
+
+		// Verify both entry points produce identical store messages
+		res1 := convertAnthropicMessagesToStore(msgs)
+		res2 := convertAnthropicMessagesToStoreAdapter(msgs)
+
+		for _, res := range [][]store.Message{res1, res2} {
+			if len(res) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(res))
+			}
+			m := res[0]
+			if m.Role != "assistant" {
+				t.Errorf("expected role 'assistant', got %q", m.Role)
+			}
+			if len(m.ToolCalls) != 1 {
+				t.Fatalf("expected 1 tool call, got %d", len(m.ToolCalls))
+			}
+			tc := m.ToolCalls[0]
+			if tc.ID != "toolu_abc123" {
+				t.Errorf("expected ID 'toolu_abc123', got %q", tc.ID)
+			}
+			if tc.Type != "function" {
+				t.Errorf("expected Type 'function', got %q", tc.Type)
+			}
+			if tc.Function.Name != "calculator" {
+				t.Errorf("expected function name 'calculator', got %q", tc.Function.Name)
+			}
+			if tc.Function.Arguments != `{"expression":"2+2"}` {
+				t.Errorf("expected arguments '{\"expression\":\"2+2\"}', got %q", tc.Function.Arguments)
+			}
+		}
+	})
+
+	t.Run("tool_result with string content", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_abc123",
+						"content":     "result is 4",
+					},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(res))
+		}
+		expectedContent := "[tool_result toolu_abc123] result is 4"
+		if res[0].Content != expectedContent {
+			t.Errorf("expected content %q, got %q", expectedContent, res[0].Content)
+		}
+	})
+
+	t.Run("tool_result with array of text content", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_abc123",
+						"content": []interface{}{
+							map[string]interface{}{"type": "text", "text": "line 1"},
+							map[string]interface{}{"type": "text", "text": "line 2"},
+						},
+					},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(res))
+		}
+		expectedContent := "[tool_result toolu_abc123] line 1\nline 2"
+		if res[0].Content != expectedContent {
+			t.Errorf("expected content %q, got %q", expectedContent, res[0].Content)
+		}
+	})
+
+	t.Run("thinking block", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":     "thinking",
+						"thinking": "Step 1: calculate 2+2.",
+					},
+					map[string]interface{}{
+						"type":     "thinking",
+						"thinking": " Step 2: verify 4.",
+					},
+					map[string]interface{}{
+						"type": "text",
+						"text": "The answer is 4.",
+					},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(res))
+		}
+		if res[0].Content != "The answer is 4." {
+			t.Errorf("expected content 'The answer is 4.', got %q", res[0].Content)
+		}
+		expectedThinking := "Step 1: calculate 2+2. Step 2: verify 4."
+		if res[0].Thinking != expectedThinking {
+			t.Errorf("expected thinking %q, got %q", expectedThinking, res[0].Thinking)
+		}
+	})
+
+	t.Run("mixed text and tool_use in single message", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type": "text",
+						"text": "Checking weather...",
+					},
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "toolu_weather_1",
+						"name":  "get_weather",
+						"input": map[string]interface{}{"location": "Boston"},
+					},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(res))
+		}
+		if res[0].Content != "Checking weather..." {
+			t.Errorf("expected content 'Checking weather...', got %q", res[0].Content)
+		}
+		if len(res[0].ToolCalls) != 1 {
+			t.Fatalf("expected 1 tool call, got %d", len(res[0].ToolCalls))
+		}
+		if res[0].ToolCalls[0].ID != "toolu_weather_1" {
+			t.Errorf("expected tool call id 'toolu_weather_1', got %q", res[0].ToolCalls[0].ID)
+		}
+		if res[0].ToolCalls[0].Type != "function" {
+			t.Errorf("expected tool call type 'function', got %q", res[0].ToolCalls[0].Type)
+		}
+		if res[0].ToolCalls[0].Function.Name != "get_weather" {
+			t.Errorf("expected function name 'get_weather', got %q", res[0].ToolCalls[0].Function.Name)
+		}
+		if res[0].ToolCalls[0].Function.Arguments != `{"location":"Boston"}` {
+			t.Errorf("expected arguments '{\"location\":\"Boston\"}', got %q", res[0].ToolCalls[0].Function.Arguments)
+		}
+	})
+
+	t.Run("typed []translator.ContentBlock support", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []translator.ContentBlock{
+					{
+						Type:     "thinking",
+						Thinking: "Pondering...",
+					},
+					{
+						Type: "text",
+						Text: "Answer is here.",
+					},
+					{
+						Type:  "tool_use",
+						ID:    "toolu_typed_1",
+						Name:  "fetch_data",
+						Input: []byte(`{"id":123}`),
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []translator.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseID: "toolu_typed_1",
+						Content:   "data payload",
+					},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+		// Message 0
+		if res[0].Thinking != "Pondering..." {
+			t.Errorf("expected thinking 'Pondering...', got %q", res[0].Thinking)
+		}
+		if res[0].Content != "Answer is here." {
+			t.Errorf("expected content 'Answer is here.', got %q", res[0].Content)
+		}
+		if len(res[0].ToolCalls) != 1 {
+			t.Fatalf("expected 1 tool call, got %d", len(res[0].ToolCalls))
+		}
+		if res[0].ToolCalls[0].Function.Arguments != `{"id":123}` {
+			t.Errorf("expected arguments '{\"id\":123}', got %q", res[0].ToolCalls[0].Function.Arguments)
+		}
+
+		// Message 1
+		if res[1].Content != "[tool_result toolu_typed_1] data payload" {
+			t.Errorf("expected tool_result content, got %q", res[1].Content)
+		}
+	})
+
+	t.Run("W2 multi-text-block join without newline", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{"type": "text", "text": "Part 1"},
+					map[string]interface{}{"type": "text", "text": " - Part 2"},
+					map[string]interface{}{"type": "text", "text": " - Part 3"},
+				},
+			},
+			{
+				Role: "assistant",
+				Content: []translator.ContentBlock{
+					{Type: "text", Text: "Hello "},
+					{Type: "text", Text: "World!"},
+				},
+			},
+		}
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+		if res[0].Content != "Part 1 - Part 2 - Part 3" {
+			t.Errorf("expected %q, got %q", "Part 1 - Part 2 - Part 3", res[0].Content)
+		}
+		if res[1].Content != "Hello World!" {
+			t.Errorf("expected %q, got %q", "Hello World!", res[1].Content)
+		}
+	})
+
+	t.Run("W3 tool_use arguments object validation and fallback", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "assistant",
+				Content: []interface{}{
+					// Valid object in map[string]interface{}
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "tu_valid_map",
+						"name":  "fn1",
+						"input": map[string]interface{}{"a": 1},
+					},
+					// Non-object in string input (e.g. number or array string)
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "tu_array_map",
+						"name":  "fn2",
+						"input": "[1, 2, 3]",
+					},
+					// Invalid JSON string in input
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "tu_invalid_map",
+						"name":  "fn3",
+						"input": "{invalid json}",
+					},
+					// Primitive input (int)
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "tu_prim_map",
+						"name":  "fn4",
+						"input": 12345,
+					},
+				},
+			},
+			{
+				Role: "assistant",
+				Content: []translator.ContentBlock{
+					// Valid object bytes
+					{
+						Type:  "tool_use",
+						ID:    "tu_valid_typed",
+						Name:  "fn5",
+						Input: []byte(`{"k":"v"}`),
+					},
+					// Non-object bytes (array)
+					{
+						Type:  "tool_use",
+						ID:    "tu_array_typed",
+						Name:  "fn6",
+						Input: []byte(`["item"]`),
+					},
+					// Invalid JSON bytes
+					{
+						Type:  "tool_use",
+						ID:    "tu_invalid_typed",
+						Name:  "fn7",
+						Input: []byte(`not json`),
+					},
+					// Empty bytes
+					{
+						Type:  "tool_use",
+						ID:    "tu_empty_typed",
+						Name:  "fn8",
+						Input: []byte(``),
+					},
+				},
+			},
+		}
+
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+
+		// Check message 0 (raw map inputs)
+		if len(res[0].ToolCalls) != 4 {
+			t.Fatalf("expected 4 tool calls in msg 0, got %d", len(res[0].ToolCalls))
+		}
+		if res[0].ToolCalls[0].Function.Arguments != `{"a":1}` {
+			t.Errorf("tc 0 expected {\"a\":1}, got %q", res[0].ToolCalls[0].Function.Arguments)
+		}
+		if res[0].ToolCalls[1].Function.Arguments != "{}" {
+			t.Errorf("tc 1 expected {}, got %q", res[0].ToolCalls[1].Function.Arguments)
+		}
+		if res[0].ToolCalls[2].Function.Arguments != "{}" {
+			t.Errorf("tc 2 expected {}, got %q", res[0].ToolCalls[2].Function.Arguments)
+		}
+		if res[0].ToolCalls[3].Function.Arguments != "{}" {
+			t.Errorf("tc 3 expected {}, got %q", res[0].ToolCalls[3].Function.Arguments)
+		}
+
+		// Check message 1 (typed block inputs)
+		if len(res[1].ToolCalls) != 4 {
+			t.Fatalf("expected 4 tool calls in msg 1, got %d", len(res[1].ToolCalls))
+		}
+		if res[1].ToolCalls[0].Function.Arguments != `{"k":"v"}` {
+			t.Errorf("tc 4 expected {\"k\":\"v\"}, got %q", res[1].ToolCalls[0].Function.Arguments)
+		}
+		if res[1].ToolCalls[1].Function.Arguments != "{}" {
+			t.Errorf("tc 5 expected {}, got %q", res[1].ToolCalls[1].Function.Arguments)
+		}
+		if res[1].ToolCalls[2].Function.Arguments != "{}" {
+			t.Errorf("tc 6 expected {}, got %q", res[1].ToolCalls[2].Function.Arguments)
+		}
+		if res[1].ToolCalls[3].Function.Arguments != "{}" {
+			t.Errorf("tc 7 expected {}, got %q", res[1].ToolCalls[3].Function.Arguments)
+		}
+	})
+
+	t.Run("S1 is_error prefix test", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tu_err_1",
+						"content":     "connection refused",
+						"is_error":    true,
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []translator.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseID: "tu_err_2",
+						Content:   "file not found",
+						IsError:   true,
+					},
+				},
+			},
+		}
+
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+		expected0 := "[tool_result tu_err_1] Error: connection refused"
+		if res[0].Content != expected0 {
+			t.Errorf("expected %q, got %q", expected0, res[0].Content)
+		}
+		expected1 := "[tool_result tu_err_2] Error: file not found"
+		if res[1].Content != expected1 {
+			t.Errorf("expected %q, got %q", expected1, res[1].Content)
+		}
+	})
+
+	t.Run("S2 non-text blocks placeholder in tool_result content", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "tu_img_1",
+						"content": []interface{}{
+							map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64"}},
+							map[string]interface{}{"type": "text", "text": "image caption"},
+							map[string]interface{}{"type": "document", "data": "xyz"},
+						},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []translator.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseID: "tu_img_2",
+						Content: []translator.ContentBlock{
+							{Type: "image"},
+							{Type: "custom_type"},
+						},
+					},
+				},
+			},
+		}
+
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+		expected0 := "[tool_result tu_img_1] [image]\nimage caption\n[unsupported block]"
+		if res[0].Content != expected0 {
+			t.Errorf("expected %q, got %q", expected0, res[0].Content)
+		}
+		expected1 := "[tool_result tu_img_2] [image]\n[unsupported block]"
+		if res[1].Content != expected1 {
+			t.Errorf("expected %q, got %q", expected1, res[1].Content)
+		}
+	})
+
+	t.Run("S3 empty tool_use_id yields bare content without marker", func(t *testing.T) {
+		msgs := []translator.AnthropicMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "",
+						"content":     "bare tool result content",
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []translator.ContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseID: "",
+						Content:   "typed bare tool result",
+					},
+				},
+			},
+		}
+
+		res := convertAnthropicMessagesToStore(msgs)
+		if len(res) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(res))
+		}
+		if res[0].Content != "bare tool result content" {
+			t.Errorf("expected %q, got %q", "bare tool result content", res[0].Content)
+		}
+		if res[1].Content != "typed bare tool result" {
+			t.Errorf("expected %q, got %q", "typed bare tool result", res[1].Content)
+		}
+	})
 }
 
 func parseAnthropicReq(m map[string]interface{}) *translator.AnthropicRequest {
@@ -259,7 +901,6 @@ func parseAnthropicReq(m map[string]interface{}) *translator.AnthropicRequest {
 	json.Unmarshal(bodyBytes, &req)
 	return &req
 }
-
 
 func TestAnthropicAdapter_WriteNonStreamResponse(t *testing.T) {
 	adapter := NewAnthropicAdapter()

@@ -2,14 +2,216 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared adapter helper functions
-// ─────────────────────────────────────────────────────────────────────────────
+// convertAnthropicMessagesToStore converts Anthropic messages to store format with full fidelity:
+// - tool_use blocks -> store.ToolCall
+// - tool_result blocks -> store.Message.Content with "[tool_result <id>] <content>" prefix
+// - thinking blocks -> store.Message.Thinking
+// - text blocks -> store.Message.Content
+func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []store.Message {
+	return convertAnthropicMessagesToStoreHelper(messages)
+}
+
+// convertAnthropicMessagesToStoreAdapter is kept as an alias pointing to the shared helper
+// to preserve any package-internal compatibility.
+func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessage) []store.Message {
+	return convertAnthropicMessagesToStoreHelper(messages)
+}
+
+func convertAnthropicMessagesToStoreHelper(messages []translator.AnthropicMessage) []store.Message {
+	var result []store.Message
+	for _, msg := range messages {
+		var (
+			textParts []string
+			thinking  strings.Builder
+			toolCalls []store.ToolCall
+		)
+
+		switch c := msg.Content.(type) {
+		case string:
+			textParts = append(textParts, c)
+		case []interface{}:
+			for _, block := range c {
+				bm, ok := block.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				blockType, _ := bm["type"].(string)
+				switch blockType {
+				case "text":
+					if t, ok := bm["text"].(string); ok && t != "" {
+						textParts = append(textParts, t)
+					}
+				case "tool_use":
+					id, _ := bm["id"].(string)
+					name, _ := bm["name"].(string)
+					args := normalizeJSONArguments(bm["input"])
+					toolCalls = append(toolCalls, store.ToolCall{
+						ID:   id,
+						Type: "function",
+						Function: store.Function{
+							Name:      name,
+							Arguments: args,
+						},
+					})
+				case "tool_result":
+					toolUseID, _ := bm["tool_use_id"].(string)
+					resContent := formatAnthropicToolResultContent(bm["content"])
+					if isErr, _ := bm["is_error"].(bool); isErr {
+						resContent = "Error: " + resContent
+					}
+					prefix := ""
+					if toolUseID != "" {
+						prefix = fmt.Sprintf("[tool_result %s] ", toolUseID)
+					}
+					textParts = append(textParts, prefix+resContent)
+				case "thinking":
+					// signature is a redacted-thinking auth marker — intentionally not persisted.
+					if th, ok := bm["thinking"].(string); ok {
+						thinking.WriteString(th)
+					}
+				}
+			}
+		case []translator.ContentBlock:
+			for _, block := range c {
+				switch block.Type {
+				case "text":
+					if block.Text != "" {
+						textParts = append(textParts, block.Text)
+					}
+				case "tool_use":
+					args := normalizeJSONArguments(block.Input)
+					toolCalls = append(toolCalls, store.ToolCall{
+						ID:   block.ID,
+						Type: "function",
+						Function: store.Function{
+							Name:      block.Name,
+							Arguments: args,
+						},
+					})
+				case "tool_result":
+					resContent := formatAnthropicToolResultContent(block.Content)
+					if block.IsError {
+						resContent = "Error: " + resContent
+					}
+					prefix := ""
+					if block.ToolUseID != "" {
+						prefix = fmt.Sprintf("[tool_result %s] ", block.ToolUseID)
+					}
+					textParts = append(textParts, prefix+resContent)
+				case "thinking":
+					if block.Thinking != "" {
+						thinking.WriteString(block.Thinking)
+					}
+				}
+			}
+		}
+
+		// Anthropic emits text blocks without implicit separators (base-parity: stored text must stay byte-identical to prior behavior); tool_result items are discrete lines.
+		result = append(result, store.Message{
+			Role:      msg.Role,
+			Content:   strings.Join(textParts, ""),
+			Thinking:  thinking.String(),
+			ToolCalls: toolCalls,
+		})
+	}
+	return result
+}
+
+func formatAnthropicToolResultContent(content interface{}) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []interface{}:
+		var parts []string
+		for _, item := range c {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				blockType, _ := itemMap["type"].(string)
+				switch blockType {
+				case "text":
+					if t, ok := itemMap["text"].(string); ok {
+						parts = append(parts, t)
+					}
+				case "image":
+					parts = append(parts, "[image]")
+				default:
+					if t, ok := itemMap["text"].(string); ok && t != "" {
+						parts = append(parts, t)
+					} else {
+						parts = append(parts, "[unsupported block]")
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	case []translator.ContentBlock:
+		var parts []string
+		for _, block := range c {
+			switch block.Type {
+			case "text":
+				parts = append(parts, block.Text)
+			case "image":
+				parts = append(parts, "[image]")
+			default:
+				if block.Text != "" {
+					parts = append(parts, block.Text)
+				} else {
+					parts = append(parts, "[unsupported block]")
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		if content == nil {
+			return ""
+		}
+		if b, err := json.Marshal(content); err == nil {
+			return string(b)
+		}
+		return fmt.Sprintf("%v", content)
+	}
+}
+
+// normalizeJSONArguments unifies tool_use input across both raw-map and typed paths:
+// it validates that the resulting Function.Arguments parses as a JSON object;
+// on failure or non-object it falls back to "{}".
+func normalizeJSONArguments(input interface{}) string {
+	if input == nil {
+		return "{}"
+	}
+	var rawStr string
+	switch inp := input.(type) {
+	case string:
+		rawStr = strings.TrimSpace(inp)
+	case []byte:
+		rawStr = strings.TrimSpace(string(inp))
+	case json.RawMessage:
+		rawStr = strings.TrimSpace(string(inp))
+	default:
+		if b, err := json.Marshal(inp); err == nil {
+			rawStr = string(b)
+		} else {
+			return "{}"
+		}
+	}
+
+	if rawStr == "" {
+		return "{}"
+	}
+
+	// Validate it parses as a JSON object
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(rawStr), &obj); err != nil || obj == nil {
+		return "{}"
+	}
+	return rawStr
+}
 
 // extractOpenAIParameters extracts non-standard parameters from OpenAI request body.
 func extractOpenAIParameters(body map[string]interface{}) map[string]interface{} {
