@@ -128,11 +128,13 @@ func ExecuteTest(cred models.ResolvedCredential, req *DecisionRequest, rawBody [
 		return res
 	}
 
-	// Step 2 — typesafe pre-flight edge check (handler step 9.5).
-	// A body carrying safety_identifier is rejected with 400 here
-	// (never reaches the upstream).
-	if cred.Provider == TypesafeProviderName {
-		if msg, failed := typesafePreflightValidate(req); failed {
+	// Step 2 — System One transport pre-flight edge check
+	// (handler step 9.5). A body carrying safety_identifier
+	// is rejected with 400 here (never reaches the upstream).
+	// Covers every *systemOneProvider instance (typesafe +
+	// openrouter) via type assertion.
+	if sp, isSystemOne := provider.(*systemOneProvider); isSystemOne {
+		if msg, failed := sp.PreflightValidate(req); failed {
 			res.Status = http.StatusBadRequest
 			res.Error = msg
 			return res

@@ -5,11 +5,15 @@ import (
 )
 
 // Decision Models commission / §5.1.a / §3.2 step 9 — the
-// per-provider registry. At P2 init() registers two adapters:
+// per-provider registry. At P2 init() registers three adapters:
 //
 //   - "openai" → openaiDecisionProvider (byte-faithful pass-through
 //     per Q18 / A26)
-//   - "typesafe" → typesafeProvider (typed struct → System One)
+//   - "typesafe" → systemOneProvider (TypeSafe direct, System One
+//     transport)
+//   - "openrouter" → systemOneProvider (OpenRouter, System One
+//     transport — shared adapter, parameterized provider name +
+//     default base URL)
 //
 // The registry is keyed on the lowercase credential provider
 // string per imggen (mirror of pkg/imggen/minimax.go:199-215).
@@ -37,12 +41,13 @@ func lookup(providerName string) (UpstreamProvider, bool) {
 	return p, ok
 }
 
-// init wires the two upstream providers (Decision Models /
-// P2.2 + P2.3). The map is init-only-written under Go's
-// import-time single-thread invariant (no concurrent access
-// until after main starts), so no mutex — mirrors
-// pkg/imggen/minimax.go:204-206.
+// init wires the upstream providers (Decision Models / P2.2 +
+// P2.3 + openrouter-decision-provider 2026-11-08). The map is
+// init-only-written under Go's import-time single-thread invariant
+// (no concurrent access until after main starts), so no mutex —
+// mirrors pkg/imggen/minimax.go:204-206.
 func init() {
 	providerRegistry[OpenAIDecisionProviderName] = NewOpenAIDecisionProvider()
 	providerRegistry[TypesafeProviderName] = NewTypesafeProvider()
+	providerRegistry[OpenRouterDecisionProviderName] = NewOpenRouterDecisionProvider()
 }

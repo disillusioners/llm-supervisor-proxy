@@ -27,7 +27,7 @@ const HARDCODED_EXCLUDE_FROM_ULTIMATE = true as const;
 // explicitly listed (not derived from the BE list) so the form's
 // contract is testable and the operator cannot accidentally pick a
 // chat-only provider like minimax or azure.
-const PROVIDER_OPTIONS = ['openai', 'typesafe'] as const;
+const PROVIDER_OPTIONS = ['openai', 'typesafe', 'openrouter'] as const;
 type DecisionProvider = typeof PROVIDER_OPTIONS[number];
 
 // Per-provider default base URL (plan §6.2 / Q11 + Q17). The form
@@ -36,6 +36,7 @@ type DecisionProvider = typeof PROVIDER_OPTIONS[number];
 const DEFAULT_BASE_URLS: Record<DecisionProvider, string> = {
   openai: 'https://api.openai.com',
   typesafe: 'https://api.typesafe.ai',
+  openrouter: 'https://openrouter.ai/api',
 };
 
 // Wire payload emitted by the form on submit. The hook layer may stamp
@@ -225,7 +226,7 @@ export function DecisionModelForm({
       nextErrors.id = 'Model ID is required';
     }
     if (!(PROVIDER_OPTIONS as readonly string[]).includes(fields.internal_provider)) {
-      nextErrors.internal_provider = 'Provider must be openai or typesafe';
+      nextErrors.internal_provider = 'Provider must be openai, typesafe or openrouter';
     }
     if (fields.credentials.length < 1) {
       nextErrors.credentials = 'At least one credential is required';
@@ -401,7 +402,7 @@ export function DecisionModelForm({
             </p>
           )}
           <p class="text-xs text-gray-400 mt-1">
-            OpenAI and TypeSafe (Jev) are the supported decision providers.
+            OpenAI, TypeSafe (Jev) and OpenRouter are the supported decision providers.
           </p>
         </div>
 

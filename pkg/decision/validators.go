@@ -234,26 +234,26 @@ func typesafeEdgeValidators() []validator {
 	}
 }
 
-// typesafePreflightValidate is the per-provider pre-flight
-// edge check (handler step 9.5). The typesafe BuildUpstream
-// re-runs the typed validator subset as defense-in-depth
-// (amendment 4); the handler pre-flight catches the same
-// provider-specific edge cases (input_image on text-only
-// TypeSafe, safety_identifier drop on TypeSafe) so the
-// proxy surfaces them as 400 BEFORE any upstream call. The
-// openai path does NOT run this — it forwards input_image
-// as-is (Q3 / R2 posture, no validator).
+// systemOnePreflightValidate is the per-provider pre-flight
+// edge check (handler step 9.5). The System One transport
+// adapters (typesafe + openrouter) share identical invariants
+// (safety_identifier / image rejection) — the handler pre-flight
+// catches them so the proxy surfaces them as 400 BEFORE any
+// upstream call. The openai path does NOT run this — it
+// forwards input_image as-is (Q3 / R2 posture, no validator).
 //
-// Returns (message, true) on failure; ("", false) on pass.
-func typesafePreflightValidate(req *DecisionRequest) (string, bool) {
+// The adapterLabel is the human-facing name used in client-
+// facing messages. Returns (message, true) on failure;
+// ("", false) on pass.
+func systemOnePreflightValidate(req *DecisionRequest, adapterLabel string) (string, bool) {
 	if req.SafetyIdentifier != "" {
-		return "TypeSafe (Jev) does not support safety_identifier (research-web §Q2)", true
+		return fmt.Sprintf("%s does not support safety_identifier (research-web §Q2)", adapterLabel), true
 	}
 	if msgs, ok := req.InputMessages(); ok {
 		for i := range msgs {
 			for j := range msgs[i].Parts {
 				if msgs[i].Parts[j].Type == InputPartTypeImage {
-					return fmt.Sprintf("TypeSafe (Jev) does not support image input (research-web §Q2); rejected decision input with input_image at message %d part %d", i, j), true
+					return fmt.Sprintf("%s does not support image input (research-web §Q2); rejected decision input with input_image at message %d part %d", adapterLabel, i, j), true
 				}
 			}
 		}
