@@ -631,6 +631,9 @@ data: [DONE]
 	if toolCalls[0].ID != "call_abc" {
 		t.Errorf("expected tool call ID 'call_abc', got %q", toolCalls[0].ID)
 	}
+	if toolCalls[0].Type != "function" {
+		t.Errorf("expected tool call Type 'function', got %q", toolCalls[0].Type)
+	}
 	if toolCalls[0].Function.Name != "get_weather" {
 		t.Errorf("expected function name 'get_weather', got %q", toolCalls[0].Function.Name)
 	}
