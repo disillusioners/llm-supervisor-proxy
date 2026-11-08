@@ -396,7 +396,7 @@ func TestLiveE2E_TypeSafe_SystemOne_RoundTrip(t *testing.T) {
 			{Type: QuestionTypePredicate, Name: "is_positive", Instructions: "Is the statement positive?"},
 		},
 	}
-	upstreamURL, _, err := (&typesafeProvider{}).BuildUpstream(
+	upstreamURL, _, err := NewTypesafeProvider().BuildUpstream(
 		models.ResolvedCredential{Provider: TypesafeProviderName, APIKey: apiKey, BaseURL: "", InternalModel: internalModel},
 		buildReq, nil)
 	if err != nil {

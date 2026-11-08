@@ -18,12 +18,15 @@ const openaiCreds: Credential[] = [
 const typesafeCreds: Credential[] = [
   { id: 'cred-ts-1', provider: 'typesafe' },
 ];
+const openrouterCreds: Credential[] = [
+  { id: 'cred-or-1', provider: 'openrouter' },
+];
 
 vi.mock('../../../hooks/useApi', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../hooks/useApi')>();
   return {
     ...real,
-    getCredentials: vi.fn(async () => [...openaiCreds, ...typesafeCreds]),
+    getCredentials: vi.fn(async () => [...openaiCreds, ...typesafeCreds, ...openrouterCreds]),
   };
 });
 
@@ -195,10 +198,78 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
         { credential_id: 'cred-ts-1', weight: 1, position: 0 },
       ]);
     });
+
+    it('openrouter provider -> internal_base_url = https://openrouter.ai/api on submit', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      const { container } = render(
+        <DecisionModelForm
+          mode="add"
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      fireEvent.input(container.querySelector('[data-testid="decision-form-id-input"]')!, {
+        target: { value: 'openrouter-router-1' },
+      });
+      fireEvent.input(container.querySelector('[data-testid="decision-form-name-input"]')!, {
+        target: { value: 'OpenRouter Decision Router' },
+      });
+
+      // Switch provider to 'openrouter'.
+      const providerSelect = container.querySelector(
+        '[data-testid="decision-form-provider-select"]',
+      ) as HTMLSelectElement;
+      fireEvent.change(providerSelect, { target: { value: 'openrouter' } });
+
+      // Base URL default should now reflect the selected provider.
+      const baseUrlInput = container.querySelector(
+        '[data-testid="decision-form-base-url-input"]',
+      ) as HTMLInputElement;
+      expect(baseUrlInput.value).toBe('https://openrouter.ai/api');
+
+      fireEvent.input(container.querySelector('[data-testid="decision-form-internal-model-input"]')!, {
+        target: { value: 'typesafe/jev-1.13' },
+      });
+
+      // Add one openrouter credential.
+      const addCredBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+      ) as HTMLButtonElement;
+      fireEvent.click(addCredBtn);
+
+      const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+      const credSelect = selects[selects.length - 1];
+      fireEvent.change(credSelect, { target: { value: 'cred-or-1' } });
+
+      const submit = container.querySelector('[data-testid="decision-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+
+      await waitFor(() => {
+        expect(onSave).toHaveBeenCalledTimes(1);
+      });
+      const arg = (onSave as Mock).mock.calls[0][0];
+      expect(arg).toMatchObject({
+        id: 'openrouter-router-1',
+        name: 'OpenRouter Decision Router',
+        kind: 'decision',
+        internal: true,
+        internal_provider: 'openrouter',
+        internal_model: 'typesafe/jev-1.13',
+        internal_base_url: 'https://openrouter.ai/api',
+        enabled: true,
+        exclude_from_ultimate_switching: true,
+      });
+      expect(arg.credentials).toEqual([
+        { credential_id: 'cred-or-1', weight: 1, position: 0 },
+      ]);
+    });
   });
 
   describe('provider dropdown filters (Q11 identity B)', () => {
-    it('provider dropdown lists exactly openai + typesafe (Q11 recommended identity)', () => {
+    it('provider dropdown lists openai + typesafe + openrouter (Q11 recommended identity)', () => {
       const { container } = render(
         <DecisionModelForm
           mode="add"
@@ -212,7 +283,7 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
       ) as HTMLSelectElement;
       expect(providerSelect).not.toBeNull();
       const opts = Array.from(providerSelect.querySelectorAll('option')).map((o) => o.value);
-      expect(opts).toEqual(['openai', 'typesafe']);
+      expect(opts).toEqual(['openai', 'typesafe', 'openrouter']);
     });
   });
 

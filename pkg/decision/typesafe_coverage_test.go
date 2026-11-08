@@ -143,7 +143,7 @@ func TestDeriveStateText_Rejections(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &DecisionRequest{Input: json.RawMessage(tc.input)}
-			_, err := deriveStateText(req)
+			_, err := deriveStateText(req, "TypeSafe (Jev)")
 			if err == nil {
 				t.Fatalf("deriveStateText(%s) = nil error, want %q", tc.input, tc.wantSub)
 			}
@@ -162,7 +162,7 @@ func TestDeriveStateText_JoinedText(t *testing.T) {
 		{"role":"user","parts":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]},
 		{"role":"user","parts":[{"type":"input_text","text":"c"}]}
 	]`)}
-	got, err := deriveStateText(req)
+	got, err := deriveStateText(req, "TypeSafe (Jev)")
 	if err != nil {
 		t.Fatalf("deriveStateText: %v", err)
 	}
@@ -679,10 +679,11 @@ func TestTranslateQuestion_Fallbacks(t *testing.T) {
 	}
 
 	choice := translateQuestion(&Question{Type: QuestionTypeChoice, Name: "c", Choices: []ChoiceOption{{Value: nil}}})
-	if choice.Choice == nil || choice.Choice.Criteria == nil {
+	crit, ok := choice.Criteria.(map[string]string)
+	if !ok || crit == nil {
 		t.Fatalf("choice translation missing criteria: %+v", choice)
 	}
-	if _, ok := choice.Choice.Criteria["__option_0"]; !ok {
-		t.Errorf("criteria = %+v, want __option_0 sentinel key", choice.Choice.Criteria)
+	if _, ok := crit["__option_0"]; !ok {
+		t.Errorf("criteria = %+v, want __option_0 sentinel key", crit)
 	}
 }

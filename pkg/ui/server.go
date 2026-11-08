@@ -1179,16 +1179,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// D4 provider gate — recommended identity B
-			// ("openai" reused + "typesafe" new).
+			// ("openai" reused + "typesafe" new + "openrouter" System One).
 			primaryProvider := ""
 			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
-			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" {
+			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" && primaryProvider != "openrouter" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q or %q (got %q)", "openai", "typesafe", primaryProvider),
+					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q, %q or %q (got %q)", "openai", "typesafe", "openrouter", primaryProvider),
 				})
 				return
 			}
@@ -1606,16 +1606,16 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires at least one credential"})
 				return
 			}
-			// D4 — recommended identity B (openai + typesafe).
+			// D4 — recommended identity B (openai + typesafe + openrouter).
 			primaryProvider := ""
 			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
-			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" {
+			if primaryProvider != "" && primaryProvider != "openai" && primaryProvider != "typesafe" && primaryProvider != "openrouter" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q or %q (got %q)", "openai", "typesafe", primaryProvider),
+					"error": fmt.Sprintf("kind \"decision\" requires the primary credential's provider to be %q, %q or %q (got %q)", "openai", "typesafe", "openrouter", primaryProvider),
 				})
 				return
 			}

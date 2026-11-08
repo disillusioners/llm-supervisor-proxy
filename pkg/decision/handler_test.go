@@ -123,6 +123,7 @@ type fakeUpstream struct {
 	hitCount  atomic.Int64
 	lastBody  []byte
 	lastAuthH string
+	lastPath  string
 	// lastCT records the raw upstream Content-Type header
 	// slice (all values) — duplicate-CT assertions read it.
 	// lastAE records the raw upstream Accept-Encoding header
@@ -159,6 +160,7 @@ func newFakeUpstream(t *testing.T, script fakeScript) (*httptest.Server, *fakeUp
 		f.mu.Lock()
 		f.lastBody = body
 		f.lastAuthH = r.Header.Get("Authorization")
+		f.lastPath = r.URL.Path
 		f.lastCT = r.Header.Values("Content-Type")
 		f.lastAE = r.Header.Values("Accept-Encoding")
 		f.mu.Unlock()

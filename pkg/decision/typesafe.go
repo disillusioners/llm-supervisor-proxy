@@ -9,23 +9,74 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 )
 
-// Decision Models commission / §3.2 step 10 / §4.2 — the
-// TypeSafe (Jev) adapter. Typed struct → System One translation
-// on the request side; keyed-map → ordered-array synthesis on
-// the response side. The typed invariants are re-asserted at
-// BuildUpstream time as defense-in-depth (amendment 4).
-//
-// Provider name (keyed in providerRegistry): "typesafe"
-// (lowercase; matches credential.Provider).
+// Provider names (keyed in providerRegistry): "typesafe" and
+// "openrouter" (lowercase; match credential.Provider).
 const TypesafeProviderName = "typesafe"
 
-// NewTypesafeProvider returns the TypeSafe (Jev) identity
-// adapter. Registered at init() time.
-func NewTypesafeProvider() UpstreamProvider {
-	return &typesafeProvider{}
+// OpenRouterDecisionProviderName keys the OpenRouter System One
+// transport adapter (openrouter-decision-provider commission
+// 2026-11-08). OpenRouter exposes the same System One endpoint
+// shape as TypeSafe direct (POST <base>/v1/systemone) with base
+// https://openrouter.ai/api — one shared transport adapter
+// parameterized per provider (see systemOneProvider below).
+const OpenRouterDecisionProviderName = "openrouter"
+
+// systemOneProvider is the SHARED System One transport adapter.
+// One implementation serves every credential provider that
+// speaks the System One protocol at <base>/v1/systemone:
+//
+//   - "typesafe"   → TypeSafe direct (default https://api.typesafe.ai)
+//   - "openrouter" → OpenRouter     (default https://openrouter.ai/api)
+//
+// The per-provider variance is exactly three fields: the
+// registry/credential name, the human-facing label used in
+// client-facing error copy, and the default base URL. Request
+// translation, response synthesis, usage extraction, and the
+// preflight invariants are identical (leader design: System One
+// transport, shared adapter preferred over a fork).
+type systemOneProvider struct {
+	// name is the registry key and the credential.Provider this
+	// instance serves (lowercase). Also used in Outcome.Reason
+	// strings (lowercase keeps log greps stable).
+	name string
+	// displayName is the human-facing label in client-facing
+	// error copy (e.g. "TypeSafe (Jev)" / "OpenRouter").
+	displayName string
+	// defaultBase is the upstream base URL used when
+	// cred.BaseURL is empty (no trailing slash).
+	defaultBase string
 }
 
-type typesafeProvider struct{}
+// NewTypesafeProvider returns the TypeSafe (Jev) System One
+// adapter. Registered at init() time.
+func NewTypesafeProvider() UpstreamProvider {
+	return &systemOneProvider{
+		name:        TypesafeProviderName,
+		displayName: "TypeSafe (Jev)",
+		defaultBase: "https://api.typesafe.ai",
+	}
+}
+
+// NewOpenRouterDecisionProvider returns the OpenRouter System
+// One adapter (same protocol, base https://openrouter.ai/api).
+// Registered at init() time.
+func NewOpenRouterDecisionProvider() UpstreamProvider {
+	return &systemOneProvider{
+		name:        OpenRouterDecisionProviderName,
+		displayName: "OpenRouter",
+		defaultBase: "https://openrouter.ai/api",
+	}
+}
+
+// PreflightValidate surfaces the System One transport's hard
+// input invariants (safety_identifier / image rejection) as a
+// clean 400 BEFORE any upstream call. Wired via type assertion
+// at handler step 9.5 and test_exec step 2 — every
+// *systemOneProvider instance (typesafe + openrouter) shares
+// the identical invariants.
+func (p *systemOneProvider) PreflightValidate(req *DecisionRequest) (string, bool) {
+	return systemOnePreflightValidate(req, p.displayName)
+}
 
 // System One request shape (research-web §Q2 verified).
 // Struct-only fields; JSON encoding uses snake_case to match
@@ -44,42 +95,21 @@ type systemOneRequest struct {
 type systemOneState struct{}
 
 // systemOneQuestion is one entry of the System One `questions`
-// map. Type is one of {"noul","choice","score"}; only Choice
-// and Score need extra fields.
+// map. Type is one of {"noul","choice","score"}. Criteria is
+// emitted at the TOP LEVEL of the question object (R3/R4
+// closure 2026-11-08):
+//
+//   - choice → criteria is a map[string]string (label →
+//     description string), canonical System One wire shape.
+//   - score  → criteria is a []string (ordered labels).
+//   - noul   → no criteria (omitted).
+//
+// The previous nested "choice"/"score" wrapper objects are gone
+// (they produced the rejected nested shape).
 type systemOneQuestion struct {
-	Type         string           `json:"type"`
-	Instructions string           `json:"instructions,omitempty"`
-	Choice       *systemOneChoice `json:"choice,omitempty"`
-	Score        *systemOneScore  `json:"score,omitempty"`
-}
-
-// systemOneChoice is the System One choice sub-shape (per-question
-// keyed map; `label` is the OpenAI value's JSON form — string
-// or boolean; `description` is optional).
-type systemOneChoice struct {
-	Criteria map[string]systemOneChoiceLabel `json:"criteria"`
-}
-
-// systemOneChoiceLabel is one criteria entry for System One's
-// choice `criteria` map. Value is verbatim (string or boolean —
-// bridge preserves the original value's JSON form).
-type systemOneChoiceLabel struct {
-	Value       interface{} `json:"value"`
-	Description string      `json:"description,omitempty"`
-}
-
-// systemOneScore is the System One score sub-shape: `criteria`
-// is an ordered array (System One uses array form for score).
-type systemOneScore struct {
-	Criteria []systemOneScoreCriterion `json:"criteria"`
-}
-
-// systemOneScoreCriterion is one entry of systemOneScore.Criteria.
-// System One stores the integer level index in `index`; the
-// OpenAI label is in `label`.
-type systemOneScoreCriterion struct {
-	Index int    `json:"index"`
-	Label string `json:"label"`
+	Type         string      `json:"type"`
+	Instructions string      `json:"instructions,omitempty"`
+	Criteria     interface{} `json:"criteria,omitempty"`
 }
 
 // BuildUpstream (Decision Models / §3.2 step 10 / §4.2):
@@ -117,11 +147,16 @@ type systemOneScoreCriterion struct {
 //     following statement true?" fallback when absent.
 //   - choice → choice: choices[].value → criteria map entries
 //     keyed by the JSON-formatted value (research-web §Q2).
-//   - score → score: levels[] → criteria array. Each entry
-//     carries `index` and `label`.
-func (p *typesafeProvider) BuildUpstream(cred models.ResolvedCredential, req *DecisionRequest, rawBody []byte) (string, []byte, error) {
+//   - choice → choice: choices[].value → top-level string map
+//     (label → description) — canonical System One wire shape
+//     (R3/R4 closure 2026-11-08; previously nested under a
+//     "choice" wrapper with object values).
+//   - score → score: levels[] → top-level ordered string array
+//     of labels (R3/R4 closure 2026-11-08; previously nested
+//     under a "score" wrapper with {index,label} objects).
+func (p *systemOneProvider) BuildUpstream(cred models.ResolvedCredential, req *DecisionRequest, rawBody []byte) (string, []byte, error) {
 	if req == nil {
-		return "", nil, DecisionErrorf("typed DecisionRequest is nil for BuildUpstream (typesafe)")
+		return "", nil, DecisionErrorf("typed DecisionRequest is nil for BuildUpstream (%s)", p.name)
 	}
 
 	// Defense-in-depth: re-assert the typed edge validators
@@ -138,7 +173,7 @@ func (p *typesafeProvider) BuildUpstream(cred models.ResolvedCredential, req *De
 	// anyway but a proxy-side check keeps the failure message
 	// in the house envelope.
 	if req.SafetyIdentifier != "" {
-		return "", nil, DecisionErrorf("TypeSafe (Jev) does not support safety_identifier (research-web §Q2)")
+		return "", nil, DecisionErrorf("%s does not support safety_identifier (research-web §Q2)", p.displayName)
 	}
 
 	// State translation. Three cases:
@@ -146,7 +181,7 @@ func (p *typesafeProvider) BuildUpstream(cred models.ResolvedCredential, req *De
 	//   2. Input is a message array with text parts only →
 	//      state is the joined text.
 	//   3. Input has any image part → 400 (text-only upstream).
-	stateStr, err := deriveStateText(req)
+	stateStr, err := deriveStateText(req, p.displayName)
 	if err != nil {
 		return "", nil, err
 	}
@@ -181,11 +216,21 @@ func (p *typesafeProvider) BuildUpstream(cred models.ResolvedCredential, req *De
 		return "", nil, err
 	}
 
-	upstreamBase := cred.BaseURL
+	upstreamBase := strings.TrimSpace(cred.BaseURL)
 	if upstreamBase == "" {
-		upstreamBase = "https://api.typesafe.ai"
+		upstreamBase = p.defaultBase
 	}
-	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + "/v1/systemone"
+	// Mirror openaidecision.go:88 (P2 review finding 1): chat-era
+	// credential bases carry a trailing "/v1" (factory.go:116 for
+	// openai; openrouter's chat default is .../api/v1). Strip a
+	// single "/v1" tail before re-appending "/v1/systemone" so the
+	// chat convention and the system-one base compose identically.
+	// Also tolerate a "/v1/" form (trailing slash after /v1) by
+	// stripping a trailing "/" first.
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/")
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/v1")
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/")
+	upstreamURL := upstreamBase + "/v1/systemone"
 	return upstreamURL, body, nil
 }
 
@@ -199,7 +244,7 @@ func (p *typesafeProvider) BuildUpstream(cred models.ResolvedCredential, req *De
 // failure surfaces as a typed validation error too (the
 // handler typed-parse already enforced a clean decode —
 // this is defense-in-depth).
-func deriveStateText(req *DecisionRequest) (string, error) {
+func deriveStateText(req *DecisionRequest, adapterLabel string) (string, error) {
 	if req.InputIsText() {
 		s, _ := req.InputText()
 		return s, nil
@@ -225,7 +270,7 @@ func deriveStateText(req *DecisionRequest) (string, error) {
 				if part.Type == "" {
 					return "", DecisionErrorf("decision input part at message %d part %d has no type (only input_text / input_image are supported)", i, j)
 				}
-				return "", DecisionErrorf("TypeSafe (Jev) does not support image input (research-web §Q2); rejected decision input with input_image at message %d part %d", i, j)
+				return "", DecisionErrorf("%s does not support image input (research-web §Q2); rejected decision input with input_image at message %d part %d", adapterLabel, i, j)
 			case InputPartTypeText:
 				sb.WriteString(part.Text)
 			default:
@@ -259,40 +304,31 @@ func translateQuestion(q *Question) systemOneQuestion {
 	case QuestionTypeChoice:
 		out.Type = "choice"
 		out.Instructions = q.Instructions
-		criteria := make(map[string]systemOneChoiceLabel, len(q.Choices))
+		// R3/R4 closure: canonical wire shape = top-level string
+		// map (label → description string). Handle both input
+		// forms: object-valued (ChoiceOption{Value,Description})
+		// and already-flat labels (ChoiceOption with empty
+		// Description → empty string value).
+		criteria := make(map[string]string, len(q.Choices))
 		for i := range q.Choices {
 			c := &q.Choices[i]
-			// System One keys on a label string. We derive
-			// the label from the value's string form (true →
-			// "true", "billing" → "billing"). The label is the
-			// JSON-marshaled value.
 			label := labelFromValue(c.Value)
 			if label == "" {
-				// Defensive: a nil value would yield an
-				// empty label, which collides with
-				// another nil-valued option. The bridge
-				// rejects via the duplicate-key error
-				// downstream; surface a typed error
-				// here instead so the failure is local.
 				label = fmt.Sprintf("__option_%d", i)
 			}
-			criteria[label] = systemOneChoiceLabel{
-				Value:       c.Value,
-				Description: c.Description,
-			}
+			criteria[label] = c.Description
 		}
-		out.Choice = &systemOneChoice{Criteria: criteria}
+		out.Criteria = criteria
 	case QuestionTypeScore:
 		out.Type = "score"
 		out.Instructions = q.Instructions
-		criteria := make([]systemOneScoreCriterion, 0, len(q.Levels))
+		// R3/R4 closure: canonical wire shape = top-level
+		// ordered string array of labels.
+		criteria := make([]string, 0, len(q.Levels))
 		for i := range q.Levels {
-			criteria = append(criteria, systemOneScoreCriterion{
-				Index: i,
-				Label: q.Levels[i].Label,
-			})
+			criteria = append(criteria, q.Levels[i].Label)
 		}
-		out.Score = &systemOneScore{Criteria: criteria}
+		out.Criteria = criteria
 	}
 	return out
 }
@@ -387,7 +423,7 @@ type systemOneUsage struct {
 //     the typed DecisionResponse.
 //   - Empty body / unparseable JSON / missing required keys ⇒
 //     502 with body verbatim (imggen-style).
-func (p *typesafeProvider) InspectResponse(respBytes []byte, originalReq *DecisionRequest) (*DecisionResponse, *Outcome, error) {
+func (p *systemOneProvider) InspectResponse(respBytes []byte, originalReq *DecisionRequest) (*DecisionResponse, *Outcome, error) {
 	if len(respBytes) == 0 {
 		return nil, &Outcome{RelayStatus: 502, Reason: "empty body"}, nil
 	}
@@ -404,13 +440,13 @@ func (p *typesafeProvider) InspectResponse(respBytes []byte, originalReq *Decisi
 	if err := json.Unmarshal(respBytes, &probe); err == nil && probe.Error != nil && probe.Error.Message != "" {
 		return nil, &Outcome{
 			RelayStatus: 502,
-			Reason:      fmt.Sprintf("typesafe returned error envelope (code=%q, type=%q)", probe.Error.Code, probe.Error.Type),
+			Reason:      fmt.Sprintf("%s returned error envelope (code=%q, type=%q)", p.name, probe.Error.Code, probe.Error.Type),
 		}, nil
 	}
 
 	var sysResp systemOneResponse
 	if err := json.Unmarshal(respBytes, &sysResp); err != nil {
-		return nil, &Outcome{RelayStatus: 502, Reason: "typesafe: unparseable JSON"}, nil
+		return nil, &Outcome{RelayStatus: 502, Reason: p.name + ": unparseable JSON"}, nil
 	}
 
 	// Ordered-answer synthesis. The OpenAI Decision wire
@@ -790,7 +826,7 @@ func strconvFloat(raw json.RawMessage) (float64, error) {
 // ExtractUsage (Decision Models / P2.4 success-only meter):
 // the typed response carries the zero-filled Usage struct —
 // the meter's Increment reads input_tokens + output_tokens.
-func (p *typesafeProvider) ExtractUsage(resp *DecisionResponse) Usage {
+func (p *systemOneProvider) ExtractUsage(resp *DecisionResponse) Usage {
 	if resp == nil {
 		return Usage{}
 	}
