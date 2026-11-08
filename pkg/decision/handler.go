@@ -335,10 +335,15 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 	// client gets a deterministic status. The openai path
 	// forwards data URLs as-is (Q3 / R2 posture) so no
 	// pre-flight check is needed there.
-	if cred.Provider == TypesafeProviderName {
-		if msg, failed := typesafePreflightValidate(&req); failed {
+	//
+	// The System One transport adapters (typesafe + openrouter)
+	// share identical invariants — wired via type assertion so
+	// the preflight covers both without provider-name
+	// enumeration.
+	if sp, isSystemOne := provider.(*systemOneProvider); isSystemOne {
+		if msg, failed := sp.PreflightValidate(&req); failed {
 			h.publishEvent(eventTypeDecision, map[string]interface{}{
-				"outcome":         "typesafe_preflight_failed",
+				"outcome":         "systemone_preflight_failed",
 				"model":           modelID,
 				"provider":        cred.Provider,
 				"error":           msg,

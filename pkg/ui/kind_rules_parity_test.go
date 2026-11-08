@@ -59,6 +59,9 @@ func addDecisionCreds(ts *modelTestServer) {
 		ID: "typesafe-cred", Provider: "typesafe", APIKey: "k",
 	})
 	ts.mockModels.AddCredential(models.CredentialConfig{
+		ID: "openrouter-cred", Provider: "openrouter", APIKey: "k",
+	})
+	ts.mockModels.AddCredential(models.CredentialConfig{
 		ID: "minimax-cred", Provider: "minimax", APIKey: "k",
 	})
 }
@@ -250,7 +253,7 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 			// allowed-provider list so a provider-list drift
 			// anywhere fails loudly.
 			name:   "D4_decision_provider_gate_rejects_minimax",
-			substr: `requires the primary credential's provider to be "openai" or "typesafe"`,
+			substr: `requires the primary credential's provider to be "openai", "typesafe" or "openrouter"`,
 			mutate: func(m *models.ModelConfig) {
 				m.Credentials = decisionRefs("minimax-cred")
 			},
@@ -372,6 +375,34 @@ func TestKindRules_Parity_Positive_ValidDecisionModelAccepted(t *testing.T) {
 	status, errSub := postDecisionModel(t, srv.URL, body)
 	if status != http.StatusCreated {
 		t.Fatalf("valid decision model should be accepted on POST, got status=%d err=%q", status, errSub)
+	}
+}
+
+// TestKindRules_Parity_Positive_OpenRouterDecisionModelAccepted —
+// sanity check: a valid decision model whose primary credential
+// is openrouter POSTs as 201. Confirms the widened D4 gate
+// actually admits openrouter (anti-vacuous: without this, a gate
+// that rejected everything would still pass the minimax-only
+// reject case).
+func TestKindRules_Parity_Positive_OpenRouterDecisionModelAccepted(t *testing.T) {
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	srv := ts.serve()
+	defer srv.Close()
+
+	body := `{
+		"id": "decision-openrouter-valid",
+		"name": "Valid OpenRouter Decision",
+		"enabled": true,
+		"kind": "decision",
+		"internal": true,
+		"internal_model": "typesafe/jev-1.13",
+		"credentials": [{"credential_id": "openrouter-cred", "weight": 1, "position": 0}],
+		"exclude_from_ultimate_switching": true
+	}`
+	status, errSub := postDecisionModel(t, srv.URL, body)
+	if status != http.StatusCreated {
+		t.Fatalf("valid openrouter decision model should be accepted on POST, got status=%d err=%q", status, errSub)
 	}
 }
 

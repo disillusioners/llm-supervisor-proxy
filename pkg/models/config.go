@@ -106,7 +106,7 @@ const (
 	// KindDecision marks models served by /v1/decisions
 	// (Decision Models commission / §3.1 site 1). These require
 	// Internal==true, InternalModel!="", Credentials non-empty,
-	// primary credential provider∈{"openai","typesafe"}
+	// primary credential provider∈{"openai","typesafe","openrouter"}
 	// (recommended identity B — openai reused, typesafe new;
 	// override A uses {"openai-decision","typesafe"}),
 	// FallbackChain empty, SecondaryUpstreamModel=="",
@@ -192,7 +192,7 @@ func (m *ModelConfig) IsGroup() bool {
 // The decision rule set (D1-D9; Decision Models / §3.1 sites 3-4,
 // §5.6 validateDecisionRules): Internal == true, InternalModel
 // != "", Credentials non-empty, internalProvider ∈ {"openai",
-// "typesafe"} (recommended identity B), FallbackChain empty,
+// "typesafe", "openrouter"} (recommended identity B), FallbackChain empty,
 // SecondaryUpstreamModel == "", PeakHourEnabled == false,
 // ReleaseStreamChunkDeadline == 0, ExcludeFromUltimateSwitching
 // == true (D9 — explicit enforcement, not the image-gen
@@ -271,7 +271,7 @@ func validateImageGenRules(m *ModelConfig, internalProvider string) error {
 // Justified analog of validateImageGenRules — same posture:
 // internal-only, deny aux features that don't apply,
 // provider-gated (recommended identity B: `openai` reused +
-// `typesafe` new; override A: `openai-decision` + `typesafe`).
+// `typesafe` new, plus `openrouter` System One transport).
 //
 // D9 ExcludeFromUltimateSwitching == true is EXPLICITLY enforced
 // here — the image-gen doc/code drift at config.go:258-259 (the
@@ -288,17 +288,17 @@ func validateDecisionRules(m *ModelConfig, internalProvider string) error {
 		return fmt.Errorf("model %s: kind %q requires at least one credential", m.ID, KindDecision)
 	}
 	// D4 provider gate — recommended identity B ("openai" reused,
-	// "typesafe" new). Override A would swap "openai" → "openai-decision".
+	// "typesafe" new, "openrouter" System One transport).
 	// Pass "" from callers without a loaded credential (JSON-file
 	// Validate path); the per-ref provider-match invariant in
 	// ModelsManager.validateModelAgainstCredentials catches the
 	// non-allowed provider at DB write time.
 	if internalProvider != "" {
 		switch internalProvider {
-		case "openai", "typesafe":
+		case "openai", "typesafe", "openrouter":
 			// ok
 		default:
-			return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q or %q (got %q)", m.ID, KindDecision, "openai", "typesafe", internalProvider)
+			return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q, %q or %q (got %q)", m.ID, KindDecision, "openai", "typesafe", "openrouter", internalProvider)
 		}
 	}
 	// D5
