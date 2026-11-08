@@ -388,3 +388,22 @@ func TestR3R4_CanonicalShape_RejectsNestedShape(t *testing.T) {
 		t.Fatalf("request body missing canonical score criteria array: %s", s)
 	}
 }
+
+// TestValidateSystemOneShape_RejectsOldNestedShape — review council
+// Suggestion #2 (2026-11-08): negative control exercising the
+// mock's 422 rejection branch directly with a hand-written
+// old-shape body (criteria nested under "choice"/"score" with
+// object values — the byte-level R3/R4 settlement spec). Complements
+// TestR3R4_CanonicalShape_RejectsNestedShape, which only checks
+// emitted bytes via BuildUpstream.
+func TestValidateSystemOneShape_RejectsOldNestedShape(t *testing.T) {
+	oldShape := []byte(`{"model":"jev","state":"x","questions":{"dept":{"type":"choice","instructions":"where?","choice":{"criteria":{"billing":{"value":"billing","description":"Billing/refunds"}}}},"frustration":{"type":"score","instructions":"rate","score":{"criteria":[{"index":0,"label":"Calm"}]}}}}`)
+	if err := validateSystemOneShape(oldShape); err == nil {
+		t.Fatal("validateSystemOneShape accepted the old nested shape; expected rejection")
+	}
+	// canonical shape must still pass
+	canonical := []byte(`{"model":"jev","state":"x","questions":{"dept":{"type":"choice","instructions":"where?","criteria":{"billing":"Billing/refunds"}},"frustration":{"type":"score","instructions":"rate","criteria":["Calm"]}}}`)
+	if err := validateSystemOneShape(canonical); err != nil {
+		t.Fatalf("validateSystemOneShape rejected canonical shape: %v", err)
+	}
+}

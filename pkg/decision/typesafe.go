@@ -216,11 +216,21 @@ func (p *systemOneProvider) BuildUpstream(cred models.ResolvedCredential, req *D
 		return "", nil, err
 	}
 
-	upstreamBase := cred.BaseURL
+	upstreamBase := strings.TrimSpace(cred.BaseURL)
 	if upstreamBase == "" {
 		upstreamBase = p.defaultBase
 	}
-	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + "/v1/systemone"
+	// Mirror openaidecision.go:88 (P2 review finding 1): chat-era
+	// credential bases carry a trailing "/v1" (factory.go:116 for
+	// openai; openrouter's chat default is .../api/v1). Strip a
+	// single "/v1" tail before re-appending "/v1/systemone" so the
+	// chat convention and the system-one base compose identically.
+	// Also tolerate a "/v1/" form (trailing slash after /v1) by
+	// stripping a trailing "/" first.
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/")
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/v1")
+	upstreamBase = strings.TrimSuffix(upstreamBase, "/")
+	upstreamURL := upstreamBase + "/v1/systemone"
 	return upstreamURL, body, nil
 }
 

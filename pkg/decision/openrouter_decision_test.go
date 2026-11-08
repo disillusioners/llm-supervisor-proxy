@@ -75,6 +75,7 @@ func TestOpenRouterDecisionProvider_BuildUpstream_DefaultURL(t *testing.T) {
 	}{
 		{name: "empty_default", baseURL: "", wantURL: "https://openrouter.ai/api/v1/systemone"},
 		{name: "trailing_slash", baseURL: "https://openrouter.ai/api/", wantURL: "https://openrouter.ai/api/v1/systemone"},
+		{name: "chat_convention_v1", baseURL: "https://openrouter.ai/api/v1", wantURL: "https://openrouter.ai/api/v1/systemone"},
 		{name: "override_host", baseURL: "https://eu.openrouter.ai/api", wantURL: "https://eu.openrouter.ai/api/v1/systemone"},
 	}
 	for _, tc := range cases {
@@ -166,5 +167,48 @@ func TestHandler_OpenRouter_UnregisteredChatProvider_502(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "no decision adapter registered for provider") {
 		t.Errorf("response should be the unregistered-provider 502: %s", rec.Body.String())
+	}
+}
+
+// TestSystemOneProvider_BuildUpstream_V1TailStrip — review council
+// Warning #1 (2026-11-08): chat-era credential bases carry a
+// trailing "/v1" (openai factory.go:116; openrouter chat default
+// is .../api/v1). The system-one builder must strip it before
+// re-appending "/v1/systemone" — otherwise .../api/v1/v1/systemone.
+func TestSystemOneProvider_BuildUpstream_V1TailStrip(t *testing.T) {
+	cases := []struct {
+		name    string
+		prov    string
+		baseURL string
+		defBase string
+		model   string
+		wantURL string
+	}{
+		// openrouter chat-era base → canonical system-one URL (NOT /api/v1/v1/systemone)
+		{name: "openrouter_chat_v1", prov: "openrouter", baseURL: "https://openrouter.ai/api/v1", defBase: "https://openrouter.ai/api", model: "typesafe/jev-1.13", wantURL: "https://openrouter.ai/api/v1/systemone"},
+		{name: "openrouter_chat_v1_trailing_slash", prov: "openrouter", baseURL: "https://openrouter.ai/api/v1/", defBase: "https://openrouter.ai/api", model: "typesafe/jev-1.13", wantURL: "https://openrouter.ai/api/v1/systemone"},
+		// typesafe regression: default base still composes exactly as before
+		{name: "typesafe_default_base", prov: "typesafe", baseURL: "", defBase: "https://api.typesafe.ai", model: "jev-1.13.0", wantURL: "https://api.typesafe.ai/v1/systemone"},
+		{name: "typesafe_chat_v1", prov: "typesafe", baseURL: "https://api.typesafe.ai/v1", defBase: "https://api.typesafe.ai", model: "jev-1.13.0", wantURL: "https://api.typesafe.ai/v1/systemone"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var p UpstreamProvider
+			if tc.prov == "openrouter" {
+				p = NewOpenRouterDecisionProvider()
+			} else {
+				p = NewTypesafeProvider()
+			}
+			req := &DecisionRequest{Model: "decision-router", Input: json.RawMessage(`"x"`),
+				Questions: []Question{{Type: QuestionTypePredicate, Name: "foo", Instructions: "?"}}}
+			cred := models.ResolvedCredential{Provider: tc.prov, InternalModel: tc.model, APIKey: "k", BaseURL: tc.baseURL}
+			url, _, err := p.BuildUpstream(cred, req, []byte(`{}`))
+			if err != nil {
+				t.Fatalf("BuildUpstream: %v", err)
+			}
+			if url != tc.wantURL {
+				t.Errorf("URL = %q, want %q", url, tc.wantURL)
+			}
+		})
 	}
 }
