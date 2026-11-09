@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -2509,5 +2510,252 @@ func TestHandleModelCopy_SourceInternalFalse_CopyReportsInternalTrue(t *testing.
 	}
 	if !out.Internal {
 		t.Errorf("out.Internal = false, want true (the 201 DTO must report the persisted internal=true state)")
+	}
+}
+
+// TestHandleModelCopy_DBBackend_PersistedRowShape asserts the PERSISTED ROW of
+// a copied model carries the full copy contract.
+//
+// The DTO-layer twin (TestHandleModelCopy_CopiesModelFaithfully) proves the
+// RESPONSE body is faithful; this test proves the ROW THAT WAS ACTUALLY STORED
+// is faithful. A copy that is faithful in the response but wrong on disk is a
+// silent data-corruption bug — and the response DTO cannot prove it.
+//
+// The row is read back through the PRODUCTION read path —
+// database.ModelsManager.GetModelNative (pkg/store/database/store.go:1074),
+// the strict row-identity lookup the admin surfaces use. NOT a raw SQL
+// connection, NOT a different DB layer than the one under test.
+//
+// The source row is seeded with a realistic, fully-populated chat shape
+// (two weighted credential refs, a fallback_chain that includes its OWN id
+// plus two other entries, peak-hour fields, secondary upstream, ultimate
+// exclusion) so every "copied verbatim" claim is exercised against a real
+// row rather than a bare one.
+func TestHandleModelCopy_DBBackend_PersistedRowShape(t *testing.T) {
+	ts := newRealPUTTestServer(t)
+	defer ts.cleanup()
+
+	// A second openai-family credential: the source carries TWO refs with
+	// distinct weights, so "same credential ids, same weights, same
+	// positions" is provable. (The provider-match invariant requires every
+	// ref to share the primary's provider.)
+	if err := ts.mgr.AddCredential(models.CredentialConfig{ID: "openai-cred-b", Provider: "openai", APIKey: "k"}); err != nil {
+		t.Fatalf("seed second openai credential: %v", err)
+	}
+
+	// Fallback peers — real rows, so the source's fallback_chain points at
+	// models that exist.
+	for _, peerID := range []string{"shape-peer-a", "shape-peer-b"} {
+		if err := ts.mgr.AddModel(models.ModelConfig{
+			ID:            peerID,
+			Name:          "Peer " + peerID,
+			Enabled:       true,
+			Kind:          models.KindChat,
+			Internal:      true,
+			InternalModel: "glm-peer",
+			Credentials:   models.TestRefs("openai-cred"),
+		}); err != nil {
+			t.Fatalf("seed fallback peer %s: %v", peerID, err)
+		}
+	}
+
+	// The SOURCE row: a realistic, fully-populated chat model whose
+	// fallback_chain includes its OWN id (the ONE documented deviation from
+	// a verbatim copy) plus two other entries.
+	//
+	// The source also carries a NON-EMPTY shadow_model_id on purpose: the
+	// copy contract says the shadow claim is CLEARED (a verbatim copy would
+	// double-claim the shadowed id — pkg/models/copy.go:90-97), so the
+	// "shadow_model_id EMPTY" assertion below is only meaningful if the
+	// source actually holds a claim to drop.
+	source := models.ModelConfig{
+		ID:                           "shape-src",
+		Name:                         "Shape Source",
+		Enabled:                      true,
+		Kind:                         models.KindChat,
+		FallbackChain:                []string{"shape-src", "shape-peer-a", "shape-peer-b"},
+		TruncateParams:               []string{"max_completion_tokens", "store"},
+		Internal:                     true,
+		InternalBaseURL:              "https://upstream.example/v1",
+		InternalModel:                "glm-5.0",
+		ReleaseStreamChunkDeadline:   models.Duration(90_000_000_000), // 90s
+		PeakHourEnabled:              true,
+		PeakHourStart:                "09:00",
+		PeakHourEnd:                  "18:00",
+		PeakHourTimezone:             "+7",
+		PeakHourModel:                "glm-4-flash",
+		SecondaryUpstreamModel:       "glm-4-flash",
+		ExcludeFromUltimateSwitching: true,
+		ShadowModelID:                "shape-claimed",
+		Credentials: models.TestRefsWeighted(
+			models.CredentialRef{CredentialID: "openai-cred", Weight: 3, Position: 0},
+			models.CredentialRef{CredentialID: "openai-cred-b", Weight: 1, Position: 1},
+		),
+	}
+	if err := ts.mgr.AddModel(source); err != nil {
+		t.Fatalf("seed source model: %v", err)
+	}
+
+	// Pre-copy snapshot of the PERSISTED source row — the copy must leave
+	// it untouched.
+	sourceBefore := ts.mgr.GetModelNative("shape-src")
+	if sourceBefore == nil {
+		t.Fatal("seed precondition broken: source row not persisted")
+	}
+	if len(sourceBefore.Credentials) != 2 {
+		t.Fatalf("seed precondition broken: source persisted %d credential refs, want 2", len(sourceBefore.Credentials))
+	}
+	if sourceBefore.Credentials[0].CredentialID != "openai-cred" || sourceBefore.Credentials[0].Weight != 3 || sourceBefore.Credentials[0].Position != 0 {
+		t.Fatalf("seed precondition broken: source ref[0] = %+v, want {openai-cred 3 0}", sourceBefore.Credentials[0])
+	}
+	if sourceBefore.Credentials[1].CredentialID != "openai-cred-b" || sourceBefore.Credentials[1].Weight != 1 || sourceBefore.Credentials[1].Position != 1 {
+		t.Fatalf("seed precondition broken: source ref[1] = %+v, want {openai-cred-b 1 1}", sourceBefore.Credentials[1])
+	}
+	if sourceBefore.ShadowModelID != "shape-claimed" {
+		t.Fatalf("seed precondition broken: source persisted shadow_model_id = %q, want %q", sourceBefore.ShadowModelID, "shape-claimed")
+	}
+
+	// Copy the source under a new id.
+	resp := postCopy(t, ts.server, "shape-src", `{"new_id":"shape-dst"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 201, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+
+	// Read the copy back through the production read path.
+	row := ts.mgr.GetModelNative("shape-dst")
+	if row == nil {
+		t.Fatal("Copy row was not persisted")
+	}
+
+	// --- IDENTITY (regenerated) ---
+	if row.ID != "shape-dst" {
+		t.Errorf("Persisted copy ID = %q, want %q", row.ID, "shape-dst")
+	}
+	if row.Name != "shape-dst" {
+		t.Errorf("Persisted copy Name = %q, want %q (the copy is renamed after its new id)", row.Name, "shape-dst")
+	}
+	if row.Enabled {
+		t.Error("Persisted copy Enabled = true, want false (dormant clone)")
+	}
+
+	// --- INTERNAL (the route pre-stamp and the store write-stamp must agree) ---
+	if !row.Internal {
+		t.Error("Persisted copy Internal = false, want true (the route pre-stamps internal=true before AddModel and the store force-stamps it at pkg/store/database/store.go:1596)")
+	}
+
+	// --- GROUP FIELDS (must never be duplicated into a copy) ---
+	if row.ShadowModelID != "" {
+		t.Errorf("Persisted copy ShadowModelID = %q, want empty", row.ShadowModelID)
+	}
+	if len(row.Members) != 0 {
+		t.Errorf("Persisted copy Members = %v, want empty (membership lives on the group row)", row.Members)
+	}
+
+	// --- CREDENTIAL REFS (shared, never duplicated; ids + weights + positions) ---
+	if len(row.Credentials) != len(sourceBefore.Credentials) {
+		t.Fatalf("Persisted copy has %d credential refs, want %d (the copy shares the source's refs)", len(row.Credentials), len(sourceBefore.Credentials))
+	}
+	for i, ref := range row.Credentials {
+		want := sourceBefore.Credentials[i]
+		if ref.CredentialID != want.CredentialID {
+			t.Errorf("Persisted copy credential[%d].credential_id = %q, want %q", i, ref.CredentialID, want.CredentialID)
+		}
+		if ref.Weight != want.Weight {
+			t.Errorf("Persisted copy credential[%d].weight = %d, want %d", i, ref.Weight, want.Weight)
+		}
+		if ref.Position != want.Position {
+			t.Errorf("Persisted copy credential[%d].position = %d, want %d", i, ref.Position, want.Position)
+		}
+	}
+
+	// --- FALLBACK CHAIN (the ONE documented deviation: the source's own id is dropped) ---
+	if !slices.Equal(row.FallbackChain, []string{"shape-peer-a", "shape-peer-b"}) {
+		t.Errorf("Persisted copy FallbackChain = %v, want [shape-peer-a shape-peer-b] (the source-id entry must be dropped, the others kept)", row.FallbackChain)
+	}
+
+	// --- BEHAVIOUR FIELDS (copied verbatim) ---
+	if !slices.Equal(row.TruncateParams, sourceBefore.TruncateParams) {
+		t.Errorf("Persisted copy TruncateParams = %v, want %v", row.TruncateParams, sourceBefore.TruncateParams)
+	}
+	if row.InternalBaseURL != sourceBefore.InternalBaseURL {
+		t.Errorf("Persisted copy InternalBaseURL = %q, want %q", row.InternalBaseURL, sourceBefore.InternalBaseURL)
+	}
+	if row.InternalModel != sourceBefore.InternalModel {
+		t.Errorf("Persisted copy InternalModel = %q, want %q", row.InternalModel, sourceBefore.InternalModel)
+	}
+	if row.ReleaseStreamChunkDeadline != sourceBefore.ReleaseStreamChunkDeadline {
+		t.Errorf("Persisted copy ReleaseStreamChunkDeadline = %v, want %v", row.ReleaseStreamChunkDeadline, sourceBefore.ReleaseStreamChunkDeadline)
+	}
+	if row.PeakHourEnabled != sourceBefore.PeakHourEnabled {
+		t.Errorf("Persisted copy PeakHourEnabled = %v, want %v", row.PeakHourEnabled, sourceBefore.PeakHourEnabled)
+	}
+	if row.PeakHourStart != sourceBefore.PeakHourStart {
+		t.Errorf("Persisted copy PeakHourStart = %q, want %q", row.PeakHourStart, sourceBefore.PeakHourStart)
+	}
+	if row.PeakHourEnd != sourceBefore.PeakHourEnd {
+		t.Errorf("Persisted copy PeakHourEnd = %q, want %q", row.PeakHourEnd, sourceBefore.PeakHourEnd)
+	}
+	if row.PeakHourTimezone != sourceBefore.PeakHourTimezone {
+		t.Errorf("Persisted copy PeakHourTimezone = %q, want %q", row.PeakHourTimezone, sourceBefore.PeakHourTimezone)
+	}
+	if row.PeakHourModel != sourceBefore.PeakHourModel {
+		t.Errorf("Persisted copy PeakHourModel = %q, want %q", row.PeakHourModel, sourceBefore.PeakHourModel)
+	}
+	if row.SecondaryUpstreamModel != sourceBefore.SecondaryUpstreamModel {
+		t.Errorf("Persisted copy SecondaryUpstreamModel = %q, want %q", row.SecondaryUpstreamModel, sourceBefore.SecondaryUpstreamModel)
+	}
+	if row.ExcludeFromUltimateSwitching != sourceBefore.ExcludeFromUltimateSwitching {
+		t.Errorf("Persisted copy ExcludeFromUltimateSwitching = %v, want %v", row.ExcludeFromUltimateSwitching, sourceBefore.ExcludeFromUltimateSwitching)
+	}
+	if row.Kind != sourceBefore.Kind {
+		t.Errorf("Persisted copy Kind = %q, want %q", row.Kind, sourceBefore.Kind)
+	}
+
+	// --- NO GROUP ROW WAS CREATED, AND NO ROW CARRIES MEMBERSHIP ---
+	for _, m := range ts.mgr.GetModels() {
+		if m.Kind == models.KindGroup {
+			t.Errorf("Persisted store contains a group row %q — the copy route must never write a group row", m.ID)
+		}
+		if len(m.Members) != 0 {
+			t.Errorf("Persisted row %q carries members %v, want none (the copy must be standalone)", m.ID, m.Members)
+		}
+		for _, mem := range m.Members {
+			if mem.ModelID == "shape-dst" {
+				t.Errorf("Persisted row %q claims the copy as a member", m.ID)
+			}
+		}
+	}
+
+	// --- THE SOURCE ROW IS UNCHANGED BY THE COPY ---
+	sourceAfter := ts.mgr.GetModelNative("shape-src")
+	if sourceAfter == nil {
+		t.Fatal("Source row disappeared after the copy")
+	}
+	if sourceAfter.Enabled != sourceBefore.Enabled {
+		t.Errorf("Source Enabled changed: %v -> %v", sourceBefore.Enabled, sourceAfter.Enabled)
+	}
+	if sourceAfter.Name != sourceBefore.Name {
+		t.Errorf("Source Name changed: %q -> %q", sourceBefore.Name, sourceAfter.Name)
+	}
+	if !slices.Equal(sourceAfter.FallbackChain, sourceBefore.FallbackChain) {
+		t.Errorf("Source FallbackChain changed: %v -> %v", sourceBefore.FallbackChain, sourceAfter.FallbackChain)
+	}
+	if len(sourceAfter.Credentials) != len(sourceBefore.Credentials) {
+		t.Errorf("Source credential count changed: %d -> %d", len(sourceBefore.Credentials), len(sourceAfter.Credentials))
+	} else {
+		for i, ref := range sourceAfter.Credentials {
+			want := sourceBefore.Credentials[i]
+			if ref.CredentialID != want.CredentialID || ref.Weight != want.Weight || ref.Position != want.Position {
+				t.Errorf("Source credential[%d] changed: %+v -> %+v", i, want, ref)
+			}
+		}
+	}
+	if sourceAfter.Internal != sourceBefore.Internal {
+		t.Errorf("Source Internal changed: %v -> %v", sourceBefore.Internal, sourceAfter.Internal)
+	}
+	if sourceAfter.ShadowModelID != sourceBefore.ShadowModelID {
+		t.Errorf("Source shadow_model_id changed: %q -> %q", sourceBefore.ShadowModelID, sourceAfter.ShadowModelID)
 	}
 }
