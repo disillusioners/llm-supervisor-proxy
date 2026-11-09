@@ -10,6 +10,9 @@ const minimaxCreds: Credential[] = [
   { id: 'cred-mini-1', provider: 'minimax' },
   { id: 'cred-mini-2', provider: 'minimax' },
 ];
+const nineRouterCreds: Credential[] = [
+  { id: 'cred-9r-1', provider: '9router' },
+];
 const openaiCreds: Credential[] = [
   { id: 'cred-oai-1', provider: 'openai' },
 ];
@@ -20,7 +23,7 @@ vi.mock('../../../hooks/useApi', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../hooks/useApi')>();
   return {
     ...real,
-    getCredentials: vi.fn(async () => [...minimaxCreds, ...openaiCreds]),
+    getCredentials: vi.fn(async () => [...minimaxCreds, ...nineRouterCreds, ...openaiCreds]),
   };
 });
 
@@ -32,12 +35,10 @@ async function waitForCredsLoaded() {
     // The MultiCredentialEditor renders a select for row 0 once creds arrive.
     // We probe by looking for the minimax options; they are absent in the
     // initial render (no creds yet) and present after the fetch resolves.
-    const sel = document.querySelector('select');
-    if (!sel) return;
-    const opts = Array.from(sel.querySelectorAll('option'));
-    if (!opts.some((o) => o.textContent && o.textContent.includes('cred-mini-1'))) {
-      throw new Error('credentials not yet loaded');
-    }
+    const addCredBtn = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+    );
+    if (!addCredBtn) throw new Error('credentials not yet loaded');
   });
 }
 
@@ -174,7 +175,7 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       // runs in handleSubmit, not in the gate.
       fireEvent.click(submit);
       await waitFor(() => {
-        expect(container.textContent).toContain('All credentials must be MiniMax');
+        expect(container.textContent).toContain('All credentials must match the selected provider');
       });
       expect(onSave).not.toHaveBeenCalled();
     });
@@ -278,7 +279,8 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       fireEvent.click(addCredBtn);
 
       // Now the select for the first (primary) row is rendered.
-      const select = container.querySelector('select') as HTMLSelectElement;
+      const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+      const select = selects.find((s) => Array.from(s.querySelectorAll('option')).some((o) => o.textContent && o.textContent.includes('cred-mini-1'))) as HTMLSelectElement;
       expect(select, 'primary credential select should be present').not.toBeNull();
       fireEvent.change(select, { target: { value: 'cred-mini-1' } });
 
@@ -415,6 +417,149 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       const required = container.querySelectorAll('[aria-required="true"]');
       // name + internal_model (id input is not rendered in edit mode).
       expect(required.length).toBe(2);
+    });
+  });
+
+  describe('9router provider support (W4)', () => {
+    it('the provider options list contains exactly minimax and 9router', () => {
+      const { container } = render(
+        <ImgGenModelForm
+          mode="add"
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      expect(providerSelect).not.toBeNull();
+      const options = Array.from(providerSelect.querySelectorAll('option')).map((o) => o.value);
+      expect(options).toContain('9router');
+      expect(options).toContain('minimax');
+      // Removal from options fails: exactly 2 supported image-gen providers
+      expect(options).toHaveLength(2);
+    });
+
+    it('a 9router credential is accepted on submit', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      const initial: ImgGenModel = {
+        id: '9r-model',
+        name: '9Router Model',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_provider: '9router',
+        internal_model: 'ag/gemini-3.8-flash',
+        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
+        credentials: [{ credential_id: 'cred-9r-1', weight: 1, position: 0 }],
+        exclude_from_ultimate_switching: true,
+      };
+      const { container } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const submit = container.querySelector('[data-testid="imggen-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+
+      await waitFor(() => {
+        expect(onSave).toHaveBeenCalledTimes(1);
+      });
+      const payload = (onSave as Mock).mock.calls[0][0];
+      expect(payload).toMatchObject({
+        id: '9r-model',
+        name: '9Router Model',
+        kind: 'image-gen',
+        internal: true,
+        internal_provider: '9router',
+        internal_model: 'ag/gemini-3.8-flash',
+        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
+        credentials: [{ credential_id: 'cred-9r-1', weight: 1, position: 0 }],
+      });
+    });
+
+    it('credential filtering by kind behaves when switching between providers', async () => {
+      const { container } = render(
+        <ImgGenModelForm
+          mode="add"
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      // 1) In default minimax mode: "+ Add credential" dropdown contains minimax creds, not 9router or openai
+      const addCredBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+      ) as HTMLButtonElement;
+      fireEvent.click(addCredBtn);
+
+      let selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+      let credSelect = selects.find((s) => s.getAttribute('data-testid') !== 'imggen-form-provider')!;
+      let optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-mini-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-9r-1'))).toBe(false);
+      expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(false);
+
+      // 2) Switch provider to 9router: credentials dropdown now contains 9router creds, not minimax
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      fireEvent.input(providerSelect, { target: { value: '9router' } });
+
+      // After switching provider, credentials array is reset; click add again
+      const addCredBtn2 = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+      ) as HTMLButtonElement;
+      fireEvent.click(addCredBtn2);
+
+      selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+      credSelect = selects.find((s) => s.getAttribute('data-testid') !== 'imggen-form-provider')!;
+      optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-9r-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-mini-1'))).toBe(false);
+      expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(false);
+    });
+
+    it('rejects a 9router model if a minimax credential is inappropriately attached', async () => {
+      const onSave = vi.fn();
+      const initial: ImgGenModel = {
+        id: 'seed-invalid',
+        name: 'Seeded Invalid',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_provider: '9router',
+        internal_model: 'ag/gemini-3.8-flash',
+        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
+        // Inappropriate minimax credential on 9router model
+        credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
+        exclude_from_ultimate_switching: true,
+      };
+      const { container } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const submit = container.querySelector('[data-testid="imggen-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+
+      await waitFor(() => {
+        expect(container.textContent).toContain('All credentials must match the selected provider');
+      });
+      expect(onSave).not.toHaveBeenCalled();
     });
   });
 });

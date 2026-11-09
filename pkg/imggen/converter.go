@@ -142,3 +142,53 @@ type UpstreamProvider interface {
 	// the handler bills 0 on error-in-200 / 5xx.
 	BillableImages(body []byte) (int, error)
 }
+
+// ResponseRewriter is the OPTIONAL body-rewrite seam used by adapters
+// whose upstream response shape differs from the existing img-gen IO
+// format the proxy already serves (data[].image_urls). The minimax
+// adapter does NOT implement it — its response is already in the
+// existing IO format, so the hook is nil and the relay is verbatim.
+//
+// Implementations MUST be nil-safe at the call site: the handler
+// type-asserts the adapter against this interface and skips the hook
+// when the assertion fails (which is what keeps the minimax path
+// byte-identical).
+//
+// Contract:
+//   - optional: an adapter that does not implement it is left
+//     untouched (verbatim pass-through);
+//   - nil ⇒ verbatim: a nil hook result (or a nil implementation)
+//     means the upstream body is relayed unchanged;
+//   - invoked ONLY after InspectResponse returns PassAsIs
+//     (RelayStatus == 0). On a promoted error the upstream body is
+//     preserved verbatim — this hook never runs on an error path;
+//   - must not mutate the minimax path (the minimax adapter never
+//     implements it).
+type ResponseRewriter interface {
+	// RewriteResponse converts an upstream success body (already
+	// classified PassAsIs) into the existing img-gen IO format
+	// (data[].image_urls). Returns the converted body bytes, or an
+	// error when conversion fails (the handler surfaces a 502).
+	RewriteResponse(body []byte) ([]byte, error)
+}
+
+// ErrorBodyNormalizer is the OPTIONAL seam used by adapters whose
+// upstream error body carries a nested or otherwise client-unfriendly
+// shape that must be flattened before the error is relayed. The
+// minimax adapter does NOT implement it — its error body is already
+// in the shape clients consume, so the relay is verbatim.
+//
+// Contract:
+//   - optional: an adapter that does not implement it leaves the
+//     upstream error body untouched;
+//   - nil ⇒ verbatim: a nil result means the upstream body is
+//     relayed unchanged;
+//   - invoked ONLY on a promoted error path (RelayStatus != 0), so
+//     it never touches a successful response;
+//   - must not mutate the minimax path.
+type ErrorBodyNormalizer interface {
+	// NormalizeErrorBody returns a client-friendly error body derived
+	// from the upstream body, or the original body unchanged when no
+	// normalization is needed or possible.
+	NormalizeErrorBody(body []byte) []byte
+}

@@ -20,6 +20,7 @@ var validProviders = map[string]bool{
 	"azure":     true,
 	"zai":       true,
 	"minimax":   true,
+	"9router":   true,
 	"grok":      true,
 	"deepseek":  true,
 	// OpenCode Zen (https://opencode.ai/zen) — OpenAI-compatible

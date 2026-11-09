@@ -447,12 +447,62 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// Outcome carries the relay decision.
 	outcome := provider.InspectResponse(resp.StatusCode, respBody)
 
+	// 10b) Optional body-rewrite hook (the IO-conversion seam).
+	// Runs ONLY after InspectResponse returns PassAsIs, and only
+	// for adapters that implement ResponseRewriter. On a conversion
+	// failure the handler surfaces a 502 with an OpenAI envelope and
+	// bills the request as a failure (the upstream completed but its
+	// body could not be shaped into the existing IO format).
+	if outcome.RelayStatus == 0 {
+		if rw, ok := provider.(ResponseRewriter); ok {
+			converted, err := rw.RewriteResponse(respBody)
+			if err != nil {
+				h.publishEvent(eventTypeImageGeneration, map[string]interface{}{
+					"outcome":         "response_conversion_failed",
+					"model":           modelID,
+					"provider":        cred.Provider,
+					"error":           err.Error(),
+					"duration_ms":     time.Since(startTime).Milliseconds(),
+					"upstream_status": resp.StatusCode,
+				})
+				h.openAIError(w, http.StatusBadGateway, "failed to convert upstream response: "+err.Error())
+				h.meterFailure(authToken, modelID, "response_conversion_failed")
+				return
+			}
+			respBody = converted
+		}
+	}
+
+	// 10c) Optional error-body normalizer (the promoted-error path
+	// only). Runs ONLY when InspectResponse promoted the response to
+	// an error, and only for adapters that implement
+	// ErrorBodyNormalizer. The success path is untouched.
+	if outcome.RelayStatus != 0 {
+		if nb, ok := provider.(ErrorBodyNormalizer); ok {
+			respBody = nb.NormalizeErrorBody(respBody)
+		}
+	}
+
 	// 11) Relay (T1.4.6 / write-first observe-after). On
 	// PassAsIs: copy headers, write upstream status, write body
 	// verbatim. On PromoteToError: 502 (or whatever RelayStatus
 	// is), preserve the upstream body verbatim (no envelope of
 	// our own — error-in-200 is MiniMax's own error shape).
 	copyResponseHeaders(w, resp)
+	// Content-Length is already stripped by isHopByHopHeader in
+	// copyResponseHeaders, so no stale upstream length can survive
+	// when a hook rewrites or normalizes the body. The Del calls
+	// below are defensive belt-and-suspenders guards ensuring Go's
+	// HTTP server stack computes the exact length for the relayed body.
+	if outcome.RelayStatus == 0 {
+		if _, ok := provider.(ResponseRewriter); ok {
+			w.Header().Del("Content-Length")
+		}
+	} else {
+		if _, ok := provider.(ErrorBodyNormalizer); ok {
+			w.Header().Del("Content-Length")
+		}
+	}
 	if outcome.RelayStatus == 0 {
 		// PassAsIs — covers upstream HTTP ≥400 passthrough AND
 		// 200-success. The handler relays the upstream status
