@@ -21,10 +21,13 @@ import (
 
 func newImgGenTestServer() *modelTestServer {
 	ts := newModelTestServer()
-	// Add a minimax credential so image-gen model validation
-	// (the kind-rule provider check) passes.
+	// Add a minimax + 9router credential so image-gen model validation
+	// (the kind-rule provider check) passes for both providers.
 	ts.mockModels.AddCredential(models.CredentialConfig{
 		ID: "minimax-cred", Provider: "minimax", APIKey: "k",
+	})
+	ts.mockModels.AddCredential(models.CredentialConfig{
+		ID: "ninerouter-cred", Provider: "9router", APIKey: "k",
 	})
 	return ts
 }
@@ -196,6 +199,30 @@ func TestHandleModels_POST_AcceptsValidImageGen(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("status = %d, want 201 (valid image-gen model); body=%s", resp.StatusCode, readBody(resp))
+	}
+}
+
+func TestHandleModels_POST_AcceptsValidImageGen9Router(t *testing.T) {
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	body := `{
+		"id": "img-9router",
+		"name": "Image 9Router",
+		"enabled": true,
+		"kind": "image-gen",
+		"internal": true,
+		"internal_model": "ag/gemini-3.8-flash",
+		"credentials": [{"credential_id": "ninerouter-cred", "weight": 1, "position": 0}]
+	}`
+	resp, err := http.Post(server.URL+"/fe/api/models", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("status = %d, want 201 (valid 9router image-gen model); body=%s", resp.StatusCode, readBody(resp))
 	}
 }
 

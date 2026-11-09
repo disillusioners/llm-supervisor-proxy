@@ -43,6 +43,12 @@ func setupImgGenManager(t *testing.T) (*ModelsManager, func()) {
 		t.Fatalf("add minimax cred: %v", err)
 	}
 	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: "ninerouter-cred", Provider: "9router", APIKey: "k",
+	}); err != nil {
+		store.Close()
+		t.Fatalf("add 9router cred: %v", err)
+	}
+	if err := mgr.AddCredential(models.CredentialConfig{
 		ID: "openai-cred", Provider: "openai", APIKey: "k",
 	}); err != nil {
 		store.Close()
@@ -66,6 +72,24 @@ func TestModelsManager_AddModel_KindImageGen_Valid(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("valid image-gen model should be accepted, got: %v", err)
+	}
+}
+
+func TestModelsManager_AddModel_KindImageGen_Valid9Router(t *testing.T) {
+	mgr, cleanup := setupImgGenManager(t)
+	defer cleanup()
+
+	err := mgr.AddModel(models.ModelConfig{
+		ID:            "img-9router",
+		Name:          "Valid 9Router Image Gen",
+		Enabled:       true,
+		Kind:          models.KindImageGen,
+		Internal:      true,
+		InternalModel: "ag/gemini-3.8-flash",
+		Credentials:   models.TestRefs("ninerouter-cred"),
+	})
+	if err != nil {
+		t.Fatalf("valid 9router image-gen model should be accepted, got: %v", err)
 	}
 }
 
@@ -233,6 +257,12 @@ func setupKindManagerAt(t *testing.T, dbPath string) (*ModelsManager, func()) {
 	}); err != nil {
 		store.Close()
 		t.Fatalf("add minimax cred: %v", err)
+	}
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: "ninerouter-cred", Provider: "9router", APIKey: "k",
+	}); err != nil {
+		store.Close()
+		t.Fatalf("add 9router cred: %v", err)
 	}
 	if err := mgr.AddCredential(models.CredentialConfig{
 		ID: "openai-cred", Provider: "openai", APIKey: "k",

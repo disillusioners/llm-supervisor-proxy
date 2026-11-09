@@ -375,12 +375,20 @@ func imageURLsFromItem(item interface{}) []string {
 					out = append(out, s)
 				}
 			}
-			return out
-		case string:
-			if strings.TrimSpace(urls) == "" {
-				return nil
+			if len(out) > 0 {
+				return out
 			}
-			return []string{urls}
+		case string:
+			if strings.TrimSpace(urls) != "" {
+				return []string{urls}
+			}
+		}
+		// b64_json (the 9router OpenAI-images shape) — convert to a
+		// data-URI so the probe reports success on either shape.
+		if b64, ok := v["b64_json"].(string); ok && strings.TrimSpace(b64) != "" {
+			if uri, err := imageDataURIFromBase64(b64); err == nil {
+				return []string{uri}
+			}
 		}
 	}
 	return nil

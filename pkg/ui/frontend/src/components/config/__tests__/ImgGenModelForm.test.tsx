@@ -32,12 +32,10 @@ async function waitForCredsLoaded() {
     // The MultiCredentialEditor renders a select for row 0 once creds arrive.
     // We probe by looking for the minimax options; they are absent in the
     // initial render (no creds yet) and present after the fetch resolves.
-    const sel = document.querySelector('select');
-    if (!sel) return;
-    const opts = Array.from(sel.querySelectorAll('option'));
-    if (!opts.some((o) => o.textContent && o.textContent.includes('cred-mini-1'))) {
-      throw new Error('credentials not yet loaded');
-    }
+    const addCredBtn = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+    );
+    if (!addCredBtn) throw new Error('credentials not yet loaded');
   });
 }
 
@@ -174,7 +172,7 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       // runs in handleSubmit, not in the gate.
       fireEvent.click(submit);
       await waitFor(() => {
-        expect(container.textContent).toContain('All credentials must be MiniMax');
+        expect(container.textContent).toContain('All credentials must match the selected provider');
       });
       expect(onSave).not.toHaveBeenCalled();
     });
@@ -278,7 +276,8 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       fireEvent.click(addCredBtn);
 
       // Now the select for the first (primary) row is rendered.
-      const select = container.querySelector('select') as HTMLSelectElement;
+      const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+      const select = selects.find((s) => Array.from(s.querySelectorAll('option')).some((o) => o.textContent && o.textContent.includes('cred-mini-1'))) as HTMLSelectElement;
       expect(select, 'primary credential select should be present').not.toBeNull();
       fireEvent.change(select, { target: { value: 'cred-mini-1' } });
 

@@ -1105,11 +1105,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
-			if primaryProvider != "" && primaryProvider != "minimax" {
+			if primaryProvider != "" && primaryProvider != "minimax" && primaryProvider != "9router" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q (got %q)", "minimax", primaryProvider),
+					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q or %q (got %q)", "minimax", "9router", primaryProvider),
 				})
 				return
 			}
@@ -1550,11 +1550,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
 				primaryProvider = strings.ToLower(pcred.Provider)
 			}
-			if primaryProvider != "" && primaryProvider != "minimax" {
+			if primaryProvider != "" && primaryProvider != "minimax" && primaryProvider != "9router" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q (got %q)", "minimax", primaryProvider),
+					"error": fmt.Sprintf("kind \"image-gen\" requires the primary credential's provider to be %q or %q (got %q)", "minimax", "9router", primaryProvider),
 				})
 				return
 			}

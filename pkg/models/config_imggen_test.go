@@ -59,6 +59,16 @@ func TestValidateKindRules_ImageGen_AllRules(t *testing.T) {
 			wantErrSub: "",
 		},
 		{
+			name: "valid image-gen 9router",
+			mutate: func(m *ModelConfig) {
+				m.Internal = true
+				m.InternalModel = "ag/gemini-3.8-flash"
+				m.Credentials = []CredentialRef{{CredentialID: "c", Weight: 1, Position: 0}}
+			},
+			provider:   "9router",
+			wantErrSub: "",
+		},
+		{
 			name: "image-gen requires internal",
 			mutate: func(m *ModelConfig) {
 				m.Internal = false

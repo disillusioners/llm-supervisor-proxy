@@ -246,8 +246,8 @@ func validateImageGenRules(m *ModelConfig, internalProvider string) error {
 	// Validate path); the per-ref provider-match invariant in
 	// ModelsManager.validateModelAgainstCredentials catches the
 	// non-minimax provider at DB write time.
-	if internalProvider != "" && internalProvider != "minimax" {
-		return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q (got %q)", m.ID, KindImageGen, "minimax", internalProvider)
+	if internalProvider != "" && internalProvider != "minimax" && internalProvider != "9router" {
+		return fmt.Errorf("model %s: kind %q requires the primary credential's provider to be %q or %q (got %q)", m.ID, KindImageGen, "minimax", "9router", internalProvider)
 	}
 	if len(m.FallbackChain) != 0 {
 		return fmt.Errorf("model %s: kind %q does not support fallback_chain", m.ID, KindImageGen)
@@ -351,9 +351,9 @@ type ModelConfig struct {
 	TruncateParams []string `json:"truncate_params,omitempty"` // Parameters to strip before forwarding (e.g. ["max_completion_tokens", "store"])
 
 	// Internal upstream configuration (call the AI provider directly via a credential)
-	Internal        bool           `json:"internal,omitempty"`
-	InternalBaseURL string         `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
-	InternalModel   string         `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
+	Internal        bool   `json:"internal,omitempty"`
+	InternalBaseURL string `json:"internal_base_url,omitempty"` // Base URL override (optional, uses credential's base_url if empty)
+	InternalModel   string `json:"internal_model,omitempty"`    // Actual model name for provider (e.g., GLM-5.0)
 
 	// Credentials is the ordered, weighted list of credential refs. Empty for
 	// legacy / non-internal rows. Validation: if non-empty, every entry's

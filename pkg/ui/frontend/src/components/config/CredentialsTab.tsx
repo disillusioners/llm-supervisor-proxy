@@ -18,6 +18,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   red: 'bg-red-900/50 text-red-300 border-red-800/40',
   yellow: 'bg-yellow-900/50 text-yellow-300 border-yellow-800/40',
   gray: 'bg-gray-900/50 text-gray-300 border-gray-800/40',
+  rose: 'bg-rose-900/50 text-rose-300 border-rose-800/40',
 };
 
 function getProviderColorClass(color: string): string {

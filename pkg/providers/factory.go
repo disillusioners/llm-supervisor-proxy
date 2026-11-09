@@ -8,15 +8,16 @@ import (
 type ProviderType string
 
 const (
-	ProviderOpenAI    ProviderType = "openai"
-	ProviderAnthropic ProviderType = "anthropic"
-	ProviderGemini    ProviderType = "gemini"
-	ProviderZhipu     ProviderType = "zhipu"
-	ProviderAzure     ProviderType = "azure"
-	ProviderZAI       ProviderType = "zai"
-	ProviderMiniMax   ProviderType = "minimax"
-	ProviderGrok      ProviderType = "grok"
-	ProviderDeepSeek  ProviderType = "deepseek"
+	ProviderOpenAI     ProviderType = "openai"
+	ProviderAnthropic  ProviderType = "anthropic"
+	ProviderGemini     ProviderType = "gemini"
+	ProviderZhipu      ProviderType = "zhipu"
+	ProviderAzure      ProviderType = "azure"
+	ProviderZAI        ProviderType = "zai"
+	ProviderMiniMax    ProviderType = "minimax"
+	ProviderNineRouter ProviderType = "9router"
+	ProviderGrok       ProviderType = "grok"
+	ProviderDeepSeek   ProviderType = "deepseek"
 	// ProviderOpencode is the identity for OpenCode Zen
 	// (https://opencode.ai/zen) — OpenAI-compatible chat-completions
 	// provider. No migration / DB schema change required; the provider
@@ -76,6 +77,11 @@ func NewProvider(providerType, apiKey, baseURL string) (Provider, error) {
 			baseURL = "https://api.minimax.io/v1"
 		}
 		return NewOpenAIProvider(apiKey, baseURL), nil
+	case ProviderNineRouter:
+		// 9router is image-generation only (the imggen lane); the
+		// chat layer does not speak it. Mirrors the typesafe precedent
+		// (ProviderTypesafe returns "not yet implemented").
+		return nil, fmt.Errorf("9router provider not yet implemented (image-generation only)")
 	case ProviderAzure:
 		// Azure OpenAI uses OpenAI-compatible API with different auth
 		// For now, treat as OpenAI with custom base URL
@@ -229,6 +235,16 @@ var providerMetadataMap = map[ProviderType]providerMetadata{
 		color:       "yellow",
 		description: "MiniMax API",
 	},
+	ProviderNineRouter: {
+		// 9router — image-generation only (the imggen lane). The chat
+		// layer returns "not yet implemented" below; the FE credential
+		// dropdown surfaces it so an operator can create a 9router
+		// credential for an image-gen model.
+		name:        "9Router",
+		baseURL:     "http://ninerouter.9router.svc.cluster.local:20128/v1",
+		color:       "rose",
+		description: "9Router image-generation gateway",
+	},
 	ProviderGrok: {
 		name:        "Grok (xAI)",
 		baseURL:     "https://api.x.ai/v1",
@@ -324,6 +340,9 @@ func GetProviderTypes() []ProviderType {
 		ProviderAzure,
 		ProviderZAI,
 		ProviderMiniMax,
+		// 9router — image-generation only (the imggen lane); the chat
+		// layer returns "not yet implemented" (mirrors typesafe).
+		ProviderNineRouter,
 		ProviderGrok,
 		ProviderDeepSeek,
 		ProviderOpencode,
