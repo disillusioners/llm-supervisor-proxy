@@ -172,14 +172,30 @@ export function ModelsTab({
   };
 
   // Esc closes the copy dialog (precedent: RequestDetail.tsx:381-387).
+  //
+  // GUARD: Esc is IGNORED while a copy request is in flight. The Cancel
+  // button is disabled in that state (:549), so an unguarded Esc would be
+  // a bypass of that guard: the dialog would close mid-request and the
+  // BE failure would then land in a CLOSED dialog (the catch writes the
+  // error inline and NEVER raises a toast), so the failure would be
+  // silently swallowed — the operator would see the dialog vanish with
+  // no confirmation and no error, and the copy never happened.
+  //
+  // NO STALE CAPTURE: `copying` is in the dependency list, so the
+  // listener is torn down and re-registered on every `copying`
+  // transition and the handler ALWAYS reads the CURRENT value. The
+  // cleanup removes the listener on every re-registration and when the
+  // dialog closes — no leak.
   useEffect(() => {
     if (!modelToCopy) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleCloseCopy();
+      // While the request is pending the dialog must stay open so the
+      // outcome (success toast or inline error) is always observable.
+      if (e.key === 'Escape' && !copying) handleCloseCopy();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [modelToCopy]);
+  }, [modelToCopy, copying]);
 
   // A11Y: initial focus lands on the new-id input; when the dialog
   // closes, focus is RESTORED to the Copy button that opened it.

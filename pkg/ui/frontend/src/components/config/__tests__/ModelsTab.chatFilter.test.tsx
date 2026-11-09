@@ -318,7 +318,11 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     const { copyBtn, dialog, input, confirm, alert, setStatus } = renderTab(onCopy);
 
     fireEvent.click(copyBtn);
-    fireEvent.input(input(), { target: { value: 'm1-copy' } });
+    // A DISTINCT id, NOT the prefill ("m1-copy"): with the prefill the
+    // test could not tell "the typed id was preserved" apart from "the
+    // field was reset to the prefill on failure" — a defect this test
+    // exists to catch.
+    fireEvent.input(input(), { target: { value: 'm1-typed-copy' } });
     await act(async () => {
       fireEvent.click(confirm());
       await Promise.resolve();
@@ -326,7 +330,7 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
 
     // The dialog STAYS OPEN and the typed id is PRESERVED.
     expect(dialog()).not.toBeNull();
-    expect(input().value).toBe('m1-copy');
+    expect(input().value).toBe('m1-typed-copy');
     // The BE's {"error":"..."} text is shown inline, announced by role.
     expect(alert()!.textContent).toBe('duplicate model ID');
     // No success toast on a failure.
@@ -365,5 +369,54 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     expect(dialog()).toBeNull();
     // Focus is RESTORED to the Copy button that opened the dialog.
     expect(document.activeElement).toBe(copyBtn);
+  });
+
+  it('Esc is IGNORED while the copy request is in flight — the dialog stays open and a late BE failure surfaces inline', async () => {
+    // A DEFERRED promise so the request is genuinely in flight: the
+    // rejection is triggered by the test, not by the click.
+    let rejectCopy: (reason?: unknown) => void = () => {};
+    const onCopy = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCopy = reject;
+        }),
+    );
+    const { copyBtn, dialog, input, confirm, alert, setStatus } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: 'm1-typed-copy' } });
+
+    // Start the copy — the request is now pending (`copying` = true,
+    // which also disables the Cancel button).
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(onCopy).toHaveBeenCalledWith('m1', 'm1-typed-copy');
+
+    // Esc mid-flight must NOT close the dialog — it is not a bypass of
+    // the disabled-Cancel guard.
+    await act(async () => {
+      fireEvent.keyDown(input(), { key: 'Escape' });
+      await Promise.resolve();
+    });
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-typed-copy');
+    // Still in flight: no error and no toast yet.
+    expect(alert()).toBeNull();
+    expect(setStatus).not.toHaveBeenCalled();
+
+    // The BE failure arrives AFTER the Esc press: it is displayed
+    // inline in the still-open dialog, the typed id is preserved and NO
+    // toast is raised.
+    await act(async () => {
+      rejectCopy(new Error('duplicate model ID'));
+      await Promise.resolve();
+    });
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-typed-copy');
+    expect(alert()!.textContent).toBe('duplicate model ID');
+    expect(setStatus).not.toHaveBeenCalled();
   });
 });
