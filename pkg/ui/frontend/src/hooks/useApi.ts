@@ -348,13 +348,50 @@ export function useModels() {
     await fetchModels();
   }, [fetchModels]);
 
+  // copyModel — clone an existing model row under a NEW id.
+  //
+  // POST /fe/api/models/{sourceId}/copy with body {"new_id":"<new id>"}.
+  // The BE owns the clone semantics (pkg/models/copy.go): the copy is
+  // DORMANT (enabled=false), it SHARES the source's credential ROWS
+  // (refs only — no secret is duplicated) and it is STANDALONE (it
+  // joins no group). Errors come back in the model-API dialect —
+  // flat {"error":"<string>"} — which apiFetch already turns into an
+  // Error carrying the BE's own message; the caller shows it inline.
+  //
+  // The route WRITES a model row, so the cache invalidation is exactly
+  // the same quadruple as every other mutation: 'models' |
+  // 'imggen-models' | 'decision-models' | 'group-models'. NEVER
+  // `deleteByPrefix` — see the addModel comment above for why
+  // (prefix deletion misses in-flight promise entries and does not
+  // cover imggen-models / decision-models).
+  const copyModel = useCallback(async (sourceId: string, newId: string) => {
+    // Council W5: the source id is interpolated into the PATH, so it
+    // must be percent-encoded — an id containing a space, '?', '#' or a
+    // non-ASCII character would otherwise corrupt the URL (or truncate
+    // the path at '?'/'#'). encodeURIComponent keeps every ordinary id
+    // byte-identical ('m-1' → 'm-1').
+    await apiFetch<Model>(`/models/${encodeURIComponent(sourceId)}/copy`, {
+      method: 'POST',
+      body: JSON.stringify({ new_id: newId }),
+    });
+    // C-07 (symmetric side of useImgGenModels).
+    // Decision Commission 2026-10-15 (amendment 9b): see addModel above.
+    // load-balance-groups (plan §6.3): quadruple — see addModel above.
+    // copy-model: the copy route writes a row — same quadruple.
+    defaultAPICache.delete('models');
+    defaultAPICache.delete('imggen-models');
+    defaultAPICache.delete('decision-models');
+    defaultAPICache.delete('group-models');
+    await fetchModels();
+  }, [fetchModels]);
+
   useEffect(() => {
     const controller = new AbortController();
     fetchModels(controller.signal);
     return () => controller.abort();
   }, [fetchModels]);
 
-  return { models, loading, addModel, updateModel, deleteModel, refetch: fetchModels };
+  return { models, loading, addModel, updateModel, deleteModel, copyModel, refetch: fetchModels };
 }
 
 // ImgGen Models API — image-gen kind only

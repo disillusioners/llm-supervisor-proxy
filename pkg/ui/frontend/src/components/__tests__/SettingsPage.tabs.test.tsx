@@ -83,6 +83,8 @@ function makeProps(overrides: Partial<{
     onAddModel: vi.fn(),
     onUpdateModel: vi.fn(),
     onDeleteModel: vi.fn(),
+    // copy-model commission — the chat tab's Copy action.
+    onCopyModel: vi.fn(),
     imgGenModels: [] as ImgGenModel[],
     onAddImgGenModel: vi.fn(),
     onUpdateImgGenModel: vi.fn(),
@@ -397,5 +399,42 @@ describe('SettingsPage — sticky last-success race ordering', () => {
     await waitFor(() => expect(props.onUpdateConfig).toHaveBeenCalled());
     const payload = (props.onUpdateConfig as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as Record<string, unknown>;
     expect(payload.sticky_last_success_enabled).toBe(false);
+  });
+  // copy-model commission — the end-to-end proof that the Copy action
+  // surfaces through the HOUSE toast mechanism (the ToastContainer
+  // rendered by SettingsPage), not a bespoke banner.
+  it('the Models tab copy action raises the house success toast naming the new id + the DISABLED warning', async () => {
+    const props = makeProps({
+      models: [{ id: 'm1', name: 'M1', enabled: true, fallback_chain: [] }],
+    });
+    const { container } = render(<SettingsPage {...props} />);
+
+    // Open the Models tab.
+    const tabs = Array.from(
+      container.querySelectorAll('div.flex.overflow-x-auto > button'),
+    ) as HTMLButtonElement[];
+    const modelsTab = tabs.find((b) => (b.textContent || '').trim() === 'Models');
+    expect(modelsTab).toBeDefined();
+    fireEvent.click(modelsTab!);
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="copy-model-button"]')).not.toBeNull();
+    });
+
+    // Open the copy dialog and submit the prefilled id.
+    fireEvent.click(container.querySelector('[data-testid="copy-model-button"]')!);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="copy-model-dialog"]')).not.toBeNull();
+    });
+    fireEvent.click(container.querySelector('[data-testid="copy-model-confirm"]')!);
+
+    // The toast carries the new id + the DISABLED warning.
+    await waitFor(() => {
+      expect(container.textContent).toContain('Copied model "m1" to "m1-copy"');
+    });
+    expect(container.textContent).toContain(
+      'The copy is DISABLED: it is not in /v1/models and not in automatic selection',
+    );
+    expect(props.onCopyModel).toHaveBeenCalledWith('m1', 'm1-copy');
   });
 });

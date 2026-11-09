@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import type { Model, InternalProvider, CredentialRef } from '../../types';
 import { escapeHtml } from '../../utils/helpers';
 import { ModelForm } from './ModelForm';
@@ -9,6 +9,12 @@ interface ModelsTabProps {
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
   onToggleModel: (model: Model) => Promise<void>;
+  // Copy action (copy-model commission): clones a chat model under a NEW
+  // id via POST /fe/api/models/{id}/copy. The BE owns the clone
+  // semantics — the copy is DORMANT (enabled=false) — so the FE only
+  // has to call it and report the outcome. Required (not optional) so
+  // the Copy row action can never silently go missing.
+  onCopyModel: (sourceId: string, newId: string) => Promise<void>;
   status: { type: 'success' | 'error'; message: string } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
   onNavigateToCredentials?: () => void;
@@ -24,6 +30,7 @@ export function ModelsTab({
   onUpdateModel,
   onDeleteModel,
   onToggleModel,
+  onCopyModel,
   status,
   setStatus,
   onNavigateToCredentials,
@@ -34,6 +41,33 @@ export function ModelsTab({
   const [modelToEdit, setModelToEdit] = useState<Model | undefined>(undefined);
   const [modelToDelete, setModelToDelete] = useState<Model | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Copy dialog (copy-model commission). `copyError` carries BOTH the
+  // inline validation message and the BE's {"error":"..."} text — the
+  // dialog stays open on a BE failure with the typed id preserved.
+  const [modelToCopy, setModelToCopy] = useState<Model | null>(null);
+  const [copyNewId, setCopyNewId] = useState('');
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [copying, setCopying] = useState(false);
+  const copyInputRef = useRef<HTMLInputElement | null>(null);
+  const copyTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const copyWasOpen = useRef(false);
+  // The in-flight flag is ALSO mirrored into a REF, and the REF is the
+  // AUTHORITATIVE one for the close guard.
+  //
+  // WHY A REF: the user-initiated close paths (Esc, the backdrop, the
+  // Cancel button) must be a NO-OP while a request is in flight, and the
+  // SUCCESS path must still be able to close the dialog afterwards. The
+  // `copying` STATE cannot serve both: Preact does not refresh the
+  // closure of an already-running async function, so a state read
+  // inside the success path can be a STALE value (the value from the
+  // render in which the click happened) — which would either block the
+  // success close (dialog stuck open) or fail to block a mid-flight
+  // close. A ref is written SYNCHRONOUSLY and read SYNCHRONOUSLY, so
+  // the guard always sees the CURRENT truth.
+  //
+  // The `copying` state keeps its usual job: it drives the Cancel
+  // button's disabled attribute and the "Copying..." label.
+  const copyingRef = useRef(false);
 
   const handleOpenAddModel = () => {
     setModelToEdit(undefined);
@@ -126,6 +160,161 @@ export function ModelsTab({
       setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to delete model' });
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // Copy dialog handlers (copy-model commission).
+  //
+  // The dialog asks for the NEW id of the copy and hands the pair to
+  // the BE route POST /fe/api/models/{sourceId}/copy. The BE owns the
+  // clone semantics; the FE owns the operator-facing contract:
+  // prefill, inline validation, error handling and the "created
+  // DISABLED" warning.
+  const handleOpenCopy = (model: Model) => {
+    setModelToCopy(model);
+    // Prefill: "<source-id>-copy" — the operator usually wants a
+    // variant of the same model, so the default is the source id with
+    // a -copy suffix (it always differs from the source, which the BE
+    // requires).
+    setCopyNewId(`${model.id}-copy`);
+    setCopyError(null);
+    // A freshly opened dialog is never in flight — reset the
+    // authoritative flag so the guard starts from a known state.
+    copyingRef.current = false;
+    setCopying(false);
+  };
+
+  // THE CHOKE POINT — every USER-initiated close of the copy dialog
+  // routes through here: the Esc handler, the backdrop click and the
+  // Cancel button.
+  //
+  // GUARDED: it is a NO-OP while a copy request is in flight. The
+  // contract (FE and BE alike) requires the dialog to STAY OPEN on a
+  // backend failure, with the BE's {"error":"..."} text shown inline
+  // and the typed id preserved. A mid-flight close would write that
+  // error into a CLOSED dialog — and the failure path raises NO toast
+  // — so the failure would be silently swallowed: the operator sees the
+  // dialog vanish with no confirmation and no error, and the copy never
+  // happened.
+  //
+  // The guard reads `copyingRef` (a ref), which is written
+  // synchronously when the request starts and when it settles, so this
+  // check always sees the CURRENT truth — never a stale closure value.
+  const handleCloseCopy = () => {
+    // TRADE-OFF (accepted, review F2): there is NO request timeout or
+    // AbortController here, so a HUNG request keeps this dialog busy —
+    // and un-closeable — until it settles. Intentional: the outcome
+    // must stay observable. Follow-up: a request timeout/abort, which is
+    // a design decision beyond this commission's scope.
+    if (copyingRef.current) return;
+    setModelToCopy(null);
+    setCopyNewId('');
+    setCopyError(null);
+    setCopying(false);
+  };
+
+  // PROGRAMMATIC close — used ONLY by the SUCCESS path, after the
+  // request has settled.
+  //
+  // It clears the in-flight flag FIRST and then closes through the
+  // shared helper, so the success close is never blocked by the guard
+  // (the helper sees the flag already cleared). It must not simply
+  // call the helper with the flag still set — that would refuse the
+  // close and leave the dialog stuck open.
+  const closeCopyAfterSuccess = () => {
+    copyingRef.current = false;
+    handleCloseCopy();
+  };
+
+  // Esc closes the copy dialog (precedent: RequestDetail.tsx:381-387).
+  //
+  // The close itself is GUARDED by handleCloseCopy, so Esc is a NO-OP
+  // while a copy request is in flight — exactly like the backdrop click
+  // and the Cancel button. The guard reads the in-flight flag through
+  // a REF, so this handler always sees the CURRENT value; the listener
+  // therefore does not need to be re-registered on every `copying`
+  // transition. The cleanup removes the listener when the dialog
+  // closes — no leak.
+  useEffect(() => {
+    if (!modelToCopy) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleCloseCopy();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [modelToCopy]);
+
+  // A11Y: initial focus lands on the new-id input; when the dialog
+  // closes, focus is RESTORED to the Copy button that opened it.
+  useEffect(() => {
+    if (modelToCopy) {
+      copyWasOpen.current = true;
+      copyInputRef.current?.focus();
+      return;
+    }
+    if (copyWasOpen.current) {
+      copyWasOpen.current = false;
+      copyTriggerRef.current?.focus();
+    }
+  }, [modelToCopy]);
+
+  const handleConfirmCopy = async () => {
+    if (!modelToCopy) return;
+    // RE-ENTRANCY GUARD: a second submit dispatched in the same tick
+    // (two clicks on Confirm) must NOT start a second request. The
+    // in-flight flag is a BOOLEAN, not a counter, so two concurrent
+    // requests would let the first settle clear it while the second is
+    // still pending — re-opening the mid-flight-close window that
+    // rounds 1 and 2 closed. One request per dialog.
+    if (copyingRef.current) return;
+    const newId = copyNewId;
+    // Inline validation BEFORE submit. The rules mirror the BE's own
+    // ValidateCopyID (pkg/models/copy.go) and the messages are the BE's
+    // own wording, so the two can never disagree:
+    //   * new_id is required
+    //   * new_id must not contain "/" or whitespace
+    if (newId.length === 0) {
+      setCopyError('new_id is required');
+      return;
+    }
+    if (newId.includes('/') || /\s/.test(newId)) {
+      setCopyError('new_id must not contain "/" or whitespace');
+      return;
+    }
+    // The in-flight flag is set on the REF synchronously, so EVERY close
+    // attempt from this moment on (Esc, backdrop, Cancel) is refused —
+    // even before the next render lands.
+    copyingRef.current = true;
+    setCopying(true);
+    setCopyError(null);
+    try {
+      await onCopyModel(modelToCopy.id, newId);
+      // Success: close the dialog and surface the house toast (the
+      // container's toast API — setStatus is the tab's toast entry
+      // point, exactly like the delete flow above).
+      //
+      // ACCURACY (council W6): the copy is DORMANT (enabled=false) — it
+      // is not auto-selected and appears in no /v1/models listing, race
+      // chain or pool; a client that names its id explicitly is still
+      // served.
+      setStatus({
+        type: 'success',
+        message: `Copied model "${modelToCopy.id}" to "${newId}". The copy is DISABLED: it is not in /v1/models and not in automatic selection — a client that names "${newId}" explicitly is still served. Enable it to add it to /v1/models and auto-selection.`,
+      });
+      // SUCCESS close — the request has settled, so the in-flight flag
+      // is cleared first and the dialog closes (closeCopyAfterSuccess
+      // clears the flag BEFORE delegating to the guarded helper, so the
+      // guard does not block it).
+      closeCopyAfterSuccess();
+    } catch (e) {
+      // BE failure: the dialog STAYS OPEN, the typed id is PRESERVED
+      // and the BE's {"error":"..."} text is shown inline. No retry, no
+      // field reset.
+      setCopyError(e instanceof Error ? e.message : 'Failed to copy model');
+      // The request is over: clear the in-flight flag so the operator
+      // can now close the dialog (Esc / backdrop / Cancel) and retry.
+      copyingRef.current = false;
+      setCopying(false);
     }
   };
 
@@ -292,6 +481,27 @@ export function ModelsTab({
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
                     </button>
+                    {/* Copy (copy-model commission): clones this chat model
+                        under a NEW id via POST /fe/api/models/{id}/copy.
+                        The copy is created DISABLED — the dialog says so
+                        before the operator submits. */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        // Remember the trigger so focus can be RESTORED
+                        // to it when the dialog closes.
+                        copyTriggerRef.current = e.currentTarget;
+                        handleOpenCopy(model);
+                      }}
+                      class="text-gray-400 hover:text-blue-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
+                      title={`Copy ${model.name}`}
+                      aria-label={`Copy ${model.name}`}
+                      data-testid="copy-model-button"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
                     <button
                       onClick={() => setModelToDelete(model)}
                       class="text-gray-400 hover:text-red-400 transition-colors p-1.5 rounded-md hover:bg-gray-600/50"
@@ -355,6 +565,81 @@ export function ModelsTab({
                 disabled={deleting}
               >
                 {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Copy Model Dialog — hand-rolled inline overlay (no modal
+          library, no new npm dependency). Modelled on the file-local
+          delete dialog above. */}
+      {modelToCopy && (
+        <div
+          class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]"
+          data-testid="copy-model-backdrop"
+          onClick={handleCloseCopy}
+        >
+          <div
+            class="bg-gray-800 rounded-lg shadow-2xl max-w-sm w-full mx-4 border border-gray-700 p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="copy-model-dialog-title"
+            data-testid="copy-model-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="copy-model-dialog-title" class="text-xl font-semibold text-white mb-2">Copy Model</h3>
+            <p class="text-gray-300 text-sm mb-4">
+              Copy <span class="font-semibold text-white">{escapeHtml(modelToCopy.name)}</span> under a new id.
+            </p>
+            <label for="copy-model-new-id" class="block text-sm font-medium text-gray-300 mb-1">New model id</label>
+            <input
+              id="copy-model-new-id"
+              ref={copyInputRef}
+              type="text"
+              value={copyNewId}
+              onInput={(e) => {
+                setCopyNewId(e.currentTarget.value);
+                // Clear a stale validation/backend message as soon as
+                // the operator edits the id.
+                setCopyError(null);
+              }}
+              class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+              placeholder="my-model-copy"
+              autocomplete="off"
+              data-testid="copy-model-new-id-input"
+            />
+            {copyError && (
+              <p role="alert" class="text-red-400 text-sm mt-2" data-testid="copy-model-error">{copyError}</p>
+            )}
+            {/* ACCURACY: the copy is DORMANT (enabled=false) — excluded
+                from /v1/models and from race chains / groups. The proxy
+                has NO enabled gate on the explicit-id path, so a client
+                that names the new id explicitly can still reach it.
+                Never claim it is unreachable. */}
+            <p class="text-gray-400 text-xs mt-3" data-testid="copy-model-warning">
+              The copy is created DISABLED: it is excluded from /v1/models and from race chains and groups, but a
+              client that names its id explicitly can still reach it. Enable it to add it to /v1/models and to
+              automatic selection.
+            </p>
+            <div class="flex gap-3 w-full mt-5">
+              <button
+                type="button"
+                onClick={handleCloseCopy}
+                class="flex-1 px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors font-medium border border-gray-600"
+                disabled={copying}
+                data-testid="copy-model-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmCopy}
+                class="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors font-medium border border-blue-500/50 shadow shadow-blue-900/20"
+                disabled={copying}
+                data-testid="copy-model-confirm"
+              >
+                {copying ? 'Copying...' : 'Copy'}
               </button>
             </div>
           </div>

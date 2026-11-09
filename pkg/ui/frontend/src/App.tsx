@@ -21,7 +21,7 @@ export function App() {
     setAppTag: setRequestsAppTag,
   } = useRequests();
   const { config, updateConfig } = useConfig();
-  const { models, addModel, updateModel, deleteModel } = useModels();
+  const { models, addModel, updateModel, deleteModel, copyModel } = useModels();
   // useImgGenModels — ImgGen Commission 2026-10-05 (fe-spec §2.3, FE-7).
   // Returns only kind: 'image-gen' models. Mutation hooks also invalidate
   // the chat 'models' cache (symmetric with useModels), so the two tabs
@@ -55,6 +55,7 @@ export function App() {
         onAddModel={addModel}
         onUpdateModel={updateModel}
         onDeleteModel={deleteModel}
+        onCopyModel={copyModel}
         imgGenModels={imgGenModels}
         onAddImgGenModel={addImgGenModel}
         onUpdateImgGenModel={updateImgGenModel}
@@ -212,6 +213,7 @@ function SettingsRoute({
     onAddModel,
     onUpdateModel,
     onDeleteModel,
+    onCopyModel,
     imgGenModels,
     onAddImgGenModel,
     onUpdateImgGenModel,
@@ -243,6 +245,8 @@ function SettingsRoute({
     onAddModel: (model: any) => Promise<void>;
     onUpdateModel: (id: string, updates: any) => Promise<void>;
     onDeleteModel: (id: string) => Promise<void>;
+    // Copy a chat model under a new id (copy-model commission).
+    onCopyModel: (sourceId: string, newId: string) => Promise<void>;
     // Image-gen (ImgGen Commission 2026-10-05). Pre-filtered server-side to
     // kind: 'image-gen' via /fe/api/models?kind=image-gen. The form's
     // submit handler stamps kind: 'image-gen' on the payload; we never
@@ -291,6 +295,7 @@ function SettingsRoute({
             onAddModel={onAddModel}
             onUpdateModel={onUpdateModel}
             onDeleteModel={onDeleteModel}
+            onCopyModel={onCopyModel}
             imgGenModels={imgGenModels}
             onAddImgGenModel={onAddImgGenModel}
             onUpdateImgGenModel={onUpdateImgGenModel}

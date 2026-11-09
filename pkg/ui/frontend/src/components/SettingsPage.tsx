@@ -22,6 +22,10 @@ interface SettingsPageProps {
   onAddModel: (model: Omit<Model, 'id'> & { id: string }) => Promise<void>;
   onUpdateModel: (id: string, updates: Partial<Model>) => Promise<void>;
   onDeleteModel: (id: string) => Promise<void>;
+  // Copy a chat model under a new id (copy-model commission). The BE
+  // route POST /fe/api/models/{id}/copy owns the clone semantics; the
+  // FE hands over (sourceId, newId) and reports the outcome.
+  onCopyModel: (sourceId: string, newId: string) => Promise<void>;
   // ImgGen Commission 2026-10-05 (fe-spec §2.5). Pre-filtered server-side
   // to kind: 'image-gen' via /fe/api/models?kind=image-gen.
   imgGenModels: Model[];
@@ -71,6 +75,7 @@ export function SettingsPage({
   onAddModel,
   onUpdateModel,
   onDeleteModel,
+  onCopyModel,
   imgGenModels,
   onAddImgGenModel,
   onUpdateImgGenModel,
@@ -569,6 +574,7 @@ export function SettingsPage({
               onAddModel={onAddModel}
               onUpdateModel={onUpdateModel}
               onDeleteModel={onDeleteModel}
+              onCopyModel={onCopyModel}
               onToggleModel={handleToggleModel}
               setStatus={setStatusWrapper}
               onNavigateToCredentials={() => setActiveTab('credentials')}
