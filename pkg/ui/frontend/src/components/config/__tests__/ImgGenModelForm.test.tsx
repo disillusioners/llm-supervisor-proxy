@@ -421,7 +421,7 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
   });
 
   describe('9router provider support (W4)', () => {
-    it('the provider options list contains 9router and removal from the options fails', () => {
+    it('the provider options list contains exactly minimax and 9router', () => {
       const { container } = render(
         <ImgGenModelForm
           mode="add"

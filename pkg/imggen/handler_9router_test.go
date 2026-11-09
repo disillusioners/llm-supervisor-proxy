@@ -293,6 +293,11 @@ func TestHandler_9Router_429Quota(t *testing.T) {
 //     preserves that exact base contract (Content-Length is stripped, body bytes identical).
 //     Preserving Content-Length would change minimax's client-visible headers vs base,
 //     violating the forbidden "Touch the minimax path's semantics" constraint.
+//   - M4' note: removing only the w.Header().Del("Content-Length") guards in handler.go
+//     does not fail tests on today's code because isHopByHopHeader in copyResponseHeaders
+//     already strips Content-Length (making Del no-ops on current paths). The truncation
+//     hazard is discriminated by the COMBINED mutation (hop-by-hop strip removed AND
+//     Del guards removed). The Del guards in handler.go are maintained as defensive belt-and-suspenders.
 func TestHandler_Minimax_ByteIdenticalStill(t *testing.T) {
 	body := successBody(1, 0)
 	env := newEnv(t, fakeScript{status: 200, body: body, contentLength: true})

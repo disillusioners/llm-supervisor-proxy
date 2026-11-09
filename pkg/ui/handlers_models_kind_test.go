@@ -395,7 +395,7 @@ func TestHandleModels_GET_KindFilter_Decision(t *testing.T) {
 	}
 }
 
-func TestHandleModels_POST_and_PUT_ChatRejectsNineRouter(t *testing.T) {
+func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T) {
 	ts := newImgGenTestServer()
 	server := ts.serve()
 	defer server.Close()
@@ -477,7 +477,68 @@ func TestHandleModels_POST_and_PUT_ChatRejectsNineRouter(t *testing.T) {
 		t.Fatalf("PUT chat with 9router status = %d, want 400", putResp.StatusCode)
 	}
 
-	// 4) POST with kind="image-gen" and 9router credential is VALID (201 Created)
+	// 4) POST with kind="decision" and 9router credential must return 400
+	decPayload := map[string]interface{}{
+		"id":                              "dec-9r",
+		"name":                            "Decision 9Router",
+		"kind":                            "decision",
+		"internal":                        true,
+		"internal_model":                  "ag/gemini-3.8-flash",
+		"exclude_from_ultimate_switching": true,
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawDec, _ := json.Marshal(decPayload)
+	respDec, err := http.Post(server.URL+"/fe/api/models", "application/json", bytes.NewReader(rawDec))
+	if err != nil {
+		t.Fatalf("POST decision with 9router: %v", err)
+	}
+	defer respDec.Body.Close()
+	if respDec.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST decision with 9router status = %d, want 400", respDec.StatusCode)
+	}
+	var errDecResp map[string]string
+	_ = json.NewDecoder(respDec.Body).Decode(&errDecResp)
+	if !strings.Contains(errDecResp["error"], `kind "decision" requires the primary credential's provider to be`) || !strings.Contains(errDecResp["error"], `"9router"`) {
+		t.Errorf("decision POST error = %q, want mention of primary credential provider requirement", errDecResp["error"])
+	}
+
+	// 5) PUT updating existing decision model to use 9router credential must return 400
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID:                           "dec-existing",
+		Name:                         "Existing Decision",
+		Enabled:                      true,
+		Kind:                         models.KindDecision,
+		Internal:                     true,
+		InternalModel:                "gpt-4",
+		ExcludeFromUltimateSwitching: true,
+		Credentials:                  models.TestRefs("test-cred"),
+	})
+	putDecPayload := map[string]interface{}{
+		"id":                              "dec-existing",
+		"name":                            "Updated Decision",
+		"kind":                            "decision",
+		"internal":                        true,
+		"internal_model":                  "ag/gemini-3.8-flash",
+		"exclude_from_ultimate_switching": true,
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawPutDec, _ := json.Marshal(putDecPayload)
+	reqDec, _ := http.NewRequest(http.MethodPut, server.URL+"/fe/api/models/dec-existing", bytes.NewReader(rawPutDec))
+	reqDec.Header.Set("Content-Type", "application/json")
+	putDecResp, err := http.DefaultClient.Do(reqDec)
+	if err != nil {
+		t.Fatalf("PUT decision with 9router: %v", err)
+	}
+	defer putDecResp.Body.Close()
+	if putDecResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT decision with 9router status = %d, want 400", putDecResp.StatusCode)
+	}
+
+	// 6) POST with kind="image-gen" and 9router credential is VALID (201 Created)
 	imgPayload := map[string]interface{}{
 		"id":             "img-9r",
 		"name":           "Image 9Router",
@@ -496,5 +557,51 @@ func TestHandleModels_POST_and_PUT_ChatRejectsNineRouter(t *testing.T) {
 	defer respImg.Body.Close()
 	if respImg.StatusCode != http.StatusCreated {
 		t.Fatalf("POST image-gen with 9router status = %d, want 201", respImg.StatusCode)
+	}
+
+	// 7) Persisted-state assertion: a rejected model must NOT be persisted
+	getResp, err := http.Get(server.URL + "/fe/api/models")
+	if err != nil {
+		t.Fatalf("GET /fe/api/models: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /fe/api/models status = %d, want 200", getResp.StatusCode)
+	}
+	var savedModels []Model
+	if err := json.NewDecoder(getResp.Body).Decode(&savedModels); err != nil {
+		t.Fatalf("decode GET /fe/api/models: %v", err)
+	}
+	for _, m := range savedModels {
+		if m.ID == "chat-9r" {
+			t.Errorf("rejected chat model chat-9r was persisted in store")
+		}
+		if m.ID == "chat-9r-empty" {
+			t.Errorf("rejected empty-kind chat model chat-9r-empty was persisted in store")
+		}
+		if m.ID == "dec-9r" {
+			t.Errorf("rejected decision model dec-9r was persisted in store")
+		}
+		if m.ID == "chat-existing" {
+			if len(m.Credentials) > 0 && m.Credentials[0].CredentialID == "ninerouter-cred" {
+				t.Errorf("chat-existing was erroneously updated with rejected 9router credential")
+			}
+		}
+		if m.ID == "dec-existing" {
+			if len(m.Credentials) > 0 && m.Credentials[0].CredentialID == "ninerouter-cred" {
+				t.Errorf("dec-existing was erroneously updated with rejected 9router credential")
+			}
+		}
+	}
+	// Verify img-9r WAS persisted
+	foundImg := false
+	for _, m := range savedModels {
+		if m.ID == "img-9r" {
+			foundImg = true
+			break
+		}
+	}
+	if !foundImg {
+		t.Errorf("valid image-gen model img-9r was not persisted in store")
 	}
 }

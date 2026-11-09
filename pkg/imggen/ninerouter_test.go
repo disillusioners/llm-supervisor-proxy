@@ -368,6 +368,23 @@ func TestNineRouter_RewriteResponse_EmptyImageURLs_NotCounted(t *testing.T) {
 	}
 }
 
+func TestNineRouter_RewriteResponse_ErrorDoesNotLeakUpstreamBody(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	secretPayload := "SUPER_SECRET_INTERNAL_UPSTREAM_PROMPT_OR_PAYLOAD"
+	// Upstream body that fails conversion (URL-shaped response) with sensitive upstream content
+	body := []byte(`{"data":[{"url":"https://example.com/image.png"}],"sensitive_info":"` + secretPayload + `"}`)
+	_, err := p.RewriteResponse(body)
+	if err == nil {
+		t.Fatalf("expected conversion error for non-convertible body, got nil")
+	}
+	if strings.Contains(err.Error(), secretPayload) {
+		t.Errorf("conversion error leaks sensitive upstream content: %v", err)
+	}
+	if strings.Contains(err.Error(), "sensitive_info") {
+		t.Errorf("conversion error leaks upstream keys: %v", err)
+	}
+}
+
 // --- Error message extraction ---
 
 func TestNineRouter_ErrorMessage_Nested(t *testing.T) {
