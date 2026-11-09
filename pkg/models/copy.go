@@ -78,9 +78,9 @@ func ValidateCopyID(newID string) error {
 //     it never clobbers the cache name index, which is last-write-wins
 //     at pkg/modelscache/models.go:816/861 — the operator can rename
 //     the copy later through the existing edit form); enabled = false
-//     (a dormant clone: it serves no traffic, appears in no
-//     /v1/models listing and joins no race chain or pool until an
-//     operator enables it deliberately).
+//     (a dormant clone: it is not auto-selected and appears in no
+//     /v1/models listing, race chain or pool; a client that names its
+//     id explicitly is still served).
 //
 //   - fallback_chain: copied, EXCEPT any entry equal to the SOURCE id
 //     is dropped — a clone must not silently fall back into its own

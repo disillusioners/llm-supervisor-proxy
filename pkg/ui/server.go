@@ -1313,20 +1313,28 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	// Nested copy route — dispatched BEFORE the id is taken, because
 	// the remainder of a copy path is "{id}/copy", not "{id}".
-	// If a model whose own id literally ends in "/copy" exists, that
-	// row takes precedence: POST copies it, while PUT/DELETE fall
-	// through to normal id handling so the row can be edited or deleted.
-	if strings.HasSuffix(remainder, "/copy") {
-		if exact := s.resolveModelRowByID(remainder); exact != nil {
-			if r.Method == http.MethodPost {
-				s.handleModelCopy(w, r, exact.ID)
-				return
-			}
-			// Fall through to normal id handling for PUT/DELETE.
-		} else {
-			s.handleModelCopy(w, r, strings.TrimSuffix(remainder, "/copy"))
+	// Dispatched for POST only. Any non-POST method on a "/copy"-suffixed
+	// path falls through to detail handling with id = full remainder (e.g.
+	// "foo/copy"), preserving pre-copy behaviour for PUT/DELETE/GET/PATCH.
+	if strings.HasSuffix(remainder, "/copy") && r.Method == http.MethodPost {
+		exact := s.resolveModelRowByID(remainder)
+		trimmed := strings.TrimSuffix(remainder, "/copy")
+		src := s.resolveModelRowByID(trimmed)
+
+		if exact != nil && src != nil && exact.ID != src.ID {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("ambiguous copy source: %q and %q both exist", trimmed, exact.ID),
+			})
 			return
 		}
+		if exact != nil {
+			s.handleModelCopy(w, r, exact.ID)
+			return
+		}
+		s.handleModelCopy(w, r, trimmed)
+		return
 	}
 
 	id := remainder
@@ -1790,9 +1798,9 @@ type ModelCopyRequest struct {
 //
 // Semantics (pkg/models/copy.go owns the fidelity contract):
 //
-//   - the copy is DORMANT (enabled=false): it serves no traffic,
-//     appears in no /v1/models listing and joins no race chain or
-//     load-balance pool until an operator enables it deliberately;
+//   - the copy is DORMANT (enabled=false): it is not auto-selected and
+//     appears in no /v1/models listing, race chain or pool; a client
+//     that names its id explicitly is still served;
 //   - the copy SHARES the source's credential ROWS (refs only — no
 //     secret is duplicated, the credentials table is never written);
 //   - the copy is STANDALONE: group membership lives on the group
@@ -1852,18 +1860,29 @@ func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceI
 		return
 	}
 
-	// Duplicate guard (defense in depth: route pre-check → store
-	// ErrDuplicateModelID at pkg/store/database/store.go:1608-1615 →
-	// JSON-backend twin → cache-layer delegation). The underlying
-	// store query is an UPSERT (PostgreSQL "ON CONFLICT (id) DO
-	// UPDATE" — pkg/store/database/querybuilder.go:99; SQLite "INSERT OR
-	// REPLACE" — :122) that would silently overwrite an existing row
-	// without the duplicate guards. Pre-check here as the first line of
-	// defense so a copy can never clobber a live row.
+	// Duplicate guard (defense in depth: route pre-check (first guard) →
+	// store in-lock duplicate SELECT → ErrDuplicateModelID (second guard)
+	// at pkg/store/database/store.go:1608-1614 → JSON-backend twin →
+	// cache-layer delegation). The underlying store query is an UPSERT
+	// (PostgreSQL "ON CONFLICT (id) DO UPDATE" —
+	// pkg/store/database/querybuilder.go:99; SQLite "INSERT OR REPLACE" —
+	// :122) that would silently overwrite an existing row without the
+	// duplicate guards. Pre-check here as the first line of defense so a
+	// copy can never clobber a live row.
 	if s.resolveModelRowByID(copyModel.ID) != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": models.ErrDuplicateModelID.Error()})
+		return
+	}
+
+	// Claims guard: if the proposed new id is claimed by an enabled
+	// group via shadow_model_id, claims-first GetModel would resolve to
+	// that group row forever, rendering the copy invisible.
+	if claimed := s.modelsConfig.GetModel(copyModel.ID); claimed != nil && claimed.ID != copyModel.ID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "model ID is claimed by an enabled group"})
 		return
 	}
 
@@ -1900,15 +1919,17 @@ func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceI
 		return
 	}
 
+	// Stamp internal=true: the store/cache persist internal=true on write
+	// (pkg/store/database/store.go:1596, pkg/modelscache/models.go:808); the
+	// response DTO must tell the truth about the stored row.
+	copyModel.Internal = true
+
 	// Single write — the same AddModel + Save path the create route
-	// uses (handleModels POST).
+	// uses (handleModels POST). Every AddModel error is mapped to 400
+	// (mirroring server.go:1269-1274); 500 remains only for Save failure.
 	if err := s.modelsConfig.AddModel(*copyModel); err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, models.ErrDuplicateModelID) {
-			status = http.StatusBadRequest
-		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}

@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // =============================================================================
@@ -1617,34 +1620,109 @@ func TestHandleModelCopy_InvalidNewID(t *testing.T) {
 	}
 }
 
-// TestHandleModelCopy_WrongMethod asserts the POST-only gate returns
-// the house plain-text 405.
+// TestHandleModelCopy_WrongMethod asserts non-POST methods on a
+// "/copy"-suffixed path fall through to pre-existing detail handling:
+// PUT on a non-existent id hits the PUT 400-on-missing path, DELETE
+// returns 404, while GET and PATCH hit the default-branch plain-text 405.
 func TestHandleModelCopy_WrongMethod(t *testing.T) {
-	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		t.Run(method, func(t *testing.T) {
-			ts := newModelTestServer()
-			server := ts.serve()
-			defer server.Close()
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
 
-			copySourceModel(ts)
+	copySourceModel(ts)
 
-			req, err := http.NewRequest(method, server.URL+"/fe/api/models/copy-src/copy", nil)
-			if err != nil {
-				t.Fatalf("Failed to build request: %v", err)
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("%s failed: %v", method, err)
-			}
-			defer resp.Body.Close()
+	// 1. GET /fe/api/models/copy-src/copy -> 405 plain-text
+	t.Run("GET", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/fe/api/models/copy-src/copy", nil)
+		if err != nil {
+			t.Fatalf("Failed to build GET request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("Expected status 405 for GET, got %d", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Method not allowed") {
+			t.Errorf("GET body = %q, want 'Method not allowed'", string(body))
+		}
+	})
 
-			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Fatalf("Expected status 405, got %d", resp.StatusCode)
-			}
-			if len(ts.mockModels.GetModels()) != 1 {
-				t.Errorf("A rejected copy must leave nothing behind, got %d rows", len(ts.mockModels.GetModels()))
-			}
-		})
+	// 2. PATCH /fe/api/models/copy-src/copy -> 405 plain-text
+	t.Run("PATCH", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPatch, server.URL+"/fe/api/models/copy-src/copy", nil)
+		if err != nil {
+			t.Fatalf("Failed to build PATCH request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PATCH failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("Expected status 405 for PATCH, got %d", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Method not allowed") {
+			t.Errorf("PATCH body = %q, want 'Method not allowed'", string(body))
+		}
+	})
+
+	// 3. DELETE /fe/api/models/copy-src/copy -> 404 (non-existent id)
+	t.Run("DELETE", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodDelete, server.URL+"/fe/api/models/copy-src/copy", nil)
+		if err != nil {
+			t.Fatalf("Failed to build DELETE request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("Expected status 404 for DELETE, got %d (body: %s)", resp.StatusCode, string(body))
+		}
+		var errOut map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+			t.Fatalf("Failed to decode DELETE error response: %v", err)
+		}
+		if errOut["error"] != "model not found" {
+			t.Errorf("DELETE error = %q, want 'model not found'", errOut["error"])
+		}
+	})
+
+	// 4. PUT /fe/api/models/copy-src/copy -> 400 (hits PUT 400-on-missing path)
+	t.Run("PUT", func(t *testing.T) {
+		putBody := `{"name":"Nonexistent Target","credentials":[{"credential_id":"test-cred","weight":1}]}`
+		req, err := http.NewRequest(http.MethodPut, server.URL+"/fe/api/models/copy-src/copy", strings.NewReader(putBody))
+		if err != nil {
+			t.Fatalf("Failed to build PUT request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("Expected status 400 for PUT on non-existent id, got %d (body: %s)", resp.StatusCode, string(body))
+		}
+		var errOut map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+			t.Fatalf("Failed to decode PUT error response: %v", err)
+		}
+		if errOut["error"] != "model not found" {
+			t.Errorf("PUT error = %q, want 'model not found'", errOut["error"])
+		}
+	})
+
+	if len(ts.mockModels.GetModels()) != 1 {
+		t.Errorf("Non-POST calls must leave store untouched, got %d rows", len(ts.mockModels.GetModels()))
 	}
 }
 
@@ -1754,9 +1832,8 @@ func TestHandleModelDetail_PUTAndDelete_StillWork(t *testing.T) {
 //     source's credential rows — no secret is duplicated);
 //  3. a duplicate new id is refused AND the existing row is NOT
 //     overwritten — the store's INSERT is an UPSERT (PostgreSQL
-//     "ON CONFLICT (id) DO UPDATE", SQLite "INSERT OR REPLACE"), so
-//     the route's pre-check is the ONLY thing standing between a
-//     mis-typed copy and a silent clobber of a live model row.
+//     "ON CONFLICT (id) DO UPDATE", SQLite "INSERT OR REPLACE"),
+//     protected by route pre-check and store in-lock duplicate check.
 func TestHandleModelCopy_DBBackend_PersistsRowAndRefusesClobber(t *testing.T) {
 	ts := newRealPUTTestServer(t)
 	defer ts.cleanup()
@@ -2105,5 +2182,332 @@ func TestHandleModelCopy_DBBackend_SourceClaimedByGroup_CopiesSourceRow(t *testi
 	}
 	if groupCount != 1 {
 		t.Errorf("Expected exactly 1 group in store, found %d", groupCount)
+	}
+}
+
+// TestHandleModelCopy_CollidingPair_AmbiguousSourceRejected asserts that when
+// BOTH "foo" and "foo/copy" exist as distinct rows, POST /fe/api/models/foo/copy
+// is rejected 400 with an ambiguous source error naming both IDs, and no new row
+// is created.
+func TestHandleModelCopy_CollidingPair_AmbiguousSourceRejected(t *testing.T) {
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	// Seed BOTH "foo" and "foo/copy" as distinct rows.
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "foo",
+		Name:          "Foo Model",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-foo",
+		Credentials:   models.TestRefs("test-cred"),
+	}); err != nil {
+		t.Fatalf("seed foo: %v", err)
+	}
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "foo/copy",
+		Name:          "Foo Copy Model",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-foo-copy",
+		Credentials:   models.TestRefs("test-cred"),
+	}); err != nil {
+		t.Fatalf("seed foo/copy: %v", err)
+	}
+
+	resp := postCopy(t, server, "foo", `{"new_id":"copy-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 400, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+
+	var errOut map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	want := `ambiguous copy source: "foo" and "foo/copy" both exist`
+	if errOut["error"] != want {
+		t.Errorf("error = %q, want %q", errOut["error"], want)
+	}
+
+	if ts.mockModels.GetModel("copy-dst") != nil {
+		t.Fatal("Ambiguous copy must create no new row")
+	}
+	if len(ts.mockModels.GetModels()) != 2 {
+		t.Errorf("Expected 2 models in store, found %d", len(ts.mockModels.GetModels()))
+	}
+}
+
+// TestHandleModelCopy_DBBackend_NewIDClaimedByGroup_Rejected asserts that
+// when the proposed new id is claimed by an enabled group via shadow_model_id,
+// the copy is rejected 400 with "model ID is claimed by an enabled group"
+// and no row is created.
+func TestHandleModelCopy_DBBackend_NewIDClaimedByGroup_Rejected(t *testing.T) {
+	ts := newRealPUTTestServer(t)
+	defer ts.cleanup()
+
+	// 1. Seed the source row (a chat model with one credential ref).
+	sourceModel := models.ModelConfig{
+		ID:             "copy-src",
+		Name:           "Copy Source Chat",
+		Enabled:        true,
+		Kind:           models.KindChat,
+		Internal:       true,
+		InternalModel:  "glm-source-model",
+		Credentials:    models.TestRefs("openai-cred"),
+		TruncateParams: []string{"max_completion_tokens"},
+	}
+	if err := ts.mgr.AddModel(sourceModel); err != nil {
+		t.Fatalf("seed source model: %v", err)
+	}
+
+	// 2. Seed an enabled group row that claims "claimed-dst" via shadow_model_id.
+	// To test the claims guard when "claimed-dst" has no underlying row, we seed
+	// the group and stamp shadow_model_id directly in SQL, then trigger a claims
+	// index rebuild via UpdateModel.
+	groupModel := models.ModelConfig{
+		ID:                           "parent-group",
+		Name:                         "Parent Group",
+		Enabled:                      true,
+		Kind:                         models.KindGroup,
+		Internal:                     true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
+	}
+	if err := ts.mgr.AddModel(groupModel); err != nil {
+		t.Fatalf("seed group model: %v", err)
+	}
+
+	dbConn, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open DB connection: %v", err)
+	}
+	defer dbConn.Close()
+
+	if _, err := dbConn.DB.ExecContext(context.Background(),
+		"UPDATE models SET shadow_model_id = ? WHERE id = ?",
+		"claimed-dst", "parent-group",
+	); err != nil {
+		t.Fatalf("stamp shadow_model_id in SQL: %v", err)
+	}
+
+	// Trigger claims index rebuild in ts.mgr via an UpdateModel on copy-src.
+	if err := ts.mgr.UpdateModel("copy-src", sourceModel); err != nil {
+		t.Fatalf("trigger claims rebuild: %v", err)
+	}
+
+	// Verify that claims-first GetModel redirects "claimed-dst" to the group row.
+	claimedLookup := ts.mgr.GetModel("claimed-dst")
+	if claimedLookup == nil || claimedLookup.ID != "parent-group" {
+		t.Fatalf("setup precondition failed: GetModel(claimed-dst) returned %v, expected parent-group via claims redirect", claimedLookup)
+	}
+	if native := ts.mgr.GetModelNative("claimed-dst"); native != nil {
+		t.Fatalf("setup precondition failed: GetModelNative(claimed-dst) should be nil, got: %v", native)
+	}
+
+	// 3. POST /fe/api/models/copy-src/copy with new_id="claimed-dst".
+	resp := postCopy(t, ts.server, "copy-src", `{"new_id":"claimed-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 400, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+
+	var errOut map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	want := "model ID is claimed by an enabled group"
+	if errOut["error"] != want {
+		t.Errorf("error = %q, want %q", errOut["error"], want)
+	}
+
+	// 4. Assert NO row with id "claimed-dst" was created.
+	if row := ts.mgr.GetModelNative("claimed-dst"); row != nil {
+		t.Fatalf("Copy row must not be created when new ID is claimed by group, found: %+v", row)
+	}
+}
+
+type mockModelsConfigDuplicateOnAdd struct {
+	*mockModelsConfig
+}
+
+func (m *mockModelsConfigDuplicateOnAdd) AddModel(model models.ModelConfig) error {
+	return models.ErrDuplicateModelID
+}
+
+// TestHandleModelCopy_StoreDuplicateErrorMappedTo400 uses a double whose
+// AddModel returns ErrDuplicateModelID for an ID that does NOT exist in the
+// store (bypassing the route pre-check), proving the route maps the store-level
+// duplicate error to 400.
+func TestHandleModelCopy_StoreDuplicateErrorMappedTo400(t *testing.T) {
+	mock := newMockModelsConfigForHandlers()
+	mock.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+	mock.AddModel(models.ModelConfig{
+		ID:            "copy-src",
+		Name:          "Copy Source",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-5.0",
+		Credentials:   models.TestRefs("test-cred"),
+	})
+
+	double := &mockModelsConfigDuplicateOnAdd{mockModelsConfig: mock}
+	s := &Server{modelsConfig: double}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Propose a new_id that does NOT exist in the mock, so the route's
+	// resolveModelRowByID pre-check returns nil.
+	resp := postCopy(t, server, "copy-src", `{"new_id":"nonexistent-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 400, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+	var errOut map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if errOut["error"] != models.ErrDuplicateModelID.Error() {
+		t.Errorf("error = %q, want %q", errOut["error"], models.ErrDuplicateModelID.Error())
+	}
+}
+
+// TestHandleModelCopy_SourceWithoutCredentials_Rejected400 asserts that
+// copying a source model with no credentials (e.g. a legacy external model)
+// is rejected with 400 and creates no row.
+func TestHandleModelCopy_SourceWithoutCredentials_Rejected400(t *testing.T) {
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:          "no-cred-src",
+		Name:        "No Cred Source",
+		Enabled:     true,
+		Internal:    false,
+		Credentials: nil,
+	}); err != nil {
+		t.Fatalf("seed no-cred-src: %v", err)
+	}
+
+	resp := postCopy(t, server, "no-cred-src", `{"new_id":"no-cred-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 400, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+	var errOut map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	want := "source model has no credentials and cannot be copied"
+	if errOut["error"] != want {
+		t.Errorf("error = %q, want %q", errOut["error"], want)
+	}
+	if ts.mockModels.GetModel("no-cred-dst") != nil {
+		t.Fatal("A rejected copy must not create a row")
+	}
+}
+
+type mockModelsConfigValidationErrorOnAdd struct {
+	*mockModelsConfig
+	validationErr error
+}
+
+func (m *mockModelsConfigValidationErrorOnAdd) AddModel(model models.ModelConfig) error {
+	return m.validationErr
+}
+
+// TestHandleModelCopy_AddModelValidationError_MappedTo400 asserts that a
+// store-level validation error from AddModel (such as "internal_model required")
+// is mapped to 400 Bad Request by the copy route (pinning C3).
+func TestHandleModelCopy_AddModelValidationError_MappedTo400(t *testing.T) {
+	mock := newMockModelsConfigForHandlers()
+	mock.AddCredential(models.CredentialConfig{
+		ID:       "test-cred",
+		Provider: "openai",
+		APIKey:   "test-key",
+	})
+	mock.AddModel(models.ModelConfig{
+		ID:            "copy-src",
+		Name:          "Copy Source",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-5.0",
+		Credentials:   models.TestRefs("test-cred"),
+	})
+
+	double := &mockModelsConfigValidationErrorOnAdd{
+		mockModelsConfig: mock,
+		validationErr:    errors.New("internal_model required"),
+	}
+	s := &Server{modelsConfig: double}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/models/", s.handleModelDetail)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp := postCopy(t, server, "copy-src", `{"new_id":"copy-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 400, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+	var errOut map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&errOut); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if errOut["error"] != "internal_model required" {
+		t.Errorf("error = %q, want %q", errOut["error"], "internal_model required")
+	}
+}
+
+// TestHandleModelCopy_SourceInternalFalse_CopyReportsInternalTrue asserts that
+// when copying a source with internal=false, the returned 201 DTO reports
+// internal=true (truthful to the persisted store state, pinning C4).
+func TestHandleModelCopy_SourceInternalFalse_CopyReportsInternalTrue(t *testing.T) {
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "ext-src",
+		Name:          "External Source",
+		Enabled:       true,
+		Internal:      false,
+		Credentials:   models.TestRefs("test-cred"),
+		InternalModel: "glm-ext",
+	}); err != nil {
+		t.Fatalf("seed ext-src: %v", err)
+	}
+
+	resp := postCopy(t, server, "ext-src", `{"new_id":"ext-dst"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 201, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+	var out Model
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if !out.Internal {
+		t.Errorf("out.Internal = false, want true (the 201 DTO must report the persisted internal=true state)")
 	}
 }
