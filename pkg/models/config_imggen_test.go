@@ -26,7 +26,28 @@ func TestValidateKindRules_Empty_DefaultsToChat(t *testing.T) {
 func TestValidateKindRules_Chat_AlwaysValid(t *testing.T) {
 	m := &ModelConfig{Kind: KindChat}
 	if err := ValidateKindRules(m, "openai"); err != nil {
-		t.Errorf("chat kind should always be valid, got: %v", err)
+		t.Errorf("chat kind should be valid for standard provider, got: %v", err)
+	}
+}
+
+func TestValidateKindRules_Chat_RejectsNineRouter(t *testing.T) {
+	m := &ModelConfig{ID: "chat-model-1", Kind: KindChat}
+	err := ValidateKindRules(m, "9router")
+	if err == nil {
+		t.Fatal("expected chat kind to reject 9router provider")
+	}
+	if !strings.Contains(err.Error(), "cannot use \"9router\" provider (image-generation only)") {
+		t.Errorf("error = %q, want mention of image-generation only", err.Error())
+	}
+
+	// Empty kind defaults to chat, so it must also reject 9router
+	mEmpty := &ModelConfig{ID: "chat-model-2", Kind: ""}
+	errEmpty := ValidateKindRules(mEmpty, "9router")
+	if errEmpty == nil {
+		t.Fatal("expected empty (default chat) kind to reject 9router provider")
+	}
+	if !strings.Contains(errEmpty.Error(), "cannot use \"9router\" provider (image-generation only)") {
+		t.Errorf("error = %q, want mention of image-generation only", errEmpty.Error())
 	}
 }
 
@@ -59,6 +80,16 @@ func TestValidateKindRules_ImageGen_AllRules(t *testing.T) {
 			wantErrSub: "",
 		},
 		{
+			name: "valid image-gen 9router",
+			mutate: func(m *ModelConfig) {
+				m.Internal = true
+				m.InternalModel = "ag/gemini-3.8-flash"
+				m.Credentials = []CredentialRef{{CredentialID: "c", Weight: 1, Position: 0}}
+			},
+			provider:   "9router",
+			wantErrSub: "",
+		},
+		{
 			name: "image-gen requires internal",
 			mutate: func(m *ModelConfig) {
 				m.Internal = false
@@ -87,14 +118,14 @@ func TestValidateKindRules_ImageGen_AllRules(t *testing.T) {
 			wantErrSub: "at least one credential",
 		},
 		{
-			name: "image-gen requires minimax provider",
+			name: "image-gen requires minimax or 9router provider",
 			mutate: func(m *ModelConfig) {
 				m.Internal = true
 				m.InternalModel = "image-01"
 				m.Credentials = []CredentialRef{{CredentialID: "c", Weight: 1, Position: 0}}
 			},
 			provider:   "openai",
-			wantErrSub: "minimax",
+			wantErrSub: `requires the primary credential's provider to be "minimax" or "9router" (got "openai")`,
 		},
 		{
 			name: "image-gen rejects fallback_chain",

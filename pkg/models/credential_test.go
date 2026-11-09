@@ -36,6 +36,7 @@ func TestIsValidProvider(t *testing.T) {
 		{"azure valid", "azure", true},
 		{"zai valid", "zai", true},
 		{"minimax valid", "minimax", true},
+		{"9router valid", "9router", true},
 		{"grok valid", "grok", true},
 		{"opencode valid", "opencode", true},
 		{"opencode-go valid", "opencode-go", true},
