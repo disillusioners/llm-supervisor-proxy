@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup } from '@testing-library/preact';
+import { render, cleanup, fireEvent, act } from '@testing-library/preact';
 import { ModelsTab } from '../ModelsTab';
 import type { Model } from '../../../types';
 
@@ -31,6 +31,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -56,6 +57,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -83,6 +85,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -106,6 +109,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -128,6 +132,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -158,6 +163,7 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
         onUpdateModel={vi.fn()}
         onDeleteModel={vi.fn()}
         onToggleModel={vi.fn()}
+        onCopyModel={vi.fn()}
         status={null}
         setStatus={vi.fn()}
       />,
@@ -166,5 +172,198 @@ describe('ModelsTab — chat-tab filter for image-gen rows (C-16, T2.4.5, FE-15)
     // empty-state now renders because chatModels.length === 0.
     expect(container.textContent).not.toContain('Image B');
     expect(container.textContent).toContain('No models configured');
+  });
+});
+
+// copy-model commission — the chat tab's Copy action.
+//
+// The BE route (POST /fe/api/models/{id}/copy) owns the clone
+// semantics; this suite pins the FE contract around it: prefill,
+// inline validation, the error path (dialog stays open, typed id
+// preserved, BE error shown inline), the success path (dialog closes,
+// success toast raised) and the a11y attributes.
+describe('ModelsTab — copy model action (copy-model commission)', () => {
+  const chat = makeModel({ id: 'm1', name: 'M1' });
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  // Render the tab with a single chat model and return the pieces the
+  // copy flow needs.
+  function renderTab(onCopyModel: (sourceId: string, newId: string) => Promise<void>) {
+    const setStatus = vi.fn();
+    const { container } = render(
+      <ModelsTab
+        models={[chat]}
+        onAddModel={vi.fn()}
+        onUpdateModel={vi.fn()}
+        onDeleteModel={vi.fn()}
+        onToggleModel={vi.fn()}
+        onCopyModel={onCopyModel}
+        status={null}
+        setStatus={setStatus}
+      />,
+    );
+    const copyBtn = container.querySelector('[data-testid="copy-model-button"]') as HTMLButtonElement;
+    const dialog = () => container.querySelector('[data-testid="copy-model-dialog"]');
+    const input = () => container.querySelector('[data-testid="copy-model-new-id-input"]') as HTMLInputElement;
+    const confirm = () => container.querySelector('[data-testid="copy-model-confirm"]') as HTMLButtonElement;
+    const alert = () => container.querySelector('[role="alert"]');
+    return { container, setStatus, copyBtn, dialog, input, confirm, alert };
+  }
+
+  it('renders a Copy row action with the house attributes (type/title/aria-label/testid)', () => {
+    const { container, copyBtn } = renderTab(vi.fn());
+    expect(copyBtn).not.toBeNull();
+    expect(copyBtn.getAttribute('type')).toBe('button');
+    expect(copyBtn.getAttribute('title')).toBe('Copy M1');
+    expect(copyBtn.getAttribute('aria-label')).toBe('Copy M1');
+    expect(container.querySelectorAll('[data-testid="copy-model-button"]').length).toBe(1);
+  });
+
+  it('opens the dialog prefilled with "<source-id>-copy" and focuses the new-id input', () => {
+    const { copyBtn, dialog, input } = renderTab(vi.fn());
+    expect(dialog()).toBeNull();
+
+    fireEvent.click(copyBtn);
+
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-copy');
+    // Initial focus lands on the new-id input.
+    expect(document.activeElement).toBe(input());
+  });
+
+  it('inline validation blocks the submit when the new id is empty', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    const { copyBtn, input, confirm, alert } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: '' } });
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    // The BE is never called.
+    expect(onCopy).not.toHaveBeenCalled();
+    // The message is inline + announced (role="alert").
+    expect(alert()!.textContent).toBe('new_id is required');
+  });
+
+  it('inline validation blocks the submit when the new id contains "/" or whitespace', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    const { copyBtn, input, confirm, alert } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: 'bad/id' } });
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+    expect(onCopy).not.toHaveBeenCalled();
+    expect(alert()!.textContent).toBe('new_id must not contain "/" or whitespace');
+
+    // Whitespace is refused with the same message (the BE's rule).
+    fireEvent.input(input(), { target: { value: 'bad id' } });
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+    expect(onCopy).not.toHaveBeenCalled();
+    expect(alert()!.textContent).toBe('new_id must not contain "/" or whitespace');
+  });
+
+  it('submit calls onCopyModel with the source id and the typed new id', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    const { copyBtn, input, confirm } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: 'm1-variant' } });
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(onCopy).toHaveBeenCalledWith('m1', 'm1-variant');
+  });
+
+  it('success closes the dialog and raises the success toast naming the new id + the DISABLED warning', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    const { copyBtn, dialog, setStatus, confirm } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    // The dialog is gone.
+    expect(dialog()).toBeNull();
+    // The house toast is raised through setStatus (the container's
+    // toast API — SettingsPage maps setStatus onto its ToastContainer).
+    expect(setStatus).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenCalledWith({
+      type: 'success',
+      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+    });
+  });
+
+  it('a backend failure keeps the dialog open, preserves the typed id and shows the BE error inline', async () => {
+    const onCopy = vi.fn().mockRejectedValue(new Error('duplicate model ID'));
+    const { copyBtn, dialog, input, confirm, alert, setStatus } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: 'm1-copy' } });
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    // The dialog STAYS OPEN and the typed id is PRESERVED.
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-copy');
+    // The BE's {"error":"..."} text is shown inline, announced by role.
+    expect(alert()!.textContent).toBe('duplicate model ID');
+    // No success toast on a failure.
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('a11y — role="dialog", aria-modal, aria-labelledby → the dialog title id', () => {
+    const { copyBtn, dialog } = renderTab(vi.fn());
+    fireEvent.click(copyBtn);
+
+    const panel = dialog()!;
+    expect(panel.getAttribute('role')).toBe('dialog');
+    expect(panel.getAttribute('aria-modal')).toBe('true');
+    const labelledBy = panel.getAttribute('aria-labelledby')!;
+    expect(labelledBy).toBeTruthy();
+    // The title element carries that id.
+    const title = panel.querySelector(`#${labelledBy}`);
+    expect(title).not.toBeNull();
+    expect(title!.textContent).toContain('Copy Model');
+  });
+
+  it('a11y — Esc closes the dialog and focus is restored to the Copy button', async () => {
+    const { copyBtn, dialog, input } = renderTab(vi.fn());
+
+    fireEvent.click(copyBtn);
+    expect(dialog()).not.toBeNull();
+    expect(document.activeElement).toBe(input());
+
+    await act(async () => {
+      // The keydown is fired on the focused input — it bubbles up to
+      // the window listener, exactly as it does in a browser.
+      fireEvent.keyDown(input(), { key: 'Escape' });
+      await Promise.resolve();
+    });
+
+    expect(dialog()).toBeNull();
+    // Focus is RESTORED to the Copy button that opened the dialog.
+    expect(document.activeElement).toBe(copyBtn);
   });
 });

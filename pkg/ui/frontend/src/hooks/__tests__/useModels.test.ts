@@ -183,5 +183,49 @@ describe('useModels — hook contract (Decision Commission P3.3 amendment 9d)', 
 
       deleteSpy.mockRestore();
     });
+
+    // copy-model commission — the copy route writes a model row, so it
+    // invalidates the same four keys as every other mutation.
+    it('copyModel POSTs to /fe/api/models/{id}/copy with the new_id payload, invalidates all four keys and refetches', async () => {
+      const deleteSpy = vi.spyOn(defaultAPICache, 'delete');
+
+      fetchMock.mockResolvedValueOnce(jsonResponse([
+        { id: 'm-1', name: 'M1', enabled: true, fallback_chain: [] },
+      ]));
+      const { result } = renderHook(() => useModels());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      deleteSpy.mockClear();
+
+      // Copy response (201) — the created (DORMANT, enabled=false) DTO.
+      fetchMock.mockResolvedValueOnce(jsonResponse(
+        { id: 'm-1-copy', name: 'm-1-copy', enabled: false, fallback_chain: [] },
+        { status: 201 },
+      ));
+      // Refetch after invalidation.
+      fetchMock.mockResolvedValueOnce(jsonResponse([]));
+
+      await act(async () => {
+        await result.current.copyModel('m-1', 'm-1-copy');
+      });
+
+      // The copy route + its documented payload.
+      const postCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes('/copy'));
+      expect(postCall).toBeDefined();
+      expect(postCall![0]).toBe('/fe/api/models/m-1/copy');
+      expect(postCall![1]).toMatchObject({
+        method: 'POST',
+        body: JSON.stringify({ new_id: 'm-1-copy' }),
+      });
+
+      // All four model caches are dropped (never deleteByPrefix).
+      assertAllThreeKeysDeleted(deleteSpy);
+
+      // The list is refetched so the new row shows up.
+      const listCalls = fetchMock.mock.calls.filter((c) => (c[0] as string) === '/fe/api/models');
+      expect(listCalls.length).toBeGreaterThanOrEqual(2);
+
+      deleteSpy.mockRestore();
+    });
   });
 });
