@@ -1297,9 +1297,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 // as a subtree, so BOTH "/fe/api/models/{id}" and
 // "/fe/api/models/{id}/copy" land here — the same precedent as
 // "/fe/api/requests/{id}" + "/fe/api/requests/{id}/summary" (see
-// handleRequestDetailOrSummary). Only a remainder ending in "/copy"
-// enters the copy branch; model ids may not contain "/" (the copy
-// route enforces that rule), so the suffix is unambiguous.
+// handleRequestDetailOrSummary). A remainder ending in "/copy" enters
+// the copy branch. If a model row whose id is literally the full
+// remainder exists (e.g. "foo/copy"), that row takes precedence:
+// POST copies it, while PUT/DELETE fall through to normal id handling.
 //
 // Phase 4 replaced the single-ref DTO; the legacy top-level
 // `credential_id` field is dropped as an unknown JSON field during the
@@ -1312,9 +1313,20 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	// Nested copy route — dispatched BEFORE the id is taken, because
 	// the remainder of a copy path is "{id}/copy", not "{id}".
+	// If a model whose own id literally ends in "/copy" exists, that
+	// row takes precedence: POST copies it, while PUT/DELETE fall
+	// through to normal id handling so the row can be edited or deleted.
 	if strings.HasSuffix(remainder, "/copy") {
-		s.handleModelCopy(w, r, strings.TrimSuffix(remainder, "/copy"))
-		return
+		if exact := s.resolveModelRowByID(remainder); exact != nil {
+			if r.Method == http.MethodPost {
+				s.handleModelCopy(w, r, exact.ID)
+				return
+			}
+			// Fall through to normal id handling for PUT/DELETE.
+		} else {
+			s.handleModelCopy(w, r, strings.TrimSuffix(remainder, "/copy"))
+			return
+		}
 	}
 
 	id := remainder
@@ -1840,13 +1852,14 @@ func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceI
 		return
 	}
 
-	// Duplicate guard. The store's pre-INSERT check (pkg/store/
-	// database/store.go:1608-1615 → ErrDuplicateModelID) is the ONLY
-	// guard against a same-id write, and the underlying INSERT is an
-	// UPSERT (PostgreSQL "ON CONFLICT (id) DO UPDATE" —
-	// pkg/store/database/querybuilder.go:99; SQLite "INSERT OR
-	// REPLACE" — :122) that would SILENTLY OVERWRITE the existing row.
-	// Pre-check here so a copy can never clobber a live row.
+	// Duplicate guard (defense in depth: route pre-check → store
+	// ErrDuplicateModelID at pkg/store/database/store.go:1608-1615 →
+	// JSON-backend twin → cache-layer delegation). The underlying
+	// store query is an UPSERT (PostgreSQL "ON CONFLICT (id) DO
+	// UPDATE" — pkg/store/database/querybuilder.go:99; SQLite "INSERT OR
+	// REPLACE" — :122) that would silently overwrite an existing row
+	// without the duplicate guards. Pre-check here as the first line of
+	// defense so a copy can never clobber a live row.
 	if s.resolveModelRowByID(copyModel.ID) != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -1867,10 +1880,19 @@ func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceI
 	}
 
 	// Every write is stamped internal=true by the store (remove-
-	// external-upstream P1) and an internal row must carry at least
-	// one credential ref. A legacy EXTERNAL source (no credentials)
-	// therefore cannot be written as a copy — refuse it here with a
-	// 400 instead of letting the store fail with a 500.
+	// external-upstream P1, pkg/store/database/store.go:1596) and an
+	// internal row must carry at least one credential ref. A legacy
+	// EXTERNAL source (no credentials) therefore cannot be written
+	// as a copy — refuse it here with a 400 instead of letting the
+	// store fail with a 500.
+	//
+	// Ruling deviation note: the specification ruling lists `internal`
+	// among the copied-verbatim fields and lists no such refusal.
+	// However, because AddModel force-stamps internal=true regardless of
+	// the source's internal setting and requires >=1 credential for any
+	// internal row, a zero-credential copy could only ever surface as a
+	// 500 store validation error. Refusing it with 400 here is the honest
+	// outcome.
 	if len(copyModel.Credentials) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

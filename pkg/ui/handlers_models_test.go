@@ -1856,3 +1856,254 @@ func TestHandleModelCopy_ReachableThroughRegisteredMux(t *testing.T) {
 		t.Fatal("Copy was not added to the store")
 	}
 }
+
+// TestHandleModelCopy_ExactIDEndingInCopy_PUTandDELETE asserts that a model
+// whose own id literally ends in "/copy" (e.g. "foo/copy") can still be
+// updated via PUT and deleted via DELETE through /fe/api/models/foo/copy
+// without being blocked by the nested copy route dispatch.
+func TestHandleModelCopy_ExactIDEndingInCopy_PUTandDELETE(t *testing.T) {
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	// Seed a model whose id is "foo/copy".
+	model := models.ModelConfig{
+		ID:            "foo/copy",
+		Name:          "Original Foo Copy",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-foo",
+		Credentials:   models.TestRefs("test-cred"),
+	}
+	if err := ts.mockModels.AddModel(model); err != nil {
+		t.Fatalf("seed foo/copy: %v", err)
+	}
+
+	// 1. PUT /fe/api/models/foo/copy updates the model.
+	putBody := `{"name":"Updated Foo Copy","internal":true,"internal_model":"glm-foo-updated","credentials":[{"credential_id":"test-cred","priority":1,"weight":1}]}`
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/fe/api/models/foo/copy", strings.NewReader(putBody))
+	if err != nil {
+		t.Fatalf("build PUT: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(putResp.Body)
+		t.Fatalf("PUT /fe/api/models/foo/copy returned %d, want 200 (body: %s)", putResp.StatusCode, string(body))
+	}
+
+	updated := ts.mockModels.GetModel("foo/copy")
+	if updated == nil {
+		t.Fatal("Model foo/copy missing after PUT")
+	}
+	if updated.Name != "Updated Foo Copy" {
+		t.Errorf("Updated Name = %q, want %q", updated.Name, "Updated Foo Copy")
+	}
+	if updated.InternalModel != "glm-foo-updated" {
+		t.Errorf("Updated InternalModel = %q, want %q", updated.InternalModel, "glm-foo-updated")
+	}
+
+	// 2. DELETE /fe/api/models/foo/copy deletes the model.
+	delReq, err := http.NewRequest(http.MethodDelete, server.URL+"/fe/api/models/foo/copy", nil)
+	if err != nil {
+		t.Fatalf("build DELETE: %v", err)
+	}
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	defer delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(delResp.Body)
+		t.Fatalf("DELETE /fe/api/models/foo/copy returned %d, want 204 (body: %s)", delResp.StatusCode, string(body))
+	}
+
+	if deleted := ts.mockModels.GetModel("foo/copy"); deleted != nil {
+		t.Errorf("Model foo/copy still exists after DELETE: %+v", deleted)
+	}
+}
+
+// TestHandleModelCopy_ExactIDEndingInCopy_POSTCopiesExactRow asserts that
+// POST /fe/api/models/foo/copy copies the row with exact id "foo/copy" when that
+// row exists, and POST /fe/api/models/normal-id/copy still copies "normal-id".
+func TestHandleModelCopy_ExactIDEndingInCopy_POSTCopiesExactRow(t *testing.T) {
+	ts := newModelTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	// Seed a model whose id is "foo/copy".
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "foo/copy",
+		Name:          "Foo Copy Source",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-exact-copy",
+		Credentials:   models.TestRefs("test-cred"),
+	}); err != nil {
+		t.Fatalf("seed foo/copy: %v", err)
+	}
+
+	// Seed a normal model whose id is "normal-id".
+	if err := ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "normal-id",
+		Name:          "Normal Model Source",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "glm-normal-model",
+		Credentials:   models.TestRefs("test-cred"),
+	}); err != nil {
+		t.Fatalf("seed normal-id: %v", err)
+	}
+
+	// 1. POST /fe/api/models/foo/copy copies the exact "foo/copy" row.
+	reqCopyExact, err := http.NewRequest(http.MethodPost, server.URL+"/fe/api/models/foo/copy", strings.NewReader(`{"new_id":"copied-from-foo-copy"}`))
+	if err != nil {
+		t.Fatalf("build copy request: %v", err)
+	}
+	reqCopyExact.Header.Set("Content-Type", "application/json")
+	respExact, err := http.DefaultClient.Do(reqCopyExact)
+	if err != nil {
+		t.Fatalf("POST /fe/api/models/foo/copy failed: %v", err)
+	}
+	defer respExact.Body.Close()
+	if respExact.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(respExact.Body)
+		t.Fatalf("POST /fe/api/models/foo/copy returned %d, want 201 (body: %s)", respExact.StatusCode, string(body))
+	}
+
+	copiedFromExact := ts.mockModels.GetModel("copied-from-foo-copy")
+	if copiedFromExact == nil {
+		t.Fatal("Model copied-from-foo-copy was not created")
+	}
+	if copiedFromExact.InternalModel != "glm-exact-copy" {
+		t.Errorf("copiedFromExact.InternalModel = %q, want glm-exact-copy (should copy foo/copy)", copiedFromExact.InternalModel)
+	}
+	if copiedFromExact.Enabled {
+		t.Error("copiedFromExact.Enabled = true, want false (dormant clone)")
+	}
+
+	// 2. POST /fe/api/models/normal-id/copy still copies "normal-id".
+	respNormal := postCopy(t, server, "normal-id", `{"new_id":"copied-from-normal"}`)
+	defer respNormal.Body.Close()
+	if respNormal.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(respNormal.Body)
+		t.Fatalf("POST /fe/api/models/normal-id/copy returned %d, want 201 (body: %s)", respNormal.StatusCode, string(body))
+	}
+
+	copiedFromNormal := ts.mockModels.GetModel("copied-from-normal")
+	if copiedFromNormal == nil {
+		t.Fatal("Model copied-from-normal was not created")
+	}
+	if copiedFromNormal.InternalModel != "glm-normal-model" {
+		t.Errorf("copiedFromNormal.InternalModel = %q, want glm-normal-model", copiedFromNormal.InternalModel)
+	}
+	if copiedFromNormal.Enabled {
+		t.Error("copiedFromNormal.Enabled = true, want false (dormant clone)")
+	}
+}
+
+// TestHandleModelCopy_DBBackend_SourceClaimedByGroup_CopiesSourceRow exercises
+// copying a model that is claimed by an enabled group via shadow_model_id.
+// It proves that resolveModelRowByID defeats the claims-first GetModel redirect,
+// copying the underlying source row instead of the group, leaving group
+// membership untouched and writing no group row.
+func TestHandleModelCopy_DBBackend_SourceClaimedByGroup_CopiesSourceRow(t *testing.T) {
+	ts := newRealPUTTestServer(t)
+	defer ts.cleanup()
+
+	// 1. Seed the source row (a chat model with one credential ref).
+	sourceModel := models.ModelConfig{
+		ID:             "claimed-src",
+		Name:           "Claimed Source Chat",
+		Enabled:        true,
+		Kind:           models.KindChat,
+		Internal:       true,
+		InternalModel:  "glm-source-model",
+		Credentials:    models.TestRefs("openai-cred"),
+		TruncateParams: []string{"max_completion_tokens"},
+	}
+	if err := ts.mgr.AddModel(sourceModel); err != nil {
+		t.Fatalf("seed source model: %v", err)
+	}
+
+	// 2. Seed an enabled group row that claims the source model via shadow_model_id.
+	groupModel := models.ModelConfig{
+		ID:                           "parent-group",
+		Name:                         "Parent Group",
+		Enabled:                      true,
+		Kind:                         models.KindGroup,
+		Internal:                     true,
+		ExcludeFromUltimateSwitching: true,
+		Members:                      []models.GroupMember{{ModelID: "claimed-src", Weight: 1}},
+		ShadowModelID:                "claimed-src",
+	}
+	if err := ts.mgr.AddModel(groupModel); err != nil {
+		t.Fatalf("seed group model: %v", err)
+	}
+
+	// Verify that the claims-first GetModel indeed redirects to the group row.
+	claimedLookup := ts.mgr.GetModel("claimed-src")
+	if claimedLookup == nil || claimedLookup.ID != "parent-group" {
+		t.Fatalf("setup precondition failed: GetModel(claimed-src) returned %v, expected parent-group via claims redirect", claimedLookup)
+	}
+
+	// 3. POST /fe/api/models/claimed-src/copy
+	resp := postCopy(t, ts.server, "claimed-src", `{"new_id":"copy-from-claimed"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected status 201, got %d (body: %s)", resp.StatusCode, string(body))
+	}
+
+	// 4. Assert the COPY is of the SOURCE row (its copied fields equal the source's, NOT the group's).
+	copyRow := ts.mgr.GetModelNative("copy-from-claimed")
+	if copyRow == nil {
+		t.Fatal("Copy row was not persisted")
+	}
+	if copyRow.Kind != models.KindChat {
+		t.Errorf("Copy Kind = %q, want %q (must be chat, not group)", copyRow.Kind, models.KindChat)
+	}
+	if copyRow.InternalModel != "glm-source-model" {
+		t.Errorf("Copy InternalModel = %q, want glm-source-model", copyRow.InternalModel)
+	}
+	if len(copyRow.Credentials) != 1 || copyRow.Credentials[0].CredentialID != "openai-cred" {
+		t.Errorf("Copy Credentials = %v, want source credentials", copyRow.Credentials)
+	}
+	if len(copyRow.Members) != 0 {
+		t.Errorf("Copy Members = %v, want empty (membership must never be duplicated into copy)", copyRow.Members)
+	}
+	if copyRow.ShadowModelID != "" {
+		t.Errorf("Copy ShadowModelID = %q, want empty", copyRow.ShadowModelID)
+	}
+	if copyRow.Enabled {
+		t.Error("Copy Enabled = true, want false (dormant clone)")
+	}
+
+	// 5. Assert that the group's membership/members are unchanged — no membership is duplicated into the copy and no group row is written.
+	groupAfter := ts.mgr.GetModelNative("parent-group")
+	if groupAfter == nil {
+		t.Fatal("Group row missing after copy")
+	}
+	if len(groupAfter.Members) != 1 || groupAfter.Members[0].ModelID != "claimed-src" {
+		t.Errorf("Group Members changed: got %+v, want [{claimed-src 1}]", groupAfter.Members)
+	}
+	if groupAfter.ShadowModelID != "claimed-src" {
+		t.Errorf("Group ShadowModelID changed: got %q, want claimed-src", groupAfter.ShadowModelID)
+	}
+
+	// Assert no extra group rows exist.
+	allModels := ts.mgr.GetModels()
+	groupCount := 0
+	for _, m := range allModels {
+		if m.Kind == models.KindGroup {
+			groupCount++
+		}
+	}
+	if groupCount != 1 {
+		t.Errorf("Expected exactly 1 group in store, found %d", groupCount)
+	}
+}
