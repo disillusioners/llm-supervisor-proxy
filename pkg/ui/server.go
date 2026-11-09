@@ -821,28 +821,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			if kindFilter != nil && !kindFilter(mc) {
 				continue
 			}
-			out = append(out, Model{
-				ID:                           mc.ID,
-				Name:                         mc.Name,
-				Enabled:                      mc.Enabled,
-				FallbackChain:                mc.FallbackChain,
-				TruncateParams:               mc.TruncateParams,
-				Kind:                         mc.Kind,
-				Internal:                     mc.Internal,
-				Credentials:                  mc.Credentials,
-				InternalBaseURL:              mc.InternalBaseURL,
-				InternalModel:                mc.InternalModel,
-				ReleaseStreamChunkDeadline:   mc.ReleaseStreamChunkDeadline,
-				PeakHourEnabled:              mc.PeakHourEnabled,
-				PeakHourStart:                mc.PeakHourStart,
-				PeakHourEnd:                  mc.PeakHourEnd,
-				PeakHourTimezone:             mc.PeakHourTimezone,
-				PeakHourModel:                mc.PeakHourModel,
-				SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
-				ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
-				Members:                      mc.Members,
-				ShadowModelID:                mc.ShadowModelID,
-			})
+			out = append(out, modelConfigToDTO(mc))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1311,7 +1290,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleModelDetail handles PUT and DELETE /fe/api/models/{id}
+// handleModelDetail handles PUT and DELETE /fe/api/models/{id}, and
+// dispatches the nested POST /fe/api/models/{id}/copy route.
+//
+// The stdlib ServeMux matches the registered PREFIX "/fe/api/models/"
+// as a subtree, so BOTH "/fe/api/models/{id}" and
+// "/fe/api/models/{id}/copy" land here — the same precedent as
+// "/fe/api/requests/{id}" + "/fe/api/requests/{id}/summary" (see
+// handleRequestDetailOrSummary). Only a remainder ending in "/copy"
+// enters the copy branch; model ids may not contain "/" (the copy
+// route enforces that rule), so the suffix is unambiguous.
 //
 // Phase 4 replaced the single-ref DTO; the legacy top-level
 // `credential_id` field is dropped as an unknown JSON field during the
@@ -1319,8 +1307,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 // endpoint) remains the only legitimate carrier of a top-level
 // credential identifier — exempt from this gate by design.
 func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
-	// /fe/api/models/{id}
-	id := r.URL.Path[len("/fe/api/models/"):]
+	// /fe/api/models/{id} (or /fe/api/models/{id}/copy)
+	remainder := r.URL.Path[len("/fe/api/models/"):]
+
+	// Nested copy route — dispatched BEFORE the id is taken, because
+	// the remainder of a copy path is "{id}/copy", not "{id}".
+	if strings.HasSuffix(remainder, "/copy") {
+		s.handleModelCopy(w, r, strings.TrimSuffix(remainder, "/copy"))
+		return
+	}
+
+	id := remainder
 	if id == "" {
 		http.Error(w, "Missing ID", http.StatusBadRequest)
 		return
@@ -1763,6 +1760,197 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ModelCopyRequest is the body of POST /fe/api/models/{id}/copy.
+//
+// The body carries ONLY the new id: every other attribute of the copy
+// is derived from the source row by models.BuildModelCopy (see
+// pkg/models/copy.go) — the copy route cannot be used to smuggle a
+// different model shape through.
+type ModelCopyRequest struct {
+	NewID string `json:"new_id"`
+}
+
+// handleModelCopy serves POST /fe/api/models/{id}/copy — clones an
+// existing model row under a NEW id.
+//
+// Semantics (pkg/models/copy.go owns the fidelity contract):
+//
+//   - the copy is DORMANT (enabled=false): it serves no traffic,
+//     appears in no /v1/models listing and joins no race chain or
+//     load-balance pool until an operator enables it deliberately;
+//   - the copy SHARES the source's credential ROWS (refs only — no
+//     secret is duplicated, the credentials table is never written);
+//   - the copy is STANDALONE: group membership lives on the group
+//     row, so the copy is in no group and this route never writes a
+//     group row;
+//   - a group source is refused (400) — a group's identity IS its
+//     membership.
+//
+// Error envelope: the model-API dialect — flat {"error":"<string>"}.
+// Status vocabulary: 201 created / 400 validation + duplicate /
+// 404 missing source / 500 store error.
+func (s *Server) handleModelCopy(w http.ResponseWriter, r *http.Request, sourceID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Limit request body to 64KB to prevent memory exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	var req ModelCopyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Resolve the SOURCE row by ROW IDENTITY (direct id) — NOT via the
+	// claims-first GetModel: a source whose id is claimed by an ENABLED
+	// group resolves to the GROUP row there, and copying that row
+	// would duplicate a group's membership. The copy is a row-identity
+	// operation, so the true row is the source.
+	src := s.resolveModelRowByID(sourceID)
+	if src == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "model not found"})
+		return
+	}
+
+	// Build the copy fully in memory. Every validation below happens
+	// BEFORE the single write, so a failed copy leaves NOTHING behind.
+	copyModel, err := models.BuildModelCopy(src, req.NewID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, models.ErrCopyEmptyNewID),
+			errors.Is(err, models.ErrCopyInvalidNewID),
+			errors.Is(err, models.ErrCopySameID),
+			errors.Is(err, models.ErrCopyGroupNotCopyable):
+			status = http.StatusBadRequest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Duplicate guard. The store's pre-INSERT check (pkg/store/
+	// database/store.go:1608-1615 → ErrDuplicateModelID) is the ONLY
+	// guard against a same-id write, and the underlying INSERT is an
+	// UPSERT (PostgreSQL "ON CONFLICT (id) DO UPDATE" —
+	// pkg/store/database/querybuilder.go:99; SQLite "INSERT OR
+	// REPLACE" — :122) that would SILENTLY OVERWRITE the existing row.
+	// Pre-check here so a copy can never clobber a live row.
+	if s.resolveModelRowByID(copyModel.ID) != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": models.ErrDuplicateModelID.Error()})
+		return
+	}
+
+	// Credential parity with the create path: the copy carries the
+	// source's credential REFS, so they are validated (and position-
+	// stamped) exactly like a fresh create payload.
+	if credErrs := validateCredentials(copyModel.Credentials, copyModel.Internal, s.modelsConfig.GetCredentials()); len(credErrs) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid credentials: " + strings.Join(credErrs, "; "),
+		})
+		return
+	}
+
+	// Every write is stamped internal=true by the store (remove-
+	// external-upstream P1) and an internal row must carry at least
+	// one credential ref. A legacy EXTERNAL source (no credentials)
+	// therefore cannot be written as a copy — refuse it here with a
+	// 400 instead of letting the store fail with a 500.
+	if len(copyModel.Credentials) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "source model has no credentials and cannot be copied"})
+		return
+	}
+
+	// Single write — the same AddModel + Save path the create route
+	// uses (handleModels POST).
+	if err := s.modelsConfig.AddModel(*copyModel); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, models.ErrDuplicateModelID) {
+			status = http.StatusBadRequest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Persist changes to disk
+	if err := s.modelsConfig.Save(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(modelConfigToDTO(copyModel))
+}
+
+// resolveModelRowByID resolves a model row by DIRECT id (row
+// identity), bypassing the claims-first redirect that GetModel applies
+// (pkg/store/database/store.go:1052-1065 — an id claimed by an
+// ENABLED group resolves to the GROUP row).
+//
+// GetModel is tried first (the cheap path); when it answers with a
+// different row (the claim redirect) the exact-id scan over the
+// model snapshot takes over. Returns nil when no row carries that id.
+func (s *Server) resolveModelRowByID(id string) *models.ModelConfig {
+	if m := s.modelsConfig.GetModel(id); m != nil && m.ID == id {
+		return m
+	}
+	rows := s.modelsConfig.GetModels()
+	for i := range rows {
+		if rows[i].ID == id {
+			row := rows[i]
+			return &row
+		}
+	}
+	return nil
+}
+
+// modelConfigToDTO maps a model row onto the wire DTO exposed by the
+// model CRUD handlers. The GET listing uses the same mapping so the
+// two surfaces cannot drift when the DTO grows a field.
+func modelConfigToDTO(mc *models.ModelConfig) Model {
+	return Model{
+		ID:                           mc.ID,
+		Name:                         mc.Name,
+		Enabled:                      mc.Enabled,
+		FallbackChain:                mc.FallbackChain,
+		TruncateParams:               mc.TruncateParams,
+		Kind:                         mc.Kind,
+		Internal:                     mc.Internal,
+		Credentials:                  mc.Credentials,
+		InternalBaseURL:              mc.InternalBaseURL,
+		InternalModel:                mc.InternalModel,
+		ReleaseStreamChunkDeadline:   mc.ReleaseStreamChunkDeadline,
+		PeakHourEnabled:              mc.PeakHourEnabled,
+		PeakHourStart:                mc.PeakHourStart,
+		PeakHourEnd:                  mc.PeakHourEnd,
+		PeakHourTimezone:             mc.PeakHourTimezone,
+		PeakHourModel:                mc.PeakHourModel,
+		SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
+		ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
+		Members:                      mc.Members,
+		ShadowModelID:                mc.ShadowModelID,
 	}
 }
 
