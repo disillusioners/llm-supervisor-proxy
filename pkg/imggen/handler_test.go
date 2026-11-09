@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,10 +47,11 @@ type fakeMiniMax struct {
 }
 
 type fakeScript struct {
-	status      int
-	body        []byte
-	contentType string
-	delay       time.Duration
+	status        int
+	body          []byte
+	contentType   string
+	contentLength bool
+	delay         time.Duration
 	// gzipNegotiate turns the fake into a real gzip-negotiating
 	// upstream: when the incoming Accept-Encoding includes gzip,
 	// the response body is gzipped + Content-Encoding: gzip is
@@ -95,6 +97,9 @@ func newFakeMiniMax(t *testing.T, script fakeScript) (*httptest.Server, *fakeMin
 			w.Header().Set("Content-Encoding", "gzip")
 		}
 		w.Header().Set("Content-Type", script.contentType)
+		if script.contentLength && len(payload) > 0 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		}
 		w.WriteHeader(script.status)
 		_, _ = w.Write(payload)
 	}))

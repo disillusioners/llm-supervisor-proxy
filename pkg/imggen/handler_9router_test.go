@@ -2,9 +2,11 @@ package imggen
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,19 +82,28 @@ func newEnv9Router(t *testing.T, script fakeScript) *handlerTestEnv {
 
 // TestHandler_9Router_ConversionRelay — the upstream returns an
 // OpenAI-images body (b64_json); the client receives the converted
-// body with data[].image_urls as a data-URI.
+// body with data[].image_urls as a data-URI, and Content-Length is removed.
 func TestHandler_9Router_ConversionRelay(t *testing.T) {
 	body := map[string]interface{}{
 		"created": 7,
 		"data":    []interface{}{map[string]interface{}{"b64_json": b64JPEG()}},
 	}
 	raw, _ := json.Marshal(body)
-	env := newEnv9Router(t, fakeScript{status: 200, body: raw})
+	env := newEnv9Router(t, fakeScript{status: 200, body: raw, contentLength: true})
 
 	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"a cat"}`, nil)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	// Verify that the rewrite hook WAS invoked (body is converted, not raw b64_json passthrough,
+	// and Content-Length header was removed so HTTP stack recomputes it).
+	if bytes.Equal(rec.Body.Bytes(), raw) {
+		t.Fatalf("body should have been converted by rewrite hook, but remained byte-equal to raw upstream")
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != "" {
+		t.Errorf("Content-Length header should have been deleted for converted 9router response, got: %q", cl)
+	}
+
 	var out map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("parse: %v", err)
@@ -107,7 +118,94 @@ func TestHandler_9Router_ConversionRelay(t *testing.T) {
 	if !strings.HasPrefix(uri, "data:image/jpeg;base64,") {
 		t.Errorf("uri = %q, want data:image/jpeg;base64,", uri[:40])
 	}
-	_ = bytes.Equal
+}
+
+// TestHandler_9Router_URLShapedUpstreamResponse — if upstream returns a
+// URL-shaped response instead of b64_json, conversion fails cleanly with 502
+// response_conversion_failed and OpenAI error envelope.
+func TestHandler_9Router_URLShapedUpstreamResponse(t *testing.T) {
+	raw := []byte(`{"created":123,"data":[{"url":"https://example.com/cat.png"}]}`)
+	env := newEnv9Router(t, fakeScript{status: 200, body: raw})
+
+	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"a cat"}`, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	errObj, ok := out["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected OpenAI error envelope, got: %s", rec.Body.String())
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "failed to convert upstream response") || !strings.Contains(msg, "no convertible image in data") {
+		t.Errorf("message = %q, want conversion failure notice", msg)
+	}
+
+	// Meter failure: image_count must be 0
+	rows, err := env.usage.GetModelUsage(context.Background(), startHour(time.Now()), startHour(time.Now()))
+	if err != nil {
+		t.Fatalf("GetModelUsage: %v", err)
+	}
+	if len(rows) > 0 && rows[0].ImageCount != 0 {
+		t.Errorf("ImageCount = %d, want 0 on conversion failure", rows[0].ImageCount)
+	}
+}
+
+// TestHandler_9Router_PartialConversion_CountsAndBilling — upstream returns n=2
+// with 1 convertible item and 1 unconvertible item. Asserts success_count=1,
+// failed_count=1, and meter delta=1 (never overcharging for unconvertible items).
+func TestHandler_9Router_PartialConversion_CountsAndBilling(t *testing.T) {
+	body := map[string]interface{}{
+		"created": 10,
+		"data": []interface{}{
+			map[string]interface{}{"b64_json": b64JPEG()},
+			map[string]interface{}{}, // unconvertible item
+		},
+	}
+	raw, _ := json.Marshal(body)
+	env := newEnv9Router(t, fakeScript{status: 200, body: raw})
+
+	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"two cats","n":2}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	data, ok := out["data"].([]interface{})
+	if !ok || len(data) != 1 {
+		t.Fatalf("len(data) = %d, want 1", len(data))
+	}
+	md, ok := out["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing metadata in response")
+	}
+	if md["success_count"] != "1" {
+		t.Errorf("success_count = %v, want 1", md["success_count"])
+	}
+	if md["failed_count"] != "1" {
+		t.Errorf("failed_count = %v, want 1", md["failed_count"])
+	}
+
+	// Meter assertion: usage counter billed exactly 1 image (delivered images), not 2
+	rows, err := env.usage.GetModelUsage(context.Background(), startHour(time.Now()), startHour(time.Now()))
+	if err != nil {
+		t.Fatalf("GetModelUsage: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 model usage row, got %d", len(rows))
+	}
+	if rows[0].RequestCount != 1 {
+		t.Errorf("request_count = %d, want 1", rows[0].RequestCount)
+	}
+	if rows[0].ImageCount != 1 {
+		t.Errorf("image_count = %d, want 1 (must bill only delivered images)", rows[0].ImageCount)
+	}
 }
 
 // TestHandler_9Router_429Quota — upstream returns 429 with a nested
@@ -137,16 +235,22 @@ func TestHandler_9Router_429Quota(t *testing.T) {
 	}
 }
 
-// TestHandler_Minimax_ByteIdentical — minimax path is untouched: a
-// success body is relayed byte-for-byte (no hook runs).
+// TestHandler_Minimax_ByteIdenticalStill — minimax path is untouched: a
+// success body is relayed byte-for-byte (no hook runs) with Content-Length preserved.
 func TestHandler_Minimax_ByteIdenticalStill(t *testing.T) {
 	body := successBody(1, 0)
-	env := newEnv(t, fakeScript{status: 200, body: body})
+	env := newEnv(t, fakeScript{status: 200, body: body, contentLength: true})
 	rec := env.sendRequest(http.MethodPost, `{"model":"`+env.modelID+`","prompt":"a cat"}`, nil)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
+	// Byte-for-byte equality:
 	if !bytes.Equal(rec.Body.Bytes(), body) {
 		t.Errorf("minimax body not byte-identical")
+	}
+	// Content-Length header MUST be preserved on minimax (no rewrite hook):
+	expectedCL := strconv.Itoa(len(body))
+	if cl := rec.Header().Get("Content-Length"); cl != expectedCL {
+		t.Errorf("Content-Length = %q, want %q (minimax Content-Length must be preserved)", cl, expectedCL)
 	}
 }

@@ -827,12 +827,25 @@ func isClientAuthHeader(h string) bool {
 	return false
 }
 
+// isHopByHopResponseHeader matches hop-by-hop headers for responses.
+// Note: Content-Length is an end-to-end representation header in responses,
+// so it is preserved for byte-identical relays (MiniMax) and explicitly
+// stripped only when the body is rewritten (9router).
+func isHopByHopResponseHeader(h string) bool {
+	switch strings.ToLower(h) {
+	case "connection", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding",
+		"upgrade":
+		return true
+	}
+	return false
+}
+
 // copyResponseHeaders copies non-hop-by-hop upstream response
-// headers onto the client response. Mirrors the header-copy
-// pattern in pkg/ultimatemodel/handler_external.go:171-176.
+// headers onto the client response, including Content-Length.
 func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	for key, values := range resp.Header {
-		if isHopByHopHeader(key) {
+		if isHopByHopResponseHeader(key) {
 			continue
 		}
 		for _, value := range values {

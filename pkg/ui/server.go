@@ -1071,6 +1071,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if (newModel.Kind == "" || newModel.Kind == models.KindChat) && len(newModel.Credentials) > 0 {
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(newModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider == "9router" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind %q cannot use %q provider (image-generation only)", models.KindChat, "9router"),
+				})
+				return
+			}
+		}
 		if newModel.Kind == models.KindImageGen {
 			if !newModel.Internal {
 				w.Header().Set("Content-Type", "application/json")
@@ -1526,6 +1540,20 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				"error": fmt.Sprintf("unknown kind %q (expected %q, %q, %q, or %q)", updatedModel.Kind, models.KindChat, models.KindImageGen, models.KindDecision, models.KindGroup),
 			})
 			return
+		}
+		if (updatedModel.Kind == "" || updatedModel.Kind == models.KindChat) && len(updatedModel.Credentials) > 0 {
+			primaryProvider := ""
+			if pcred := s.modelsConfig.GetCredential(updatedModel.Credentials[0].CredentialID); pcred != nil {
+				primaryProvider = strings.ToLower(pcred.Provider)
+			}
+			if primaryProvider == "9router" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("kind %q cannot use %q provider (image-generation only)", models.KindChat, "9router"),
+				})
+				return
+			}
 		}
 		if updatedModel.Kind == models.KindImageGen {
 			if !updatedModel.Internal {

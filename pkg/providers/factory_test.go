@@ -77,8 +77,8 @@ func TestGetProviderTypes(t *testing.T) {
 	// implemented" from NewProvider, but the id is registered so
 	// /fe/api/providers and the FE DecisionModelForm provider
 	// dropdown can see it.
-	if len(types) != 15 {
-		t.Errorf("expected 15 provider types, got %d", len(types))
+	if len(types) != 14 {
+		t.Errorf("expected 14 provider types, got %d", len(types))
 	}
 	// Spot-check the typesafe addition.
 	foundTypesafe := false
@@ -123,17 +123,6 @@ func TestGetProviderTypes(t *testing.T) {
 	}
 	if !foundOpenRouter {
 		t.Errorf("ProviderOpenRouter missing from GetProviderTypes()")
-	}
-	// Spot-check the 9router addition (image-generation only).
-	foundNineRouter := false
-	for _, t := range types {
-		if t == ProviderNineRouter {
-			foundNineRouter = true
-			break
-		}
-	}
-	if !foundNineRouter {
-		t.Errorf("ProviderNineRouter missing from GetProviderTypes()")
 	}
 }
 

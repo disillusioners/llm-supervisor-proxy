@@ -104,9 +104,31 @@ func TestNineRouter_InspectResponse_EmptyData(t *testing.T) {
 	}
 }
 
+func TestNineRouter_InspectResponse_DataWithNullItem(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	got := p.InspectResponse(200, []byte(`{"data":[null]}`))
+	if got.RelayStatus != 502 {
+		t.Errorf("RelayStatus = %d, want 502", got.RelayStatus)
+	}
+	if got.Code != CodeEmptyImage {
+		t.Errorf("Code = %q, want %q", got.Code, CodeEmptyImage)
+	}
+}
+
+func TestNineRouter_InspectResponse_DataWithEmptyObject(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	got := p.InspectResponse(200, []byte(`{"data":[{}]}`))
+	if got.RelayStatus != 502 {
+		t.Errorf("RelayStatus = %d, want 502", got.RelayStatus)
+	}
+	if got.Code != CodeEmptyImage {
+		t.Errorf("Code = %q, want %q", got.Code, CodeEmptyImage)
+	}
+}
+
 // --- BuildUpstream ---
 
-func TestNineRouter_BuildUpstream(t *testing.T) {
+func TestNineRouter_BuildUpstream_ExplicitURLResponseFormat(t *testing.T) {
 	p := NewNineRouterProvider().(*nineRouterProvider)
 	cred := models.ResolvedCredential{
 		Provider:      "9router",
@@ -139,10 +161,37 @@ func TestNineRouter_BuildUpstream(t *testing.T) {
 	}
 }
 
+func TestNineRouter_BuildUpstream_OmittedResponseFormat(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	cred := models.ResolvedCredential{
+		Provider:      "9router",
+		APIKey:        "k",
+		BaseURL:       "http://host:20128/v1",
+		InternalModel: "ag/gemini-3.8-flash",
+	}
+	// Client completely omits response_format (OpenAI default is "url").
+	// Adapter must inject response_format: "b64_json" unconditionally.
+	url, body, err := p.BuildUpstream(cred, []byte(`{"model":"m","prompt":"a dog","n":1}`))
+	if err != nil {
+		t.Fatalf("BuildUpstream: %v", err)
+	}
+	if url != "http://host:20128/v1/images/generations" {
+		t.Errorf("URL = %q, want %q", url, "http://host:20128/v1/images/generations")
+	}
+	var m map[string]interface{}
+	if err := jsonUnmarshal(body, &m); err != nil {
+		t.Fatalf("body: %v", err)
+	}
+	if m["response_format"] != "b64_json" {
+		t.Errorf("response_format = %v, want b64_json when omitted by client", m["response_format"])
+	}
+}
+
 // --- BillableImages ---
 
 func TestNineRouter_BillableImages(t *testing.T) {
 	p := NewNineRouterProvider().(*nineRouterProvider)
+	// Fully convertible upstream body (2 items)
 	body := []byte(`{"data":[{"b64_json":"A"},{"b64_json":"B"}]}`)
 	n, err := p.BillableImages(body)
 	if err != nil {
@@ -150,6 +199,26 @@ func TestNineRouter_BillableImages(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("BillableImages = %d, want 2", n)
+	}
+
+	// Partially convertible upstream body (1 valid, 1 empty map): bills only 1
+	partialBody := []byte(`{"data":[{"b64_json":"A"},{}]}`)
+	nPartial, err := p.BillableImages(partialBody)
+	if err != nil {
+		t.Fatalf("BillableImages: %v", err)
+	}
+	if nPartial != 1 {
+		t.Errorf("BillableImages = %d, want 1 for partial body", nPartial)
+	}
+
+	// Converted body with metadata.success_count: "1"
+	convertedBody := []byte(`{"data":[{"image_urls":["data:..."]}],"metadata":{"success_count":"1","failed_count":"1"}}`)
+	nConv, err := p.BillableImages(convertedBody)
+	if err != nil {
+		t.Fatalf("BillableImages: %v", err)
+	}
+	if nConv != 1 {
+		t.Errorf("BillableImages = %d, want 1 for converted body", nConv)
 	}
 }
 
@@ -208,7 +277,7 @@ func TestNineRouter_RewriteResponse_PNG(t *testing.T) {
 
 func TestNineRouter_RewriteResponse_UnknownMagicFallback(t *testing.T) {
 	p := NewNineRouterProvider().(*nineRouterProvider)
-	// Unknown magic bytes — fallback to image/jpeg.
+	// Unknown magic bytes — truthful fallback to application/octet-stream.
 	unknown := []byte{0x00, 0x01, 0x02, 0x03, 0x04}
 	b64 := base64.StdEncoding.EncodeToString(unknown)
 	body := []byte(`{"data":[{"b64_json":"` + b64 + `"}]}`)
@@ -216,8 +285,35 @@ func TestNineRouter_RewriteResponse_UnknownMagicFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RewriteResponse: %v", err)
 	}
-	if !strings.Contains(string(out), "data:image/jpeg;base64,") {
-		t.Errorf("expected fallback image/jpeg data-URI, got: %s", out)
+	if !strings.Contains(string(out), "data:application/octet-stream;base64,") {
+		t.Errorf("expected fallback application/octet-stream data-URI, got: %s", out)
+	}
+}
+
+func TestNineRouter_RewriteResponse_PartialConversionCounts(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46}
+	b64 := base64.StdEncoding.EncodeToString(jpeg)
+	// 2 items: 1 valid b64_json, 1 empty map (unconvertible)
+	body := []byte(`{"data":[{"b64_json":"` + b64 + `"},{}]}`)
+	out, err := p.RewriteResponse(body)
+	if err != nil {
+		t.Fatalf("RewriteResponse: %v", err)
+	}
+	var m map[string]interface{}
+	if err := jsonUnmarshal(out, &m); err != nil {
+		t.Fatalf("out: %v", err)
+	}
+	data := m["data"].([]interface{})
+	if len(data) != 1 {
+		t.Fatalf("len(data) = %d, want 1", len(data))
+	}
+	md := m["metadata"].(map[string]interface{})
+	if md["success_count"] != "1" {
+		t.Errorf("success_count = %v, want 1", md["success_count"])
+	}
+	if md["failed_count"] != "1" {
+		t.Errorf("failed_count = %v, want 1", md["failed_count"])
 	}
 }
 

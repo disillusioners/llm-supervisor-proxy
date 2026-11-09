@@ -394,3 +394,107 @@ func TestHandleModels_GET_KindFilter_Decision(t *testing.T) {
 		t.Errorf("?kind=decision must return decision models only; got %+v", got)
 	}
 }
+
+func TestHandleModels_POST_and_PUT_ChatRejectsNineRouter(t *testing.T) {
+	ts := newImgGenTestServer()
+	server := ts.serve()
+	defer server.Close()
+
+	// 1) POST with kind="chat" and a 9router credential must return 400
+	chatPayload := map[string]interface{}{
+		"id":             "chat-9r",
+		"name":           "Chat 9Router",
+		"kind":           "chat",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawChat, _ := json.Marshal(chatPayload)
+	resp, err := http.Post(server.URL+"/fe/api/models", "application/json", bytes.NewReader(rawChat))
+	if err != nil {
+		t.Fatalf("POST chat with 9router: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST chat with 9router status = %d, want 400", resp.StatusCode)
+	}
+	var errResp map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], `kind "chat" cannot use "9router" provider (image-generation only)`) {
+		t.Errorf("error = %q, want mention of image-generation only", errResp["error"])
+	}
+
+	// 2) POST with kind="" (default chat) and 9router credential must also return 400
+	emptyKindPayload := map[string]interface{}{
+		"id":             "chat-9r-empty",
+		"name":           "Chat 9Router Empty Kind",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawEmpty, _ := json.Marshal(emptyKindPayload)
+	respEmpty, err := http.Post(server.URL+"/fe/api/models", "application/json", bytes.NewReader(rawEmpty))
+	if err != nil {
+		t.Fatalf("POST empty kind with 9router: %v", err)
+	}
+	defer respEmpty.Body.Close()
+	if respEmpty.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST empty kind with 9router status = %d, want 400", respEmpty.StatusCode)
+	}
+
+	// 3) PUT updating existing chat model to use 9router credential must return 400
+	ts.mockModels.AddModel(models.ModelConfig{
+		ID:            "chat-existing",
+		Name:          "Existing Chat",
+		Enabled:       true,
+		Internal:      true,
+		InternalModel: "gpt-4",
+		Credentials:   models.TestRefs("test-cred"),
+	})
+	putPayload := map[string]interface{}{
+		"id":             "chat-existing",
+		"name":           "Updated Chat",
+		"kind":           "chat",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawPut, _ := json.Marshal(putPayload)
+	req, _ := http.NewRequest(http.MethodPut, server.URL+"/fe/api/models/chat-existing", bytes.NewReader(rawPut))
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT chat with 9router: %v", err)
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT chat with 9router status = %d, want 400", putResp.StatusCode)
+	}
+
+	// 4) POST with kind="image-gen" and 9router credential is VALID (201 Created)
+	imgPayload := map[string]interface{}{
+		"id":             "img-9r",
+		"name":           "Image 9Router",
+		"kind":           "image-gen",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
+		"credentials": []map[string]interface{}{
+			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
+		},
+	}
+	rawImg, _ := json.Marshal(imgPayload)
+	respImg, err := http.Post(server.URL+"/fe/api/models", "application/json", bytes.NewReader(rawImg))
+	if err != nil {
+		t.Fatalf("POST image-gen with 9router: %v", err)
+	}
+	defer respImg.Body.Close()
+	if respImg.StatusCode != http.StatusCreated {
+		t.Fatalf("POST image-gen with 9router status = %d, want 201", respImg.StatusCode)
+	}
+}

@@ -218,6 +218,9 @@ func ValidateKindRules(m *ModelConfig, internalProvider string) error {
 	}
 	switch m.Kind {
 	case "", KindChat:
+		if internalProvider == "9router" {
+			return fmt.Errorf("model %s: kind %q cannot use %q provider (image-generation only)", m.ID, KindChat, "9router")
+		}
 		return nil
 	case KindImageGen:
 		return validateImageGenRules(m, internalProvider)

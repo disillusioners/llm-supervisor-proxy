@@ -7,13 +7,11 @@ import (
 )
 
 // defaultImageMIME is the MIME type used when the decoded magic bytes do
-// not match any of the sniffed signatures below. It is the document fallback
-// for unknown magic bytes (see imageDataURIFromBase64). The observed
-// 9router upstream payload is unambiguously JPEG (FF D8 FF E0 00 10 4A 46
-// JFIF); a JPEG default keeps the synthesized data-URI renderable in an
-// <img> element even when the upstream ever ships an unrecognised variant,
-// and the bytes are preserved losslessly so a client can re-sniff.
-const defaultImageMIME = "image/jpeg"
+// not match any of the sniffed signatures below. It is the truthful fallback
+// for unknown magic bytes (application/octet-stream) — we do not claim an image
+// type we did not verify. The FE data-URI preview allowlist will not preview
+// an octet-stream URI, which is acceptable and consistent.
+const defaultImageMIME = "application/octet-stream"
 
 // imageDataURIFromBase64 converts a base64-encoded image payload into a
 // data-URI, sniffing the MIME type from the DECODED magic bytes.
