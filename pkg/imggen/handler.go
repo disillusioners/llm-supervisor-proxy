@@ -489,13 +489,11 @@ func (h *Handler) HandleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	// is), preserve the upstream body verbatim (no envelope of
 	// our own — error-in-200 is MiniMax's own error shape).
 	copyResponseHeaders(w, resp)
-	// When the body was rewritten/normalized its length differs from
-	// the upstream's Content-Length header (which copyResponseHeaders
-	// includes because it is not hop-by-hop in the response sense
-	// here — it is copied verbatim). Drop it so Go computes the
-	// correct length for the new body (otherwise the client gets a
-	// truncated response). This only matters on the hook paths; the
-	// minimax path (no hooks) is unchanged.
+	// Content-Length is already stripped by isHopByHopHeader in
+	// copyResponseHeaders, so no stale upstream length can survive
+	// when a hook rewrites or normalizes the body. The Del calls
+	// below are defensive belt-and-suspenders guards ensuring Go's
+	// HTTP server stack computes the exact length for the relayed body.
 	if outcome.RelayStatus == 0 {
 		if _, ok := provider.(ResponseRewriter); ok {
 			w.Header().Del("Content-Length")
