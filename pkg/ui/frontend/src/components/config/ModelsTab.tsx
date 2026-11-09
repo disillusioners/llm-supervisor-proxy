@@ -201,6 +201,11 @@ export function ModelsTab({
   // synchronously when the request starts and when it settles, so this
   // check always sees the CURRENT truth — never a stale closure value.
   const handleCloseCopy = () => {
+    // TRADE-OFF (accepted, review F2): there is NO request timeout or
+    // AbortController here, so a HUNG request keeps this dialog busy —
+    // and un-closeable — until it settles. Intentional: the outcome
+    // must stay observable. Follow-up: a request timeout/abort, which is
+    // a design decision beyond this commission's scope.
     if (copyingRef.current) return;
     setModelToCopy(null);
     setCopyNewId('');
@@ -255,6 +260,13 @@ export function ModelsTab({
 
   const handleConfirmCopy = async () => {
     if (!modelToCopy) return;
+    // RE-ENTRANCY GUARD: a second submit dispatched in the same tick
+    // (two clicks on Confirm) must NOT start a second request. The
+    // in-flight flag is a BOOLEAN, not a counter, so two concurrent
+    // requests would let the first settle clear it while the second is
+    // still pending — re-opening the mid-flight-close window that
+    // rounds 1 and 2 closed. One request per dialog.
+    if (copyingRef.current) return;
     const newId = copyNewId;
     // Inline validation BEFORE submit. The rules mirror the BE's own
     // ValidateCopyID (pkg/models/copy.go) and the messages are the BE's

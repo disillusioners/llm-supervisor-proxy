@@ -534,4 +534,34 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
       message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
     });
   });
+
+  it('two same-tick submits start only ONE request (re-entrancy guard) — one success toast, dialog closed', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    const { copyBtn, dialog, setStatus, confirm } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    // Two submits dispatched in the SAME tick (the re-entrancy probe):
+    // without the guard BOTH start a request. The in-flight flag is a
+    // BOOLEAN, not a counter, so the first request settling would clear
+    // it while the second is still pending — re-opening the
+    // mid-flight-close window that rounds 1 and 2 closed.
+    await act(async () => {
+      fireEvent.click(confirm());
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    // EXACTLY ONE request.
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(onCopy).toHaveBeenCalledWith('m1', 'm1-copy');
+
+    // The single request still produces the normal outcome: the dialog
+    // closes and exactly ONE success toast is raised.
+    expect(dialog()).toBeNull();
+    expect(setStatus).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenCalledWith({
+      type: 'success',
+      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+    });
+  });
 });
