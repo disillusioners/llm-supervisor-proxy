@@ -23,7 +23,7 @@ const defaultImageMIME = "application/octet-stream"
 //	89 50 4E 47    -> image/png    (PNG magic \x89PNG)
 //	47 49 46 38    -> image/gif    (GIF87a / GIF89a)
 //	RIFF....WEBP   -> image/webp   (RIFF container with WEBP form)
-//	(anything else) -> defaultImageMIME (image/jpeg) — explicit fallback
+//	(anything else) -> defaultImageMIME (application/octet-stream) — truthful fallback
 //
 // The returned data-URI carries the base64 of the decoded bytes re-encoded
 // canonically (no embedded whitespace), so the data-URI is self-contained

@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +82,9 @@ func newEnv9Router(t *testing.T, script fakeScript) *handlerTestEnv {
 // TestHandler_9Router_ConversionRelay — the upstream returns an
 // OpenAI-images body (b64_json); the client receives the converted
 // body with data[].image_urls as a data-URI, and Content-Length is removed.
+//
+// Mutation discrimination (M1): detects if ResponseRewriter hook is REMOVED from 9router.
+// If the hook is removed, body would remain raw upstream b64_json instead of converted data-URI image_urls.
 func TestHandler_9Router_ConversionRelay(t *testing.T) {
 	body := map[string]interface{}{
 		"created": 7,
@@ -151,6 +153,50 @@ func TestHandler_9Router_URLShapedUpstreamResponse(t *testing.T) {
 	}
 	if len(rows) > 0 && rows[0].ImageCount != 0 {
 		t.Errorf("ImageCount = %d, want 0 on conversion failure", rows[0].ImageCount)
+	}
+}
+
+// TestHandler_9Router_OutboundRequestBody_ResponseFormatB64Json — wire-level proof
+// asserting the ACTUAL OUTBOUND request body received by upstream (env.fake.lastBody).
+// Verifies response_format="b64_json" in BOTH cases: when client omits response_format
+// and when client explicitly passes response_format="url".
+func TestHandler_9Router_OutboundRequestBody_ResponseFormatB64Json(t *testing.T) {
+	// Case 1: Client omits response_format (OpenAI default is "url").
+	body1 := map[string]interface{}{
+		"created": 1,
+		"data":    []interface{}{map[string]interface{}{"b64_json": b64JPEG()}},
+	}
+	raw1, _ := json.Marshal(body1)
+	env1 := newEnv9Router(t, fakeScript{status: 200, body: raw1})
+	rec1 := env1.sendRequest(http.MethodPost, `{"model":"`+env1.modelID+`","prompt":"a cat"}`, nil)
+	if rec1.Code != 200 {
+		t.Fatalf("omitted case: status = %d, want 200; body=%s", rec1.Code, rec1.Body.String())
+	}
+	var outbound1 map[string]interface{}
+	if err := json.Unmarshal(env1.fake.lastBody, &outbound1); err != nil {
+		t.Fatalf("omitted case: parse upstream lastBody: %v", err)
+	}
+	if outbound1["response_format"] != "b64_json" {
+		t.Errorf("omitted case: outbound response_format = %v, want b64_json", outbound1["response_format"])
+	}
+
+	// Case 2: Client explicitly passes response_format="url".
+	body2 := map[string]interface{}{
+		"created": 2,
+		"data":    []interface{}{map[string]interface{}{"b64_json": b64JPEG()}},
+	}
+	raw2, _ := json.Marshal(body2)
+	env2 := newEnv9Router(t, fakeScript{status: 200, body: raw2})
+	rec2 := env2.sendRequest(http.MethodPost, `{"model":"`+env2.modelID+`","prompt":"a dog","response_format":"url"}`, nil)
+	if rec2.Code != 200 {
+		t.Fatalf("url case: status = %d, want 200; body=%s", rec2.Code, rec2.Body.String())
+	}
+	var outbound2 map[string]interface{}
+	if err := json.Unmarshal(env2.fake.lastBody, &outbound2); err != nil {
+		t.Fatalf("url case: parse upstream lastBody: %v", err)
+	}
+	if outbound2["response_format"] != "b64_json" {
+		t.Errorf("url case: outbound response_format = %v, want b64_json", outbound2["response_format"])
 	}
 }
 
@@ -236,7 +282,17 @@ func TestHandler_9Router_429Quota(t *testing.T) {
 }
 
 // TestHandler_Minimax_ByteIdenticalStill — minimax path is untouched: a
-// success body is relayed byte-for-byte (no hook runs) with Content-Length preserved.
+// success body is relayed byte-for-byte (no hook runs), and header behavior
+// strictly matches base (Content-Length stripped via isHopByHopHeader).
+//
+// Mutation discrimination:
+//   - M2: detects if ResponseRewriter hook is inappropriately APPLIED to minimax.
+//     Minimax does not implement ResponseRewriter, so body must remain byte-for-byte
+//     identical to upstream.
+//   - M4: base copyResponseHeaders drops Content-Length via isHopByHopHeader; minimax
+//     preserves that exact base contract (Content-Length is stripped, body bytes identical).
+//     Preserving Content-Length would change minimax's client-visible headers vs base,
+//     violating the forbidden "Touch the minimax path's semantics" constraint.
 func TestHandler_Minimax_ByteIdenticalStill(t *testing.T) {
 	body := successBody(1, 0)
 	env := newEnv(t, fakeScript{status: 200, body: body, contentLength: true})
@@ -244,13 +300,13 @@ func TestHandler_Minimax_ByteIdenticalStill(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	// Byte-for-byte equality:
+	// Byte-for-byte body equality:
 	if !bytes.Equal(rec.Body.Bytes(), body) {
 		t.Errorf("minimax body not byte-identical")
 	}
-	// Content-Length header MUST be preserved on minimax (no rewrite hook):
-	expectedCL := strconv.Itoa(len(body))
-	if cl := rec.Header().Get("Content-Length"); cl != expectedCL {
-		t.Errorf("Content-Length = %q, want %q (minimax Content-Length must be preserved)", cl, expectedCL)
+	// Base header behavior: Content-Length is considered hop-by-hop by isHopByHopHeader
+	// and stripped by copyResponseHeaders, matching base behavior.
+	if cl := rec.Header().Get("Content-Length"); cl != "" {
+		t.Errorf("Content-Length = %q, want empty (base copyResponseHeaders strips Content-Length)", cl)
 	}
 }

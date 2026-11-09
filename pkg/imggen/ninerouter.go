@@ -24,15 +24,12 @@ type nineRouterProvider struct{}
 // gateway:
 //   - upstreamURL = TrimSuffix(cred.BaseURL, "/") + "/images/generations"
 //     (the credential's BaseURL already carries "/v1", matching the
-//     minimax convention — see pkg/providers/factory.go:48).
+//     minimax convention).
 //   - upstreamBody = shallow-copy of the client body with the "model"
-//     field rewritten to cred.InternalModel. The two MiniMax-native
-//     request keys that the OpenAI-images dialect does not carry
-//     (aspect_ratio, response_format) are translated: aspect_ratio is
-//     dropped and response_format is rewritten to "b64_json", so the
-//     upstream returns the b64 payload the conversion hook converts
-//     into the existing IO format. Every other body key passes
-//     through verbatim.
+//     field rewritten to cred.InternalModel. MiniMax-native aspect_ratio
+//     is dropped, and response_format is unconditionally set to "b64_json"
+//     so the upstream returns the base64 payload needed for data-URI
+//     conversion. Every other body key passes through verbatim.
 func (p *nineRouterProvider) BuildUpstream(cred models.ResolvedCredential, clientBody []byte) (string, []byte, error) {
 	var body map[string]interface{}
 	if err := json.Unmarshal(clientBody, &body); err != nil {
@@ -110,9 +107,10 @@ func (p *nineRouterProvider) InspectResponse(upstreamStatus int, body []byte) Ou
 	if len(items) == 0 {
 		return Outcome{RelayStatus: 502, Reason: "empty data array", Code: CodeEmptyImage}
 	}
-	// Validate data items: check if all items are null or empty objects (e.g. data:[null] or data:[{}]).
-	// If all items are null or empty, fail early as CodeEmptyImage with 502.
-	allNullOrEmpty := true
+	// Validate data items: check if items are null, empty objects, or carry empty image data
+	// (e.g. data:[null], data:[{}], data:[{"b64_json":""}]).
+	// If all items lack usable image data, fail early as CodeEmptyImage with 502.
+	allEmpty := true
 	for _, item := range items {
 		if item == nil {
 			continue
@@ -121,13 +119,29 @@ func (p *nineRouterProvider) InspectResponse(upstreamStatus int, body []byte) Ou
 		if !ok || len(m) == 0 {
 			continue
 		}
-		allNullOrEmpty = false
-		break
+		if hasUsableImageData(m) {
+			allEmpty = false
+			break
+		}
 	}
-	if allNullOrEmpty {
+	if allEmpty {
 		return Outcome{RelayStatus: 502, Reason: "empty data array", Code: CodeEmptyImage}
 	}
 	return Outcome{RelayStatus: 0, Reason: "", Code: CodeOK}
+}
+
+// hasUsableImageData checks whether an item in the data array has non-empty image content.
+func hasUsableImageData(m map[string]interface{}) bool {
+	if urls, ok := m["image_urls"].([]interface{}); ok && len(urls) > 0 {
+		return true
+	}
+	if b64, ok := m["b64_json"].(string); ok && strings.TrimSpace(b64) != "" {
+		return true
+	}
+	if u, ok := m["url"].(string); ok && strings.TrimSpace(u) != "" {
+		return true
+	}
+	return false
 }
 
 // BillableImages returns the number of billable images. If called on the converted
@@ -208,8 +222,8 @@ func (p *nineRouterProvider) RewriteResponse(body []byte) ([]byte, error) {
 			continue
 		}
 		// Upstream already speaking the existing IO format — pass
-		// through verbatim.
-		if urls, ok := m["image_urls"]; ok {
+		// through verbatim only when image_urls is non-empty.
+		if urls, ok := m["image_urls"].([]interface{}); ok && len(urls) > 0 {
 			out = append(out, map[string]interface{}{"image_urls": urls})
 			continue
 		}
@@ -315,10 +329,11 @@ func extractNineRouterMessage(resp map[string]interface{}, depth int) string {
 	return strings.TrimSpace(msg)
 }
 
-// embeddedJSONObject finds and parses the first or innermost JSON object embedded
-// in s. It tries the widest { ... } span first, and if unmarshal fails, searches
-// for nested or innermost parseable JSON objects. Returns nil when no JSON object
-// can be parsed, preserving graceful degradation.
+// embeddedJSONObject finds and parses a JSON object embedded in s.
+// It parses the widest { ... } span first; if that fails (e.g. malformed
+// or trailing garbage), it searches inner spans for a parseable JSON object.
+// Extraction of the innermost human-readable message across nested layers
+// is achieved via recursive extractNineRouterMessage calls.
 func embeddedJSONObject(s string) map[string]interface{} {
 	start := strings.IndexByte(s, '{')
 	end := strings.LastIndexByte(s, '}')

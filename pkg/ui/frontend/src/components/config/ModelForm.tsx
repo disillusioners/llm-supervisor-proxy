@@ -329,6 +329,10 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         if (!row.credential_id) {
           throw new Error(`Credential row ${i + 1}: please select a credential`);
         }
+        const resolved = credentials.find(c => c.id === row.credential_id);
+        if (resolved?.provider === '9router') {
+          throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
+        }
         if (!Number.isFinite(row.weight) || row.weight < 1) {
           throw new Error(`Credential row ${i + 1}: weight must be at least 1`);
         }
@@ -542,7 +546,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
           )}
           <MultiCredentialEditor
             credentials={formData.credentials}
-            availableCredentials={credentials}
+            availableCredentials={credentials.filter((c) => c.provider !== '9router')}
             loading={loadingCredentials}
             onChange={handleCredentialRowsChange}
             onNavigateToCredentials={onNavigateToCredentials}

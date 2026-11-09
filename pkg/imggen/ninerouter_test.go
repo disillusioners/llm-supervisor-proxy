@@ -126,6 +126,27 @@ func TestNineRouter_InspectResponse_DataWithEmptyObject(t *testing.T) {
 	}
 }
 
+func TestNineRouter_InspectResponse_DataWithEmptyB64Json(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	// Empty b64_json string must be rejected as CodeEmptyImage with 502
+	got := p.InspectResponse(200, []byte(`{"data":[{"b64_json":""}]}`))
+	if got.RelayStatus != 502 {
+		t.Errorf("RelayStatus = %d, want 502", got.RelayStatus)
+	}
+	if got.Code != CodeEmptyImage {
+		t.Errorf("Code = %q, want %q", got.Code, CodeEmptyImage)
+	}
+
+	// Whitespace-only b64_json string
+	gotWS := p.InspectResponse(200, []byte(`{"data":[{"b64_json":"   "}]}`))
+	if gotWS.RelayStatus != 502 {
+		t.Errorf("RelayStatus = %d, want 502", gotWS.RelayStatus)
+	}
+	if gotWS.Code != CodeEmptyImage {
+		t.Errorf("Code = %q, want %q", gotWS.Code, CodeEmptyImage)
+	}
+}
+
 // --- BuildUpstream ---
 
 func TestNineRouter_BuildUpstream_ExplicitURLResponseFormat(t *testing.T) {
@@ -307,6 +328,36 @@ func TestNineRouter_RewriteResponse_PartialConversionCounts(t *testing.T) {
 	data := m["data"].([]interface{})
 	if len(data) != 1 {
 		t.Fatalf("len(data) = %d, want 1", len(data))
+	}
+	md := m["metadata"].(map[string]interface{})
+	if md["success_count"] != "1" {
+		t.Errorf("success_count = %v, want 1", md["success_count"])
+	}
+	if md["failed_count"] != "1" {
+		t.Errorf("failed_count = %v, want 1", md["failed_count"])
+	}
+}
+
+func TestNineRouter_RewriteResponse_EmptyImageURLs_NotCounted(t *testing.T) {
+	p := NewNineRouterProvider().(*nineRouterProvider)
+	// Over-billing edge: empty image_urls array must NOT be counted as delivered
+	bodyAllEmpty := []byte(`{"data":[{"image_urls":[]}]}`)
+	_, err := p.RewriteResponse(bodyAllEmpty)
+	if err == nil {
+		t.Fatalf("expected error when all items have empty image_urls, got nil")
+	}
+
+	// Mixed: 1 valid b64_json, 1 empty image_urls -> success_count=1, failed_count=1
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46}
+	b64 := base64.StdEncoding.EncodeToString(jpeg)
+	bodyMixed := []byte(`{"data":[{"b64_json":"` + b64 + `"},{"image_urls":[]}]}`)
+	out, err := p.RewriteResponse(bodyMixed)
+	if err != nil {
+		t.Fatalf("RewriteResponse: %v", err)
+	}
+	var m map[string]interface{}
+	if err := jsonUnmarshal(out, &m); err != nil {
+		t.Fatalf("out: %v", err)
 	}
 	md := m["metadata"].(map[string]interface{})
 	if md["success_count"] != "1" {
