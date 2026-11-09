@@ -227,5 +227,36 @@ describe('useModels — hook contract (Decision Commission P3.3 amendment 9d)', 
 
       deleteSpy.mockRestore();
     });
+
+    // Council W5 (frontend half) — the source id is interpolated into
+    // the PATH, so it must be percent-encoded: an id containing a space,
+    // '?' or '#' would otherwise corrupt the URL. encodeURIComponent
+    // leaves ordinary ids byte-identical ('m-1' → 'm-1'), which is why
+    // the sibling test above still asserts the plain path.
+    it('copyModel URL-encodes the source id in the path (W5)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([
+        { id: 'm 1/odd?x#y', name: 'Odd', enabled: true, fallback_chain: [] },
+      ]));
+      const { result } = renderHook(() => useModels());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      // Copy response (201) then the refetch.
+      fetchMock.mockResolvedValueOnce(jsonResponse(
+        { id: 'encoded-copy', name: 'encoded-copy', enabled: false, fallback_chain: [] },
+        { status: 201 },
+      ));
+      fetchMock.mockResolvedValueOnce(jsonResponse([]));
+
+      const sourceId = 'm 1/odd?x#y';
+      await act(async () => {
+        await result.current.copyModel(sourceId, 'encoded-copy');
+      });
+
+      const postCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes('/copy'));
+      expect(postCall).toBeDefined();
+      // The ENCODED form, byte for byte — no raw space, '?' or '#'.
+      expect(postCall![0]).toBe(`/fe/api/models/${encodeURIComponent(sourceId)}/copy`);
+      expect(postCall![0]).toBe('/fe/api/models/m%201%2Fodd%3Fx%23y/copy');
+    });
   });
 });

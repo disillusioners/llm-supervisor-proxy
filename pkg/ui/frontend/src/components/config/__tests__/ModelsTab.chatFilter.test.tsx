@@ -309,7 +309,7 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     expect(setStatus).toHaveBeenCalledTimes(1);
     expect(setStatus).toHaveBeenCalledWith({
       type: 'success',
-      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+      message: 'Copied model "m1" to "m1-copy". The copy is DISABLED: it is not in /v1/models and not in automatic selection — a client that names "m1-copy" explicitly is still served. Enable it to add it to /v1/models and auto-selection.',
     });
   });
 
@@ -531,7 +531,7 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     expect(setStatus).toHaveBeenCalledTimes(1);
     expect(setStatus).toHaveBeenCalledWith({
       type: 'success',
-      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+      message: 'Copied model "m1" to "m1-copy". The copy is DISABLED: it is not in /v1/models and not in automatic selection — a client that names "m1-copy" explicitly is still served. Enable it to add it to /v1/models and auto-selection.',
     });
   });
 
@@ -561,7 +561,38 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     expect(setStatus).toHaveBeenCalledTimes(1);
     expect(setStatus).toHaveBeenCalledWith({
       type: 'success',
-      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+      message: 'Copied model "m1" to "m1-copy". The copy is DISABLED: it is not in /v1/models and not in automatic selection — a client that names "m1-copy" explicitly is still served. Enable it to add it to /v1/models and auto-selection.',
     });
+  });
+
+  it('W9a — the dialog warning paragraph renders the EXACT truthful text (not-listed + explicit-id still served + the C2 enable clause)', () => {
+    const { copyBtn, container } = renderTab(vi.fn());
+
+    fireEvent.click(copyBtn);
+
+    const warning = container.querySelector('[data-testid="copy-model-warning"]');
+    expect(warning).not.toBeNull();
+
+    // The EXACT RENDERED text of the paragraph (queried from the DOM,
+    // not compared against a constant), INCLUDING the C2 trailing
+    // sentence. A regression to "unreachable" / "cannot be reached"
+    // wording changes this string and fails here — the paragraph
+    // previously had NO test reading it, which is exactly how the
+    // untruthful toast (C1) and the contradictory trailing sentence (C2)
+    // slipped through.
+    expect(warning!.textContent).toBe(
+      'The copy is created DISABLED: it is excluded from /v1/models and from race chains and groups, but a client that names its id explicitly can still reach it. Enable it to add it to /v1/models and to automatic selection.',
+    );
+
+    // The two required facts, asserted independently so a partial
+    // rewording fails loudly rather than only on the exact-match above.
+    expect(warning!.textContent).toContain('excluded from /v1/models');
+    expect(warning!.textContent).toContain('race chains and groups');
+    expect(warning!.textContent).toContain('names its id explicitly can still reach it');
+    expect(warning!.textContent).toContain('Enable it to add it to /v1/models and to automatic selection.');
+
+    // Truthfulness tripwire: the copy IS served on the explicit-id path,
+    // so no "unreachable" claim may appear anywhere in the paragraph.
+    expect(warning!.textContent).not.toMatch(/unreachable|cannot be reached|can not be reached/i);
   });
 });

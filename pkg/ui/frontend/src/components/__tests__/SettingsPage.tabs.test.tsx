@@ -432,7 +432,9 @@ describe('SettingsPage — sticky last-success race ordering', () => {
     await waitFor(() => {
       expect(container.textContent).toContain('Copied model "m1" to "m1-copy"');
     });
-    expect(container.textContent).toContain('The copy was created DISABLED — enable it before use.');
+    expect(container.textContent).toContain(
+      'The copy is DISABLED: it is not in /v1/models and not in automatic selection',
+    );
     expect(props.onCopyModel).toHaveBeenCalledWith('m1', 'm1-copy');
   });
 });

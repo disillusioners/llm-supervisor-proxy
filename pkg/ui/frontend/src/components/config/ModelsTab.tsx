@@ -293,15 +293,13 @@ export function ModelsTab({
       // container's toast API — setStatus is the tab's toast entry
       // point, exactly like the delete flow above).
       //
-      // ACCURACY: the copy is DORMANT (enabled=false). It is excluded
-      // from /v1/models and from race chains / groups, but the proxy
-      // has NO enabled gate on the explicit-id path, so a client that
-      // names the new id explicitly can still reach it. Say that it is
-      // disabled and must be enabled before use — never that it is
-      // unreachable.
+      // ACCURACY (council W6): the copy is DORMANT (enabled=false) — it
+      // is not auto-selected and appears in no /v1/models listing, race
+      // chain or pool; a client that names its id explicitly is still
+      // served.
       setStatus({
         type: 'success',
-        message: `Copied model "${modelToCopy.id}" to "${newId}". The copy was created DISABLED — enable it before use.`,
+        message: `Copied model "${modelToCopy.id}" to "${newId}". The copy is DISABLED: it is not in /v1/models and not in automatic selection — a client that names "${newId}" explicitly is still served. Enable it to add it to /v1/models and auto-selection.`,
       });
       // SUCCESS close — the request has settled, so the in-flight flag
       // is cleared first and the dialog closes (closeCopyAfterSuccess
@@ -619,9 +617,10 @@ export function ModelsTab({
                 has NO enabled gate on the explicit-id path, so a client
                 that names the new id explicitly can still reach it.
                 Never claim it is unreachable. */}
-            <p class="text-gray-400 text-xs mt-3">
+            <p class="text-gray-400 text-xs mt-3" data-testid="copy-model-warning">
               The copy is created DISABLED: it is excluded from /v1/models and from race chains and groups, but a
-              client that names its id explicitly can still reach it. Enable it before use.
+              client that names its id explicitly can still reach it. Enable it to add it to /v1/models and to
+              automatic selection.
             </p>
             <div class="flex gap-3 w-full mt-5">
               <button

@@ -365,7 +365,12 @@ export function useModels() {
   // (prefix deletion misses in-flight promise entries and does not
   // cover imggen-models / decision-models).
   const copyModel = useCallback(async (sourceId: string, newId: string) => {
-    await apiFetch<Model>(`/models/${sourceId}/copy`, {
+    // Council W5: the source id is interpolated into the PATH, so it
+    // must be percent-encoded — an id containing a space, '?', '#' or a
+    // non-ASCII character would otherwise corrupt the URL (or truncate
+    // the path at '?'/'#'). encodeURIComponent keeps every ordinary id
+    // byte-identical ('m-1' → 'm-1').
+    await apiFetch<Model>(`/models/${encodeURIComponent(sourceId)}/copy`, {
       method: 'POST',
       body: JSON.stringify({ new_id: newId }),
     });
