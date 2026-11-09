@@ -419,4 +419,119 @@ describe('ModelsTab — copy model action (copy-model commission)', () => {
     expect(alert()!.textContent).toBe('duplicate model ID');
     expect(setStatus).not.toHaveBeenCalled();
   });
+
+  it('the BACKDROP closes the copy dialog when idle (guards the selector + the idle close path)', async () => {
+    const { copyBtn, dialog, container } = renderTab(vi.fn());
+
+    fireEvent.click(copyBtn);
+    expect(dialog()).not.toBeNull();
+
+    // The backdrop is the overlay behind the dialog panel. Selecting it
+    // by testid (not by structure) is what makes this test meaningful:
+    // a wrong selector would silently click a harmless element and the
+    // "does not close" assertion would pass VACUOUSLY.
+    const backdrop = container.querySelector('[data-testid="copy-model-backdrop"]') as HTMLElement;
+    expect(backdrop).not.toBeNull();
+
+    await act(async () => {
+      fireEvent.click(backdrop);
+      await Promise.resolve();
+    });
+
+    // Idle → the backdrop click DOES close the dialog.
+    expect(dialog()).toBeNull();
+  });
+
+  it('clicking the BACKDROP while the copy request is in flight does NOT close the dialog — a late BE failure surfaces inline', async () => {
+    // A DEFERRED promise so the request is genuinely in flight: the
+    // rejection is triggered by the test, not by the click.
+    let rejectCopy: (reason?: unknown) => void = () => {};
+    const onCopy = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCopy = reject;
+        }),
+    );
+    const { copyBtn, dialog, input, confirm, alert, setStatus, container } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    fireEvent.input(input(), { target: { value: 'm1-typed-copy' } });
+
+    // Start the copy — the request is now pending.
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    expect(onCopy).toHaveBeenCalledWith('m1', 'm1-typed-copy');
+
+    const backdrop = container.querySelector('[data-testid="copy-model-backdrop"]') as HTMLElement;
+    expect(backdrop).not.toBeNull();
+
+    // A backdrop click mid-flight must NOT close the dialog — the
+    // contract requires the dialog to stay open so the outcome is
+    // always observable.
+    await act(async () => {
+      fireEvent.click(backdrop);
+      await Promise.resolve();
+    });
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-typed-copy');
+    // Still in flight: no error and no toast yet.
+    expect(alert()).toBeNull();
+    expect(setStatus).not.toHaveBeenCalled();
+
+    // The BE failure arrives AFTER the backdrop click: it is displayed
+    // inline in the still-open dialog, the typed id is preserved and NO
+    // toast is raised.
+    await act(async () => {
+      rejectCopy(new Error('duplicate model ID'));
+      await Promise.resolve();
+    });
+    expect(dialog()).not.toBeNull();
+    expect(input().value).toBe('m1-typed-copy');
+    expect(alert()!.textContent).toBe('duplicate model ID');
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('the SUCCESS path still closes the dialog and raises the toast (the in-flight guard must not block it)', async () => {
+    // A DEFERRED promise so the request is still in flight when we
+    // assert — that is what makes this test discriminate against the
+    // "success close blocked by the guard" regression.
+    let resolveCopy: () => void = () => {};
+    const onCopy = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCopy = resolve;
+        }),
+    );
+    const { copyBtn, dialog, setStatus, confirm } = renderTab(onCopy);
+
+    fireEvent.click(copyBtn);
+    await act(async () => {
+      fireEvent.click(confirm());
+      await Promise.resolve();
+    });
+
+    // The request IS in flight here (the button is in its "Copying..."
+    // state), so the in-flight guard is ARMED at this moment.
+    expect(confirm().textContent).toBe('Copying...');
+    expect(dialog()).not.toBeNull();
+
+    // The request settles successfully.
+    await act(async () => {
+      resolveCopy();
+      await Promise.resolve();
+    });
+
+    // The success close must still go through — the programmatic close
+    // clears the in-flight flag first. If the guard blocked it, the
+    // dialog would stay open and the operator would see no toast.
+    expect(dialog()).toBeNull();
+    expect(setStatus).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenCalledWith({
+      type: 'success',
+      message: 'Copied model "m1" to "m1-copy". The copy was created DISABLED — enable it before use.',
+    });
+  });
 });

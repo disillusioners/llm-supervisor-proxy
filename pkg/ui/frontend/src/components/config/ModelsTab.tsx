@@ -51,6 +51,23 @@ export function ModelsTab({
   const copyInputRef = useRef<HTMLInputElement | null>(null);
   const copyTriggerRef = useRef<HTMLButtonElement | null>(null);
   const copyWasOpen = useRef(false);
+  // The in-flight flag is ALSO mirrored into a REF, and the REF is the
+  // AUTHORITATIVE one for the close guard.
+  //
+  // WHY A REF: the user-initiated close paths (Esc, the backdrop, the
+  // Cancel button) must be a NO-OP while a request is in flight, and the
+  // SUCCESS path must still be able to close the dialog afterwards. The
+  // `copying` STATE cannot serve both: Preact does not refresh the
+  // closure of an already-running async function, so a state read
+  // inside the success path can be a STALE value (the value from the
+  // render in which the click happened) — which would either block the
+  // success close (dialog stuck open) or fail to block a mid-flight
+  // close. A ref is written SYNCHRONOUSLY and read SYNCHRONOUSLY, so
+  // the guard always sees the CURRENT truth.
+  //
+  // The `copying` state keeps its usual job: it drives the Cancel
+  // button's disabled attribute and the "Copying..." label.
+  const copyingRef = useRef(false);
 
   const handleOpenAddModel = () => {
     setModelToEdit(undefined);
@@ -161,41 +178,66 @@ export function ModelsTab({
     // requires).
     setCopyNewId(`${model.id}-copy`);
     setCopyError(null);
+    // A freshly opened dialog is never in flight — reset the
+    // authoritative flag so the guard starts from a known state.
+    copyingRef.current = false;
     setCopying(false);
   };
 
+  // THE CHOKE POINT — every USER-initiated close of the copy dialog
+  // routes through here: the Esc handler, the backdrop click and the
+  // Cancel button.
+  //
+  // GUARDED: it is a NO-OP while a copy request is in flight. The
+  // contract (FE and BE alike) requires the dialog to STAY OPEN on a
+  // backend failure, with the BE's {"error":"..."} text shown inline
+  // and the typed id preserved. A mid-flight close would write that
+  // error into a CLOSED dialog — and the failure path raises NO toast
+  // — so the failure would be silently swallowed: the operator sees the
+  // dialog vanish with no confirmation and no error, and the copy never
+  // happened.
+  //
+  // The guard reads `copyingRef` (a ref), which is written
+  // synchronously when the request starts and when it settles, so this
+  // check always sees the CURRENT truth — never a stale closure value.
   const handleCloseCopy = () => {
+    if (copyingRef.current) return;
     setModelToCopy(null);
     setCopyNewId('');
     setCopyError(null);
     setCopying(false);
   };
 
+  // PROGRAMMATIC close — used ONLY by the SUCCESS path, after the
+  // request has settled.
+  //
+  // It clears the in-flight flag FIRST and then closes through the
+  // shared helper, so the success close is never blocked by the guard
+  // (the helper sees the flag already cleared). It must not simply
+  // call the helper with the flag still set — that would refuse the
+  // close and leave the dialog stuck open.
+  const closeCopyAfterSuccess = () => {
+    copyingRef.current = false;
+    handleCloseCopy();
+  };
+
   // Esc closes the copy dialog (precedent: RequestDetail.tsx:381-387).
   //
-  // GUARD: Esc is IGNORED while a copy request is in flight. The Cancel
-  // button is disabled in that state (:549), so an unguarded Esc would be
-  // a bypass of that guard: the dialog would close mid-request and the
-  // BE failure would then land in a CLOSED dialog (the catch writes the
-  // error inline and NEVER raises a toast), so the failure would be
-  // silently swallowed — the operator would see the dialog vanish with
-  // no confirmation and no error, and the copy never happened.
-  //
-  // NO STALE CAPTURE: `copying` is in the dependency list, so the
-  // listener is torn down and re-registered on every `copying`
-  // transition and the handler ALWAYS reads the CURRENT value. The
-  // cleanup removes the listener on every re-registration and when the
-  // dialog closes — no leak.
+  // The close itself is GUARDED by handleCloseCopy, so Esc is a NO-OP
+  // while a copy request is in flight — exactly like the backdrop click
+  // and the Cancel button. The guard reads the in-flight flag through
+  // a REF, so this handler always sees the CURRENT value; the listener
+  // therefore does not need to be re-registered on every `copying`
+  // transition. The cleanup removes the listener when the dialog
+  // closes — no leak.
   useEffect(() => {
     if (!modelToCopy) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      // While the request is pending the dialog must stay open so the
-      // outcome (success toast or inline error) is always observable.
-      if (e.key === 'Escape' && !copying) handleCloseCopy();
+      if (e.key === 'Escape') handleCloseCopy();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [modelToCopy, copying]);
+  }, [modelToCopy]);
 
   // A11Y: initial focus lands on the new-id input; when the dialog
   // closes, focus is RESTORED to the Copy button that opened it.
@@ -227,6 +269,10 @@ export function ModelsTab({
       setCopyError('new_id must not contain "/" or whitespace');
       return;
     }
+    // The in-flight flag is set on the REF synchronously, so EVERY close
+    // attempt from this moment on (Esc, backdrop, Cancel) is refused —
+    // even before the next render lands.
+    copyingRef.current = true;
     setCopying(true);
     setCopyError(null);
     try {
@@ -245,12 +291,19 @@ export function ModelsTab({
         type: 'success',
         message: `Copied model "${modelToCopy.id}" to "${newId}". The copy was created DISABLED — enable it before use.`,
       });
-      handleCloseCopy();
+      // SUCCESS close — the request has settled, so the in-flight flag
+      // is cleared first and the dialog closes (closeCopyAfterSuccess
+      // clears the flag BEFORE delegating to the guarded helper, so the
+      // guard does not block it).
+      closeCopyAfterSuccess();
     } catch (e) {
       // BE failure: the dialog STAYS OPEN, the typed id is PRESERVED
       // and the BE's {"error":"..."} text is shown inline. No retry, no
       // field reset.
       setCopyError(e instanceof Error ? e.message : 'Failed to copy model');
+      // The request is over: clear the in-flight flag so the operator
+      // can now close the dialog (Esc / backdrop / Cancel) and retry.
+      copyingRef.current = false;
       setCopying(false);
     }
   };
@@ -514,6 +567,7 @@ export function ModelsTab({
       {modelToCopy && (
         <div
           class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60]"
+          data-testid="copy-model-backdrop"
           onClick={handleCloseCopy}
         >
           <div
