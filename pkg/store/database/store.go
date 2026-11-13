@@ -197,11 +197,6 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.ToolRepair = mergeToolRepairConfig(existing.ToolRepair, incoming.ToolRepair)
 	}
 
-	// Ultimate model: check if ultimate model config was provided
-	if isUltimateModelProvided(incoming.UltimateModel) {
-		result.UltimateModel = incoming.UltimateModel
-	}
-
 	// Raw upstream response logging: check if any field was set
 	if incoming.LogRawUpstreamResponse || incoming.LogRawUpstreamOnError || incoming.LogRawUpstreamMaxKB != 0 {
 		result.LogRawUpstreamResponse = incoming.LogRawUpstreamResponse
@@ -271,14 +266,6 @@ func isRaceRetryProvided(cfg config.Config) bool {
 // isIdleTerminationProvided checks if idle termination config was explicitly provided
 func isIdleTerminationProvided(cfg config.Config) bool {
 	return cfg.IdleTerminationEnabled || cfg.IdleTerminationTimeout != 0
-}
-
-// isUltimateModelProvided checks if ultimate model config was explicitly provided
-// by checking if ModelID is non-empty (MaxHash defaults to 100, so 0 means not set)
-func isUltimateModelProvided(um config.UltimateModelConfig) bool {
-	// ModelID is the primary indicator - empty string means feature is disabled
-	// We also check MaxHash to detect if the config was sent at all
-	return um.ModelID != "" || um.MaxHash != 0
 }
 
 // Get returns current configuration
@@ -365,13 +352,6 @@ func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	return m.cfg.LoopDetection
 }
 
-// GetUltimateModel returns the ultimate model configuration
-func (m *ConfigManager) GetUltimateModel() config.UltimateModelConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.UltimateModel
-}
-
 // GetRaceRetryEnabled returns whether race retry is enabled
 func (m *ConfigManager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
@@ -406,20 +386,6 @@ func (m *ConfigManager) GetRaceMaxBufferBytes() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.RaceMaxBufferBytes
-}
-
-// GetToolCallBufferDisabled returns whether tool call buffering is disabled
-func (m *ConfigManager) GetToolCallBufferDisabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.ToolCallBufferDisabled
-}
-
-// GetToolCallBufferMaxSize returns the max size for tool call buffer
-func (m *ConfigManager) GetToolCallBufferMaxSize() int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.ToolCallBufferMaxSize
 }
 
 // GetLogRawUpstreamResponse returns whether to log successful upstream responses
@@ -2017,7 +1983,7 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 	// DEAD-POST-P1 (remove-external-upstream): the non-internal
 	// credentials carve-out below existed ONLY for the
 	// ultimate-external D3 provider probe, whose sole reader
-	// (pkg/ultimatemodel/handler_external.go) was deleted with the
+	// (the retired raw-passthrough handler) was deleted with the
 	// external upstream path. With every write stamping internal=true
 	// (P1 task 7) and legacy internal=0 rows disabled by migration 032,
 	// no non-internal model can carry credentials through this
@@ -2541,7 +2507,7 @@ func resolveWithCredential(modelConfig *models.ModelConfig, cred *models.Credent
 // the phase3 model_credential_selected event payload) and NewlyBound
 // (W-1 signal: true ⇔ this call stored a new engine binding — the
 // only way newlyBound flows from the engine's binding-store side
-// effect through to the proxy/ultimatemodel call sites).
+// effect through to the proxy call sites).
 //
 // Phase 3: this is now an alias of models.ResolvedCredential. The
 // canonical declaration lives in pkg/models so the ModelsConfigInterface

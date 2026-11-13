@@ -18,7 +18,6 @@
 | Pack | Script | Scope | Timeout | Last Run | Status |
 |------|--------|-------|---------|----------|--------|
 | proxy_unit_test | test/packs/proxy_unit_test.sh | handler, race_executor, adapters, streaming, auth | 120s | 2026-10-06 | PASS (474P/0F/7S long-wait heartbeat skips; incl. NEW imggen misroute+filter tests; @ e2d93c3 imggen final verification) |
-| ultimatemodel_unit_test | test/packs/ultimatemodel_unit_test.sh | handler, handler_external, handler_internal, usage | 120s | 2026-10-06 | PASS (169+101 sub, 0 fail; @ e2d93c3 imggen final verification) |
 | store_unit_test | test/packs/store_unit_test.sh | database, querybuilder, mock_store | 120s | 2026-10-06 | PASS (182P/0F/4S PG-conditional skips; migration 029 fresh-DB green; imggen kind gates 8/8; CloseLifecycle ran+passed on Linux; re-verified post pack-script fix @ 3ea122c) |
 | models_unit_test | test/packs/models_unit_test.sh | config, peak_hours, credentials, errors, secondary_upstream | 120s | 2026-10-06 | PASS (92 top/276 sub incl. full kind-discriminator validation matrix; @ e2d93c3) |
 | toolrepair_unit_test | test/packs/toolrepair_unit_test.sh | repair, strategies, fixer | 120s | 2026-10-06 | PASS (17/105; @ e2d93c3) |
@@ -35,7 +34,7 @@
 | reasoning_content_dir | inline: `go test ./test/reasoning_content/ -v -count=1 -timeout 240s` | serialization chain + non-stream reasoning_content | 240s go-test / `timeout 300` outer | 2026-10-06 | PASS (2 funcs / 14 subtests; @ e2d93c3) |
 | imggen_unit_test | inline: `go test ./pkg/imggen/ -v -count=1 -timeout 110s` (outer `timeout 300`) | pkg/imggen — handler, minimax, no_key_in_artifacts (live_e2e_test.go EXCLUDED via `//go:build live_imggen`) | 300s outer / 110s go | 2026-10-06 | PASS (42P/0F/0S @ 2a7e6d4; re-run 42P @ 548006f after cov-adds +10 assertion lines; NoKeyInArtifacts confirmed EXECUTED untagged; FIRST registered run) — **re-test @ 0d08e3e PASS: 42/0/0 identical baseline (no regression from store fix)** — 2026-11-09 9router gate: 91 top-level RUN / 91 PASS / 0F / 0S verbose (`-timeout=240s` inside `timeout 300`, isolated HOME); 33 new 9router/b64 tests all literal `--- PASS` |
 | orphan_unit_test | inline: `go test ./pkg/memlimit/ ./pkg/modelscache/ -count=1 -timeout 110s` (outer `timeout 120`) | pkg/memlimit + pkg/modelscache — pre-existing pack orphans surfaced by 2026-10-06 inventory (formerly one-off regC/regD sweeps) | 120s outer / 110s go | 2026-10-06 | PASS (both ok: 0.009s + 4.101s; FIRST registered run) |
-| e2e_mock_regression_test | inline: `go test ./test/e2e_anthropic_thinking_leak/ ./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/ ./test/e2e_reasoning_content/ ./test/e2e_ultimate_internal_reasoning/ -v -count=1 -timeout 240s` (outer `timeout 300`) | ALL 5 registered in-process httptest e2e mock suites in one invocation | 300s outer / 240s go | 2026-10-06 | PASS (94 RUN / 94 PASS / 0F / 0S; 27s; zero network-shaped errors; FIRST registered combined run) |
+| e2e_mock_regression_test | inline: `go test ./test/e2e_anthropic_thinking_leak/ ./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/ ./test/e2e_reasoning_content/ -v -count=1 -timeout 240s` (outer `timeout 300`) | ALL registered in-process httptest e2e mock suites in one invocation | 300s outer / 240s go | 2026-10-06 | PASS (94 RUN / 94 PASS / 0F / 0S; 27s; zero network-shaped errors; FIRST registered combined run) |
 | sticky_order_test | inline: `go test ./pkg/stickyorder -count=1 -timeout=110s` + `go test ./pkg/proxy -run 'Sticky' -count=1 -timeout=110s` (outer `timeout 300` each; sticky-scoped `-race` variant same scope) | pkg/stickyorder units (engine+order, 18) + pkg/proxy Sticky wiring matrix (27 top + 7 sub) + gate scenario pack `pkg/proxy/sticky_scenario_test.go` @ 5f75216 (RUN1/RUN2 same-prefix, unpin/re-pin/revert, handler-wired short-TTL) | 300s outer / 110s go | 2026-11-06 | PASS (stickyorder 18/18; proxy Sticky 27+7; scenario 4/4 incl. -count=2; sticky-scoped -race PASS 56.7s; registered during sticky-last-success-ordering gate @ fee32a8+5f75216 — full report RESULTS/2026-11-06-sticky-last-success-ordering-gate.md) |
 | fe_vitest_suite | inline: `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE full suite (windowing, RequestDetail, ImgGen tab/form/hook, chatFilter, SettingsPage tabs) | 300s outer | 2026-10-06 | PASS 83/83 (7 files; 23 imggen-specific; 5.65s; @ 2a7e6d4 imggen final verification) |
 | fe_typecheck | inline: `cd pkg/ui/frontend && timeout 240 npx tsc --noEmit` | FE TypeScript error gate (vite build does NOT type-check) | 240s | 2026-10-06 | PASS-scoped (26 errors / 11 files = documented baseline; ZERO errors in imggen or commission-touched files; @ 2a7e6d4) |
@@ -46,8 +45,7 @@
 
 | Slice | Exact command | Result |
 |-------|---------------|--------|
-| raceA_proxy | `timeout 300 go test -race -run 'TestRealStreaming\|TestLiveRelay\|TestLiveMode\|TestUltimateCapturePersistence' -count=1 ./pkg/proxy/ -timeout 280s` | **PASS** — 0 races, 24s |
-| raceB_ultimate | `timeout 300 go test -race -run 'TestUltimate' -count=1 ./pkg/ultimatemodel/ -timeout 280s` | **PASS** — 0 races, 2.8s |
+| raceA_proxy | `timeout 300 go test -race -run 'TestRealStreaming\|TestLiveRelay\|TestLiveMode' -count=1 ./pkg/proxy/ -timeout 280s` | **PASS** — 0 races, 24s |
 | raceC_translator | `timeout 300 go test -race -count=1 ./pkg/proxy/translator/ -timeout 280s` | **PASS** — 0 races, 1.1s |
 
 ## Mock Test Packs
@@ -58,9 +56,7 @@
 | frontend_api_cache_mock | test/mock_frontend_api_cache.mjs | Unit | 60s | 2026-04-09 | PASS |
 | allowed_models_integration | test/integration_allowed_models_test.go | Integration | N/A (Go test) | 2026-05-01 | PASS |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E | N/A (Go test) | 2026-05-05 | PASS |
-| ultimate_model_shell_mock | test/test_mock_ultimate_model.sh | Shell E2E (mock ultimate fallback; ports 4001/4322 harness-fixed, pre-existing convention) | 75s internal / `timeout 300` outer | 2026-08-28 | **PASS 49/49** @ 22e76d6 (rsd merge gate; real-binary ultimate paths incl. live streaming defaults; ~150s wall) |
 | openai_internal_buffered_shell_mock | test/test_mock_openai_internal_buffered.sh | Shell E2E (buffered openai internal; ports 4003/4324 harness-fixed, pre-existing convention) | 60s internal / `timeout 300` outer | 2026-08-28 (re-run) | **PASS 60/60** @ 61fa02a — harness repaired by 61fa02a (credentials[] payload + buffer header on all 15 curls); prior FAIL 0/60 (credential-LB schema rot) superseded |
-| e2e_ultimate_internal_reasoning | test/e2e_ultimate_internal_reasoning/ | E2E Mock (capturing in-process upstream) | 110s go-test / `timeout 300` outer | 2026-08-28 | PASS 1/1 @ 22e76d6 (rsd merge gate) |
 | minimax_reasoning_shell_mock | test/test_mock_minimax_reasoning.sh | Shell E2E (mock MiniMax upstream w/ reasoning_details replay + capture; ports 4005/4325 harness-fixed) | 120s internal / `timeout 300` outer | 2026-08-28 | **PASS 53/53** @ 22e76d6 (rsd merge gate; 11s wall — previous near-cap warning RESOLVED, was a cold-build artifact) |
 | e2e_minimax_reasoning | test/e2e_minimax_reasoning/ | E2E Mock (capturing in-process upstream; 4-path scenario suite, P3-5) | 240s go-test / `timeout 300` outer | 2026-09-26 | **PASS (all S1–S14, 4.101s) @ cc5e15c** — S8 flag-absent expectations updated to body-content gate (3 subtests `assertUntouched`→`assertTranslated`, +14/−7); prior 2026-08-28 PASS 43/43 @ 22e76d6 superseded (3 S8 subtests failed @ 6829d98 with stale header-only contract — see LESSONS/2026-09-26-stale-e2e-contract-after-gate-widening.md) |
 | minimax_interleaved_matrix | inline (exact command in code block below — **NOT** `\|`, see warning) | Unit (P3-2 byte-identical negative matrix: 24 body + 4 header + 4 usage) | `timeout 300` | 2026-08-21 | **PASS** — 34/34 test funcs (46 PASS incl. 12 subtests) @ `355f06c`; quoting repair: registered `\|` form was vacuous (0 tests run, see LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md); 2 N/A cells noted 2026-08-19 stand |
@@ -68,7 +64,6 @@
 | fe_reasoning_observability | test/e2e_fe_reasoning_observability/ | E2E Mock (in-process proxy + real-HTTP FE API mount; closure gate + 16-row path matrix) | 240s go-test / `timeout 300` outer | 2026-08-28 | **PASS 20/20** @ 22e76d6 (rsd merge gate: closure 4/4 + matrix 16/16; capture taps mode-independent; NOTE: no anthropic-internal-nonstream row — S3-class bug not covered here) |
 | anthropic_thinking_leak | test/e2e_anthropic_thinking_leak/ | E2E Mock (in-process anthropic /v1/messages; sink-vs-wire dual assertion) | 240s go-test / `timeout 300` outer | 2026-08-29 | **PASS 4/4 @ b48a14f (feature/db-cache-layer, -race)** — S3 FIXED on this branch (fixes 64da4ae + e60de91 are ancestors); prior PARTIAL @ 22e76d6 superseded — see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md |
 | rsd_m1_openai_ttfb | test/mock_rsd_m1_openai_ttfb.sh | Shell E2E (real binary; OpenAI path TTFB default-vs-buffered; ports 10110/10111) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS** @ 22e76d6 (A: TTFB 103ms vs total 1536ms, 5 gaps ≥150ms; B: TTFB 1603ms spread 0ms; C info: byte-diff = live `: keepalive` only, content identical; D healthz 200; 3× stable) |
-| rsd_m2_anthropic_ultimate_ui | test/mock_rsd_m2_anthropic_ultimate_ui.sh | Shell E2E (real binary; /v1/messages both modes + ultimate + UI records; ports 10120/10121) | 240s internal / `timeout 300` outer | 2026-09-22 (fix-branch legacy-consumer regression; prior 2026-08-28 final gate) | **PASS — E is HARD since e60de91** @ e60de91 (A: TTFB 1ms/incremental; B: 1551ms/single-burst; **E HARD: non-stream id-normalized byte-identity — both 322B, sha-identical, Anthropic-shape both, OpenAI-shape negative guard clean**; F: S3 records exact; C documented-impractical). See RESULTS/2026-08-28-rsd-m2-e-hard-gate-final.md; 2026-09-22 re-run **PASS @ uncommitted fix/fe-api-payload-ram-incident** (legacy `?include=messages` consumer intact — D/F full-payload checks pass, E id-normalized byte-identity holds, exit 0 ×2; isolated HOME, ports 10120/10121 freed). See RESULTS/2026-09-22-fe-api-payload-ram-incident-verification.md |
 | rsd_m3_edge_cases | test/mock_rsd_m3_edge_cases.sh | Shell E2E (real binary; header truth table + first-wins + stream=false + disconnect; ports 10130/10131) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 21/21** @ 22e76d6 (truth table 12/12 incl. case+garbage; multi-line first-wins both directions; stream=false byte-identical; disconnect: healthz 200, no panic) |
 | e2e_reasoning_content | test/e2e_reasoning_content/ | E2E Mock (reasoning_content chain, streaming + non-stream) | 240s go-test / `timeout 300` outer | 2026-08-28 | PASS 5 top-level + 7 sub @ 22e76d6 (rsd merge gate) |
 | gzip_request_decompression | test/mock_gzip_request_decompression.sh | Shell E2E (real binary; gzip request-body original scenario a-f; ports 10140/10141) | 240s internal / `timeout 300` outer | 2026-08-28 | **PASS 6/6** @ 7a9ecff (gzip feature gate; byte-identity both /v1 protocols, corrupt→400, 150 MiB bomb→413 + liveness, SSE passthrough; 3 harness-only fixes on first run — see LESSONS/2026-08-28-gzip-e2e-harness-lessons.md) |
@@ -85,10 +80,10 @@
 # ⚠️ NOT 'Interleaved\|MiniMax\|Reasoning' — in single quotes, go's RE2 reads
 # \| as an ESCAPED LITERAL PIPE and matches ZERO tests (vacuous exit-0 PASS).
 # The `\|` form only ever worked unquoted, where the shell strips the backslash.
-timeout 300 go test ./pkg/proxy/ ./pkg/ultimatemodel/ -run 'Interleaved|MiniMax|Reasoning' -count=1 -timeout 280s
+timeout 300 go test ./pkg/proxy/ -run 'Interleaved|MiniMax|Reasoning' -count=1 -timeout 280s
 ```
 
-Expected: 17 test funcs in `pkg/proxy` + 17 in `pkg/ultimatemodel` = **34 test functions** (46 `--- PASS` lines incl. 12 subtests), exit 0. If output says `[no tests to run]`, the quoting regression has returned — see `LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md`.
+Expected: 17 test funcs in `pkg/proxy` (historical: the ult-internal half was removed with the ultimate subsystem 2026-11), exit 0. If output says `[no tests to run]`, the quoting regression has returned — see `LESSONS/2026-08-21-interleaved-matrix-regex-vacuous-pass.md`.
 
 ---
 
@@ -99,7 +94,6 @@ Full `go test ./...` equivalence executed as 5 parallel per-package-group inline
 | Inline pack | Command | Result |
 |-------------|---------|--------|
 | regA_proxy | `timeout 300 go test -count=1 ./pkg/proxy` | **PASS** ok 55.042s (incl. NEW race_minimax_fallback_e2e_test.go) |
-| regB_ultimate_translator | `timeout 300 go test -count=1 ./pkg/ultimatemodel ./pkg/proxy/translator ./pkg/proxy/normalizers ./pkg/proxy/token` | **PASS** (~6.2s) |
 | regC_store_cache_lb | `timeout 300 go test -count=1 ./pkg/store/database ./pkg/store ./pkg/modelscache ./pkg/credentiallb` | **PASS** (~4s) |
 | regD_light | `timeout 300 go test -count=1 . ./cmd ./pkg/auth ./pkg/bufferstore ./pkg/config ./pkg/crypto ./pkg/events ./pkg/logger ./pkg/loopdetection ./pkg/loopdetection/fingerprint ./pkg/mcp ./pkg/memlimit ./pkg/middleware/gzipmw ./pkg/models ./pkg/proxyheader ./pkg/providers ./pkg/supervisor ./pkg/toolcall ./pkg/toolrepair ./pkg/ui ./pkg/usage` | **PASS** (18 ok + 3 no-test-files; slowest mcp 17.5s) |
 | regE_test_tree | `timeout 300 go test -count=1 ./test/...` | **PASS after fix** — e2e_minimax_reasoning 3 stale S8 subtests failed @ 6829d98 (old header-only contract), fixed by cc5e15c, package re-run PASS 4.101s |
@@ -131,65 +125,11 @@ Update after each test run:
 | Category | Status | Details |
 |----------|--------|---------|
 | Go Build | ✅ PASS | `go build ./cmd/main.go` |
-| Go Unit Tests | ✅ PASS | 22/23 packages (2 pre-existing failures in ultimatemodel, also fail on master) |
+| Go Unit Tests | ✅ PASS | (historical run; the retired ult-internal package's failures no longer apply) |
 | Go Vet | ✅ PASS | No issues |
 | Frontend Build | ✅ PASS | 1.46s, 4 chunks, no warnings |
 | Browser Tests | ✅ 5/5 | Delete dialog, cancel, delete, loading state, overlay dismiss |
 | Quick Fixes | 1 | Overlay click dismiss handler (commit 585fe6a) |
-
-*Note: `ultimatemodel_unit_test` has 2 pre-existing failures unrelated to this PR (also fail on master):
-`TestExecute_PerTokenOverride_WithID` and `TestExecute_AllLookupsUseID/per-token_uses_ID_lookup`
-
-### Commit 3cd5d56 - Critical Test Gaps Fix (C1+C2)
-| Category | Status | Details |
-|----------|--------|---------|
-| Go Build | ✅ PASS | `go build ./cmd/main.go` |
-| Go Unit Tests | ✅ PASS | 21/21 packages, 946 tests |
-| Go Vet | ✅ PASS | No issues |
-| New Test Functions | ✅ 8 | 4 executor E2E + 4 coordinator peak+secondary |
-
-#### New Test Functions
-| Function | Location | Verifies |
-|----------|----------|----------|
-| TestExecuteInternalRequest_SecondaryModelSwap_E2E_NonStream | race_executor_test.go | Provider receives secondary model (non-stream) |
-| TestExecuteInternalRequest_SecondaryModelSwap_E2E_Stream | race_executor_test.go | Provider receives secondary model (stream) |
-| TestExecuteInternalRequest_NoSecondary_UsesPrimary_E2E | race_executor_test.go | Empty secondary → primary used |
-| TestExecuteInternalRequest_SecondaryFalse_UsesPrimary_E2E | race_executor_test.go | Flag=false → primary used |
-| TestRaceCoordinator_PeakHourWithSecondaryModel | race_coordinator_test.go | Main=peak, second=secondary |
-| TestRaceCoordinator_PeakHourModelOnly_NoSecondary | race_coordinator_test.go | Peak active, no secondary |
-| TestRaceCoordinator_SecondaryOverridesPeakHour | race_coordinator_test.go | Secondary independent of peak |
-| TestRaceCoordinator_NoPeakHour_UsesInternalModel | race_coordinator_test.go | Peak disabled → internal model |
-
-### Commit 9b20182 - Secondary Upstream Model Phase 4 Tests
-| Category | Status | Details |
-|----------|--------|---------|
-| Go Build | ✅ PASS | `go build ./cmd/main.go` |
-| Frontend Build | ✅ PASS | `npm run build` (1.00s) |
-| Go Unit Tests | ✅ PASS | 21/21 packages, 935 tests |
-| Go Vet | ✅ PASS | No issues |
-| New Test Files | ✅ 7 files | 2011 lines of new tests |
-| Test Matrix | ✅ 4/4 | All scenarios covered |
-
-### Phase 4 Test Files
-| File | Lines | Type |
-|------|-------|------|
-| pkg/models/config_secondary_test.go | 360 | NEW — validation |
-| pkg/proxy/race_coordinator_test.go | 215 | EXTENDED — coordinator |
-| pkg/proxy/race_executor_test.go | 279 | EXTENDED — executor |
-| pkg/proxy/race_request_test.go | 162 | EXTENDED — request flag |
-| pkg/proxy/race_retry_test.go | 68 | EXTENDED — retry integration |
-| pkg/store/database/database_test.go | 370 | EXTENDED — store CRUD |
-| pkg/ui/handlers_models_test.go | 557 | NEW — API handlers |
-
-### Commit a2a6c41 - Credential ID Model Creation Fix (Branch: fix/model-credential-create)
-
-| Category | Status | Details |
-|----------|--------|---------|
-| Go Build | ✅ PASS | `go build ./cmd/main.go` |
-| Go Unit Tests | ✅ PASS | 25/27 packages (2 pre-existing race in stream_buffer.go:166) |
-| Go Vet | ✅ PASS | No issues |
-| Frontend Build | ✅ PASS | Built in 1.72s |
-| Code Logic Verification | ✅ PASS | All 6 checks passed |
 
 **Pre-existing failures (unrelated to fix):**
 - `pkg/proxy` — nil pointer dereference in `streamBuffer.GetAllRawBytesOnce()` (stream_buffer.go:166)
@@ -255,10 +195,9 @@ blocked ✅
 | race_modelscache_x10 | `timeout 300 go test -race -count=10 -timeout 280s ./pkg/modelscache/` | **PASS** — 10/10 clean, 36.2s (USER-MANDATED repetition; incl. new realerror + edge-case tests @ b48a14f) |
 | race_store | `./pkg/store/...` | **PASS** — 14.2s; stabilized BusDrain test deterministic; quarantined CloseLifecycle did not fire |
 | race_mcp | `./pkg/mcp/...` | **PASS** — 19s |
-| race_ult_loop_tool | `./pkg/ultimatemodel/... ./pkg/loopdetection/... ./pkg/toolrepair/ ./pkg/toolcall/` | **PASS** — 8s |
 | race_misc_small | `./pkg/{models,auth,config,crypto,credentiallb,providers,proxyheader,events,bufferstore,supervisor,usage,ui,middleware}/...` | **PASS** — 13/13 pkgs, ~21s wall (gzipmw 20.7s dominant) |
 | race_testroot_buildgate | `./test/ ./test/reasoning_content/ ./cmd/...` + `go build ./... && go vet ./...` | **PASS** — 10s; build+vet silent |
-| race_e2e_g1 | `./test/e2e_reasoning_content/ ./test/e2e_ultimate_internal_reasoning/` | **PASS** — 4.3s |
+| race_e2e_g1 | `./test/e2e_reasoning_content/` | **PASS** — 4.3s |
 | race_e2e_g2 | `./test/e2e_fe_reasoning_observability/ ./test/e2e_minimax_reasoning/` | **PASS** — 18.5s (240s historical plain budget NOT approached under race) |
 | race_e2e_anthropic | `./test/e2e_anthropic_thinking_leak/` | **PASS 4/4** — S3 FIXED on this branch (see LESSONS/2026-08-29-s3-anthropic-green-on-dbcache-branch.md) |
 | race_repo_root | `./` | **NO-TEST-FILES** (root pkg = scratch CLI test_load.go only) — sweep coverage complete |
@@ -266,14 +205,14 @@ blocked ✅
 
 ## Ad-hoc gate packs — 2026-10-23 auto-build-version functional gate (wt feature/auto-build-version @ e12c52b)
 
-All packs: go1.26.0 toolchain on PATH + `GOTOOLCHAIN=local` + `GOMODCACHE/GOCACHE/GOPATH` pinned + **isolated HOME** (`/tmp/gate-*`); Go packs carry `-skip TestB1_UltimateModelAllowed` (QUARANTINE.md 2026-10-18, mirrors testroot wiring). Full report: `RESULTS/2026-10-23-auto-build-version-functional.md`.
+All packs: go1.26.0 toolchain on PATH + `GOTOOLCHAIN=local` + `GOMODCACHE/GOCACHE/GOPATH` pinned + **isolated HOME** (`/tmp/gate-*`). Full report: `RESULTS/2026-10-23-auto-build-version-functional.md`.
 
 | Pack | Command (inline) | Scope | Timeout | Last Run | Status |
 |------|------------------|-------|---------|----------|--------|
-| gate_go_g1 | `timeout 300 go test ./pkg/proxy/... -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | proxy, normalizers, token, translator (4/41) | 300s/240s | 2026-10-23 | PASS (4/4 ok, 92s; @ e12c52b) |
-| gate_go_g2 | `timeout 300 go test ./pkg/store/... ./pkg/credentiallb ./pkg/grouplb ./pkg/modelscache ./pkg/auth ./pkg/crypto ./pkg/config ./pkg/models -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | persistence/LB lane (9/41) | 300s/240s | 2026-10-23 | PASS (9/9 ok, 45s; TOCTOU green run-1) |
-| gate_go_g3 | `timeout 300 go test . ./scripts ./pkg/providers ./pkg/mcp ./pkg/ultimatemodel ./pkg/toolcall ./pkg/toolrepair ./pkg/supervisor ./pkg/bufferstore ./pkg/events ./pkg/usage ./pkg/memlimit ./pkg/middleware/... ./pkg/proxyheader ./pkg/loopdetection/... ./pkg/logger -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | infra/misc lane (17/41; 3 no-test pkgs) | 300s/240s | 2026-10-23 | PASS (17/17 ok, ~50s; usage-stress + httpbin + SSRF all clean run-1) |
-| gate_go_g4 | `timeout 300 go test ./cmd ./pkg/ui ./pkg/imggen ./pkg/decision/... ./test/... -count=1 -timeout 240s -skip TestB1_UltimateModelAllowed` | kinds + cmd + ui + test-root (11/41; B1 skip verified `no tests to run`) | 300s/240s | 2026-10-23 | PASS (11/11 ok, 31s; NEW version guards green) |
+| gate_go_g1 | `timeout 300 go test ./pkg/proxy/... -count=1 -timeout 240s` | proxy, normalizers, token, translator (4/41) | 300s/240s | 2026-10-23 | PASS (4/4 ok, 92s; @ e12c52b) |
+| gate_go_g2 | `timeout 300 go test ./pkg/store/... ./pkg/credentiallb ./pkg/grouplb ./pkg/modelscache ./pkg/auth ./pkg/crypto ./pkg/config ./pkg/models -count=1 -timeout 240s` | persistence/LB lane (9/41) | 300s/240s | 2026-10-23 | PASS (9/9 ok, 45s; TOCTOU green run-1) |
+| gate_go_g3 | `timeout 300 go test . ./scripts ./pkg/providers ./pkg/mcp ./pkg/toolcall ./pkg/toolrepair ./pkg/supervisor ./pkg/bufferstore ./pkg/events ./pkg/usage ./pkg/memlimit ./pkg/middleware/... ./pkg/proxyheader ./pkg/loopdetection/... ./pkg/logger -count=1 -timeout 240s` | infra/misc lane (17/41; 3 no-test pkgs) | 300s/240s | 2026-10-23 | PASS (17/17 ok, ~50s; usage-stress + httpbin + SSRF all clean run-1) |
+| gate_go_g4 | `timeout 300 go test ./cmd ./pkg/ui ./pkg/imggen ./pkg/decision/... ./test/... -count=1 -timeout 240s` | kinds + cmd + ui + test-root (11/41) | 300s/240s | 2026-10-23 | PASS (11/11 ok, 31s; NEW version guards green) |
 | gate_fe_vitest | `cd pkg/ui/frontend && timeout 300 npx vitest run` | FE full suite incl. tsc-baseline comparator + NEW Header.test.tsx | 300s | 2026-10-23 | PASS (23 files / 237 tests / 0F / 0S; comparator 5/5; 19s) |
 | gate_e2e_version_injection | 3× `go build` (default / `-X main.Version=424242 -s -w` / `-X main.Version= -s -w`) → serve (isolated HOME, `APPLY_ENV_OVERRIDES=1 PORT=1812x/1813x/1814x`) → curl `/fe/api/version` + banner grep → kill | version-injection closure proof (v150 symptom) | 290s outer / 240s per build | 2026-10-23 | PASS 3/3 (dev / 424242 / dev-on-empty; banners match; ports verified freed; 36s) |
 | gate_version_guards | `timeout 120 go test ./cmd ./pkg/ui -run Version -count=1 -v` + `timeout 240 npx vitest run src/components/__tests__/Header.test.tsx` | fresh version-guard re-runs | 120s/240s | 2026-10-23 | PASS (4 tests + 3 subtests; Header 1/1; 7s) |
@@ -286,11 +225,10 @@ Full report: `RESULTS/2026-10-27-openrouter-provider-registration-gate.md`. All 
 
 | Pack | Command (inline) | Scope | Timeout | Last Run | Status |
 |------|------------------|-------|---------|----------|--------|
-| gate_or_full_regression | `timeout 300 go test ./... -count=1 -timeout 270s` | ENTIRE suite — 41/41 packages (`go list ./...` = 41) | 300s/270s | 2026-10-27 | **PASS** (38 ok + 3 no-test-files; 86s wall; go1.26.1 darwin/arm64; `pkg/providers` incl. NEW openrouter_test.go 5/5 executed unguarded; **zero quarantine adjudications needed** — all 4 active QUARANTINE.md flakes + `TestB1_UltimateModelAllowed` passed run-1) |
+| gate_or_full_regression | `timeout 300 go test ./... -count=1 -timeout 270s` | ENTIRE suite — 41/41 packages (`go list ./...` = 41) | 300s/270s | 2026-10-27 | **PASS** (38 ok + 3 no-test-files; 86s wall; go1.26.1 darwin/arm64; `pkg/providers` incl. NEW openrouter_test.go 5/5 executed unguarded; **zero quarantine adjudications needed** — all active QUARANTINE.md flakes passed run-1) |
 | gate_or_runtime_smoke | `timeout 300 bash test/test_provider_registration_smoke.sh` | Real-binary boot (isolated HOME, `APPLY_ENV_OVERRIDES=1 PORT=18240`) → GET /fe/api/providers openrouter entry → credential-create 201 → model validate `{"valid":true}` → model create 201 → NEG `"openrouter "` 400 + NEG `"OpenRouter"` 400 + shared-provider mixed-brand 400 → /healthz 200 → /ui/ 200 html → SIGTERM exit 0 → port freed | 300s/280s | 2026-10-27 | **PASS 18/18** (pre-commit proof 1.3s; re-verified from repo path post-commit 3.0s @ 815a9ff; explicit-args run 18/18; deepseek cross-brand run 18/18 proves the pack is brand-generic) |
 | gate_or_build | `timeout 300 bash test/packs/build_gate_test.sh` | go build + go vet | 300s/120s | 2026-10-27 | **PASS** (5s; ensure.md Critical #2/#3; new test file type-checked by vet even though go build skips _test.go) |
 | gate_or_fe_vitest | isolated copy: `rsync -a --exclude node_modules --exclude .vite-temp pkg/ui/frontend/ /tmp/or-fe/frontend/` → `npm ci` in copy → `timeout 300 npx vitest run` in copy | FE suite + tsc-baseline comparator (types.ts in change set → ensure.md Critical #4) | 300s (+240s ci) | 2026-10-27 | **PASS** (23 files / 242 tests / 0F/0S; comparator 5/5 = zero NEW tsc error locations; repo node_modules stale since 2026-05-22 → vitest/happy-dom/@testing-library missing; worked around via isolated copy, repo tree mtime-diff verified clean — see skill `isolated-test-pack-run`) |
 
 Notes:
-- `TestB1_UltimateModelAllowed` passed run-1 WITHOUT the `-skip` the 2026-10-23 gate carried — the quarantine citation it used (QUARANTINE.md 2026-10-18) is absent from today's QUARANTINE.md and did not reproduce on this host (go1.26.1 darwin/arm64). Not chased further; if it fires again, re-quarantine with current evidence.
 - New committed pack: `test/test_provider_registration_smoke.sh` @ **815a9ff** (526 lines, executable, matches the 20 other test/*.sh convention; NOT run by CI — verified no workflow/Makefile/script globs test/*.sh; manual gate like every other shell pack here). Gate a NEW brand: `timeout 300 bash test/test_provider_registration_smoke.sh <brand> "<Display Name>" <base_url> <port 10000-19999>`.

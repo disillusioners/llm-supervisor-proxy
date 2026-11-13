@@ -5,7 +5,7 @@
 //   - Credential bearer replaces the client token — the client's
 //     Authorization / X-API-Key / x-api-key is STRIPPED before
 //     upstream (BE-A2 — the proxy's sk- token must never reach
-//     MiniMax). Differs from pkg/ultimatemodel/handler_external.go
+//     MiniMax).
 //     where the client bearer IS the upstream key.
 //   - 404 / 413 / 502 / 504 use the OpenAI envelope via
 //     models.NewOpenAIError (BE-T3 / Amendment 5).
@@ -806,7 +806,7 @@ func NewCredentialResolverFromConfig(resolve func(string) (models.ResolvedCreden
 
 // isHopByHopHeader matches the IETF hop-by-hop header set the
 // Go stdlib considers (Host, Content-Length, Transfer-Encoding
-// at minimum). Mirrors pkg/ultimatemodel/handler_external.go:141.
+// at minimum).
 func isHopByHopHeader(h string) bool {
 	switch strings.ToLower(h) {
 	case "host", "content-length", "transfer-encoding":
@@ -827,7 +827,7 @@ func isClientAuthHeader(h string) bool {
 
 // copyResponseHeaders copies non-hop-by-hop upstream response
 // headers onto the client response. Mirrors the header-copy
-// pattern in pkg/ultimatemodel/handler_external.go:171-176.
+// pattern used by the raw-passthrough handlers.
 func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	for key, values := range resp.Header {
 		if isHopByHopHeader(key) {

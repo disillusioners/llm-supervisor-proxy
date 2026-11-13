@@ -142,18 +142,30 @@ The proxy uses a **parallel race retry** mechanism for maximum reliability:
 | `LOG_RAW_UPSTREAM_ON_ERROR` | `false` | Log failed/error upstream responses. |
 | `LOG_RAW_UPSTREAM_MAX_KB` | `1024` | Max KB per response to log. |
 
-### Ultimate Model Configuration
+### Last-Resort Fallback (Backup-Only Group Member)
 
-For handling duplicate requests with a designated high-priority model:
+The retired ultimate-model escalation role is served by a group's
+**backup-only member**: a group member flagged `backup_only: true`
+participates in the BACKUP sub-pool only and is served exclusively after
+every default member in the request's exclusion set has failed — the same
+last-resort semantics the escalation used to provide, with no new
+mechanism (the pre-existing two-tier pool behavior).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ULTIMATE_MODEL_ID` | *(empty)* | Model ID for duplicate request handling. |
-| `ULTIMATE_MODEL_MAX_HASH` | `100` | Max hashes in circular buffer. |
+Configure it on a load-balance group via the UI (Models → group → member
+"backup only" toggle) or the API — at least one member must stay in the
+default pool:
 
-Ultimate-model trigger schedule is fixed (not configurable): escalation on
-the **5th/10th/20th/30th/40th** request with the same content hash; requests
-beyond the 40th receive an un-retryable `ultimate_model_retry_exhausted` error.
+```json
+{
+  "id": "my-group",
+  "kind": "group",
+  "members": [
+    { "model_id": "primary-a", "weight": 3 },
+    { "model_id": "primary-b", "weight": 1 },
+    { "model_id": "last-resort-model", "weight": 1, "backup_only": true }
+  ]
+}
+```
 
 ### Loop Detection Configuration
 
@@ -546,7 +558,6 @@ For full details, see [`docs/loop-detection-implementation.md`](docs/loop-detect
 │   ├── supervisor/          # Idle timeout monitoring
 │   ├── toolcall/            # Tool call buffering
 │   ├── toolrepair/          # Automatic tool call JSON repair
-│   ├── ultimatemodel/       # Ultimate model for duplicate requests
 │   └── ui/                  # Web UI
 │       └── frontend/        # Preact frontend source
 ├── k8s/                     # Kubernetes Helm chart & manifests

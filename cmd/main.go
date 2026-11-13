@@ -407,10 +407,8 @@ func main() {
 	// the hot path).
 	//
 	// DecompressRequest is the next layer; it runs FIRST on the
-	// request side so every handler — proxy, ultimatemodel (which
-	// ultimately calls Execute → executeExternal with body bytes
-	// produced from r.Body via initRequestContext's parse), UI, MCP
-	// — sees a decompressed body. CompressResponse's response-side
+	// request side so every handler — proxy, UI, MCP — sees a
+	// decompressed body. CompressResponse's response-side
 	// work is independent of DecompressRequest's request-side work;
 	// they never share state.
 	//

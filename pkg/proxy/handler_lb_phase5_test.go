@@ -360,8 +360,7 @@ func buildHandlerStack(t *testing.T, modelsCfg *mockModelsConfig, internalModelI
 	db := setupIntegrationDB(t)
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	plaintextToken, storedToken, err := tokenStore.CreateToken(
-		context.Background(), "phase5-token", nil, "phase5-test", false, "", nil,
-	)
+		context.Background(), "phase5-token", nil, "phase5-test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -558,8 +557,7 @@ func TestHandler_ShutdownOrder_LIFO(t *testing.T) {
 	db := setupIntegrationDB(t)
 	tokenStore := auth.NewTokenStore(db, database.SQLite)
 	plaintextToken, _, err := tokenStore.CreateToken(
-		context.Background(), "shutdown-order", nil, "shutdown-test", false, "", nil,
-	)
+		context.Background(), "shutdown-order", nil, "shutdown-test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}

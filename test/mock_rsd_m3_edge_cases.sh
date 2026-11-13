@@ -343,8 +343,6 @@ export UPSTREAM_URL="http://127.0.0.1:$MOCK_PORT"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID="mock-ultimate-m3"
-export ULTIMATE_MODEL_MAX_HASH="100"
 export XDG_CONFIG_HOME="$HOME/.config"
 mkdir -p "$XDG_CONFIG_HOME"
 
@@ -369,9 +367,7 @@ echo "${YELLOW}[6/9] Configuring credential + model...${NC}"
 
 # Clean any stale state (idempotent)
 curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/fe/api/models/mock-openai-m3" >/dev/null 2>&1 || true
-curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/fe/api/models/mock-ultimate-m3" >/dev/null 2>&1 || true
 curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/fe/api/credentials/mock-openai-cred-m3" >/dev/null 2>&1 || true
-curl -s -X DELETE "http://127.0.0.1:$PROXY_PORT/fe/api/credentials/mock-ultimate-cred-m3" >/dev/null 2>&1 || true
 sleep 1
 
 # Sweep stale rsd-m3 test tokens

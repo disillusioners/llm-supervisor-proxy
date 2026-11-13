@@ -10,9 +10,8 @@ package proxy
 //                                         model resolution, conversation key,
 //                                         group rewrite, sticky order) and the
 //                                         HandleChatCompletions orchestration
-//                                         that runs the ultimate-model check,
-//                                         the race handoff, and the finalize
-//                                         paths.
+//                                         that runs the race handoff and the
+//                                         finalize paths.
 //   - Race handoff .................... the bounded re-entry loop that builds
 //                                         a coordinator per attempt set, waits
 //                                         for a winner, and streams / renders
@@ -33,7 +32,7 @@ package proxy
 //     the wrong file.
 //
 // Size rationale: this file sits in the 2000-line band because one request's
-// lifecycle — ultimate escalation, ultimate/race handoff, the streaming relay
+// lifecycle — the race handoff, the streaming relay
 // with its heartbeat/idle/deadline arms, and the non-stream renderer — is ONE
 // interleaved flow: the same requestContext fields and the same writeMu
 // discipline thread through every arm. Splitting by concern would scatter
@@ -69,7 +68,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/ultimatemodel"
 	usage "github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
@@ -96,8 +94,6 @@ func (c *Config) Clone() ConfigSnapshot {
 		RaceParallelOnIdle:       cfg.RaceParallelOnIdle,
 		RaceMaxParallel:          cfg.RaceMaxParallel,
 		RaceMaxBufferBytes:       cfg.RaceMaxBufferBytes,
-		ToolCallBufferDisabled:   cfg.ToolCallBufferDisabled,
-		ToolCallBufferMaxSize:    cfg.ToolCallBufferMaxSize,
 		LogRawUpstreamResponse:   cfg.LogRawUpstreamResponse,
 		LogRawUpstreamOnError:    cfg.LogRawUpstreamOnError,
 		LogRawUpstreamMaxKB:      cfg.LogRawUpstreamMaxKB,
@@ -130,10 +126,6 @@ type ConfigSnapshot struct {
 	// byte-identical request path.
 	StickyLastSuccessEnabled bool
 
-	// Tool Call Buffering
-	ToolCallBufferDisabled bool
-	ToolCallBufferMaxSize  int64
-
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse bool
 	LogRawUpstreamOnError  bool
@@ -148,14 +140,13 @@ type ConfigSnapshot struct {
 }
 
 type Handler struct {
-	config          *Config
-	bus             *events.Bus
-	store           *store.RequestStore
-	client          *http.Client
-	bufferStore     *bufferstore.BufferStore
-	tokenStore      auth.TokenStoreInterface
-	ultimateHandler *ultimatemodel.Handler
-	counter         *usage.Counter
+	config      *Config
+	bus         *events.Bus
+	store       *store.RequestStore
+	client      *http.Client
+	bufferStore *bufferstore.BufferStore
+	tokenStore  auth.TokenStoreInterface
+	counter     *usage.Counter
 
 	// credEngine is the load-balancing engine injected at construction
 	// (Phase 3 / Tasks 3 + W-3). The Config struct has NO CredEngine
@@ -226,20 +217,6 @@ func NewHandler(
 		tokenStore:  tokenStore,
 		counter:     counter,
 	}
-
-	// Initialize ultimate model handler (Phase 3 / Task 3): the engine
-	// is forwarded to ultimatemodel.NewHandler so its internal executeInternal
-	// path can call ExcludeAndReselect for the rate-limit failover hook
-	// (Task 21). The package owns the ult-internal hook end-to-end.
-	h.ultimateHandler = ultimatemodel.NewHandler(config.ConfigMgr, config.ModelsConfig, bus, credEngine)
-
-	// Wire up tool call buffer configuration for ultimate model handler
-	cfg := config.ConfigMgr.Get()
-	h.ultimateHandler.SetToolCallBufferConfig(
-		cfg.ToolCallBufferMaxSize,
-		cfg.ToolCallBufferDisabled,
-		&cfg.ToolRepair,
-	)
 
 	return h
 }
@@ -605,8 +582,6 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	if authToken != nil {
 		rc.tokenID = authToken.ID
 		rc.tokenName = authToken.Name
-		rc.ultimateModelEnabled = authToken.UltimateModelEnabled
-		rc.ultimateModelID = authToken.UltimateModelID
 	}
 
 	// Phase 3 / Task 2a — POST-AUTH wiring site (A-1, A-1-wiring).
@@ -756,390 +731,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 	// === END MODEL ACCESS CHECK ===
 
-	// Debug log when ultimate model is skipped due to missing permission
-	if h.ultimateHandler != nil && !rc.ultimateModelEnabled && rc.tokenID != "" {
-		log.Printf("[DEBUG] ultimate model skipped: token %s (%s) lacks ultimate_model_enabled, model: %s", rc.tokenID, rc.tokenName, rc.reqLog.Model)
-	}
-
-	// Header override for forcing ultimate model (fail-closed: requires auth AND admin must have enabled it)
-	forceUltimate := r.Header.Get("X-Force-Ultimate-Model") == "true" || r.Header.Get("X-Force-Ultimate-Model") == "1"
-	if forceUltimate && authToken != nil && rc.ultimateModelEnabled {
-		rc.ultimateModelEnabled = true
-		log.Printf("[DEBUG] ultimate model forced via X-Force-Ultimate-Model header")
-	}
-
-	// remove-external-upstream P1 fixup — DEFERRED boundary 404 (leader
-	// ruling 2026-10-18): initRequestContext deferred the
-	// unknown/non-internal 404 gate for this request because it carries
-	// X-Force-Ultimate-Model (auth had not run at the gate, so ultimate
-	// entitlement could not be checked there). The interception above is
-	// the hoist: an ultimate-entitled token takes the raw-passthrough
-	// path regardless of body-model resolvability (pre-P1 semantics;
-	// option (c) rejected). Any other header-bearing request — no
-	// ultimate handler wired, unauthenticated, or a token without
-	// ultimate_model_enabled — is a normal request and keeps the full
-	// 404 gate, fired here with the boundary site's exact envelope and
-	// event payload. rc.modelNotFoundDeferred implies the header was
-	// present at init, so the forceUltimate conjunct is belt-and-braces.
-	if rc.modelNotFoundDeferred && !(h.ultimateHandler != nil && forceUltimate && rc.ultimateModelEnabled) {
-		notFoundMsg := fmt.Sprintf("model '%s' not found", rc.reqLog.Model)
-		rc.reqLog.Status = "failed"
-		rc.reqLog.Error = notFoundMsg
-		rc.reqLog.EndTime = time.Now()
-		rc.reqLog.Duration = time.Since(rc.startTime).String()
-		h.store.Add(rc.reqLog)
-		h.publishEvent("model_not_found", map[string]interface{}{
-			"id":              rc.reqID,
-			"model":           rc.reqLog.Model,
-			"outcome":         "model_not_found",
-			"upstream_status": 0,
-		})
-		h.sendError(w, http.StatusNotFound, notFoundMsg, "invalid_request_error", "model_not_found")
-		return
-	}
-
 	// Header-driven flag for MiniMax reasoning_details split-mode translation.
-	// Mirrors the X-Force-Ultimate-Model value-list semantics (R8/Q3):
-	// accepted values are case-sensitive lowercase "true" or "1" only.
-	// Parsed via proxyheader.ParseInterleavedThinkingHeader (single source
-	// of truth shared with pkg/ultimatemodel.Execute). Stored on rc for
-	// race paths; ultimate paths re-parse the header because rc does not
-	// cross the pkg/proxy → pkg/ultimatemodel package boundary.
+	// Value-list semantics (R8/Q3): accepted values are case-sensitive
+	// lowercase "true" or "1" only. Parsed via
+	// proxyheader.ParseInterleavedThinkingHeader. Stored on rc for the
+	// race paths.
 	rc.interleavedThinking = proxyheader.ParseInterleavedThinkingHeader(r)
-
-	// === ULTIMATE MODEL ACCESS CHECK ===
-	// For ultimate model, we need to check access control separately
-	// because the ultimate model might not be in the original request's model list
-	ultimateModelID := ""
-	if h.ultimateHandler != nil && (rc.ultimateModelEnabled || forceUltimate) {
-		// Determine which ultimate model will be used
-		ultimateModelID = h.ultimateHandler.GetModelID()
-		if rc.ultimateModelID != "" {
-			ultimateModelID = rc.ultimateModelID
-		}
-
-		// If ultimate model is different from the requested model, check access control
-		if ultimateModelID != "" && authToken != nil {
-			var requestedModelID string
-			if rc.resolvedModel != nil {
-				requestedModelID = rc.resolvedModel.ID
-			}
-			if ultimateModelID != requestedModelID {
-				// Ultimate model is different - check if allowed
-				if !authToken.IsModelAllowed(ultimateModelID) {
-					log.Printf("[AUTH] Ultimate model '%s' not allowed for token %s (%s)", ultimateModelID, rc.tokenID, rc.tokenName)
-
-					rc.reqLog.Status = "failed"
-					rc.reqLog.Error = fmt.Sprintf("ultimate model '%s' not allowed for this token", ultimateModelID)
-					rc.reqLog.EndTime = time.Now()
-					rc.reqLog.Duration = time.Since(rc.startTime).String()
-					rc.reqLog.UltimateModelUsed = true
-					rc.reqLog.UltimateModelID = ultimateModelID
-					h.store.Add(rc.reqLog)
-
-					h.publishEvent("ultimate_model_not_allowed", map[string]interface{}{
-						"id":    rc.reqID,
-						"model": ultimateModelID,
-						"token": rc.tokenID,
-					})
-
-					h.sendModelNotAllowedError(w, ultimateModelID)
-					return
-				}
-			}
-		}
-	}
-	// === END ULTIMATE MODEL ACCESS CHECK ===
-
-	// === ULTIMATE MODEL CHECK (EARLY EXIT) ===
-	// Check if ultimate model should be triggered for duplicate requests
-	// Permission gate: skip if token lacks ultimate_model_enabled permission
-	if h.ultimateHandler != nil && rc.ultimateModelEnabled {
-		// Extract messages from request body
-		if messages, ok := rc.requestBody["messages"].([]interface{}); ok && len(messages) > 0 {
-			// Convert to map[string]interface{} format for hashing
-			msgMaps := make([]map[string]interface{}, len(messages))
-			for i, msg := range messages {
-				if m, ok := msg.(map[string]interface{}); ok {
-					msgMaps[i] = m
-				}
-			}
-
-			var result ultimatemodel.ShouldTriggerResult
-			if forceUltimate {
-				result = h.ultimateHandler.ForceTrigger(msgMaps)
-				log.Printf("[DEBUG] ForceTrigger hash=%s", shortHash8(result.Hash))
-			} else {
-				result = h.ultimateHandler.ShouldTrigger(msgMaps)
-			}
-			if result.Triggered {
-				// Exclusion gate: skip ultimate model switching for excluded models
-				// Note: forceUltimate always bypasses exclusion (admin override)
-				if !forceUltimate && rc.resolvedModel != nil && rc.resolvedModel.ExcludeFromUltimateSwitching {
-					log.Printf("[UltimateModel] ultimate model switching excluded for model=%s hash=%s", rc.resolvedModel.ID, shortHash8(result.Hash))
-					h.publishEvent("ultimate_model_excluded", map[string]interface{}{
-						"id":    rc.reqID,
-						"model": rc.resolvedModel.ID,
-						"hash":  shortHash8(result.Hash),
-					})
-					// Fall through to normal flow (no ultimate model switch)
-				} else {
-					// Check if the per-hash attempt limit is exhausted
-					// (strictly beyond the hardcoded 40-attempt cap)
-					if result.AttemptsExhausted {
-						// Resolve ultimate model ID with per-token override
-						ultimateModelID := h.ultimateHandler.GetModelID()
-						if rc.ultimateModelID != "" {
-							ultimateModelID = rc.ultimateModelID
-						}
-
-						log.Printf("[UltimateModel] Attempt limit exhausted for hash=%s (attempt %d/%d)",
-							shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
-
-						// Determine if streaming
-						isStream := false
-						if stream, ok := rc.requestBody["stream"].(bool); ok {
-							isStream = stream
-						}
-
-						// Update request log
-						rc.reqLog.Status = "failed"
-						rc.reqLog.Error = fmt.Sprintf("Request attempt limit exceeded (attempt %d/%d)", result.CurrentAttempt, result.MaxAttempts)
-						rc.reqLog.EndTime = time.Now()
-						rc.reqLog.Duration = time.Since(rc.startTime).String()
-						rc.reqLog.UltimateModelUsed = true
-						rc.reqLog.UltimateModelID = ultimateModelID
-						h.store.Add(rc.reqLog)
-
-						// Publish event.
-						//
-						// COMPATIBILITY NOTE: the payload keys "current_retry" /
-						// "max_retries" are KEPT for frontend compatibility
-						// (EventLog.tsx and any external consumers read them);
-						// their values now mean TOTAL attempts against the
-						// hardcoded 40 cap (e.g. 41/40), not the removed
-						// max-retries config knob.
-						h.publishEvent("ultimate_model_retry_exhausted", map[string]interface{}{
-							"id":            rc.reqID,
-							"hash":          shortHash8(result.Hash),
-							"current_retry": result.CurrentAttempt,
-							"max_retries":   result.MaxAttempts,
-						})
-
-						// Send error response (HTTP 200 with JSON stream error)
-						h.ultimateHandler.SendRetryExhaustedError(w, result.Hash, result.CurrentAttempt, result.MaxAttempts, isStream)
-						return
-					}
-
-					// Resolve ultimate model ID with per-token override
-					ultimateModelID := h.ultimateHandler.GetModelID()
-					if rc.ultimateModelID != "" {
-						ultimateModelID = rc.ultimateModelID
-						log.Printf("[UltimateModel] Using per-token override model=%s (token=%s)", ultimateModelID, rc.tokenID)
-					}
-					log.Printf("[UltimateModel] Triggered for duplicate request (schedule milestone), using %s, hash=%s, attempt=%d/%d",
-						ultimateModelID, shortHash8(result.Hash), result.CurrentAttempt, result.MaxAttempts)
-
-					// Note: Ultimate model access check was already done above in the ULTIMATE MODEL ACCESS CHECK section
-
-					// Update request log with ultimate model info
-					rc.reqLog.UltimateModelUsed = true
-					rc.reqLog.UltimateModelID = ultimateModelID
-					rc.reqLog.Status = "running"
-					h.store.Add(rc.reqLog)
-
-					// Publish event.
-					//
-					// COMPATIBILITY NOTE: the payload keys "current_retry" /
-					// "max_retries" are KEPT for frontend compatibility; their
-					// values now mean TOTAL attempts against the hardcoded 40
-					// cap (milestone values are 5/10/20/30/40 of 40).
-					h.publishEvent("ultimate_model_triggered", map[string]interface{}{
-						"id":             rc.reqID,
-						"ultimate_model": ultimateModelID,
-						"original_model": rc.reqLog.Model,
-						"hash":           shortHash8(result.Hash),
-						"current_retry":  result.CurrentAttempt,
-						"max_retries":    result.MaxAttempts,
-					})
-
-					// Execute with ultimate model (raw proxy, no retry/fallback)
-					// The Execute method determines streaming from requestBody["stream"]
-					// Heartbeat is started by the ultimate handler after headers are sent
-					//
-					// execResult carries both the existing usage stats AND the
-					// passively-captured assistant Content / Thinking (Fix 3 of
-					// the reasoning-observability effort). The ultimatemodel
-					// package observes bytes/events as they are written to the
-					// client and never mutates the wire path — see
-					// pkg/ultimatemodel/handler_capture_test.go for the
-					// byte-identity proofs.
-					//
-					// Phase 3 / Task 8: conversationKey (post-auth wired at
-					// handler.go:401+) is threaded down so ultimate-internal's
-					// resolution can use the LB engine (Tasks 8/9); the
-					// intermediate Execute gains the 9th positional arg with
-					// no semantic change to trigger / capture behavior.
-					//
-					// Phase 4 / dispatcher addendum Item 1: thread the
-					// per-request delivery mode into the variadic opts.
-					// Execute's zero value = live (the header-absent
-					// default), so omitting this arg forced ultimate
-					// paths live even when the client opted into
-					// buffering via X-LLMProxy-Buffer-Response —
-					// violating the "header = current behavior"
-					// guarantee. Purely additive: BufferMode=false keeps
-					// Phase 4's live default verbatim.
-					execResult, err := h.ultimateHandler.Execute(r.Context(), w, r, rc.requestBody, rc.reqLog.Model, result.Hash, &rc.headersSent, &ultimateModelID, rc.conversationKey,
-						ultimatemodel.ExecuteOptions{BufferMode: rc.bufferMode})
-					if err != nil {
-						log.Printf("[UltimateModel] Error: %v", err)
-						rc.reqLog.Status = "failed"
-						rc.reqLog.Error = err.Error()
-						rc.reqLog.EndTime = time.Now()
-						rc.reqLog.Duration = time.Since(rc.startTime).String()
-						h.store.Add(rc.reqLog)
-
-						h.publishEvent("ultimate_model_failed", map[string]interface{}{
-							"id":             rc.reqID,
-							"ultimate_model": ultimateModelID,
-							"error":          err.Error(),
-						})
-
-						// If headers not sent, send error response
-						if !rc.headersSent {
-							if strings.Contains(err.Error(), "not found") {
-								http.Error(w, "Ultimate model not found in database", http.StatusBadGateway)
-							} else {
-								http.Error(w, err.Error(), http.StatusBadGateway)
-							}
-						} else {
-							// Headers already sent (streaming) - send SSE error
-							h.sendSSEError(w, models.ErrorTypeUpstreamError, err.Error())
-						}
-						return
-					}
-
-					// Success - update log with usage
-					rc.reqLog.Status = "completed"
-					rc.reqLog.EndTime = time.Now()
-					rc.reqLog.Duration = time.Since(rc.startTime).String()
-					if execResult != nil {
-						rc.reqLog.Usage = execResult.Usage
-					}
-
-					// Fix 3 (reasoning-observability): ultimate paths
-					// previously persisted NO assistant message at all,
-					// so the Web UI showed no reply (neither content nor
-					// reasoning). Now we persist
-					// store.Message{Role: assistant, Content, Thinking,
-					// ToolCalls} from the passively-captured result.
-					// Only persist when there is something to persist:
-					// any of Content, Thinking, or ToolCalls must be
-					// non-empty. An empty capture (e.g. an error path
-					// that returned early without a body, or a
-					// successful response with no observable assistant
-					// turn at all) leaves the Messages slice as it was
-					// so we don't pollute the Web UI with blank
-					// assistant entries.
-					//
-					// W7 extends the Fix 3 conditional with the
-					// ToolCalls presence check: a tool-call-only
-					// assistant turn (empty Content + empty Thinking
-					// + real tool_calls) used to fall through this
-					// gate, leaving the UI blank for that turn. The
-					// ExecuteResult.ToolCalls are populated by the
-					// capture-side hooks at all four Execute paths.
-					if execResult != nil &&
-						(execResult.Content != "" ||
-							execResult.Thinking != "" ||
-							len(execResult.ToolCalls) > 0) {
-						rc.reqLog.Messages = append(rc.reqLog.Messages, store.Message{
-							Role:      "assistant",
-							Content:   execResult.Content,
-							Thinking:  execResult.Thinking,
-							ToolCalls: execResult.ToolCalls,
-						})
-					}
-					h.store.Add(rc.reqLog)
-
-					// Fallback token counting: if provider didn't return usage, estimate from request
-					if token.FallbackEnabled() {
-						if rc.reqLog.Usage == nil || (rc.reqLog.Usage.PromptTokens == 0 && rc.reqLog.Usage.CompletionTokens == 0 && rc.reqLog.Usage.TotalTokens == 0) {
-							tokenizer := token.GetTokenizer()
-							model := ultimateModelID
-							requestBytes, _ := json.Marshal(rc.requestBody)
-							promptTokens, err := tokenizer.CountPromptTokens(requestBytes, model)
-							if err != nil {
-								log.Printf("failed to count prompt tokens: %v", err)
-							} else {
-								completionTokens := 0
-								if rc.reqLog.Usage != nil {
-									completionTokens = rc.reqLog.Usage.CompletionTokens
-								}
-								rc.reqLog.Usage = &store.Usage{
-									PromptTokens:     promptTokens,
-									CompletionTokens: completionTokens,
-									TotalTokens:      promptTokens + completionTokens,
-								}
-								h.store.Add(rc.reqLog)
-							}
-						}
-					}
-
-					// Count this request for hourly usage tracking
-					if rc.tokenID != "" && h.counter != nil {
-						var promptTokens, completionTokens, totalTokens int
-						if rc.reqLog.Usage != nil {
-							promptTokens = rc.reqLog.Usage.PromptTokens
-							completionTokens = rc.reqLog.Usage.CompletionTokens
-							totalTokens = rc.reqLog.Usage.TotalTokens
-						}
-						hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
-						go func() {
-							if err := h.counter.Increment(context.Background(), rc.tokenID, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
-								log.Printf("failed to increment usage counter: %v", err)
-							}
-						}()
-					}
-
-					// Count this request for model hourly usage tracking
-					if rc.reqLog.Model != "" && h.counter != nil {
-						var promptTokens, completionTokens, totalTokens int
-						if rc.reqLog.Usage != nil {
-							promptTokens = rc.reqLog.Usage.PromptTokens
-							completionTokens = rc.reqLog.Usage.CompletionTokens
-							totalTokens = rc.reqLog.Usage.TotalTokens
-						}
-						hourBucket := rc.reqLog.StartTime.UTC().Format("2006-01-02T15")
-						go func() {
-							// load-balance-groups / Q9 (Am11): 5s
-							// detached-context timeout (decision
-							// pattern) — r.Context() cancellation
-							// must not drop billing. Ultimate branch
-							// stays group-name-row-ONLY (the ultimate
-							// target was served, not a member).
-							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-							defer cancel()
-							if err := h.counter.IncrementModelUsage(ctx, rc.reqLog.Model, hourBucket, 1, promptTokens, completionTokens, totalTokens); err != nil {
-								log.Printf("failed to increment model usage counter: %v", err)
-							}
-						}()
-					}
-
-					h.publishEvent("request_completed", map[string]interface{}{
-						"id":             rc.reqID,
-						"model":          ultimateModelID,
-						"duration":       rc.reqLog.Duration,
-						"ultimate_model": true,
-					})
-
-					return // DONE - no fallback, no retry
-				}
-			}
-		}
-	}
-	// === END ULTIMATE MODEL CHECK ===
 
 	h.publishEvent("request_started", map[string]interface{}{"id": rc.reqID})
 
@@ -2115,8 +1712,6 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 	// response body was written. The writeErr / short-write gate is the
 	// non-stream mirror of the stream lane's client-write-fail early
 	// return: a dropped or truncated body is not a delivered success.
-	// Ultimate-path completion and first-byte/deadline picks never
-	// reach here (design §4.2).
 	if rc.conf.stickyActive(rc.conversationKey) && !winner.deadlinePick && writeErr == nil && n == len(finalBody) {
 		h.stickyEngine.RecordSuccess(rc.conversationKey, winner.GetModelID())
 	}
@@ -2128,17 +1723,4 @@ func (h *Handler) handleNonStreamResult(w http.ResponseWriter, rc *requestContex
 			go h.saveRawResponse(rc.reqID, capturedBytes, rc.rawBody, rc.conf.LogRawUpstreamMaxKB)
 		}
 	}
-}
-
-// shortHash8 returns the first 8 characters of an ultimate-model hash,
-// or the input unchanged when it is shorter. The hash is EMPTY when
-// shouldTriggerInternal early-returns (no global ultimate model id, or an
-// empty message list), so slicing it blindly panics — as it did on the
-// ForceTrigger debug log before this guard. Every Hash[:8] site goes
-// through here.
-func shortHash8(h string) string {
-	if len(h) < 8 {
-		return h
-	}
-	return h[:8]
 }

@@ -32,16 +32,6 @@ type requestContext struct {
 	// Resolved model config at the boundary (nil for unknown models)
 	resolvedModel *models.ModelConfig
 
-	// remove-external-upstream P1 fixup (leader ruling 2026-10-18): set by
-	// initRequestContext when the boundary unknown/non-internal 404 gate is
-	// DEFERRED because the request carries X-Force-Ultimate-Model — the
-	// force-ultimate interception outranks the gate, and auth has not run
-	// at init time so entitlement cannot be checked there. HandleChat
-	// Completions fires the deferred 404 post-auth iff the request does
-	// NOT qualify for the ultimate path (no ultimate handler, no token, or
-	// a token without ultimate_model_enabled).
-	modelNotFoundDeferred bool
-
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 
@@ -153,18 +143,11 @@ type requestContext struct {
 	tokenID   string
 	tokenName string
 
-	// Ultimate model permission (from token)
-	ultimateModelEnabled bool
-	ultimateModelID      string // Per-token override model ID (empty = use global config)
-
 	// InterleavedThinking indicates the client opted into MiniMax
 	// reasoning_details split-mode translation via X-Proxy-Interleaved-Thinking.
 	// True iff the request carried X-Proxy-Interleaved-Thinking: true|1
-	// (case-sensitive lowercase; matches X-Force-Ultimate-Model precedent
-	// at handler.go:465). Drives the race-path gate alongside the credential
-	// MiniMax check. Per B3 (architecture §4), ultimate paths re-parse the
-	// header in ultimatemodel.Execute and pass an explicit parameter down,
-	// rather than reading from rc (which never crosses the package boundary).
+	// (case-sensitive lowercase value semantics). Drives the race-path gate
+	// alongside the credential MiniMax check.
 	interleavedThinking bool
 }
 

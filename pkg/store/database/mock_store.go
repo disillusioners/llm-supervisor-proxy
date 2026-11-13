@@ -139,13 +139,6 @@ func (m *MockConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	return m.Config.LoopDetection
 }
 
-// GetUltimateModel returns the ultimate model configuration.
-func (m *MockConfigManager) GetUltimateModel() config.UltimateModelConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Config.UltimateModel
-}
-
 // GetRaceRetryEnabled returns whether race retry is enabled.
 func (m *MockConfigManager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
@@ -180,20 +173,6 @@ func (m *MockConfigManager) GetRaceMaxBufferBytes() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.Config.RaceMaxBufferBytes
-}
-
-// GetToolCallBufferDisabled returns whether tool call buffering is disabled.
-func (m *MockConfigManager) GetToolCallBufferDisabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Config.ToolCallBufferDisabled
-}
-
-// GetToolCallBufferMaxSize returns the max size for tool call buffer.
-func (m *MockConfigManager) GetToolCallBufferMaxSize() int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Config.ToolCallBufferMaxSize
 }
 
 // GetLogRawUpstreamResponse returns whether to log successful upstream responses.

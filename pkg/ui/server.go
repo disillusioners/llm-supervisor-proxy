@@ -266,25 +266,23 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 //     show payload weights and the operator can spot outlier requests
 //     before opening them.
 type RequestSummary struct {
-	ID                string                      `json:"id"`
-	Status            string                      `json:"status"`
-	Model             string                      `json:"model"`
-	StartTime         time.Time                   `json:"startTime"`
-	EndTime           time.Time                   `json:"endTime"`
-	Duration          string                      `json:"duration"`
-	Retries           int                         `json:"retries"`
-	Error             string                      `json:"error,omitempty"`
-	Usage             *store.Usage                `json:"usage,omitempty"`
-	TokenID           string                      `json:"token_id,omitempty"`
-	TokenName         string                      `json:"token_name,omitempty"`
-	OriginalModel     string                      `json:"original_model,omitempty"`
-	FallbackUsed      []string                    `json:"fallback_used,omitempty"`
-	CurrentFallback   string                      `json:"current_fallback,omitempty"`
-	UltimateModelUsed bool                        `json:"ultimate_model_used"`
-	UltimateModelID   string                      `json:"ultimate_model_id,omitempty"`
-	IsStream          bool                        `json:"is_stream"`
-	AppTag            string                      `json:"app_tag,omitempty"`
-	UpstreamRequests  store.UpstreamRequestStatus `json:"upstream_requests,omitempty"`
+	ID               string                      `json:"id"`
+	Status           string                      `json:"status"`
+	Model            string                      `json:"model"`
+	StartTime        time.Time                   `json:"startTime"`
+	EndTime          time.Time                   `json:"endTime"`
+	Duration         string                      `json:"duration"`
+	Retries          int                         `json:"retries"`
+	Error            string                      `json:"error,omitempty"`
+	Usage            *store.Usage                `json:"usage,omitempty"`
+	TokenID          string                      `json:"token_id,omitempty"`
+	TokenName        string                      `json:"token_name,omitempty"`
+	OriginalModel    string                      `json:"original_model,omitempty"`
+	FallbackUsed     []string                    `json:"fallback_used,omitempty"`
+	CurrentFallback  string                      `json:"current_fallback,omitempty"`
+	IsStream         bool                        `json:"is_stream"`
+	AppTag           string                      `json:"app_tag,omitempty"`
+	UpstreamRequests store.UpstreamRequestStatus `json:"upstream_requests,omitempty"`
 	// P0-1 summary projection additions:
 	MessageCount   int   `json:"message_count"`
 	TotalSizeBytes int64 `json:"total_size_bytes"`
@@ -298,27 +296,25 @@ type RequestSummary struct {
 // entry so the per-entry constant matters.
 func summaryFromRequest(s *Server, r *store.RequestLog) RequestSummary {
 	return RequestSummary{
-		ID:                r.ID,
-		Status:            r.Status,
-		Model:             r.Model,
-		StartTime:         r.StartTime,
-		EndTime:           r.EndTime,
-		Duration:          r.Duration,
-		Retries:           r.Retries,
-		Error:             r.Error,
-		Usage:             r.Usage,
-		TokenID:           r.TokenID,
-		TokenName:         r.TokenName,
-		OriginalModel:     r.OriginalModel,
-		FallbackUsed:      r.FallbackUsed,
-		CurrentFallback:   r.CurrentFallback,
-		UltimateModelUsed: r.UltimateModelUsed,
-		UltimateModelID:   r.UltimateModelID,
-		IsStream:          r.IsStream,
-		AppTag:            r.AppTag,
-		UpstreamRequests:  r.UpstreamRequests,
-		MessageCount:      len(r.Messages),
-		TotalSizeBytes:    s.store.SizeOf(r.ID),
+		ID:               r.ID,
+		Status:           r.Status,
+		Model:            r.Model,
+		StartTime:        r.StartTime,
+		EndTime:          r.EndTime,
+		Duration:         r.Duration,
+		Retries:          r.Retries,
+		Error:            r.Error,
+		Usage:            r.Usage,
+		TokenID:          r.TokenID,
+		TokenName:        r.TokenName,
+		OriginalModel:    r.OriginalModel,
+		FallbackUsed:     r.FallbackUsed,
+		CurrentFallback:  r.CurrentFallback,
+		IsStream:         r.IsStream,
+		AppTag:           r.AppTag,
+		UpstreamRequests: r.UpstreamRequests,
+		MessageCount:     len(r.Messages),
+		TotalSizeBytes:   s.store.SizeOf(r.ID),
 	}
 }
 
@@ -2242,23 +2238,19 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 
 // TokenResponse represents a token in API responses (without sensitive data)
 type TokenResponse struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	ExpiresAt            *string   `json:"expires_at,omitempty"`
-	CreatedAt            string    `json:"created_at"`
-	CreatedBy            string    `json:"created_by"`
-	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
-	UltimateModel        string    `json:"ultimate_model"`           // Empty = use global config
-	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	ExpiresAt     *string   `json:"expires_at,omitempty"`
+	CreatedAt     string    `json:"created_at"`
+	CreatedBy     string    `json:"created_by"`
+	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
 }
 
 // CreateTokenRequest represents the request body for creating a token
 type CreateTokenRequest struct {
-	Name                 string    `json:"name"`
-	ExpiresAt            *string   `json:"expires_at,omitempty"` // ISO 8601 format, optional
-	UltimateModelEnabled bool      `json:"ultimate_model_enabled"`
-	UltimateModel        *string   `json:"ultimate_model,omitempty"` // nil/empty = use global config
-	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
+	Name          string    `json:"name"`
+	ExpiresAt     *string   `json:"expires_at,omitempty"`     // ISO 8601 format, optional
+	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil/empty = all models allowed
 }
 
 // CreateTokenResponse includes the plaintext token (shown only once)
@@ -2318,9 +2310,7 @@ func (s *Server) handleTokenDetail(w http.ResponseWriter, r *http.Request) {
 
 // UpdateTokenPermissionRequest represents the request body for updating token permission
 type UpdateTokenPermissionRequest struct {
-	UltimateModelEnabled *bool     `json:"ultimate_model_enabled"`   // pointer for distinguishing unset vs false
-	UltimateModel        *string   `json:"ultimate_model,omitempty"` // nil = keep existing; "" = use global; "value" = override
-	AllowedModels        *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
+	AllowedModels *[]string `json:"allowed_models,omitempty"` // nil = keep existing; empty array = all models allowed
 }
 
 // updateTokenPermission handles PATCH /fe/api/tokens/{id}
@@ -2345,26 +2335,6 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	// Determine ultimateModelEnabled to set:
-	// - If UltimateModelEnabled is nil in request, keep existing value
-	// - If UltimateModelEnabled is non-nil, use the provided value
-	var ultimateModelEnabledToSet bool
-	if req.UltimateModelEnabled != nil {
-		ultimateModelEnabledToSet = *req.UltimateModelEnabled
-	} else {
-		ultimateModelEnabledToSet = currentToken.UltimateModelEnabled
-	}
-
-	// Determine ultimateModelID to set (three-state):
-	// - If UltimateModel is nil in request, keep existing value
-	// - If UltimateModel is non-nil (including empty string), use the provided value
-	var ultimateModelIDToSet string
-	if req.UltimateModel != nil {
-		ultimateModelIDToSet = *req.UltimateModel
-	} else {
-		ultimateModelIDToSet = currentToken.UltimateModelID
-	}
-
 	// Determine allowed_models to set:
 	// - If AllowedModels is nil in request, keep existing value
 	// - If AllowedModels is non-nil (including empty array), use the provided value
@@ -2375,7 +2345,7 @@ func (s *Server) updateTokenPermission(ctx context.Context, w http.ResponseWrite
 		allowedModelsToSet = currentToken.AllowedModels
 	}
 
-	err = s.tokenStore.UpdateTokenPermission(ctx, id, ultimateModelEnabledToSet, ultimateModelIDToSet, allowedModelsToSet)
+	err = s.tokenStore.UpdateTokenPermission(ctx, id, allowedModelsToSet)
 	if err != nil {
 		if err == auth.ErrTokenNotFound {
 			http.Error(w, "Token not found", http.StatusNotFound)
@@ -2406,13 +2376,11 @@ func (s *Server) listTokens(ctx context.Context, w http.ResponseWriter, r *http.
 	response := make([]TokenResponse, len(tokens))
 	for i, t := range tokens {
 		response[i] = TokenResponse{
-			ID:                   t.ID,
-			Name:                 t.Name,
-			CreatedAt:            t.CreatedAt.Format(time.RFC3339),
-			CreatedBy:            t.CreatedBy,
-			UltimateModelEnabled: t.UltimateModelEnabled,
-			UltimateModel:        t.UltimateModelID, // Empty = use global config
-			AllowedModels:        &t.AllowedModels,
+			ID:            t.ID,
+			Name:          t.Name,
+			CreatedAt:     t.CreatedAt.Format(time.RFC3339),
+			CreatedBy:     t.CreatedBy,
+			AllowedModels: &t.AllowedModels,
 		}
 		if t.ExpiresAt != nil {
 			iso := t.ExpiresAt.Format(time.RFC3339)
@@ -2464,13 +2432,7 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 		allowedModels = *req.AllowedModels
 	}
 
-	// Get ultimate model ID (nil/empty = use global config)
-	var ultimateModelID string
-	if req.UltimateModel != nil {
-		ultimateModelID = *req.UltimateModel
-	}
-
-	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, req.UltimateModelEnabled, ultimateModelID, allowedModels)
+	plaintext, token, err := s.tokenStore.CreateToken(ctx, req.Name, expiresAt, createdBy, allowedModels)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create token: %v", err), http.StatusInternalServerError)
 		return
@@ -2478,13 +2440,11 @@ func (s *Server) createToken(ctx context.Context, w http.ResponseWriter, r *http
 
 	response := CreateTokenResponse{
 		TokenResponse: TokenResponse{
-			ID:                   token.ID,
-			Name:                 token.Name,
-			CreatedAt:            token.CreatedAt.Format(time.RFC3339),
-			CreatedBy:            token.CreatedBy,
-			UltimateModelEnabled: token.UltimateModelEnabled,
-			UltimateModel:        token.UltimateModelID, // Empty = use global config
-			AllowedModels:        &token.AllowedModels,
+			ID:            token.ID,
+			Name:          token.Name,
+			CreatedAt:     token.CreatedAt.Format(time.RFC3339),
+			CreatedBy:     token.CreatedBy,
+			AllowedModels: &token.AllowedModels,
 		},
 		Token: plaintext, // Show once!
 	}

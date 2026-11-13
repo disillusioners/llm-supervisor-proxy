@@ -767,6 +767,14 @@ func (c *raceCoordinator) manage() {
 							advanceTarget, hasAdvance := c.fallbackAdvanceTargetLocked(latestReq.modelID)
 							if hasAdvance {
 								log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
+								// Group-fallback observability (wi-7769a812
+								// part 1): member_failed + attempted +
+								// advanced fire together at the advance
+								// decision; Part 2 keeps the emission while
+								// making the path exhaustive on both routes.
+								c.publishGroupFallback("group_member_failed", latestReq.modelID, latestReq.modelID, "", failReason.String())
+								c.publishGroupFallback("group_fallback_attempted", latestReq.modelID, advanceTarget, "", failReason.String())
+								c.publishGroupFallback("group_fallback_advanced", latestReq.modelID, advanceTarget, "", failReason.String())
 								shouldSpawn = true
 								triggerInfo = spawnTriggerInfo{
 									trigger:       triggerMainError,
@@ -776,6 +784,11 @@ func (c *raceCoordinator) manage() {
 								}
 							} else {
 								log.Printf("[RACE] Latest request %d failed: %s; no advance target — chain end, terminal", latestReq.id, failReason)
+								// Group-fallback observability: the failed
+								// member was the chain's LAST (or not in the
+								// chain) — the group's fallback is exhausted.
+								c.publishGroupFallback("group_member_failed", latestReq.modelID, latestReq.modelID, "", failReason.String())
+								c.publishGroupFallback("group_fallback_exhausted", latestReq.modelID, "", "", failReason.String())
 							}
 						}
 					}
@@ -1927,6 +1940,48 @@ func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string
 	}
 	c.eventBus.Publish(events.Event{
 		Type:      credentiallb.EventCredentialFailover,
+		Timestamp: time.Now().Unix(),
+		Data:      data,
+	})
+}
+
+// publishGroupFallback (wi-7769a812 part 1 — replacement observability
+// for the retired escalation subsystem) publishes one of the group-fallback
+// events from the EXISTING race-path group fallback/advance site.
+// Fired ONLY for group traffic (c.groupPick != nil) — plain model
+// chains keep their existing race_* event vocabulary untouched.
+// Event types (single source of truth with the FE EventLog renderers):
+//
+//	group_member_failed     — a group member's attempt failed
+//	group_fallback_attempted — a fallback to the next member was decided
+//	group_fallback_advanced  — the chain actually advanced to that member
+//	group_fallback_exhausted — no advance target: the group's fallback
+//	                           chain is exhausted (terminal for this path)
+//
+// Bounded + redacted by construction (ids + the classified reason
+// token only — no upstream error bodies).
+func (c *raceCoordinator) publishGroupFallback(eventType, fromMember, toMember, groupIDOverride, reason string) {
+	if c.eventBus == nil || c.groupPick == nil {
+		return
+	}
+	gp := c.groupPick
+	data := map[string]interface{}{
+		"group_id":    gp.GroupID,
+		"member_id":   fromMember,
+		"from_member": fromMember,
+		"reason":      reason,
+	}
+	if toMember != "" {
+		data["to_member"] = toMember
+	}
+	if groupIDOverride != "" {
+		data["group_id"] = groupIDOverride
+	}
+	if c.requestID != "" {
+		data["id"] = c.requestID
+	}
+	c.eventBus.Publish(events.Event{
+		Type:      eventType,
 		Timestamp: time.Now().Unix(),
 		Data:      data,
 	})

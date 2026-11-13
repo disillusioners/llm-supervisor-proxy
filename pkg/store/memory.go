@@ -37,14 +37,14 @@ func (r *RequestLog) Size() int64 {
 	// Fields we charge an overhead for (must match the actual struct
 	// fields + the per-field `n += len(...)` calls below):
 	//   ID, Status, Model, Duration, Error, TokenID, TokenName,
-	//   OriginalModel, AppTag, UltimateModelID, CurrentFallback,
-	//   RouteModel (12 strings; the slice of strings FallbackUsed is
+	//   OriginalModel, AppTag, CurrentFallback,
+	//   RouteModel (11 strings; the slice of strings FallbackUsed is
 	//   charged per-element below).
 	//   Plus the Usage object (1 wrapper overhead) and the UpstreamRequests
 	//   struct (1 wrapper overhead).
-	// Total charged overheads = 14. Keep this list in sync with the per-
+	// Total charged overheads = 13. Keep this list in sync with the per-
 	// field n += len(...) lines below — if you add a field, bump this count.
-	const fieldsCharged = 14
+	const fieldsCharged = 13
 	n := int64(perFieldOverhead) * fieldsCharged
 
 	n += int64(len(r.ID))
@@ -56,7 +56,6 @@ func (r *RequestLog) Size() int64 {
 	n += int64(len(r.TokenName))
 	n += int64(len(r.OriginalModel))
 	n += int64(len(r.AppTag))
-	n += int64(len(r.UltimateModelID))
 	n += int64(len(r.CurrentFallback))
 	n += int64(len(r.RouteModel))
 
@@ -148,10 +147,6 @@ type RequestLog struct {
 	// a SEPARATE field from FallbackUsed (whose semantics — failed
 	// fallback attempts — are metered per-element below).
 	RouteModel string `json:"route_model,omitempty"`
-
-	// Ultimate model tracking
-	UltimateModelUsed bool   `json:"ultimate_model_used"`         // Whether ultimate model was triggered for this request
-	UltimateModelID   string `json:"ultimate_model_id,omitempty"` // The ultimate model ID used (if triggered)
 
 	// Request metadata
 	IsStream   bool                   `json:"is_stream"`            // Whether this was a streaming request

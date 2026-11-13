@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -195,7 +194,7 @@ func TestA1_AllowedModelMatch(t *testing.T) {
 
 	// Create token with allowed_models containing IDs (NOT names)
 	// Token allows "model-id-1" which maps to "First Model"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "allowed-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -220,7 +219,7 @@ func TestA2_AllowedModelMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models containing "model-id-1" only
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -259,7 +258,7 @@ func TestA3_UnknownModelFailClosed(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models (has restrictions)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -293,7 +292,7 @@ func TestA4_OpenAccessUnrestricted(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with NO allowed_models (nil = open access)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", false, "", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "unrestricted-token", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -319,7 +318,7 @@ func TestA4b_OpenAccessEmptySlice(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with empty allowed_models slice
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "empty-allowed-token", nil, "test", false, "", []string{})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "empty-allowed-token", nil, "test", []string{})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -347,7 +346,7 @@ func TestA5_RestrictedToken_UnknownModel_Denied(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token with allowed_models = ["model-id-1"] (restricted)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "restricted-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -379,62 +378,6 @@ func TestA5_RestrictedToken_UnknownModel_Denied(t *testing.T) {
 // Group B: Ultimate Model + allowed_models Interaction Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// TestB1_UltimateModelAllowed verifies that ultimate model is allowed when in allowed_models
-func TestB1_UltimateModelAllowed(t *testing.T) {
-	env := setupAccessControlEnv(t)
-	ctx := context.Background()
-
-	// Create token with ultimate model enabled and allowed_models containing ultimate model ID
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "ultimate-allowed-token", nil, "test", true, "ultimate-id", []string{"model-id-1", "ultimate-id"})
-	if err != nil {
-		t.Fatalf("CreateToken failed: %v", err)
-	}
-
-	// Send a request that will trigger ultimate model
-	// (Use the Force header to trigger it)
-	req := makeAccessControlRequest("model-id-1", plaintext)
-	req.Header.Set("X-Force-Ultimate-Model", "true")
-	rr := httptest.NewRecorder()
-	env.handler.HandleChatCompletions(rr, req)
-
-	// Ultimate model should be allowed (200)
-	if rr.Code == http.StatusForbidden {
-		t.Error("Expected 200 OK, got 403 Forbidden (ultimate model should be allowed when in allowed_models)")
-	}
-	if rr.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestB2_UltimateModelForbidden verifies that ultimate model is denied when NOT in allowed_models
-func TestB2_UltimateModelForbidden(t *testing.T) {
-	env := setupAccessControlEnv(t)
-	ctx := context.Background()
-
-	// Create token with ultimate model enabled but NOT in allowed_models
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "ultimate-forbidden-token", nil, "test", true, "ultimate-id", []string{"model-id-1"})
-	if err != nil {
-		t.Fatalf("CreateToken failed: %v", err)
-	}
-
-	// Send a request that will trigger ultimate model
-	req := makeAccessControlRequest("model-id-1", plaintext)
-	req.Header.Set("X-Force-Ultimate-Model", "true")
-	rr := httptest.NewRecorder()
-	env.handler.HandleChatCompletions(rr, req)
-
-	// Ultimate model should be forbidden (403)
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("Expected 403 Forbidden, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	// Verify error message mentions the ultimate model
-	body := rr.Body.String()
-	if !strings.Contains(body, "ultimate-id") {
-		t.Errorf("Expected error to mention ultimate model ID 'ultimate-id', got: %s", body)
-	}
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Group C: ID Consistency Tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -465,7 +408,7 @@ func TestC1_IsModelAllowedReceivesIDs(t *testing.T) {
 	}
 
 	// Create token allowing "model-id-1"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-test-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-test-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -511,7 +454,7 @@ func TestEdge_IDMatchesName(t *testing.T) {
 	}
 
 	// Create token allowing "gpt-4" (works as both ID and name)
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-equals-name-token", nil, "test", false, "", []string{"gpt-4"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "id-equals-name-token", nil, "test", []string{"gpt-4"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -532,7 +475,7 @@ func TestEdge_CaseSensitiveIDMatch(t *testing.T) {
 	ctx := context.Background()
 
 	// Token allows "model-id-1"
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-test-token", nil, "test", false, "", []string{"model-id-1"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "case-test-token", nil, "test", []string{"model-id-1"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -566,7 +509,7 @@ func TestEdge_MultipleModelsAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	// Token allows both model-id-1 and model-id-2
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "multi-allowed-token", nil, "test", false, "", []string{"model-id-1", "model-id-2"})
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "multi-allowed-token", nil, "test", []string{"model-id-1", "model-id-2"})
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}

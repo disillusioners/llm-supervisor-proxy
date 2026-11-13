@@ -8,13 +8,11 @@
 //
 //	raceExtModel      — registered MiniMax model + MiniMax credential
 //	race-internal     — registered model with Internal:true + MiniMax credential
-//	ultExtModel       — X-Force-Ultimate-Model target (ModelID=ultExtModel)
-//	ultimate-internal — X-Force-Ultimate-Model target (ModelID=ultIntModel)
 //
 // remove-external-upstream P1: the external dispatch is deleted; the "Ext"
 // model ids above are ordinary INTERNAL registrations kept as fixtures.
 //
-// The harness mirrors test/e2e_ultimate_internal_reasoning/ (real
+// The harness wires a real
 // database.Store + auth.TokenStore + models.ModelsConfig + proxy.Handler).
 package e2e_minimax_reasoning
 
@@ -126,19 +124,6 @@ const (
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "race-internal-minimax"
 
-	// ultExtModel is an X-Force-Ultimate-Model target (Internal:true; the
-	// former ultimate-external dispatch is deleted; the id is historical).
-	ultExtModel = "ultimate-external-minimax"
-
-	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
-	// ⇒ ultimate-internal path.
-	ultIntModel = "ultimate-internal-minimax"
-
-	// ultExtModelOpenAI is an ultimate-external target bound to the
-	// non-MiniMax credential (S9: ultimate paths gate on the MODEL's
-	// CredentialID, not the global upstream credential).
-	ultExtModelOpenAI = "ultimate-external-openai"
-
 	// raceIntModelOpenAI is registered Internal:true with a non-MiniMax
 	// credential (S3 negative / S9).
 	raceIntModelOpenAI = "race-internal-openai"
@@ -154,8 +139,8 @@ type testEnv struct {
 	mockUp        *mockUpstream
 	handler       *proxy.Handler
 	modelsConfig  *models.ModelsConfig
-	ultimateToken string // plaintext token with ultimateModelEnabled=true
-	plainToken    string // plaintext token with ultimateModelEnabled=false
+	ultimateToken string // authenticated token (historical name)
+	plainToken    string // authenticated token
 }
 
 // envOptions customizes setupTestEnv per test.
@@ -166,8 +151,6 @@ type envOptions struct {
 	// noUpstreamCred leaves the upstream credential unset for the external path
 	// (S10: no credential resolvable ⇒ feature inert on race-external).
 	noUpstreamCred bool
-	// ultimateModelID overrides ULTIMATE_MODEL_ID. Empty uses ultIntModel.
-	ultimateModelID string
 }
 
 // setupTestEnv wires a full proxy.Handler against a capturing upstream.
@@ -175,8 +158,6 @@ type envOptions struct {
 // Registered models:
 //   - raceIntModel     Internal:true  + minimax cred  (base_url = upstream)
 //   - raceIntModelOpenAI Internal:true + openai cred  (base_url = upstream)
-//   - ultExtModel      Internal:false + minimax cred (ultimate target, external)
-//   - ultIntModel      Internal:true  + minimax cred (ultimate target, internal)
 //
 // The external upstream credential (the retired upstream-credential config) is MiniMax
 // unless overridden via envOptions — race-external gate = flag && that
@@ -274,49 +255,9 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		InternalModel: "gpt-4o-mini",
 	})
 
-	// Ultimate models. Both are registered so X-Force-Ultimate-Model can
-	// route to them; ULTIMATE_MODEL_ID env picks the active one per test.
-	// remove-external-upstream P5: registered INTERNAL (the ultimate-
-	// external dispatch is deleted); the MiniMax translation gate is
-	// credential-driven, so the credential choice still governs it.
-	addModel(models.ModelConfig{
-		ID:            ultExtModel,
-		Name:          "Ultimate MiniMax Target",
-		Enabled:       true,
-		Internal:      true,
-		Credentials:   models.TestRefs(minimaxCredID),
-		InternalModel: "minimax-ultimate-external-name",
-	})
-	addModel(models.ModelConfig{
-		ID:            ultIntModel,
-		Name:          "Ultimate Internal MiniMax",
-		Enabled:       true,
-		Internal:      true,
-		Credentials:   models.TestRefs(minimaxCredID),
-		InternalModel: "minimax-ultimate-internal-name",
-	})
-	// Ultimate target bound to the non-MiniMax credential (S9).
-	addModel(models.ModelConfig{
-		ID:            ultExtModelOpenAI,
-		Name:          "Ultimate OpenAI Target",
-		Enabled:       true,
-		Internal:      true,
-		Credentials:   models.TestRefs(openaiCredID),
-		InternalModel: "gpt-4o-ultimate-external",
-	})
-
-	// Env: ultimate model + fast deadlines. X-Force-Ultimate-Model
-	// triggers unconditionally on the first call under the fixed
-	// schedule — no retry-limit env workaround needed anymore.
+	// Env: fast deadlines.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
-	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
-
-	ultimateID := opts.ultimateModelID
-	if ultimateID == "" {
-		ultimateID = ultIntModel
-	}
-	t.Setenv("ULTIMATE_MODEL_ID", ultimateID)
 
 	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
 	// env wiring is retired — every model carries its own credential.
@@ -342,13 +283,13 @@ func setupTestEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts envOption
 		modelsConfig: modelsConfig,
 	}
 
-	// Two tokens: one with ultimate permission, one without.
+	// Authenticated tokens (historically one per permission tier).
 	ctx := context.Background()
-	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", true, "", nil)
+	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", nil)
 	if err != nil {
-		t.Fatalf("create ultimate token: %v", err)
+		t.Fatalf("create token: %v", err)
 	}
-	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", false, "", nil)
+	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("create plain token: %v", err)
 	}
@@ -366,7 +307,6 @@ type chatRequest struct {
 	stream   bool
 	messages []map[string]interface{}
 	flag     bool // send X-Proxy-Interleaved-Thinking: true
-	forceUlt bool // send X-Force-Ultimate-Model: true
 	token    string
 	marker   string // extra marker header value (S14 positive control)
 }
@@ -387,9 +327,6 @@ func (cr chatRequest) build(t *testing.T) (*http.Request, *httptest.ResponseReco
 	req.Header.Set("Authorization", "Bearer "+cr.token)
 	if cr.flag {
 		req.Header.Set("X-Proxy-Interleaved-Thinking", "true")
-	}
-	if cr.forceUlt {
-		req.Header.Set("X-Force-Ultimate-Model", "true")
 	}
 	if cr.marker != "" {
 		req.Header.Set("X-Test-Marker", cr.marker)

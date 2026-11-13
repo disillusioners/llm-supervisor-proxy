@@ -1,7 +1,7 @@
 // Package proxyheader provides shared parsing for proxy-only HTTP headers
-// used by both pkg/proxy and pkg/ultimatemodel. It exists as a separate
-// package to avoid an import cycle (proxy → ultimatemodel → proxy would
-// otherwise be unavoidable when ultimatemodel needs the same accepted-value
+// used by pkg/proxy (race + fallback paths). It exists as a separate
+// package so the header vocabulary has one home.
+
 // list).
 package proxyheader
 
@@ -18,7 +18,7 @@ import (
 // additional case-folding is required here — the stdlib already does
 // it. Callers that pass a raw http.Header.Get lookup (race path:
 // pkg/proxy/handler.go:479; ultimate path:
-// pkg/ultimatemodel/handler.go:623) inherit the canonicalization for
+// the retired raw-passthrough paths) inherited the canonicalization for
 // free.
 const InterleavedThinkingHeader = "X-Proxy-Interleaved-Thinking"
 
@@ -31,16 +31,15 @@ const InterleavedThinkingHeader = "X-Proxy-Interleaved-Thinking"
 // alphabetic variants ("true", "True", "TRUE" are equivalent).
 //
 // This is a deliberate relaxation of the prior strict `== "true" || ==
-// "1"` semantics (the original matched the X-Force-Ultimate-Model
+// "1"` semantics (value-list style, matching the retired force-header
 // precedent at pkg/proxy/handler.go:466). The relaxation was made to
 // accommodate clients that send the flag in non-lowercase form
 // (notably JS / Python clients that emit JSON-stringified booleans
 // or the default Python str(True) = "True" output). The accepted-value
 // set stays narrow — anything outside strconv.ParseBool's whitelist
 // still resolves to false — and the gate's provider-side
-// `providerIsMiniMax` short-circuit (race_executor.go:62,
-// ultimatemodel/handler_external.go:98) bounds any false-positive
-// blast radius to MiniMax-only paths.
+// `providerIsMiniMax` short-circuit (race_executor.go:62) bounds any
+// false-positive blast radius to MiniMax-only paths.
 //
 // W11 cheap: this godoc explicitly enumerates the accepted values
 // (via the strconv.ParseBool reference) so a future reader does not

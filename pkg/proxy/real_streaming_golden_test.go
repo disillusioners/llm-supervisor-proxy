@@ -261,7 +261,7 @@ func goldenRegistry() []goldenGen {
 		})
 	}
 	// Paths 5+6 — Ultimate external/internal stream — covered by
-	// existing pkg/ultimatemodel tests; their goldens are produced
+	// the retired raw-passthrough battery; their goldens are produced
 	// in that package's own test fixtures.
 	return out
 }

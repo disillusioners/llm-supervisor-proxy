@@ -22,7 +22,7 @@ import (
 // response body must be unchanged.
 //
 // The corresponding ultimate sites are tested in
-// pkg/ultimatemodel/handler_response_interleaved_test.go.
+// the retired ult-internal package's response interleaved tests.
 
 func TestRaceInternal_Response_NegativeCase_ByteIdentical_NonMiniMax(t *testing.T) {
 	// The race-internal path uses the typed ChatCompletionResponse

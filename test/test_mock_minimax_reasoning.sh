@@ -14,7 +14,6 @@
 #   - non-MiniMax credential inertness (no translation when provider != minimax)
 #   - error path (no reasoning leakage in error body)
 #   - usage passthrough
-#   - ultimate-path duplicate-hash trigger (ultimate upstream IS translated)
 #
 # Run via outer wrapper:
 #   timeout 300 bash test/test_mock_minimax_reasoning.sh
@@ -126,8 +125,6 @@ export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export RACE_RETRY_ENABLED="false"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID="mock-ultimate-reasoning-model"
-export ULTIMATE_MODEL_MAX_HASH="100"
 
 cd "$ROOT_DIR"
 go run cmd/main.go >/tmp/minimax_reasoning_proxy.log 2>&1 &
@@ -149,7 +146,6 @@ echo -e "\n${YELLOW}[4/6] Configuring credentials + models via admin API...${NC}
 for i in 1 2 3; do
     curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-minimax-reasoning-model" 2>/dev/null || true
     curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-openai-reasoning-model" 2>/dev/null || true
-    curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/models/mock-ultimate-reasoning-model" 2>/dev/null || true
     sleep 0.3
 done
 sleep 0.5
@@ -192,27 +188,12 @@ MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
     -d "{\"id\":\"mock-openai-reasoning-model\",\"name\":\"Mock OpenAI Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-openai-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
 echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model B (openai internal) created${NC}" || { echo -e "  ${RED}Model B failed: $MR${NC}"; exit 1; }
 
-# Model U — ultimate model (MiniMax cred, matches ULTIMATE_MODEL_ID)
-MR=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/models" \
-    -H "Content-Type: application/json" \
-    -d "{\"id\":\"mock-ultimate-reasoning-model\",\"name\":\"Mock Ultimate Reasoning\",\"enabled\":true,\"internal\":true,\"credentials\":[{\"credential_id\":\"mock-minimax-reasoning-cred\",\"weight\":1,\"position\":0}],\"internal_model\":\"mock-model\",\"internal_base_url\":\"http://localhost:$MOCK_PORT/v1\"}")
-echo "$MR" | grep -q '"id"' && echo -e "  ${GREEN}Model U (ultimate, minimax) created${NC}" || { echo -e "  ${RED}Model U failed: $MR${NC}"; exit 1; }
-
 # ----------------------------------------------------------------------------
-# Token isolation (review blocker B1):
-# This script shares the developer's persistent SQLite DB, so any pre-existing
-# token on file there could carry a per-token ultimate_model_id override
-# pointing at a real provider. If that token is inherited into the script
-# environment, the ultimate-path branches (e.g. T15) would dial a REAL
-# upstream — violating the mock-only constraint that already caused one
-# real api.minimax.io call during development.
-#
-# Fix: mint a dedicated test token for this script. The mint payload below
-# carries `ultimate_model_enabled: true` but NO `ultimate_model_id` field, so
-# ultimate resolution falls back to the env-pinned ULTIMATE_MODEL_ID
-# (mock-ultimate-reasoning-model — the local mock). Stale tokens from
-# previously crashed runs are swept BEFORE minting so a hard-killed prior
-# run cannot resurrect a personal token's override.
+# Token isolation:
+# This script shares the developer's persistent SQLite DB, so mint a
+# DEDICATED test token instead of inheriting whatever personal token is
+# on file. Stale dedicated tokens from previously crashed runs are swept
+# BEFORE minting so a hard-killed prior run cannot leave auth noise.
 # ----------------------------------------------------------------------------
 
 # Sweep stale dedicated tokens from previously crashed runs.
@@ -228,15 +209,11 @@ for tid in $STALE_TOKEN_IDS; do
     curl -s -X DELETE "http://localhost:$PROXY_PORT/fe/api/tokens/$tid" >/dev/null 2>&1 || true
 done
 
-# Mint the dedicated test token. NOTE: the payload MUST NOT include a
-# per-token `ultimate_model_id` override — the absence of that field is
-# what binds this script to the env-pinned mock ultimate model. Reviewer-
-# explicit confirmation.
+# Mint the dedicated test token.
 TOKEN_RESPONSE=$(curl -s -X POST "http://localhost:$PROXY_PORT/fe/api/tokens" \
     -H "Content-Type: application/json" \
     -d '{
-        "name": "mock-minimax-reasoning-test",
-        "ultimate_model_enabled": true
+        "name": "mock-minimax-reasoning-test"
     }')
 API_KEY=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
 TEST_TOKEN_ID=$(echo "$TOKEN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null)
@@ -244,7 +221,7 @@ if [ -z "$API_KEY" ] || [ -z "$TEST_TOKEN_ID" ]; then
     echo -e "${RED}Failed to create dedicated test token: $TOKEN_RESPONSE${NC}"
     exit 1
 fi
-echo -e "  ${GREEN}Dedicated mock-minimax-reasoning-test token created (ultimate enabled, NO per-token ultimate_model_id override)${NC}"
+echo -e "  ${GREEN}Dedicated mock-minimax-reasoning-test token created${NC}"
 
 # ============================================================================
 # Assertion helpers
@@ -738,7 +715,7 @@ assert_not_contains "$T10_CAPTURED" '"reasoning_details"' "T10: NO reasoning_det
 CURRENT_T="T11"
 echo -e "\n${BLUE}=== T11 header hygiene: no x-proxy-interleaved-thinking leak upstream ===${NC}"
 # Use the LAST captured request (any mode that was sent with the header) to check
-# headers. We use the T2 capture (MODE-NS-DETAILS) — non-ultimate, race-style.
+# headers. We use the T2 capture (MODE-NS-DETAILS) — race-style.
 LEAK_FOUND=0
 while IFS= read -r line; do
     H=$(echo "$line" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); h=r.get("headers") or {}; print("|".join(k for k in h.keys() if "interleaved-thinking" in k.lower()))' 2>/dev/null)
@@ -809,109 +786,6 @@ echo -e "\n${BLUE}=== T14 usage passthrough: T2 (NS details) preserves upstream 
 assert_contains "$T2_RESP" '"prompt_tokens":11' "T14: prompt_tokens=11 passthrough"
 assert_contains "$T2_RESP" '"completion_tokens":7' "T14: completion_tokens=7 passthrough"
 assert_contains "$T2_RESP" '"total_tokens":18' "T14: total_tokens=18 passthrough"
-
-# --- T15 ultimate path: duplicate-hash retry trigger ---
-CURRENT_T="T15"
-echo -e "\n${BLUE}=== T15 ultimate path: duplicate-hash retry → ultimate request IS translated ===${NC}"
-# Per template (test_mock_ultimate_model.sh Test 7): with the fixed
-# 5/10/20/30/40 schedule, the 1st-4th identical requests fail in the normal
-# flow (MODE-ERROR-500) and the 5th request (first schedule milestone)
-# triggers the ultimate model.
-# To detect the ultimate request: it has the same body as the primary. Both
-# proxy through the mock at 4005 (which is BOTH the primary and ultimate URL
-# in this setup). The captured request count for "MODE-ERROR-500" should be
-# >= 2 (four failed primaries plus one ultimate — the count only proves the
-# ultimate path was reached and translated).
-T15A=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -H "X-Proxy-Interleaved-Thinking: true" \
-    -d "{
-        \"model\":\"mock-minimax-reasoning-model\",
-        \"messages\":[{\"role\":\"user\",\"content\":\"ultimate-t15-trigger MODE-ERROR-500\"}],
-        \"stream\":false
-    }" 2>&1)
-# Requests 2-4: identical bodies, still below the first milestone
-for _ in 2 3 4; do
-    curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $API_KEY" \
-        -H "X-Proxy-Interleaved-Thinking: true" \
-        -d "{
-            \"model\":\"mock-minimax-reasoning-model\",
-            \"messages\":[{\"role\":\"user\",\"content\":\"ultimate-t15-trigger MODE-ERROR-500\"}],
-            \"stream\":false
-        }" >/dev/null 2>&1
-done
-# Request 5: first schedule milestone — ultimate model reached
-T15B=$(curl -s --max-time 10 "http://localhost:$PROXY_PORT/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -H "X-Proxy-Interleaved-Thinking: true" \
-    -d "{
-        \"model\":\"mock-minimax-reasoning-model\",
-        \"messages\":[{\"role\":\"user\",\"content\":\"ultimate-t15-trigger MODE-ERROR-500\"}],
-        \"stream\":false
-    }" 2>&1)
-echo "  T15 first: $(truncate "$T15A" 120)"
-echo "  T15 fifth: $(truncate "$T15B" 120)"
-T15_COUNT=$(python3 - <<'PY' 2>/dev/null
-import json
-fp="/tmp/minimax_reasoning_capture_4005.jsonl"
-n=0
-try:
-    with open(fp) as f:
-        for line in f:
-            r = json.loads(line.strip())
-            body = r.get("body") or {}
-            msgs = body.get("messages") or []
-            if not msgs: continue
-            last = msgs[-1]
-            content = last.get("content") or ""
-            if isinstance(content, list):
-                content = " ".join(p.get("text","") for p in content if isinstance(p, dict))
-            if "ultimate-t15-trigger" in str(content):
-                n += 1
-except: pass
-print(n)
-PY
-)
-echo "  T15 captured requests for trigger: $T15_COUNT"
-if [ "$T15_COUNT" -ge 2 ]; then
-    assert_pass "T15: duplicate-hash triggered ultimate retry (>=2 captured)"
-else
-    assert_skip "T15: only $T15_COUNT captured — ultimate retry did not fire (hash not created). Trigger mechanics may differ; this is informational."
-fi
-# Regardless: assert that any captured request for "ultimate-t15-trigger" DOES
-# contain reasoning_split at top level (translation ON for ultimate path too).
-T15_ANY_SPLIT=$(python3 - <<'PY' 2>/dev/null
-import json
-fp="/tmp/minimax_reasoning_capture_4005.jsonl"
-out=False
-try:
-    with open(fp) as f:
-        for line in f:
-            r = json.loads(line.strip())
-            body = r.get("body") or {}
-            msgs = body.get("messages") or []
-            if not msgs: continue
-            last = msgs[-1]
-            content = last.get("content") or ""
-            if isinstance(content, list):
-                content = " ".join(p.get("text","") for p in content if isinstance(p, dict))
-            if "ultimate-t15-trigger" in str(content):
-                if "reasoning_split" in json.dumps(body):
-                    out = True
-                    break
-except: pass
-print("yes" if out else "no")
-PY
-)
-if [ "$T15_ANY_SPLIT" = "yes" ]; then
-    assert_pass "T15: ultimate-path captured request IS translated (reasoning_split present)"
-else
-    assert_fail "T15: no captured request shows reasoning_split — ultimate translation NOT fired"
-fi
 
 # ============================================================================
 # Phase 6 — Summary

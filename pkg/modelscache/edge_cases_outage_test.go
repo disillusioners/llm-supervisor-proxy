@@ -236,7 +236,7 @@ func TestEdgeCase_TokenCreatedDuringOutage_BecomesValidAfterTTL(t *testing.T) {
 	st.tokSrc.down.Store(false)
 	clk.Advance(61 * time.Second) // past the 60s negative TTL
 	if _, err := st.dbStore.DB.Exec(
-		`INSERT INTO auth_tokens (id, token_hash, name, created_at, created_by, ultimate_model_enabled, allowed_models) VALUES (?, ?, 'late-create', datetime('now'), 'edge-test', 0, '[]')`,
+		`INSERT INTO auth_tokens (id, token_hash, name, created_at, created_by, allowed_models) VALUES (?, ?, 'late-create', datetime('now'), 'edge-test', '[]')`,
 		"late-token-id", hash); err != nil {
 		t.Fatalf("late-create insert: %v", err)
 	}

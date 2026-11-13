@@ -635,12 +635,10 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				// remove-external-upstream P1 (task 4, A16): the
 				// global-upstream fallback is GONE. An anthropic-provider
 				// credential/model with no base URL anywhere is a
-				// configuration error — fail the ATTEMPT (well-formed,
-				// mirroring the deleted pkg/ultimatemodel
-				// handler_external.go "upstream URL not configured"
-				// shape) and let the model fallback loop / all-models
-				// 502 envelope carry it. Never forward to a retired
-				// global upstream.
+				// configuration error — fail the ATTEMPT (well-formed
+				// "upstream URL not configured" envelope) and let the
+				// model fallback loop / all-models 502 envelope carry it.
+				// Never forward to a retired global upstream.
 				log.Printf("Anthropic passthrough attempt for model %s failed: no upstream URL configured (credential base_url and internal_base_url both empty)", modelConfig.ID)
 				arc.lastError = []byte("upstream URL not configured for anthropic passthrough")
 				arc.lastStatusCode = http.StatusBadGateway

@@ -459,9 +459,8 @@ func TestCountingHooks_AllThreeHandlerLocations(t *testing.T) {
 
 	// Simulate all three counting points
 	countingPoints := []string{
-		"ultimate_model_success",   // Lines 471-485
-		"stream_result_success",    // Lines 805-819
-		"handle_nonstream_success", // Lines 946-960
+		"stream_result_success",    // race stream lane
+		"handle_nonstream_success", // non-stream lane
 	}
 
 	for _, location := range countingPoints {

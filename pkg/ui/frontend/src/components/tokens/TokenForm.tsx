@@ -9,7 +9,7 @@ interface TokenFormProps {
   // the mapped object dropped `kind`, so every row passed `!m.kind`).
   models: { name: string; id: string; kind?: 'chat' | 'image-gen' | 'decision' | 'group' }[];
   token?: ApiToken;  // For editing existing tokens
-  onSubmit: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[], ultimateModel?: string) => Promise<void>;
+  onSubmit: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
 }
@@ -22,23 +22,15 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
     }
     return '';
   });
-  const [ultimateModelEnabled, setUltimateModelEnabled] = useState(token?.ultimate_model_enabled || false);
-  const [ultimateModel, setUltimateModel] = useState(token?.ultimate_model || '');
   const [selectedModels, setSelectedModels] = useState<string[]>(token?.allowed_models || []);
   const [saving, setSaving] = useState(false);
 
   const isEditing = !!token;
 
-  // Decision Commission 2026-10-15 (plan §6.7.a / P3.8 / amendment 7):
-  // Both pickers here list chat-only models. The filter shape
-  // `!m.kind || m.kind === 'chat'` matches the chat-kind baseline (no
-  // kind / kind === 'chat') and excludes image-gen + decision.
-  // Same pattern as C-16 (`ModelsTab.tsx:157`).
-  // load-balance-groups 2026-10-16 (plan §6.4 arm 4 of 4 — P3.7): the
-  // same positive filter shape also excludes kind === 'group' — groups
-  // are ultimate-excluded by G7 anyway, but the pickers say so
-  // explicitly (defense-in-depth + operator clarity, per Q10's
-  // rejection of the skip-exclusion override).
+  // load-balance-groups 2026-10-16 (plan §6.4 arm 4 of 4 — P3.7):
+  // the positive filter shape `!m.kind || m.kind === 'chat'` matches
+  // the chat-kind baseline and excludes image-gen, decision, and
+  // group kinds (defense-in-depth + operator clarity).
   const chatModels = models.filter((m) => !m.kind || m.kind === 'chat');
 
   const handleSubmit = async () => {
@@ -52,9 +44,7 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
       onStatus(null);
       const expires = expiresAt ? new Date(expiresAt).toISOString() : null;
       // When selectedModels is empty, it means all models are allowed
-      // When ultimateModelEnabled is false, clear ultimateModel to ""
-      const ultimateModelValue = ultimateModelEnabled ? ultimateModel : '';
-      await onSubmit(name.trim(), expires, ultimateModelEnabled, selectedModels, ultimateModelValue);
+      await onSubmit(name.trim(), expires, selectedModels);
     } catch (e) {
       onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save token' });
     } finally {
@@ -129,74 +119,6 @@ export function TokenForm({ models, token, onSubmit, onCancel, onStatus }: Token
           </p>
         </div>
 
-        {/* Ultimate Model Access Toggle */}
-        <div>
-          <label class="block text-sm font-medium text-gray-300 mb-1">
-            Ultimate Model Access <span class="text-gray-500">(optional)</span>
-          </label>
-          <div class="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setUltimateModelEnabled(!ultimateModelEnabled);
-                if (ultimateModelEnabled) {
-                  // Clearing - reset ultimateModel value
-                  setUltimateModel('');
-                }
-              }}
-              class={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                ultimateModelEnabled ? 'bg-blue-600' : 'bg-gray-600'
-              }`}
-            >
-              <span class={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                ultimateModelEnabled ? 'translate-x-6' : 'translate-x-1'
-              }`} />
-            </button>
-            <span class="text-sm text-gray-400">
-              {ultimateModelEnabled ? 'Enabled' : 'Disabled'}
-            </span>
-          </div>
-          <p class="text-xs text-gray-400 mt-1">
-            Allow this token to trigger the ultimate model for duplicate request handling
-          </p>
-        </div>
-
-        {/* Ultimate Model Override - only shown when enabled */}
-        {ultimateModelEnabled && (
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-1">
-              Ultimate Model Override <span class="text-gray-500">(optional)</span>
-            </label>
-            <select
-              value={ultimateModel}
-              onChange={(e) => setUltimateModel((e.target as HTMLSelectElement).value)}
-              class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            >
-              <option value="">Global Default</option>
-              {/* Decision Commission 2026-10-15 (plan §6.7.a / P3.8 /
-                  amendment 7): filter the per-token ultimate-model
-                  options to chat-only models. The filter shape
-                  (!m.kind || m.kind === 'chat') excludes image-gen,
-                  decision, and group kinds. Same pattern as
-                  ModelsTab.tsx:157 / C-16. load-balance-groups:
-                  groups are ultimate-excluded by G7, but the picker
-                  says so explicitly. The global ultimate model_id
-                  (free-text, SettingsPage:104) is NOT kind-gated —
-                  see plan §6.7.a ultimate-target note (Q16
-                  scope-defer). */}
-              {[...chatModels]
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-            </select>
-            <p class="text-xs text-gray-400 mt-1">
-              Overrides the global ultimate model configuration for this token
-            </p>
-          </div>
-        )}
 
         <div class="flex justify-end gap-3 pt-2">
           <button

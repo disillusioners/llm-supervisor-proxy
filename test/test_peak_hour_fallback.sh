@@ -114,7 +114,6 @@ export RACE_RETRY_ENABLED="true"
 export RACE_PARALLEL_ON_IDLE="false"
 export RACE_MAX_PARALLEL="2"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID=""
 
 go run cmd/main.go &
 PROXY_PID=$!

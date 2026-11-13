@@ -500,7 +500,7 @@ type ModelsConfigInterface interface {
 // model_credential_selected event payload) and NewlyBound (W-1
 // only-on-first-binding event signal). The canonical concrete
 // implementation lives in pkg/store/database.ResolvedCredential;
-// pkg/models declares it here so pkg/proxy / pkg/ultimatemodel
+// pkg/models declares it here so pkg/proxy
 // can talk about the shape without an import cycle.
 type ResolvedCredential struct {
 	Provider      string

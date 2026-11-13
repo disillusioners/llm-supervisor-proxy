@@ -63,7 +63,6 @@ type stickyHarness struct {
 	clean   func()
 
 	// tokenStore / cfgMutate are optional seams for the ultimate-path
-	// fixture (auth is required for X-Force-Ultimate-Model entitlement,
 	// and the global ultimate model id comes from config).
 	tokenStore auth.TokenStoreInterface
 	cfgMutate  func(*config.Config)
@@ -1026,55 +1025,6 @@ func TestStickyOrder_PromotionDoesNotTouchRouteModel(t *testing.T) {
 // TestStickyOrder_UltimatePath_NoRecord pins §4.2 exclusion 1: the
 // ultimate-model completion is not a race delivered success, so it must
 // neither record nor disturb an existing record.
-func TestStickyOrder_UltimatePath_NoRecord(t *testing.T) {
-	h := newStickyHarness(t, true, true)
-
-	// Auth is required for the X-Force-Ultimate-Model entitlement.
-	db := setupIntegrationDB(t)
-	t.Cleanup(func() { _ = db.Close() })
-	h.tokenStore = auth.NewTokenStore(db, database.SQLite)
-	plaintext, token, err := h.tokenStore.CreateToken(context.Background(), "sticky-ultimate", nil, "test-user", true, "", nil)
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
-
-	h.seedChatModel(t, "m-a")
-	h.seedChatModel(t, "ultimate-model")
-	h.cfgMutate = func(c *config.Config) { c.UltimateModel.ModelID = "ultimate-model" }
-	h.rebuild(t)
-
-	msgs := stickyMessages()
-	key := stickyKeyFor("m-a", msgs) // tokenID "" — see the token-salted variant below
-	body := map[string]interface{}{
-		"model":    "m-a",
-		"messages": msgs,
-	}
-	req := makeChatRequest(t, body)
-	req.Header.Set("Authorization", "Bearer "+plaintext)
-	req.Header.Set("X-Force-Ultimate-Model", "true")
-
-	rec := httptest.NewRecorder()
-	h.h.HandleChatCompletions(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("ultimate path did not execute: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Sanity: the ULTIMATE path (not the race) served this request.
-	rl := h.lastRequestLog(t)
-	if !rl.UltimateModelUsed {
-		t.Fatalf("expected the ultimate path to run (UltimateModelUsed=false, model=%q)", rl.Model)
-	}
-
-	// The token-salted key for this authenticated request + the unsalted
-	// key must BOTH be empty: nothing in the engine at all.
-	tokenKey := credentiallb.ComputeConversationKey("m-a", token.ID, credentiallb.ExtractLeadingUserRun(msgs))
-	if v, ok := h.sticky.Get(tokenKey); ok {
-		t.Fatalf("ultimate-path completion recorded a winner: key=%s model=%q", "token", v)
-	}
-	if v, ok := h.sticky.Get(key); ok {
-		t.Fatalf("ultimate-path completion recorded a winner: key=%s model=%q", "unsalted", v)
-	}
-}
 
 // ─── §9 fixture: client-write-fail records NOTHING (BOTH lanes) ─────────────
 

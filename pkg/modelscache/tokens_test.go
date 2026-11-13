@@ -54,7 +54,7 @@ func (f *fakeTokenStore) ValidateToken(ctx context.Context, plaintext string) (*
 	return tok, nil
 }
 
-func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (f *fakeTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
 	plaintext, _, _ := auth.GenerateToken()
 	hash := auth.HashToken(plaintext)
 	tok := &auth.AuthToken{ID: "id-" + name, Name: name, TokenHash: hash, ExpiresAt: expiresAt, CreatedBy: createdBy}
@@ -101,7 +101,7 @@ func (f *fakeTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Aut
 	return nil, auth.ErrTokenNotFound
 }
 
-func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
+func (f *fakeTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
 	return nil
 }
 
@@ -394,7 +394,7 @@ func TestCachedTokenStore_WriteThrough_CreateToken(t *testing.T) {
 	inner := newFakeTokenStore()
 	c := NewCachedTokenStore(inner, Options{})
 
-	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", false, "", nil)
+	plaintext, tok, err := c.CreateToken(context.Background(), "svc", nil, "tester", nil)
 	if err != nil || tok == nil {
 		t.Fatalf("CreateToken: %v %v", tok, err)
 	}

@@ -29,13 +29,13 @@
 | Tool Call | `pkg/toolcall/buffer_test.go`, `pkg/toolcall/buffer_minimax_test.go` | ~15 | ✅ PASS |
 | **Tool Repair** | `pkg/toolrepair/repair_test.go`, `pkg/toolrepair/strategies_test.go` | **~45** | ✅ PASS |
 | **UI Handlers** | `pkg/ui/handlers_usage_test.go` | ~34 | ✅ PASS |
-| **Ultimate Model** | `pkg/ultimatemodel/handler_test.go`, `pkg/ultimatemodel/usage_test.go`, `pkg/ultimatemodel/hash_cache_test.go` | ~60 | ✅ PASS |
-| **Ultimate Model External** | `pkg/ultimatemodel/handler_external_test.go` | **~27** | ✅ PASS |
-| **Ultimate Model Internal** | `pkg/ultimatemodel/handler_internal_test.go` | **~28** | ✅ PASS |
-| **E2E Ultimate-Internal Reasoning** | `test/e2e_ultimate_internal_reasoning/` | 1 (multi-assert) | ✅ PASS (new 2026-08-18, commit `c3a4b35`) |
+| **Ultimate Model** | `pkg/ultimatemodel/handler_test.go`, `pkg/ultimatemodel/usage_test.go`, `pkg/ultimatemodel/hash_cache_test.go` | ~60 | 🗑️ REMOVED at 8c49e1a (package deleted) |
+| **Ultimate Model External** | `pkg/ultimatemodel/handler_external_test.go` | **~27** | 🗑️ REMOVED at 8c49e1a (package deleted) |
+| **Ultimate Model Internal** | `pkg/ultimatemodel/handler_internal_test.go` | **~28** | 🗑️ REMOVED at 8c49e1a (package deleted) |
+| **E2E Ultimate-Internal Reasoning** | `test/e2e_ultimate_internal_reasoning/` | 1 (multi-assert) | 🗑️ REMOVED at 8c49e1a (harness deleted) |
 | **E2E Race Fallback → MiniMax gate** | `pkg/proxy/race_minimax_fallback_e2e_test.go` | 2 (multi-assert) | ✅ PASS (new 2026-09-26, commit `578512f`) — incident path: primary 429 → race fallback → translated wire body + non-MiniMax guard |
 | Usage Counter | `pkg/usage/counter_test.go` | ~10 | ✅ PASS |
-| **Total** | | **~819** | |
+| **Total** | | **~819** (≈703 active after 8c49e1a removed the four ultimate rows above) | |
 
 ### Changes Since Last Update (2026-03-31 → 2026-04-06)
 

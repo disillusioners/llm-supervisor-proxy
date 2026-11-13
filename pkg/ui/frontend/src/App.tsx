@@ -280,9 +280,9 @@ function SettingsRoute({
     groupError?: string | null;
     onRetryGroupModels?: () => void;
     tokens: any[];
-    onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<any>;
+    onCreateToken: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<any>;
     onDeleteToken: (id: string) => Promise<void>;
-    onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[]) => Promise<boolean>;
+    onUpdateTokenPermission: (id: string, allowedModels?: string[]) => Promise<boolean>;
     onRefetchTokens: () => void;
 }) {
     return (

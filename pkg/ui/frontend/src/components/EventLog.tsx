@@ -88,11 +88,10 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     const dur = e.data?.duration ? ` after ${e.data.duration}` : '';
     return `Shadow retry lost: ${e.data?.main_model || 'main'} completed before ${e.data?.model || '?'}${dur}`;
   },
-  ultimate_model_triggered: (e) => {
-    const hash = e.data?.hash ? ` (${e.data.hash.substring(0, 8)}...)` : '';
-    return `Ultimate model triggered: ${e.data?.original_model || '?'} -> ${e.data?.ultimate_model || '?'}${hash}`;
+  group_member_failed: (e) => {
+    const reason = e.data?.reason ? ` (${e.data.reason})` : '';
+    return `Group member failed: ${e.data?.group_id || '?'} member ${e.data?.member_id || '?'}${reason}`;
   },
-  ultimate_model_failed: (e) => `Ultimate model failed: ${e.data?.ultimate_model || '?'} - ${e.data?.error || 'Unknown error'}`,
   race_started: (e) => `Race started with models: ${e.data?.models?.join(', ') || '?'}`,
   race_spawn: (e) => {
     // race-error-reason-classification — ADDITIVE: the classified reason
@@ -153,10 +152,12 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     const strategies = d?.strategies_used?.join(', ') || 'none';
     return `Tool repair: ${repaired}/${total} repaired, ${failed} failed (strategies: ${strategies})`;
   },
-  ultimate_model_retry_exhausted: (e) => {
-    const d = e.data;
-    return `Ultimate model attempts exhausted: ${d?.current_retry || '?'}/${d?.max_retries || '?'}`;
-  },
+  group_fallback_attempted: (e) =>
+    `Group fallback attempted: ${e.data?.group_id || '?'} ${e.data?.from_member || '?'} -> ${e.data?.to_member || '?'}`,
+  group_fallback_advanced: (e) =>
+    `Group fallback advanced: ${e.data?.group_id || '?'} ${e.data?.from_member || '?'} -> ${e.data?.to_member || '?'}`,
+  group_fallback_exhausted: (e) =>
+    `Group fallback exhausted: ${e.data?.group_id || '?'} no members left after ${e.data?.from_member || '?'}`,
   internal_error: (e) => `Internal error: ${e.data?.error || 'Unknown error'}`,
 };
 
@@ -192,8 +193,10 @@ const EVENT_COLORS: Record<EventType, string> = {
   shadow_retry_won: 'text-green-400',
   shadow_retry_failed: 'text-red-400',
   shadow_retry_lost: 'text-gray-400',
-  ultimate_model_triggered: 'text-pink-400',
-  ultimate_model_failed: 'text-red-400',
+  group_fallback_attempted: 'text-orange-400',
+  group_fallback_advanced: 'text-green-400',
+  group_fallback_exhausted: 'text-red-400',
+  group_member_failed: 'text-red-400',
   stream_normalize: 'text-amber-400',
   race_started: 'text-cyan-400',
   race_spawn: 'text-blue-400',
@@ -203,7 +206,6 @@ const EVENT_COLORS: Record<EventType, string> = {
   race_secondary_model_used: 'text-purple-400',
   model_credential_failover: 'text-amber-300',
   tool_repair: 'text-amber-400',
-  ultimate_model_retry_exhausted: 'text-red-400',
   internal_error: 'text-red-400',
 };
 
@@ -240,8 +242,10 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   shadow_retry_won: 'SHADOW_RETRY_WON',
   shadow_retry_failed: 'SHADOW_RETRY_FAILED',
   shadow_retry_lost: 'SHADOW_RETRY_LOST',
-  ultimate_model_triggered: 'ULTIMATE_MODEL',
-  ultimate_model_failed: 'ULTIMATE_MODEL_FAILED',
+  group_fallback_attempted: 'GROUP_FALLBACK_ATTEMPTED',
+  group_fallback_advanced: 'GROUP_FALLBACK_ADVANCED',
+  group_fallback_exhausted: 'GROUP_FALLBACK_EXHAUSTED',
+  group_member_failed: 'GROUP_MEMBER_FAILED',
   race_started: 'RACE_STARTED',
   race_spawn: 'RACE_SPAWN',
   race_winner_selected: 'RACE_WINNER',
@@ -250,7 +254,6 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   race_secondary_model_used: 'SECONDARY_MODEL_USED',
   model_credential_failover: 'CRED_FAILOVER',
   tool_repair: 'TOOL_REPAIR',
-  ultimate_model_retry_exhausted: 'ULTIMATE_ATTEMPTS_EXHAUSTED',
   internal_error: 'INTERNAL_ERROR',
 };
 
@@ -331,10 +334,7 @@ export const EventLog: FunctionComponent<EventLogProps> = ({
                 <span class={`shrink-0 font-semibold ${getEventColor(event.type)}`}>
                   [{getEventTypeLabel(event.type)}]
                 </span>
-                <span
-                  class="text-gray-300"
-                  aria-label={event.type === 'ultimate_model_retry_exhausted' ? 'Ultimate model attempt limit reached' : undefined}
-                >
+                <span class="text-gray-300">
                   {getEventMessage(event)}
                   {(event.type === 'stream_error_after_headers' || event.type === 'upstream_error_status' || event.type === 'internal_error') && event.data?.buffer_id && (
                     <a

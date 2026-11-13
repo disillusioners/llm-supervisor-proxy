@@ -142,8 +142,6 @@ unset UPSTREAM_URL   # deliberately: global default upstream = http://localhost:
 export PORT="$PROXY_PORT"
 export APPLY_ENV_OVERRIDES="true"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID=""
-export ULTIMATE_MODEL_MAX_HASH="100"
 export INTERNAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 echo "${YELLOW}[env] isolated HOME=$HOME; SQLite dialect; UPSTREAM_URL unset (default 4001)${NC}"
 

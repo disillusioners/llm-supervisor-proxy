@@ -35,13 +35,9 @@ import (
 // wiringFiles are the call-site files whose ASTs must NOT contain
 // a `translator.ReasoningDetail{...}` composite literal. Paths are
 // resolved relative to the test package directory via repoRoot().
-// remove-external-upstream P1: pkg/ultimatemodel/handler_external.go
-// is deleted with the external arm — dropped from this list (the
-// drift trap now walks the three surviving wiring files).
 var wiringFiles = []string{
 	"pkg/proxy/race_executor.go",
 	"pkg/proxy/internal_handler.go",
-	"pkg/ultimatemodel/handler_internal.go",
 }
 
 // translatorSourceFiles is the allow-list — the only files in which

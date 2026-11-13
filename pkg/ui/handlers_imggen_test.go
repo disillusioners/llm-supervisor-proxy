@@ -736,7 +736,7 @@ func (m *imgGenParityTokenStore) ValidateToken(ctx context.Context, plaintext st
 	return nil, auth.ErrTokenNotFound
 }
 
-func (m *imgGenParityTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *imgGenParityTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
 	return "", nil, auth.ErrTokenNotFound
 }
 
@@ -760,7 +760,7 @@ func (m *imgGenParityTokenStore) GetTokenByID(ctx context.Context, id string) (*
 	return t, nil
 }
 
-func (m *imgGenParityTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
+func (m *imgGenParityTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
 	return auth.ErrTokenNotFound
 }
 

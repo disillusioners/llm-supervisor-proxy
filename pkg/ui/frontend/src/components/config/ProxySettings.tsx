@@ -1,7 +1,4 @@
-import type { Model } from '../../types';
-
 interface ProxySettingsProps {
-  models: Model[];
   port: number;
   idleTimeout: string;
   streamDeadline: string;
@@ -16,9 +13,6 @@ interface ProxySettingsProps {
   raceMaxParallel: number;
   raceMaxBufferBytes: number;
   stickyLastSuccessEnabled: boolean;
-  // Ultimate model fields
-  ultimateModelId: string;
-  ultimateModelMaxHash: number;
   // Raw response logging fields
   logRawUpstreamResponse: boolean;
   logRawUpstreamOnError: boolean;
@@ -33,8 +27,6 @@ interface ProxySettingsProps {
   onRaceMaxParallelChange: (value: number) => void;
   onRaceMaxBufferBytesChange: (value: number) => void;
   onStickyLastSuccessEnabledChange: (value: boolean) => void;
-  onUltimateModelIdChange: (value: string) => void;
-  onUltimateModelMaxHashChange: (value: number) => void;
   onLogRawUpstreamResponseChange: (value: boolean) => void;
   onLogRawUpstreamOnErrorChange: (value: boolean) => void;
   onLogRawUpstreamMaxKBChange: (value: number) => void;
@@ -45,7 +37,6 @@ interface ProxySettingsProps {
 }
 
 export function ProxySettings({
-  models,
   port,
   idleTimeout,
   streamDeadline,
@@ -58,8 +49,6 @@ export function ProxySettings({
   raceMaxParallel,
   raceMaxBufferBytes,
   stickyLastSuccessEnabled,
-  ultimateModelId,
-  ultimateModelMaxHash,
   logRawUpstreamResponse,
   logRawUpstreamOnError,
   logRawUpstreamMaxKB,
@@ -72,8 +61,6 @@ export function ProxySettings({
   onRaceMaxParallelChange,
   onRaceMaxBufferBytesChange,
   onStickyLastSuccessEnabledChange,
-  onUltimateModelIdChange,
-  onUltimateModelMaxHashChange,
   onLogRawUpstreamResponseChange,
   onLogRawUpstreamOnErrorChange,
   onLogRawUpstreamMaxKBChange,
@@ -332,58 +319,6 @@ export function ProxySettings({
             Promote the model that last delivered a success for this conversation to the front of the race chain.
           </p>
         </div>
-      </div>
-
-      {/* Ultimate Model Section */}
-      <div class="border-t border-gray-700 pt-4 mt-4">
-        <h3 class="text-sm font-medium text-gray-200 mb-3">Ultimate Model</h3>
-        <p class="text-xs text-gray-400 mb-3">
-          When a duplicate request is detected, the proxy will bypass all normal logic
-          (fallback, retry, buffering) and use this model as a raw proxy.
-        </p>
-
-        {/* Ultimate Model ID */}
-        <div class="mb-3">
-          <label class="block text-sm font-medium text-gray-300 mb-1">Ultimate Model ID</label>
-          <select
-            value={ultimateModelId}
-            onChange={(e) => onUltimateModelIdChange((e.target as HTMLSelectElement).value)}
-            class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-          >
-            <option value="">None (disabled)</option>
-            {models.filter(m => m.enabled).map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name || model.id}
-              </option>
-            ))}
-          </select>
-          <p class="text-xs text-gray-500 mt-1">
-            Select a model to use for duplicate request handling. Leave empty to disable.
-          </p>
-        </div>
-
-        {/* Max Hash Cache Size */}
-        <div class="mb-3">
-          <label class="block text-sm font-medium text-gray-300 mb-1">Max Hash Cache Size</label>
-          <input
-            type="number"
-            value={ultimateModelMaxHash}
-            onInput={(e) => onUltimateModelMaxHashChange(parseInt((e.target as HTMLInputElement).value) || 100)}
-            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-            placeholder="100"
-            min="1"
-            max="10000"
-          />
-          <p class="text-xs text-gray-500 mt-1">
-            Maximum number of request hashes to remember for duplicate detection.
-            Uses circular buffer (oldest removed when full).
-          </p>
-        </div>
-
-        <p class="text-xs text-gray-500 mt-2">
-          Ultimate model trigger schedule is fixed: escalation on the 5th/10th/20th/30th/40th
-          request with the same content (hard 40-attempt cap, no configuration).
-        </p>
       </div>
 
       {/* Debug & Logging Section */}
