@@ -254,8 +254,8 @@ func am29AddCodingCoding(t *testing.T, h *am29Harness) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "coding[coding]", Name: "Coding Self-Shadow", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-		ShadowModelID:                "coding",
+		Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID: "coding",
 	}); err != nil {
 		t.Fatalf("AddModel(coding[coding]): %v", err)
 	}
@@ -305,7 +305,7 @@ func am29AddWrapperGroup(t *testing.T, h *am29Harness) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "wrapper[coding-actual]", Name: "Wrapper Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      []models.GroupMember{{ModelID: "coding-actual", Weight: 1}},
+		Members: []models.GroupMember{{ModelID: "coding-actual", Weight: 1}},
 		// ShadowModelID deliberately empty — see shadow_claim
 		// note above (avoids the claims-index hijack on the
 		// internal member ID).
@@ -398,8 +398,8 @@ func am29AssertBootLazyPin(t *testing.T, groupID string) {
 	if err := mgr1.AddModel(models.ModelConfig{
 		ID: groupID, Name: "Coding Self-Shadow", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-		ShadowModelID:                "coding",
+		Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID: "coding",
 	}); err != nil {
 		mgr1.Close()
 		store1.Close()

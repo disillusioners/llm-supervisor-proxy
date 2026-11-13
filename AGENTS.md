@@ -114,13 +114,6 @@ Environment variables can override configuration values when `APPLY_ENV_OVERRIDE
 | `BUFFER_STORAGE_DIR` | *(empty)* | Directory for buffer content files (defaults to user config dir) |
 | `BUFFER_MAX_STORAGE_MB` | `100` | Max total storage for buffers in MB |
 
-### Tool Call Buffer Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TOOL_CALL_BUFFER_DISABLED` | `false` | Disable tool call buffering (for clients that handle partial JSON) |
-| `TOOL_CALL_BUFFER_MAX_SIZE` | `1048576` | Max bytes per tool call buffer (1MB) |
-
 ### Loop Detection Configuration
 
 | Variable | Default | Description |

@@ -82,7 +82,7 @@ func seedFailoverPoolGroup(t *testing.T, h *groupHarness, groupID string, member
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: groupID, Name: groupID, Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      members,
+		Members: members,
 	}); err != nil {
 		t.Fatalf("AddModel(%s): %v", groupID, err)
 	}

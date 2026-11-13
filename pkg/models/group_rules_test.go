@@ -22,12 +22,12 @@ func groupBaseFixture() (ModelConfig, []ModelConfig) {
 	memberA := ModelConfig{ID: "coding", Name: "Coding", Enabled: true, Kind: KindChat, Internal: true, InternalModel: "glm-5", Credentials: []CredentialRef{{CredentialID: "cred-openai", Weight: 1, Position: 0}}}
 	memberB := ModelConfig{ID: "coding-alt", Name: "Coding Alt", Enabled: true, Kind: "", Internal: true, InternalModel: "kimi", Credentials: []CredentialRef{{CredentialID: "cred-zhipu", Weight: 1, Position: 0}}}
 	group := ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         KindGroup,
-		Internal:                     true,
-		Members:                      []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
+		ID:       "coding-group",
+		Name:     "Coding Group",
+		Enabled:  true,
+		Kind:     KindGroup,
+		Internal: true,
+		Members:  []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
 	}
 	collection := []ModelConfig{memberA, memberB, group}
 	return group, collection
@@ -164,7 +164,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G3_member_must_be_chat_kind",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, }
+				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}}
 				*coll = append(*coll, img)
 				m.Members = []GroupMember{{ModelID: "img-model", Weight: 1}}
 			},
@@ -180,7 +180,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G8_shadow_target_must_be_chat_kind",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, }
+				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}}
 				*coll = append(*coll, img)
 				m.ShadowModelID = "img-model"
 			},
@@ -286,13 +286,13 @@ func newGroupJSONConfig() *ModelsConfig {
 
 func jsonValidGroup() ModelConfig {
 	return ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         KindGroup,
-		Internal:                     true,
-		Members:                      []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
-		ShadowModelID:                "coding",
+		ID:            "coding-group",
+		Name:          "Coding Group",
+		Enabled:       true,
+		Kind:          KindGroup,
+		Internal:      true,
+		Members:       []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
+		ShadowModelID: "coding",
 	}
 }
 

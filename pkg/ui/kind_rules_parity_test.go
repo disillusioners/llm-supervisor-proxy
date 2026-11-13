@@ -146,15 +146,15 @@ func validateDecisionRulesCaller(m models.ModelConfig, primaryProvider string) s
 // when nil to mirror the JSON `omitempty` wire shape).
 func marshalBrokenModel(broken models.ModelConfig) string {
 	payload := map[string]interface{}{
-		"id":                              "decision-1",
-		"name":                            broken.Name,
-		"enabled":                         broken.Enabled,
-		"kind":                            broken.Kind,
-		"internal":                        broken.Internal,
-		"internal_model":                  broken.InternalModel,
-		"fallback_chain":                  broken.FallbackChain,
-		"secondary_upstream_model":        broken.SecondaryUpstreamModel,
-		"peak_hour_enabled":               broken.PeakHourEnabled,
+		"id":                       "decision-1",
+		"name":                     broken.Name,
+		"enabled":                  broken.Enabled,
+		"kind":                     broken.Kind,
+		"internal":                 broken.Internal,
+		"internal_model":           broken.InternalModel,
+		"fallback_chain":           broken.FallbackChain,
+		"secondary_upstream_model": broken.SecondaryUpstreamModel,
+		"peak_hour_enabled":        broken.PeakHourEnabled,
 	}
 	if len(broken.Credentials) > 0 {
 		payload["credentials"] = []map[string]interface{}{{"credential_id": broken.Credentials[0].CredentialID, "weight": 1, "position": 0}}
@@ -290,13 +290,13 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 
 			// Valid base model — all D-rules satisfied.
 			base := models.ModelConfig{
-				ID:                           "decision-1",
-				Name:                         "Decision One",
-				Enabled:                      true,
-				Kind:                         models.KindDecision,
-				Internal:                     true,
-				InternalModel:                "gpt-6-luna",
-				Credentials:                  decisionRefs("openai-cred"),
+				ID:            "decision-1",
+				Name:          "Decision One",
+				Enabled:       true,
+				Kind:          models.KindDecision,
+				Internal:      true,
+				InternalModel: "gpt-6-luna",
+				Credentials:   decisionRefs("openai-cred"),
 			}
 
 			// --- ValidateKindRules (the helper, single source of truth) ---
@@ -424,7 +424,7 @@ func addGroupMembers(ts *modelTestServer) {
 	ts.mockModels.AddModel(models.ModelConfig{
 		ID: "member-img", Name: "Member Img", Enabled: true, Kind: models.KindImageGen,
 		Internal: true, InternalModel: "image-01",
-		Credentials:                  []models.CredentialRef{{CredentialID: "test-cred", Weight: 1, Position: 0}},
+		Credentials: []models.CredentialRef{{CredentialID: "test-cred", Weight: 1, Position: 0}},
 	})
 	ts.mockModels.AddModel(models.ModelConfig{
 		ID: "other-group", Name: "Other Group", Enabled: true, Kind: models.KindGroup,
@@ -437,12 +437,12 @@ func addGroupMembers(ts *modelTestServer) {
 // no claim — the claim cases mutate it on).
 func groupBase() models.ModelConfig {
 	return models.ModelConfig{
-		ID:                           "group-1",
-		Name:                         "Group One",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		Members:                      []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-b", Weight: 2}},
+		ID:       "group-1",
+		Name:     "Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-b", Weight: 2}},
 	}
 }
 
@@ -466,11 +466,11 @@ func validateGroupRulesCaller(m models.ModelConfig, collection []models.ModelCon
 // included; zero-value optional fields omitted).
 func marshalGroupModel(m models.ModelConfig) string {
 	payload := map[string]interface{}{
-		"id":                              "group-1",
-		"name":                            m.Name,
-		"enabled":                         m.Enabled,
-		"kind":                            m.Kind,
-		"internal":                        m.Internal,
+		"id":       "group-1",
+		"name":     m.Name,
+		"enabled":  m.Enabled,
+		"kind":     m.Kind,
+		"internal": m.Internal,
 	}
 	if len(m.Members) > 0 {
 		members := make([]map[string]interface{}, 0, len(m.Members))

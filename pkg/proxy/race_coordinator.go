@@ -843,7 +843,7 @@ func (c *raceCoordinator) manage() {
 									modelID:       advanceTarget,
 								}
 							} else {
-								log.Printf("[RACE] Latest request %d failed: %s; no advance target — chain end, terminal", latestReq.id, failReason)
+								log.Printf("[RACE] Latest request %d failed: %s; advance ended — no untried target or client-attributable failure; chain end, terminal", latestReq.id, failReason)
 								// Group-fallback observability: the failed
 								// member was the chain's LAST (or not in the
 								// chain, or the failure is client-attributable

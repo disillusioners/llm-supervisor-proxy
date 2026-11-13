@@ -567,13 +567,13 @@ func setupDecisionManager(t *testing.T) (*ModelsManager, func()) {
 // (D1-D9) so individual subtests can mutate one field at a time.
 func validDecision() models.ModelConfig {
 	return models.ModelConfig{
-		ID:                           "decision-x",
-		Name:                         "Valid Decision",
-		Enabled:                      true,
-		Kind:                         models.KindDecision,
-		Internal:                     true,
-		InternalModel:                "gpt-6-luna",
-		Credentials:                  models.TestRefs("openai-cred"),
+		ID:            "decision-x",
+		Name:          "Valid Decision",
+		Enabled:       true,
+		Kind:          models.KindDecision,
+		Internal:      true,
+		InternalModel: "gpt-6-luna",
+		Credentials:   models.TestRefs("openai-cred"),
 	}
 }
 

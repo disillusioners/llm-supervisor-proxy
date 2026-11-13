@@ -66,11 +66,11 @@ func newGroupManager(t *testing.T) (*ModelsManager, func()) {
 // canonical day-1 shape).
 func validGroup() models.ModelConfig {
 	return models.ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
+		ID:       "coding-group",
+		Name:     "Coding Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 2},
 			{ModelID: "coding-alt", Weight: 1},
@@ -815,11 +815,11 @@ func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 	// Hand-built all-backup group — bypasses the D2 write validation
 	// on purpose (the state is unreachable via the API).
 	allBackup := models.ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
+		ID:       "coding-group",
+		Name:     "Coding Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1, BackupOnly: true},
 			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -919,7 +919,7 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "g-solo", Name: "Solo Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		Members: []models.GroupMember{{ModelID: "coding", Weight: 1}},
 	}); err != nil {
 		t.Fatalf("seed solo group: %v", err)
 	}
@@ -1031,7 +1031,7 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "Zero Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-				Members: []models.GroupMember{
+			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1, BackupOnly: true},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
 			},
@@ -1063,7 +1063,7 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "One Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-				Members: []models.GroupMember{
+			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
 			},

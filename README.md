@@ -127,12 +127,9 @@ The proxy uses a **parallel race retry** mechanism for maximum reliability:
 | `BUFFER_STORAGE_DIR` | *(empty)* | Directory for buffer content files (defaults to user config dir). |
 | `BUFFER_MAX_STORAGE_MB` | `100` | Max total storage for buffers in MB. |
 
-### Tool Call Buffer Configuration
+### Tool Call Buffering
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TOOL_CALL_BUFFER_DISABLED` | `false` | Disable tool call buffering (for clients that handle partial JSON). |
-| `TOOL_CALL_BUFFER_MAX_SIZE` | `1048576` | Max bytes per tool call buffer (1MB default). |
+Tool-call buffering is always on with built-in defaults and is not configurable.
 
 ### Raw Upstream Response Logging
 
@@ -353,16 +350,10 @@ Configure via the Web UI under Tool Repair settings.
 
 ## 🛡️ Tool Call Buffering
 
-For streaming clients that cannot handle partial JSON in tool call arguments:
-
-- **Enabled by default** - Buffers fragments until valid JSON is formed
-- **Emits complete tool calls** - Only when arguments are fully parsed
-- **Configurable max size** - Default 1MB per request
-
-Disable if your client handles partial JSON:
-```bash
-export TOOL_CALL_BUFFER_DISABLED=true
-```
+For streaming clients that cannot handle partial JSON in tool call arguments,
+tool-call buffering is always on with built-in defaults — fragments are
+buffered until valid JSON is formed and only complete tool calls are emitted.
+It is not configurable.
 
 ## 📊 Stream Normalizers
 

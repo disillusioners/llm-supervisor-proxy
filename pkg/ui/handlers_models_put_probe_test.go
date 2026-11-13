@@ -176,13 +176,13 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 			id: "chat-edit",
 			edit: func() map[string]interface{} {
 				return map[string]interface{}{
-					"id":                           "chat-edit",
-					"name":                         "Chat Edited",
-					"enabled":                      true,
-					"kind":                         models.KindChat,
-					"internal":                     true,
-					"internal_model":               "gpt-4o-mini",
-					"secondary_upstream_model":     "gpt-4o-fallback",
+					"id":                       "chat-edit",
+					"name":                     "Chat Edited",
+					"enabled":                  true,
+					"kind":                     models.KindChat,
+					"internal":                 true,
+					"internal_model":           "gpt-4o-mini",
+					"secondary_upstream_model": "gpt-4o-fallback",
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
@@ -245,13 +245,13 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 			kind: models.KindDecision,
 			seed: func() models.ModelConfig {
 				return models.ModelConfig{
-					ID:                           "decision-edit",
-					Name:                         "Decision Original",
-					Enabled:                      true,
-					Kind:                         models.KindDecision,
-					Internal:                     true,
-					InternalModel:                "gpt-6-luna",
-					Credentials:                  models.TestRefs("openai-cred"),
+					ID:            "decision-edit",
+					Name:          "Decision Original",
+					Enabled:       true,
+					Kind:          models.KindDecision,
+					Internal:      true,
+					InternalModel: "gpt-6-luna",
+					Credentials:   models.TestRefs("openai-cred"),
 				}
 			},
 			id: "decision-edit",
@@ -465,12 +465,12 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 			id: "chat-edit",
 			edit: func() map[string]interface{} {
 				return map[string]interface{}{
-					"id":                           "chat-edit",
-					"name":                         "Chat Edited",
-					"enabled":                      true,
-					"internal":                     true,
-					"internal_model":               "gpt-4o-mini",
-					"secondary_upstream_model":     "gpt-4o-fallback",
+					"id":                       "chat-edit",
+					"name":                     "Chat Edited",
+					"enabled":                  true,
+					"internal":                 true,
+					"internal_model":           "gpt-4o-mini",
+					"secondary_upstream_model": "gpt-4o-fallback",
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
@@ -531,13 +531,13 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 			name: "decision",
 			seed: func() models.ModelConfig {
 				return models.ModelConfig{
-					ID:                           "decision-edit",
-					Name:                         "Decision Original",
-					Enabled:                      true,
-					Kind:                         models.KindDecision,
-					Internal:                     true,
-					InternalModel:                "gpt-6-luna",
-					Credentials:                  models.TestRefs("openai-cred"),
+					ID:            "decision-edit",
+					Name:          "Decision Original",
+					Enabled:       true,
+					Kind:          models.KindDecision,
+					Internal:      true,
+					InternalModel: "gpt-6-luna",
+					Credentials:   models.TestRefs("openai-cred"),
 				}
 			},
 			id: "decision-edit",

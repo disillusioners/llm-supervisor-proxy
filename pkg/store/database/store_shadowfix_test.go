@@ -72,8 +72,8 @@ func TestShadowFix_CredentialsChangedDrain_KeepsSelfShadowMemberEngineState(t *t
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-		ShadowModelID:                "coding",
+		Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID: "coding",
 	}); err != nil {
 		t.Fatalf("AddModel(coding-group): %v", err)
 	}

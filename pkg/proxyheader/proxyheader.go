@@ -1,8 +1,6 @@
 // Package proxyheader provides shared parsing for proxy-only HTTP headers
 // used by pkg/proxy (race + fallback paths). It exists as a separate
 // package so the header vocabulary has one home.
-
-// list).
 package proxyheader
 
 import (

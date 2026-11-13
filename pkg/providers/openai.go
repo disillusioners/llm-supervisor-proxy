@@ -981,8 +981,8 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 //     here so the field extraction below stays single-path.
 //
 // Twin-divergence analysis: the two near-duplicate hydration blocks in
-// pkg/proxy/race_executor.go (~836-864) and
-// the retired ult-internal handler package (~525-560) were byte-identical
+// pkg/proxy/race_executor.go (~836-864) and the ultimate-internal
+// handler package (since retired) were byte-identical
 // at extraction time; this helper collapses them to a single source of
 // truth. Kills the recurrence vector for the reasoning_content
 // silent-drop bug class (origin: commit 83814b0 fixed a twin-divergence
@@ -991,8 +991,8 @@ func populateReasoningFromDetails(msg *ChatMessage) {
 // two.
 //
 // Used by the type-stripped reasoning_details hydration on the
-// race-internal (pkg/proxy/race_executor.go) and ultimate-internal
-// (the retired ult-internal handler package) request paths.
+// race-internal (pkg/proxy/race_executor.go) request path; historically
+// also the (retired) ultimate-internal handler.
 func HydrateReasoningDetails(msg map[string]any) []ReasoningDetailEntry {
 	raw, ok := msg["reasoning_details"].([]interface{})
 	if !ok {

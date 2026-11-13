@@ -157,7 +157,7 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
   group_fallback_advanced: (e) =>
     `Group fallback advanced: ${e.data?.group_id || '?'} ${e.data?.from_member || '?'} -> ${e.data?.to_member || '?'}`,
   group_fallback_exhausted: (e) =>
-    `Group fallback exhausted: ${e.data?.group_id || '?'} no members left after ${e.data?.from_member || '?'}`,
+    `Group fallback exhausted: ${e.data?.group_id || '?'} advance ended after ${e.data?.from_member || '?'} — no untried target or client-attributable failure (see reason)`,
   internal_error: (e) => `Internal error: ${e.data?.error || 'Unknown error'}`,
 };
 

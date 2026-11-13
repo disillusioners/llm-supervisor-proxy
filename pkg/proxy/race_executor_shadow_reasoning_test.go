@@ -249,13 +249,13 @@ func shadowReasoningModelsConfig(t *testing.T) *models.ModelsConfig {
 	}
 
 	group := models.ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-		ShadowModelID:                "coding", // self-shadow: claims its OWN member
+		ID:            "coding-group",
+		Name:          "Coding Group",
+		Enabled:       true,
+		Kind:          models.KindGroup,
+		Internal:      true,
+		Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID: "coding", // self-shadow: claims its OWN member
 	}
 	if err := mc.AddModel(group); err != nil {
 		t.Fatalf("AddModel(group): %v", err)

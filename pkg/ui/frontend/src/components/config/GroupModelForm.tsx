@@ -258,10 +258,10 @@ export function GroupModelForm({
       <h3 class="text-lg font-medium text-white mb-1">
         {mode === 'add' ? 'Add Group Model' : 'Edit Group Model'}
       </h3>
-      {/* G1/G7 read-only surfaced constants — the payload always stamps
+      {/* Read-only surfaced constants — the payload always stamps
           these; the operator cannot change them. */}
       <p class="text-xs text-gray-400 mb-4" data-testid="group-form-fixed-constants">
-        Virtual load-balancing group — kind: group · internal: true · excluded from ultimate switching (fixed by G1/G7).
+        Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.
       </p>
       <div class="space-y-4">
         {/* Group ID — disabled in edit mode (id is immutable, primary key). */}

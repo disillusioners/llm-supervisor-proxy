@@ -129,8 +129,8 @@ func TestHandleModels_ShadowHide_TwoEnabledGroups_NoUniqueness(t *testing.T) {
 			Internal: true, InternalModel: "glm-5"},
 		{ID: "coding-group", Name: "Coding Group", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-			ShadowModelID:                "coding",
+			Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+			ShadowModelID: "coding",
 		},
 	})
 	rec := httptest.NewRecorder()

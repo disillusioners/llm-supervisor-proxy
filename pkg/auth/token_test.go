@@ -190,94 +190,94 @@ func TestScanAllowedModels(t *testing.T) {
 
 func TestAuthToken_IsModelAllowed(t *testing.T) {
 	tests := []struct {
-		name         string
+		name          string
 		allowedModels []string
-		modelName    string
-		expected     bool
+		modelName     string
+		expected      bool
 	}{
 		{
-			name:         "nil allowed models allows any model",
+			name:          "nil allowed models allows any model",
 			allowedModels: nil,
-			modelName:    "gpt-4",
-			expected:     true,
+			modelName:     "gpt-4",
+			expected:      true,
 		},
 		{
-			name:         "nil allowed models allows any model 2",
+			name:          "nil allowed models allows any model 2",
 			allowedModels: nil,
-			modelName:    "claude-3",
-			expected:     true,
+			modelName:     "claude-3",
+			expected:      true,
 		},
 		{
-			name:         "empty allowed models allows any model",
+			name:          "empty allowed models allows any model",
 			allowedModels: []string{},
-			modelName:    "gpt-4",
-			expected:     true,
+			modelName:     "gpt-4",
+			expected:      true,
 		},
 		{
-			name:         "empty allowed models allows any model 2",
+			name:          "empty allowed models allows any model 2",
 			allowedModels: []string{},
-			modelName:    "claude-3",
-			expected:     true,
+			modelName:     "claude-3",
+			expected:      true,
 		},
 		{
-			name:         "model in list returns true",
+			name:          "model in list returns true",
 			allowedModels: []string{"gpt-4", "claude-3", "gemini-pro"},
-			modelName:    "claude-3",
-			expected:     true,
+			modelName:     "claude-3",
+			expected:      true,
 		},
 		{
-			name:         "model not in list returns false",
+			name:          "model not in list returns false",
 			allowedModels: []string{"gpt-4", "claude-3"},
-			modelName:    "gemini-pro",
-			expected:     false,
+			modelName:     "gemini-pro",
+			expected:      false,
 		},
 		{
-			name:         "exact match required case-sensitive - lowercase",
+			name:          "exact match required case-sensitive - lowercase",
 			allowedModels: []string{"gpt-4"},
-			modelName:    "gpt-4",
-			expected:     true,
+			modelName:     "gpt-4",
+			expected:      true,
 		},
 		{
-			name:         "exact match required case-sensitive - uppercase mismatch",
+			name:          "exact match required case-sensitive - uppercase mismatch",
 			allowedModels: []string{"gpt-4"},
-			modelName:    "GPT-4",
-			expected:     false,
+			modelName:     "GPT-4",
+			expected:      false,
 		},
 		{
-			name:         "exact match required case-sensitive - mixed case mismatch",
+			name:          "exact match required case-sensitive - mixed case mismatch",
 			allowedModels: []string{"Claude-3"},
-			modelName:    "claude-3",
-			expected:     false,
+			modelName:     "claude-3",
+			expected:      false,
 		},
 		{
-			name:         "single model in list exact match",
+			name:          "single model in list exact match",
 			allowedModels: []string{"o3-mini"},
-			modelName:    "o3-mini",
-			expected:     true,
+			modelName:     "o3-mini",
+			expected:      true,
 		},
 		{
-			name:         "single model in list mismatch",
+			name:          "single model in list mismatch",
 			allowedModels: []string{"o3-mini"},
-			modelName:    "o3",
-			expected:     false,
+			modelName:     "o3",
+			expected:      false,
 		},
 		{
-			name:         "first model in list",
+			name:          "first model in list",
 			allowedModels: []string{"gpt-4", "claude-3"},
-			modelName:    "gpt-4",
-			expected:     true,
+			modelName:     "gpt-4",
+			expected:      true,
 		},
 		{
-			name:         "last model in list",
+			name:          "last model in list",
 			allowedModels: []string{"gpt-4", "claude-3"},
-			modelName:    "claude-3",
-			expected:     true,
+			modelName:     "claude-3",
+			expected:      true,
 		},
 		{
-			name:         "empty model name when models allowed",
+			name:          "empty model name when models allowed",
 			allowedModels: []string{"gpt-4"},
-			modelName:    "",
-			expected:     false,
+			modelName:     "",
+			expected:      false,
 		},
 	}
 
@@ -293,4 +293,3 @@ func TestAuthToken_IsModelAllowed(t *testing.T) {
 		})
 	}
 }
-
