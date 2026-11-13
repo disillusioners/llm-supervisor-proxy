@@ -1051,9 +1051,11 @@ func (c *CachedModelsConfig) RewriteGroupEntries(modelList []string, conversatio
 // (Am24) to the inner manager's engine. group-backup-members / D5:
 // the returned `pool` string ("default" / "backup") propagates
 // verbatim so the proxy can observe a backup-pool transition.
-func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, string, bool) {
+// wi-7769a812 part 2 / D3: cooldown is caller-owned (the proxy's hot
+// skip-cache TTL) and forwards verbatim.
+func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (string, string, bool) {
 	if gr, ok := c.inner.(models.GroupRewriter); ok {
-		return gr.ExcludeGroupMember(groupID, conversationKey, memberID)
+		return gr.ExcludeGroupMember(groupID, conversationKey, memberID, cooldown)
 	}
 	return "", "", false
 }

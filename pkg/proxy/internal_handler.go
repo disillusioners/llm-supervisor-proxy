@@ -230,7 +230,11 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	// (1) initial-call *ProviderError (pre-first-byte guard: ChatCompletion/
 	//     StreamChatCompletion errors return before any write to `w`);
 	// (2) eligible-class classification — rate-limit AND quota-class
-	//     (layered credential fallback Fix 1; 401/auth stays terminal);
+	//     (layered credential fallback Fix 1), PLUS — wi-7769a812
+	//     part 2 ruling #6 — upstream 401/403 (a pooled-credential
+	//     rejection rotates under the rate-limit policy AND the member
+	//     advance proceeds; parity with the coordinator's
+	//     rotationEligible widening);
 	// (3) multi-credential model (single-cred ⇒ ReselectNone anyway);
 	// (4) budget: this hook retries at most ONCE — structurally within
 	//     the R3-5 budget (≤ len(credentials)−1) given (3).
@@ -240,7 +244,12 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	}
 	class := classifyCredFailure(providerErr)
 	if class == credFailoverNone {
-		return err
+		if !upstreamAuthRejected(providerErr, providerErr.StatusCode) {
+			return err
+		}
+		// Ruling #6: the upstream rejected the credential — rotate
+		// under the rate-limit policy (60s / Retry-After).
+		class = credFailoverRateLimit
 	}
 	if len(h.config.Credentials) <= 1 {
 		return err

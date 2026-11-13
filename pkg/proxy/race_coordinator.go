@@ -79,6 +79,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 )
 
@@ -278,6 +279,21 @@ type raceCoordinator struct {
 	// the MAIN attempt so the W-1 publish site can fire
 	// model_member_selected newlyBound-only.
 	groupPick *groupPickInfo
+
+	// wi-7769a812 part 2 — the EXHAUST-ARM FLIP latch (see the gate
+	// comment in manage()): true once the Case-1 site has published
+	// the chain-end member_failed + group_fallback_exhausted pair for
+	// this coordinator. One-shot per request; mutated only from
+	// manage() under c.mu.
+	chainEndPublished bool
+
+	// wi-7769a812 part 2 — the classified reason of the LATEST failed
+	// attempt, stored at the Case-1 site for the handler's re-entry
+	// gate (FinalFailureReason): the P2 client-attributable fail-fast
+	// at the member level ("no more members"). Zero value = no
+	// classified failure yet (deadline/idle-only paths) — reads as
+	// advance-eligible. Mutated only from manage() under c.mu.
+	lastFailReason failureReason
 }
 
 func newRaceCoordinator(ctx context.Context, cfg *ConfigSnapshot, req *http.Request, rawBody []byte, models []string, interleaved bool) *raceCoordinator {
@@ -673,7 +689,22 @@ func (c *raceCoordinator) manage() {
 			// failure) get its FULL failover chain before terminal.
 			modelAttempts := c.modelAttemptCountLocked()
 			credEligible := c.credFailoverEligibleLocked()
-			gate := modelAttempts < len(c.models) || credEligible
+			// wi-7769a812 part 2 — the EXHAUST-ARM FLIP. In part-1 code
+			// the gate rode solely on `modelAttempts < len || credEligible`;
+			// at a chain-end member's failure modelAttempts == len exactly,
+			// so when the rotation budget was spent/W3 one-shot closed the
+			// rest, the gate shut BEFORE the Case-1 site could run and the
+			// chain-end failure resolved silently — the exhaust arm at the
+			// advance site was UNREACHABLE (POK
+			// group-fallback-exhaust-arm-unreachable-p1). Part 2's
+			// exhaustive fallback makes the arm live: a chain-end failure
+			// that no spawn branch will consume must STILL reach Case-1
+			// once, to publish member_failed + group_fallback_exhausted
+			// (payload contract: to_member ABSENT). chainEndPublished is
+			// a one-shot latch under c.mu — after the publish, the gate
+			// shuts again and the all-failed resolution below proceeds.
+			chainEndPending := modelAttempts >= len(c.models) && !c.chainEndPublished
+			gate := modelAttempts < len(c.models) || credEligible || chainEndPending
 			spawnedCredFailover := false
 			if c.winner == nil && gate {
 				running := 0
@@ -698,6 +729,27 @@ func (c *raceCoordinator) manage() {
 						// error string never reaches an event payload or a
 						// [RACE] log line unbounded again.
 						failReason := classifyRequestFailure(latestReq)
+
+						// wi-7769a812 part 2 — store the classified reason
+						// of the LATEST failed attempt on the coordinator
+						// (under c.mu, mutated only from manage()). The
+						// handler's re-entry gate reads it via
+						// FinalFailureReason() to apply the P2
+						// client-attributable fail-fast at the member level
+						// ("no more members").
+						c.lastFailReason = failReason
+
+						// wi-7769a812 part 2 / USER RULING D3 — feed the
+						// skip cache on LIMIT-CLASS failures ONLY (never
+						// 5xx/timeouts/auth). The mark benches the failed
+						// (credential, wire-model) AND (provider,
+						// wire-model) pair for the config TTL so selection
+						// becomes health-aware (Phase-0 A2 fix). Read of
+						// latestReq.resolved mirrors the existing
+						// credFailoverPlanLocked site (:1823-era precedent):
+						// the row is DONE-failed here, its executor write
+						// long since retired.
+						c.markUpstreamSkipLocked(latestReq)
 
 						// ── HOISTED CRED-FAILOVER BRANCH (Round 3c C1;
 						// Tasks 18-20; layered credential fallback Fix 1) ──
@@ -765,7 +817,15 @@ func (c *raceCoordinator) manage() {
 							// wrong-model retry in the C1 family); the
 							// race resolves as failed for this path.
 							advanceTarget, hasAdvance := c.fallbackAdvanceTargetLocked(latestReq.modelID)
-							if hasAdvance {
+							// wi-7769a812 part 2 — P2 fail-fast (spec item 6):
+							// a client-attributable failure (400/413/415/422/
+							// client-cancelled) stops the CHAIN here — no
+							// advance, the group's fallback is honestly
+							// exhausted for this request. The failure is the
+							// client payload's, not the pool's; advancing
+							// would thrash every member with the same
+							// guaranteed-400 bytes.
+							if hasAdvance && !memberAdvanceBlocked(failReason) {
 								log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
 								// Group-fallback observability (wi-7769a812
 								// part 1): member_failed + attempted +
@@ -786,9 +846,15 @@ func (c *raceCoordinator) manage() {
 								log.Printf("[RACE] Latest request %d failed: %s; no advance target — chain end, terminal", latestReq.id, failReason)
 								// Group-fallback observability: the failed
 								// member was the chain's LAST (or not in the
-								// chain) — the group's fallback is exhausted.
+								// chain, or the failure is client-attributable
+								// and the chain MUST NOT advance) — the
+								// group's fallback is exhausted. The publish
+								// is the one-shot consumption of this tick's
+								// chainEndPending gate admission (the flip
+								// comment at the gate).
 								c.publishGroupFallback("group_member_failed", latestReq.modelID, latestReq.modelID, "", failReason.String())
 								c.publishGroupFallback("group_fallback_exhausted", latestReq.modelID, "", "", failReason.String())
+								c.chainEndPublished = true
 							}
 						}
 					}
@@ -1695,11 +1761,15 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	if !latest.IsDone() || latest.GetError() == nil {
 		return false
 	}
-	// Fix 1 — BOTH eligible classes gate here: rate_limit (429-style)
-	// and quota_exceeded (402 / insufficient credit). Everything else
-	// (401/auth, 5xx, timeouts) stays ineligible — eligibility is
-	// never widened beyond these two classes.
-	if classifyCredFailure(latest.GetError()) == credFailoverNone {
+	// Fix 1 — the rotation gate rides P1 (rotationEligible): BOTH
+	// limit classes (rate_limit 429-style, quota_exceeded 402 /
+	// insufficient credit) plus — wi-7769a812 part 2 ruling #6 —
+	// upstream 401/403 (pooled-credential rejection upstream rotates
+	// AND advances; the proxy-boundary client-auth 401/403 never
+	// reaches the coordinator). 5xx/timeouts stay rotation-INELIGIBLE
+	// here while remaining advance-eligible via P2
+	// (memberAdvanceBlocked) — the predicates are not complements.
+	if !rotationEligible(latest.GetError(), latest.GetHTTPStatus()) {
 		return false
 	}
 	// Task 23 pre-first-byte guard (race path): c.winner == nil. Framing
@@ -1985,6 +2055,63 @@ func (c *raceCoordinator) publishGroupFallback(eventType, fromMember, toMember, 
 		Timestamp: time.Now().Unix(),
 		Data:      data,
 	})
+}
+
+// markUpstreamSkipLocked (wi-7769a812 part 2 / USER RULING D3) feeds
+// the global upstream skip cache from a FAILED attempt. LIMIT-CLASS
+// failures ONLY (classifyCredFailure != none — 429/402 family):
+// never 5xx, never timeouts, never auth, never client-attributable
+// 4xx. The mark benches BOTH identities the failure implicates:
+//
+//	(credential, wireModel) — this account is walled for this model
+//	(provider, wireModel)   — the whole provider may be walled for
+//	                        this model (a provider-wide wall skips
+//	                        every member on that provider)
+//
+// for the CONFIG-OWNED TTL (hot snapshot value; Clone normalizes to
+// the 60s default). The cache is an optimizer, never an availability
+// gate: selection consults it to SKIP while unmarked alternatives
+// exist and DEGRADES to one honest attempt against the soonest-
+// expiring mark when everything is walled.
+//
+// Called from the Case-1 site with c.mu held (the _Locked suffix
+// documents the call discipline, not the cache's own lock).
+// latestReq.resolved is read the same way credFailoverPlanLocked
+// reads it (attempt DONE-failed — the executor's resolution write
+// has long since landed).
+func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
+	cache := c.cfg.UpstreamSkipCache
+	if cache == nil {
+		return
+	}
+	if classifyCredFailure(latestReq.GetError()) == credFailoverNone {
+		return
+	}
+	credID := latestReq.resolved.CredentialID
+	provider := strings.ToLower(latestReq.resolved.Provider)
+	wireModel := latestReq.resolved.InternalModel
+	if wireModel == "" {
+		// Unresolved rows (legacy/non-internal): the row ID is the
+		// only model identity available — still worth a credential
+		// mark so member selection sees the wall.
+		wireModel = latestReq.modelID
+	}
+	ttl := c.cfg.UpstreamSkipCacheTTL
+	cache.Mark(skipcache.ScopeCredential, credID, wireModel, ttl)
+	cache.Mark(skipcache.ScopeProvider, provider, wireModel, ttl)
+}
+
+// FinalFailureReason (wi-7769a812 part 2) exposes the classified
+// reason of the LATEST failed attempt so the HANDLER's member-level
+// re-entry gate can apply the same P2 fail-fast the coordinator
+// applies to the chain: a client-attributable final failure stops the
+// member iteration ("no more members") without thrashing the pool.
+// Zero value (no classified failure — deadline/idle-only resolution)
+// reads as advance-eligible.
+func (c *raceCoordinator) FinalFailureReason() failureReason {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastFailReason
 }
 
 // GetRequestStatuses (Phase 3 / Round 3c — S4): credFailover rows are

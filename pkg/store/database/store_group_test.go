@@ -642,7 +642,7 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.AddModel(validGroup()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding", 0)
 	if !ok {
 		t.Fatal("two-member group must produce a replacement")
 	}
@@ -660,7 +660,7 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.UpdateModel("coding-group", updated); err != nil {
 		t.Fatalf("update to single-member: %v", err)
 	}
-	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding", 0)
 	if ok2 {
 		t.Error("single-member ExcludeGroupMember must return ok=false (no alternative)")
 	}
@@ -881,7 +881,7 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 
 	// The DEFAULT failed terminally → the re-entry must hand to the
 	// BACKUP, annotated as a backup-pool pick (D5).
-	pick, pool, ok := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding", 0)
 	if !ok {
 		t.Fatal("C1: a servable backup must be handed to the re-entry (got ok=false)")
 	}
@@ -908,7 +908,7 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 	}
 	// The default is still cooling from the first call; the backup is
 	// unservable ⇒ terminal.
-	if pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding"); ok2 {
+	if pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding", 0); ok2 {
 		t.Fatalf("C1: both pools exhausted must be terminal, got (%q, %q, true)", pick2, pool2)
 	}
 }
@@ -928,7 +928,7 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed solo group: %v", err)
 	}
-	if pick, pool, ok := mgr.ExcludeGroupMember("g-solo", "conv-solo", "coding"); ok {
+	if pick, pool, ok := mgr.ExcludeGroupMember("g-solo", "conv-solo", "coding", 0); ok {
 		t.Fatalf("1-member group must fail fast, got (%q, %q, true)", pick, pool)
 	}
 
@@ -947,13 +947,13 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 		t.Fatalf("seed two group: %v", err)
 	}
 	// First exclusion: ReselectHealthy → the other default.
-	first, pool1, ok1 := mgr.ExcludeGroupMember("g-two", "conv-two", "coding")
+	first, pool1, ok1 := mgr.ExcludeGroupMember("g-two", "conv-two", "coding", 0)
 	if !ok1 || pool1 != models.PoolDefault || first == "coding" {
 		t.Fatalf("v1 reselect: (%q, %q, %v), want a different default with pool=default", first, pool1, ok1)
 	}
 	// Second exclusion (all defaults now cooling): v1 availability
 	// ruling re-serves a cooling default rather than failing.
-	second, pool2, ok2 := mgr.ExcludeGroupMember("g-two", "conv-two", first)
+	second, pool2, ok2 := mgr.ExcludeGroupMember("g-two", "conv-two", first, 0)
 	if !ok2 || pool2 != models.PoolDefault || second == "" {
 		t.Fatalf("v1 all-cooling: (%q, %q, %v), want the soonest default re-served", second, pool2, ok2)
 	}
@@ -1126,7 +1126,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	}
 
 	// (1) exclude default-1 → the OTHER DEFAULT serves.
-	pick, pool, ok := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding", 0)
 	if !ok {
 		t.Fatal("GAP-1: excluding one default must leave the other default to serve")
 	}
@@ -1141,7 +1141,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	}
 
 	// (2) exclude default-2 as well → the BACKUP serves.
-	pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-alt")
+	pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-alt", 0)
 	if !ok2 {
 		t.Fatal("GAP-1: with every default excluded the backup must serve")
 	}
@@ -1156,7 +1156,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	// gracefully (the v1 availability ruling re-serves the
 	// soonest-expiring backup; the F1 ruling keeps cooling
 	// graceful and reserves "loud" for config breakage).
-	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
 	if !ok3 {
 		t.Fatalf("GAP-1/F1: an all-cooling pool degrades gracefully (ok=true), got (%q, %q, false)", pick3, pool3)
 	}
@@ -1175,7 +1175,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	if err := mgr.UpdateModel("coding-third", *row); err != nil {
 		t.Fatalf("disable backup: %v", err)
 	}
-	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
 	if ok4 {
 		t.Fatalf("GAP-1: with every default excluded AND the backup unservable the failure must be terminal, got (%q, %q, true)", pick4, pool4)
 	}

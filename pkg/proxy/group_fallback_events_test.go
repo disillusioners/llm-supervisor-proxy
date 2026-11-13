@@ -1,10 +1,11 @@
 package proxy
 
 // Group-fallback observability events (wi-7769a812 part 1 — ultimate
-// retirement replacement). The four event types are published from the
-// race-path group advance site (race_coordinator.go Case-1) and are
-// gated on group traffic ONLY (c.groupPick != nil — plain model chains
-// keep the race_* vocabulary untouched).
+// retirement replacement; part 2 flipped the exhaust arm). The four
+// event types are published from the race-path group advance site
+// (race_coordinator.go Case-1) and are gated on group traffic ONLY
+// (c.groupPick != nil — plain model chains keep the race_*
+// vocabulary untouched).
 //
 // Coverage contract (this file is the ONLY regression guard):
 //
@@ -13,28 +14,21 @@ package proxy
 //	    failed member, carrying the payload keys group_id / member_id /
 //	    from_member / to_member / reason (+ id) — end-to-end through a
 //	    live coordinator;
-//	(b) a chain END resolves terminally (no winner, no spawn past the
-//	    gate) and the group_fallback_exhausted PUBLISH CONTRACT —
-//	    member naming, group_id, classified reason, and the ABSENT
-//	    to_member key — is pinned via the publisher seam.
+//	(b) a chain END resolves terminally AND — since part 2's
+//	    exhaustive fallback flipped the admission gate
+//	    (chainEndPending) — PUBLISHES member_failed for the chain-end
+//	    member + group_fallback_exhausted, with the publish contract
+//	    (member naming, group_id, classified reason, and the ABSENT
+//	    to_member key) asserted end-to-end;
+//	(c) the exhausted payload contract is pinned at the publisher
+//	    seam as well (the to_member-absent contrast with
+//	    member_failed).
 //
-// Reachability note (do not "fix" this into an end-to-end exhaust
-// assertion): in part-1 code the Case-1 exhaust arm is UNREACHABLE
-// through manage(). At a chain-end member's failure modelAttempts ==
-// len(c.models) exactly (one model-row per member; credFailover rows
-// are count-exempt), so the hoisted admission gate rides solely on
-// credFailoverEligibleLocked — and while that budget remains, the
-// engine's ExcludeAndReselect always answers (healthy pick, or
-// all-cooling ⇒ soonest-expiry whose pick is always an untried
-// credential: pre-injected cooldowns predate every exclusion mark, and
-// the main row's credential never enters triedCredIDs). So the
-// credFailover branch consumes every gate-open chain-end tick and the
-// W3 one-shot flag closes the rest — group_fallback_exhausted becomes
-// live only with part 2's exhaustive pre-commit fallback ("Part 2
-// keeps the emission while making the path exhaustive on both
-// routes", race_coordinator.go advance site). What CAN be pinned today
-// without a production change: the terminal chain-end resolution and
-// the exhausted payload shape.
+// Part-2 reachability (supersedes the part-1 note): the exhaust arm
+// is LIVE. A chain-end failure that no spawn branch consumes reaches
+// Case-1 once via the chainEndPending gate disjunct, publishes the
+// member_failed + exhausted pair, and latches (chainEndPublished) so
+// the terminal resolves exactly once.
 
 import (
 	"strings"
@@ -191,15 +185,14 @@ func TestCoordinator_GroupFallbackEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("chain end resolves terminally with no advance or exhaust events", func(t *testing.T) {
+	t.Run("chain end publishes member_failed and exhausted terminally", func(t *testing.T) {
 		// Every member fails: m1 and m2 advance (their failures pass
 		// the hoisted admission gate), but the chain-end member's
-		// failure closes the gate (modelAttempts == len(models)) and
-		// the race resolves as all-failed — no advance target, no
-		// exhaust emission (see the file-header reachability note:
-		// the exhaust arm goes live with part 2's exhaustive
-		// fallback). Pinned here so a part-2 rewrite that changes the
-		// terminal shape fails loudly HERE first.
+		// failure has no advance target — wi-7769a812 part 2 flipped
+		// the gate (chainEndPending), so that failure now reaches the
+		// Case-1 site ONCE and publishes member_failed (m3) +
+		// group_fallback_exhausted (payload contract: to_member
+		// ABSENT), then the race resolves all-failed.
 		coord, provider, bus, _ := newLayeredChainEnv(
 			t,
 			[]layeredChainModel{{id: "m1", credCount: 1}, {id: "m2", credCount: 1}, {id: "m3", credCount: 1}},
@@ -222,23 +215,49 @@ func TestCoordinator_GroupFallbackEvents(t *testing.T) {
 		advanced := eventsOfType(all, "group_fallback_advanced")
 		exhausted := eventsOfType(all, "group_fallback_exhausted")
 
-		if len(memberFailed) != 2 {
-			t.Fatalf("group_member_failed events = %d, want 2 (m1, m2 — the chain-end member m3's failure is gate-closed, see file header)", len(memberFailed))
+		if len(memberFailed) != 3 {
+			t.Fatalf("group_member_failed events = %d, want 3 (m1, m2, AND the chain-end member m3 — part 2 made the exhaust arm live)", len(memberFailed))
 		}
 		if len(attempted) != 2 || len(advanced) != 2 {
-			t.Fatalf("advance events = attempted:%d advanced:%d, want 2/2 (m1→m2, m2→m3 only)", len(attempted), len(advanced))
+			t.Fatalf("advance events = attempted:%d advanced:%d, want 2/2 (m1→m2, m2→m3 only — the chain-end member advances NOWHERE)", len(attempted), len(advanced))
 		}
-		if len(exhausted) != 0 {
-			t.Fatalf("group_fallback_exhausted events = %d, want 0 in part 1 (gate-unreachable; part 2 flips this — update this pin alongside that change)", len(exhausted))
+		if len(exhausted) != 1 {
+			t.Fatalf("group_fallback_exhausted events = %d, want exactly 1 (the chainEndPending one-shot — a second publish would mean the latch leaked)", len(exhausted))
 		}
+
+		// The chain-end member_failed names m3.
+		if got := asString(payloadMap(t, memberFailed[2])["member_id"]); got != "m3" {
+			t.Errorf("member_failed[2] member_id = %q, want m3 (the chain-end member)", got)
+		}
+
+		// The exhausted event: names the failed chain-end member and
+		// the group, carries the classified reason — and NO to_member
+		// key (nothing to advance to; the key is omitted, not empty).
+		d := payloadMap(t, exhausted[0])
+		if got := asString(d["group_id"]); got != "g-end" {
+			t.Errorf("exhausted group_id = %q, want g-end", got)
+		}
+		if got := asString(d["member_id"]); got != "m3" {
+			t.Errorf("exhausted member_id = %q, want m3", got)
+		}
+		if got := asString(d["from_member"]); got != "m3" {
+			t.Errorf("exhausted from_member = %q, want m3", got)
+		}
+		if _, present := d["to_member"]; present {
+			t.Errorf("exhausted payload carries to_member = %v — want the key ABSENT (no advance target)", d["to_member"])
+		}
+		if got := asString(d["reason"]); !strings.HasPrefix(got, "reason=upstream_4xx") {
+			t.Errorf("exhausted reason = %q, want the classified failureReason line (reason=upstream_4xx …)", got)
+		}
+
 		// The advance payloads still name the group and carry the
-		// classified reason at chain end.
+		// classified reason for the two real advances.
 		for i, wantTo := range []string{"m2", "m3"} {
-			d := payloadMap(t, attempted[i])
-			if got := asString(d["group_id"]); got != "g-end" {
+			ad := payloadMap(t, attempted[i])
+			if got := asString(ad["group_id"]); got != "g-end" {
 				t.Errorf("attempted[%d] group_id = %q, want g-end", i, got)
 			}
-			if got := asString(d["to_member"]); got != wantTo {
+			if got := asString(ad["to_member"]); got != wantTo {
 				t.Errorf("attempted[%d] to_member = %q, want %s", i, got, wantTo)
 			}
 		}

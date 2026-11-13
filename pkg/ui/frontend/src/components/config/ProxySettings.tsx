@@ -7,6 +7,8 @@ interface ProxySettingsProps {
   // Idle termination fields
   idleTerminationEnabled: boolean;
   idleTerminationTimeout: string;
+  // wi-7769a812 part 2 / D3: upstream skip-cache TTL
+  upstreamSkipCacheTTL: string;
   // Race retry fields
   raceRetryEnabled: boolean;
   raceParallelOnIdle: boolean;
@@ -22,6 +24,7 @@ interface ProxySettingsProps {
   onIdleTimeoutChange: (value: string) => void;
   onStreamDeadlineChange: (value: string) => void;
   onMaxGenTimeChange: (value: string) => void;
+  onUpstreamSkipCacheTTLChange: (value: string) => void;
   onRaceRetryEnabledChange: (value: boolean) => void;
   onRaceParallelOnIdleChange: (value: boolean) => void;
   onRaceMaxParallelChange: (value: number) => void;
@@ -44,6 +47,7 @@ export function ProxySettings({
   originalPort,
   idleTerminationEnabled,
   idleTerminationTimeout,
+  upstreamSkipCacheTTL,
   raceRetryEnabled,
   raceParallelOnIdle,
   raceMaxParallel,
@@ -56,6 +60,7 @@ export function ProxySettings({
   onIdleTimeoutChange,
   onStreamDeadlineChange,
   onMaxGenTimeChange,
+  onUpstreamSkipCacheTTLChange,
   onRaceRetryEnabledChange,
   onRaceParallelOnIdleChange,
   onRaceMaxParallelChange,
@@ -188,6 +193,28 @@ export function ProxySettings({
         </div>
         <p class="text-xs text-gray-500 mt-1">
           Max idle time after stream winner is selected. If upstream sends no data for this duration, the stream is terminated.
+        </p>
+      </div>
+
+      {/* Upstream Skip Cache TTL (wi-7769a812 part 2 / USER RULING D3) */}
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">Upstream Skip Cache TTL</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </span>
+          <input
+            type="text"
+            value={upstreamSkipCacheTTL}
+            onInput={(e) => onUpstreamSkipCacheTTLChange((e.target as HTMLInputElement).value)}
+            class="w-full pl-10 pr-4 py-2 border border-gray-600 rounded-md text-white placeholder-gray-400 bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
+            placeholder="60s"
+          />
+        </div>
+        <p class="text-xs text-gray-500 mt-1">
+          How long a limit-class upstream failure (429/402 — quota/rate/billing) benches its credential and provider for the model. Never applied to 5xx. Default 60s.
         </p>
       </div>
 

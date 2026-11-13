@@ -21,6 +21,7 @@ package proxy
 // ─────────────────────────────────────────────────────────────────────────────
 
 import (
+	"errors"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
@@ -89,7 +90,10 @@ func (c credFailoverClass) readable() string {
 // quota vocabulary anywhere in type/code/message) still classifies as
 // rate_limit and keeps the existing 60s/Retry-After behavior.
 //
-// 401/auth errors match neither classifier — terminal, as required.
+// 401/auth errors match neither classifier — terminal for the LIMIT
+// vocabulary. Part 2 (wi-7769a812) keeps this function as the
+// LIMIT-CLASS classifier ONLY — see rotationEligible / the predicate
+// split below for what changed about who consumes it.
 func classifyCredFailure(err error) credFailoverClass {
 	if err == nil {
 		return credFailoverNone
@@ -101,6 +105,93 @@ func classifyCredFailure(err error) credFailoverClass {
 		return credFailoverRateLimit
 	}
 	return credFailoverNone
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PART-2 PREDICATE SPLIT (wi-7769a812 part 2 — spec items 5 + 6).
+//
+// classifyCredFailure used to drive BOTH decisions downstream:
+//
+//	(a) credential-rotation eligibility (credFailoverEligibleLocked —
+//	    the Layer-1 ExcludeAndReselect branch), and
+//	(b) the admission gate of the whole Case-1 site — so a failure
+//	    outside the limit classes closed the gate entirely and a
+//	    chain-end failure never reached the exhaust arm, while any
+//	    client-attributable 4xx freely thrashed the pool.
+//
+// Part 2 splits the ONE implicit predicate into TWO explicit ones:
+//
+//	rotationEligible(err)      — P1 "is a credential worth rotating?"
+//	    limit classes (unchanged) + upstream 401/403 (USER RULING #6:
+//	    a pooled-credential rejection upstream IS a credential
+//	    fault — rotate AND advance; the client-boundary 401/403
+//	    never reaches this layer, it is answered at handler entry).
+//	memberAdvanceBlocked(fr)   — P2 "must we STOP advancing past
+//	    this member?" — the client-attributable fail-fast: 400 /
+//	    413 / 415 / 422 / client-cancelled context. Everything else
+//	    (5xx, timeouts, connection errors, limit classes, upstream
+//	    auth) ADVANCES — including 5xx/timeout, which stay
+//	    rotation-INELIGIBLE (P1 false) yet advance-worthy (P2 false):
+//	    the two predicates are deliberately NOT complements.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// upstreamAuthRejected reports whether the error carries an upstream
+// 401/403 — the upstream rejected the CREDENTIAL we sent (pooled-
+// credential rejection). Resolution: attempt HTTP status first (the
+// executor stores it), then the ProviderError status. Pure function.
+func upstreamAuthRejected(err error, storedStatus int) bool {
+	if err == nil {
+		return false
+	}
+	status := storedStatus
+	if status == 0 {
+		var pe *providers.ProviderError
+		if errors.As(err, &pe) && pe != nil {
+			status = pe.StatusCode
+		}
+	}
+	return status == 401 || status == 403
+}
+
+// rotationEligible is P1 — the Layer-1 credential-rotation gate. The
+// limit classes keep their exact pre-part-2 meaning (quota beats
+// rate-limit; nothing else in the limit vocabulary). Upstream
+// 401/403 is the ONE widening (user ruling #6): the failed
+// credential is benched with the rate-limit cooldown policy (60s /
+// Retry-After) via toEngineClass's non-quota default.
+func rotationEligible(err error, storedStatus int) bool {
+	return classifyCredFailure(err) != credFailoverNone || upstreamAuthRejected(err, storedStatus)
+}
+
+// clientAttributableStatuses — the 4xx family the CLIENT caused:
+// malformed request (400), payload too large (413), unsupported media
+// type (415), unprocessable content (422). Retrying the same bytes on
+// another member is guaranteed thrash: the request body does not
+// change between members, so the failure is attributable to the
+// CLIENT payload, not the member's health. (401/403 deliberately
+// ABSENT — upstream auth failures rotate+advance per ruling #6; 429
+// is limit-class and feeds the skip cache instead.)
+var clientAttributableStatuses = map[int]bool{
+	400: true,
+	413: true,
+	415: true,
+	422: true,
+}
+
+// memberAdvanceBlocked is P2 — "is this failure client-attributable,
+// so advancing past the member (chain OR group pool) would be
+// dishonest thrash?". Also true for a CLIENT-cancelled context (the
+// request is gone; no member can serve it). 5xx, timeouts, limit
+// classes, connection errors, proxy-internal failures, and upstream
+// 401/403 all return FALSE — advance.
+//
+// fr is the classified failureReason (race_reason.go vocabulary);
+// Status carries the upstream HTTP status when one is known.
+func memberAdvanceBlocked(fr failureReason) bool {
+	if fr.Class == reasonClassCancelled {
+		return true
+	}
+	return clientAttributableStatuses[fr.Status]
 }
 
 // effectiveCooldown returns the cooldown duration the engine will seed

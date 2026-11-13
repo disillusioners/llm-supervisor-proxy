@@ -149,6 +149,8 @@ export function SettingsPage({
   // Stream idle termination state
   const [idleTerminationEnabled, setIdleTerminationEnabled] = useState(true);
   const [idleTerminationTimeout, setIdleTerminationTimeout] = useState("2m");
+  // wi-7769a812 part 2 / D3: upstream skip-cache TTL (default 60s)
+  const [upstreamSkipCacheTTL, setUpstreamSkipCacheTTL] = useState("60s");
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -182,6 +184,9 @@ export function SettingsPage({
       // Stream idle termination sync
       setIdleTerminationEnabled(config.idle_termination_enabled ?? true);
       setIdleTerminationTimeout(config.idle_termination_timeout ?? "2m");
+      // wi-7769a812 part 2 / D3: skip-cache TTL sync (BE normalizes
+      // 0 → 60s, so a missing/zero value renders the default)
+      setUpstreamSkipCacheTTL(config.upstream_skip_cache_ttl ?? "60s");
     }
   }, [config]);
 
@@ -210,6 +215,8 @@ export function SettingsPage({
         // Stream idle termination
         idle_termination_enabled: idleTerminationEnabled,
         idle_termination_timeout: idleTerminationTimeout,
+        // wi-7769a812 part 2 / D3: upstream skip-cache TTL
+        upstream_skip_cache_ttl: upstreamSkipCacheTTL,
       });
 
       // Show success message, and also show restart warning if required
@@ -533,10 +540,12 @@ export function SettingsPage({
               logRawUpstreamMaxKB={logRawUpstreamMaxKB}
               idleTerminationEnabled={idleTerminationEnabled}
               idleTerminationTimeout={idleTerminationTimeout}
+              upstreamSkipCacheTTL={upstreamSkipCacheTTL}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
               onStreamDeadlineChange={setStreamDeadline}
               onMaxGenTimeChange={setMaxGenTime}
+              onUpstreamSkipCacheTTLChange={setUpstreamSkipCacheTTL}
               onRaceRetryEnabledChange={setRaceRetryEnabled}
               onRaceParallelOnIdleChange={setRaceParallelOnIdle}
               onRaceMaxParallelChange={setRaceMaxParallel}

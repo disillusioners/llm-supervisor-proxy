@@ -105,6 +105,20 @@ type Config struct {
 	// (credentiallb.DefaultQuotaCooldown, applied at the engine seam).
 	CredentialQuotaCooldown Duration `json:"credential_quota_cooldown,omitempty"`
 
+	// wi-7769a812 part 2 / USER RULING D3 (user-designed, FINAL):
+	// UpstreamSkipCacheTTL is the window a LIMIT-CLASS upstream failure
+	// (429/402 family — quota/rate/billing) benches its
+	// (credential, model) and (provider, model) pair from selection.
+	// NEVER applied to 5xx/timeouts. Default 60s, clamp [5s, 1h] when
+	// set; hot-readable (proxy ConfigSnapshot per request — no
+	// restart). The cache is an optimizer, never an availability gate:
+	// all-candidates-marked degrades to ONE honest attempt against the
+	// soonest-expiring mark. This key is ALSO the single source of
+	// truth for the group member exclusion window on member failure
+	// (the flat 60s grouplb cooldown is retired for the failure path —
+	// the proxy passes this TTL to ExcludeGroupMember).
+	UpstreamSkipCacheTTL Duration `json:"upstream_skip_cache_ttl,omitempty"`
+
 	// Idle Termination
 	IdleTerminationEnabled bool     `json:"idle_termination_enabled"`
 	IdleTerminationTimeout Duration `json:"idle_termination_timeout"`
@@ -237,6 +251,8 @@ var Defaults = Config{
 	// "use the engine default" — same fallback-at-the-seam contract as
 	// ImageGenTimeout.
 	CredentialQuotaCooldown: Duration(credentiallb.DefaultQuotaCooldown),
+	// wi-7769a812 part 2 / USER RULING D3: skip-cache TTL default 60s.
+	UpstreamSkipCacheTTL: Duration(60 * time.Second),
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -325,6 +341,25 @@ func (c *Config) Validate() error {
 		}
 		if c.CredentialQuotaCooldown > Duration(credentiallb.QuotaCooldownCeiling) {
 			return errors.New("credential_quota_cooldown must be at most 24h when set")
+		}
+	}
+	// wi-7769a812 part 2 / USER RULING D3: UpstreamSkipCacheTTL is the
+	// skip-cache window for LIMIT-CLASS upstream failures — the single
+	// TTL that governs (a) the (credential|provider, model) skip marks
+	// and (b) the group member exclusion window the flat 60s cooldown
+	// used to own (one source of truth). Clamp [5s, 1h] when set:
+	// the floor keeps a hand-edited sub-5s window from defeating the
+	// skip entirely (the mark would expire between two requests of the
+	// same conversation); the ceiling keeps a typo'd value from
+	// benching a provider for hours on a transient 429. 0 falls back
+	// to the 60s default (applied at the proxy Clone seam — the
+	// snapshot is always normalized, readers never see 0).
+	if c.UpstreamSkipCacheTTL > 0 {
+		if c.UpstreamSkipCacheTTL < Duration(5*time.Second) {
+			return errors.New("upstream_skip_cache_ttl must be at least 5s when set")
+		}
+		if c.UpstreamSkipCacheTTL > Duration(time.Hour) {
+			return errors.New("upstream_skip_cache_ttl must be at most 1h when set")
 		}
 	}
 	if c.MaxStreamBufferSize < 0 {

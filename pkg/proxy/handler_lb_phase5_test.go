@@ -1196,6 +1196,21 @@ func TestHandler_QuotaError_SpawnsCredFailover_SameModel(t *testing.T) {
 // proxy seam" claim (the always-402 exhaust pin in
 // cred_failover_layered_test.go exercises ONLY the quota class).
 func TestHandler_NonRateLimitError_401StraightToTerminal(t *testing.T) {
+	// wi-7769a812 part 2 — CONTRACT FLIPPED by USER RULING #6 (the
+	// spec is FINAL; deviation must be justified in writing): upstream
+	// 401/403 is a POOLED-CREDENTIAL REJECTION — the upstream rejected
+	// the credential the proxy sent — so it now ROTATES the credential
+	// (P1 widened: rotationEligible) AND the request advances/fails
+	// through the normal exhaustion path. The old pin ("401 straight
+	// to terminal, zero engine touches") was the pre-part-2 contract;
+	// only a CLIENT-BOUNDARY auth failure stops (that one is answered
+	// at handler entry and never reaches the coordinator).
+	//
+	// New pinned contract for a 2-credential model 401'd on every call:
+	//   - exactly 2 upstream calls (main + ONE rotation retry),
+	//   - 1 engine failover + a cooldown seeded for the rejected
+	//     credential (rate-limit class policy — 60s / Retry-After),
+	//   - 1 model_credential_failover event, 1 cred_failover spawn row.
 	mock := &mockModelsConfig{}
 	for _, id := range []string{"cred-A", "cred-B"} {
 		mock.AddCredential(models.CredentialConfig{
@@ -1214,42 +1229,43 @@ func TestHandler_NonRateLimitError_401StraightToTerminal(t *testing.T) {
 	upstream.fail401 = true
 	upstream.mu.Unlock()
 	// Point BOTH credentials at the 401 upstream (either first pick —
-	// seed-7 driven — must behave identically: no failover for either).
+	// seed-7 driven — must behave identically: the rotation retries
+	// the OTHER credential, which 401s identically).
 	mock.credentials[0].BaseURL = srv.URL
 	mock.credentials[1].BaseURL = srv.URL
 
 	env := buildHandlerStack(t, mock, []string{"m1"})
 
-	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test 401-ineligible")
+	_ = sendChatRequest(t, env.handler, env.plaintextToken, "m1", "phase5-test 401-rotates")
 
-	// EXACTLY ONE upstream call: the main attempt. 401 must not buy a
-	// same-model retry (the quota/rate-limit classes are the only
-	// eligible classes).
-	if got := upstream.callCount(); got != 1 {
-		t.Errorf("upstream calls = %d, want exactly 1 (401 is ineligible — no same-model retry)", got)
+	// TWO upstream calls: the main attempt + ONE rotation retry (the
+	// R3-5 per-model budget is len(credentials)-1 = 1 for 2 creds).
+	if got := upstream.callCount(); got != 2 {
+		t.Errorf("upstream calls = %d, want exactly 2 (main + the ruling-#6 rotation retry)", got)
 	}
 
-	// Engine state UNTOUCHED: no cooldowns, no failover counter advance.
+	// Engine state: the rotation benched the rejected credential and
+	// the failover counter advanced by exactly the single retry.
 	stats := env.credLB.Stats()
 	if st, ok := stats["m1"]; ok {
-		if st.Failovers != 0 {
-			t.Errorf("engine stats[m1].Failovers = %d, want 0 (401 must not trigger credential failover)", st.Failovers)
+		if st.Failovers != 1 {
+			t.Errorf("engine stats[m1].Failovers = %d, want 1 (the ruling-#6 rotation)", st.Failovers)
 		}
-		if st.Cooldowns != 0 {
-			t.Errorf("engine stats[m1].Cooldowns = %d, want 0 (401 must not seed ANY cooldown)", st.Cooldowns)
+		if st.Cooldowns == 0 {
+			t.Errorf("engine stats[m1].Cooldowns = %d, want >= 1 (the 401'd credential must be benched)", st.Cooldowns)
 		}
 	}
 
-	// Zero model_credential_failover events.
+	// ONE model_credential_failover event (the rotation).
 	failoverEvents := drainEventsOfType(env.bus, credentiallb.EventCredentialFailover)
-	if len(failoverEvents) != 0 {
-		t.Errorf("model_credential_failover events = %d, want 0 (401 must not publish)", len(failoverEvents))
+	if len(failoverEvents) != 1 {
+		t.Errorf("model_credential_failover events = %d, want 1 (the ruling-#6 rotation)", len(failoverEvents))
 	}
 
-	// Zero cred-failover spawn rows.
+	// Exactly one cred-failover spawn row beside the main row.
 	allSpawns := recordSpawns(drainAllEvents(env.bus))
-	if n := countByType(allSpawns, "cred_failover"); n != 0 {
-		t.Errorf("modelTypeCredFailover spawn rows = %d, want 0 (401 is ineligible); full: %v", n, allSpawns)
+	if n := countByType(allSpawns, "cred_failover"); n != 1 {
+		t.Errorf("modelTypeCredFailover spawn rows = %d, want 1 (the ruling-#6 rotation); full: %v", n, allSpawns)
 	}
 	if n := countByType(allSpawns, "main"); n != 1 {
 		t.Errorf("modelTypeMain spawn rows = %d, want exactly 1", n)

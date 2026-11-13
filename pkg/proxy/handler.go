@@ -65,6 +65,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxyheader"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
@@ -76,11 +77,31 @@ type Config struct {
 	ConfigMgr    config.ManagerInterface      // Config manager for dynamic updates
 	ModelsConfig models.ModelsConfigInterface // Models config for fallback chains
 	EventBus     *events.Bus                  // Event bus for publishing events
+
+	// UpstreamSkipCache (wi-7769a812 part 2 / USER RULING D3) is the
+	// global upstream skip registry — the (credential|provider, model)
+	// limit-failure marks selection consults. MAY BE NIL: unwired
+	// callers (legacy tests) degrade to pre-feature behavior
+	// byte-identically (every skipcache method is nil-receiver-safe).
+	// Carried on Config (NOT a constructor arg) per the EventBus
+	// precedent: a long-lived shared registry, same instance across
+	// requests, no per-request capture semantics (unlike credEngine's
+	// constructor-only law — the cache holds no per-request state).
+	UpstreamSkipCache *skipcache.Cache
 }
 
 // Clone returns a snapshot of the current config values
 func (c *Config) Clone() ConfigSnapshot {
 	cfg := c.ConfigMgr.Get()
+	// wi-7769a812 part 2 / D3: normalize the skip-cache TTL at the
+	// snapshot seam — readers (coordinator marking, member advance,
+	// re-entry exclusion) never see 0/negative. Unset/invalid ⇒ the
+	// documented 60s default; the config Validate clamp [5s,1h]
+	// bounds hand-set values before they get here.
+	ttl := cfg.UpstreamSkipCacheTTL.Duration()
+	if ttl <= 0 {
+		ttl = skipcache.DefaultTTL
+	}
 	return ConfigSnapshot{
 		IdleTimeout:              cfg.IdleTimeout.Duration(),
 		StreamDeadline:           cfg.StreamDeadline.Duration(),
@@ -99,6 +120,8 @@ func (c *Config) Clone() ConfigSnapshot {
 		LogRawUpstreamMaxKB:      cfg.LogRawUpstreamMaxKB,
 		IdleTerminationEnabled:   cfg.IdleTerminationEnabled,
 		IdleTerminationTimeout:   cfg.IdleTerminationTimeout.Duration(),
+		UpstreamSkipCacheTTL:     ttl,
+		UpstreamSkipCache:        c.UpstreamSkipCache,
 		EventBus:                 c.EventBus,
 	}
 }
@@ -134,6 +157,13 @@ type ConfigSnapshot struct {
 	// Idle Termination
 	IdleTerminationEnabled bool
 	IdleTerminationTimeout time.Duration
+
+	// wi-7769a812 part 2 / USER RULING D3 — the global upstream skip
+	// cache (limit-class failure marks) + its CONFIG-OWNED TTL,
+	// hot-normalized at Clone (readers never see <=0). Nil cache =
+	// feature off (nil-receiver-safe degradation everywhere).
+	UpstreamSkipCacheTTL time.Duration
+	UpstreamSkipCache    *skipcache.Cache
 
 	// Event Bus for publishing events during request handling
 	EventBus *events.Bus
@@ -656,6 +686,9 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			rc.modelListOriginal = rc.modelList
 			rc.modelList = newList
 			rc.groupPick = pick
+			// wi-7769a812 part 2 — exhaustive member iteration: the
+			// sticky pick is this request's FIRST tried member.
+			rc.groupTriedMembers = map[string]bool{pick.MemberID: true}
 			// Am25 metering stamp: record the served member when it
 			// differs from the client-requested string (day-1
 			// self-shadow keeps RouteModel empty — exactly one usage
@@ -837,7 +870,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// shape), the rebuilt list's promotion IS the request's first and
 		// only line. The order stays observable in race_started either way.
 		reorderLogID := rc.reqID
-		if rc.groupReentered && stickyPromotionLogged {
+		if rc.groupAdvances > 0 && stickyPromotionLogged {
 			reorderLogID = ""
 		}
 		beforeStickyOrder := rc.modelList
@@ -902,11 +935,45 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			return
 		default:
 			// All attempts failed with errors. Group-level Am24
-			// re-entry: terminal member-pipeline failure ⇒ ONE
-			// ExcludeAndReselect + rebuild + resume; a second
-			// terminal failure (or any non-group request) falls
-			// through to the real failure path.
-			if rc.groupPick != nil && !rc.groupReentered && h.tryGroupReentry(rc) {
+			// re-entry — wi-7769a812 part 2 made it EXHAUSTIVE:
+			// terminal member-pipeline failure ⇒ ExcludeAndReselect +
+			// rebuild + resume, up to N attempts for an N-member group
+			// (the one-re-entry latch is retired). The gate is
+			// PRE-COMMIT only:
+			//
+			//   !rc.streamingNonRetryable.Load() — the commit flag
+			//   (first NON-HEARTBEAT upstream payload frame forwarded).
+			//   Headers / ": connected" / heartbeats are non-committing
+			//   framing (headersSent is set BEFORE ": connected" — it is
+			//   PROVEN to close the window on framing-only progress and
+			//   is NEVER the gate).
+			//
+			//   LEADER DECISION 3 OVERTURN (2026-11-13, wi-7769a812
+			//   part 2): the original ruling (real-streaming-default
+			//   plan §Phase 5 / Deferred #2, comment preserved at the
+			//   streamingNonRetryable field in handler_helpers.go)
+			//   held the flag write-only because the winner-nil check
+			//   covered enforcement. The winner-nil check cannot
+			//   express the member-advance question: it lives inside
+			//   the coordinator, and the advance decision is the
+			//   HANDLER's, after the coordinator resolved with no
+			//   winner. Pre-commit member advance is safe — framing
+			//   carries no model content, so switching members behind
+			//   headers/heartbeats cannot corrupt the stream. The old
+			//   decision assumed post-commit/one-shot semantics for
+			//   any future reader; the exhaustive pre-commit window is
+			//   exactly the case it did not consider. Full overturn
+			//   rationale: commit body of wi-7769a812 part 2 +
+			//   handler_helpers.go streamingNonRetryable comment.
+			//
+			//   P2 fail-fast: the coordinator's final classified
+			//   failure (FinalFailureReason) client-attributable ⇒
+			//   stop honestly — no more members, no more models.
+			if rc.groupPick != nil &&
+				!rc.streamingNonRetryable.Load() &&
+				rc.groupAdvances < models.MaxGroupMembers &&
+				!memberAdvanceBlocked(coordinator.FinalFailureReason()) &&
+				h.tryGroupReentry(rc) {
 				continue
 			}
 			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
@@ -920,8 +987,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // Member-internal 429s never reach here (absorbed by the member's own
 // credential LB inside the race); this fires ONLY on the terminal
 // all-attempts-failed exit. Returns true when the request should
-// resume execution with the rebuilt list (exactly once per request —
-// the caller's groupReentered flag is set here).
+// resume execution with the rebuilt list. wi-7769a812 part 2: the
+// caller's gate bounds this to N attempts for an N-member group
+// (groupAdvances counter + the pool's own exhaustion); the
+// replacement member is refused when THIS request already tried it
+// (groupTriedMembers) — pool-ordered iteration, each member at most
+// once per request.
 //
 // group-backup-members / D5: when the recovery is sourced from the
 // BACKUP pool (all defaults had been excluded/failed), the log
@@ -929,16 +1000,36 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // model_member_selected event's pool field is the same. The
 // retry-after log line preserves existing behavior for the
 // default-pool re-entry.
+//
+// wi-7769a812 part 2 / USER RULING D3: the member exclusion window
+// handed to the engine is the CONFIG-OWNED skip-cache TTL (hot
+// snapshot value) — the flat 60s grouplb DefaultCooldown is retired
+// for the FAILURE path; the TTL is the single source of truth for
+// "how long a failed member stays avoided" (the skip cache is the
+// selection-time health authority; the engine cooldown is the
+// exclusion-set bookkeeping whose window now derives from the same
+// config key).
 func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {
 		return false
 	}
-	replacement, pool, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID)
+	replacement, pool, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID, rc.conf.UpstreamSkipCacheTTL)
 	if !avail || replacement == "" {
 		return false // single-member group / all members exhausted — real failure
 	}
-	rc.groupReentered = true // max ONE re-entry; no chaining
+	// Exhaustive iteration bookkeeping (part 2): never re-serve a
+	// member this request already attempted, even when the pool's
+	// all-cooling availability ruling hands one back.
+	if rc.groupTriedMembers == nil {
+		rc.groupTriedMembers = make(map[string]bool)
+	}
+	if rc.groupTriedMembers[replacement] {
+		log.Printf("[grouplb] request %s: pool re-offered already-tried member %s — group fallback exhausted", rc.reqID, replacement)
+		return false
+	}
+	rc.groupTriedMembers[replacement] = true
+	rc.groupAdvances++
 
 	// Rebuild the modelList via the SAME rewrite helper (the engine
 	// binding now points at the replacement member — sticky).

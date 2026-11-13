@@ -83,6 +83,11 @@ export interface AppConfig {
   // Idle termination configuration
   idle_termination_enabled?: boolean;
   idle_termination_timeout?: string;
+  // wi-7769a812 part 2 / USER RULING D3: upstream skip-cache TTL —
+  // how long a limit-class upstream failure (429/402 family) benches
+  // its (credential|provider, model) pair. Duration string, default
+  // "60s"; never applied to 5xx.
+  upstream_skip_cache_ttl?: string;
   // Deprecated - kept for backward compatibility with older backend versions
   max_idle_retries?: number;
   max_generation_retries?: number;

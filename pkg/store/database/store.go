@@ -53,6 +53,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -204,6 +205,14 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		if incoming.LogRawUpstreamMaxKB != 0 {
 			result.LogRawUpstreamMaxKB = incoming.LogRawUpstreamMaxKB
 		}
+	}
+
+	// wi-7769a812 part 2 / USER RULING D3: skip-cache TTL. 0 means
+	// not sent (same 0-means-not-sent shape as StreamDeadline /
+	// IdleTimeout — a zero-clearing PUT cannot disable the skip cache,
+	// it would only fall back to the 60s default at the Clone seam).
+	if incoming.UpstreamSkipCacheTTL != 0 {
+		result.UpstreamSkipCacheTTL = incoming.UpstreamSkipCacheTTL
 	}
 
 	return result
@@ -713,6 +722,26 @@ type ModelsManager struct {
 	// Disabled groups contribute NO entries (a disabled group
 	// must not hijack traffic it isn't serving).
 	claims map[string]string
+
+	// skipCache (wi-7769a812 part 2 / USER RULING D3) is the global
+	// upstream skip registry consulted by the cache-aware group
+	// member re-validation (isServableGroupMember). MAY BE NIL:
+	// unwired (legacy tests / plain NewModelsManager callers)
+	// degrade to the base Am28 checks byte-identically. Injected
+	// from cmd/main.go via SetSkipCache — the SAME instance the
+	// proxy handler marks, so a failure mark benches the member at
+	// selection time for the configured TTL.
+	skipCache *skipcache.Cache
+}
+
+// SetSkipCache wires the global upstream skip cache (wi-7769a812
+// part 2 / D3) into the manager's selection path. Call once at boot,
+// BEFORE the first request; the setter exists so NewModelsManager's
+// signature (and its ~30 test callers) stay untouched.
+func (m *ModelsManager) SetSkipCache(c *skipcache.Cache) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skipCache = c
 }
 
 // Engine returns the underlying *credentiallb.Engine. It is non-nil
