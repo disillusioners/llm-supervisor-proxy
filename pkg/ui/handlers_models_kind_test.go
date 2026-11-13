@@ -262,7 +262,7 @@ func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKin
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), })
 
 	// Capture log output during the request.
 	var logBuf bytes.Buffer
@@ -318,7 +318,7 @@ func TestHandleModels_GET_KindFilter_ChatExcludesImageGenAndDecision(t *testing.
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), })
 
 	u := server.URL + "/fe/api/models?kind=chat"
 	resp, err := http.Get(u)
@@ -352,7 +352,7 @@ func TestHandleModels_GET_KindFilter_ImageGenExcludesDecision(t *testing.T) {
 	defer server.Close()
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), })
 
 	u := server.URL + "/fe/api/models?kind=image-gen"
 	resp, err := http.Get(u)
@@ -378,7 +378,7 @@ func TestHandleModels_GET_KindFilter_Decision(t *testing.T) {
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), })
 
 	u := server.URL + "/fe/api/models?kind=decision"
 	resp, err := http.Get(u)
@@ -484,7 +484,6 @@ func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T)
 		"kind":                            "decision",
 		"internal":                        true,
 		"internal_model":                  "ag/gemini-3.8-flash",
-		"exclude_from_ultimate_switching": true,
 		"credentials": []map[string]interface{}{
 			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
 		},
@@ -512,7 +511,6 @@ func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T)
 		Kind:                         models.KindDecision,
 		Internal:                     true,
 		InternalModel:                "gpt-4",
-		ExcludeFromUltimateSwitching: true,
 		Credentials:                  models.TestRefs("test-cred"),
 	})
 	putDecPayload := map[string]interface{}{
@@ -521,7 +519,6 @@ func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T)
 		"kind":                            "decision",
 		"internal":                        true,
 		"internal_model":                  "ag/gemini-3.8-flash",
-		"exclude_from_ultimate_switching": true,
 		"credentials": []map[string]interface{}{
 			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
 		},

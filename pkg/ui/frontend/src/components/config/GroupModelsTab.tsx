@@ -98,16 +98,15 @@ export function GroupModelsTab({
   const handleSave = async (payload: GroupModelPayload) => {
     try {
       if (formMode === 'add') {
-        // The form has already stamped kind/internal/
-        // exclude_from_ultimate_switching (G1/G7; internal is now
-        // unconditionally true repo-wide), the empty
+        // The form has already stamped kind/internal (G1; internal is
+        // now unconditionally true repo-wide), the empty
         // fallback_chain (G6), and the empty credentials list (groups
         // carry none); the parent's addModel just forwards the body to
         // POST /fe/api/models.
         await onAddModel(payload);
         setStatus({ type: 'success', message: TOAST.added });
       } else {
-        const { id, name, kind, internal, members, shadow_model_id, enabled, exclude_from_ultimate_switching, fallback_chain, credentials } = payload;
+        const { id, name, kind, internal, members, shadow_model_id, enabled, fallback_chain, credentials } = payload;
         // kind/internal are stamped here too (not just inherited from
         // the hook's client-side merge) because the BE PUT decodes the
         // body wholesale — a sparse PUT that dropped kind would skip
@@ -120,7 +119,6 @@ export function GroupModelsTab({
           internal,
           members,
           shadow_model_id,
-          exclude_from_ultimate_switching,
           fallback_chain,
           credentials,
         });

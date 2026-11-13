@@ -70,8 +70,6 @@ type Model struct {
 	PeakHourModel    string `json:"peak_hour_model"`
 	// Secondary upstream model for retry logic
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
-	// Ultimate model exclusion
-	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
 	// Group membership + ID-space claim (load-balance-groups /
 	// migration 031): kind=="group" rows only. Members is the flat
 	// [{model_id, weight}] list; ShadowModelID the optional claim.
@@ -899,11 +897,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				groupReject(`kind "group" does not support release_stream_chunk_deadline`)
 				return
 			}
-			// G7 — explicit write-gate stamp (D9 posture).
-			if !newModel.ExcludeFromUltimateSwitching {
-				groupReject(`kind "group" requires exclude_from_ultimate_switching to be true (G7 explicit enforcement)`)
-				return
-			}
+			// (Former G7 exclusion flag — retired
+			// with the ultimate model subsystem; no gate remains.)
 			// G8 self-part (an empty newModel.ID is re-checked with
 			// the generated ID by the DB-layer validator).
 			if newModel.ShadowModelID != "" && newModel.ShadowModelID == newModel.ID {
@@ -1217,18 +1212,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			// D9 — EXPLICIT enforcement. Unlike image-gen (which
-			// has the documented doc/code drift at config.go:258-259),
-			// decision ships with belt-and-suspenders write-time
-			// enforcement of exclude_from_ultimate_switching=true.
-			if !newModel.ExcludeFromUltimateSwitching {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{
-					"error": "kind \"decision\" requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)",
-				})
-				return
-			}
+			// (Former D9 exclusion flag — retired
+			// with the ultimate model subsystem; no gate remains.)
 		}
 
 		// Generate ID if not provided
@@ -1240,26 +1225,25 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		// stamped by validateCredentials (or the slice is empty for
 		// an external model — both are legal).
 		modelConfig := models.ModelConfig{
-			ID:                           newModel.ID,
-			Name:                         newModel.Name,
-			Enabled:                      newModel.Enabled,
-			FallbackChain:                newModel.FallbackChain,
-			TruncateParams:               newModel.TruncateParams,
-			Kind:                         newModel.Kind,
-			Internal:                     newModel.Internal,
-			Credentials:                  newModel.Credentials,
-			InternalBaseURL:              newModel.InternalBaseURL,
-			InternalModel:                newModel.InternalModel,
-			ReleaseStreamChunkDeadline:   newModel.ReleaseStreamChunkDeadline,
-			PeakHourEnabled:              newModel.PeakHourEnabled,
-			PeakHourStart:                newModel.PeakHourStart,
-			PeakHourEnd:                  newModel.PeakHourEnd,
-			PeakHourTimezone:             newModel.PeakHourTimezone,
-			PeakHourModel:                newModel.PeakHourModel,
-			SecondaryUpstreamModel:       newModel.SecondaryUpstreamModel,
-			ExcludeFromUltimateSwitching: newModel.ExcludeFromUltimateSwitching,
-			Members:                      newModel.Members,
-			ShadowModelID:                newModel.ShadowModelID,
+			ID:                         newModel.ID,
+			Name:                       newModel.Name,
+			Enabled:                    newModel.Enabled,
+			FallbackChain:              newModel.FallbackChain,
+			TruncateParams:             newModel.TruncateParams,
+			Kind:                       newModel.Kind,
+			Internal:                   newModel.Internal,
+			Credentials:                newModel.Credentials,
+			InternalBaseURL:            newModel.InternalBaseURL,
+			InternalModel:              newModel.InternalModel,
+			ReleaseStreamChunkDeadline: newModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:            newModel.PeakHourEnabled,
+			PeakHourStart:              newModel.PeakHourStart,
+			PeakHourEnd:                newModel.PeakHourEnd,
+			PeakHourTimezone:           newModel.PeakHourTimezone,
+			PeakHourModel:              newModel.PeakHourModel,
+			SecondaryUpstreamModel:     newModel.SecondaryUpstreamModel,
+			Members:                    newModel.Members,
+			ShadowModelID:              newModel.ShadowModelID,
 		}
 
 		if err := s.modelsConfig.AddModel(modelConfig); err != nil {
@@ -1414,11 +1398,8 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				groupReject(`kind "group" does not support release_stream_chunk_deadline`)
 				return
 			}
-			// G7 — explicit write-gate stamp (D9 posture).
-			if !updatedModel.ExcludeFromUltimateSwitching {
-				groupReject(`kind "group" requires exclude_from_ultimate_switching to be true (G7 explicit enforcement)`)
-				return
-			}
+			// (Former G7 exclusion flag — retired
+			// with the ultimate model subsystem; no gate remains.)
 			// G8 self-part — the group cannot claim its own ID (the
 			// route id is the row identity).
 			if updatedModel.ShadowModelID != "" && updatedModel.ShadowModelID == id {
@@ -1688,13 +1669,8 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" does not support release_stream_chunk_deadline (decision responses are not streamed)"})
 				return
 			}
-			// D9 — explicit enforce.
-			if !updatedModel.ExcludeFromUltimateSwitching {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"decision\" requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)"})
-				return
-			}
+			// (Former D9 exclusion flag — retired
+			// with the ultimate model subsystem; no gate remains.)
 		}
 
 		// Keep the same ID
@@ -1703,26 +1679,25 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// Convert to models.ModelConfig and update. Positions are
 		// already stamped by validateCredentials above.
 		modelConfig := models.ModelConfig{
-			ID:                           updatedModel.ID,
-			Name:                         updatedModel.Name,
-			Enabled:                      updatedModel.Enabled,
-			FallbackChain:                updatedModel.FallbackChain,
-			TruncateParams:               updatedModel.TruncateParams,
-			Kind:                         updatedModel.Kind,
-			Internal:                     updatedModel.Internal,
-			Credentials:                  updatedModel.Credentials,
-			InternalBaseURL:              updatedModel.InternalBaseURL,
-			InternalModel:                updatedModel.InternalModel,
-			ReleaseStreamChunkDeadline:   updatedModel.ReleaseStreamChunkDeadline,
-			PeakHourEnabled:              updatedModel.PeakHourEnabled,
-			PeakHourStart:                updatedModel.PeakHourStart,
-			PeakHourEnd:                  updatedModel.PeakHourEnd,
-			PeakHourTimezone:             updatedModel.PeakHourTimezone,
-			PeakHourModel:                updatedModel.PeakHourModel,
-			SecondaryUpstreamModel:       updatedModel.SecondaryUpstreamModel,
-			ExcludeFromUltimateSwitching: updatedModel.ExcludeFromUltimateSwitching,
-			Members:                      updatedModel.Members,
-			ShadowModelID:                updatedModel.ShadowModelID,
+			ID:                         updatedModel.ID,
+			Name:                       updatedModel.Name,
+			Enabled:                    updatedModel.Enabled,
+			FallbackChain:              updatedModel.FallbackChain,
+			TruncateParams:             updatedModel.TruncateParams,
+			Kind:                       updatedModel.Kind,
+			Internal:                   updatedModel.Internal,
+			Credentials:                updatedModel.Credentials,
+			InternalBaseURL:            updatedModel.InternalBaseURL,
+			InternalModel:              updatedModel.InternalModel,
+			ReleaseStreamChunkDeadline: updatedModel.ReleaseStreamChunkDeadline,
+			PeakHourEnabled:            updatedModel.PeakHourEnabled,
+			PeakHourStart:              updatedModel.PeakHourStart,
+			PeakHourEnd:                updatedModel.PeakHourEnd,
+			PeakHourTimezone:           updatedModel.PeakHourTimezone,
+			PeakHourModel:              updatedModel.PeakHourModel,
+			SecondaryUpstreamModel:     updatedModel.SecondaryUpstreamModel,
+			Members:                    updatedModel.Members,
+			ShadowModelID:              updatedModel.ShadowModelID,
 		}
 
 		if err := s.modelsConfig.UpdateModel(id, modelConfig); err != nil {
@@ -1970,26 +1945,25 @@ func (s *Server) resolveModelRowByID(id string) *models.ModelConfig {
 // two surfaces cannot drift when the DTO grows a field.
 func modelConfigToDTO(mc *models.ModelConfig) Model {
 	return Model{
-		ID:                           mc.ID,
-		Name:                         mc.Name,
-		Enabled:                      mc.Enabled,
-		FallbackChain:                mc.FallbackChain,
-		TruncateParams:               mc.TruncateParams,
-		Kind:                         mc.Kind,
-		Internal:                     mc.Internal,
-		Credentials:                  mc.Credentials,
-		InternalBaseURL:              mc.InternalBaseURL,
-		InternalModel:                mc.InternalModel,
-		ReleaseStreamChunkDeadline:   mc.ReleaseStreamChunkDeadline,
-		PeakHourEnabled:              mc.PeakHourEnabled,
-		PeakHourStart:                mc.PeakHourStart,
-		PeakHourEnd:                  mc.PeakHourEnd,
-		PeakHourTimezone:             mc.PeakHourTimezone,
-		PeakHourModel:                mc.PeakHourModel,
-		SecondaryUpstreamModel:       mc.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: mc.ExcludeFromUltimateSwitching,
-		Members:                      mc.Members,
-		ShadowModelID:                mc.ShadowModelID,
+		ID:                         mc.ID,
+		Name:                       mc.Name,
+		Enabled:                    mc.Enabled,
+		FallbackChain:              mc.FallbackChain,
+		TruncateParams:             mc.TruncateParams,
+		Kind:                       mc.Kind,
+		Internal:                   mc.Internal,
+		Credentials:                mc.Credentials,
+		InternalBaseURL:            mc.InternalBaseURL,
+		InternalModel:              mc.InternalModel,
+		ReleaseStreamChunkDeadline: mc.ReleaseStreamChunkDeadline,
+		PeakHourEnabled:            mc.PeakHourEnabled,
+		PeakHourStart:              mc.PeakHourStart,
+		PeakHourEnd:                mc.PeakHourEnd,
+		PeakHourTimezone:           mc.PeakHourTimezone,
+		PeakHourModel:              mc.PeakHourModel,
+		SecondaryUpstreamModel:     mc.SecondaryUpstreamModel,
+		Members:                    mc.Members,
+		ShadowModelID:              mc.ShadowModelID,
 	}
 }
 

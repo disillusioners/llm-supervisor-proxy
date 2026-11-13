@@ -34,7 +34,6 @@ func copySourceFixture() *ModelConfig {
 		PeakHourTimezone:             "+7",
 		PeakHourModel:                "glm-4-flash",
 		SecondaryUpstreamModel:       "glm-4-flash",
-		ExcludeFromUltimateSwitching: true,
 		// A chat row never carries members, but the field must stay
 		// empty on the copy (membership lives on the group row).
 		Members: []GroupMember{},
@@ -94,9 +93,6 @@ func TestBuildModelCopy_CopiesBehaviourFieldsVerbatim(t *testing.T) {
 	}
 	if cp.SecondaryUpstreamModel != src.SecondaryUpstreamModel {
 		t.Errorf("SecondaryUpstreamModel = %q, want %q", cp.SecondaryUpstreamModel, src.SecondaryUpstreamModel)
-	}
-	if cp.ExcludeFromUltimateSwitching != src.ExcludeFromUltimateSwitching {
-		t.Errorf("ExcludeFromUltimateSwitching = %v, want %v", cp.ExcludeFromUltimateSwitching, src.ExcludeFromUltimateSwitching)
 	}
 	if cp.Kind != src.Kind {
 		t.Errorf("Kind = %q, want %q", cp.Kind, src.Kind)

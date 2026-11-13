@@ -13,14 +13,8 @@ import { GroupMemberEditor } from './GroupMemberEditor';
 //                                        ~11 internal-dispatch predicates.
 //                                        Now the only mode repo-wide
 //                                        (remove-external-upstream).
-//   exclude_from_ultimate_switching:
-//   true                               — G7: explicit enforcement; ultimate
-//                                        switching is evaluated on the group
-//                                        row pre-rewrite, so the flag shields
-//                                        group traffic
 const HARDCODED_KIND = 'group' as const;
 const HARDCODED_INTERNAL = true as const;
-const HARDCODED_EXCLUDE_FROM_ULTIMATE = true as const;
 
 // Wire payload emitted by the form on submit (mirrors the BE Model DTO
 // group fields — pkg/ui/server.go Model struct). The hook layer stamps
@@ -35,7 +29,6 @@ export interface GroupModelPayload {
   members: GroupMember[];
   shadow_model_id: string;
   enabled: boolean;
-  exclude_from_ultimate_switching: true;
   fallback_chain: [];
   credentials: [];
 }
@@ -240,7 +233,6 @@ export function GroupModelForm({
         })),
         shadow_model_id: shadow,
         enabled: fields.enabled,
-        exclude_from_ultimate_switching: HARDCODED_EXCLUDE_FROM_ULTIMATE,
         fallback_chain: [],
         credentials: [],
       };

@@ -574,7 +574,6 @@ func validDecision() models.ModelConfig {
 		Internal:                     true,
 		InternalModel:                "gpt-6-luna",
 		Credentials:                  models.TestRefs("openai-cred"),
-		ExcludeFromUltimateSwitching: true,
 	}
 }
 
@@ -639,11 +638,6 @@ func TestModelsManager_AddModel_KindDecision_Violations(t *testing.T) {
 			name:       "D8 decision with release_stream_chunk_deadline",
 			mutate:     func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
 			wantErrSub: "release_stream_chunk_deadline",
-		},
-		{
-			name:       "D9 decision without exclude_from_ultimate_switching",
-			mutate:     func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
-			wantErrSub: "exclude_from_ultimate_switching",
 		},
 	}
 	for _, tc := range tests {

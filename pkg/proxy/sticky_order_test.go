@@ -183,7 +183,7 @@ func (h *stickyHarness) seedGroup(t *testing.T, id string, members ...models.Gro
 	t.Helper()
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: id, Name: id, Enabled: true, Kind: models.KindGroup,
-		Internal: true, ExcludeFromUltimateSwitching: true,
+		Internal: true, 
 		Members: members,
 	}); err != nil {
 		t.Fatalf("AddModel(%s): %v", id, err)

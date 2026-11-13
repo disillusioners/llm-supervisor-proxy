@@ -201,7 +201,6 @@ func newLiveDecisionHandler(t *testing.T, modelID, provider, internalModel, apiK
 			Credentials: []models.CredentialRef{
 				{CredentialID: "live-cred", Weight: 1, Position: 0},
 			},
-			ExcludeFromUltimateSwitching: true,
 		}, true
 	})
 	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {

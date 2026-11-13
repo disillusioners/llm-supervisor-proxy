@@ -1274,7 +1274,6 @@ func copySourceModel(ts *modelTestServer) {
 		PeakHourTimezone:             "+7",
 		PeakHourModel:                "glm-4-flash",
 		SecondaryUpstreamModel:       "glm-4-flash",
-		ExcludeFromUltimateSwitching: true,
 	})
 }
 
@@ -1340,9 +1339,6 @@ func TestHandleModelCopy_CopiesModelFaithfully(t *testing.T) {
 	}
 	if out.SecondaryUpstreamModel != "glm-4-flash" {
 		t.Errorf("SecondaryUpstreamModel = %q, want glm-4-flash", out.SecondaryUpstreamModel)
-	}
-	if !out.ExcludeFromUltimateSwitching {
-		t.Error("ExcludeFromUltimateSwitching = false, want true")
 	}
 	if out.Kind != models.KindChat {
 		t.Errorf("Kind = %q, want %q", out.Kind, models.KindChat)
@@ -1445,7 +1441,6 @@ func TestHandleModelCopy_FallbackChainDropsSourceEntry(t *testing.T) {
 		TruncateParams:               []string{"max_completion_tokens"},
 		Kind:                         models.KindChat,
 		ShadowModelID:                "shadowed-model",
-		ExcludeFromUltimateSwitching: true,
 	})
 
 	resp := postCopy(t, server, "copy-src", `{"new_id":"copy-dst"}`)
@@ -1479,7 +1474,6 @@ func TestHandleModelCopy_GroupSourceRefused(t *testing.T) {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	})
 
@@ -1742,7 +1736,6 @@ func TestHandleModelCopy_NotAddedToAnyGroup(t *testing.T) {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	})
 
@@ -2115,7 +2108,6 @@ func TestHandleModelCopy_DBBackend_SourceClaimedByGroup_CopiesSourceRow(t *testi
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "claimed-src", Weight: 1}},
 		ShadowModelID:                "claimed-src",
 	}
@@ -2275,7 +2267,6 @@ func TestHandleModelCopy_DBBackend_NewIDClaimedByGroup_Rejected(t *testing.T) {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	}
 	if err := ts.mgr.AddModel(groupModel); err != nil {
@@ -2585,7 +2576,6 @@ func TestHandleModelCopy_DBBackend_PersistedRowShape(t *testing.T) {
 		PeakHourTimezone:             "+7",
 		PeakHourModel:                "glm-4-flash",
 		SecondaryUpstreamModel:       "glm-4-flash",
-		ExcludeFromUltimateSwitching: true,
 		ShadowModelID:                "shape-claimed",
 		Credentials: models.TestRefsWeighted(
 			models.CredentialRef{CredentialID: "openai-cred", Weight: 3, Position: 0},
@@ -2705,9 +2695,6 @@ func TestHandleModelCopy_DBBackend_PersistedRowShape(t *testing.T) {
 	}
 	if row.SecondaryUpstreamModel != sourceBefore.SecondaryUpstreamModel {
 		t.Errorf("Persisted copy SecondaryUpstreamModel = %q, want %q", row.SecondaryUpstreamModel, sourceBefore.SecondaryUpstreamModel)
-	}
-	if row.ExcludeFromUltimateSwitching != sourceBefore.ExcludeFromUltimateSwitching {
-		t.Errorf("Persisted copy ExcludeFromUltimateSwitching = %v, want %v", row.ExcludeFromUltimateSwitching, sourceBefore.ExcludeFromUltimateSwitching)
 	}
 	if row.Kind != sourceBefore.Kind {
 		t.Errorf("Persisted copy Kind = %q, want %q", row.Kind, sourceBefore.Kind)

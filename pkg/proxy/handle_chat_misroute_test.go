@@ -139,7 +139,6 @@ func TestHandleChatCompletions_RejectsDecisionMisroute(t *testing.T) {
 		ID: "dec-1", Name: "Decision 1", Enabled: true,
 		Kind: models.KindDecision, Internal: true,
 		InternalModel: "gpt-6-luna", Credentials: cred,
-		ExcludeFromUltimateSwitching: true,
 	}); err != nil {
 		t.Fatalf("AddModel: %v", err)
 	}

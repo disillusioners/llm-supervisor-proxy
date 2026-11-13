@@ -254,7 +254,6 @@ func shadowReasoningModelsConfig(t *testing.T) *models.ModelsConfig {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
 		ShadowModelID:                "coding", // self-shadow: claims its OWN member
 	}

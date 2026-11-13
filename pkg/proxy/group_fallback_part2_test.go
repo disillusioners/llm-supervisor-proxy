@@ -140,7 +140,6 @@ func seedExhaustGroup(t *testing.T, h *groupHarness, groupID string) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: groupID, Name: groupID, Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "x-one", Weight: 1},
 			{ModelID: "x-two", Weight: 1},

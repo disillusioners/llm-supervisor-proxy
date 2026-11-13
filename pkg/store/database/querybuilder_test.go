@@ -238,7 +238,7 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		// store-layer write-path and Round-2 reviewer punch-list #12.
 		// Ship-blocker fix 2026-10-06: kind grew it to 19; migration 031
 		// grew it to 21.
-		if countOccurrences(got, "$") != 21 {
+		if countOccurrences(got, "$") != 20 {
 			t.Errorf("PostgreSQL InsertModel() should have 21 placeholders (18 cols + kind + 2 group cols), got: %d", countOccurrences(got, "$"))
 		}
 	})
@@ -261,7 +261,7 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		// credential_id alongside credentials_json in the same UPDATE
 		// statement; migration 031 (load-balance-groups / P1.4) adds
 		// members_json + shadow_model_id as SET columns 19-20.
-		if countOccurrences(got, "?") != 21 {
+		if countOccurrences(got, "?") != 20 {
 			t.Errorf("SQLite UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
 		}
 	})
@@ -275,7 +275,7 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		}
 		// Verify it has 21 placeholders (20 SET columns incl. kind + the two
 		// group columns + WHERE id = $21 — migration 031, P1.4)
-		if countOccurrences(got, "$") != 21 {
+		if countOccurrences(got, "$") != 20 {
 			t.Errorf("PostgreSQL UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
 		}
 	})

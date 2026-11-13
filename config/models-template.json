@@ -27,8 +27,7 @@
       "kind": "decision",
       "internal": true,
       "credential_id": "openai-default",
-      "internal_model": "gpt-6-luna",
-      "exclude_from_ultimate_switching": true
+      "internal_model": "gpt-6-luna"
     },
     {
       "id": "decision-router-typesafe",
@@ -37,8 +36,7 @@
       "kind": "decision",
       "internal": true,
       "credential_id": "typesafe-default",
-      "internal_model": "jev-latest",
-      "exclude_from_ultimate_switching": true
+      "internal_model": "jev-latest"
     },
     {
       "id": "coding[coding]",
@@ -49,8 +47,7 @@
       "members": [
         { "model_id": "coding", "weight": 1 }
       ],
-      "shadow_model_id": "coding",
-      "exclude_from_ultimate_switching": true
+      "shadow_model_id": "coding"
     }
   ]
 }

@@ -135,7 +135,6 @@ func newEnvForMockUpstream(t *testing.T, provider, internalModel, upstreamURL st
 			Credentials: []models.CredentialRef{
 				{CredentialID: "cred-1", Weight: 1, Position: 0},
 			},
-			ExcludeFromUltimateSwitching: true,
 		}, true
 	})
 	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {

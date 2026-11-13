@@ -18,7 +18,6 @@ function makeDecisionRow(overrides: Partial<DecisionModel> = {}): DecisionModel 
     internal_model: 'gpt-6-luna',
     internal_base_url: 'https://api.openai.com',
     credentials: [{ credential_id: 'cred-oai-1', weight: 1, position: 0 }],
-    exclude_from_ultimate_switching: true,
     ...overrides,
   };
 }

@@ -270,8 +270,8 @@ function SettingsRoute({
     onRetryDecisionModels?: () => void;
     // Group (load-balance-groups 2026-10-16 / plan §6.1). Pre-filtered
     // server-side to kind: 'group' via /fe/api/models?kind=group. The
-    // form's submit handler stamps kind: 'group' + internal: true +
-    // exclude_from_ultimate_switching: true (G1/G7) on the payload; we
+    // form's submit handler stamps kind: 'group' + internal: true (G1)
+    // on the payload; we
     // never pass chat rows through these callbacks.
     groupModels: any[];
     onAddGroupModel: (model: any) => Promise<void>;

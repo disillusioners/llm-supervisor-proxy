@@ -110,10 +110,8 @@ const (
 	// (recommended identity B — openai reused, typesafe new;
 	// override A uses {"openai-decision","typesafe"}),
 	// FallbackChain empty, SecondaryUpstreamModel=="",
-	// PeakHourEnabled==false, ReleaseStreamChunkDeadline==0,
-	// and EXPLICIT ExcludeFromUltimateSwitching==true (D9 — the
-	// image-gen doc/code drift at config.go:258-259 is NOT
-	// inherited). Excluded from /v1/models.
+	// PeakHourEnabled==false, ReleaseStreamChunkDeadline==0.
+	// Excluded from /v1/models.
 	KindDecision = "decision"
 
 	// KindGroup marks VIRTUAL load-balancing group models
@@ -127,9 +125,8 @@ const (
 	// modelList to the sticky-picked member, after which the
 	// member's existing pipeline runs unchanged. Groups carry no
 	// credentials, no fallback_chain, no secondary_upstream_model,
-	// no peak_hour_*, no release_stream_chunk_deadline (G6), and
-	// REQUIRE ExcludeFromUltimateSwitching==true (G7). Listed in
-	// /v1/models; a claimed model's ID resolves to the group
+	// and no peak_hour_* or release_stream_chunk_deadline (G6).
+	// Listed in /v1/models; a claimed model's ID resolves to the group
 	// (claim-first GetModel) while the claimed row stays editable
 	// via the strict twins.
 	KindGroup = "group"
@@ -189,21 +186,23 @@ func (m *ModelConfig) IsGroup() bool {
 //   - PeakHourEnabled == false
 //   - ReleaseStreamChunkDeadline == 0 (no stream chunks in image resp)
 //
-// The decision rule set (D1-D9; Decision Models / §3.1 sites 3-4,
+// The decision rule set (D1-D8; Decision Models / §3.1 sites 3-4,
 // §5.6 validateDecisionRules): Internal == true, InternalModel
 // != "", Credentials non-empty, internalProvider ∈ {"openai",
 // "typesafe", "openrouter"} (recommended identity B), FallbackChain empty,
 // SecondaryUpstreamModel == "", PeakHourEnabled == false,
-// ReleaseStreamChunkDeadline == 0, ExcludeFromUltimateSwitching
-// == true (D9 — explicit enforcement, not the image-gen
-// doc/code drift).
+// ReleaseStreamChunkDeadline == 0. (D9 — the historical
+// ultimate-switching exclusion flag — was retired with the
+// ultimate model subsystem; the DB column stays, inert.)
 //
 // The group rule set (G1-G8 field-level subset; load-balance-groups
 // commission / §5.1, §5.2): Internal == true (G1), FallbackChain
 // empty, SecondaryUpstreamModel == "", PeakHourEnabled == false,
-// ReleaseStreamChunkDeadline == 0 (G6), ExcludeFromUltimateSwitching
-// == true (G7 — D9 posture), and ShadowModelID != the group's own
-// ID (G8 self-part). The collection-aware half of the G-rules
+// ReleaseStreamChunkDeadline == 0 (G6), and ShadowModelID != the
+// group's own ID (G8 self-part). (G7 — the historical
+// ultimate-switching exclusion flag — was retired with the
+// ultimate model subsystem; the DB column stays, inert.) The
+// collection-aware half of the G-rules
 // (member existence/kind/weight/dup/cap, shadow-target checks and
 // the G8 cross-group uniqueness scan) lives in ValidateGroupMembers
 // (pkg/models/group.go) — it needs the model collection and is run
@@ -275,11 +274,6 @@ func validateImageGenRules(m *ModelConfig, internalProvider string) error {
 // internal-only, deny aux features that don't apply,
 // provider-gated (recommended identity B: `openai` reused +
 // `typesafe` new, plus `openrouter` System One transport).
-//
-// D9 ExcludeFromUltimateSwitching == true is EXPLICITLY enforced
-// here — the image-gen doc/code drift at config.go:258-259 (the
-// doc claimed enforcement but no code enforced) is NOT inherited.
-// Decision gets belt-and-suspenders write-time enforcement.
 func validateDecisionRules(m *ModelConfig, internalProvider string) error {
 	if !m.Internal {
 		return fmt.Errorf("model %s: kind %q requires internal to be true", m.ID, KindDecision)
@@ -320,13 +314,8 @@ func validateDecisionRules(m *ModelConfig, internalProvider string) error {
 	if m.ReleaseStreamChunkDeadline != 0 {
 		return fmt.Errorf("model %s: kind %q does not support release_stream_chunk_deadline (decision responses are not streamed)", m.ID, KindDecision)
 	}
-	// D9 — EXPLICIT enforcement. Decision ships with belt-and-suspenders
-	// write-time enforcement of exclude_from_ultimate_switching=true;
-	// unlike image-gen, the doc/code drift at config.go:258-259 is
-	// NOT inherited.
-	if !m.ExcludeFromUltimateSwitching {
-		return fmt.Errorf("model %s: kind %q requires exclude_from_ultimate_switching to be true (D9 explicit enforcement)", m.ID, KindDecision)
-	}
+	// (Former D9 exclusion flag — retired with the
+	// ultimate model subsystem; no gate remains for it.)
 	return nil
 }
 
@@ -387,9 +376,6 @@ type ModelConfig struct {
 	// Secondary upstream model for retry logic (only valid for internal=true)
 	SecondaryUpstreamModel string `json:"secondary_upstream_model,omitempty"`
 
-	// ExcludeFromUltimateSwitching prevents this model from being used in ultimate model switching
-	ExcludeFromUltimateSwitching bool `json:"exclude_from_ultimate_switching,omitempty"`
-
 	// Kind discriminates between chat and image-generation models
 	// (ImgGen Models commission / BE-D1). `chat` (default; also
 	// implied by an empty value) is the historical chat / completion
@@ -398,10 +384,7 @@ type ModelConfig struct {
 	// values are rejected by ModelsConfig.Validate (via the shared
 	// ValidateKindRules helper called from BOTH ModelsConfig.Validate
 	// AND ModelsManager.validateModelAgainstCredentials, per
-	// Architect Amendment 2). Internally, `kind:"image-gen"` also
-	// forces ExcludeFromUltimateSwitching to true on write so the
-	// chat-side path stays correct even if the operator edits a row
-	// from the chat form. Client `fallback_chain`,
+	// Architect Amendment 2). Client `fallback_chain`,
 	// `secondary_upstream_model`, `peak_hour_*`, and
 	// `release_stream_chunk_deadline` are rejected on image-gen
 	// rows (BE-D2 + the FE-5 hidden-field posture).

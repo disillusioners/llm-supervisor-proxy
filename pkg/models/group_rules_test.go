@@ -27,7 +27,6 @@ func groupBaseFixture() (ModelConfig, []ModelConfig) {
 		Enabled:                      true,
 		Kind:                         KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
 	}
 	collection := []ModelConfig{memberA, memberB, group}
@@ -78,11 +77,6 @@ func TestValidateKindRules_Group_FieldRuleViolations(t *testing.T) {
 			name:       "G6_group_rejects_release_stream_chunk_deadline",
 			mutate:     func(m *ModelConfig) { m.ReleaseStreamChunkDeadline = Duration(60 * 1e9) },
 			wantErrSub: "does not support release_stream_chunk_deadline",
-		},
-		{
-			name:       "G7_group_requires_exclude_from_ultimate_switching",
-			mutate:     func(m *ModelConfig) { m.ExcludeFromUltimateSwitching = false },
-			wantErrSub: "requires exclude_from_ultimate_switching to be true",
 		},
 		{
 			name:       "G8_group_cannot_shadow_own_id",
@@ -161,7 +155,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G5_group_as_member_forbidden",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				other := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, ExcludeFromUltimateSwitching: true, Members: []GroupMember{{ModelID: "coding", Weight: 1}}}
+				other := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, Members: []GroupMember{{ModelID: "coding", Weight: 1}}}
 				*coll = append(*coll, other)
 				m.Members = []GroupMember{{ModelID: "coding", Weight: 1}, {ModelID: "other-group", Weight: 1}}
 			},
@@ -170,7 +164,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G3_member_must_be_chat_kind",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, ExcludeFromUltimateSwitching: true}
+				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, }
 				*coll = append(*coll, img)
 				m.Members = []GroupMember{{ModelID: "img-model", Weight: 1}}
 			},
@@ -186,7 +180,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G8_shadow_target_must_be_chat_kind",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, ExcludeFromUltimateSwitching: true}
+				img := ModelConfig{ID: "img-model", Name: "Img", Enabled: true, Kind: KindImageGen, Internal: true, InternalModel: "image-01", Credentials: []CredentialRef{{CredentialID: "cred-minimax", Weight: 1, Position: 0}}, }
 				*coll = append(*coll, img)
 				m.ShadowModelID = "img-model"
 			},
@@ -195,7 +189,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G8_shadow_target_cannot_be_a_group",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				other := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, ExcludeFromUltimateSwitching: true, Members: []GroupMember{{ModelID: "coding", Weight: 1}}}
+				other := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, Members: []GroupMember{{ModelID: "coding", Weight: 1}}}
 				*coll = append(*coll, other)
 				m.ShadowModelID = "other-group"
 			},
@@ -204,7 +198,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 		{
 			name: "G8_uniqueness_no_other_enabled_group_claims_same_id",
 			mutate: func(m *ModelConfig, coll *[]ModelConfig) {
-				claimer := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, ExcludeFromUltimateSwitching: true, Members: []GroupMember{{ModelID: "coding-alt", Weight: 1}}, ShadowModelID: "coding"}
+				claimer := ModelConfig{ID: "other-group", Name: "Other", Enabled: true, Kind: KindGroup, Internal: true, Members: []GroupMember{{ModelID: "coding-alt", Weight: 1}}, ShadowModelID: "coding"}
 				*coll = append(*coll, claimer)
 				m.ShadowModelID = "coding"
 			},
@@ -232,7 +226,7 @@ func TestValidateGroupMembers_CollectionRuleViolations(t *testing.T) {
 // resolves through the same scan — §3.8 / arch R1 Am20).
 func TestValidateGroupMembers_G8_DisabledClaimIsInert(t *testing.T) {
 	group, collection := groupBaseFixture()
-	disabledClaimer := ModelConfig{ID: "other-group", Name: "Other", Enabled: false, Kind: KindGroup, Internal: true, ExcludeFromUltimateSwitching: true, Members: []GroupMember{{ModelID: "coding-alt", Weight: 1}}, ShadowModelID: "coding"}
+	disabledClaimer := ModelConfig{ID: "other-group", Name: "Other", Enabled: false, Kind: KindGroup, Internal: true, Members: []GroupMember{{ModelID: "coding-alt", Weight: 1}}, ShadowModelID: "coding"}
 	collection = append(collection, disabledClaimer)
 	group.ShadowModelID = "coding"
 	if err := ValidateGroupMembers(&group, collection); err != nil {
@@ -297,7 +291,6 @@ func jsonValidGroup() ModelConfig {
 		Enabled:                      true,
 		Kind:                         KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []GroupMember{{ModelID: "coding", Weight: 2}, {ModelID: "coding-alt", Weight: 1}},
 		ShadowModelID:                "coding",
 	}
@@ -330,11 +323,10 @@ func TestModelsConfig_Group_SavePath(t *testing.T) {
 
 	brokenKind := jsonValidGroup()
 	brokenKind.ID = "coding-group-2"
-	brokenKind.ExcludeFromUltimateSwitching = false // G7
 	brokenKind.ShadowModelID = ""
-	if err := mc.AddModel(brokenKind); err == nil {
-		t.Fatal("JSON AddModel accepted G7 violation")
-	}
+	// (Former G7 rejection probe removed: the ultimate-switching
+	// exclusion requirement was retired with the ultimate model
+	// subsystem — a group row no longer carries or needs the flag.)
 
 	// UpdateModel runs the same rules on the proposed state.
 	upd := jsonValidGroup()

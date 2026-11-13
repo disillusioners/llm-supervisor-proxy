@@ -622,8 +622,7 @@ export function SettingsPage({
               Same posture as the sibling tabs: parent receives
               groupModels pre-filtered server-side via
               /fe/api/models?kind=group. The form inside stamps
-              kind: 'group' + internal: true +
-              exclude_from_ultimate_switching: true (G1/G7) so a chat
+              kind: 'group' + internal: true (G1) so a chat
               row can never round-trip into this surface. chatModels
               feeds the member + shadow pickers (chat-kind only);
               wrapPreloadModel carries the one-click-wrap pre-fill

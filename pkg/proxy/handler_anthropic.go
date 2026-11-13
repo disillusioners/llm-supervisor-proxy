@@ -1920,7 +1920,7 @@ func extractOpenAIResponseContentFromSSE(sseBuffer []byte) (content, thinking st
 		// Parse the chunk JSON
 		var chunk map[string]interface{}
 		if err := json.Unmarshal(data, &chunk); err != nil {
-			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed chunk: %v", err)
+			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed SSE line: %v", err)
 			continue
 		}
 

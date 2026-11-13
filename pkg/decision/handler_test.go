@@ -400,7 +400,6 @@ func newEnvForProvider(t *testing.T, script fakeScript, provider, internalModel,
 			Credentials: []models.CredentialRef{
 				{CredentialID: "cred-1", Weight: 1, Position: 0},
 			},
-			ExcludeFromUltimateSwitching: true,
 		}, true
 	})
 	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {

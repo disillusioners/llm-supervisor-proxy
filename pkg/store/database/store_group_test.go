@@ -71,7 +71,6 @@ func validGroup() models.ModelConfig {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 2},
 			{ModelID: "coding-alt", Weight: 1},
@@ -100,8 +99,8 @@ func TestGroup_SavePath_And_RoundTrip(t *testing.T) {
 	if got.Kind != models.KindGroup || !got.IsGroup() {
 		t.Errorf("round-trip: Kind = %q, want %q (IsGroup=%v)", got.Kind, models.KindGroup, got.IsGroup())
 	}
-	if !got.Internal || !got.ExcludeFromUltimateSwitching {
-		t.Errorf("round-trip: Internal=%v ExcludeFromUltimateSwitching=%v, want true/true", got.Internal, got.ExcludeFromUltimateSwitching)
+	if !got.Internal {
+		t.Errorf("round-trip: Internal=%v, want true", got.Internal)
 	}
 	if len(got.Members) != 2 {
 		t.Fatalf("round-trip: Members len = %d, want 2 (got %+v)", len(got.Members), got.Members)
@@ -176,7 +175,6 @@ func TestGroup_AddModel_GViolations(t *testing.T) {
 		{"G6_no_secondary", func(m *models.ModelConfig) { m.SecondaryUpstreamModel = "x" }, "does not support secondary_upstream_model"},
 		{"G6_no_peak_hour", func(m *models.ModelConfig) { m.PeakHourEnabled = true }, "does not support peak_hour_enabled"},
 		{"G6_no_chunk_deadline", func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) }, "does not support release_stream_chunk_deadline"},
-		{"G7_ultimate_exclusion_required", func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false }, "requires exclude_from_ultimate_switching"},
 		{"G8_no_own_id_claim", func(m *models.ModelConfig) { m.ShadowModelID = "coding-group" }, "cannot be the group's own ID"},
 		{"G8_shadow_target_must_exist", func(m *models.ModelConfig) { m.ShadowModelID = "ghost" }, "does not exist"},
 	}
@@ -822,7 +820,6 @@ func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 		Enabled:                      true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1, BackupOnly: true},
 			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -869,7 +866,6 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 	g := models.ModelConfig{
 		ID: "g-c1", Name: "C1 Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -923,7 +919,6 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "g-solo", Name: "Solo Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
 	}); err != nil {
 		t.Fatalf("seed solo group: %v", err)
@@ -938,7 +933,6 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "g-two", Name: "Two Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1},
@@ -1037,8 +1031,7 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "Zero Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
-			Members: []models.GroupMember{
+				Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1, BackupOnly: true},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
 			},
@@ -1070,8 +1063,7 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "One Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
-			Members: []models.GroupMember{
+				Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
 			},
@@ -1114,7 +1106,6 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	g := models.ModelConfig{
 		ID: "g-cascade", Name: "Cascade Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1},

@@ -2092,8 +2092,9 @@ func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
 	wireModel := latestReq.resolved.InternalModel
 	if wireModel == "" {
 		// Unresolved rows (legacy/non-internal): the row ID is the
-		// only model identity available — still worth a credential
-		// mark so member selection sees the wall.
+		// only model identity available. The provider-scope mark below
+		// still lands; the credential-scope mark is a no-op when
+		// credID is empty (no account to wall).
 		wireModel = latestReq.modelID
 	}
 	ttl := c.cfg.UpstreamSkipCacheTTL

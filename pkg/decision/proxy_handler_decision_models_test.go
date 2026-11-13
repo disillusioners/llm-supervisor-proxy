@@ -60,7 +60,6 @@ func makeDecisionHandler(t *testing.T, modelID, kind string) *Handler {
 		}
 		if kind == models.KindDecision {
 			mc.InternalModel = "gpt-6-luna"
-			mc.ExcludeFromUltimateSwitching = true
 		}
 		if kind == models.KindImageGen {
 			mc.InternalModel = "image-01"
@@ -236,7 +235,6 @@ func TestDecision_Resolver_DecisionModel_ProviderLookup_502(t *testing.T) {
 			Internal:                     true,
 			InternalModel:                "gpt-6-luna",
 			Credentials:                  []models.CredentialRef{{CredentialID: "anth-cred", Weight: 1, Position: 0}},
-			ExcludeFromUltimateSwitching: true,
 		}
 	}
 	resolveCred := func(id string) (models.ResolvedCredential, bool) {

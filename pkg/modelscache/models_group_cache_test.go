@@ -89,7 +89,6 @@ func validGroupRow() models.ModelConfig {
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind:                         models.KindGroup,
 		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 2},
 			{ModelID: "coding-alt", Weight: 1},

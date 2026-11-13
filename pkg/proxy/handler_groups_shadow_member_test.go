@@ -260,7 +260,6 @@ func TestShadowFix_SelfShadowMemberServes_LiveShape(t *testing.T) {
 	if err := h.cache.AddModel(models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 10},
 			{ModelID: "coding2", Weight: 3},
@@ -312,7 +311,6 @@ func TestShadowFix_SelfShadowMemberServes_Day1Shape(t *testing.T) {
 	if err := h.cache.AddModel(models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
 		ShadowModelID:                "coding",
 	}); err != nil {
@@ -350,7 +348,6 @@ func TestShadowFix_PlainMemberUnaffected(t *testing.T) {
 	if err := h.cache.AddModel(models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding2", Weight: 1},
@@ -484,7 +481,6 @@ func TestShadowFix_SelfShadowMemberCredentialFailover(t *testing.T) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "g-shadow", Name: "G Shadow", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members:                      []models.GroupMember{{ModelID: "m-int", Weight: 1}},
 		ShadowModelID:                "m-int",
 	}); err != nil {
