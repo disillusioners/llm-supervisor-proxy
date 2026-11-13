@@ -488,10 +488,10 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 		arc.reqLog.RouteModel = ""
 	}
 	if pool == models.PoolBackup {
-		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			arc.reqID, pick.GroupID, pick.MemberID)
 	} else {
-		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			arc.reqID, pick.GroupID, pick.MemberID)
 	}
 	// load-balance-groups / P4.5 (P2 deferred #1) — publish the

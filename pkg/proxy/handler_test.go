@@ -2041,52 +2041,6 @@ func TestIdleTermination_NormalStreamingNotTerminated(t *testing.T) {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Ultimate Model Permission Gate Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ultimateMockTokenStore is a mock implementation of auth.TokenStoreInterface for ultimate model tests
-type ultimateMockTokenStore struct {
-	tokens map[string]*auth.AuthToken
-}
-
-func newUltimateMockTokenStore() *ultimateMockTokenStore {
-	return &ultimateMockTokenStore{
-		tokens: make(map[string]*auth.AuthToken),
-	}
-}
-
-func (m *ultimateMockTokenStore) addToken(plaintext string, token *auth.AuthToken) {
-	m.tokens[plaintext] = token
-}
-
-func (m *ultimateMockTokenStore) ValidateToken(ctx context.Context, plaintext string) (*auth.AuthToken, error) {
-	if token, ok := m.tokens[plaintext]; ok {
-		return token, nil
-	}
-	return nil, auth.ErrTokenNotFound
-}
-
-func (m *ultimateMockTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
-	panic("not implemented")
-}
-
-func (m *ultimateMockTokenStore) DeleteToken(ctx context.Context, id string) error {
-	panic("not implemented")
-}
-
-func (m *ultimateMockTokenStore) ListTokens(ctx context.Context) ([]auth.AuthToken, error) {
-	panic("not implemented")
-}
-
-func (m *ultimateMockTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.AuthToken, error) {
-	panic("not implemented")
-}
-
-func (m *ultimateMockTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
-	panic("not implemented")
-}
-
 // newTestHandlerWithTokenStore creates a handler with a mock token store for auth testing
 func newTestHandlerWithTokenStore(t *testing.T, upstreamHandler http.HandlerFunc, modelsConfig models.ModelsConfigInterface, tokenStore auth.TokenStoreInterface, configOpts ...func(*config.Config)) (*Handler, *httptest.Server) {
 	t.Helper()

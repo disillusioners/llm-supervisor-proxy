@@ -454,20 +454,14 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}
 	})
 
-	// (5) Ultimate external — REMOVED with the external arm
-	// (remove-external-upstream P1); the surviving first-byte pin is
-	// the internal test TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion.
-	t.Run("5_UltimateExternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 5 (raw-passthrough external) removed with the external arm")
-	})
-
-	// (6) Ultimate internal — pinned by existing
-	// TestUltimateInternal_LiveStream (when present); the
-	// TestAnthropicLiveStream_ForwardBytesBeforeCompletion family
-	// covers the equivalent property for the internal path.
-	t.Run("6_UltimateInternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 6 (raw-passthrough internal) removed with the ultimate subsystem")
-	})
+	// Paths (5) ultimate-external and (6) ultimate-internal no longer
+	// exist: the raw-passthrough external arm was removed earlier
+	// (remove-external-upstream P1), and the internal arm — together
+	// with the pkg/ultimatemodel pin tests — went with the ultimate
+	// subsystem retirement (wi-7769a812 part 1). The first-byte
+	// property for the surviving internal path is pinned by
+	// TestAnthropicLiveStream_ForwardBytesBeforeCompletion
+	// (handler_anthropic_live_test.go).
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

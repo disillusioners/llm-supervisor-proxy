@@ -1046,10 +1046,10 @@ func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 		rc.reqLog.RouteModel = ""
 	}
 	if pool == models.PoolBackup {
-		log.Printf("[grouplb] request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+		log.Printf("[grouplb] request %s: terminal member failure — group %s pool=backup reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			rc.reqID, pick.GroupID, pick.MemberID)
 	} else {
-		log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+		log.Printf("[grouplb] request %s: terminal member failure — group %s reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			rc.reqID, pick.GroupID, pick.MemberID)
 	}
 	if h.bus != nil {

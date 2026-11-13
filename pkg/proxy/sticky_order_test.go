@@ -1020,12 +1020,6 @@ func TestStickyOrder_PromotionDoesNotTouchRouteModel(t *testing.T) {
 	}
 }
 
-// ─── §9 fixture: ultimate-path completion records NOTHING ───────────────────
-
-// TestStickyOrder_UltimatePath_NoRecord pins §4.2 exclusion 1: the
-// ultimate-model completion is not a race delivered success, so it must
-// neither record nor disturb an existing record.
-
 // ─── §9 fixture: client-write-fail records NOTHING (BOTH lanes) ─────────────
 
 // failWriteResponseWriter fails ONLY body writes — headers behave

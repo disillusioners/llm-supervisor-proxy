@@ -229,7 +229,7 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		if !contains(got, "ON CONFLICT") {
 			t.Errorf("PostgreSQL InsertModel() should use ON CONFLICT")
 		}
-		// Verify it has 21 placeholders (18 columns + kind + the two
+		// Verify it has 20 placeholders (17 columns + kind + the two
 		// group columns members_json / shadow_model_id persisted via
 		// migration 031 — load-balance-groups / P1.4).
 		// Phase 1 M-1 contract: the INSERT writes BOTH credentials_json AND
@@ -237,9 +237,10 @@ func TestQueryBuilder_InsertModel(t *testing.T) {
 		// to 18 in this statement. See technical-analysis.md §API Contract
 		// store-layer write-path and Round-2 reviewer punch-list #12.
 		// Ship-blocker fix 2026-10-06: kind grew it to 19; migration 031
-		// grew it to 21.
+		// grew it to 21; wi-7769a812 part 3 retired
+		// exclude_from_ultimate_switching, bringing it to 20.
 		if countOccurrences(got, "$") != 20 {
-			t.Errorf("PostgreSQL InsertModel() should have 21 placeholders (18 cols + kind + 2 group cols), got: %d", countOccurrences(got, "$"))
+			t.Errorf("PostgreSQL InsertModel() should have 20 placeholders (17 cols + kind + 2 group cols), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
@@ -256,13 +257,14 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "UPDATE models SET") {
 			t.Errorf("SQLite UpdateModel() should use UPDATE models SET")
 		}
-		// Verify it has 21 ? placeholders (18 SET columns incl. kind
+		// Verify it has 20 ? placeholders (19 SET columns incl. kind
 		// + the two group columns + WHERE id = ?). M-1 shadow adds
 		// credential_id alongside credentials_json in the same UPDATE
 		// statement; migration 031 (load-balance-groups / P1.4) adds
-		// members_json + shadow_model_id as SET columns 19-20.
+		// members_json + shadow_model_id as SET columns 18-19;
+		// wi-7769a812 part 3 retired exclude_from_ultimate_switching.
 		if countOccurrences(got, "?") != 20 {
-			t.Errorf("SQLite UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
+			t.Errorf("SQLite UpdateModel() should have 20 placeholders (19 SET cols + WHERE id), got: %d", countOccurrences(got, "?"))
 		}
 	})
 
@@ -273,10 +275,11 @@ func TestQueryBuilder_UpdateModel(t *testing.T) {
 		if !contains(got, "$1") || !contains(got, "$18") {
 			t.Errorf("PostgreSQL UpdateModel() should use $N placeholders, got: %v", got)
 		}
-		// Verify it has 21 placeholders (20 SET columns incl. kind + the two
-		// group columns + WHERE id = $21 — migration 031, P1.4)
+		// Verify it has 20 placeholders (19 SET columns incl. kind + the two
+		// group columns + WHERE id = $20 — migration 031, P1.4;
+		// wi-7769a812 part 3 retired exclude_from_ultimate_switching)
 		if countOccurrences(got, "$") != 20 {
-			t.Errorf("PostgreSQL UpdateModel() should have 21 placeholders (20 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
+			t.Errorf("PostgreSQL UpdateModel() should have 20 placeholders (19 SET cols + WHERE id), got: %d", countOccurrences(got, "$"))
 		}
 	})
 }
