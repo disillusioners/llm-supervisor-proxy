@@ -1,17 +1,23 @@
 package database
 
 // wi-7769a812 part 2 / USER RULING D3 — the skip-cache-aware group
-// member selection (the Phase-0 A2 credential-blind-selection fix):
+// member selection, REWORKED by part 3 / ORDERING-NOT-FILTERING
+// (CRITICAL-FIX 73e3bd0): health state reaches selection ONLY through
+// memberDemotionExpiry (the ordering key — marks DEMOTE a candidate
+// to the tail, soonest-expiring first, and never remove it):
 //
-//	1. HEALTH-AWARE SELECTION: a member whose (credential, model)
-//	   upstream is skip-marked is excluded from selection while
-//	   unmarked alternatives exist (also provider-wide walls).
-//	2. DEGRADATION: when EVERY member is marked, the cache is an
-//	   OPTIMIZER, never an availability gate — the rewrite serves ONE
-//	   honest attempt against the SOONEST-EXPIRING mark instead of
-//	   failing the group as empty-at-runtime.
-//	3. EXPIRY: a mark past its TTL stops skipping — selection
-//	   behavior is byte-identical to pre-part-2 again.
+//	1. ORDERING: a member whose (credential|provider, model) upstream
+//	   is skip-marked is DEMOTED behind unmarked candidates (never
+//	   excluded — the part-2 "excluded while unmarked alternatives
+//	   exist" filtering predicate is RETIRED; it was the incident's
+//	   root cause).
+//	2. ALL-MARKED: every candidate benched ⇒ the sweep serves the
+//	   SOONEST-expiring demoted head — the cache is an OPTIMIZER,
+//	   never an availability gate; the group never fails as
+//	   empty-at-runtime because of marks.
+//	3. EXPIRY: a mark past its TTL stops benching — the member returns
+//	   to the unbenched order, selection behavior byte-identical to
+//	   pre-part-2 again.
 //	4. UNWIRED: a manager without SetSkipCache keeps the exact
 //	   pre-part-2 selection (nil-cache degradation).
 
@@ -128,11 +134,22 @@ func TestGroup_SkipCache_TTLExpiryRestoresSelection(t *testing.T) {
 	if got := pickOf(t, mgr, "conv-live"); got != "coding-alt" {
 		t.Fatalf("live mark: pick = %q, want coding-alt", got)
 	}
+	// CRITICAL-FIX item 8 — assert the mark through the REAL ordering
+	// seam, not the mark-blind shape predicate: while LIVE, the mark
+	// must bench (demote) the member via memberDemotionExpiry.
+	if _, benched := mgr.memberDemotionExpiry("coding-group", mgr.GetModelNative("coding")); !benched {
+		t.Fatal("pre-expiry sanity: live mark must bench the member (memberDemotionExpiry ok=true) — the ordering seam must see the mark")
+	}
 	time.Sleep(50 * time.Millisecond)
 
 	row := mgr.GetModelNative("coding")
-	if !mgr.isServableGroupMember(row) {
-		t.Fatal("expired mark must restore servability (the cache is an optimizer with a TTL, not a permanent gate)")
+	// CRITICAL-FIX item 8: isServableGroupMember is the mark-blind
+	// Am28 SHAPE predicate under ordering-not-filtering — asserting
+	// servability through it passed for the wrong reason (true even
+	// with the mark live). The real seam is memberDemotionExpiry: the
+	// expired mark must stop BENCHING the member.
+	if _, benched := mgr.memberDemotionExpiry("coding-group", row); benched {
+		t.Fatal("expired mark must stop benching the member (memberDemotionExpiry ok=false — the cache is an optimizer with a TTL, not a permanent gate)")
 	}
 	// With the wall gone, BOTH members are servable — the sticky pick
 	// is weight-random again, so only assert it is a member.
@@ -196,17 +213,30 @@ func TestGroup_SkipCache_ProviderMarkDoesNotWallSibling(t *testing.T) {
 		t.Fatalf("AddModel(dual-group): %v", err)
 	}
 
-	// Mark the WHOLE provider (openai) at provider scope. Under current
-	// (filtering) semantics isServableGroupMember returns false (walled).
-	// Under desired (ordering-only) semantics the member stays servable
-	// because it still has upstream identity (marks order, never filter).
+	// Mark the WHOLE provider (openai) at provider scope. Under the
+	// retired (filtering) semantics the member vanished from the
+	// candidate set; under ordering-not-filtering the mark must reach
+	// the REAL ordering seam — the member is DEMOTED (benched with a
+	// live expiry), never removed.
 	cache.Mark(skipcache.ScopeProvider, "openai", "dual-model", time.Minute)
 
 	row := mgr.GetModelNative("dual")
 	if row == nil {
 		t.Fatal("dual row missing")
 	}
+	// CRITICAL-FIX item 8: assert the mark through memberDemotionExpiry
+	// — the provider mark must BENCH the member (the ordering seam sees
+	// it and sorts it to the tail). Asserting only isServableGroupMember
+	// here passed for the wrong reason: that predicate is mark-blind by
+	// design (shape gate), so it was true regardless of the mark.
+	if until, benched := mgr.memberDemotionExpiry("dual-group", row); !benched {
+		t.Fatal("T5 RED: provider mark never reached the ordering seam — the member must be DEMOTED (memberDemotionExpiry ok=true), not invisible to it")
+	} else if !until.After(time.Now()) {
+		t.Fatalf("T5 RED: benching expiry %v is not in the future — mark not honored as a live demotion", until)
+	}
+	// ...and the shape predicate stays TRUE: a marked member is a
+	// demoted CANDIDATE, never a filtered one (ordering-never-filtering).
 	if !mgr.isServableGroupMember(row) {
-		t.Fatalf("T5 RED: provider-marked member reported unservable — marks must order, never filter")
+		t.Fatal("T5 RED: provider-marked member reported unservable — marks must order, never filter")
 	}
 }

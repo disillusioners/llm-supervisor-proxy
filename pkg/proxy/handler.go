@@ -906,14 +906,18 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			// WIN-CLEAR (wi-7769a812 part 3): the winner's identity is
 			// proven healthy — clear its own live skip marks
 			// ((credential, wire-model) + (provider, wire-model)) and
-			// its grouplb member-cooldown row. The incident's
+			// ITS OWN grouplb member-cooldown row — keyed by the
+			// WINNER's modelList identity (winner.modelID), never
+			// groupPick.MemberID: on a chain-entry win the picked head
+			// FAILED this request and its cooldown must survive
+			// (CRITICAL-FIX part 3 review, item 4). The incident's
 			// companion defect: agentic-go WON while its marks stayed
 			// live, so every later request still benched it.
 			winnerWireModel := winner.resolved.InternalModel
 			if winnerWireModel == "" {
 				winnerWireModel = winner.modelID
 			}
-			h.clearWinnerUpstreamSkip(&rc.conf, rc.groupPick, winner.resolved.CredentialID, winner.resolved.Provider, winnerWireModel)
+			h.clearWinnerUpstreamSkip(&rc.conf, rc.groupPick, winner.resolved.CredentialID, winner.resolved.Provider, winnerWireModel, winner.modelID)
 			defer func() {
 				if winner.cancel != nil {
 					winner.cancel()
@@ -1049,16 +1053,17 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // retry-after log line preserves existing behavior for the
 // default-pool re-entry.
 //
-// wi-7769a812 part 3 — ORDERING-NOT-FILTERING (supersedes the part-2
-// D3 wording above): the skip cache is ORDERING, never a gate — marks
-// demote candidates to the tail (soonest-expiring first) and never
-// remove them; the rewrite (pickServableGroupMember) is the single
-// ordering authority for BOTH the offer and the rebuild, so they can
-// no longer diverge. Within-request: a member that already failed
-// THIS request stays excluded (groupTriedMembers — a TRUE exclusion);
-// cross-request marks only demote. The member exclusion window handed
-// to the engine on a genuine failure remains the CONFIG-OWNED
-// skip-cache TTL.
+// wi-7769a812 part 3 — ORDERING-NOT-FILTERING (the governing
+// semantics of this whole function, superseding the part-2 D3
+// mode-switch cascade): the skip cache is ORDERING, never a gate —
+// marks demote candidates to the tail (soonest-expiring first) and
+// never remove them; the rewrite (pickServableGroupMember) is the
+// single ordering authority for BOTH the offer and the rebuild, so
+// they can no longer diverge. Within-request: a member that already
+// failed THIS request stays excluded (groupTriedMembers — a TRUE
+// exclusion); cross-request marks only demote. The member exclusion
+// window handed to the engine on a genuine failure remains the
+// CONFIG-OWNED skip-cache TTL.
 func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {

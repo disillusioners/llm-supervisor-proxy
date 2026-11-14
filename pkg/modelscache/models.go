@@ -1060,6 +1060,30 @@ func (c *CachedModelsConfig) ExcludeGroupMember(groupID, conversationKey, member
 	return "", "", false
 }
 
+// ClearGroupMemberCooldown forwards the manager-side WIN-CLEAR seam
+// (73e3bd0) to the inner manager's grouplb engine: a member that just
+// WON a race is by definition servable, so its exclusion row must not
+// outlive the win. The method deliberately lives OUTSIDE
+// models.GroupRewriter (handler_helpers.go asserts it structurally —
+// the OPTIONAL-seam shape keeps the ~11 test fakes and the JSON
+// backend valid), so this forward mirrors that same structural
+// assertion: the decorator satisfies it, backends without the
+// capability never clear.
+//
+// CRITICAL-FIX (part 3 review, Critical 1): production
+// conf.ModelsConfig is *CachedModelsConfig (CACHE_LAYER_ENABLED
+// default ON — cmd/main.go), and without this forward the handler's
+// dynamic assertion failed SILENTLY: winning members stayed
+// engine-cooled/demoted up to TTL while every raw-manager repro test
+// stayed green (the modelscache-decorator-forward-trap, exact shape).
+func (c *CachedModelsConfig) ClearGroupMemberCooldown(groupID, memberID string) {
+	if gcm, ok := c.inner.(interface {
+		ClearGroupMemberCooldown(groupID, memberID string)
+	}); ok {
+		gcm.ClearGroupMemberCooldown(groupID, memberID)
+	}
+}
+
 // GetModelNative serves the load-balance-groups Am22 L1 direct-ID
 // lookup (claims BYPASSED) FROM THE CACHE.
 //

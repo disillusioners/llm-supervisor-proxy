@@ -330,9 +330,13 @@ func memberWireModel(row *models.ModelConfig) string {
 }
 
 // memberSoonestSkipExpiry returns the earliest live skip-cache expiry
-// across the member's upstream identities (the D3 degradation anchor:
-// ONE honest attempt against the soonest-expiring mark). ok=false
-// when the member has no live marks (or the cache is unwired).
+// across the member's upstream identities — one input to
+// memberDemotionExpiry's ordering key: the member's soonest live mark
+// sorts it to the demoted bucket's tail head (ORDERING-NOT-FILTERING;
+// the part-2 "D3 degradation anchor: ONE honest attempt" framing is
+// retired — there is no special degrade mode, only the ordering
+// sweep). ok=false when the member has no live marks (or the cache is
+// unwired).
 func (m *ModelsManager) memberSoonestSkipExpiry(row *models.ModelConfig) (time.Time, bool) {
 	if m.skipCache == nil || row == nil || len(row.Credentials) == 0 {
 		return time.Time{}, false
