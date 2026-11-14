@@ -587,6 +587,18 @@ loop:
 
 			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 			if success {
+				// WIN-CLEAR (wi-7769a812 part 3): the winning identity
+				// is proven healthy — clear its own live skip marks and
+				// ITS OWN grouplb member-cooldown row — keyed by the
+				// WINNER's modelList identity (currentModel, the walk
+				// entry that just won), never groupPick.MemberID: when
+				// a chain entry wins, the picked head FAILED this
+				// request and its cooldown must survive
+				// (CRITICAL-FIX part 3 review, item 4 — mirror of the
+				// OpenAI-lane hook; both lanes funnel through
+				// clearWinnerUpstreamSkip). agentic-go WON at 12:49:06
+				// while its marks stayed live — that must not recur.
+				h.clearWinnerUpstreamSkip(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel, currentModel)
 				return
 			}
 
@@ -656,9 +668,29 @@ loop:
 		if arc.groupPick != nil &&
 			!arc.payloadCommitted &&
 			arc.groupAdvances < models.MaxGroupMembers &&
-			!memberAdvanceBlocked(classifyAnthropicFailure(arc)) &&
-			h.tryGroupReentryAnthropic(arc) {
-			continue loop
+			!memberAdvanceBlocked(classifyAnthropicFailure(arc)) {
+			// F3 (CRITICAL-FIX part 3 review, item 3): harvest THIS
+			// walk's attempted set into the within-request tried-set,
+			// mirroring the OpenAI lane's coordinator.AttemptedModelIDs
+			// union (handler.go, winner==nil arm). The walk body above
+			// records nothing, so a member attempted as ANOTHER
+			// member's chain entry was invisible to the tried-set and
+			// could be re-offered as a member head by the re-entry
+			// below — the double-run class. Reaching this gate means
+			// the inner loop exhausted arc.modelList (a break exits
+			// before here), so every current entry — member head AND
+			// chain entries — was attempted THIS request. Non-member
+			// entries are inert here: the set is only consulted
+			// against group-member offers.
+			if arc.groupTriedMembers == nil {
+				arc.groupTriedMembers = make(map[string]bool)
+			}
+			for _, attemptedModel := range arc.modelList {
+				arc.groupTriedMembers[attemptedModel] = true
+			}
+			if h.tryGroupReentryAnthropic(arc) {
+				continue loop
+			}
 		}
 		break
 	}
@@ -2551,6 +2583,12 @@ func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
 // wire-model) and (provider, wire-model) pairs for the config-owned
 // TTL. No-op when the cache is unwired or the attempt failed before
 // resolving an upstream identity.
+//
+//	ORDERING-NOT-FILTERING DOCTRINE (part 3 supersedes the D3
+//	skip/degrade wording): the cache is an optimization, not the
+//	truth: it may reorder candidates, never exclude them — a marked
+//	identity is DEMOTED (soonest-expiring first), never invisible,
+//	and a WIN clears its own marks (clearWinnerUpstreamSkip).
 func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext) {
 	if arc == nil || arc.conf.UpstreamSkipCache == nil {
 		return

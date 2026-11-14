@@ -1143,21 +1143,30 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 		t.Fatalf("GAP-1: pick = %q, want coding-third (the backup)", pick2)
 	}
 
-	// (3a) every member COOLING → RUNTIME DEGRADATION degrades
-	// gracefully (the v1 availability ruling re-serves the
-	// soonest-expiring backup; the F1 ruling keeps cooling
-	// graceful and reserves "loud" for config breakage).
+	// (3a) every member COOLING → ORDERING, not filtering: the cooling
+	// defaults are DEMOTED candidates, not dead. The sweep's demoted
+	// head is the SOONEST-expiring mark (ties: configured order) —
+	// "coding" was excluded first, so its cooldown recovers first and
+	// it serves, pool=default. The v1 re-serve-the-backup shape is
+	// superseded: a merely-COOLING default is never dead while it is
+	// base-servable.
 	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
 	if !ok3 {
-		t.Fatalf("GAP-1/F1: an all-cooling pool degrades gracefully (ok=true), got (%q, %q, false)", pick3, pool3)
+		t.Fatalf("C1 rebase: an all-cooling group still has DEMOTED candidates (ok=true), got (%q, %q, false)", pick3, pool3)
 	}
-	if pool3 != models.PoolBackup || pick3 != "coding-third" {
-		t.Fatalf("GAP-1/F1: all-cooling fallback = (%q, %q), want (coding-third, backup)", pick3, pool3)
+	if pool3 != models.PoolDefault {
+		t.Fatalf("C1 rebase: all-cooling head = pool %q, want default (cooling defaults are demoted, not dead)", pool3)
+	}
+	if pick3 != "coding" {
+		t.Fatalf("C1 rebase: all-cooling head = %q, want coding (soonest-expiring demoted default; ties break by configured order)", pick3)
 	}
 
 	// (3b) CONFIG BREAKAGE — the backup row is Am28-unservable
-	// (disabled between write and request) ⇒ the failure is REAL
-	// (terminal ok=false).
+	// (disabled between write and request). Terminal requires NO
+	// base-servable member: the cooling defaults are still base-
+	// servable, so they still serve (demoted, pool=default). The
+	// failure would only be terminal if every member failed the Am28
+	// base check.
 	row := mgr.GetModelNative("coding-third")
 	if row == nil {
 		t.Fatal("GAP-1: coding-third row missing")
@@ -1167,7 +1176,10 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 		t.Fatalf("disable backup: %v", err)
 	}
 	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
-	if ok4 {
-		t.Fatalf("GAP-1: with every default excluded AND the backup unservable the failure must be terminal, got (%q, %q, true)", pick4, pool4)
+	if !ok4 {
+		t.Fatalf("C1 rebase: with the backup disabled the cooling defaults are still base-servable candidates — not terminal, got (%q, %q, false)", pick4, pool4)
+	}
+	if pool4 != models.PoolDefault || pick4 == "coding-third" {
+		t.Fatalf("C1 rebase: serve = (%q, %q), want a demoted default (the disabled backup must never serve)", pick4, pool4)
 	}
 }

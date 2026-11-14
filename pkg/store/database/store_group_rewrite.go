@@ -22,6 +22,7 @@ package database
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,28 +86,47 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 }
 
 // pickServableGroupMember picks the sticky member for the group and
-// re-validates it (Am28). Stale picks (deleted / disabled / wrong
-// kind between group write and request) are skip-and-reselected: the
-// stale member is excluded (default cooldown) and the next healthy
-// member picked. Bounded by the member count; exhaustion of the
-// default pool falls through to the BACKUP pool
-// (group-backup-members / D1); exhaustion of the backup pool
-// returns ok=false (empty-at-runtime group).
+// re-validates it (Am28 shape gates) — now under ORDERING-NOT-
+// FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE):
 //
-// Pool selection mirrors the engine partition: the default pool is
-// tried first; the backup pool is tried only when the default pool
-// has no servable member left. Returns the pool the served member
-// was drawn from ("default" | "backup") for D5 observability.
+//	The cache is an optimization, not the truth: it may reorder
+//	candidates, never exclude them.
 //
-// group-backup-members / D8: the engine's selection-time repair
-// (union-scoped existence check) is what detects a binding whose
-// member left the group; the repair signal is carried up to the
-// proxy (the `binding=stale` observability token). The default
-// pool's ErrNoMembers is treated as "the default pool is exhausted"
-// — NOT as a request failure — so the backup pool is consulted;
-// this is the defensive empty-default path (the all-defaults-
-// removed state is unreachable via the API — D2 blocks zero-default
-// writes — but the picker must not fail on it).
+// Four phases, one request:
+//
+//	Phase 1 — DEFAULT pool via engine offers (sticky binding /
+//	          weighted pick / all-cooling honest-attempt ruling, all
+//	          UNCHANGED engine semantics). Each offer is classified:
+//	          • base-stale (deleted / disabled / wrong kind) → genuine
+//	            Am28 exclusion — engine skip-and-reselect KEPT
+//	            (cooldown write is honest bookkeeping for a row that
+//	            cannot serve at all);
+//	          • skip-marked or engine-cooling → DEMOTED into the
+//	            bucket — NO cooldown write (a demotion must not
+//	            poison the next re-entry's engine view — that write
+//	            fed the incident's marked-member bounce);
+//	          • otherwise → SERVED (head of the order).
+//	Phase 2 — BACKUP pool: identical classification via the backup
+//	          picker.
+//	Phase 3 — COMPLETENESS sweep: every ref not yet classified is
+//	          enumerated directly and demoted with its earliest live
+//	          expiry (skip mark ∨ engine cooldown; a healthy-but-
+//	          unoffered member anchors at "now"). This is what makes
+//	          the demoted list END-TO-END: nothing servable can be
+//	          left undiscovered behind the engine's offer loop.
+//	Phase 4 — the demoted sweep EXECUTES: sorted by (expiry asc, ref
+//	          order asc) the head is SERVED — flows into the race
+//	          list like any other pick (the superseded D3 "degrade"
+//	          picked-then-dropped; this head is a full candidate).
+//
+// A request therefore fails ONLY after every base-servable member
+// across BOTH pools has had its honest attempt ordered (the actual
+// attempts happen in the race/re-entry cascade the rewrite feeds).
+// supersede note: the C1 default-skip pre-check and the D3
+// degradeToSoonestExpiry special case are GONE — both were filters;
+// the ordering above preserves their intent (healthy backups are
+// served before benched defaults because benched defaults sit in the
+// bucket behind every unbenched candidate).
 func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conversationKey string) (memberID string, newlyBound bool, pool string, staleRepaired bool, ok bool) {
 	if m.groupEngine == nil {
 		return "", false, "", false, false
@@ -117,111 +137,148 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 		m.groupEngine.OnGroupChanged(group.ID, refs)
 	}
 
-	// C1: when a backup pool exists AND every default is cooling, the
-	// default pool is exhausted for this run — the backup pool takes
-	// over. Without this the rebuild would re-serve a cooling
-	// default (the v1 all-cooling availability ruling) and undo the
-	// re-entry cascade in ExcludeGroupMember. Backup-less groups
-	// keep the v1 ruling byte-identically (D7).
-	defaultPoolExhausted := m.groupEngine.HasBackupPool(group.ID) && !m.groupEngine.DefaultPoolHealthy(group.ID)
+	idxOf := make(map[string]int, len(refs))
+	for i, r := range refs {
+		idxOf[r.ModelID] = i
+	}
+	var bucket []demotedMember
+	seen := make(map[string]bool, len(refs))
 
-	// Pool 1: defaults. +1 defensive iteration over the default
-	// member count bounds the loop even when every pick comes back
-	// stale. All-defaults exhausted ⇒ fall through to the backup
-	// loop. wi-7769a812 part 2: the re-validation predicate is
-	// CACHE-AWARE — a member whose upstreams are all skip-marked
-	// (limit-class failures, D3) is skipped exactly like a stale one,
-	// so selection becomes health-aware while unmarked alternatives
-	// exist (the A2 fix).
+	// Phase 1: default pool via engine offers.
 	defaults := defaultRefs(refs)
-	for attempt := 0; !defaultPoolExhausted && attempt <= len(defaults); attempt++ {
+	for attempt := 0; attempt <= len(defaults); attempt++ {
 		pick, newly, repaired, err := m.groupEngine.GetOrSelectWithRepair(group.ID, conversationKey)
 		if err != nil {
-			// D8: the default pool has no member at all (empty
-			// default pool / refs invalidated under us) ⇒ the
-			// default pool is EXHAUSTED. Fall through to the
-			// backup pool instead of failing the request.
+			// D8: empty/invalid default pool — fall through to the
+			// backup sweep (NOT a request failure).
 			break
 		}
-		if m.isServableGroupMember(m.GetModelNative(pick)) {
+		if seen[pick] {
+			// Engine re-offered a classified member (its distinct-offer
+			// space is spent — the all-cooling ruling is deterministic).
+			// Stop asking rather than spinning to the loop bound.
+			break
+		}
+		seen[pick] = true
+		row := m.GetModelNative(pick)
+		if !isServableGroupMemberBase(row) {
+			m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
+			continue
+		}
+		expiry, benched := m.memberDemotionExpiry(group.ID, row)
+		if !benched {
 			return pick, newly, models.PoolDefault, repaired, true
 		}
-		// Am28: stale — skip-and-reselect (cools the stale member;
-		// rebinds the conversation to the next healthy member).
-		// wi-7769a812 part 2: a cache-marked (unhealthy) member lands
-		// here too; the exclusion window stays the engine default —
-		// the SKIP CACHE is the health authority, this write is
-		// exclusion-set bookkeeping only.
-		m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
+		bucket = append(bucket, demotedMember{memberID: pick, expiry: expiry, idx: idxOf[pick], pool: models.PoolDefault})
+		m.groupEngine.RebindPast(group.ID, conversationKey, seenKeys(seen))
 	}
 
-	// Pool 2: backups (group-backup-members / D1). Tries each
-	// backup member in turn; exhausts the BACKUP pool only after
-	// every backup member is stale/excluded/skip-marked. Returns
-	// ok=false when even the backup pool is exhausted — OR falls
-	// through to the D3 degradation below.
+	// Phase 2: backup pool — same shape.
 	backups := backupRefs(refs)
 	for attempt := 0; attempt <= len(backups); attempt++ {
 		pick, newly, repaired, err := m.groupEngine.PickBackupMemberWithRepair(group.ID, conversationKey)
 		if err != nil {
-			return m.degradeToSoonestExpiry(group, refs)
+			break // no backups / invalid refs → the bucket decides
 		}
-		if m.isServableGroupMember(m.GetModelNative(pick)) {
+		if seen[pick] {
+			break
+		}
+		seen[pick] = true
+		row := m.GetModelNative(pick)
+		if !isServableGroupMemberBase(row) {
+			m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
+			continue
+		}
+		expiry, benched := m.memberDemotionExpiry(group.ID, row)
+		if !benched {
 			if m.groupEngine.HasBackupPool(group.ID) {
 				log.Printf("[grouplb] group=%s pool=backup member=%s — all default members exhausted for this run", group.ID, pick)
 			}
 			return pick, newly, models.PoolBackup, repaired, true
 		}
-		m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
+		bucket = append(bucket, demotedMember{memberID: pick, expiry: expiry, idx: idxOf[pick], pool: models.PoolBackup})
+		m.groupEngine.RebindBackupPast(group.ID, conversationKey, seenKeys(seen))
 	}
-	return m.degradeToSoonestExpiry(group, refs)
-}
 
-// degradeToSoonestExpiry (wi-7769a812 part 2 / USER RULING D3 — the
-// anti-availability-gate guard). When EVERY member's upstreams are
-// skip-marked (a provider-wide wall / all-credentials-walled group),
-// the cache-aware servability above would exhaust both pools and —
-// pre-part-2 — surface an empty-at-runtime group (Am28 FailedGroupID)
-// for a group whose members are merely HEALTH-MARKED, not gone. The
-// cache is an OPTIMIZER, NEVER an availability gate: this degradation
-// picks the member whose soonest skip mark expires FIRST (the most
-// likely-recovered upstream) and serves ONE honest attempt against
-// it. Members that fail the BASE Am28 checks (deleted / disabled /
-// wrong kind) are never degradation candidates — only health marks
-// are bypassed here.
-func (m *ModelsManager) degradeToSoonestExpiry(group *models.ModelConfig, refs []grouplb.MemberRef) (string, bool, string, bool, bool) {
-	var bestID string
-	var bestExpiry time.Time
-	var bestBackup bool
-	found := false
+	// Phase 3: completeness sweep — classify every ref the engine's
+	// offer loop never surfaced (the all-cooling ruling re-offers only
+	// its soonest member, so untouched members MUST be enumerated
+	// directly or they would stay invisible — the incident's trap).
 	for _, r := range refs {
+		if seen[r.ModelID] {
+			continue
+		}
 		row := m.GetModelNative(r.ModelID)
 		if !isServableGroupMemberBase(row) {
 			continue
 		}
-		expiry, ok := m.memberSoonestSkipExpiry(row)
-		if !ok {
-			// An unmarked member reaching this point means the engine
-			// refused it for a non-health reason (excluded this run);
-			// still a valid one-honest-attempt candidate — treat its
-			// expiry as "now" so a genuinely-marked member wins the
-			// anchor only when nothing unmarked remains.
+		expiry, benched := m.memberDemotionExpiry(group.ID, row)
+		if !benched {
+			// Healthy but never offered (defensive — a fresh binding
+			// the rebind kept pointing away from). Most-recovered
+			// anchor: "now" sorts it to the bucket head.
 			expiry = time.Now()
-			ok = true
 		}
-		if !found || expiry.Before(bestExpiry) {
-			bestID, bestExpiry, bestBackup, found = r.ModelID, expiry, r.BackupOnly, true
+		poolTag := models.PoolDefault
+		if r.BackupOnly {
+			poolTag = models.PoolBackup
 		}
+		bucket = append(bucket, demotedMember{memberID: r.ModelID, expiry: expiry, idx: r.Position, pool: poolTag})
 	}
-	if !found {
-		return "", false, "", false, false
+
+	// Phase 4: the demoted sweep EXECUTES — head = soonest-expiring
+	// mark (ties: configured member order). This pick is a FULL
+	// candidate: it flows into the race list end-to-end.
+	if len(bucket) > 0 {
+		sort.SliceStable(bucket, func(i, j int) bool {
+			if !bucket[i].expiry.Equal(bucket[j].expiry) {
+				return bucket[i].expiry.Before(bucket[j].expiry)
+			}
+			return bucket[i].idx < bucket[j].idx
+		})
+		head := bucket[0]
+		log.Printf("[grouplb] group=%s pool=%s member=%s — no unbenched candidate; serving soonest-expiring demoted head (ordering-not-filtering; expiry in %s)",
+			group.ID, head.pool, head.memberID, time.Until(head.expiry).Round(time.Second))
+		return head.memberID, false, head.pool, false, true
 	}
-	if bestBackup {
-		log.Printf("[grouplb] group=%s pool=backup member=%s — all upstreams skip-marked (D3 degradation: ONE honest attempt against the soonest-expiring mark)", group.ID, bestID)
-		return bestID, false, models.PoolBackup, false, true
+	return "", false, "", false, false
+}
+
+// demotedMember is one base-servable member the ordering sweep
+// benched (skip-marked and/or engine-cooling): a real candidate,
+// demoted — never excluded (ordering-not-filtering doctrine). idx is
+// the member's configured position — the deterministic tie-break.
+type demotedMember struct {
+	memberID string
+	expiry   time.Time
+	idx      int
+	pool     string
+}
+
+// seenKeys extracts the classified-member ids for the RebindPast
+// exclusion sets.
+func seenKeys(seen map[string]bool) []string {
+	keys := make([]string, 0, len(seen))
+	for id := range seen {
+		keys = append(keys, id)
 	}
-	log.Printf("[grouplb] group=%s member=%s — all upstreams skip-marked (D3 degradation: ONE honest attempt against the soonest-expiring mark)", group.ID, bestID)
-	return bestID, false, models.PoolDefault, false, true
+	return keys
+}
+
+// memberDemotionExpiry returns the member's earliest live benching
+// expiry — the soonest skip mark across its upstream identities and
+// its grouplb engine cooldown, whichever recovers first. ok=false
+// when the member is neither skip-marked nor cooling (an unbenched
+// candidate).
+func (m *ModelsManager) memberDemotionExpiry(groupID string, row *models.ModelConfig) (time.Time, bool) {
+	if row == nil {
+		return time.Time{}, false
+	}
+	best, ok := m.memberSoonestSkipExpiry(row)
+	if cdUntil, cooling := m.groupEngine.MemberCooldownUntil(groupID, row.ID); cooling && (!ok || cdUntil.Before(best)) {
+		best, ok = cdUntil, true
+	}
+	return best, ok
 }
 
 // isServableGroupMemberBase is the Am28 re-validation predicate: the
@@ -243,37 +300,23 @@ func isServableGroupMemberBase(row *models.ModelConfig) bool {
 	}
 }
 
-// isServableGroupMember (wi-7769a812 part 2 / USER RULING D3) is the
-// CACHE-AWARE re-validation predicate: the base Am28 checks AND at
-// least one UNMARKED upstream. The member's upstream identities are
-// its credential refs — a member is skippable when EVERY credential
-// is marked for the member's wire model, either directly
-// (credential, model) or provider-wide ((provider, model) — every
-// cred of the provider marked skips every member on that provider).
-// Credential-less rows (legacy) have no markable upstream identity
-// and stay base-servable. A nil cache (feature unwired) degrades to
-// the base checks — byte-identical pre-part-2 behavior.
+// isServableGroupMember is the CANDIDATE predicate (wi-7769a812
+// part 3 — P0 fix): the row passes the BASE Am28 shape gates (exists,
+// enabled, chat-kind) — full stop.
+//
+//	ORDERING-NOT-FILTERING DOCTRINE: the cache is an optimization,
+//	not the truth: it may reorder candidates, never exclude them.
+//
+// The part-2 cache-aware arms (every-credential-marked ⇒ member
+// invisible) are RETIRED — that predicate converted a health MARK
+// into member NON-EXISTENCE and is the root cause of the incident
+// (two servable members hidden behind credential-scoped marks).
+// Health state now reaches selection only through
+// memberDemotionExpiry (the ordering key): a marked member is DEMOTED
+// to the tail of the candidate order, never removed from it. Nil row:
+// false (nothing to serve).
 func (m *ModelsManager) isServableGroupMember(row *models.ModelConfig) bool {
-	if !isServableGroupMemberBase(row) {
-		return false
-	}
-	if m.skipCache == nil || len(row.Credentials) == 0 {
-		return true
-	}
-	model := memberWireModel(row)
-	for _, ref := range row.Credentials {
-		if m.skipCache.Marked(skipcache.ScopeCredential, ref.CredentialID, model) {
-			continue
-		}
-		cred := m.GetCredential(ref.CredentialID)
-		if cred == nil || cred.Provider == "" {
-			return true // no provider identity to wall — servable
-		}
-		if !m.skipCache.Marked(skipcache.ScopeProvider, strings.ToLower(cred.Provider), model) {
-			return true // one healthy upstream — member servable
-		}
-	}
-	return false // every upstream walled
+	return isServableGroupMemberBase(row)
 }
 
 // memberWireModel is the skip-cache model key for a member row: the
@@ -287,9 +330,13 @@ func memberWireModel(row *models.ModelConfig) string {
 }
 
 // memberSoonestSkipExpiry returns the earliest live skip-cache expiry
-// across the member's upstream identities (the D3 degradation anchor:
-// ONE honest attempt against the soonest-expiring mark). ok=false
-// when the member has no live marks (or the cache is unwired).
+// across the member's upstream identities — one input to
+// memberDemotionExpiry's ordering key: the member's soonest live mark
+// sorts it to the demoted bucket's tail head (ORDERING-NOT-FILTERING;
+// the part-2 "D3 degradation anchor: ONE honest attempt" framing is
+// retired — there is no special degrade mode, only the ordering
+// sweep). ok=false when the member has no live marks (or the cache is
+// unwired).
 func (m *ModelsManager) memberSoonestSkipExpiry(row *models.ModelConfig) (time.Time, bool) {
 	if m.skipCache == nil || row == nil || len(row.Credentials) == 0 {
 		return time.Time{}, false
@@ -331,85 +378,67 @@ func backupRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
 
 // ExcludeGroupMember implements models.GroupRewriter (Am24): the
 // GROUP-level exclude-and-reselect fired on terminal member-pipeline
-// failure. ok=true means a member is available for the next
-// re-entry attempt; ("", "", false) means no alternative exists —
-// the failure is real. (wi-7769a812 part 2: the Am24 max-ONE
-// re-entry latch is retired — the PROXY bounds the member iteration
-// to N attempts for an N-member group; the engine's contract here is
-// unchanged: one exclude + one reselect per call.)
+// failure. ok=true means a member is available for the next re-entry
+// attempt; ("", "", false) means no alternative exists — the failure
+// is real. (wi-7769a812 part 2: the Am24 max-ONE re-entry latch is
+// retired — the PROXY bounds the member iteration to N attempts for
+// an N-member group.)
 //
-// group-backup-members / C1 + D5 — the cascade decision is
-// mode-aware:
-//
-//   - ReselectHealthy: a live default is available → serve it
-//     (PoolDefault).
-//   - ReselectSoonestExpiry (EVERY default is now cooling) WITH a
-//     backup pool: cascade to the backup pool (PoolBackup). Serving
-//     the soonest-expiring cooling default here would re-run the
-//     member that just failed and keep the backups dead on the
-//     terminal-failure seam — the C1 defect. Backup-less groups keep
-//     the v1 soonest-default re-serve byte-identically (D7).
-//   - ReselectSoonestExpiry WITHOUT a backup pool: serve the
-//     soonest-expiring default (v1 behavior, D7).
-//   - ReselectNone (default pool genuinely exhausted, or a
-//     single-member group): cascade to the backup pool; a
-//     single-member backup-less group therefore fails fast exactly
-//     as v1 did.
-//
-// The returned `pool` is "backup" only when the backup pool actually
-// served a member, so the proxy's D5 `pool=backup` annotation + the
-// D4 metering predicate flow unchanged.
-//
-// wi-7769a812 part 2 / USER RULING D3: the cooldown parameter is
-// CALLER-OWNED — the proxy passes the config-owned skip-cache TTL so
-// the member exclusion window derives from the same config key as
-// the upstream skip marks (one source of truth). <=0 keeps the
-// engine default (the Am28/stale and legacy callers).
+// wi-7769a812 part 3 — ORDERING-NOT-FILTERING rework (P0 fix). The
+// old mode-switch cascade (ReselectHealthy / SoonestExpiry+no-backup
+// D7 re-serve / C1 backup-cascade) offered candidates from a DIFFERENT
+// authority than the rebuild's rewrite: its backup cascade starved the
+// default pool (the C1 "all default members exhausted" seam — a
+// benched default could NEVER be offered back while any backup could
+// be picked), and its SoonestExpiry offers stored no binding, so the
+// rebuild re-served the OLD bound member — the incident's race-#2
+// mechanics. Now the offer IS the rewrite: exclude the failed member
+// (engine cooldown write — genuine-failure bookkeeping, cooldown
+// CALLER-OWNED per part 2 D3: the proxy passes the config-owned
+// skip-cache TTL), then let pickServableGroupMember — the SAME
+// ordering authority the rebuild uses — pick the head. Offer and
+// rebuild can no longer diverge: both are the four-phase ordering
+// sweep (unbenched members first, demoted soonest-expiring first,
+// every base-servable member of BOTH pools a real candidate). The
+// proxy's tried-set (F3) refuses re-offers of members that already
+// failed THIS request by excluding them through this same call, which
+// cools them and strictly advances the ordering head.
 func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (string, string, bool) {
 	if m.groupEngine == nil {
 		return "", "", false
 	}
-	pick, mode := m.groupEngine.ExcludeAndReselect(groupID, conversationKey, memberID, cooldown)
-
-	switch {
-	case mode == grouplb.ReselectHealthy && pick != "":
-		// A live default is available.
-		return pick, models.PoolDefault, true
-
-	case mode == grouplb.ReselectSoonestExpiry && pick != "" && !m.groupEngine.HasBackupPool(groupID):
-		// v1 all-cooling availability ruling — backup-less groups
-		// only (D7 byte-compat).
-		return pick, models.PoolDefault, true
-
-	default:
-		// C1: every default is cooling (SoonestExpiry) with a backup
-		// pool, OR the default pool is genuinely exhausted
-		// (ReselectNone). The backup pool takes over; if it cannot
-		// serve, the failure is real.
-		if bPick, ok := m.pickServableBackup(groupID, conversationKey); ok {
-			return bPick, models.PoolBackup, true
-		}
+	// (1) Honest exclusion of the failed member (genuine-failure
+	// bookkeeping — this write is DESIRED; the write the doctrine bans
+	// is cooling merely-MARKED picks inside the ordering sweep).
+	m.groupEngine.ExcludeAndReselect(groupID, conversationKey, memberID, cooldown)
+	// (2) The offer is the ordering sweep's head — same authority as
+	// the handler's rebuild.
+	group := m.GetModelNative(groupID)
+	if group == nil || !group.IsGroup() {
 		return "", "", false
 	}
+	pick, _, pool, _, ok := m.pickServableGroupMember(group, conversationKey)
+	if !ok || pick == "" {
+		return "", "", false
+	}
+	if pick == memberID {
+		// The ordering head IS the member that just failed terminally
+		// (single-servable-member groups, or every alternative base-
+		// stale) — no alternative exists; the failure is real (Am24).
+		return "", "", false
+	}
+	return pick, pool, true
 }
 
-// pickServableBackup resolves a servable BACKUP member for a re-entry
-// attempt (group-backup-members / C1): pick, validate at the Am28
-// predicate, and on a stale pick reselect once within the backup pool
-// (mirrors the rewrite loop's skip-and-reselect). Returns ("", false)
-// when no servable backup exists.
-func (m *ModelsManager) pickServableBackup(groupID, conversationKey string) (string, bool) {
-	bPick, _, err := m.groupEngine.PickBackupMember(groupID, conversationKey)
-	if err != nil || bPick == "" {
-		return "", false
+// ClearGroupMemberCooldown is the manager-side WIN-CLEAR seam: a
+// member that just WON a race is by definition servable, so its
+// grouplb exclusion row must not outlive the win. Consumed by the
+// proxy via an OPTIONAL interface assertion (the GroupRewriter
+// interface itself is untouched — the ~11 structural fakes stay
+// valid; backends without the capability simply never clear).
+func (m *ModelsManager) ClearGroupMemberCooldown(groupID, memberID string) {
+	if m == nil || m.groupEngine == nil {
+		return
 	}
-	if m.isServableGroupMember(m.GetModelNative(bPick)) {
-		return bPick, true
-	}
-	// Stale backup — reselect once within the backup pool.
-	replacement, mode := m.groupEngine.ExcludeAndBackupReselect(groupID, conversationKey, bPick, 0)
-	if replacement == "" || mode == grouplb.ReselectNone {
-		return "", false
-	}
-	return replacement, true
+	m.groupEngine.ClearCooldown(groupID, memberID)
 }

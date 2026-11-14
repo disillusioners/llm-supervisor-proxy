@@ -2069,10 +2069,15 @@ func (c *raceCoordinator) publishGroupFallback(eventType, fromMember, toMember, 
 //	                        every member on that provider)
 //
 // for the CONFIG-OWNED TTL (hot snapshot value; Clone normalizes to
-// the 60s default). The cache is an optimizer, never an availability
-// gate: selection consults it to SKIP while unmarked alternatives
-// exist and DEGRADES to one honest attempt against the soonest-
-// expiring mark when everything is walled.
+// the 60s default).
+//
+//	ORDERING-NOT-FILTERING DOCTRINE (part 3 supersedes the D3
+//	"skip-while-alternatives / degrade-to-soonest" wording): the
+//	cache is an optimization, not the truth: it may reorder
+//	candidates, never exclude them. Selection orders unmarked
+//	candidates first, then these marks soonest-expiring first; a
+//	marked member is a demoted candidate, never an invisible one.
+//	A WIN clears the winner's own marks (clearWinnerUpstreamSkip).
 //
 // Called from the Case-1 site with c.mu held (the _Locked suffix
 // documents the call discipline, not the cache's own lock).
@@ -2113,6 +2118,76 @@ func (c *raceCoordinator) FinalFailureReason() failureReason {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.lastFailReason
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F6 (wi-7769a812 part 3) — request-scoped tried-set persistence.
+//
+// Each group re-entry iteration constructs a FRESH coordinator; the
+// per-coordinator credential tried-set (triedCredIDs) and W3
+// single-shot flags die with it, so a fresh coordinator could re-spawn
+// a credential that 402'd seconds earlier under the previous
+// coordinator (the incident's race-#2 back-rotation onto
+// opendesign-flash). The race-retry loop now HARVESTS this state from
+// every failed coordinator and SEEDS it into the next — the tried-set
+// becomes request-scoped while staying coordinator-owned inside one
+// race. Mutated/read under c.mu like the fields they carry.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SeedRaceState pre-loads the coordinator's credential-layer tried
+// bookkeeping from the request-scoped harvest (F6). Nil maps: no-op.
+// Call once after construction, before Start.
+func (c *raceCoordinator) SeedRaceState(triedCredIDs, soonestExpiryByModel map[string]bool) {
+	if len(triedCredIDs) == 0 && len(soonestExpiryByModel) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range triedCredIDs {
+		c.triedCredIDs[id] = true
+	}
+	for m := range soonestExpiryByModel {
+		c.soonestExpiryAttemptedByModel[m] = true
+	}
+}
+
+// HarvestRaceState returns copies of the credential-layer tried-set
+// and W3 single-shot flags for the request-scoped hand-off (F6). Call
+// after the race resolved (manage() has exited — the maps are stable;
+// the lock guards against late executor bookkeeping reads).
+func (c *raceCoordinator) HarvestRaceState() (triedCredIDs, soonestExpiryByModel map[string]bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	tried := make(map[string]bool, len(c.triedCredIDs))
+	for id := range c.triedCredIDs {
+		tried[id] = true
+	}
+	soon := make(map[string]bool, len(c.soonestExpiryAttemptedByModel))
+	for m := range c.soonestExpiryAttemptedByModel {
+		soon[m] = true
+	}
+	return tried, soon
+}
+
+// AttemptedModelIDs returns the distinct upstream model ids this race
+// attempted (chain entries included) — the handler unions them into
+// the request's groupTriedMembers so the re-entry cannot re-offer a
+// member that already ran as a chain fallback of another member (the
+// incident's opendesign-flash double-run). Bounded by the chain
+// length; deduplicated, attempt order preserved.
+func (c *raceCoordinator) AttemptedModelIDs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seen := make(map[string]bool, len(c.requests))
+	out := make([]string, 0, len(c.requests))
+	for _, r := range c.requests {
+		if r == nil || seen[r.modelID] {
+			continue
+		}
+		seen[r.modelID] = true
+		out = append(out, r.modelID)
+	}
+	return out
 }
 
 // GetRequestStatuses (Phase 3 / Round 3c — S4): credFailover rows are

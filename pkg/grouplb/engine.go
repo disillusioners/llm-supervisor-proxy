@@ -1167,3 +1167,145 @@ func (e *Engine) ExcludeAndBackupReselect(
 	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
 	return pick, ReselectHealthy
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ordering-not-filtering seams (wi-7769a812 part 3 — P0 fix).
+//
+// Doctrine: the cache is an optimization, not the truth: it may
+// reorder candidates, never exclude them. These methods let the
+// manager's rewrite sweep ADVANCE past already-classified members
+// WITHOUT writing cooldown rows (a demotion must not poison the next
+// re-entry's engine view), and let a race WIN clear a member's
+// exclusion row (a member that just won is by definition servable).
+// The legacy ExcludeAndReselect / ExcludeAndBackupReselect semantics
+// (cooldown write + reselect) are UNCHANGED — they remain the
+// genuine-failure exclusion path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RebindPast advances the (groupID, conversationKey) DEFAULT-pool
+// binding past every member in excludeIDs — WITHOUT any cooldown
+// write. Used by the rewrite's ordering sweep after it classifies a
+// skip-marked or engine-cooling pick: the sweep must keep discovering
+// distinct members, but benching state must stay read-only (the mark
+// is the ordering authority; an engine cooldown write here would
+// poison the next re-entry). When the current binding points at a
+// member NOT in excludeIDs (still fresh), it is kept as-is. When no
+// non-excluded non-cooling member remains, the binding is left
+// untouched (the caller's seen-set terminates its sweep). Nil
+// receiver / unknown group: no-op.
+func (e *Engine) RebindPast(groupID, conversationKey string, excludeIDs []string) {
+	if e == nil {
+		return
+	}
+	now := time.Now()
+
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return
+	}
+	exclude := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		exclude[id] = true
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	// Keep a binding that still points somewhere fresh (B2 analog).
+	if conversationKey != "" {
+		if b, ok := st.bindings[conversationKey]; ok && !exclude[b.memberID] && memberInRefs(st.members, b.memberID) {
+			return
+		}
+	}
+	pick := st.pickHealthyExcludingLocked(now, st.selector, st.defaultMembers, exclude)
+	if pick == "" || conversationKey == "" {
+		return
+	}
+	if _, exists := st.bindings[conversationKey]; !exists {
+		st.bindingsCount++
+	}
+	st.bindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+}
+
+// RebindBackupPast is RebindPast for the BACKUP-pool binding map
+// (backupBindings / backupSelector / backupMembers). Same
+// no-cooldown-write discipline.
+func (e *Engine) RebindBackupPast(groupID, conversationKey string, excludeIDs []string) {
+	if e == nil {
+		return
+	}
+	now := time.Now()
+
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return
+	}
+	exclude := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		exclude[id] = true
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if conversationKey != "" {
+		if b, ok := st.backupBindings[conversationKey]; ok && !exclude[b.memberID] && memberInRefs(st.members, b.memberID) {
+			return
+		}
+	}
+	pick := st.pickHealthyExcludingLocked(now, st.backupSelector, st.backupMembers, exclude)
+	if pick == "" || conversationKey == "" {
+		return
+	}
+	if _, exists := st.backupBindings[conversationKey]; !exists {
+		st.backupBindingsCount++
+	}
+	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+}
+
+// ClearCooldown removes groupID's cooldown row for memberID — the
+// WIN-CLEAR seam: a member that just WON a race is by definition
+// servable, so its exclusion row must not outlive the win. Missing
+// row: no-op. Nil receiver / empty memberID: no-op. (Cooldowns are
+// shared across both pools — D1 — so one delete covers the member
+// wherever it was cooled from.)
+func (e *Engine) ClearCooldown(groupID, memberID string) {
+	if e == nil || memberID == "" {
+		return
+	}
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	delete(st.cooldowns, memberID)
+	st.mu.Unlock()
+}
+
+// MemberCooldownUntil reports groupID's live cooldown expiry for
+// memberID — the rewrite's ordering sweep reads it as the member's
+// demotion key (soonest cooldown = most likely recovered). ok=false
+// when the member is not currently cooling. Read-only; never writes.
+func (e *Engine) MemberCooldownUntil(groupID, memberID string) (time.Time, bool) {
+	if e == nil || memberID == "" {
+		return time.Time{}, false
+	}
+	e.mu.RLock()
+	st := e.groups[groupID]
+	e.mu.RUnlock()
+	if st == nil {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	until, ok := st.cooldowns[memberID]
+	if !ok || !until.After(now) {
+		return time.Time{}, false
+	}
+	return until, true
+}
