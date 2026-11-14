@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/loopdetection"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 )
 
@@ -82,6 +83,18 @@ type requestContext struct {
 	groupPick         *groupPickInfo
 	groupAdvances     int
 	groupTriedMembers map[string]bool
+
+	// F6 (wi-7769a812 part 3) — the credential-layer tried-set,
+	// REQUEST-SCOPED: each re-entry iteration constructs a FRESH race
+	// coordinator whose per-coordinator triedCredIDs /
+	// soonestExpiryAttemptedByModel start empty. Harvested from every
+	// failed coordinator and seeded into the next (SeedRaceState /
+	// HarvestRaceState), so a credential that 402'd under coordinator
+	// N cannot be re-spawned under coordinator N+1 (the incident's
+	// back-rotation onto a just-walled credential). Mutated only from
+	// the race-retry loop (single goroutine).
+	credTriedAcrossRace     map[string]bool
+	soonestExpiryAcrossRace map[string]bool
 
 	// Accumulated response buffers
 	accumulatedResponse  strings.Builder
@@ -820,5 +833,54 @@ func extractUsageFromChunk(data []byte) *store.Usage {
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
+	}
+}
+
+// clearWinnerUpstreamSkip is the WIN-CLEAR seam (wi-7769a812 part 3):
+// on a member's race WIN, clear that member's own live benching state
+// — the winning credential's (credential, wire-model) skip mark, the
+// winning provider's (provider, wire-model) skip mark, and the
+// grouplb member-cooldown row. A win is direct evidence of health:
+// the marks it disproves must not outlive it (the incident's
+// companion defect — agentic-go WON at 12:49:06 while still marked).
+// Both protocol lanes funnel here. The member-cooldown clear rides an
+// OPTIONAL interface assertion (the GroupRewriter interface itself is
+// untouched; structural fakes and the JSON backend simply never
+// clear). No-op when the cache is unwired or identities are empty.
+//
+// winnerModelID is the WINNER's modelList identity — the member head
+// on a head win, or the chain entry / re-entry arm that actually
+// won. CRITICAL-FIX (part 3 review, item 4): the member-cooldown
+// clear targets THIS identity, never groupPick.MemberID — on a
+// chain-entry win (the normal fallback shape) the picked head FAILED
+// this request and its cooldown is genuine failure bookkeeping that
+// must survive; clearing the failed head while the winner stayed
+// bench-marked was the half-closed win-clear. A winner whose model ID
+// is not a group member (a foreign chain entry) clears no row —
+// Engine.ClearCooldown deletes only existing rows. Empty
+// winnerModelID: no member-cooldown clear.
+//
+//	ORDERING-NOT-FILTERING DOCTRINE: the cache is an optimization,
+//	not the truth: it may reorder candidates, never exclude them —
+//	a proven-healthy identity must return to the head of the order
+//	immediately, not wait out its TTL at the tail.
+func (h *Handler) clearWinnerUpstreamSkip(conf *ConfigSnapshot, groupPick *groupPickInfo, credentialID, provider, wireModel, winnerModelID string) {
+	if conf == nil {
+		return
+	}
+	if conf.UpstreamSkipCache != nil && wireModel != "" {
+		if credentialID != "" {
+			conf.UpstreamSkipCache.Clear(skipcache.ScopeCredential, credentialID, wireModel)
+		}
+		if provider != "" {
+			conf.UpstreamSkipCache.Clear(skipcache.ScopeProvider, strings.ToLower(provider), wireModel)
+		}
+	}
+	if groupPick != nil && groupPick.GroupID != "" && winnerModelID != "" {
+		if gcm, ok := conf.ModelsConfig.(interface {
+			ClearGroupMemberCooldown(groupID, memberID string)
+		}); ok {
+			gcm.ClearGroupMemberCooldown(groupPick.GroupID, winnerModelID)
+		}
 	}
 }

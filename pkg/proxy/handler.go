@@ -884,6 +884,12 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// the W-1 publish site (race_executor) can fire
 		// model_member_selected newlyBound-only.
 		coordinator.groupPick = rc.groupPick
+		// F6 (wi-7769a812 part 3): the credential-layer tried-set is
+		// REQUEST-scoped — seed this fresh coordinator with everything
+		// the previous re-entry iterations already tried, so a
+		// credential that 402'd under an earlier coordinator cannot be
+		// re-spawned here.
+		coordinator.SeedRaceState(rc.credTriedAcrossRace, rc.soonestExpiryAcrossRace)
 		coordinator.Start()
 
 		winner := coordinator.WaitForWinner()
@@ -897,6 +903,21 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if winner != nil {
+			// WIN-CLEAR (wi-7769a812 part 3): the winner's identity is
+			// proven healthy — clear its own live skip marks
+			// ((credential, wire-model) + (provider, wire-model)) and
+			// ITS OWN grouplb member-cooldown row — keyed by the
+			// WINNER's modelList identity (winner.modelID), never
+			// groupPick.MemberID: on a chain-entry win the picked head
+			// FAILED this request and its cooldown must survive
+			// (CRITICAL-FIX part 3 review, item 4). The incident's
+			// companion defect: agentic-go WON while its marks stayed
+			// live, so every later request still benched it.
+			winnerWireModel := winner.resolved.InternalModel
+			if winnerWireModel == "" {
+				winnerWireModel = winner.modelID
+			}
+			h.clearWinnerUpstreamSkip(&rc.conf, rc.groupPick, winner.resolved.CredentialID, winner.resolved.Provider, winnerWireModel, winner.modelID)
 			defer func() {
 				if winner.cancel != nil {
 					winner.cancel()
@@ -927,6 +948,37 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 
 		// If winner is nil, it means either context cancelled or all models failed
+		// F6 (wi-7769a812 part 3): harvest this coordinator's
+		// credential-layer tried-set + W3 flags into the request-scoped
+		// maps (seeded into the next iteration's coordinator), and union
+		// the attempted model ids into the group tried-set — a member
+		// that ran as a CHAIN entry of another member must not be
+		// re-offered by the re-entry (F3).
+		triedCreds, soonestSpent := coordinator.HarvestRaceState()
+		if len(triedCreds) > 0 {
+			if rc.credTriedAcrossRace == nil {
+				rc.credTriedAcrossRace = make(map[string]bool)
+			}
+			for id := range triedCreds {
+				rc.credTriedAcrossRace[id] = true
+			}
+		}
+		if len(soonestSpent) > 0 {
+			if rc.soonestExpiryAcrossRace == nil {
+				rc.soonestExpiryAcrossRace = make(map[string]bool)
+			}
+			for m := range soonestSpent {
+				rc.soonestExpiryAcrossRace[m] = true
+			}
+		}
+		if rc.groupPick != nil {
+			if rc.groupTriedMembers == nil {
+				rc.groupTriedMembers = make(map[string]bool)
+			}
+			for _, m := range coordinator.AttemptedModelIDs() {
+				rc.groupTriedMembers[m] = true
+			}
+		}
 		select {
 		case <-rc.baseCtx.Done():
 			// Context cancelled (timeout, client disconnect, etc.) - treat as failure
@@ -1001,43 +1053,69 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 // retry-after log line preserves existing behavior for the
 // default-pool re-entry.
 //
-// wi-7769a812 part 2 / USER RULING D3: the member exclusion window
-// handed to the engine is the CONFIG-OWNED skip-cache TTL (hot
-// snapshot value) — the flat 60s grouplb DefaultCooldown is retired
-// for the FAILURE path; the TTL is the single source of truth for
-// "how long a failed member stays avoided" (the skip cache is the
-// selection-time health authority; the engine cooldown is the
-// exclusion-set bookkeeping whose window now derives from the same
-// config key).
+// wi-7769a812 part 3 — ORDERING-NOT-FILTERING (the governing
+// semantics of this whole function, superseding the part-2 D3
+// mode-switch cascade): the skip cache is ORDERING, never a gate —
+// marks demote candidates to the tail (soonest-expiring first) and
+// never remove them; the rewrite (pickServableGroupMember) is the
+// single ordering authority for BOTH the offer and the rebuild, so
+// they can no longer diverge. Within-request: a member that already
+// failed THIS request stays excluded (groupTriedMembers — a TRUE
+// exclusion); cross-request marks only demote. The member exclusion
+// window handed to the engine on a genuine failure remains the
+// CONFIG-OWNED skip-cache TTL.
 func (h *Handler) tryGroupReentry(rc *requestContext) bool {
 	gr, ok := rc.conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {
 		return false
 	}
-	replacement, pool, avail := gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, rc.groupPick.MemberID, rc.conf.UpstreamSkipCacheTTL)
-	if !avail || replacement == "" {
-		return false // single-member group / all members exhausted — real failure
-	}
-	// Exhaustive iteration bookkeeping (part 2): never re-serve a
-	// member this request already attempted, even when the pool's
-	// all-cooling availability ruling hands one back.
 	if rc.groupTriedMembers == nil {
 		rc.groupTriedMembers = make(map[string]bool)
 	}
-	if rc.groupTriedMembers[replacement] {
-		log.Printf("[grouplb] request %s: pool re-offered already-tried member %s — group fallback exhausted", rc.reqID, replacement)
+	// F3 — true within-request exclusion with a bounded offer walk:
+	// each ExcludeGroupMember call excludes one member (genuine
+	// failure bookkeeping — every refused offer already failed THIS
+	// request) and the ordering sweep's head strictly advances, so
+	// the walk terminates in ≤ member-count iterations. Bounded by
+	// MaxGroupMembers for safety.
+	replacement, pool, avail := "", "", false
+	excludeTarget := rc.groupPick.MemberID
+	for iter := 0; iter <= models.MaxGroupMembers; iter++ {
+		replacement, pool, avail = gr.ExcludeGroupMember(rc.groupPick.GroupID, rc.conversationKey, excludeTarget, rc.conf.UpstreamSkipCacheTTL)
+		if !avail || replacement == "" {
+			return false // single-member group / all members exhausted — real failure
+		}
+		if !rc.groupTriedMembers[replacement] {
+			break
+		}
+		log.Printf("[grouplb] request %s: pool re-offered already-tried member %s — excluding and advancing the ordering scan", rc.reqID, replacement)
+		excludeTarget = replacement
+	}
+	if !avail || replacement == "" || rc.groupTriedMembers[replacement] {
+		log.Printf("[grouplb] request %s: offer walk exhausted without a fresh member — group fallback exhausted", rc.reqID)
 		return false
 	}
-	rc.groupTriedMembers[replacement] = true
-	rc.groupAdvances++
 
-	// Rebuild the modelList via the SAME rewrite helper (the engine
-	// binding now points at the replacement member — sticky).
+	// Rebuild the modelList via the SAME rewrite helper (the offer and
+	// the rebuild are one ordering authority — store_group_rewrite.go
+	// ExcludeGroupMember delegates to pickServableGroupMember).
 	newList, pick, failGroup := h.applyGroupRewrite(&rc.conf, rc.modelListOriginal, rc.conversationKey)
 	if failGroup != "" || pick == nil {
 		log.Printf("[grouplb] request %s: re-entry rebuild failed for group %s — treating as real failure", rc.reqID, rc.groupPick.GroupID)
 		return false
 	}
+	// F3 post-rebuild guard: the rebuild is the SAME ordering
+	// authority as the offer walk, so it normally re-serves the
+	// accepted replacement — the tried-mark happens HERE (after the
+	// guard) so agreement passes and only genuine divergence onto an
+	// already-attempted member is refused. Never race a member THIS
+	// request already attempted.
+	if rc.groupTriedMembers[pick.MemberID] {
+		log.Printf("[grouplb] request %s: rebuild re-served already-tried member %s — group fallback exhausted", rc.reqID, pick.MemberID)
+		return false
+	}
+	rc.groupTriedMembers[pick.MemberID] = true
+	rc.groupAdvances++
 	rc.modelList = newList
 	rc.groupPick = pick
 	if pick.MemberID != rc.reqLog.Model {

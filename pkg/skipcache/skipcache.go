@@ -10,16 +10,20 @@
 // per-request via the proxy's ConfigSnapshot); the expiry TIME is
 // minted at mark time so every reader sees one consistent window.
 //
-// Selection consults the cache: a member whose upstreams are all
-// marked is skipped while unmarked alternatives exist (the Phase-0
-// A2 credential-blind-selection fix), and a provider-wide wall
-// (every credential of the provider marked for the model) skips
-// every member on that provider.
+// ORDERING-NOT-FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE):
 //
-// THE CACHE IS AN OPTIMIZER, NEVER AN AVAILABILITY GATE: when every
-// candidate is marked, the caller DEGRADES to one honest attempt
-// against the SOONEST-EXPIRING mark (SoonestExpiry). Nothing in this
-// package ever refuses a request.
+//	The cache is an optimization, not the truth: it may reorder
+//	candidates, never exclude them.
+//
+// Selection consults the cache ONLY to ORDER: unmarked candidates
+// first (normal pool/weight/sticky order), then marked ones —
+// soonest-expiring first (the most likely-recovered upstream). A
+// marked member is a DEMOTED candidate, never an invisible one: a
+// request may only fail after every member×credential has genuinely
+// failed THIS request, so execution proceeds through the demoted
+// list when the unmarked head cannot serve. A WIN clears the
+// winner's own live marks (Cache.Clear) — a proven-healthy identity
+// must not stay benched.
 //
 // Concurrency: the read path is a single RLock map lookup on a
 // composite string key (no allocation on the read path beyond the
@@ -76,8 +80,10 @@ func key(scope, id, model string) string {
 
 // Mark records a limit-class failure for (scope, id, model) for ttl.
 // ttl <= 0 is a no-op (callers without a configured window must not
-// mint zero-TTL marks — that would silently disable the skip). A
-// live mark is extended (idempotent re-mark shape). Nil receiver: no-op.
+// mint zero-TTL marks — that would silently disable the demotion).
+// A live mark is extended (idempotent re-mark shape). Nil receiver:
+// no-op. Marks DEMOTE for the TTL window — they never exclude (see
+// the package doctrine above).
 func (c *Cache) Mark(scope, id, model string, ttl time.Duration) {
 	if c == nil || ttl <= 0 || id == "" || model == "" {
 		return
@@ -117,6 +123,24 @@ func (c *Cache) Marked(scope, id, model string) bool {
 	return true
 }
 
+// Clear removes a live mark for (scope, id, model) — the WIN-CLEAR
+// seam: a race WIN on the marked identity is direct evidence of
+// health, so the mark must not outlive it. Missing mark: no-op.
+// Nil receiver / empty id / empty model: no-op.
+//
+// The cache is an optimization, not the truth: it may reorder
+// candidates, never exclude them — Clear exists so a proven-healthy
+// identity returns to the head of the order immediately instead of
+// waiting out its TTL at the tail.
+func (c *Cache) Clear(scope, id, model string) {
+	if c == nil || id == "" || model == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.marked, key(scope, id, model))
+	c.mu.Unlock()
+}
+
 // Pair is one (scope, id) candidate to probe for a model — the shape
 // selection call sites build from a member's credential refs.
 type Pair struct {
@@ -140,9 +164,9 @@ func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 }
 
 // SoonestExpiry returns the EARLIEST live expiry among the pairs for
-// model — the degradation anchor ("one honest attempt against the
-// soonest-expiring mark"). ok=false when nothing is marked. Nil
-// receiver: ok=false.
+// model — the demoted-sweep ORDERING comparator (unmarked first, then
+// marked soonest-expiring first). ok=false when nothing is marked.
+// Nil receiver: ok=false.
 func (c *Cache) SoonestExpiry(pairs []Pair, model string) (time.Time, bool) {
 	if c == nil {
 		return time.Time{}, false

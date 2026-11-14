@@ -90,28 +90,33 @@ type GroupRewriter interface {
 	// ⇒ fresh weighted pick, no binding.
 	RewriteGroupEntries(modelList []string, conversationKey string) GroupRewriteResult
 
-	// ExcludeGroupMember marks the member as cooling and rebinds the
-	// conversation to the next healthy member (ExcludeAndReselect).
-	// wi-7769a812 part 2 / USER RULING D3: cooldown is CALLER-OWNED —
-	// the proxy passes the CONFIG-OWNED skip-cache TTL (hot snapshot
-	// value) so the member exclusion window derives from the same
-	// config key as the (credential|provider, model) skip marks (ONE
-	// source of truth; the flat 60s DefaultCooldown is retired for
-	// the failure path). cooldown <= 0 falls back to the engine
-	// default (Am28 stale-repair shape).
+	// ExcludeGroupMember marks the member as cooling (genuine-failure
+	// bookkeeping — a member that failed THIS request) and returns the
+	// ORDERING SWEEP'S NEXT HEAD: the exclude rides ExcludeAndReselect,
+	// then the offer is pickServableGroupMember's head — the SAME
+	// ordering authority the re-entry rebuild uses, so offer and
+	// rebuild cannot diverge (73e3bd0).
 	//
-	// Returns the replacement member, the pool the member was drawn
-	// from ("default" / "backup"), and ok=true on ReselectHealthy, on
-	// ReselectSoonestExpiry in a backup-less group (the v1
-	// all-cooling availability re-serve of the soonest-expiring
-	// default), or on a successful backup-pool cascade (ReselectNone /
-	// ReselectSoonestExpiry with HasBackupPool); ("", "", false) when
-	// no alternative exists (single-member group / all exhausted) —
-	// the caller treats the failure as real.
-	// group-backup-members / D5: the pool string is observable ONLY
-	// on actual fallback; ReselectNone / ReselectSoonestExpiry in the
-	// default pool cascades into the backup pool before returning
-	// ok=false (the fall-through is invisible to the caller unless the
-	// pool=backup path actually serves).
+	// wi-7769a812 part 3 / ORDERING-NOT-FILTERING (supersedes the
+	// part-2 D3 mode-switch cascade — ReselectHealthy / ReselectNone /
+	// ReselectSoonestExpiry are RETIRED vocabulary): candidates are
+	// ORDERED, never filtered — a benched (skip-marked / cooling)
+	// member may still be offered as the sweep's head (soonest-
+	// expiring first, configured order breaking ties); ok=false means
+	// NO servable candidate exists at all (single-member group / all
+	// base-stale), never "marked".
+	//
+	// Cooldown is CALLER-OWNED — the proxy passes the CONFIG-OWNED
+	// skip-cache TTL (hot snapshot value) so the member exclusion
+	// window derives from the same config key as the
+	// (credential|provider, model) skip marks (ONE source of truth;
+	// the flat 60s DefaultCooldown is retired for the failure path).
+	// cooldown <= 0 falls back to the engine default (Am28
+	// stale-repair shape).
+	//
+	// Returns the offered head, the pool it was drawn from
+	// (models.PoolDefault / models.PoolBackup), and ok=true when a
+	// head other than the just-failed member exists; ("", "", false)
+	// otherwise — the caller treats the failure as real.
 	ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (replacement string, pool string, ok bool)
 }
