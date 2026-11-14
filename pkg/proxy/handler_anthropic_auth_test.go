@@ -40,9 +40,10 @@ import (
 // store, one internal model ("claude-sonnet-4-5") whose credential points at
 // a counting mock upstream, and the canonical anthropic request/response
 // builders. Mirrors the chat-lane auth-test fixture (newTestManagerWithConfig
-// + seedInternalFixtureNamed + modelAccessMockTokenStore) so the two lanes'
-// contracts are pinned against identical wiring.
-func newAnthropicAuthTestHandler(t *testing.T, hits *atomic.Int64, tokenStore auth.TokenStoreInterface) (*Handler, *httptest.Server) {
+// + modelAccessMockTokenStore); the internal model row is seeded via
+// seedInternalFixtureNamed. The two lanes' contracts are pinned against
+// identical wiring.
+func newAnthropicAuthTestHandler(t *testing.T, hits *atomic.Int64, tokenStore auth.TokenStoreInterface) *Handler {
 	t.Helper()
 
 	upstream := httptest.NewServer(upstreamCountingHandler(hits))
@@ -61,7 +62,7 @@ func newAnthropicAuthTestHandler(t *testing.T, hits *atomic.Int64, tokenStore au
 	h := NewHandler(cfg, bus, reqStore, nil, tokenStore, nil, nil, nil)
 
 	t.Cleanup(func() { upstream.Close() })
-	return h, upstream
+	return h
 }
 
 // anthropicAuthFixtureToken returns a mock token store holding one token
@@ -76,12 +77,13 @@ func anthropicAuthFixtureToken(plaintext string, allowedModels []string) *modelA
 	return tokenStore
 }
 
-// TestAnthropic_NoToken_Returns401 pins regression (a)/(d): the previously
+// TestAnthropic_NoToken_Returns401 pins regression (a): the previously
 // anonymous call (defect v191 — runtime-proven 200 at v191 with tokenID
 // empty) must now be rejected with 401 BEFORE any upstream traffic.
 func TestAnthropic_NoToken_Returns401(t *testing.T) {
 	var hits atomic.Int64
-	h, _ := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil))
+	plaintext := "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	h := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, nil))
 
 	body := anthropicBody("claude-sonnet-4-5", false, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -117,7 +119,8 @@ func TestAnthropic_NoToken_Returns401(t *testing.T) {
 // key is the same contract as no key — 401, zero upstream traffic.
 func TestAnthropic_InvalidToken_Returns401(t *testing.T) {
 	var hits atomic.Int64
-	h, _ := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil))
+	plaintext := "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	h := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, nil))
 
 	body := anthropicBody("claude-sonnet-4-5", false, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -145,7 +148,7 @@ func TestAnthropic_InvalidToken_Returns401(t *testing.T) {
 func TestAnthropic_ModelNotAllowed_Returns403(t *testing.T) {
 	var hits atomic.Int64
 	plaintext := "sk-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	h, _ := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, []string{"some-other-model"}))
+	h := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, []string{"some-other-model"}))
 
 	body := anthropicBody("claude-sonnet-4-5", false, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -186,7 +189,7 @@ func TestAnthropic_ModelNotAllowed_Returns403(t *testing.T) {
 func TestAnthropic_ModelAllowed_PassesThrough(t *testing.T) {
 	var hits atomic.Int64
 	plaintext := "sk-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	h, _ := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, []string{"claude-sonnet-4-5"}))
+	h := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, []string{"claude-sonnet-4-5"}))
 
 	body := anthropicBody("claude-sonnet-4-5", false, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},
@@ -221,7 +224,7 @@ func TestAnthropic_ModelAllowed_PassesThrough(t *testing.T) {
 func TestAnthropic_UnrestrictedToken_PassesThrough(t *testing.T) {
 	var hits atomic.Int64
 	plaintext := "sk-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	h, _ := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, nil))
+	h := newAnthropicAuthTestHandler(t, &hits, anthropicAuthFixtureToken(plaintext, nil))
 
 	body := anthropicBody("claude-sonnet-4-5", false, []map[string]interface{}{
 		{"role": "user", "content": "Hello"},

@@ -361,6 +361,9 @@ func (ar anthropicRequest) build(t *testing.T) (*http.Request, *httptest.Respons
 // hotfix closes (v191 / anomaly 4a231ed0).
 func (e *testEnv) run(ar anthropicRequest) *httptest.ResponseRecorder {
 	req, rr := ar.build(e.t)
+	// Order note: build() already applied ar.extraHeaders above (an
+	// extraHeaders "x-api-key" entry, if present, was Set there); this
+	// Set runs afterward, so the minted token is the final header value.
 	req.Header.Set("x-api-key", e.token)
 	e.handler.HandleAnthropicMessages(rr, req)
 	return rr

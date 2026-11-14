@@ -388,7 +388,7 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.leadingUserRun = credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(anthropicReq.Messages))
 		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
 		// authenticated token's ID for salted conversation keys (the
-		// OPENAI-path parity fix landed in W3 at handler.go:431-474).
+		// OPENAI-path parity fix landed in W3 at handler.go:611-613).
 		// Since the auth hotfix, requests reaching this point with a
 		// tokenStore present are authenticated (401-gated above), so
 		// arcTokenID == "" only when auth is DISABLED (tokenStore nil)
