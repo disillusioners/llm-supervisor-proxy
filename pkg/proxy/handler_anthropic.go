@@ -59,6 +59,7 @@ import (
 
 	"errors"
 
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
@@ -341,18 +342,43 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 	// after our pre-processing (arcMessagesAsInterfaces below). For
 	// multimodals we canonicalize the JSON like the OpenAI path does.
 	//
-	// Resolve auth (mirrors handler.go:411-437 — the OpenAI path's
-	// POST-AUTH wiring site). h.authenticate returns (nil, true) when
-	// tokenStore is nil (auth disabled), so the call is a no-op when
-	// auth is off; when the client sends no/invalid Bearer we also get
-	// nil and degrade to the unsalted key (A-1 graceful degradation).
-	// Only when a valid sk- token is presented does arc.tokenID take
-	// the token's ID, salting the conversationKey per-principal.
+	// Resolve auth + ENFORCE it (chat-lane parity — handler.go:584-609).
+	// h.authenticate returns (nil, true) when tokenStore is nil (auth
+	// disabled), so this gate is a no-op when auth is off. When a
+	// tokenStore IS present, a missing/invalid/expired key ⇒ 401
+	// sendAuthError — the SAME contract as the OpenAI lane. The
+	// pre-hotfix wiring called authenticate and DISCARDED the result
+	// (its only consumer was the per-principal conversation-key salt),
+	// which let anonymous callers reach every catalog model on this
+	// route (defect v191, anomaly 4a231ed0).
+	//
+	// The original "A-1 graceful degradation" wording here described
+	// the conversation-key SALTING fallback (no token ⇒ unsalted key),
+	// NOT an authentication bypass. Salting still degrades correctly
+	// for the only principal that can now reach this point without a
+	// token: an auth-disabled binary (tokenStore == nil) keeps
+	// arcTokenID == "" and the unsalted key, unchanged.
 	var arcTokenID string
+	var authToken *auth.AuthToken
 	if h.tokenStore != nil {
-		if authToken, _ := h.authenticate(r); authToken != nil {
-			arcTokenID = authToken.ID
+		authToken, _ = h.authenticate(r)
+		if authToken == nil {
+			// Authentication required but failed (401, chat-lane parity)
+			reqLog.Status = "failed"
+			reqLog.Error = "Authentication failed: invalid or expired API key"
+			reqLog.EndTime = time.Now()
+			reqLog.Duration = time.Since(startTime).String()
+			h.store.Add(reqLog)
+
+			h.publishEvent("auth_failed", map[string]interface{}{
+				"id":    reqID,
+				"error": "invalid_api_key",
+			})
+
+			h.sendAuthError(w)
+			return
 		}
+		arcTokenID = authToken.ID
 	}
 	// remove-external-upstream P1 (A11 anthropic twin, R11): the
 	// `.Internal` conjunct is GONE — the boundary 404 gate above already
@@ -362,10 +388,13 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.leadingUserRun = credentiallb.ExtractLeadingUserRun(arcMessagesAsInterfaces(anthropicReq.Messages))
 		// POST-AUTH wiring (Task 16 / A-1): arcTokenID carries the
 		// authenticated token's ID for salted conversation keys (the
-		// OPENAI-path parity fix landed in W3 at handler.go:431-474).
-		// Anonymous requests (no token / invalid token / auth disabled)
-		// keep arcTokenID == "" → unsalted key — accepted residual
-		// risk per A-1.
+		// OPENAI-path parity fix landed in W3 at handler.go:611-613).
+		// Since the auth hotfix, requests reaching this point with a
+		// tokenStore present are authenticated (401-gated above), so
+		// arcTokenID == "" only when auth is DISABLED (tokenStore nil)
+		// — the unsalted key remains the correct degradation for that
+		// configuration alone (A-1's salting relaxation, not an auth
+		// bypass).
 		//
 		// W-2 + C2 (mirrors the chat-completions post-auth site): when
 		// no leading user run was extracted the key stays "" — the
@@ -433,6 +462,35 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		log.Printf("[grouplb] anthropic request %s: group=%s → sticky member=%s (newlyBound=%v)",
 			arc.reqID, pick.GroupID, pick.MemberID, pick.NewlyBound)
 	}
+
+	// === MODEL ACCESS CHECK (Anthropic lane) ===
+	// Chat-lane parity with handler.go:704-765: the token allow-list
+	// evaluates the CLIENT-REQUESTED ID STRING (§3.4 Q1 tail — a token
+	// listing a claimed/shadowed ID reaches the group through that
+	// alias exactly as on the OpenAI lane). resolvedModel is non-nil
+	// here (the boundary 404 gate above rejected unknown/non-internal
+	// models), so the chat lane's unknown-model fail-closed arm is
+	// unreachable on this lane by construction.
+	if authToken != nil && !authToken.IsModelAllowed(reqLog.Model) {
+		log.Printf("[AUTH] Model '%s' (ID: %s) not allowed for token %s (%s)",
+			reqLog.Model, resolvedModel.ID, arcTokenID, authToken.Name)
+
+		reqLog.Status = "failed"
+		reqLog.Error = fmt.Sprintf("model '%s' not allowed for this token", reqLog.Model)
+		reqLog.EndTime = time.Now()
+		reqLog.Duration = time.Since(startTime).String()
+		h.store.Add(reqLog)
+
+		h.publishEvent("model_not_allowed", map[string]interface{}{
+			"id":    reqID,
+			"model": reqLog.Model,
+			"token": arcTokenID,
+		})
+
+		h.sendModelNotAllowedError(w, reqLog.Model)
+		return
+	}
+	// === END MODEL ACCESS CHECK ===
 
 	// Sticky last-success race ORDER (design site (b)): post-group-
 	// rewrite, pre-walk. The Anthropic lane has no race coordinator —

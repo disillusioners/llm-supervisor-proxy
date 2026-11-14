@@ -153,15 +153,35 @@ func TestAnthropic_ConversationKeyPerTokenSalting(t *testing.T) {
 	keyB := rec.keys[len(rec.keys)-1]
 
 	// ── Case C: anonymous (no auth header) ─────────────────────────
+	// AUTH-HOTFIX REGRESSION PIN (defect v191 / anomaly 4a231ed0):
+	// pre-hotfix this lane called authenticate() and DISCARDED the
+	// result — an anonymous request was SERVED with the unsalted
+	// conversation key. Now it must 401 BEFORE any key derivation:
+	// the recorded-keys slice MUST stay empty (auth enforcement
+	// precedes the ResolveInternalConfigWithAffinity call entirely).
 	reqAnon := makeAnthropicRequestWithAuth(t, body, "")
 	rec.keys = nil
-	h.HandleAnthropicMessages(httptest.NewRecorder(), reqAnon)
-	if len(rec.keys) == 0 {
-		t.Fatalf("expected ResolveInternalConfigWithAffinity to be called for anonymous request; got no recorded keys")
+	recAnon := httptest.NewRecorder()
+	h.HandleAnthropicMessages(recAnon, reqAnon)
+	if recAnon.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous /v1/messages: status = %d, want 401 (body=%s)", recAnon.Code, recAnon.Body.String())
 	}
-	keyAnon := rec.keys[len(rec.keys)-1]
+	if len(rec.keys) != 0 {
+		t.Fatalf("anonymous /v1/messages must be rejected BEFORE key derivation; got %d recorded conversation keys", len(rec.keys))
+	}
+	// (The A-1 unsalted-key degradation now applies ONLY to
+	// auth-disabled binaries (tokenStore nil, the cases above all
+	// present a tokenStore); its math for the "" salt stays pinned by
+	// the credentiallb ComputeConversationKey unit tests.)
 
 	// ── Assertions ─────────────────────────────────────────────────
+
+	// leadingUserRun is the canonical JSON array of the leading
+	// contiguous user-message run (2026-10-17 derivation), derived
+	// exactly the way the OpenAI path derives it.
+	wantRun := credentiallb.ExtractLeadingUserRun([]interface{}{
+		map[string]interface{}{"role": "user", "content": firstUserMsg},
+	})
 
 	// (1) Salted: token A and token B MUST produce DIFFERENT keys for
 	// the SAME first-user-message — the whole point of the W3 parity
@@ -170,25 +190,11 @@ func TestAnthropic_ConversationKeyPerTokenSalting(t *testing.T) {
 		t.Fatalf("token-A and token-B produced the SAME conversationKey %q — tokenID is not being salted on the Anthropic path", keyA)
 	}
 	// (Sanity: keys must look like 64-char hex SHA-256.)
-	if len(keyA) != 64 || len(keyB) != 64 || len(keyAnon) != 64 {
-		t.Fatalf("expected 64-char hex keys; got A=%d B=%d anon=%d chars", len(keyA), len(keyB), len(keyAnon))
+	if len(keyA) != 64 || len(keyB) != 64 {
+		t.Fatalf("expected 64-char hex keys; got A=%d B=%d chars", len(keyA), len(keyB))
 	}
 
-	// (2) Anonymous request MUST produce the UNSALTED baseline key
-	// (A-1 graceful degradation), equal to
-	// ComputeConversationKey(modelID, "", leadingUserRun) — where
-	// leadingUserRun is the canonical JSON array of the leading
-	// contiguous user-message run (2026-10-17 derivation), derived
-	// here exactly the way the OpenAI path derives it.
-	wantRun := credentiallb.ExtractLeadingUserRun([]interface{}{
-		map[string]interface{}{"role": "user", "content": firstUserMsg},
-	})
-	wantAnon := credentiallb.ComputeConversationKey("anthropic-test-model", "", wantRun)
-	if keyAnon != wantAnon {
-		t.Fatalf("anonymous conversationKey = %q, want unsalted baseline %q", keyAnon, wantAnon)
-	}
-
-	// (3) Token A and token B salted keys MUST equal
+	// (2) Token A and token B salted keys MUST equal
 	// ComputeConversationKey(modelID, tokenID, leadingUserRun) with
 	// their respective IDs — closes the loop on the wiring.
 	wantA := credentiallb.ComputeConversationKey("anthropic-test-model", "token-A-uuid", wantRun)
