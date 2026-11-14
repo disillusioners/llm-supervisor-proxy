@@ -138,49 +138,6 @@ func Test404Gate_DeadBypassHeader_Still404(t *testing.T) {
 
 // ─── D5: force-ultimate + unresolvable body model + no/bad auth ──────────────
 
-// TestForceUltimateHoist_Unauthenticated_NoPremature404 pins the
-// verifier-recommended behavioural guard: the force header defers the
-// boundary 404 gate, but with NO credentials the request must stop at the
-// AUTH region (401) — never leak a premature model_not_found 404 before
-// auth, and never run the ultimate path for an anonymous caller.
-func TestForceUltimateHoist_Unauthenticated_NoPremature404(t *testing.T) {
-	env := setupHoistTest(t, true /* ultimateModelEnabled */)
-
-	rec := env.doNoAuth(t, true /* forceHeader */)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated force-ultimate: status = %d, want 401 (body=%s)", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "model_not_found") {
-		t.Errorf("premature 404 leak before auth: %s", rec.Body.String())
-	}
-	for _, log := range env.reqStore.List() {
-		if log.UltimateModelUsed {
-			t.Error("UltimateModelUsed=true for an unauthenticated caller — the ultimate path must not run")
-		}
-	}
-}
-
-// TestForceUltimateHoist_BadToken_NoPremature404 — same guard with a
-// malformed bearer token.
-func TestForceUltimateHoist_BadToken_NoPremature404(t *testing.T) {
-	env := setupHoistTest(t, true /* ultimateModelEnabled */)
-
-	rec := env.doBadToken(t, true /* forceHeader */)
-
-	if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusForbidden {
-		t.Fatalf("bad-token force-ultimate: status = %d, want 401/403 (body=%s)", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "model_not_found") {
-		t.Errorf("premature 404 leak before auth: %s", rec.Body.String())
-	}
-	for _, log := range env.reqStore.List() {
-		if log.UltimateModelUsed {
-			t.Error("UltimateModelUsed=true for a bad-token caller — the ultimate path must not run")
-		}
-	}
-}
-
 // ─── D3: the lightllm provider routes like any other provider ────────────────
 
 // TestProviderRouting_LightLLM_NonStreamAndStream drives a chat request

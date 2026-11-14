@@ -107,10 +107,6 @@ const (
 	// ⇒ race-internal path via the race coordinator.
 	raceIntModel = "matrix-race-internal"
 
-	// ultIntModel is the X-Force-Ultimate-Model target with Internal:true
-	// ⇒ ultimate-internal path.
-	ultIntModel = "matrix-ultimate-internal"
-
 	// minimaxCredID drives the MiniMax translation gate rows (M1/M2):
 	// credential provider must be "minimax" AND the request must carry
 	// X-Proxy-Interleaved-Thinking.
@@ -124,16 +120,15 @@ const (
 
 // testEnv holds all wired dependencies for one test.
 type testEnv struct {
-	t             *testing.T
-	db            *sql.DB
-	dbStore       *database.Store
-	tokenStore    *auth.TokenStore
-	upstream      *httptest.Server
-	mockUp        *mockUpstream
-	handler       *proxy.Handler
-	modelsConfig  *models.ModelsConfig
-	ultimateToken string // plaintext token with ultimateModelEnabled=true
-	plainToken    string // plaintext token (ultimateModelEnabled=false)
+	t            *testing.T
+	db           *sql.DB
+	dbStore      *database.Store
+	tokenStore   *auth.TokenStore
+	upstream     *httptest.Server
+	mockUp       *mockUpstream
+	handler      *proxy.Handler
+	modelsConfig *models.ModelsConfig
+	plainToken   string // authenticated token
 
 	// reqStore is the SAME *store.RequestStore the proxy handler writes
 	// into — the store the FE API must read from.
@@ -144,9 +139,6 @@ type testEnv struct {
 
 // matrixOptions customizes setupMatrixEnv per matrix row group.
 type matrixOptions struct {
-	// ultimateModelID overrides ULTIMATE_MODEL_ID (ultimate rows). Empty
-	// means "no ultimate model configured".
-	ultimateModelID string
 	// upstreamProviderMinimax binds UPSTREAM_CREDENTIAL_ID to the MiniMax
 	// credential so the race-external translation gate fires (M1).
 	upstreamProviderMinimax bool
@@ -154,7 +146,7 @@ type matrixOptions struct {
 
 // setupMatrixEnv wires the path-matrix environment: everything setupTestEnv
 // builds, plus the registered models the R/N/M rows route through and BOTH
-// tokens (plain + ultimate-enabled).
+// tokens.
 func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixOptions) *testEnv {
 	t.Helper()
 
@@ -232,16 +224,6 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		InternalModel: "matrix-race-internal-upstream",
 	})
 
-	// Ultimate-internal model (Internal:true ⇒ executeInternal).
-	addModel(models.ModelConfig{
-		ID:            ultIntModel,
-		Name:          "Matrix Ultimate Internal",
-		Enabled:       true,
-		Internal:      true,
-		Credentials:   models.TestRefs(externalCredID),
-		InternalModel: "matrix-ult-internal-upstream",
-	})
-
 	// Anthropic-client internal model (openai provider ⇒ translation mode,
 	// NOT anthropic passthrough — R9/R10/R11 translate OpenAI→Anthropic).
 	addModel(models.ModelConfig{
@@ -253,14 +235,9 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 		InternalModel: "matrix-anthropic-internal-upstream",
 	})
 
-	// Env: fast deadlines + ultimate model. X-Force-Ultimate-Model
-	// triggers on the first call under the fixed schedule.
+	// Env: fast deadlines.
 	t.Setenv("APPLY_ENV_OVERRIDES", "1")
 	t.Setenv("MAX_GENERATION_TIME", "10s")
-	t.Setenv("ULTIMATE_MODEL_MAX_HASH", "100")
-	if opts.ultimateModelID != "" {
-		t.Setenv("ULTIMATE_MODEL_ID", opts.ultimateModelID)
-	}
 
 	// remove-external-upstream P1: the UPSTREAM_URL / UPSTREAM_CREDENTIAL_ID
 	// env wiring is retired (internal models carry their own credential). The
@@ -297,13 +274,9 @@ func setupMatrixEnv(t *testing.T, upstreamHandler http.HandlerFunc, opts matrixO
 	}
 
 	ctx := context.Background()
-	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", false, "", nil)
+	env.plainToken, _, err = tokenStore.CreateToken(ctx, "plain-token", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("create plain token: %v", err)
-	}
-	env.ultimateToken, _, err = tokenStore.CreateToken(ctx, "ult-token", nil, "test", true, "", nil)
-	if err != nil {
-		t.Fatalf("create ultimate token: %v", err)
 	}
 
 	return env
@@ -327,7 +300,6 @@ type chatRequest struct {
 	stream   *bool // nil ⇒ omit the "stream" field entirely (original bug shape)
 	messages []map[string]interface{}
 	flag     bool // send X-Proxy-Interleaved-Thinking: true
-	forceUlt bool // send X-Force-Ultimate-Model: true
 	token    string
 }
 
@@ -349,9 +321,6 @@ func (cr chatRequest) build(t *testing.T) (*http.Request, *httptest.ResponseReco
 	req.Header.Set("Authorization", "Bearer "+cr.token)
 	if cr.flag {
 		req.Header.Set("X-Proxy-Interleaved-Thinking", "true")
-	}
-	if cr.forceUlt {
-		req.Header.Set("X-Force-Ultimate-Model", "true")
 	}
 	return req, httptest.NewRecorder()
 }

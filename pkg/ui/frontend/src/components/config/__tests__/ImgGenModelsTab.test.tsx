@@ -16,7 +16,6 @@ function makeImgGenRow(overrides: Partial<ImgGenModel> = {}): ImgGenModel {
     internal_model: 'image-01',
     internal_base_url: 'https://api.minimax.io/v1',
     credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
-    exclude_from_ultimate_switching: true,
     ...overrides,
   };
 }

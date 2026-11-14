@@ -121,11 +121,6 @@ const RequestList: FunctionComponent<RequestListProps> = ({
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-1">
                   <span class="text-sm text-gray-300">{req.model}</span>
-                  {req.ultimate_model_used && (
-                    <span class="ml-1 px-1.5 py-0.5 rounded text-xs bg-purple-500 text-purple-300">
-                      ultimate
-                    </span>
-                  )}
                 </div>
                 <div class="text-xs text-gray-400 flex items-center gap-2">
                   <span>{formatLocaleTime(req.startTime)}</span>
@@ -137,7 +132,7 @@ const RequestList: FunctionComponent<RequestListProps> = ({
                   )}
                 </div>
                 {/* Upstream request status breakdown */}
-                {!req.ultimate_model_used && req.upstream_requests && (
+                {req.upstream_requests && (
                   <div class="text-xs text-gray-500 flex items-center gap-1">
                     <UpstreamStatusIndicator status={req.upstream_requests.main} />
                     <span>main</span>

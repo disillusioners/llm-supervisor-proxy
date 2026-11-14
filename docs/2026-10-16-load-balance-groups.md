@@ -45,7 +45,7 @@ Via the dashboard:
    - `shadow_model_id = "coding"` (claim the existing chat ID).
    - `members = [{model_id: "coding", weight: 1}]` (single member
      on day-1).
-   - `internal = true`, `exclude_from_ultimate_switching = true`.
+   - `internal = true` (the former ultimate-switching exclusion flag was retired with the ultimate model subsystem).
 3. **Submit.** The form 400s if any G-rule fails (see §4) — fix
    the violation and re-submit.
 
@@ -60,7 +60,6 @@ curl -X POST http://localhost:8080/fe/api/models \
     "enabled": true,
     "kind": "group",
     "internal": true,
-    "exclude_from_ultimate_switching": true,
     "shadow_model_id": "coding",
     "members": [{"model_id": "coding", "weight": 1}]
   }'
@@ -84,7 +83,6 @@ declare a group with N members and weights:
   "enabled": true,
   "kind": "group",
   "internal": true,
-  "exclude_from_ultimate_switching": true,
   "members": [
     { "model_id": "m-a", "weight": 3 },
     { "model_id": "m-b", "weight": 2 },
@@ -126,7 +124,7 @@ them 400s the write.
 | G4 | every `member.model_id` resolves to an enabled chat row | Stale members cause G-violations on subsequent writes (UI catches it on submit). |
 | G5 | members must be text-kind, NOT group | No group-of-groups (USER-DECIDED). |
 | G6 | no `fallback_chain`, no `secondary_upstream_model`, no `peak_hour_enabled`, no `release_stream_chunk_deadline` | Rejected for groups (v2 candidates). |
-| G7 | `exclude_from_ultimate_switching == true` (write-gate) | Ultimate-model switching is a single-model feature; groups present a moving target — the silent stop is documented (§3.6.4). |
+| (former G7) | retired with the ultimate model subsystem | the ultimate-switching exclusion requirement no longer applies; the DB column stays, inert |
 | G8 | the group ID != any other enabled group's shadow_model_id, AND shadow_model_id != group's own id | One enabled group at a time per claimed ID; the group cannot claim itself. |
 
 A group whose every member is currently disabled (or deleted) is

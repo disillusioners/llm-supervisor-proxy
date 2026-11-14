@@ -24,7 +24,7 @@
 //   - path 4 (OpenAI race) asserts the EVENT-ORDERING property
 //     (race_winner_selected observed on bus BEFORE upstream done)
 //     via the event-bus subscriber
-//   - paths 5 and 6 are deferred to pkg/ultimatemodel tests
+//   - the two retired raw-passthrough paths were removed with the
 //     (same rationale as real_streaming_parity_test.go header)
 package proxy
 
@@ -227,7 +227,7 @@ func assertFirstByteBeforeUpstreamDone(t *testing.T, pathName string, clientFirs
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6-path rollout — first-byte timing across the same 6 surfaces as the
-// parity matrix (paths 5+6 covered by existing ultimatemodel tests).
+// parity matrix (the two retired raw-passthrough paths are gone).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // TestRealStreaming_FirstByteTiming_AllPaths is the first-byte
@@ -454,20 +454,14 @@ func TestRealStreaming_FirstByteTiming_AllPaths(t *testing.T) {
 		}
 	})
 
-	// (5) Ultimate external — REMOVED with the external arm
-	// (remove-external-upstream P1); the surviving first-byte pin is
-	// the internal test TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion.
-	t.Run("5_UltimateExternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 5 (Ultimate external) removed with the external arm; first-byte pinned by pkg/ultimatemodel TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion")
-	})
-
-	// (6) Ultimate internal — pinned by existing
-	// TestUltimateInternal_LiveStream (when present); the
-	// TestAnthropicLiveStream_ForwardBytesBeforeCompletion family
-	// covers the equivalent property for the internal path.
-	t.Run("6_UltimateInternal_FirstByteBeforeDone", func(t *testing.T) {
-		t.Skip("path 6 pinned by existing pkg/ultimatemodel tests; see file header")
-	})
+	// Paths (5) ultimate-external and (6) ultimate-internal no longer
+	// exist: the raw-passthrough external arm was removed earlier
+	// (remove-external-upstream P1), and the internal arm — together
+	// with the pkg/ultimatemodel pin tests — went with the ultimate
+	// subsystem retirement (wi-7769a812 part 1). The first-byte
+	// property for the surviving internal path is pinned by
+	// TestAnthropicLiveStream_ForwardBytesBeforeCompletion
+	// (handler_anthropic_live_test.go).
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

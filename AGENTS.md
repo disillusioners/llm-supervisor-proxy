@@ -114,13 +114,6 @@ Environment variables can override configuration values when `APPLY_ENV_OVERRIDE
 | `BUFFER_STORAGE_DIR` | *(empty)* | Directory for buffer content files (defaults to user config dir) |
 | `BUFFER_MAX_STORAGE_MB` | `100` | Max total storage for buffers in MB |
 
-### Tool Call Buffer Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TOOL_CALL_BUFFER_DISABLED` | `false` | Disable tool call buffering (for clients that handle partial JSON) |
-| `TOOL_CALL_BUFFER_MAX_SIZE` | `1048576` | Max bytes per tool call buffer (1MB) |
-
 ### Loop Detection Configuration
 
 | Variable | Default | Description |
@@ -128,16 +121,13 @@ Environment variables can override configuration values when `APPLY_ENV_OVERRIDE
 | `LOOP_DETECTION_ENABLED` | `true` | Enable loop detection |
 | `LOOP_DETECTION_SHADOW_MODE` | `true` | Shadow mode (log only, no interruption) |
 
-### Ultimate Model Configuration
+### Last-Resort Fallback (Backup-Only Group Member)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ULTIMATE_MODEL_ID` | *(empty)* | Model ID for duplicate request handling |
-| `ULTIMATE_MODEL_MAX_HASH` | `100` | Max hashes in circular buffer |
-
-Ultimate-model trigger schedule is fixed (not configurable): escalation on
-the **5th/10th/20th/30th/40th** request with the same content hash; requests
-beyond the 40th receive an un-retryable `ultimate_model_retry_exhausted` error.
+The retired ultimate-model escalation role is served by a group's
+**backup-only member** (`backup_only: true` on a group's member entry —
+BACKUP sub-pool only, served exclusively after every default member in the
+request's exclusion set has failed). See README "Last-Resort Fallback" for
+the config shape.
 
 ### Raw Upstream Response Logging
 
@@ -331,9 +321,7 @@ The proxy uses a **parallel race retry** mechanism for maximum reliability:
 ```
 Client Request
      │
-     ├─► UltimateModel.ShouldTrigger() ──► YES ──► Execute ultimate model (no retry)
-     │
-     └─► NO ──► Race Coordinator
+     └─► Race Coordinator
                      │
                      ├─ MAIN REQUEST (original model, starts immediately)
                      │       │

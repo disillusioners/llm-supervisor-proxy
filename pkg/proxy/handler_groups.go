@@ -432,21 +432,41 @@ func groupFailMessage(groupID string) string {
 }
 
 // tryGroupReentryAnthropic — Am24 mirror for the /v1/messages
-// sequential loop. Same contract as tryGroupReentry (max ONE
-// re-entry per request, pre-first-byte enforced by the
-// headersSent guard at the loop top), but operating on the
-// anthropicRequestContext. The rebuild is performed by the SAME
+// sequential loop. Same contract as tryGroupReentry, but operating on
+// the anthropicRequestContext. The rebuild is performed by the SAME
 // shared helper (parity by construction).
+//
+// wi-7769a812 part 2: the max-ONE re-entry latch (groupReentered) is
+// RETIRED — the caller's gate bounds the member iteration to N
+// attempts for an N-member group (payloadCommitted pre-commit +
+// groupAdvances cap + the groupTriedMembers set here refusing an
+// already-tried replacement), and the member exclusion window handed
+// to the engine is the CONFIG-OWNED skip-cache TTL (D3 — one source
+// of truth with the upstream skip marks). Pre-commit is enforced by
+// the CALLER's !arc.payloadCommitted gate (the loop-top guard +
+// re-entry gate); pre-first-byte is inherited from the same flag
+// (headersSent is non-committing — the lazy preamble fires on
+// framing-only progress).
 func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	gr, ok := arc.conf.ModelsConfig.(models.GroupRewriter)
 	if !ok {
 		return false
 	}
-	replacement, pool, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID)
+	replacement, pool, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID, arc.conf.UpstreamSkipCacheTTL)
 	if !avail || replacement == "" {
 		return false
 	}
-	arc.groupReentered = true
+	// Exhaustive iteration bookkeeping (part 2): never re-serve a
+	// member this request already attempted.
+	if arc.groupTriedMembers == nil {
+		arc.groupTriedMembers = make(map[string]bool)
+	}
+	if arc.groupTriedMembers[replacement] {
+		log.Printf("[grouplb] anthropic request %s: pool re-offered already-tried member %s — group fallback exhausted", arc.reqID, replacement)
+		return false
+	}
+	arc.groupTriedMembers[replacement] = true
+	arc.groupAdvances++
 	newList, pick, failGroup := h.applyGroupRewrite(&arc.conf, arc.modelListOriginal, arc.conversationKey)
 	if failGroup != "" || pick == nil {
 		log.Printf("[grouplb] anthropic request %s: re-entry rebuild failed for group %s — treating as real failure", arc.reqID, arc.groupPick.GroupID)
@@ -468,10 +488,10 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 		arc.reqLog.RouteModel = ""
 	}
 	if pool == models.PoolBackup {
-		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → re-entering once",
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s pool=backup reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			arc.reqID, pick.GroupID, pick.MemberID)
 	} else {
-		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → re-entering once",
+		log.Printf("[grouplb] anthropic request %s: terminal member failure — group %s reselect member=%s → advancing to next member in pool order (exhaustive fallback)",
 			arc.reqID, pick.GroupID, pick.MemberID)
 	}
 	// load-balance-groups / P4.5 (P2 deferred #1) — publish the

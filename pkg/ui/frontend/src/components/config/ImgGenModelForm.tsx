@@ -17,7 +17,6 @@ type ImgGenProvider = typeof PROVIDER_OPTIONS[number];
 // remove-external-upstream commission retired the external tick.
 const HARDCODED_KIND = 'image-gen' as const;
 const HARDCODED_INTERNAL = true as const;
-const HARDCODED_EXCLUDE_FROM_ULTIMATE = true as const;
 
 // Per-provider default base URL (mirrors the BE credential default for
 // minimax and the in-cluster 9router endpoint). The form stamps this on
@@ -41,7 +40,6 @@ export interface ImgGenModelPayload {
   internal_base_url: string;
   credentials: CredentialRef[];
   enabled: boolean;
-  exclude_from_ultimate_switching: true;
 }
 
 interface ImgGenModelFormProps {
@@ -223,7 +221,6 @@ export function ImgGenModelForm({
         internal_base_url: baseUrl,
         credentials: fields.credentials,
         enabled: fields.enabled,
-        exclude_from_ultimate_switching: HARDCODED_EXCLUDE_FROM_ULTIMATE,
       };
       await onSave(payload);
     } catch (e) {

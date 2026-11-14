@@ -116,14 +116,14 @@ export function DecisionModelsTab({
     try {
       if (formMode === 'add') {
         // Strip the local-only wrapper to a wire-shaped Model. The
-        // form has already stamped kind/internal/internal_provider/
-        // exclude_from_ultimate_switching (internal is now
+        // form has already stamped kind/internal/internal_provider
+        // (internal is now
         // unconditionally true repo-wide — no external upstream), so the
         // parent's addModel just forwards the body to POST
         // /fe/api/models. Decision models never have a fallback chain
         // (decision models reject it per plan §6.2 row decision rules),
         // so we send an empty array.
-        const { id, name, kind, internal, internal_provider, internal_model, internal_base_url, credentials, enabled, exclude_from_ultimate_switching } = payload;
+        const { id, name, kind, internal, internal_provider, internal_model, internal_base_url, credentials, enabled } = payload;
         await onAddModel({
           id,
           name,
@@ -136,11 +136,10 @@ export function DecisionModelsTab({
           internal_model,
           internal_base_url,
           credentials,
-          exclude_from_ultimate_switching,
         });
         setStatus({ type: 'success', message: TOAST.added });
       } else {
-        const { id, name, internal_model, internal_base_url, credentials, enabled, exclude_from_ultimate_switching, internal_provider } = payload;
+        const { id, name, internal_model, internal_base_url, credentials, enabled, internal_provider } = payload;
         await onUpdateModel(id, {
           name,
           enabled,
@@ -148,7 +147,6 @@ export function DecisionModelsTab({
           internal_base_url,
           credentials,
           internal_provider,
-          exclude_from_ultimate_switching,
           // kind/internal are immutable in edit — the form does not
           // surface them and the BE rejects a kind flip anyway.
           // (internal is now unconditionally true repo-wide.)

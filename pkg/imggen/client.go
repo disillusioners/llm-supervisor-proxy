@@ -10,7 +10,7 @@ import (
 // accumulation of orphaned connection pools that occur when
 // creating a new client per request.
 //
-// Copied from pkg/ultimatemodel/handler_external.go:28-35 with one
+// Adapted from the retired raw-passthrough handler package with one
 // CRITICAL difference (Architect Amendment 10): the Transport
 // declares ResponseHeaderTimeout: 0 EXPLICITLY. The default is 0
 // but a silent future "add a 30s header timeout" change would

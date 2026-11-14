@@ -70,9 +70,9 @@ func ValidateCopyID(newID string) error {
 //     REFS — the copy SHARES the credential rows, no secret is ever
 //     duplicated and the credentials table is NEVER written);
 //     release_stream_chunk_deadline; peak_hour_enabled / start / end
-//     / timezone / model; secondary_upstream_model;
-//     exclude_from_ultimate_switching; kind. The provider is inherited
-//     implicitly through Credentials[0] (it is not a model-row field).
+//     / timezone / model; secondary_upstream_model; kind. The
+//     provider is inherited implicitly through Credentials[0] (it is
+//     not a model-row field).
 //
 //   - REGENERATED: id = newID; name = newID (unique by construction —
 //     it never clobbers the cache name index, which is last-write-wins
@@ -136,9 +136,8 @@ func BuildModelCopy(src *ModelConfig, newID string) (*ModelConfig, error) {
 		PeakHourEnd:      src.PeakHourEnd,
 		PeakHourTimezone: src.PeakHourTimezone,
 		PeakHourModel:    src.PeakHourModel,
-		// Secondary upstream + ultimate-switching exclusion — verbatim.
-		SecondaryUpstreamModel:       src.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: src.ExcludeFromUltimateSwitching,
+		// Secondary upstream — verbatim.
+		SecondaryUpstreamModel: src.SecondaryUpstreamModel,
 		// Members is deliberately NOT copied: membership lives on the
 		// group row, so the copy is standalone by construction (and a
 		// group source is refused above anyway).

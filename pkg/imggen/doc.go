@@ -2,7 +2,7 @@
 // supervisor proxy. It implements POST /v1/image_generation as a
 // raw single-attempt pass-through to MiniMax (ImgGen Models
 // commission / BE-R1). It is structurally a sibling of
-// pkg/ultimatemodel/handler_external.go and lives outside
+// the retired raw-passthrough handler package and lives outside
 // pkg/proxy so the chat-supervision exclusion boundary is
 // mechanically enforceable via the import audit at task 1.8.2.
 //

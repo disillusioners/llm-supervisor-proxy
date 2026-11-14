@@ -293,21 +293,19 @@ func (m *memTokenStore) ValidateToken(ctx context.Context, plaintext string) (*a
 	return nil, auth.ErrTokenNotFound
 }
 
-func (m *memTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *memTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
 	plaintext, hash, err := auth.GenerateToken()
 	if err != nil {
 		return "", nil, err
 	}
 	tok := &auth.AuthToken{
-		ID:                   "mem-" + plaintext[:8],
-		Name:                 name,
-		TokenHash:            hash,
-		ExpiresAt:            expiresAt,
-		CreatedAt:            time.Now(),
-		CreatedBy:            createdBy,
-		UltimateModelEnabled: ultimateModelEnabled,
-		UltimateModelID:      ultimateModelID,
-		AllowedModels:        allowedModels,
+		ID:            "mem-" + plaintext[:8],
+		Name:          name,
+		TokenHash:     hash,
+		ExpiresAt:     expiresAt,
+		CreatedAt:     time.Now(),
+		CreatedBy:     createdBy,
+		AllowedModels: allowedModels,
 	}
 	m.add(tok)
 	return plaintext, tok, nil
@@ -340,15 +338,13 @@ func (m *memTokenStore) GetTokenByID(ctx context.Context, id string) (*auth.Auth
 	return t, nil
 }
 
-func (m *memTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
+func (m *memTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.tokens[id]
 	if !ok {
 		return auth.ErrTokenNotFound
 	}
-	t.UltimateModelEnabled = ultimateModelEnabled
-	t.UltimateModelID = ultimateModelID
 	t.AllowedModels = allowedModels
 	return nil
 }
@@ -404,7 +400,6 @@ func newEnvForProvider(t *testing.T, script fakeScript, provider, internalModel,
 			Credentials: []models.CredentialRef{
 				{CredentialID: "cred-1", Weight: 1, Position: 0},
 			},
-			ExcludeFromUltimateSwitching: true,
 		}, true
 	})
 	h.SetCredentialResolver(func(id string) (models.ResolvedCredential, bool) {

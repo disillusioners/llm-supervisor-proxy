@@ -280,7 +280,7 @@ func TestE2EReasoningContent_NonStreaming_MultiTurn(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token", nil, "test", false, "", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestE2EReasoningContent_Streaming_MultiTurn(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-stream", nil, "test", false, "", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-stream", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestE2EReasoningContent_RequestForwarding(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-fwd", nil, "test", false, "", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-fwd", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}
@@ -814,7 +814,7 @@ func TestE2EReasoningContent_ResponseForwarding(t *testing.T) {
 			ctx := context.Background()
 
 			// Create token
-			plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-resp-"+tt.name, nil, "test", false, "", nil)
+			plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-resp-"+tt.name, nil, "test", nil)
 			if err != nil {
 				t.Fatalf("CreateToken failed: %v", err)
 			}
@@ -933,7 +933,7 @@ func TestE2EReasoningContent_StreamingResponseChunks(t *testing.T) {
 	ctx := context.Background()
 
 	// Create token
-	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-stream-rc", nil, "test", false, "", nil)
+	plaintext, _, err := env.tokenStore.CreateToken(ctx, "test-token-stream-rc", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken failed: %v", err)
 	}

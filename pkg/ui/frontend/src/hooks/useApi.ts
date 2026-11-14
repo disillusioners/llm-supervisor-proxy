@@ -895,17 +895,12 @@ export function useTokens() {
     }
   }, []);
 
-  const createToken = useCallback(async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[], ultimateModel?: string): Promise<ApiToken> => {
+  const createToken = useCallback(async (name: string, expiresAt: string | null, allowedModels?: string[]): Promise<ApiToken> => {
     const body: Record<string, unknown> = {
       name,
       expires_at: expiresAt,
-      ultimate_model_enabled: ultimateModelEnabled,
       allowed_models: allowedModels && allowedModels.length > 0 ? allowedModels : null,
     };
-    // Include ultimate_model if provided (even empty string to clear any previous value)
-    if (ultimateModel !== undefined) {
-      body.ultimate_model = ultimateModel;
-    }
     const token = await apiFetch<ApiToken>('/tokens', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -915,15 +910,13 @@ export function useTokens() {
     return token;
   }, [fetchTokens]);
 
-  const updateTokenPermission = useCallback(async (id: string, ultimateModelEnabled: boolean, allowedModels?: string[], ultimateModel?: string): Promise<boolean> => {
+  const updateTokenPermission = useCallback(async (id: string, allowedModels?: string[]): Promise<boolean> => {
     try {
       const response = await fetch(`${API_BASE}/tokens/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ultimate_model_enabled: ultimateModelEnabled,
           allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null,
-          ...(ultimateModel !== undefined && { ultimate_model: ultimateModel }),
         }),
       });
       if (!response.ok) {
@@ -931,7 +924,7 @@ export function useTokens() {
         const err = await response.json().catch(() => ({ error: 'Request failed' }));
         throw new Error(err.error || 'Request failed');
       }
-      setTokens(prev => prev.map(t => t.id === id ? { ...t, ultimate_model_enabled: ultimateModelEnabled, allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null, ultimate_model: ultimateModel ?? t.ultimate_model } : t));
+      setTokens(prev => prev.map(t => t.id === id ? { ...t, allowed_models: allowedModels !== undefined && allowedModels.length > 0 ? allowedModels : null } : t));
       // Invalidate cache so next fetch gets fresh data
       defaultAPICache.delete('tokens');
       return true;

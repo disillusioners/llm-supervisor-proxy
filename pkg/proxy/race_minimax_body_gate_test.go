@@ -28,8 +28,8 @@ package proxy
 //
 // All six are exercised against executeInternalRequest, the canonical
 // race-internal site. The same widening is applied to
-// pkg/ultimatemodel/handler_internal.go:137 (twin B) and
-// pkg/ultimatemodel/handler_external.go:111,184,342 — see
+// the retired ult-internal handler (twin B) and
+// the retired raw-passthrough handler — see
 // handler_minimax_body_gate_test.go in that package.
 
 import (

@@ -151,7 +151,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_base_url: 'https://api.minimax.io/v1',
         // Pretend a now-deleted non-minimax credential is still attached.
         credentials: [{ credential_id: 'cred-oai-1', weight: 1, position: 0 }],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm
@@ -217,7 +216,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         // (loadingCredentials === true), the OLD code would false-
         // negative on this perfectly valid row.
         credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm
@@ -299,7 +297,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_provider: 'minimax',
         internal_model: 'image-01',
         enabled: true,
-        exclude_from_ultimate_switching: true,
       });
       expect(arg.credentials).toEqual([
         { credential_id: 'cred-mini-1', weight: 1, position: 0 },
@@ -330,7 +327,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_model: 'image-01',
         internal_base_url: 'https://api.minimax.io/v1',
         credentials: [],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm
@@ -403,7 +399,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_model: 'image-01',
         internal_base_url: '',
         credentials: [],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm
@@ -452,7 +447,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_model: 'ag/gemini-3.8-flash',
         internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
         credentials: [{ credential_id: 'cred-9r-1', weight: 1, position: 0 }],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm
@@ -540,7 +534,6 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
         internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
         // Inappropriate minimax credential on 9router model
         credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <ImgGenModelForm

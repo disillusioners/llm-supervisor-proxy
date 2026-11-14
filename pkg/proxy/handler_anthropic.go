@@ -57,10 +57,14 @@ import (
 	"strings"
 	"time"
 
+	"errors"
+
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/google/uuid"
 )
@@ -418,6 +422,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		arc.modelListOriginal = arc.modelList
 		arc.modelList = newList
 		arc.groupPick = pick
+		// wi-7769a812 part 2 — exhaustive member iteration: the sticky
+		// pick is this request's FIRST tried member.
+		arc.groupTriedMembers = map[string]bool{pick.MemberID: true}
 		// Am25 metering stamp (Anthropic path meters nothing —
 		// Am13; the stamp is recorded for log/FE observability only).
 		if pick.MemberID != arc.reqLog.Model {
@@ -453,17 +460,23 @@ loop:
 			}
 
 			// Phase 3 / task 3.4 (Anthropic-path sequential fallback loop
-			// guard in live mode — architect resolution per the plan):
-			// once the live translator has emitted ANY byte (arc.headersSent
-			// set at handleAnthropicLiveStreamResponse or the new live
-			// internal-variant entry), no model fallback can happen mid-
-			// stream — the Anthropic client is already committed to this
-			// stream's wire shape. The guard is loop-top (NOT inside
-			// attemptAnthropicModel) so we skip the wasted per-model
-			// setup at :275-299 on iterations that can never switch.
-			// Pre-first-byte (iteration 0, headers not sent) fallback is
-			// unchanged — the guard fires only AFTER the first byte.
-			if arc.headersSent && !arc.bufferMode {
+			// guard in live mode — architect resolution per the plan),
+			// wi-7769a812 part 2 AMENDED: the guard rides
+			// arc.payloadCommitted — the route's OWN commit flag (first
+			// NON-HEARTBEAT upstream payload frame forwarded) — NOT
+			// headersSent. The lazy preamble sets headersSent on the
+			// first wire-writing event INCLUDING SSE-comment keep-alives
+			// (writeLiveStreamPreamble), so the old guard closed the
+			// fallback window on framing-only progress; once the
+			// translator has emitted actual payload (a non-ping event)
+			// no member switch can happen mid-stream — the Anthropic
+			// client is already committed to this stream's wire shape.
+			// The guard is loop-top (NOT inside attemptAnthropicModel)
+			// so we skip the wasted per-model setup on iterations that
+			// can never switch. Pre-commit (iteration 0, payload not
+			// forwarded) fallback is unchanged — buffered mode keeps
+			// its delivery-at-end semantics (guard off, as before).
+			if arc.payloadCommitted && !arc.bufferMode {
 				break loop
 			}
 
@@ -519,12 +532,38 @@ loop:
 				return
 			}
 
+			// wi-7769a812 part 2 / USER RULING D3 — feed the skip cache
+			// on LIMIT-CLASS failures ONLY (429/402 family — never 5xx,
+			// never auth, never client-attributable 4xx). The mark
+			// benches the attempt's (credential, wire-model) AND
+			// (provider, wire-model) pair for the config TTL so member
+			// selection becomes health-aware (Phase-0 A2 fix).
+			h.markAnthropicUpstreamSkip(arc)
+
+			// wi-7769a812 part 2 — P2 fail-fast: a client-attributable
+			// failure (400/413/415/422 / client-cancelled) stops the
+			// CHAIN here — the request body does not change between
+			// members, so advancing would thrash every member with the
+			// same guaranteed-failing bytes. Everything else (5xx,
+			// timeouts, limit classes, upstream 401/403) advances.
+			if memberAdvanceBlocked(classifyAnthropicFailure(arc)) {
+				log.Printf("[grouplb] anthropic request %s: client-attributable failure (status=%d) — failing fast, no further members",
+					arc.reqID, arc.lastStatusCode)
+				break loop
+			}
+
 			// Restore arc state for next fallback iteration
 			arc.isAnthropicUpstream = savedIsAnthropicUpstream
 			arc.targetURL = savedTargetURL
 			arc.credentialAPIKey = savedCredentialAPIKey
 			arc.requestBody = savedRequestBody
 			arc.anthropicReq.Model = savedAnthropicReqModel
+			// wi-7769a812 part 2 — a member advance starts a FRESH
+			// translator: a pre-commit failed attempt may have advanced
+			// the old translator's messageStart/ping state without any
+			// wire write, and the next member's stream must open its own
+			// well-formed preamble.
+			arc.liveTranslator = nil
 			// W4: a failed attempt (internal or otherwise) may have left partial
 			// accumulation in arc.accumulatedThinking — e.g. a failed internal
 			// attempt captures thinking into its sink mid-stream before the
@@ -540,7 +579,7 @@ loop:
 			// Sticky last-success failure invalidation (winner-matched
 			// inside the engine): only a failure of the RECORDED winner
 			// unpins the slot. Between-attempt loop aborts (client
-			// disconnect / headersSent `break loop`) are NOT model
+			// disconnect / payloadCommitted `break loop`) are NOT model
 			// failures and never reach this arm.
 			if arc.conf.stickyActive(arc.conversationKey) {
 				h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
@@ -548,10 +587,19 @@ loop:
 		}
 
 		// All models failed (loop body ended without success). Am24
-		// re-entry for group requests: terminal member-pipeline
-		// failure ⇒ ONE reselect + rebuild; second terminal failure
-		// propagates. Non-group traffic: real failure (groupPick nil).
-		if arc.groupPick != nil && !arc.groupReentered && h.tryGroupReentryAnthropic(arc) {
+		// re-entry for group requests — wi-7769a812 part 2 made it
+		// EXHAUSTIVE: terminal member-pipeline failure ⇒ reselect +
+		// rebuild + resume, up to N attempts for an N-member group
+		// (the one-re-entry latch is retired). Gate is PRE-COMMIT
+		// only (arc.payloadCommitted — never headersSent, which the
+		// lazy preamble sets on framing-only progress) + the P2
+		// client-attributable fail-fast. Non-group traffic: real
+		// failure (groupPick nil).
+		if arc.groupPick != nil &&
+			!arc.payloadCommitted &&
+			arc.groupAdvances < models.MaxGroupMembers &&
+			!memberAdvanceBlocked(classifyAnthropicFailure(arc)) &&
+			h.tryGroupReentryAnthropic(arc) {
 			continue loop
 		}
 		break
@@ -615,6 +663,16 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 		if resolvedOK {
 			cred = arc.conf.ModelsConfig.GetCredential(resolved.CredentialID)
 		}
+		// wi-7769a812 part 2 — stash the attempt's upstream identity
+		// for the loop's skip-cache marking seam (D3) + the P2
+		// classifier: wire model first (the string the upstream
+		// actually receives), falling back to the row ID.
+		arc.lastAttemptCredentialID = resolved.CredentialID
+		arc.lastAttemptProvider = resolved.Provider
+		arc.lastAttemptModel = resolved.InternalModel
+		if arc.lastAttemptModel == "" {
+			arc.lastAttemptModel = modelConfig.ID
+		}
 		credProvider := ""
 		if cred != nil {
 			credProvider = strings.ToLower(cred.Provider)
@@ -635,12 +693,10 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				// remove-external-upstream P1 (task 4, A16): the
 				// global-upstream fallback is GONE. An anthropic-provider
 				// credential/model with no base URL anywhere is a
-				// configuration error — fail the ATTEMPT (well-formed,
-				// mirroring the deleted pkg/ultimatemodel
-				// handler_external.go "upstream URL not configured"
-				// shape) and let the model fallback loop / all-models
-				// 502 envelope carry it. Never forward to a retired
-				// global upstream.
+				// configuration error — fail the ATTEMPT (well-formed
+				// "upstream URL not configured" envelope) and let the
+				// model fallback loop / all-models 502 envelope carry it.
+				// Never forward to a retired global upstream.
 				log.Printf("Anthropic passthrough attempt for model %s failed: no upstream URL configured (credential base_url and internal_base_url both empty)", modelConfig.ID)
 				arc.lastError = []byte("upstream URL not configured for anthropic passthrough")
 				arc.lastStatusCode = http.StatusBadGateway
@@ -671,19 +727,22 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 			}
 			success = h.doAnthropicRequest(w, arc)
 
-			// Phase 3 / Task 22 (Round 3b review #4 + Round 3c — W1):
-			// rate-limit failover hook on the anthropic-passthrough branch.
-			// The branch produces NO *ProviderError; classify via
-			// arc.lastStatusCode == 429 OR body `type` substring
-			// `rate_limit` (isAnthropicRateLimit). Pre-write guard:
-			// !arc.headersSent (no Anthropic bytes written — the
-			// first-byte marker is handler_anthropic.go:648-654, NOT
-			// adapter_anthropic.go SetStreamHeaders). Multi-cred +
-			// engine present; single retry per mode (R3-5 budget is
-			// structurally bounded — one retry ≤ len(credentials)−1).
+			// Phase 3 / Task 22 (Round 3b review #4 + Round 3c — W1),
+			// wi-7769a812 part 2 WIDENED: credential failover hook on
+			// the anthropic-passthrough branch. The branch produces NO
+			// *ProviderError; classify via arc.lastStatusCode + body
+			// vocabulary (isAnthropicLimitClass: 429 OR rate-limit body,
+			// PLUS 402 / quota body; and isAnthropicUpstreamAuth: 401/403
+			// — ruling #6, a pooled-credential rejection upstream
+			// rotates AND advances). Pre-write guard: !arc.headersSent
+			// (no Anthropic bytes written — the first-byte marker is
+			// handler_anthropic.go:648-654, NOT adapter_anthropic.go
+			// SetStreamHeaders). Multi-cred + engine present; single
+			// retry per mode (R3-5 budget is structurally bounded — one
+			// retry ≤ len(credentials)−1).
 			if !success &&
 				!arc.headersSent &&
-				isAnthropicRateLimit(arc) &&
+				(isAnthropicLimitClass(arc) || isAnthropicUpstreamAuth(arc)) &&
 				h.credEngine != nil &&
 				resolvedOK &&
 				len(modelConfig.Credentials) > 1 {
@@ -939,8 +998,7 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		err := internalHandler.HandleRequest(arc.baseCtx, openaiReq, recorder, arc.isStream, arc.conversationKey)
 		if err != nil {
 			log.Printf("[DEBUG ANTHROPIC] Internal request failed: %v", err)
-			arc.lastError = []byte(err.Error())
-			arc.lastStatusCode = http.StatusBadGateway
+			anthropicStoreUpstreamFailure(arc, err)
 			return false
 		}
 
@@ -1008,8 +1066,7 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 		// caller's `!headersSent` branch) instead of returning true,
 		// which would leave the client with an empty 200.
 		if !arc.isStream {
-			arc.lastError = []byte(err.Error())
-			arc.lastStatusCode = http.StatusBadGateway
+			anthropicStoreUpstreamFailure(arc, err)
 			return false
 		}
 		// Mid-stream error path (NB2): the InternalHandler's
@@ -1289,11 +1346,17 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 
 		// Mirror per-event payload into arc.accumulated* and write
 		// each emitted event to the wire, flushing after each.
+		// wi-7769a812 part 2: the FIRST forwarded non-ping event is
+		// the COMMIT (first non-heartbeat upstream payload frame) —
+		// the lazy preamble above only set headersSent (framing).
 		for _, ev := range events {
 			mirrorTranslatorEventIntoArc(ev, arc)
 			if _, err := w.Write([]byte(ev)); err != nil {
 				log.Printf("Live stream wire write failed: %v", err)
 				return true
+			}
+			if !arc.payloadCommitted && !anthropicEventIsPing(ev) {
+				arc.payloadCommitted = true
 			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -1328,6 +1391,15 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 				log.Printf("Live stream final wire write failed: %v", werr)
 				break
 			}
+			// wi-7769a812 part 2 — NO commit here: Finalize's events
+			// (block-stops / message_delta / message_stop) are
+			// SYNTHESIZED by the translator, not upstream payload
+			// frames — on an empty stream Finalize still emits
+			// message_stop, and treating that as a commit would close
+			// the fallback window on framing-only progress (the exact
+			// defect the commit flag exists to prevent). The scan phase
+			// above is the authoritative commit site: every real
+			// upstream payload frame passes through it.
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -1557,6 +1629,10 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			}
 
 			_, arc.clientWriteErr = w.Write(anthropicEvents)
+			// wi-7769a812 part 2: the translated event batch is the
+			// payload frame (the buffered path delivers everything at
+			// [DONE] — this write IS the first payload frame).
+			arc.payloadCommitted = true
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -1604,13 +1680,39 @@ type anthropicRequestContext struct {
 	isAnthropicUpstream bool   // true when upstream speaks Anthropic protocol
 	credentialAPIKey    string // resolved API key from model's credential (for internal passthrough)
 
+	// payloadCommitted (wi-7769a812 part 2) — the Anthropic route's
+	// OWN commit flag: true once the FIRST NON-HEARTBEAT upstream
+	// payload frame has been forwarded to the client. The lazy
+	// preamble boundary (": connected" + headers) sets headersSent
+	// WITHOUT setting this — headersSent is PROVEN non-committing
+	// (writeLiveStreamPreamble fires on the first wire-writing event,
+	// including SSE comment keep-alives), so the fallback-iteration
+	// gate reads THIS flag, never headersSent. Set at every payload
+	// write site: the live translator loop (non-ping events), the
+	// passthrough pipe (non-ping data lines), the buffered stream
+	// final write, and the non-stream body write.
+	payloadCommitted bool
+
+	// lastAttempt* (wi-7769a812 part 2) — the upstream identity of
+	// the MOST RECENT attempt, stashed by attemptAnthropicModel so
+	// the sequential loop can feed the skip cache on LIMIT-CLASS
+	// failures (D3) without re-resolving. Zero values on resolution
+	// failure = no mark.
+	lastAttemptCredentialID string
+	lastAttemptProvider     string
+	lastAttemptModel        string
+
 	// anthropicRequestContext P2 group fields (Am21/Am24 mirror of
 	// requestContext): original list preserved for the re-entry
 	// rebuild; groupPick for metering-adjacent identity + failure
-	// semantics; groupReentered enforces max-ONE re-entry.
+	// semantics. wi-7769a812 part 2: groupReentered (max-ONE
+	// re-entry) is RETIRED — groupAdvances + groupTriedMembers bound
+	// the member iteration to N attempts for an N-member group,
+	// mirroring the OpenAI route.
 	modelListOriginal []string
 	groupPick         *groupPickInfo
-	groupReentered    bool
+	groupAdvances     int
+	groupTriedMembers map[string]bool
 
 	// bufferMode is the per-request delivery mode (real-streaming-default
 	// plan, Phase 3 / task 3.7): true = buffered (legacy, header opt-in
@@ -1818,7 +1920,7 @@ func extractOpenAIResponseContentFromSSE(sseBuffer []byte) (content, thinking st
 		// Parse the chunk JSON
 		var chunk map[string]interface{}
 		if err := json.Unmarshal(data, &chunk); err != nil {
-			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed chunk: %v", err)
+			log.Printf("extractOpenAIResponseContentFromSSE: skipping malformed SSE line: %v", err)
 			continue
 		}
 
@@ -1991,6 +2093,8 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, arc.clientWriteErr = w.Write(bodyBytes)
+	// wi-7769a812 part 2: the whole JSON body is the payload frame.
+	arc.payloadCommitted = true
 
 	h.finalizeAnthropicSuccess(arc)
 	return true
@@ -2036,6 +2140,14 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 			data := bytes.TrimPrefix(line, []byte("data: "))
 			var event map[string]interface{}
 			if json.Unmarshal(data, &event) == nil {
+				// wi-7769a812 part 2: the first forwarded non-ping data
+				// line is the COMMIT (non-heartbeat payload frame);
+				// ping keep-alives stay framing.
+				if eventType, _ := event["type"].(string); eventType == string(translator.EventPing) {
+					// ping — framing, no commit
+				} else if !arc.payloadCommitted {
+					arc.payloadCommitted = true
+				}
 				switch eventType := event["type"]; eventType {
 				case "content_block_delta":
 					if delta, ok := event["delta"].(map[string]interface{}); ok {
@@ -2251,6 +2363,164 @@ func isAnthropicRateLimit(arc *anthropicRequestContext) bool {
 	switch body.Error.Code {
 	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
 		return true
+	}
+	return false
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wi-7769a812 part 2 — Anthropic-route exhaustive pre-commit group
+// fallback helpers: the failure classifier (P2 input), the skip-cache
+// marking seam (USER RULING D3), and the lazy-preamble-boundary
+// commit predicate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// anthropicStoreUpstreamFailure records a failed internal attempt's
+// error on the arc — preserving the TRUE upstream HTTP status when
+// the error carries a *providers.ProviderError (errors.As), instead
+// of the blanket 502 the site used to store. wi-7769a812 part 2: the
+// P2 client-attributable fail-fast (memberAdvanceBlocked) and the
+// final error envelope both read this status, so the 400 a client's
+// own payload provoked must not be laundered into a 502.
+func anthropicStoreUpstreamFailure(arc *anthropicRequestContext, err error) {
+	arc.lastError = []byte(err.Error())
+	arc.lastStatusCode = http.StatusBadGateway
+	var pe *providers.ProviderError
+	if errors.As(err, &pe) && pe != nil && pe.StatusCode > 0 {
+		arc.lastStatusCode = pe.StatusCode
+	}
+}
+
+// isAnthropicQuotaFailure classifies the stored anthropic error as
+// QUOTA-class (402 / quota vocabulary in the body) — the D3
+// limit-class sibling of isAnthropicRateLimit. HTTP-200-with-embedded
+// quota text is OUT OF SCOPE, same as the rate-limit R3-1 pinning.
+func isAnthropicQuotaFailure(arc *anthropicRequestContext) bool {
+	if arc == nil {
+		return false
+	}
+	if arc.lastStatusCode == http.StatusPaymentRequired {
+		return true
+	}
+	if len(arc.lastError) == 0 {
+		return false
+	}
+	var body struct {
+		Type  string `json:"type"`
+		Code  string `json:"code"`
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(arc.lastError, &body); err != nil {
+		return false
+	}
+	quotaVocab := func(s string) bool {
+		s = strings.ToLower(s)
+		return strings.Contains(s, "quota") ||
+			strings.Contains(s, "insufficient") ||
+			strings.Contains(s, "credit") ||
+			strings.Contains(s, "billing") ||
+			strings.Contains(s, "payment")
+	}
+	if quotaVocab(body.Type) || quotaVocab(body.Error.Type) {
+		return true
+	}
+	switch body.Code {
+	case "insufficient_credits", "credit_balance_too_low", "billing_error", "quota_exceeded":
+		return true
+	}
+	switch body.Error.Code {
+	case "insufficient_credits", "credit_balance_too_low", "billing_error", "quota_exceeded":
+		return true
+	}
+	return false
+}
+
+// isAnthropicLimitClass is the anthropic-route LIMIT-CLASS check
+// (rate-limit OR quota) — the D3 marking vocabulary. NEVER 5xx.
+func isAnthropicLimitClass(arc *anthropicRequestContext) bool {
+	return isAnthropicRateLimit(arc) || isAnthropicQuotaFailure(arc)
+}
+
+// isAnthropicUpstreamAuth reports an upstream 401/403 — the ruling-#6
+// pooled-credential rejection (rotate + advance).
+func isAnthropicUpstreamAuth(arc *anthropicRequestContext) bool {
+	return arc != nil && (arc.lastStatusCode == http.StatusUnauthorized || arc.lastStatusCode == http.StatusForbidden)
+}
+
+// classifyAnthropicFailure maps the anthropic route's stored failure
+// (arc.lastStatusCode + arc.lastError + arc.baseCtx) onto the shared
+// failureReason vocabulary so the SAME P2 predicate
+// (memberAdvanceBlocked) gates both routes. Cancelled wins first
+// (client gone — nothing more to try); then rate-limit vocabulary;
+// then the status family; then unknown. Bounded + id-only (no body
+// text rides the reason).
+func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
+	if arc == nil {
+		return failureReason{Class: reasonClassUnknown}
+	}
+	if arc.baseCtx.Err() != nil {
+		return failureReason{Class: reasonClassCancelled}
+	}
+	status := arc.lastStatusCode
+	switch {
+	case status == http.StatusTooManyRequests:
+		return failureReason{Class: reasonClassRateLimit, Status: status}
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return failureReason{Class: reasonClassAuth, Status: status}
+	case status == http.StatusConflict:
+		return failureReason{Class: reasonClassConflict, Status: status}
+	case status == http.StatusPaymentRequired:
+		return failureReason{Class: reasonClassRateLimit, Status: status}
+	case status >= 500:
+		return failureReason{Class: reasonClassUpstream5xx, Status: status}
+	case status >= 400:
+		return failureReason{Class: reasonClassUpstream4xx, Status: status}
+	}
+	// 200-with-embedded-error or no status: mine the body vocabulary
+	// the W1 seam already trusts.
+	if isAnthropicRateLimit(arc) {
+		return failureReason{Class: reasonClassRateLimit, Status: status}
+	}
+	return failureReason{Class: reasonClassUnknown, Status: status}
+}
+
+// markAnthropicUpstreamSkip (wi-7769a812 part 2 / USER RULING D3)
+// feeds the global upstream skip cache from a FAILED anthropic
+// attempt — LIMIT-CLASS failures ONLY (isAnthropicLimitClass). The
+// identities benched are the attempt's resolved (credential,
+// wire-model) and (provider, wire-model) pairs for the config-owned
+// TTL. No-op when the cache is unwired or the attempt failed before
+// resolving an upstream identity.
+func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext) {
+	if arc == nil || arc.conf.UpstreamSkipCache == nil {
+		return
+	}
+	if !isAnthropicLimitClass(arc) {
+		return
+	}
+	if arc.lastAttemptCredentialID == "" && arc.lastAttemptProvider == "" {
+		return
+	}
+	wireModel := arc.lastAttemptModel
+	if wireModel == "" {
+		wireModel = arc.originalModel
+	}
+	ttl := arc.conf.UpstreamSkipCacheTTL
+	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
+	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+}
+
+// anthropicEventIsPing reports whether a translated Anthropic SSE
+// event is a pure heartbeat (`event: ping`) — NON-COMMITTING framing
+// under the part-2 commit semantics. The event string is the full
+// "event: X\ndata: {...}" shape the translator emits.
+func anthropicEventIsPing(eventStr string) bool {
+	for _, ln := range strings.Split(eventStr, "\n") {
+		if strings.HasPrefix(ln, "event: ") {
+			return strings.TrimSpace(strings.TrimPrefix(ln, "event: ")) == string(translator.EventPing)
+		}
 	}
 	return false
 }

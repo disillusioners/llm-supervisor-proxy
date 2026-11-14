@@ -20,7 +20,6 @@ import { MultiCredentialEditor } from './MultiCredentialEditor';
 // edit to PROVIDER_OPTIONS.
 const HARDCODED_KIND = 'decision' as const;
 const HARDCODED_INTERNAL = true as const;
-const HARDCODED_EXCLUDE_FROM_ULTIMATE = true as const;
 
 // Identity B (recommended) — Q11 approved. Override A would swap
 // 'openai' -> 'openai-decision' here. The two provider options are
@@ -53,7 +52,6 @@ export interface DecisionModelPayload {
   internal_base_url: string;
   credentials: CredentialRef[];
   enabled: boolean;
-  exclude_from_ultimate_switching: true;
 }
 
 interface DecisionModelFormProps {
@@ -73,7 +71,7 @@ interface DecisionModelFormProps {
 // hard-coded fields are derived from constants above, not stored in
 // state. `internal_provider` and the mirrored `internal_base_url`
 // are user-editable (dropdown + input); the rest of the constants
-// (kind/internal/exclude_from_ultimate_switching) are bound at submit
+// (kind/internal) are bound at submit
 // time.
 interface FormFields {
   id: string;
@@ -282,7 +280,6 @@ export function DecisionModelForm({
         internal_base_url: baseUrl,
         credentials: fields.credentials,
         enabled: fields.enabled,
-        exclude_from_ultimate_switching: HARDCODED_EXCLUDE_FROM_ULTIMATE,
       };
       await onSave(payload);
     } catch (e) {

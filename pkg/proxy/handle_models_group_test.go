@@ -31,7 +31,6 @@ func TestHandleModels_ShadowHide_EnabledGroup(t *testing.T) {
 		// listed; the claim HIDES the chat row "coding".
 		{ID: "coding-group", Name: "Coding Group", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
 			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 2},
 				{ModelID: "coding-alt", Weight: 1},
@@ -91,7 +90,6 @@ func TestHandleModels_ShadowHide_DisabledGroupReveals(t *testing.T) {
 		// shadowed chat row is NOT hidden.
 		{ID: "coding-group", Name: "Coding Group", Enabled: false,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
 			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 2},
 				{ModelID: "coding-alt", Weight: 1},
@@ -131,9 +129,8 @@ func TestHandleModels_ShadowHide_TwoEnabledGroups_NoUniqueness(t *testing.T) {
 			Internal: true, InternalModel: "glm-5"},
 		{ID: "coding-group", Name: "Coding Group", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
-			Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-			ShadowModelID:                "coding",
+			Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+			ShadowModelID: "coding",
 		},
 	})
 	rec := httptest.NewRecorder()

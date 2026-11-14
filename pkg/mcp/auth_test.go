@@ -26,7 +26,7 @@ func (m *mockAuthTokenStore) ValidateToken(ctx context.Context, plaintext string
 	return nil, auth.ErrTokenNotFound
 }
 
-func (m *mockAuthTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
+func (m *mockAuthTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
 	return "", nil, nil
 }
 
@@ -42,7 +42,7 @@ func (m *mockAuthTokenStore) GetTokenByID(ctx context.Context, id string) (*auth
 	return nil, nil
 }
 
-func (m *mockAuthTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
+func (m *mockAuthTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
 	return nil
 }
 

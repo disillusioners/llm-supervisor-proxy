@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // load-balance-groups §3.6.1 (Am21) — the modelList rewrite seam.
 //
 // The rewrite is ONE shared manager-level helper (implemented on
@@ -88,21 +90,28 @@ type GroupRewriter interface {
 	// ⇒ fresh weighted pick, no binding.
 	RewriteGroupEntries(modelList []string, conversationKey string) GroupRewriteResult
 
-	// ExcludeGroupMember marks the member as cooling for the group
-	// (60s default) and rebinds the conversation to the next healthy
-	// member (ExcludeAndReselect). Returns the replacement member,
-	// the pool the member was drawn from ("default" / "backup"),
-	// and ok=true on ReselectHealthy, on ReselectSoonestExpiry in a
-	// backup-less group (the v1 all-cooling availability re-serve of
-	// the soonest-expiring default), or on a successful backup-pool
-	// cascade (ReselectNone / ReselectSoonestExpiry with
-	// HasBackupPool); ("", "", false) when no alternative exists
-	// (single-member group / all exhausted) — the caller treats the
-	// failure as real (max-ONE re-entry, Am24).
+	// ExcludeGroupMember marks the member as cooling and rebinds the
+	// conversation to the next healthy member (ExcludeAndReselect).
+	// wi-7769a812 part 2 / USER RULING D3: cooldown is CALLER-OWNED —
+	// the proxy passes the CONFIG-OWNED skip-cache TTL (hot snapshot
+	// value) so the member exclusion window derives from the same
+	// config key as the (credential|provider, model) skip marks (ONE
+	// source of truth; the flat 60s DefaultCooldown is retired for
+	// the failure path). cooldown <= 0 falls back to the engine
+	// default (Am28 stale-repair shape).
+	//
+	// Returns the replacement member, the pool the member was drawn
+	// from ("default" / "backup"), and ok=true on ReselectHealthy, on
+	// ReselectSoonestExpiry in a backup-less group (the v1
+	// all-cooling availability re-serve of the soonest-expiring
+	// default), or on a successful backup-pool cascade (ReselectNone /
+	// ReselectSoonestExpiry with HasBackupPool); ("", "", false) when
+	// no alternative exists (single-member group / all exhausted) —
+	// the caller treats the failure as real.
 	// group-backup-members / D5: the pool string is observable ONLY
 	// on actual fallback; ReselectNone / ReselectSoonestExpiry in the
 	// default pool cascades into the backup pool before returning
 	// ok=false (the fall-through is invisible to the caller unless the
 	// pool=backup path actually serves).
-	ExcludeGroupMember(groupID, conversationKey, memberID string) (replacement string, pool string, ok bool)
+	ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (replacement string, pool string, ok bool)
 }

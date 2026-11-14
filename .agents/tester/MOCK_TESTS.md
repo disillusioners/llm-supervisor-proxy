@@ -4,7 +4,7 @@
 - **Created**: 2026-08-21
 - **Script**: `test/e2e_fe_reasoning_observability/path_matrix_test.go` (+ harness extension in `harness_test.go`)
 - **Language**: Go (in-process; reuses the FE-API-over-real-HTTP harness from the closure-gate suite)
-- **Status**: ACTIVE — 16/16 matrix rows pass
+- **Status**: ACTIVE — 16/16 matrix rows pass (row count is pre-8c49e1a; the ultimate arms were removed from the harness with the retirement)
 
 ### Configuration
 - **Timeout**: dual-layer — outer `timeout 300 go test ./test/e2e_fe_reasoning_observability/ -v -count=1 -timeout 240s`
@@ -13,7 +13,8 @@
 
 ### What It Tests
 Thinking visible in the FE API `GET /fe/api/requests/{id}` on EVERY capture
-path: race x stream/non-stream, ultimate x stream/non-stream x internal/external,
+path: race x stream/non-stream (ultimate x stream/non-stream x internal/external
+arms REMOVED at 8c49e1a),
 anthropic-client (internal stream + external non-stream), plus MiniMax
 translated rows (reasoning_details → reasoning_content) and negative
 omitempty-cleanliness rows.
@@ -21,7 +22,7 @@ omitempty-cleanliness rows.
 ### Test Scenarios
 - R1..R10 positive core matrix (byte-exact thinking via FE API)
 - N1..N4 negative rows (ZERO "thinking" occurrences when no reasoning upstream)
-- M1 minimax race-external stream translated; M2 minimax ultimate-external non-stream translated
+- M1 minimax race-external stream translated; M2 minimax ultimate-external non-stream translated (M2's ultimate arm REMOVED at 8c49e1a)
 
 ### Success Criteria
 - [x] All 16 rows pass; byte-exact equality on positives; strict absence on negatives
@@ -29,9 +30,9 @@ omitempty-cleanliness rows.
 - [x] No process/port leaks
 
 ### Implementation Notes
-- Ultimate rows: X-Force-Ultimate-Model + ultimateModelEnabled token + ULTIMATE_MODEL_MAX_RETRIES=0 (ForceTrigger fires on first call)
+- Ultimate rows (X-Force-Ultimate-Model + ultimateModelEnabled token + ULTIMATE_MODEL_MAX_RETRIES=0): REMOVED at 8c49e1a — the ultimate trigger surface no longer exists
 - Anthropic rows: HandleAnthropicMessages with x-api-key + anthropic-version headers
-- **GOTCHA (cost one fail/re-run)**: the ultimate-external MiniMax translation gate reads the MODEL's CredentialID, NOT the global upstream credential — M2 needs a minimax-credentialed ultimate model (`matrix-ultimate-external-minimax`)
+- **GOTCHA (cost one fail/re-run; HISTORICAL — the path it describes was removed at 8c49e1a)**: the ultimate-external MiniMax translation gate reads the MODEL's CredentialID, NOT the global upstream credential — M2 needed a minimax-credentialed ultimate model (`matrix-ultimate-external-minimax`)
 - R1 is the closure-gate scenario kept as matrix row 1 (Scenario A test still exists)
 
 ### Last Run
@@ -163,11 +164,15 @@ payload shape the 🧠 block renders.
 
 # Mock Test: Ultimate Internal Reasoning-Content Reproduction (commit 83814b0 verification)
 
+> **REMOVED at 8c49e1a**: the harness `test/e2e_ultimate_internal_reasoning/` and the
+> `pkg/ultimatemodel` package it exercised were deleted with the ultimate-model retirement.
+> Section retained below as a historical record only.
+
 ### Metadata
 - **Created**: 2026-08-18
 - **Script**: `test/e2e_ultimate_internal_reasoning/e2e_ultimate_internal_reasoning_test.go` (Go test, in-process)
 - **Language**: Go (reuses `httptest` mockUpstream pattern from `test/e2e_reasoning_content/`)
-- **Status**: ACTIVE — verified against fix 83814b0 on 2026-08-18 (negative-control proven)
+- **Status**: ~~ACTIVE~~ RETIRED — harness deleted at 8c49e1a (was verified against fix 83814b0 on 2026-08-18, negative-control proven)
 
 ### Configuration
 - **Timeout**: dual-layer — outer `timeout 300 go test ./test/e2e_ultimate_internal_reasoning/ -v -count=1 -timeout 110s`
@@ -245,7 +250,7 @@ Real-process E2E of the `x-proxy-interleaved-thinking` translation feature again
 mock MiniMax upstream: request-direction translation (reasoning_content → reasoning_details +
 reasoning_split), response-direction translation (non-stream + SSE, incremental AND cumulative),
 flag-absent legacy passthrough, header hygiene on external paths, non-MiniMax inertness,
-error path, usage passthrough, ultimate-path trigger via duplicate-hash retry.
+error path, usage passthrough (ultimate-path trigger via duplicate-hash retry — scenario REMOVED at 8c49e1a).
 
 ### Mock Services Required
 - Single MiniMax-shaped mock upstream (Go): OpenAI-compatible `/v1/chat/completions`;
@@ -270,11 +275,11 @@ error path, usage passthrough, ultimate-path trigger via duplicate-hash retry.
 8. Empty-text entry → no empty delta (H7)
 9. Multi-entry chunk → ordered deltas
 10. Flag absent + MODE-PLAIN → legacy passthrough (captured upstream un-translated, no reasoning_split)
-11. Header hygiene: zero `x-proxy-interleaved-thinking` (any case) in captured upstream headers — race-external AND ultimate-external
+11. Header hygiene: zero `x-proxy-interleaved-thinking` (any case) in captured upstream headers — race-external (ultimate-external arm REMOVED at 8c49e1a)
 12. Non-MiniMax cred + flag ON → no translation
 13. MODE-ERROR-500 → clean client error, no reasoning leakage
 14. usage passthrough on translated path
-15. Ultimate-path duplicate-hash trigger → translated ultimate upstream request
+15. Ultimate-path duplicate-hash trigger → translated ultimate upstream request (REMOVED at 8c49e1a)
 
 ### Success Criteria
 - [ ] `bash test/test_mock_minimax_reasoning.sh` exits 0 under `timeout 300`
@@ -304,21 +309,21 @@ error path, usage passthrough, ultimate-path trigger via duplicate-hash retry.
 - **Cleanup**: `t.Cleanup` + httptest auto-reap
 
 ### What It Tests
-All 4 proxy paths (race-internal, race-external, ultimate-internal, ultimate-external) × request/response × stream/non-stream translation behavior, flag quadrants, header hygiene, credential gate, error path, drift counter.
+All 4 proxy paths (race-internal, race-external, ultimate-internal, ultimate-external — the two ultimate arms REMOVED at 8c49e1a) × request/response × stream/non-stream translation behavior, flag quadrants, header hygiene, credential gate, error path, drift counter.
 
 ### Key mechanics (from recon @ d5280ce)
-- Ultimate paths: `t.Setenv ULTIMATE_MODEL_ID/MAX_HASH/MAX_RETRIES` + token with `ultimateModelEnabled=true` + `X-Force-Ultimate-Model: true`
+- Ultimate paths: `t.Setenv ULTIMATE_MODEL_ID/MAX_HASH/MAX_RETRIES` + token with `ultimateModelEnabled=true` + `X-Force-Ultimate-Model: true` (REMOVED at 8c49e1a)
 - Race paths: plain token, model `Internal` true/false + `credential_id` → minimax cred
-- Gate: `interleaved && provider=="minimax"` (case-insensitive) at race_executor.go:173/244/939/1221, ultimamodel handler_internal.go:88, handler_external.go:99/171/289
+- Gate: `interleaved && provider=="minimax"` (case-insensitive) at race_executor.go (handler sites deleted at 8c49e1a)
 - Response on internal paths: typed extraction in pkg/providers/openai.go (NOT translator)
 - Drift counter: `translator.FormatDriftCount()` — suite must leave delta == 0
 
 ### Test Scenarios (14 groups)
-S1/S2 request translation (race-ext, ult-ext) · S3 typed internal request paths (+negative nil) ·
+S1/S2 request translation (race-ext; ult-ext arm REMOVED at 8c49e1a) · S3 typed internal request paths (+negative nil) ·
 S4 NS response external (concat, strip details/audio/name, Q2 both-modes single-winner) ·
 S5 NS response internal (typed extraction) · S6 stream external (incremental+cumulative+multi-entry+H7+H2+[DONE]) ·
-S7 stream internal (thinking events) · S8 flag-absent all 4 paths (legacy identity) ·
-S9 non-MiniMax + flag ON all 4 paths · S10 credential gate (no cred → inert) ·
+S7 stream internal (thinking events) · S8 flag-absent paths (legacy identity; ultimate arms removed at 8c49e1a) ·
+S9 non-MiniMax + flag ON (ultimate arms removed at 8c49e1a) · S10 credential gate (no cred → inert) ·
 S11 error 500 (clean error, no leakage) · S12 usage preservation · S13 drift counter delta==0 ·
 S14 header-value table at integration level (true/1 activate; True/TRUE/false/no/garbage/absent legacy)
 
@@ -395,7 +400,7 @@ Closes the specific leak the dev-verify pass caught pre-fix on `fix/ui-reasoning
 - **Service Port**: 10110 (proxy under test)
 - **Mock Ports**: 10111 (mock OpenAI upstream)
 - **Cleanup**: kill PIDs on 10110/10111 before start and on EXIT trap; verify ports freed; NEVER touch 8088 or any process not bound to 10110/10111
-- **Isolation (HARD)**: proxy config MUST live in a temp dir (temp HOME and/or explicit config path / DATABASE_URL to temp SQLite). MUST NOT read/write the developer's real ~/.config/llm-supervisor-proxy. Follow the config-isolation precedent of test/test_mock_ultimate_model.sh.
+- **Isolation (HARD)**: proxy config MUST live in a temp dir (temp HOME and/or explicit config path / DATABASE_URL to temp SQLite). MUST NOT read/write the developer's real ~/.config/llm-supervisor-proxy. Follow the config-isolation precedent of test/test_mock_ultimate_model.sh (script removed at 8c49e1a — the precedent stands).
 
 ### What It Tests
 The user's original complaint, against the REAL binary: default = REAL streaming on the OpenAI race path (/v1/chat/completions); `X-LLMProxy-Buffer-Response: true` = buffered (legacy) — first byte reaches client only after upstream completes.
@@ -435,11 +440,15 @@ The proxy emits an SSE preamble `: connected\n\n` IMMEDIATELY in both modes (`pk
 
 # Mock Test: real-streaming-default M2 — Anthropic path + ultimate path + UI records (merge gate)
 
+> **REMOVED at 8c49e1a**: the harness `test/mock_rsd_m2_anthropic_ultimate_ui.sh` was deleted
+> with the ultimate-model retirement (its ultimate-path arm died with it). Section retained
+> below as a historical record only.
+
 ### Metadata
 - **Created**: 2026-08-28
-- **Script**: `test/mock_rsd_m2_anthropic_ultimate_ui.sh`
+- **Script**: `test/mock_rsd_m2_anthropic_ultimate_ui.sh` (deleted at 8c49e1a)
 - **Language**: Bash + python3
-- **Status**: ACTIVE (merge-gate for feature/real-streaming-default; final gate round @ e60de91)
+- **Status**: ~~ACTIVE~~ RETIRED (script deleted at 8c49e1a; historical merge-gate for feature/real-streaming-default)
 
 ### Configuration
 - **Timeout**: internal alarm 240s; outer `timeout 300`
@@ -607,7 +616,7 @@ zero behavior change. NO response compression was added.
 - [ ] Total runtime < 240s internal
 
 ### Implementation Notes
-- Mirror harness mechanics from `test/mock_rsd_m3_edge_cases.sh` / `test/mock_rsd_m2_anthropic_ultimate_ui.sh`
+- Mirror harness mechanics from `test/mock_rsd_m3_edge_cases.sh` / `test/mock_rsd_m2_anthropic_ultimate_ui.sh` (the latter removed at 8c49e1a)
   (binary startup, config/model/token seeding, healthz wait).
 - Read `pkg/middleware/gzipmw/gzip.go` for the actual decompression cap → align scenario e
   size; assert 413 per requirement, report actual if it differs.

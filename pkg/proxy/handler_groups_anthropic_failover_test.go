@@ -47,7 +47,6 @@ func TestHandlerGroups_AnthropicReentry_PublishesEventMemberFailover(t *testing.
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "g-anth", Name: "G-Anth", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "m-a", Weight: 1},
 			{ModelID: "m-b", Weight: 1},

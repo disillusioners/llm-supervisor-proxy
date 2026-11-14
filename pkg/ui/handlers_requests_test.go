@@ -153,23 +153,22 @@ func TestHandleRequests_DefaultProjection_NoMessagesField(t *testing.T) {
 func TestHandleRequests_DefaultProjection_KeepsIdentityFields(t *testing.T) {
 	ts := newRequestsTestServer(t)
 	ts.store.Add(&store.RequestLog{
-		ID:              "req-keep",
-		Status:          "completed",
-		Model:           "model-x",
-		StartTime:       time.Unix(1700000000, 0).UTC(),
-		EndTime:         time.Unix(1700000060, 0).UTC(),
-		Duration:        "1m0s",
-		Retries:         2,
-		Error:           "boom",
-		Usage:           &store.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
-		TokenID:         "tok-1",
-		TokenName:       "demo",
-		OriginalModel:   "model-orig",
-		FallbackUsed:    []string{"fb-1"},
-		IsStream:        true,
-		AppTag:          "my-app",
-		UltimateModelID: "ult-1",
-		Messages:        []store.Message{{Role: "user", Content: "hello world"}},
+		ID:            "req-keep",
+		Status:        "completed",
+		Model:         "model-x",
+		StartTime:     time.Unix(1700000000, 0).UTC(),
+		EndTime:       time.Unix(1700000060, 0).UTC(),
+		Duration:      "1m0s",
+		Retries:       2,
+		Error:         "boom",
+		Usage:         &store.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+		TokenID:       "tok-1",
+		TokenName:     "demo",
+		OriginalModel: "model-orig",
+		FallbackUsed:  []string{"fb-1"},
+		IsStream:      true,
+		AppTag:        "my-app",
+		Messages:      []store.Message{{Role: "user", Content: "hello world"}},
 	})
 	server := ts.serve()
 	defer server.Close()
@@ -191,16 +190,15 @@ func TestHandleRequests_DefaultProjection_KeepsIdentityFields(t *testing.T) {
 	item := arr[0]
 
 	wantStrings := map[string]string{
-		"id":                "req-keep",
-		"status":            "completed",
-		"model":             "model-x",
-		"duration":          "1m0s",
-		"error":             "boom",
-		"token_id":          "tok-1",
-		"token_name":        "demo",
-		"original_model":    "model-orig",
-		"app_tag":           "my-app",
-		"ultimate_model_id": "ult-1",
+		"id":             "req-keep",
+		"status":         "completed",
+		"model":          "model-x",
+		"duration":       "1m0s",
+		"error":          "boom",
+		"token_id":       "tok-1",
+		"token_name":     "demo",
+		"original_model": "model-orig",
+		"app_tag":        "my-app",
 	}
 	for k, want := range wantStrings {
 		got, ok := item[k].(string)
@@ -820,8 +818,6 @@ func goldenRequest() *store.RequestLog {
 		TokenName:        "demo",
 		OriginalModel:    "orig-model",
 		FallbackUsed:     []string{"fb-1"},
-		UltimateModelUsed: false,
-		UltimateModelID:  "",
 		IsStream:         true,
 		Parameters:       map[string]interface{}{"temperature": 0.7},
 		AppTag:           "golden-app",

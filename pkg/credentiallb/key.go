@@ -44,7 +44,7 @@ var ErrNoCredentials = errors.New("credentiallb: model has no credentials")
 // a fresh pick with no binding stored).
 //
 // Full 64 hex chars, no truncation (birthday-paradox bound; same
-// policy as ultimatemodel.HashMessages).
+// policy as the retired message-hash helper did).
 func ComputeConversationKey(modelID, tokenID, leadingUserRun string) string {
 	sum := sha256.Sum256([]byte(modelID + "|" + tokenID + "|" + leadingUserRun))
 	return hex.EncodeToString(sum[:])

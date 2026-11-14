@@ -2,7 +2,7 @@
 // middleware for llm-supervisor-proxy.
 //
 // The middleware is applied at the composition root (cmd/main.go) so it
-// sits BEFORE every handler — proxy, ultimatemodel, UI, MCP. When a
+// sits BEFORE every handler — proxy, UI, MCP. When a
 // client sends Content-Encoding: gzip, the middleware decompresses the
 // body in place (capped at MaxDecompressedBytes) and rewrites the
 // request so downstream code sees an ordinary uncompressed request:

@@ -230,8 +230,6 @@ export UPSTREAM_URL="http://127.0.0.1:$MOCK_PORT/v1"
 export IDLE_TIMEOUT="5s"
 export MAX_GENERATION_TIME="20s"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID=""
-export ULTIMATE_MODEL_MAX_HASH="100"
 
 # XDG_CONFIG_HOME for explicit isolation (same as M2/M3)
 export XDG_CONFIG_HOME="$HOME/.config"

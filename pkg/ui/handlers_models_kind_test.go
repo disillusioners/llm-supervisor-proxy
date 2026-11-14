@@ -262,7 +262,7 @@ func TestHandleModels_GET_KindFilter_DefaultArm_UnknownKind_LogsWarning_ThreeKin
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred")})
 
 	// Capture log output during the request.
 	var logBuf bytes.Buffer
@@ -318,7 +318,7 @@ func TestHandleModels_GET_KindFilter_ChatExcludesImageGenAndDecision(t *testing.
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred")})
 
 	u := server.URL + "/fe/api/models?kind=chat"
 	resp, err := http.Get(u)
@@ -352,7 +352,7 @@ func TestHandleModels_GET_KindFilter_ImageGenExcludesDecision(t *testing.T) {
 	defer server.Close()
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred")})
 
 	u := server.URL + "/fe/api/models?kind=image-gen"
 	resp, err := http.Get(u)
@@ -378,7 +378,7 @@ func TestHandleModels_GET_KindFilter_Decision(t *testing.T) {
 
 	ts.mockModels.AddModel(models.ModelConfig{ID: "chat-1", Name: "Chat 1", Enabled: true, Internal: true, InternalModel: "x", Credentials: models.TestRefs("test-cred")})
 	ts.mockModels.AddModel(models.ModelConfig{ID: "img-1", Name: "Image 1", Enabled: true, Internal: true, Kind: models.KindImageGen, InternalModel: "image-01", Credentials: imgGenTestCreds()})
-	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred"), ExcludeFromUltimateSwitching: true})
+	ts.mockModels.AddModel(models.ModelConfig{ID: "dec-1", Name: "Decision 1", Enabled: true, Internal: true, Kind: models.KindDecision, InternalModel: "gpt-6-luna", Credentials: models.TestRefs("test-cred")})
 
 	u := server.URL + "/fe/api/models?kind=decision"
 	resp, err := http.Get(u)
@@ -479,12 +479,11 @@ func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T)
 
 	// 4) POST with kind="decision" and 9router credential must return 400
 	decPayload := map[string]interface{}{
-		"id":                              "dec-9r",
-		"name":                            "Decision 9Router",
-		"kind":                            "decision",
-		"internal":                        true,
-		"internal_model":                  "ag/gemini-3.8-flash",
-		"exclude_from_ultimate_switching": true,
+		"id":             "dec-9r",
+		"name":           "Decision 9Router",
+		"kind":           "decision",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
 		"credentials": []map[string]interface{}{
 			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
 		},
@@ -506,22 +505,20 @@ func TestHandleModels_POST_and_PUT_ChatAndDecisionRejectNineRouter(t *testing.T)
 
 	// 5) PUT updating existing decision model to use 9router credential must return 400
 	ts.mockModels.AddModel(models.ModelConfig{
-		ID:                           "dec-existing",
-		Name:                         "Existing Decision",
-		Enabled:                      true,
-		Kind:                         models.KindDecision,
-		Internal:                     true,
-		InternalModel:                "gpt-4",
-		ExcludeFromUltimateSwitching: true,
-		Credentials:                  models.TestRefs("test-cred"),
+		ID:            "dec-existing",
+		Name:          "Existing Decision",
+		Enabled:       true,
+		Kind:          models.KindDecision,
+		Internal:      true,
+		InternalModel: "gpt-4",
+		Credentials:   models.TestRefs("test-cred"),
 	})
 	putDecPayload := map[string]interface{}{
-		"id":                              "dec-existing",
-		"name":                            "Updated Decision",
-		"kind":                            "decision",
-		"internal":                        true,
-		"internal_model":                  "ag/gemini-3.8-flash",
-		"exclude_from_ultimate_switching": true,
+		"id":             "dec-existing",
+		"name":           "Updated Decision",
+		"kind":           "decision",
+		"internal":       true,
+		"internal_model": "ag/gemini-3.8-flash",
 		"credentials": []map[string]interface{}{
 			{"credential_id": "ninerouter-cred", "weight": 1, "position": 0},
 		},

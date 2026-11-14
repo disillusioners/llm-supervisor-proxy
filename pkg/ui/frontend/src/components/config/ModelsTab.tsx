@@ -96,7 +96,6 @@ export function ModelsTab({
     internal_model?: string;
     secondary_upstream_model?: string;
     release_stream_chunk_deadline?: string;
-    exclude_from_ultimate_switching: boolean;
   }) => {
     try {
       if (modelFormMode === 'add') {
@@ -116,7 +115,6 @@ export function ModelsTab({
           secondary_upstream_model: data.secondary_upstream_model || '',
           release_stream_chunk_deadline: data.release_stream_chunk_deadline,
           credentials: data.credentials,
-          exclude_from_ultimate_switching: data.exclude_from_ultimate_switching,
         });
         setStatus({ type: 'success', message: 'Model added successfully' });
       } else {
@@ -137,7 +135,6 @@ export function ModelsTab({
           peak_hour_end: data.peak_hour_end,
           peak_hour_timezone: data.peak_hour_timezone,
           peak_hour_model: data.peak_hour_model,
-          exclude_from_ultimate_switching: data.exclude_from_ultimate_switching,
         });
         setStatus({ type: 'success', message: 'Model updated successfully' });
       }

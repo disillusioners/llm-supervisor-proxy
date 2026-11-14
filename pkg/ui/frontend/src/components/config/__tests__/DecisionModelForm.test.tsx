@@ -124,7 +124,6 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
         internal_model: 'gpt-6-luna',
         internal_base_url: 'https://api.openai.com',
         enabled: true,
-        exclude_from_ultimate_switching: true,
       });
       expect(arg.credentials).toEqual([
         { credential_id: 'cred-oai-1', weight: 1, position: 0 },
@@ -192,7 +191,6 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
         internal_model: 'jev-1.13.0',
         internal_base_url: 'https://api.typesafe.ai',
         enabled: true,
-        exclude_from_ultimate_switching: true,
       });
       expect(arg.credentials).toEqual([
         { credential_id: 'cred-ts-1', weight: 1, position: 0 },
@@ -260,7 +258,6 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
         internal_model: 'typesafe/jev-1.13',
         internal_base_url: 'https://openrouter.ai/api',
         enabled: true,
-        exclude_from_ultimate_switching: true,
       });
       expect(arg.credentials).toEqual([
         { credential_id: 'cred-or-1', weight: 1, position: 0 },
@@ -380,7 +377,6 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
         internal_model: 'gpt-6-luna',
         internal_base_url: 'https://api.openai.com',
         credentials: [],
-        exclude_from_ultimate_switching: true,
       };
       const { container } = render(
         <DecisionModelForm
