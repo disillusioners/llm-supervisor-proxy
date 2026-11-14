@@ -223,9 +223,12 @@ func TestHandlerGroups_HiddenHealthyMember_LogRepro(t *testing.T) {
 	}
 }
 
-// TestHandlerGroups_MarkedMembers_Ordering (T2): unmarked candidates
-// first (normal order), then marked soonest-expiring-first; marked
-// never skipped entirely.
+// TestHandlerGroups_MarkedMembers_Ordering (T2): skip marks and
+// grouplb cooldowns ORDER, never FILTER — the candidate set is always
+// the full servable member×credential set. Unmarked first (pool/weight
+// order), then marked soonest-expiring-first; REQUEST_FAILED only
+// after every member×credential across both pools genuinely failed
+// this request (the within-request tried-set is never re-picked).
 func TestHandlerGroups_MarkedMembers_Ordering(t *testing.T) {
 	h := newGroupHarness(t)
 	defer h.close()
