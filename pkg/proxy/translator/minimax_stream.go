@@ -13,8 +13,10 @@ import (
 // MiniMax reasoning_details ↔ reasoning_content response-side translation
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Scope: EXTERNAL response paths only (D2 — race-external + ultimate-external).
-// Internal response paths (race-internal + ultimate-internal) extract
+// Scope: no production caller remains — the external upstream path (the
+// D2 external consumer of this translator) has been removed, so the type
+// currently lives on for its tests. Internal response paths (race-internal)
+// extract
 // reasoning_details directly inside pkg/providers/openai.go's stream parser
 // and response-assembly, so this translator is not invoked on those paths.
 //
@@ -316,8 +318,8 @@ func translateNonStreamResponseBody(body map[string]any) (changed bool, err erro
 // TranslateNonStreamResponseBytes is the response-side bytes wrapper. It
 // parses the body, runs the map-core translator, and re-marshals the
 // result. Use this on verbatim-byte call sites that already hold response
-// bytes and have no usable map representation (notably ultim-ext
-// non-stream per §5.3 — the only verbatim path).
+// bytes and have no usable map representation (the verbatim path per
+// §5.3).
 //
 // Data-absent fast path (N-1/Q3): when the map-core translator reports
 // that nothing was modified (no reasoning_details anywhere AND none of
@@ -424,20 +426,19 @@ func NewStreamTranslator() *StreamTranslator {
 //     future-proofing the §6.1 contract.
 //
 // Call-site newline handling is the CALLER's concern, not the
-// translator's. Two of the three call sites today have slightly
-// different input shapes (documented here, NOT normalized — see C1
-// framing nuance note below):
+// translator's. No production call site remains (the external paths
+// that consumed this translator have been removed); the framing-variance
+// notes below are retained for the test callers and any future
+// re-attachment. The two input shapes the translator must tolerate,
+// NOT normalized (see C1 framing nuance note below):
 //
-//   - ultimate-external (handler_external.go:300-309) reads via
-//     `reader.ReadString('\n')`, so the input line INCLUDES its
-//     trailing `\n`. The translator's `\n\n` terminator on the
-//     mutated path adds a second `\n`, producing `…\n\n` (SSE-legal).
-//     On the unchanged path the verbatim return carries the
-//     caller's `\n` (SSE-legal terminator).
-//   - race-external (race_executor.go:1294-1301) strips the trailing
-//     `\n` BEFORE passing to the translator, then appends a `\n` via
-//     streamBuffer.Add (stream_buffer.go:119) when the chunk is
-//     queued. The translator's `\n\n` terminator on the mutated
+//   - WITH the trailing `\n`: the translator's `\n\n` terminator on
+//     the mutated path adds a second `\n`, producing `…\n\n`
+//     (SSE-legal). On the unchanged path the verbatim return carries
+//     the caller's `\n` (SSE-legal terminator).
+//   - STRIPPED before the call, with the caller re-adding `\n` when
+//     the chunk is queued via streamBuffer.Add: the translator's
+//     `\n\n` terminator on the mutated
 //     path adds the missing framing, then the buffer adds its `\n`,
 //     producing `…\n\n\n` (triple-newline, SSE-legal — multiple
 //     consecutive `\n` are valid message terminators per SSE spec).
@@ -474,7 +475,7 @@ func NewStreamTranslator() *StreamTranslator {
 //
 // Not goroutine-safe; see NewStreamTranslator godoc. The translator
 // does not call into `toolrepair` and does not mutate tool_call state
-// on ultim-ext (W3 — the per-event buffer is constructed later in the
+// (W3 — the per-event buffer is constructed later in the
 // call site after ChunkBytes returns the stripped line).
 func (t *StreamTranslator) ChunkBytes(line []byte) (stripped []byte, emitted [][]byte, err error) {
 	if t == nil {

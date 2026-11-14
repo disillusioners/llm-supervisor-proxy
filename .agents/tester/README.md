@@ -77,7 +77,7 @@ Go-based proxy server for supervising and managing LLM API requests. Uses SQLite
 |------|-----------|-------|-----------|
 | proxy_unit_test | pkg/proxy/ | ~300+ | race_executor_test.go, handler_*.go, adapter_*.go |
 | token_unit_test | pkg/proxy/token/ | ~23 | counter_test.go, prompts_test.go |
-| ultimatemodel_unit_test | pkg/ultimatemodel/ | ~114 | handler_external_test.go, handler_internal_test.go, usage_test.go |
+| ~~ultimatemodel_unit_test~~ | ~~pkg/ultimatemodel/~~ — REMOVED at 8c49e1a | ~114 | handler_external_test.go, handler_internal_test.go, usage_test.go (all deleted with the package) |
 | store_unit_test | pkg/store/database/ | ~50+ | querybuilder_test.go, database_test.go |
 | models_unit_test | pkg/models/ | ~100 | peak_hours_test.go, config_deep_test.go, config_secondary_test.go |
 | toolrepair_unit_test | pkg/toolrepair/ | ~45 | strategies_test.go, repair_test.go |

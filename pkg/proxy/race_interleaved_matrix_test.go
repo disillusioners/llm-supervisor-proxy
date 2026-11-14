@@ -5,7 +5,7 @@ package proxy
 // are split between race_interleaved_test.go (existing N2 cells),
 // race_response_interleaved_test.go (existing N2 + N1 request cells),
 // and THIS file (N1 response, N3, header, W8). The ultim-side cells
-// are filled in pkg/ultimatemodel/handler_interleaved_matrix_test.go.
+// had a twin in the retired ult-internal package's interleaved matrix tests.
 //
 // All tests are byte-equality assertions against the canonical
 // pre-feature baseline. The matrix cell naming follows:

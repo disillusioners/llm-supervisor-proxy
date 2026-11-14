@@ -149,24 +149,6 @@ func TestMockConfigManager_GetLoopDetection(t *testing.T) {
 	}
 }
 
-func TestMockConfigManager_GetUltimateModel(t *testing.T) {
-	mock := NewMockConfigManager()
-	mock.SetConfig(config.Config{
-		UltimateModel: config.UltimateModelConfig{
-			ModelID: "claude-3-opus",
-			MaxHash: 200,
-		},
-	})
-
-	um := mock.GetUltimateModel()
-	if um.ModelID != "claude-3-opus" {
-		t.Errorf("Expected ModelID 'claude-3-opus', got %s", um.ModelID)
-	}
-	if um.MaxHash != 200 {
-		t.Errorf("Expected MaxHash 200, got %d", um.MaxHash)
-	}
-}
-
 func TestMockConfigManager_GetRaceRetryEnabled(t *testing.T) {
 	mock := NewMockConfigManager()
 	mock.SetConfig(config.Config{
@@ -208,28 +190,6 @@ func TestMockConfigManager_GetRaceMaxBufferBytes(t *testing.T) {
 
 	if mock.GetRaceMaxBufferBytes() != 10*1024*1024 {
 		t.Errorf("Expected 10MB, got %d", mock.GetRaceMaxBufferBytes())
-	}
-}
-
-func TestMockConfigManager_GetToolCallBufferDisabled(t *testing.T) {
-	mock := NewMockConfigManager()
-	mock.SetConfig(config.Config{
-		ToolCallBufferDisabled: true,
-	})
-
-	if !mock.GetToolCallBufferDisabled() {
-		t.Error("Expected ToolCallBufferDisabled to be true")
-	}
-}
-
-func TestMockConfigManager_GetToolCallBufferMaxSize(t *testing.T) {
-	mock := NewMockConfigManager()
-	mock.SetConfig(config.Config{
-		ToolCallBufferMaxSize: 2 * 1024 * 1024,
-	})
-
-	if mock.GetToolCallBufferMaxSize() != 2*1024*1024 {
-		t.Errorf("Expected 2MB, got %d", mock.GetToolCallBufferMaxSize())
 	}
 }
 

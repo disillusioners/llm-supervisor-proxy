@@ -1359,15 +1359,9 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 		"race_parallel_on_idle": false,
 		"race_max_parallel": 8,
 		"race_max_buffer_bytes": 4000000,
-		"tool_call_buffer_disabled": true,
-		"tool_call_buffer_max_size": 2097152,
 		"log_raw_upstream_response": false,
 		"log_raw_upstream_on_error": true,
-		"log_raw_upstream_max_kb": 2048,
-		"ultimate_model": {
-			"model_id": "ultimate-model",
-			"max_hash": 200
-		}
+		"log_raw_upstream_max_kb": 2048
 	}`
 
 	// Update the database with our test JSON
@@ -1423,14 +1417,6 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 		t.Errorf("RaceMaxBufferBytes mismatch: got %d, want 4000000", loadedCfg.RaceMaxBufferBytes)
 	}
 
-	// Verify tool call buffer fields
-	if !loadedCfg.ToolCallBufferDisabled {
-		t.Errorf("ToolCallBufferDisabled mismatch: got %v, want true", loadedCfg.ToolCallBufferDisabled)
-	}
-	if loadedCfg.ToolCallBufferMaxSize != 2097152 {
-		t.Errorf("ToolCallBufferMaxSize mismatch: got %d, want 2097152", loadedCfg.ToolCallBufferMaxSize)
-	}
-
 	// Verify log raw upstream fields
 	if loadedCfg.LogRawUpstreamResponse {
 		t.Errorf("LogRawUpstreamResponse mismatch: got %v, want false", loadedCfg.LogRawUpstreamResponse)
@@ -1463,14 +1449,6 @@ func TestConfigManager_JSONRoundtrip(t *testing.T) {
 	}
 	if len(loadedCfg.LoopDetection.ReasoningModelPatterns) != 2 {
 		t.Errorf("LoopDetection.ReasoningModelPatterns mismatch: got %v, want [o1 o3]", loadedCfg.LoopDetection.ReasoningModelPatterns)
-	}
-
-	// Verify ultimate model fields
-	if loadedCfg.UltimateModel.ModelID != "ultimate-model" {
-		t.Errorf("UltimateModel.ModelID mismatch: got %s, want ultimate-model", loadedCfg.UltimateModel.ModelID)
-	}
-	if loadedCfg.UltimateModel.MaxHash != 200 {
-		t.Errorf("UltimateModel.MaxHash mismatch: got %d, want 200", loadedCfg.UltimateModel.MaxHash)
 	}
 }
 

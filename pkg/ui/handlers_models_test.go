@@ -1257,24 +1257,23 @@ func TestHandleValidateModel_RejectsEmptyCredentialsWhenInternal(t *testing.T) {
 // tests (every behaviour-defining field carries a non-zero value).
 func copySourceModel(ts *modelTestServer) {
 	ts.mockModels.AddModel(models.ModelConfig{
-		ID:                           "copy-src",
-		Name:                         "Copy Source",
-		Enabled:                      true,
-		FallbackChain:                []string{"other-model"},
-		TruncateParams:               []string{"max_completion_tokens"},
-		Kind:                         models.KindChat,
-		Internal:                     true,
-		InternalBaseURL:              "https://upstream.example/v1",
-		InternalModel:                "glm-5.0",
-		Credentials:                  models.TestRefs("test-cred"),
-		ReleaseStreamChunkDeadline:   models.Duration(90_000_000_000),
-		PeakHourEnabled:              true,
-		PeakHourStart:                "09:00",
-		PeakHourEnd:                  "18:00",
-		PeakHourTimezone:             "+7",
-		PeakHourModel:                "glm-4-flash",
-		SecondaryUpstreamModel:       "glm-4-flash",
-		ExcludeFromUltimateSwitching: true,
+		ID:                         "copy-src",
+		Name:                       "Copy Source",
+		Enabled:                    true,
+		FallbackChain:              []string{"other-model"},
+		TruncateParams:             []string{"max_completion_tokens"},
+		Kind:                       models.KindChat,
+		Internal:                   true,
+		InternalBaseURL:            "https://upstream.example/v1",
+		InternalModel:              "glm-5.0",
+		Credentials:                models.TestRefs("test-cred"),
+		ReleaseStreamChunkDeadline: models.Duration(90_000_000_000),
+		PeakHourEnabled:            true,
+		PeakHourStart:              "09:00",
+		PeakHourEnd:                "18:00",
+		PeakHourTimezone:           "+7",
+		PeakHourModel:              "glm-4-flash",
+		SecondaryUpstreamModel:     "glm-4-flash",
 	})
 }
 
@@ -1340,9 +1339,6 @@ func TestHandleModelCopy_CopiesModelFaithfully(t *testing.T) {
 	}
 	if out.SecondaryUpstreamModel != "glm-4-flash" {
 		t.Errorf("SecondaryUpstreamModel = %q, want glm-4-flash", out.SecondaryUpstreamModel)
-	}
-	if !out.ExcludeFromUltimateSwitching {
-		t.Error("ExcludeFromUltimateSwitching = false, want true")
 	}
 	if out.Kind != models.KindChat {
 		t.Errorf("Kind = %q, want %q", out.Kind, models.KindChat)
@@ -1439,13 +1435,12 @@ func TestHandleModelCopy_FallbackChainDropsSourceEntry(t *testing.T) {
 	// Give the source a fallback chain that points at itself.
 	ts.mockModels.UpdateModel("copy-src", models.ModelConfig{
 		ID: "copy-src", Name: "Copy Source", Enabled: true, Internal: true,
-		InternalModel:                "glm-5.0",
-		Credentials:                  models.TestRefs("test-cred"),
-		FallbackChain:                []string{"copy-src", "other-model"},
-		TruncateParams:               []string{"max_completion_tokens"},
-		Kind:                         models.KindChat,
-		ShadowModelID:                "shadowed-model",
-		ExcludeFromUltimateSwitching: true,
+		InternalModel:  "glm-5.0",
+		Credentials:    models.TestRefs("test-cred"),
+		FallbackChain:  []string{"copy-src", "other-model"},
+		TruncateParams: []string{"max_completion_tokens"},
+		Kind:           models.KindChat,
+		ShadowModelID:  "shadowed-model",
 	})
 
 	resp := postCopy(t, server, "copy-src", `{"new_id":"copy-dst"}`)
@@ -1474,13 +1469,12 @@ func TestHandleModelCopy_GroupSourceRefused(t *testing.T) {
 	defer server.Close()
 
 	ts.mockModels.AddModel(models.ModelConfig{
-		ID:                           "group-1",
-		Name:                         "Group One",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
+		ID:       "group-1",
+		Name:     "Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	})
 
 	resp := postCopy(t, server, "group-1", `{"new_id":"group-copy"}`)
@@ -1737,13 +1731,12 @@ func TestHandleModelCopy_NotAddedToAnyGroup(t *testing.T) {
 
 	copySourceModel(ts)
 	ts.mockModels.AddModel(models.ModelConfig{
-		ID:                           "group-1",
-		Name:                         "Group One",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
+		ID:       "group-1",
+		Name:     "Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	})
 
 	resp := postCopy(t, server, "copy-src", `{"new_id":"copy-dst"}`)
@@ -2110,14 +2103,13 @@ func TestHandleModelCopy_DBBackend_SourceClaimedByGroup_CopiesSourceRow(t *testi
 
 	// 2. Seed an enabled group row that claims the source model via shadow_model_id.
 	groupModel := models.ModelConfig{
-		ID:                           "parent-group",
-		Name:                         "Parent Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "claimed-src", Weight: 1}},
-		ShadowModelID:                "claimed-src",
+		ID:            "parent-group",
+		Name:          "Parent Group",
+		Enabled:       true,
+		Kind:          models.KindGroup,
+		Internal:      true,
+		Members:       []models.GroupMember{{ModelID: "claimed-src", Weight: 1}},
+		ShadowModelID: "claimed-src",
 	}
 	if err := ts.mgr.AddModel(groupModel); err != nil {
 		t.Fatalf("seed group model: %v", err)
@@ -2270,13 +2262,12 @@ func TestHandleModelCopy_DBBackend_NewIDClaimedByGroup_Rejected(t *testing.T) {
 	// the group and stamp shadow_model_id directly in SQL, then trigger a claims
 	// index rebuild via UpdateModel.
 	groupModel := models.ModelConfig{
-		ID:                           "parent-group",
-		Name:                         "Parent Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
+		ID:       "parent-group",
+		Name:     "Parent Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "copy-src", Weight: 1}},
 	}
 	if err := ts.mgr.AddModel(groupModel); err != nil {
 		t.Fatalf("seed group model: %v", err)
@@ -2569,24 +2560,23 @@ func TestHandleModelCopy_DBBackend_PersistedRowShape(t *testing.T) {
 	// "shadow_model_id EMPTY" assertion below is only meaningful if the
 	// source actually holds a claim to drop.
 	source := models.ModelConfig{
-		ID:                           "shape-src",
-		Name:                         "Shape Source",
-		Enabled:                      true,
-		Kind:                         models.KindChat,
-		FallbackChain:                []string{"shape-src", "shape-peer-a", "shape-peer-b"},
-		TruncateParams:               []string{"max_completion_tokens", "store"},
-		Internal:                     true,
-		InternalBaseURL:              "https://upstream.example/v1",
-		InternalModel:                "glm-5.0",
-		ReleaseStreamChunkDeadline:   models.Duration(90_000_000_000), // 90s
-		PeakHourEnabled:              true,
-		PeakHourStart:                "09:00",
-		PeakHourEnd:                  "18:00",
-		PeakHourTimezone:             "+7",
-		PeakHourModel:                "glm-4-flash",
-		SecondaryUpstreamModel:       "glm-4-flash",
-		ExcludeFromUltimateSwitching: true,
-		ShadowModelID:                "shape-claimed",
+		ID:                         "shape-src",
+		Name:                       "Shape Source",
+		Enabled:                    true,
+		Kind:                       models.KindChat,
+		FallbackChain:              []string{"shape-src", "shape-peer-a", "shape-peer-b"},
+		TruncateParams:             []string{"max_completion_tokens", "store"},
+		Internal:                   true,
+		InternalBaseURL:            "https://upstream.example/v1",
+		InternalModel:              "glm-5.0",
+		ReleaseStreamChunkDeadline: models.Duration(90_000_000_000), // 90s
+		PeakHourEnabled:            true,
+		PeakHourStart:              "09:00",
+		PeakHourEnd:                "18:00",
+		PeakHourTimezone:           "+7",
+		PeakHourModel:              "glm-4-flash",
+		SecondaryUpstreamModel:     "glm-4-flash",
+		ShadowModelID:              "shape-claimed",
 		Credentials: models.TestRefsWeighted(
 			models.CredentialRef{CredentialID: "openai-cred", Weight: 3, Position: 0},
 			models.CredentialRef{CredentialID: "openai-cred-b", Weight: 1, Position: 1},
@@ -2705,9 +2695,6 @@ func TestHandleModelCopy_DBBackend_PersistedRowShape(t *testing.T) {
 	}
 	if row.SecondaryUpstreamModel != sourceBefore.SecondaryUpstreamModel {
 		t.Errorf("Persisted copy SecondaryUpstreamModel = %q, want %q", row.SecondaryUpstreamModel, sourceBefore.SecondaryUpstreamModel)
-	}
-	if row.ExcludeFromUltimateSwitching != sourceBefore.ExcludeFromUltimateSwitching {
-		t.Errorf("Persisted copy ExcludeFromUltimateSwitching = %v, want %v", row.ExcludeFromUltimateSwitching, sourceBefore.ExcludeFromUltimateSwitching)
 	}
 	if row.Kind != sourceBefore.Kind {
 		t.Errorf("Persisted copy Kind = %q, want %q", row.Kind, sourceBefore.Kind)

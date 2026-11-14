@@ -77,14 +77,12 @@ func TestAnthropic_ConversationKeyPerTokenSalting(t *testing.T) {
 	// whose conversation keys must NOT collide.
 	tokens := map[string]*auth.AuthToken{
 		"sk-tok-A-payload-padded-to-sixtyfour-hex-chars-aaaaaaaaaaaaaaaa": {
-			ID:                   "token-A-uuid",
-			Name:                 "Token A",
-			UltimateModelEnabled: false,
+			ID:   "token-A-uuid",
+			Name: "Token A",
 		},
 		"sk-tok-B-payload-padded-to-sixtyfour-hex-chars-bbbbbbbbbbbbbbbb": {
-			ID:                   "token-B-uuid",
-			Name:                 "Token B",
-			UltimateModelEnabled: false,
+			ID:   "token-B-uuid",
+			Name: "Token B",
 		},
 	}
 	tokenStore := &recordingTokenStore{tokens: tokens}
@@ -223,7 +221,7 @@ func (r *recordingTokenStore) ValidateToken(_ context.Context, plaintext string)
 }
 
 // Unused methods — panic if hit, mirroring mockTokenStore pattern.
-func (r *recordingTokenStore) CreateToken(context.Context, string, *time.Time, string, bool, string, []string) (string, *auth.AuthToken, error) {
+func (r *recordingTokenStore) CreateToken(context.Context, string, *time.Time, string, []string) (string, *auth.AuthToken, error) {
 	panic("not implemented")
 }
 func (r *recordingTokenStore) DeleteToken(context.Context, string) error { panic("not implemented") }
@@ -233,7 +231,7 @@ func (r *recordingTokenStore) ListTokens(context.Context) ([]auth.AuthToken, err
 func (r *recordingTokenStore) GetTokenByID(context.Context, string) (*auth.AuthToken, error) {
 	panic("not implemented")
 }
-func (r *recordingTokenStore) UpdateTokenPermission(context.Context, string, bool, string, []string) error {
+func (r *recordingTokenStore) UpdateTokenPermission(context.Context, string, []string) error {
 	panic("not implemented")
 }
 

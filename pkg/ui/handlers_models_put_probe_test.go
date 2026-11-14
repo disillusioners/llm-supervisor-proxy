@@ -176,14 +176,13 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 			id: "chat-edit",
 			edit: func() map[string]interface{} {
 				return map[string]interface{}{
-					"id":                           "chat-edit",
-					"name":                         "Chat Edited",
-					"enabled":                      true,
-					"kind":                         models.KindChat,
-					"internal":                     true,
-					"internal_model":               "gpt-4o-mini",
-					"secondary_upstream_model":     "gpt-4o-fallback",
-					"exclude_from_ultimate_switching": false,
+					"id":                       "chat-edit",
+					"name":                     "Chat Edited",
+					"enabled":                  true,
+					"kind":                     models.KindChat,
+					"internal":                 true,
+					"internal_model":           "gpt-4o-mini",
+					"secondary_upstream_model": "gpt-4o-fallback",
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
@@ -227,7 +226,6 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 					"credentials": []map[string]interface{}{
 						{"credential_id": "minimax-cred", "weight": 1, "position": 0},
 					},
-					"exclude_from_ultimate_switching": true,
 				}
 			},
 			assertions: func(t *testing.T, got map[string]interface{}) {
@@ -247,14 +245,13 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 			kind: models.KindDecision,
 			seed: func() models.ModelConfig {
 				return models.ModelConfig{
-					ID:                           "decision-edit",
-					Name:                         "Decision Original",
-					Enabled:                      true,
-					Kind:                         models.KindDecision,
-					Internal:                     true,
-					InternalModel:                "gpt-6-luna",
-					Credentials:                  models.TestRefs("openai-cred"),
-					ExcludeFromUltimateSwitching: true,
+					ID:            "decision-edit",
+					Name:          "Decision Original",
+					Enabled:       true,
+					Kind:          models.KindDecision,
+					Internal:      true,
+					InternalModel: "gpt-6-luna",
+					Credentials:   models.TestRefs("openai-cred"),
 				}
 			},
 			id: "decision-edit",
@@ -269,7 +266,6 @@ func TestHandleModelDetail_PUT_AllKinds_EditsPersist(t *testing.T) {
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
-					"exclude_from_ultimate_switching": true,
 				}
 			},
 			assertions: func(t *testing.T, got map[string]interface{}) {
@@ -331,21 +327,18 @@ func TestHandleModelDetail_PUT_KindFieldMirrorsPOST(t *testing.T) {
 			if kind == models.KindImageGen {
 				creds = "minimax-cred"
 			}
-			excludeFromUltimate := true
-			if kind == models.KindChat {
-				excludeFromUltimate = false
-			}
 			// Seed via direct DB write so the PUT path has an
-			// existing row to update.
+			// existing row to update. (The former exclusion flag was
+			// retired with the ultimate model subsystem and is no
+			// longer seeded.)
 			if err := ts.mgr.AddModel(models.ModelConfig{
-				ID:                           id,
-				Name:                         "Kind Mirror " + kind,
-				Enabled:                      true,
-				Kind:                         kind,
-				Internal:                     true,
-				InternalModel:                "any",
-				Credentials:                  models.TestRefs(creds),
-				ExcludeFromUltimateSwitching: excludeFromUltimate,
+				ID:            id,
+				Name:          "Kind Mirror " + kind,
+				Enabled:       true,
+				Kind:          kind,
+				Internal:      true,
+				InternalModel: "any",
+				Credentials:   models.TestRefs(creds),
 			}); err != nil {
 				t.Fatalf("seed AddModel: %v", err)
 			}
@@ -359,7 +352,6 @@ func TestHandleModelDetail_PUT_KindFieldMirrorsPOST(t *testing.T) {
 				"credentials": []map[string]interface{}{
 					{"credential_id": creds, "weight": 1, "position": 0},
 				},
-				"exclude_from_ultimate_switching": excludeFromUltimate,
 			}
 			status, respBody := doPUT(t, ts.server, id, body)
 			if status != http.StatusOK {
@@ -473,13 +465,12 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 			id: "chat-edit",
 			edit: func() map[string]interface{} {
 				return map[string]interface{}{
-					"id":                           "chat-edit",
-					"name":                         "Chat Edited",
-					"enabled":                      true,
-					"internal":                     true,
-					"internal_model":               "gpt-4o-mini",
-					"secondary_upstream_model":     "gpt-4o-fallback",
-					"exclude_from_ultimate_switching": false,
+					"id":                       "chat-edit",
+					"name":                     "Chat Edited",
+					"enabled":                  true,
+					"internal":                 true,
+					"internal_model":           "gpt-4o-mini",
+					"secondary_upstream_model": "gpt-4o-fallback",
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
@@ -522,7 +513,6 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 					"credentials": []map[string]interface{}{
 						{"credential_id": "minimax-cred", "weight": 1, "position": 0},
 					},
-					"exclude_from_ultimate_switching": true,
 				}
 			},
 			assertions: func(t *testing.T, got map[string]interface{}) {
@@ -541,14 +531,13 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 			name: "decision",
 			seed: func() models.ModelConfig {
 				return models.ModelConfig{
-					ID:                           "decision-edit",
-					Name:                         "Decision Original",
-					Enabled:                      true,
-					Kind:                         models.KindDecision,
-					Internal:                     true,
-					InternalModel:                "gpt-6-luna",
-					Credentials:                  models.TestRefs("openai-cred"),
-					ExcludeFromUltimateSwitching: true,
+					ID:            "decision-edit",
+					Name:          "Decision Original",
+					Enabled:       true,
+					Kind:          models.KindDecision,
+					Internal:      true,
+					InternalModel: "gpt-6-luna",
+					Credentials:   models.TestRefs("openai-cred"),
 				}
 			},
 			id: "decision-edit",
@@ -563,7 +552,6 @@ func TestHandleModelDetail_PUT_JSONFileBackend_AllKinds_EditsPersist(t *testing.
 					"credentials": []map[string]interface{}{
 						{"credential_id": "openai-cred", "weight": 1, "position": 0},
 					},
-					"exclude_from_ultimate_switching": true,
 				}
 			},
 			assertions: func(t *testing.T, got map[string]interface{}) {
@@ -842,7 +830,6 @@ func TestHandleModelDetail_PUT_JSONFileBackend_FailedValidationLeavesStateIntact
 		"credentials": []map[string]interface{}{
 			{"credential_id": "openai-cred", "weight": 1, "position": 0},
 		},
-		"exclude_from_ultimate_switching": false,
 	}
 	status, body := doPUT(t, ts.server, "target", putBody)
 	// Both pre-fix and post-fix return 400 here: the sibling

@@ -9,10 +9,11 @@ import (
 // MiniMax reasoning_details ↔ reasoning_content request-side translation
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Scope: EXTERNAL request paths only (race-external + ultimate-external per D2).
-// Internal request paths (race-internal + ultimate-internal) carry the
-// reasoning details via typed fields on providers.ChatMessage (D1) and the
-// typed ReasoningSplit *bool on providers.ChatCompletionRequest.
+// Scope: the race-internal request path (executeInternalRequest is the
+// only remaining production caller — the external upstream path has been
+// removed). The body-map translation runs there pre-conversion; the
+// reasoning details then travel as typed fields on providers.ChatMessage
+// (D1) and the typed ReasoningSplit *bool on providers.ChatCompletionRequest.
 //
 // Thread safety: NOT goroutine-safe. Each translator function mutates the
 // caller-supplied map in place; the bytes wrapper allocates a fresh map.
@@ -32,7 +33,7 @@ type ReasoningDetail struct {
 }
 
 // ReasoningTextType is the MiniMax wire type for plain reasoning text.
-// Exported (R3 carve-out — providers/ultimatemodel may import this
+// Exported (R3 carve-out — provider packages may import this
 // constant directly to avoid duplicating the wire-literal in the
 // reasoning_details hydration paths).
 const ReasoningTextType = "reasoning.text"
@@ -153,7 +154,7 @@ func TranslateMessagesReasoning(body map[string]any) error {
 // level. Top-level placement is the documented choice (Q8, R7): the MiniMax
 // SDK reads reasoning_split from the body root, not from inside any nested
 // object, and a top-level key survives the bodyCopy shallow-copy semantics
-// used by the ultimate-external path.
+// of the race-internal request path.
 //
 // Not goroutine-safe; the gate is the caller's responsibility.
 //
@@ -169,7 +170,7 @@ func InjectReasoningSplit(body map[string]any) error {
 
 // HasReasoningContent reports whether any message in body["messages"]
 // carries a non-empty `reasoning_content` string. Used by the request-side
-// gate sites (race-internal + ultimate-internal + ultimate-external) to
+// gate site (race-internal) to
 // widen the MiniMax reasoning translation beyond the
 // X-Proxy-Interleaved-Thinking client header — clients that echo
 // reasoning_content without the header are the untranslated-passthrough

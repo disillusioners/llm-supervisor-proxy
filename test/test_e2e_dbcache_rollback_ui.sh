@@ -121,8 +121,6 @@ unset UPSTREAM_URL          # boot 1: default upstream = http://localhost:4001 (
 export PORT="$PROXY_PORT"
 export APPLY_ENV_OVERRIDES="true"
 export LOOP_DETECTION_ENABLED="false"
-export ULTIMATE_MODEL_ID=""
-export ULTIMATE_MODEL_MAX_HASH="100"
 export INTERNAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
 # ---- sentinel on 4001 (exclusive to this pack) ----

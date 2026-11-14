@@ -1,0 +1,157 @@
+package database
+
+// wi-7769a812 part 2 / USER RULING D3 — the skip-cache-aware group
+// member selection (the Phase-0 A2 credential-blind-selection fix):
+//
+//	1. HEALTH-AWARE SELECTION: a member whose (credential, model)
+//	   upstream is skip-marked is excluded from selection while
+//	   unmarked alternatives exist (also provider-wide walls).
+//	2. DEGRADATION: when EVERY member is marked, the cache is an
+//	   OPTIMIZER, never an availability gate — the rewrite serves ONE
+//	   honest attempt against the SOONEST-EXPIRING mark instead of
+//	   failing the group as empty-at-runtime.
+//	3. EXPIRY: a mark past its TTL stops skipping — selection
+//	   behavior is byte-identical to pre-part-2 again.
+//	4. UNWIRED: a manager without SetSkipCache keeps the exact
+//	   pre-part-2 selection (nil-cache degradation).
+
+import (
+	"testing"
+	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
+)
+
+// newSkipCacheGroupManager seeds the canonical two-member span-
+// provider group (coding: openai/glm-5 + coding-alt: zhipu/kimi) and
+// wires a fresh skip cache into the manager.
+func newSkipCacheGroupManager(t *testing.T) (*ModelsManager, *skipcache.Cache, func()) {
+	t.Helper()
+	mgr, cleanup := newGroupManager(t)
+	cache := skipcache.New()
+	mgr.SetSkipCache(cache)
+	if err := mgr.AddModel(validGroup()); err != nil {
+		cleanup()
+		t.Fatalf("AddModel(group): %v", err)
+	}
+	return mgr, cache, cleanup
+}
+
+// pickOf rewrites a direct-named group entry and returns the served
+// member id ("" when the rewrite failed).
+func pickOf(t *testing.T, mgr *ModelsManager, key string) string {
+	t.Helper()
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, key)
+	if res.FailedGroupID != "" {
+		return ""
+	}
+	return res.MemberID
+}
+
+// TestGroup_SkipCache_HealthAwareSelection (A2 fix) — the member
+// whose credential is marked is NEVER picked while the alternative is
+// unmarked; the pick lands on the healthy member across fresh
+// conversation keys (weight-independent).
+func TestGroup_SkipCache_HealthAwareSelection(t *testing.T) {
+	mgr, cache, cleanup := newSkipCacheGroupManager(t)
+	defer cleanup()
+
+	// Mark the heavy member's (credential, wire-model) pair — the
+	// limit-class failure shape the coordinator's marking seam mints.
+	cache.Mark(skipcache.ScopeCredential, "cred-openai", "glm-5", time.Minute)
+	cache.Mark(skipcache.ScopeProvider, "openai", "glm-5", time.Minute)
+
+	for i := 0; i < 10; i++ {
+		got := pickOf(t, mgr, "conv-skip-"+string(rune('a'+i)))
+		if got != "coding-alt" {
+			t.Fatalf("pick = %q, want coding-alt (the marked member's upstreams are walled; selection must be health-aware)", got)
+		}
+	}
+}
+
+// TestGroup_SkipCache_ProviderWallSkipsAllItsMembers — a
+// provider-scope mark alone (every cred of the provider marked for
+// the model) skips the member without any credential-scope mark.
+func TestGroup_SkipCache_ProviderWallSkipsAllItsMembers(t *testing.T) {
+	mgr, cache, cleanup := newSkipCacheGroupManager(t)
+	defer cleanup()
+
+	cache.Mark(skipcache.ScopeProvider, "openai", "glm-5", time.Minute)
+
+	for i := 0; i < 5; i++ {
+		got := pickOf(t, mgr, "conv-wall-"+string(rune('a'+i)))
+		if got != "coding-alt" {
+			t.Fatalf("pick = %q, want coding-alt (a provider-wide wall skips every member on that provider)", got)
+		}
+	}
+}
+
+// TestGroup_SkipCache_AllMarked_DegradesToSoonestExpiry — the
+// anti-availability-gate guard (MANDATE: all-candidates-marked ⇒ ONE
+// honest attempt against the SOONEST-EXPIRING mark): with both
+// members walled, the rewrite still SERVES (no FailedGroupID), and it
+// serves the member whose mark expires first.
+func TestGroup_SkipCache_AllMarked_DegradesToSoonestExpiry(t *testing.T) {
+	mgr, cache, cleanup := newSkipCacheGroupManager(t)
+	defer cleanup()
+
+	// coding's wall expires in 30ms; coding-alt's in 10 minutes —
+	// the degradation anchor must pick coding.
+	cache.Mark(skipcache.ScopeCredential, "cred-openai", "glm-5", 30*time.Millisecond)
+	cache.Mark(skipcache.ScopeProvider, "openai", "glm-5", 30*time.Millisecond)
+	cache.Mark(skipcache.ScopeCredential, "cred-zhipu", "kimi", 10*time.Minute)
+	cache.Mark(skipcache.ScopeProvider, "zhipu", "kimi", 10*time.Minute)
+
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, "conv-degrade")
+	if res.FailedGroupID != "" {
+		t.Fatalf("all-marked group must DEGRADE to one honest attempt, not fail as empty-at-runtime (FailedGroupID=%q)", res.FailedGroupID)
+	}
+	if res.MemberID != "coding" {
+		t.Fatalf("degraded pick = %q, want coding (the SOONEST-expiring mark — 30ms vs 10m)", res.MemberID)
+	}
+	if res.MemberPool != models.PoolDefault {
+		t.Fatalf("degraded pool = %q, want default (the anchor member is a default)", res.MemberPool)
+	}
+}
+
+// TestGroup_SkipCache_TTLExpiryRestoresSelection — a mark past its
+// TTL stops skipping: the member is servable again and the selection
+// degrades to the pre-mark behavior.
+func TestGroup_SkipCache_TTLExpiryRestoresSelection(t *testing.T) {
+	mgr, cache, cleanup := newSkipCacheGroupManager(t)
+	defer cleanup()
+
+	cache.Mark(skipcache.ScopeCredential, "cred-openai", "glm-5", 20*time.Millisecond)
+	cache.Mark(skipcache.ScopeProvider, "openai", "glm-5", 20*time.Millisecond)
+
+	if got := pickOf(t, mgr, "conv-live"); got != "coding-alt" {
+		t.Fatalf("live mark: pick = %q, want coding-alt", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	row := mgr.GetModelNative("coding")
+	if !mgr.isServableGroupMember(row) {
+		t.Fatal("expired mark must restore servability (the cache is an optimizer with a TTL, not a permanent gate)")
+	}
+	// With the wall gone, BOTH members are servable — the sticky pick
+	// is weight-random again, so only assert it is a member.
+	got := pickOf(t, mgr, "conv-after-expiry")
+	if got != "coding" && got != "coding-alt" {
+		t.Fatalf("post-expiry pick = %q, want one of the group's members", got)
+	}
+}
+
+// TestGroup_SkipCache_NilCacheByteIdentical — a manager without
+// SetSkipCache keeps the exact pre-part-2 selection: the marked-
+// elsewhere cache is invisible, picks flow unchanged.
+func TestGroup_SkipCache_NilCacheByteIdentical(t *testing.T) {
+	mgr, _, cleanup := newSkipCacheGroupManager(t)
+	defer cleanup()
+	mgr.SetSkipCache(nil) // unwire — the legacy test/main shape
+
+	got := pickOf(t, mgr, "conv-nil-cache")
+	if got != "coding" && got != "coding-alt" {
+		t.Fatalf("nil-cache pick = %q, want one of the group's members (nil cache must not skip anything)", got)
+	}
+}

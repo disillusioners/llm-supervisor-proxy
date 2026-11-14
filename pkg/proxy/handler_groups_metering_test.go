@@ -331,7 +331,6 @@ func TestHandlerGroups_Am25_Metering_RowShapes(t *testing.T) {
 		if err := g.mgr.AddModel(models.ModelConfig{
 			ID: "g-backup", Name: "Backup Group", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
 			Members: []models.GroupMember{
 				{ModelID: "b-default", Weight: 1},
 				{ModelID: "b-backup", Weight: 1, BackupOnly: true},

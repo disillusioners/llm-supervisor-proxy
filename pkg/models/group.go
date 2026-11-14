@@ -81,13 +81,8 @@ func validateGroupRules(m *ModelConfig, internalProvider string) error {
 	if m.ReleaseStreamChunkDeadline != 0 {
 		return fmt.Errorf("model %s: kind %q does not support release_stream_chunk_deadline", m.ID, KindGroup)
 	}
-	// G7 — EXPLICIT enforcement (D9 precedent; the image-gen
-	// doc/code drift is NOT inherited). Ultimate switching is
-	// evaluated on the group row pre-rewrite; forcing the flag
-	// shields group traffic.
-	if !m.ExcludeFromUltimateSwitching {
-		return fmt.Errorf("model %s: kind %q requires exclude_from_ultimate_switching to be true (G7 explicit enforcement)", m.ID, KindGroup)
-	}
+	// (Former G7 exclusion flag — retired with the
+	// ultimate model subsystem; no gate remains for it.)
 	// G8 self-part — a group cannot claim its OWN ID (pointless:
 	// GetModel(groupID) already returns the group; it would only
 	// mask configuration errors). Claiming one of the group's own

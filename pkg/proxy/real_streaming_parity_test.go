@@ -20,14 +20,10 @@
 //	(3) Anthropic→OpenAI-wire internal translation
 //	    (doAnthropicInternalRequest at handler_anthropic.go:600-685)
 //	(4) /v1/chat/completions OpenAI race path (handler.go race-coord+relay)
-//	(5) Ultimate external stream — REMOVED with the external arm
-//	    (remove-external-upstream P1); no surviving path.
-//	(6) Ultimate internal stream — COVERED by
-//	    pkg/ultimatemodel/handler_internal_test.go
-//	    TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion +
-//	    TestUltimateCapture_LiveMode_IdenticalToBuffered_Internal
-//	    (the proxy-package boundary can't reach the private
-//	    handleInternalStream method directly)
+//	(5) Raw-passthrough external stream — REMOVED with the external
+//	    arm (remove-external-upstream P1); no surviving path.
+//	(6) Raw-passthrough internal stream — REMOVED with the ultimate
+//	    subsystem (wi-7769a812 part 1); no surviving path.
 //
 // Variant matrix (plan task 5.2 acceptance): each of paths 1-4 is
 // exercised against the canonical fixtures in fixtureSet():
@@ -37,7 +33,7 @@
 // (usage-only first chunk, provider-shaped), and comment_first (the
 // SSE `: connected\n\n` preamble + first data — locks in the live-mode
 // preamble-write timing invariant for path 1). Path 6 is pinned
-// by ultimatemodel-package tests (the fixtureSet() lives in proxy
+// by the retired package's tests (the fixtureSet() lives in proxy
 // and is not used by the ultimate path).
 //
 // Determinism rules (plan Phase 5):
@@ -567,28 +563,10 @@ func TestRealStreaming_ParityMatrix_AllPaths(t *testing.T) {
 		})
 	}
 
-	// (5)+(6) Ultimate external/internal stream — DEFERRED to existing
-	// pkg/ultimatemodel tests. The ultimate Handler's streamResponse +
-	// handleInternalStream methods are package-private (lowercase), so a
-	// direct parity call from pkg/proxy is impossible. The surviving
-	// internal pinnners (TestUltimateInternal_LiveStream_
-	// ForwardBytesBeforeCompletion + TestUltimateCapture_LiveMode_
-	// IdenticalToBuffered_Internal in handler_internal_test.go) already
-	// assert buffered == live wire bytes (transitively pinning buffered
-	// == pre-feature). These two subtests document the deferral
-	// accurately (skip comments previously claimed "re-verify"
-	// semantics they did not implement — finding #5 cleanup).
-	t.Run("5_UltimateExternal_HeaderPresent", func(t *testing.T) {
-		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
-		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
-		t.Skip("path 5 (Ultimate external) removed with the external arm — no surviving path to pin")
-	})
-
-	t.Run("6_UltimateInternal_HeaderPresent", func(t *testing.T) {
-		// DEFERRED — pinned by existing pkg/ultimatemodel tests.
-		// See this file's header doc (plan 5.10 + ExecuteOptions caveat).
-		t.Skip("path 6 pinned by pkg/ultimatemodel TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion; the proxy-package boundary cannot reach the private handleInternalStream method directly")
-	})
+	// (5)+(6) The raw-passthrough (ultimate) external/internal stream
+	// paths were REMOVED with the ultimate-model subsystem (wi-7769a812
+	// part 1); there is no surviving path to pin, so the parity matrix
+	// now ends at path (4).
 }
 
 // streamEventsForVariant maps a content-variant label to the typed
@@ -741,16 +719,12 @@ func TestRealStreaming_RollbackViaHeader(t *testing.T) {
 		}
 	})
 
-	t.Run("Ultimate_External_Path_Stub", func(t *testing.T) {
-		// Path 5 (Ultimate external) was REMOVED with the external
-		// arm (remove-external-upstream P1) — no surviving path to
-		// pin. We confirm here that the header dispatch lands in
-		// buffered mode for the proxy lanes (paths 1-4); the
-		// surviving ultimate-internal dispatch is structurally
-		// identical (same ExecuteOptions shape) and is covered by
-		// the ultimatemodel test battery
-		// (TestUltimateInternal_LiveStream_ForwardBytesBeforeCompletion).
-		t.Skip("path 5 (Ultimate external) removed with the external arm — no surviving path to pin")
+	t.Run("RawPassthrough_External_Path_Stub", func(t *testing.T) {
+		// Path 5 (raw-passthrough external) was REMOVED with the
+		// external arm (remove-external-upstream P1), and path 6
+		// (raw-passthrough internal) was removed with the ultimate
+		// subsystem (wi-7769a812 part 1) — no surviving path to pin.
+		t.Skip("raw-passthrough paths removed; parity matrix ends at path 4")
 	})
 }
 

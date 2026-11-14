@@ -2,7 +2,9 @@ package ui
 
 // Decision Models commission / §10 P1.9 (amendment 6): parity test
 // asserting `pkg/ui/server.go` POST inline ≡ `pkg/ui/server.go` PUT
-// inline ≡ `models.validateDecisionRules` for the D1-D9 rule set.
+// inline ≡ `models.validateDecisionRules` for the D1-D8 rule set
+// (D9 — the ultimate-switching exclusion requirement — was retired
+// with the ultimate model subsystem).
 //
 // Drift detector: if any of the three enforcement sites drifts out
 // of sync, the test fails loudly. The plan's P1.9 acceptance text
@@ -144,16 +146,15 @@ func validateDecisionRulesCaller(m models.ModelConfig, primaryProvider string) s
 // when nil to mirror the JSON `omitempty` wire shape).
 func marshalBrokenModel(broken models.ModelConfig) string {
 	payload := map[string]interface{}{
-		"id":                              "decision-1",
-		"name":                            broken.Name,
-		"enabled":                         broken.Enabled,
-		"kind":                            broken.Kind,
-		"internal":                        broken.Internal,
-		"internal_model":                  broken.InternalModel,
-		"fallback_chain":                  broken.FallbackChain,
-		"secondary_upstream_model":        broken.SecondaryUpstreamModel,
-		"peak_hour_enabled":               broken.PeakHourEnabled,
-		"exclude_from_ultimate_switching": broken.ExcludeFromUltimateSwitching,
+		"id":                       "decision-1",
+		"name":                     broken.Name,
+		"enabled":                  broken.Enabled,
+		"kind":                     broken.Kind,
+		"internal":                 broken.Internal,
+		"internal_model":           broken.InternalModel,
+		"fallback_chain":           broken.FallbackChain,
+		"secondary_upstream_model": broken.SecondaryUpstreamModel,
+		"peak_hour_enabled":        broken.PeakHourEnabled,
 	}
 	if len(broken.Credentials) > 0 {
 		payload["credentials"] = []map[string]interface{}{{"credential_id": broken.Credentials[0].CredentialID, "weight": 1, "position": 0}}
@@ -177,7 +178,7 @@ func releaseDeadlineString(d models.Duration) string {
 }
 
 // TestKindRules_Parity_AllThreeSitesInSync — the P1.9 parity
-// test. Iterates the D1-D9 matrix and asserts that:
+// test. Iterates the D1-D8 matrix and asserts that:
 //
 //	models.ValidateKindRules(m, primaryProvider)  ⇒  errSubstring
 //	POST inline mirror                             ⇒  400 + errSubstring
@@ -278,11 +279,6 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 			substr: "does not support release_stream_chunk_deadline",
 			mutate: func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
 		},
-		{
-			name:   "D9_decision_requires_exclude_from_ultimate_switching",
-			substr: "requires exclude_from_ultimate_switching to be true",
-			mutate: func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
-		},
 	}
 
 	for _, tc := range cases {
@@ -294,14 +290,13 @@ func TestKindRules_Parity_AllThreeSitesInSync(t *testing.T) {
 
 			// Valid base model — all D-rules satisfied.
 			base := models.ModelConfig{
-				ID:                           "decision-1",
-				Name:                         "Decision One",
-				Enabled:                      true,
-				Kind:                         models.KindDecision,
-				Internal:                     true,
-				InternalModel:                "gpt-6-luna",
-				Credentials:                  decisionRefs("openai-cred"),
-				ExcludeFromUltimateSwitching: true,
+				ID:            "decision-1",
+				Name:          "Decision One",
+				Enabled:       true,
+				Kind:          models.KindDecision,
+				Internal:      true,
+				InternalModel: "gpt-6-luna",
+				Credentials:   decisionRefs("openai-cred"),
 			}
 
 			// --- ValidateKindRules (the helper, single source of truth) ---
@@ -369,8 +364,7 @@ func TestKindRules_Parity_Positive_ValidDecisionModelAccepted(t *testing.T) {
 		"kind": "decision",
 		"internal": true,
 		"internal_model": "gpt-6-luna",
-		"credentials": [{"credential_id": "openai-cred", "weight": 1, "position": 0}],
-		"exclude_from_ultimate_switching": true
+		"credentials": [{"credential_id": "openai-cred", "weight": 1, "position": 0}]
 	}`
 	status, errSub := postDecisionModel(t, srv.URL, body)
 	if status != http.StatusCreated {
@@ -397,8 +391,7 @@ func TestKindRules_Parity_Positive_OpenRouterDecisionModelAccepted(t *testing.T)
 		"kind": "decision",
 		"internal": true,
 		"internal_model": "typesafe/jev-1.13",
-		"credentials": [{"credential_id": "openrouter-cred", "weight": 1, "position": 0}],
-		"exclude_from_ultimate_switching": true
+		"credentials": [{"credential_id": "openrouter-cred", "weight": 1, "position": 0}]
 	}`
 	status, errSub := postDecisionModel(t, srv.URL, body)
 	if status != http.StatusCreated {
@@ -431,12 +424,10 @@ func addGroupMembers(ts *modelTestServer) {
 	ts.mockModels.AddModel(models.ModelConfig{
 		ID: "member-img", Name: "Member Img", Enabled: true, Kind: models.KindImageGen,
 		Internal: true, InternalModel: "image-01",
-		Credentials:                  []models.CredentialRef{{CredentialID: "test-cred", Weight: 1, Position: 0}},
-		ExcludeFromUltimateSwitching: true,
+		Credentials: []models.CredentialRef{{CredentialID: "test-cred", Weight: 1, Position: 0}},
 	})
 	ts.mockModels.AddModel(models.ModelConfig{
 		ID: "other-group", Name: "Other Group", Enabled: true, Kind: models.KindGroup,
-		Internal: true, ExcludeFromUltimateSwitching: true,
 		Members:       []models.GroupMember{{ModelID: "member-b", Weight: 1}},
 		ShadowModelID: "member-a",
 	})
@@ -446,13 +437,12 @@ func addGroupMembers(ts *modelTestServer) {
 // no claim — the claim cases mutate it on).
 func groupBase() models.ModelConfig {
 	return models.ModelConfig{
-		ID:                           "group-1",
-		Name:                         "Group One",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-b", Weight: 2}},
+		ID:       "group-1",
+		Name:     "Group One",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members:  []models.GroupMember{{ModelID: "member-a", Weight: 1}, {ModelID: "member-b", Weight: 2}},
 	}
 }
 
@@ -476,12 +466,11 @@ func validateGroupRulesCaller(m models.ModelConfig, collection []models.ModelCon
 // included; zero-value optional fields omitted).
 func marshalGroupModel(m models.ModelConfig) string {
 	payload := map[string]interface{}{
-		"id":                              "group-1",
-		"name":                            m.Name,
-		"enabled":                         m.Enabled,
-		"kind":                            m.Kind,
-		"internal":                        m.Internal,
-		"exclude_from_ultimate_switching": m.ExcludeFromUltimateSwitching,
+		"id":       "group-1",
+		"name":     m.Name,
+		"enabled":  m.Enabled,
+		"kind":     m.Kind,
+		"internal": m.Internal,
 	}
 	if len(m.Members) > 0 {
 		members := make([]map[string]interface{}, 0, len(m.Members))
@@ -600,11 +589,6 @@ func TestKindRules_Parity_Group_AllThreeSitesInSync(t *testing.T) {
 			name:   "G6_group_rejects_release_stream_chunk_deadline",
 			substr: "does not support release_stream_chunk_deadline",
 			mutate: func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) },
-		},
-		{
-			name:   "G7_group_requires_exclude_from_ultimate_switching",
-			substr: "requires exclude_from_ultimate_switching to be true",
-			mutate: func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false },
 		},
 		{
 			name:   "G8_group_cannot_shadow_own_id",

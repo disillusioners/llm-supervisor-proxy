@@ -57,9 +57,9 @@ interface SettingsPageProps {
   groupError?: string | null;
   onRetryGroupModels?: () => void;
   tokens: ApiToken[];
-  onCreateToken: (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => Promise<ApiToken>;
+  onCreateToken: (name: string, expiresAt: string | null, allowedModels?: string[]) => Promise<ApiToken>;
   onDeleteToken: (id: string) => Promise<void>;
-  onUpdateTokenPermission: (id: string, ultimateModelEnabled: boolean, allowedModels?: string[]) => Promise<boolean>;
+  onUpdateTokenPermission: (id: string, allowedModels?: string[]) => Promise<boolean>;
   onRefetchTokens: () => void;
 }
 
@@ -142,9 +142,6 @@ export function SettingsPage({
   const [raceParallelOnIdle, setRaceParallelOnIdle] = useState(true);
   const [raceMaxParallel, setRaceMaxParallel] = useState(3);
   const [raceMaxBufferBytes, setRaceMaxBufferBytes] = useState(5 * 1024 * 1024);
-  // Ultimate model state
-  const [ultimateModelId, setUltimateModelId] = useState('');
-  const [ultimateModelMaxHash, setUltimateModelMaxHash] = useState(100);
   // Raw response logging state
   const [logRawUpstreamResponse, setLogRawUpstreamResponse] = useState(false);
   const [logRawUpstreamOnError, setLogRawUpstreamOnError] = useState(false);
@@ -152,6 +149,8 @@ export function SettingsPage({
   // Stream idle termination state
   const [idleTerminationEnabled, setIdleTerminationEnabled] = useState(true);
   const [idleTerminationTimeout, setIdleTerminationTimeout] = useState("2m");
+  // wi-7769a812 part 2 / D3: upstream skip-cache TTL (default 60s)
+  const [upstreamSkipCacheTTL, setUpstreamSkipCacheTTL] = useState("60s");
 
   // Store original port to detect changes
   const [originalPort, setOriginalPort] = useState<number>(8089);
@@ -178,9 +177,6 @@ export function SettingsPage({
       setRaceMaxParallel(config.race_max_parallel ?? 3);
       setRaceMaxBufferBytes(config.race_max_buffer_bytes ?? 5242880);
       setStickyLastSuccessEnabled(config.sticky_last_success_enabled ?? false);
-      // Ultimate model sync
-      setUltimateModelId(config.ultimate_model?.model_id || '');
-      setUltimateModelMaxHash(config.ultimate_model?.max_hash || 100);
       // Raw response logging sync
       setLogRawUpstreamResponse(config.log_raw_upstream_response ?? false);
       setLogRawUpstreamOnError(config.log_raw_upstream_on_error ?? false);
@@ -188,6 +184,9 @@ export function SettingsPage({
       // Stream idle termination sync
       setIdleTerminationEnabled(config.idle_termination_enabled ?? true);
       setIdleTerminationTimeout(config.idle_termination_timeout ?? "2m");
+      // wi-7769a812 part 2 / D3: skip-cache TTL sync (BE normalizes
+      // 0 → 60s, so a missing/zero value renders the default)
+      setUpstreamSkipCacheTTL(config.upstream_skip_cache_ttl ?? "60s");
     }
   }, [config]);
 
@@ -209,11 +208,6 @@ export function SettingsPage({
         // for this flag too, so omitting it would silently clear it on
         // every proxy-settings save.
         sticky_last_success_enabled: stickyLastSuccessEnabled,
-        // Ultimate model
-        ultimate_model: {
-          model_id: ultimateModelId,
-          max_hash: ultimateModelMaxHash,
-        },
         // Raw response logging
         log_raw_upstream_response: logRawUpstreamResponse,
         log_raw_upstream_on_error: logRawUpstreamOnError,
@@ -221,6 +215,8 @@ export function SettingsPage({
         // Stream idle termination
         idle_termination_enabled: idleTerminationEnabled,
         idle_termination_timeout: idleTerminationTimeout,
+        // wi-7769a812 part 2 / D3: upstream skip-cache TTL
+        upstream_skip_cache_ttl: upstreamSkipCacheTTL,
       });
 
       // Show success message, and also show restart warning if required
@@ -333,9 +329,9 @@ export function SettingsPage({
   };
 
   // Token handlers
-  const handleCreateToken = async (name: string, expiresAt: string | null, ultimateModelEnabled?: boolean, allowedModels?: string[]) => {
+  const handleCreateToken = async (name: string, expiresAt: string | null, allowedModels?: string[]) => {
     try {
-      const token = await onCreateToken(name, expiresAt, ultimateModelEnabled, allowedModels);
+      const token = await onCreateToken(name, expiresAt, allowedModels);
       setNewToken(token);
       setShowTokenValue(true);
       onRefetchTokens();
@@ -529,7 +525,6 @@ export function SettingsPage({
         <div class="max-w-4xl mx-auto">
           {activeTab === 'proxy' && (
             <ProxySettings
-              models={models}
               port={port}
               idleTimeout={idleTimeout}
               streamDeadline={streamDeadline}
@@ -540,24 +535,22 @@ export function SettingsPage({
               raceMaxParallel={raceMaxParallel}
               raceMaxBufferBytes={raceMaxBufferBytes}
               stickyLastSuccessEnabled={stickyLastSuccessEnabled}
-              ultimateModelId={ultimateModelId}
-              ultimateModelMaxHash={ultimateModelMaxHash}
               logRawUpstreamResponse={logRawUpstreamResponse}
               logRawUpstreamOnError={logRawUpstreamOnError}
               logRawUpstreamMaxKB={logRawUpstreamMaxKB}
               idleTerminationEnabled={idleTerminationEnabled}
               idleTerminationTimeout={idleTerminationTimeout}
+              upstreamSkipCacheTTL={upstreamSkipCacheTTL}
               onPortChange={setPort}
               onIdleTimeoutChange={setIdleTimeout}
               onStreamDeadlineChange={setStreamDeadline}
               onMaxGenTimeChange={setMaxGenTime}
+              onUpstreamSkipCacheTTLChange={setUpstreamSkipCacheTTL}
               onRaceRetryEnabledChange={setRaceRetryEnabled}
               onRaceParallelOnIdleChange={setRaceParallelOnIdle}
               onRaceMaxParallelChange={setRaceMaxParallel}
               onRaceMaxBufferBytesChange={setRaceMaxBufferBytes}
               onStickyLastSuccessEnabledChange={setStickyLastSuccessEnabled}
-              onUltimateModelIdChange={setUltimateModelId}
-              onUltimateModelMaxHashChange={setUltimateModelMaxHash}
               onLogRawUpstreamResponseChange={setLogRawUpstreamResponse}
               onLogRawUpstreamOnErrorChange={setLogRawUpstreamOnError}
               onLogRawUpstreamMaxKBChange={setLogRawUpstreamMaxKB}
@@ -629,8 +622,7 @@ export function SettingsPage({
               Same posture as the sibling tabs: parent receives
               groupModels pre-filtered server-side via
               /fe/api/models?kind=group. The form inside stamps
-              kind: 'group' + internal: true +
-              exclude_from_ultimate_switching: true (G1/G7) so a chat
+              kind: 'group' + internal: true (G1) so a chat
               row can never round-trip into this surface. chatModels
               feeds the member + shadow pickers (chat-kind only);
               wrapPreloadModel carries the one-click-wrap pre-fill

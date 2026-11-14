@@ -66,12 +66,11 @@ func newGroupManager(t *testing.T) (*ModelsManager, func()) {
 // canonical day-1 shape).
 func validGroup() models.ModelConfig {
 	return models.ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
+		ID:       "coding-group",
+		Name:     "Coding Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 2},
 			{ModelID: "coding-alt", Weight: 1},
@@ -100,8 +99,8 @@ func TestGroup_SavePath_And_RoundTrip(t *testing.T) {
 	if got.Kind != models.KindGroup || !got.IsGroup() {
 		t.Errorf("round-trip: Kind = %q, want %q (IsGroup=%v)", got.Kind, models.KindGroup, got.IsGroup())
 	}
-	if !got.Internal || !got.ExcludeFromUltimateSwitching {
-		t.Errorf("round-trip: Internal=%v ExcludeFromUltimateSwitching=%v, want true/true", got.Internal, got.ExcludeFromUltimateSwitching)
+	if !got.Internal {
+		t.Errorf("round-trip: Internal=%v, want true", got.Internal)
 	}
 	if len(got.Members) != 2 {
 		t.Fatalf("round-trip: Members len = %d, want 2 (got %+v)", len(got.Members), got.Members)
@@ -176,7 +175,6 @@ func TestGroup_AddModel_GViolations(t *testing.T) {
 		{"G6_no_secondary", func(m *models.ModelConfig) { m.SecondaryUpstreamModel = "x" }, "does not support secondary_upstream_model"},
 		{"G6_no_peak_hour", func(m *models.ModelConfig) { m.PeakHourEnabled = true }, "does not support peak_hour_enabled"},
 		{"G6_no_chunk_deadline", func(m *models.ModelConfig) { m.ReleaseStreamChunkDeadline = models.Duration(60 * 1e9) }, "does not support release_stream_chunk_deadline"},
-		{"G7_ultimate_exclusion_required", func(m *models.ModelConfig) { m.ExcludeFromUltimateSwitching = false }, "requires exclude_from_ultimate_switching"},
 		{"G8_no_own_id_claim", func(m *models.ModelConfig) { m.ShadowModelID = "coding-group" }, "cannot be the group's own ID"},
 		{"G8_shadow_target_must_exist", func(m *models.ModelConfig) { m.ShadowModelID = "ghost" }, "does not exist"},
 	}
@@ -642,7 +640,7 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.AddModel(validGroup()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding", 0)
 	if !ok {
 		t.Fatal("two-member group must produce a replacement")
 	}
@@ -660,7 +658,7 @@ func TestGroup_ExcludeGroupMember(t *testing.T) {
 	if err := mgr.UpdateModel("coding-group", updated); err != nil {
 		t.Fatalf("update to single-member: %v", err)
 	}
-	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding")
+	_, _, ok2 := mgr.ExcludeGroupMember("coding-group", "conv-term", "coding", 0)
 	if ok2 {
 		t.Error("single-member ExcludeGroupMember must return ok=false (no alternative)")
 	}
@@ -817,12 +815,11 @@ func TestGroup_D8_EmptyDefaultPool_FallsToBackup(t *testing.T) {
 	// Hand-built all-backup group — bypasses the D2 write validation
 	// on purpose (the state is unreachable via the API).
 	allBackup := models.ModelConfig{
-		ID:                           "coding-group",
-		Name:                         "Coding Group",
-		Enabled:                      true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
+		ID:       "coding-group",
+		Name:     "Coding Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1, BackupOnly: true},
 			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -869,7 +866,6 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 	g := models.ModelConfig{
 		ID: "g-c1", Name: "C1 Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -881,7 +877,7 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 
 	// The DEFAULT failed terminally → the re-entry must hand to the
 	// BACKUP, annotated as a backup-pool pick (D5).
-	pick, pool, ok := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding", 0)
 	if !ok {
 		t.Fatal("C1: a servable backup must be handed to the re-entry (got ok=false)")
 	}
@@ -908,7 +904,7 @@ func TestGroup_C1_ReentryCascadesToBackup(t *testing.T) {
 	}
 	// The default is still cooling from the first call; the backup is
 	// unservable ⇒ terminal.
-	if pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding"); ok2 {
+	if pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-c1", "conv-c1", "coding", 0); ok2 {
 		t.Fatalf("C1: both pools exhausted must be terminal, got (%q, %q, true)", pick2, pool2)
 	}
 }
@@ -923,12 +919,11 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "g-solo", Name: "Solo Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		Members: []models.GroupMember{{ModelID: "coding", Weight: 1}},
 	}); err != nil {
 		t.Fatalf("seed solo group: %v", err)
 	}
-	if pick, pool, ok := mgr.ExcludeGroupMember("g-solo", "conv-solo", "coding"); ok {
+	if pick, pool, ok := mgr.ExcludeGroupMember("g-solo", "conv-solo", "coding", 0); ok {
 		t.Fatalf("1-member group must fail fast, got (%q, %q, true)", pick, pool)
 	}
 
@@ -938,7 +933,6 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 	if err := mgr.AddModel(models.ModelConfig{
 		ID: "g-two", Name: "Two Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1},
@@ -947,13 +941,13 @@ func TestGroup_C1_BackupLessGroupsKeepV1Semantics(t *testing.T) {
 		t.Fatalf("seed two group: %v", err)
 	}
 	// First exclusion: ReselectHealthy → the other default.
-	first, pool1, ok1 := mgr.ExcludeGroupMember("g-two", "conv-two", "coding")
+	first, pool1, ok1 := mgr.ExcludeGroupMember("g-two", "conv-two", "coding", 0)
 	if !ok1 || pool1 != models.PoolDefault || first == "coding" {
 		t.Fatalf("v1 reselect: (%q, %q, %v), want a different default with pool=default", first, pool1, ok1)
 	}
 	// Second exclusion (all defaults now cooling): v1 availability
 	// ruling re-serves a cooling default rather than failing.
-	second, pool2, ok2 := mgr.ExcludeGroupMember("g-two", "conv-two", first)
+	second, pool2, ok2 := mgr.ExcludeGroupMember("g-two", "conv-two", first, 0)
 	if !ok2 || pool2 != models.PoolDefault || second == "" {
 		t.Fatalf("v1 all-cooling: (%q, %q, %v), want the soonest default re-served", second, pool2, ok2)
 	}
@@ -1037,7 +1031,6 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "Zero Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
 			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1, BackupOnly: true},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -1070,7 +1063,6 @@ func TestGroup_D2_ZeroDefaultRejectedOnWritePath(t *testing.T) {
 		return models.ModelConfig{
 			ID: id, Name: "One Default", Enabled: true,
 			Kind: models.KindGroup, Internal: true,
-			ExcludeFromUltimateSwitching: true,
 			Members: []models.GroupMember{
 				{ModelID: "coding", Weight: 1},
 				{ModelID: "coding-alt", Weight: 1, BackupOnly: true},
@@ -1114,7 +1106,6 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	g := models.ModelConfig{
 		ID: "g-cascade", Name: "Cascade Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 1},
 			{ModelID: "coding-alt", Weight: 1},
@@ -1126,7 +1117,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	}
 
 	// (1) exclude default-1 → the OTHER DEFAULT serves.
-	pick, pool, ok := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding")
+	pick, pool, ok := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding", 0)
 	if !ok {
 		t.Fatal("GAP-1: excluding one default must leave the other default to serve")
 	}
@@ -1141,7 +1132,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	}
 
 	// (2) exclude default-2 as well → the BACKUP serves.
-	pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-alt")
+	pick2, pool2, ok2 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-alt", 0)
 	if !ok2 {
 		t.Fatal("GAP-1: with every default excluded the backup must serve")
 	}
@@ -1156,7 +1147,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	// gracefully (the v1 availability ruling re-serves the
 	// soonest-expiring backup; the F1 ruling keeps cooling
 	// graceful and reserves "loud" for config breakage).
-	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	pick3, pool3, ok3 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
 	if !ok3 {
 		t.Fatalf("GAP-1/F1: an all-cooling pool degrades gracefully (ok=true), got (%q, %q, false)", pick3, pool3)
 	}
@@ -1175,7 +1166,7 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	if err := mgr.UpdateModel("coding-third", *row); err != nil {
 		t.Fatalf("disable backup: %v", err)
 	}
-	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third")
+	pick4, pool4, ok4 := mgr.ExcludeGroupMember("g-cascade", "conv-cascade", "coding-third", 0)
 	if ok4 {
 		t.Fatalf("GAP-1: with every default excluded AND the backup unservable the failure must be terminal, got (%q, %q, true)", pick4, pool4)
 	}

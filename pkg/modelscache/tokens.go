@@ -260,8 +260,8 @@ func isVerdictClass(err error) bool {
 
 // CreateToken delegates to the inner store, then caches the returned
 // token as a positive (write-through) and records id→hash.
-func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) (string, *auth.AuthToken, error) {
-	plaintext, token, err := c.inner.CreateToken(ctx, name, expiresAt, createdBy, ultimateModelEnabled, ultimateModelID, allowedModels)
+func (c *CachedTokenStore) CreateToken(ctx context.Context, name string, expiresAt *time.Time, createdBy string, allowedModels []string) (string, *auth.AuthToken, error) {
+	plaintext, token, err := c.inner.CreateToken(ctx, name, expiresAt, createdBy, allowedModels)
 	if err != nil {
 		return "", nil, err
 	}
@@ -294,8 +294,8 @@ func (c *CachedTokenStore) DeleteToken(ctx context.Context, id string) error {
 // UpdateTokenPermission delegates to the inner store, then drops the
 // cached entry for the token (permission changes must not be masked
 // by a stale positive; the next ValidateToken re-reads).
-func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, ultimateModelEnabled bool, ultimateModelID string, allowedModels []string) error {
-	if err := c.inner.UpdateTokenPermission(ctx, id, ultimateModelEnabled, ultimateModelID, allowedModels); err != nil {
+func (c *CachedTokenStore) UpdateTokenPermission(ctx context.Context, id string, allowedModels []string) error {
+	if err := c.inner.UpdateTokenPermission(ctx, id, allowedModels); err != nil {
 		return err
 	}
 	c.mu.Lock()

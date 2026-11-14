@@ -27,6 +27,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/stickyorder"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
@@ -230,10 +231,20 @@ func main() {
 	log.Printf("Buffer storage initialized at: %s (max %d MB)", bufferStorageDir, cfg.BufferMaxStorageMB)
 
 	// Initialize Proxy Config (interface consumers see modelsConfig).
+	// wi-7769a812 part 2 / USER RULING D3 — the global upstream skip
+	// cache: ONE process-wide instance shared by the proxy (marking
+	// on limit-class failures + member-advance gates) and the models
+	// manager (cache-aware member selection). Nil-safe everywhere;
+	// constructed unconditionally so a runtime config flip needs no
+	// restart (the TTL rides the hot ConfigSnapshot).
+	upstreamSkipCache := skipcache.New()
+	modelsMgr.SetSkipCache(upstreamSkipCache)
+
 	proxyConfig := &proxy.Config{
-		ConfigMgr:    configMgr,
-		ModelsConfig: modelsConfig,
-		EventBus:     bus,
+		ConfigMgr:         configMgr,
+		ModelsConfig:      modelsConfig,
+		EventBus:          bus,
+		UpstreamSkipCache: upstreamSkipCache,
 	}
 
 	// Initialize Token Store
@@ -407,10 +418,8 @@ func main() {
 	// the hot path).
 	//
 	// DecompressRequest is the next layer; it runs FIRST on the
-	// request side so every handler — proxy, ultimatemodel (which
-	// ultimately calls Execute → executeExternal with body bytes
-	// produced from r.Body via initRequestContext's parse), UI, MCP
-	// — sees a decompressed body. CompressResponse's response-side
+	// request side so every handler — proxy, UI, MCP — sees a
+	// decompressed body. CompressResponse's response-side
 	// work is independent of DecompressRequest's request-side work;
 	// they never share state.
 	//

@@ -13,14 +13,8 @@ import { GroupMemberEditor } from './GroupMemberEditor';
 //                                        ~11 internal-dispatch predicates.
 //                                        Now the only mode repo-wide
 //                                        (remove-external-upstream).
-//   exclude_from_ultimate_switching:
-//   true                               — G7: explicit enforcement; ultimate
-//                                        switching is evaluated on the group
-//                                        row pre-rewrite, so the flag shields
-//                                        group traffic
 const HARDCODED_KIND = 'group' as const;
 const HARDCODED_INTERNAL = true as const;
-const HARDCODED_EXCLUDE_FROM_ULTIMATE = true as const;
 
 // Wire payload emitted by the form on submit (mirrors the BE Model DTO
 // group fields — pkg/ui/server.go Model struct). The hook layer stamps
@@ -35,7 +29,6 @@ export interface GroupModelPayload {
   members: GroupMember[];
   shadow_model_id: string;
   enabled: boolean;
-  exclude_from_ultimate_switching: true;
   fallback_chain: [];
   credentials: [];
 }
@@ -240,7 +233,6 @@ export function GroupModelForm({
         })),
         shadow_model_id: shadow,
         enabled: fields.enabled,
-        exclude_from_ultimate_switching: HARDCODED_EXCLUDE_FROM_ULTIMATE,
         fallback_chain: [],
         credentials: [],
       };
@@ -266,10 +258,10 @@ export function GroupModelForm({
       <h3 class="text-lg font-medium text-white mb-1">
         {mode === 'add' ? 'Add Group Model' : 'Edit Group Model'}
       </h3>
-      {/* G1/G7 read-only surfaced constants — the payload always stamps
+      {/* Read-only surfaced constants — the payload always stamps
           these; the operator cannot change them. */}
       <p class="text-xs text-gray-400 mb-4" data-testid="group-form-fixed-constants">
-        Virtual load-balancing group — kind: group · internal: true · excluded from ultimate switching (fixed by G1/G7).
+        Virtual load-balancing group — kind: group · internal: true · backup-only members serve as last-resort fallback in the race chain.
       </p>
       <div class="space-y-4">
         {/* Group ID — disabled in edit mode (id is immutable, primary key). */}

@@ -47,7 +47,7 @@ describe('GroupModelForm — payload stamping + client G-rule mirror (load-balan
     vi.clearAllMocks();
   });
 
-  it('stamps kind group + internal true + exclude_from_ultimate_switching true + empty fallback/credentials on the payload (G1/G7)', async () => {
+  it('stamps kind group + internal true + empty fallback/credentials on the payload (G1; the retired exclusion flag stays absent)', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const { container } = render(<GroupModelForm {...makeProps({ onSave })} />);
 
@@ -62,7 +62,11 @@ describe('GroupModelForm — payload stamping + client G-rule mirror (load-balan
     const payload = onSave.mock.calls[0][0];
     expect(payload.kind).toBe('group');
     expect(payload.internal).toBe(true);
-    expect(payload.exclude_from_ultimate_switching).toBe(true);
+    // Exact key set pins the wire contract: the retired exclusion flag
+    // (former G7 stamp) must stay ABSENT, not merely falsy.
+    expect(Object.keys(payload).sort()).toEqual(
+      ['credentials', 'enabled', 'fallback_chain', 'id', 'internal', 'kind', 'members', 'name', 'shadow_model_id']
+    );
     expect(payload.fallback_chain).toEqual([]);
     expect(payload.credentials).toEqual([]);
     expect(payload.id).toBe('my-group');

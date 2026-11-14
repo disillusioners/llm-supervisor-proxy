@@ -82,7 +82,7 @@ func raceIntProviderIsMiniMax(cfg *ConfigSnapshot, modelID string) bool {
 // onCredentialSelected (Phase 3 / Task 6) is the callback that emits
 // model_credential_selected with the result struct. Calling it here
 // keeps the publish at "single source of truth" — only this path
-// publishes, never the ultimate-internal or /v1/messages paths.
+// publishes, never the /v1/messages paths.
 func executeRequest(
 	ctx context.Context,
 	cfg *ConfigSnapshot,
@@ -156,8 +156,8 @@ func executeRequest(
 // publishCredentialSelected (Phase 3 / Task 6) fires the
 // model_credential_selected event when the engine's NewlyBound flag is
 // true for an internal execution. The single-source-of-truth here
-// means the race-internal path owns event publication; the ultimate
-// paths do NOT publish — and an empty conversationKey (W-2 + C2) is
+// means the race-internal path owns event publication; no other path
+// publishes — and an empty conversationKey (W-2 + C2) is
 // naturally absorbed because empty-key picks return NewlyBound=false.
 //
 // load-balance-groups / Q15: the SAME site fires model_member_selected
@@ -470,8 +470,8 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 		return fmt.Errorf("failed to convert request: %w", err)
 	}
 
-	// P1-8(d) on race-internal (typed-field setter — symmetric with twin B
-	// on ultimate-internal). When the gate fired above, bodyMap now
+	// P1-8(d) on race-internal (typed-field setter — the remaining twin
+	// after the escalation-lane removal). When the gate fired above, bodyMap now
 	// carries reasoning_split at the top level.
 	//
 	// This typed setter is REQUIRED, not belt-and-suspenders:
@@ -1000,8 +1000,8 @@ func convertToProviderRequest(body map[string]interface{}, model string) (*provi
 				// The field exists for request-side map→struct hydration so
 				// the typed openai.go marshaler emits reasoning_details on
 				// the wire (P1-8 d). Delegated to providers.HydrateReasoningDetails
-				// to eliminate the twin-divergence duplication with the
-				// ultimate-internal convertRequest path (M4 dedup).
+				// to eliminate the twin-divergence duplication in the
+				// request-side hydration (M4 dedup).
 				chatMsg.ReasoningDetails = providers.HydrateReasoningDetails(msg)
 				// Handle name field for preserving message sender identity
 				if name, ok := msg["name"].(string); ok {

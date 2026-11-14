@@ -130,15 +130,15 @@ export function ImgGenModelsTab({
     try {
       if (formMode === 'add') {
         // Strip the local-only wrapper to a wire-shaped Model. The form
-        // has already stamped kind/internal/internal_provider/
-        // exclude_from_ultimate_switching (internal is now
+        // has already stamped kind/internal/internal_provider
+        // (internal is now
         // unconditionally true repo-wide — no external upstream), so the
         // parent's addModel just forwards the body to POST
         // /fe/api/models. The Model type requires `fallback_chain:
         // string[]`; image-gen models never have a fallback chain, so we
         // send an empty array (the BE-D2 validator rejects any non-empty
         // value).
-        const { id, name, kind, internal, internal_provider, internal_model, internal_base_url, credentials, enabled, exclude_from_ultimate_switching } = payload;
+        const { id, name, kind, internal, internal_provider, internal_model, internal_base_url, credentials, enabled } = payload;
         await onAddModel({
           id,
           name,
@@ -151,18 +151,16 @@ export function ImgGenModelsTab({
           internal_model,
           internal_base_url,
           credentials,
-          exclude_from_ultimate_switching,
         });
         setStatus({ type: 'success', message: TOAST.added });
       } else {
-        const { id, name, internal_model, internal_base_url, credentials, enabled, exclude_from_ultimate_switching } = payload;
+        const { id, name, internal_model, internal_base_url, credentials, enabled } = payload;
         await onUpdateModel(id, {
           name,
           enabled,
           internal_model,
           internal_base_url,
           credentials,
-          exclude_from_ultimate_switching,
           // kind/internal/internal_provider are immutable in edit — the form
           // does not surface them and the BE rejects a kind flip anyway.
           // (internal is now unconditionally true repo-wide.)

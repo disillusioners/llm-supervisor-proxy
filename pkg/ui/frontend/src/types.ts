@@ -54,11 +54,6 @@ export interface ToolRepairConfig {
   fixer_timeout: number;            // in seconds
 }
 
-export interface UltimateModelConfig {
-  model_id: string;
-  max_hash: number;
-}
-
 export interface AppConfig {
   version: string;
   port: number;
@@ -74,7 +69,6 @@ export interface AppConfig {
   sticky_last_success_enabled: boolean;
   loop_detection: LoopDetectionConfig;
   tool_repair: ToolRepairConfig;
-  ultimate_model: UltimateModelConfig;
   updated_at: string;
   // Raw upstream response logging
   log_raw_upstream_response?: boolean;
@@ -84,13 +78,16 @@ export interface AppConfig {
   max_stream_buffer_size?: number;
   buffer_storage_dir?: string;
   buffer_max_storage_mb?: number;
-  // SSE and tool call buffer configuration
+  // SSE configuration
   sse_heartbeat_enabled?: boolean;
-  tool_call_buffer_disabled?: boolean;
-  tool_call_buffer_max_size?: number;
   // Idle termination configuration
   idle_termination_enabled?: boolean;
   idle_termination_timeout?: string;
+  // wi-7769a812 part 2 / USER RULING D3: upstream skip-cache TTL —
+  // how long a limit-class upstream failure (429/402 family) benches
+  // its (credential|provider, model) pair. Duration string, default
+  // "60s"; never applied to 5xx.
+  upstream_skip_cache_ttl?: string;
   // Deprecated - kept for backward compatibility with older backend versions
   max_idle_retries?: number;
   max_generation_retries?: number;
@@ -146,8 +143,6 @@ export interface Model {
   peak_hour_end?: string;          // 'HH:MM' format
   peak_hour_timezone?: string;     // UTC offset string like '+7', '-5', '+5.5'
   peak_hour_model?: string;        // Alternative upstream model name
-  // Ultimate model exclusion
-  exclude_from_ultimate_switching?: boolean;
   // Group membership + ID-space claim (load-balance-groups commission /
   // migration 031): kind=='group' rows only, mirroring the Go
   // Model.Members / ShadowModelID wire tags (both omitempty). Members
@@ -204,8 +199,6 @@ export interface ApiToken {
   expires_at?: string;    // ISO date or null
   created_at: string;
   last_used_at?: string;
-  ultimate_model_enabled: boolean;
-  ultimate_model: string;  // Per-token ultimate model override (empty = use global default)
   allowed_models: string[] | null;  // null means all models allowed
 }
 
@@ -250,9 +243,6 @@ export interface RequestListItem {
   is_stream?: boolean;
   fallback_used?: string[];
   // Tool call / thinking are NOT included in the list projection.
-  // Ultimate model tracking
-  ultimate_model_used?: boolean;
-  ultimate_model_id?: string;
   // Application tag for grouping/filtering
   app_tag?: string;
   // Upstream request status tracking (for race retry)
@@ -328,9 +318,11 @@ export type EventType =
   | 'shadow_retry_won'
   | 'shadow_retry_failed'
   | 'shadow_retry_lost'
-  | 'ultimate_model_triggered'
-  | 'ultimate_model_failed'
-  | 'ultimate_model_retry_exhausted'
+  // Load-balance group fallback / member failure observability
+  | 'group_fallback_attempted'
+  | 'group_fallback_advanced'
+  | 'group_fallback_exhausted'
+  | 'group_member_failed'
   | 'internal_error';
 
 export interface EventData {
@@ -378,12 +370,11 @@ export interface EventData {
   model?: string;
   main_model?: string;
   internal?: boolean;
-  // Ultimate model fields
-  ultimate_model?: string;
-  original_model?: string;
-  hash?: string;
-  current_retry?: number;  // For ultimate_model_retry_exhausted event
-  max_retries?: number;    // For ultimate_model_retry_exhausted event
+  // Load-balance group fallback fields
+  group_id?: string;       // Owning group (group_fallback_* / group_member_failed)
+  member_id?: string;      // The group member the event is about
+  from_member?: string;    // Member that failed / was advanced past
+  to_member?: string;      // Member the fallback advanced to
   // Response logging fields
   request_body_id?: string; // Correlation ID for request body
   size_bytes?: number;      // Size of logged response

@@ -95,7 +95,6 @@ interface ModelFormProps {
     peak_hour_end?: string;
     peak_hour_timezone?: string;
     peak_hour_model?: string;
-    exclude_from_ultimate_switching: boolean;
   }) => Promise<void>;
   onCancel: () => void;
   onStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
@@ -128,7 +127,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     peak_hour_end: string;
     peak_hour_timezone: string;
     peak_hour_model: string;
-    exclude_from_ultimate_switching: boolean;
   }>({
     id: '',
     name: '',
@@ -145,7 +143,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     peak_hour_end: '',
     peak_hour_timezone: '+0',
     peak_hour_model: '',
-    exclude_from_ultimate_switching: false,
   });
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loadingCredentials, setLoadingCredentials] = useState(false);
@@ -220,7 +217,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         peak_hour_end: initialData.peak_hour_end ?? '',
         peak_hour_timezone: initialData.peak_hour_timezone ?? '+0',
         peak_hour_model: initialData.peak_hour_model ?? '',
-        exclude_from_ultimate_switching: initialData.exclude_from_ultimate_switching ?? false,
       });
       setLegacyCredentialNotice(legacyNotice);
     } else if (mode === 'add') {
@@ -240,7 +236,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         peak_hour_end: '',
         peak_hour_timezone: '+0',
         peak_hour_model: '',
-        exclude_from_ultimate_switching: false,
       });
       setLegacyCredentialNotice(null);
     }
@@ -378,7 +373,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         peak_hour_end: formData.peak_hour_enabled ? formData.peak_hour_end : undefined,
         peak_hour_timezone: formData.peak_hour_enabled ? formData.peak_hour_timezone : undefined,
         peak_hour_model: formData.peak_hour_enabled ? formData.peak_hour_model : undefined,
-        exclude_from_ultimate_switching: formData.exclude_from_ultimate_switching,
       });
     } catch (e) {
       onStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save model' });
@@ -737,24 +731,6 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                 </div>
               )}
             </div>
-          </div>
-
-          {/* Exclude from Ultimate Model Switching */}
-          <div class="border-t border-gray-600/50 pt-3">
-            <label class="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={formData.exclude_from_ultimate_switching}
-                onInput={(e) => handleInputChange('exclude_from_ultimate_switching', (e.target as HTMLInputElement).checked)}
-                class="w-4 h-4 mt-0.5 rounded border-gray-600 bg-gray-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-gray-800"
-              />
-              <div>
-                <span class="text-gray-300 font-medium">Exclude from Ultimate Model Switching</span>
-                <p class="text-xs text-gray-400 mt-0.5">
-                  When enabled, this model will never trigger ultimate model switching, even for duplicate requests
-                </p>
-              </div>
-            </label>
           </div>
 
           <div class="pt-2 flex items-center gap-2">

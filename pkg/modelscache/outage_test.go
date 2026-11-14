@@ -260,7 +260,7 @@ func TestOutageSimulation_NoMisroutes_OneHourSimulated(t *testing.T) {
 
 	// Create tokens through the cache (write-through) and warm the
 	// resolutions + configured-model lookups BEFORE the outage.
-	tokPlain, tok, err := st.tokens.CreateToken(context.Background(), "svc", nil, "test", false, "", nil)
+	tokPlain, tok, err := st.tokens.CreateToken(context.Background(), "svc", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}

@@ -22,9 +22,12 @@ package database
 
 import (
 	"log"
+	"strings"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 )
 
 // RewriteGroupEntries implements models.GroupRewriter (Am21). See
@@ -125,7 +128,11 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 	// Pool 1: defaults. +1 defensive iteration over the default
 	// member count bounds the loop even when every pick comes back
 	// stale. All-defaults exhausted ⇒ fall through to the backup
-	// loop.
+	// loop. wi-7769a812 part 2: the re-validation predicate is
+	// CACHE-AWARE — a member whose upstreams are all skip-marked
+	// (limit-class failures, D3) is skipped exactly like a stale one,
+	// so selection becomes health-aware while unmarked alternatives
+	// exist (the A2 fix).
 	defaults := defaultRefs(refs)
 	for attempt := 0; !defaultPoolExhausted && attempt <= len(defaults); attempt++ {
 		pick, newly, repaired, err := m.groupEngine.GetOrSelectWithRepair(group.ID, conversationKey)
@@ -136,25 +143,30 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 			// backup pool instead of failing the request.
 			break
 		}
-		if isServableGroupMember(m.GetModelNative(pick)) {
+		if m.isServableGroupMember(m.GetModelNative(pick)) {
 			return pick, newly, models.PoolDefault, repaired, true
 		}
 		// Am28: stale — skip-and-reselect (cools the stale member;
 		// rebinds the conversation to the next healthy member).
+		// wi-7769a812 part 2: a cache-marked (unhealthy) member lands
+		// here too; the exclusion window stays the engine default —
+		// the SKIP CACHE is the health authority, this write is
+		// exclusion-set bookkeeping only.
 		m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
 	}
 
 	// Pool 2: backups (group-backup-members / D1). Tries each
 	// backup member in turn; exhausts the BACKUP pool only after
-	// every backup member is stale/excluded. Returns ok=false
-	// when even the backup pool is exhausted.
+	// every backup member is stale/excluded/skip-marked. Returns
+	// ok=false when even the backup pool is exhausted — OR falls
+	// through to the D3 degradation below.
 	backups := backupRefs(refs)
 	for attempt := 0; attempt <= len(backups); attempt++ {
 		pick, newly, repaired, err := m.groupEngine.PickBackupMemberWithRepair(group.ID, conversationKey)
 		if err != nil {
-			return "", false, "", false, false
+			return m.degradeToSoonestExpiry(group, refs)
 		}
-		if isServableGroupMember(m.GetModelNative(pick)) {
+		if m.isServableGroupMember(m.GetModelNative(pick)) {
 			if m.groupEngine.HasBackupPool(group.ID) {
 				log.Printf("[grouplb] group=%s pool=backup member=%s — all default members exhausted for this run", group.ID, pick)
 			}
@@ -162,16 +174,64 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 		}
 		m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
 	}
-	return "", false, "", false, false
+	return m.degradeToSoonestExpiry(group, refs)
 }
 
-// isServableGroupMember is the Am28 re-validation predicate: the
+// degradeToSoonestExpiry (wi-7769a812 part 2 / USER RULING D3 — the
+// anti-availability-gate guard). When EVERY member's upstreams are
+// skip-marked (a provider-wide wall / all-credentials-walled group),
+// the cache-aware servability above would exhaust both pools and —
+// pre-part-2 — surface an empty-at-runtime group (Am28 FailedGroupID)
+// for a group whose members are merely HEALTH-MARKED, not gone. The
+// cache is an OPTIMIZER, NEVER an availability gate: this degradation
+// picks the member whose soonest skip mark expires FIRST (the most
+// likely-recovered upstream) and serves ONE honest attempt against
+// it. Members that fail the BASE Am28 checks (deleted / disabled /
+// wrong kind) are never degradation candidates — only health marks
+// are bypassed here.
+func (m *ModelsManager) degradeToSoonestExpiry(group *models.ModelConfig, refs []grouplb.MemberRef) (string, bool, string, bool, bool) {
+	var bestID string
+	var bestExpiry time.Time
+	var bestBackup bool
+	found := false
+	for _, r := range refs {
+		row := m.GetModelNative(r.ModelID)
+		if !isServableGroupMemberBase(row) {
+			continue
+		}
+		expiry, ok := m.memberSoonestSkipExpiry(row)
+		if !ok {
+			// An unmarked member reaching this point means the engine
+			// refused it for a non-health reason (excluded this run);
+			// still a valid one-honest-attempt candidate — treat its
+			// expiry as "now" so a genuinely-marked member wins the
+			// anchor only when nothing unmarked remains.
+			expiry = time.Now()
+			ok = true
+		}
+		if !found || expiry.Before(bestExpiry) {
+			bestID, bestExpiry, bestBackup, found = r.ModelID, expiry, r.BackupOnly, true
+		}
+	}
+	if !found {
+		return "", false, "", false, false
+	}
+	if bestBackup {
+		log.Printf("[grouplb] group=%s pool=backup member=%s — all upstreams skip-marked (D3 degradation: ONE honest attempt against the soonest-expiring mark)", group.ID, bestID)
+		return bestID, false, models.PoolBackup, false, true
+	}
+	log.Printf("[grouplb] group=%s member=%s — all upstreams skip-marked (D3 degradation: ONE honest attempt against the soonest-expiring mark)", group.ID, bestID)
+	return bestID, false, models.PoolDefault, false, true
+}
+
+// isServableGroupMemberBase is the Am28 re-validation predicate: the
 // member row exists, is enabled, and is chat-kind (kind chat or the
 // legacy "" normalization; not group / image-gen / decision — the
 // same text-kind rule as G3/G5 at write time, re-checked at request
 // time to cover member disabled/deleted/retyped between group write
-// and request).
-func isServableGroupMember(row *models.ModelConfig) bool {
+// and request). HEALTH-AGNOSTIC by design: this is the shape check
+// the D3 degradation also honors (health marks never gate it).
+func isServableGroupMemberBase(row *models.ModelConfig) bool {
 	if row == nil || !row.Enabled {
 		return false
 	}
@@ -181,6 +241,68 @@ func isServableGroupMember(row *models.ModelConfig) bool {
 	default:
 		return false
 	}
+}
+
+// isServableGroupMember (wi-7769a812 part 2 / USER RULING D3) is the
+// CACHE-AWARE re-validation predicate: the base Am28 checks AND at
+// least one UNMARKED upstream. The member's upstream identities are
+// its credential refs — a member is skippable when EVERY credential
+// is marked for the member's wire model, either directly
+// (credential, model) or provider-wide ((provider, model) — every
+// cred of the provider marked skips every member on that provider).
+// Credential-less rows (legacy) have no markable upstream identity
+// and stay base-servable. A nil cache (feature unwired) degrades to
+// the base checks — byte-identical pre-part-2 behavior.
+func (m *ModelsManager) isServableGroupMember(row *models.ModelConfig) bool {
+	if !isServableGroupMemberBase(row) {
+		return false
+	}
+	if m.skipCache == nil || len(row.Credentials) == 0 {
+		return true
+	}
+	model := memberWireModel(row)
+	for _, ref := range row.Credentials {
+		if m.skipCache.Marked(skipcache.ScopeCredential, ref.CredentialID, model) {
+			continue
+		}
+		cred := m.GetCredential(ref.CredentialID)
+		if cred == nil || cred.Provider == "" {
+			return true // no provider identity to wall — servable
+		}
+		if !m.skipCache.Marked(skipcache.ScopeProvider, strings.ToLower(cred.Provider), model) {
+			return true // one healthy upstream — member servable
+		}
+	}
+	return false // every upstream walled
+}
+
+// memberWireModel is the skip-cache model key for a member row: the
+// upstream model name the executor would send (InternalModel), or
+// the row ID when no explicit upstream name is configured.
+func memberWireModel(row *models.ModelConfig) string {
+	if row.InternalModel != "" {
+		return row.InternalModel
+	}
+	return row.ID
+}
+
+// memberSoonestSkipExpiry returns the earliest live skip-cache expiry
+// across the member's upstream identities (the D3 degradation anchor:
+// ONE honest attempt against the soonest-expiring mark). ok=false
+// when the member has no live marks (or the cache is unwired).
+func (m *ModelsManager) memberSoonestSkipExpiry(row *models.ModelConfig) (time.Time, bool) {
+	if m.skipCache == nil || row == nil || len(row.Credentials) == 0 {
+		return time.Time{}, false
+	}
+	model := memberWireModel(row)
+	pairs := make([]skipcache.Pair, 0, len(row.Credentials)*2)
+	for _, ref := range row.Credentials {
+		pairs = append(pairs, skipcache.Pair{Scope: skipcache.ScopeCredential, ID: ref.CredentialID})
+		if cred := m.GetCredential(ref.CredentialID); cred != nil && cred.Provider != "" {
+			pairs = append(pairs, skipcache.Pair{Scope: skipcache.ScopeProvider, ID: strings.ToLower(cred.Provider)})
+		}
+	}
+	return m.skipCache.SoonestExpiry(pairs, model)
 }
 
 // defaultRefs / backupRefs split engine refs into their two pools
@@ -209,9 +331,12 @@ func backupRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
 
 // ExcludeGroupMember implements models.GroupRewriter (Am24): the
 // GROUP-level exclude-and-reselect fired on terminal member-pipeline
-// failure. ok=true means a member is available for the single
+// failure. ok=true means a member is available for the next
 // re-entry attempt; ("", "", false) means no alternative exists —
-// the failure is real (max ONE re-entry per request, Am24).
+// the failure is real. (wi-7769a812 part 2: the Am24 max-ONE
+// re-entry latch is retired — the PROXY bounds the member iteration
+// to N attempts for an N-member group; the engine's contract here is
+// unchanged: one exclude + one reselect per call.)
 //
 // group-backup-members / C1 + D5 — the cascade decision is
 // mode-aware:
@@ -234,11 +359,17 @@ func backupRefs(refs []grouplb.MemberRef) []grouplb.MemberRef {
 // The returned `pool` is "backup" only when the backup pool actually
 // served a member, so the proxy's D5 `pool=backup` annotation + the
 // D4 metering predicate flow unchanged.
-func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string) (string, string, bool) {
+//
+// wi-7769a812 part 2 / USER RULING D3: the cooldown parameter is
+// CALLER-OWNED — the proxy passes the config-owned skip-cache TTL so
+// the member exclusion window derives from the same config key as
+// the upstream skip marks (one source of truth). <=0 keeps the
+// engine default (the Am28/stale and legacy callers).
+func (m *ModelsManager) ExcludeGroupMember(groupID, conversationKey, memberID string, cooldown time.Duration) (string, string, bool) {
 	if m.groupEngine == nil {
 		return "", "", false
 	}
-	pick, mode := m.groupEngine.ExcludeAndReselect(groupID, conversationKey, memberID, 0)
+	pick, mode := m.groupEngine.ExcludeAndReselect(groupID, conversationKey, memberID, cooldown)
 
 	switch {
 	case mode == grouplb.ReselectHealthy && pick != "":
@@ -272,7 +403,7 @@ func (m *ModelsManager) pickServableBackup(groupID, conversationKey string) (str
 	if err != nil || bPick == "" {
 		return "", false
 	}
-	if isServableGroupMember(m.GetModelNative(bPick)) {
+	if m.isServableGroupMember(m.GetModelNative(bPick)) {
 		return bPick, true
 	}
 	// Stale backup — reselect once within the backup pool.

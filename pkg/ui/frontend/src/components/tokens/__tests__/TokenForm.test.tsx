@@ -10,8 +10,6 @@ import { TokenForm } from '../TokenForm';
 // These tests assert that:
 //   1. The allowed-models picker (ModelMultiSelect) excludes both
 //      image-gen + decision rows.
-//   2. The per-token ultimate-model <select> excludes both non-chat
-//      kinds.
 //
 // The fixtures use a multi-kind model set so a single render covers
 // every kind in one chrome — same as C-16 / ModelsTab.tsx:157.
@@ -87,71 +85,4 @@ describe('TokenForm — kind filter for both pickers (Decision Commission 2026-1
     });
   });
 
-  describe('per-token ultimate-model <select>', () => {
-    it('P3.8 — per-token ultimate-model <select> excludes image-gen + decision rows', () => {
-      // Multi-kind fixture again. The per-token ultimate-model
-      // <select> is gated by `ultimateModelEnabled`; we must enable
-      // the toggle first to mount the select.
-      const chat = makeModel({ id: 'chat-1', name: 'Chat One' });
-      const imgGen = makeModel({ id: 'img-1', name: 'Image Gen One', kind: 'image-gen' });
-      const decision = makeModel({ id: 'dec-1', name: 'Decision One', kind: 'decision' });
-      const group = makeModel({ id: 'grp-1', name: 'Group One', kind: 'group' });
-
-      const models: ModelFixture[] = [chat, imgGen, decision, group];
-
-      const { container } = render(
-        <TokenForm
-          models={models}
-          onSubmit={vi.fn()}
-          onCancel={vi.fn()}
-          onStatus={vi.fn()}
-        />,
-      );
-
-      // Enable the "Ultimate Model Access" toggle. The toggle is a
-      // <button> with type="button" inside a flex row; we click the
-      // first such button above the ultimate-model select area.
-      // Simplest: find the toggle by its visible label text.
-      const ultimateToggleLabel = Array.from(container.querySelectorAll('label, button'))
-        .find((el) => el.textContent && el.textContent.includes('Ultimate Model Access'));
-      expect(ultimateToggleLabel, 'Ultimate Model Access label should be present').toBeDefined();
-
-      // Find the actual toggle button. The label wraps a button —
-      // we click the button inside the row labelled "Ultimate Model
-      // Access".
-      let ultimateBtn: HTMLButtonElement | undefined;
-      container.querySelectorAll('div').forEach((div) => {
-        const lbl = div.querySelector('label, span');
-        if (lbl && lbl.textContent && lbl.textContent.includes('Ultimate Model Access')) {
-          ultimateBtn = div.querySelector('button') as HTMLButtonElement;
-        }
-      });
-      expect(ultimateBtn, 'Ultimate Model Access toggle button should be present').toBeDefined();
-      fireEvent.click(ultimateBtn!);
-
-      // After enabling the toggle, the per-token ultimate-model
-      // <select> mounts. Find ALL <select> elements (the form has no
-      // <select> besides this one — the only other form control is
-      // a date input + text inputs + buttons).
-      const selects = container.querySelectorAll('select');
-      expect(selects.length, 'exactly one <select> should render after enabling the toggle').toBe(1);
-      const ultimateSelect = selects[0];
-
-      // Verify the option labels: chat-only. The image-gen + decision
-      // rows MUST NOT appear in the options.
-      const optionTexts = Array.from(ultimateSelect.querySelectorAll('option')).map((o) => o.textContent || '');
-      // First option is "Global Default" (empty value).
-      expect(optionTexts[0]).toContain('Global Default');
-      // Chat row IS present.
-      expect(optionTexts.some((t) => t.includes('Chat One'))).toBe(true);
-      // Image-gen row is NOT present.
-      expect(optionTexts.some((t) => t.includes('Image Gen One'))).toBe(false);
-      // Decision row is NOT present.
-      expect(optionTexts.some((t) => t.includes('Decision One'))).toBe(false);
-      // load-balance-groups (plan §6.4 arm 4 / P3.7): group row is NOT
-      // present — groups are ultimate-excluded by G7; the picker says
-      // so explicitly (defense-in-depth).
-      expect(optionTexts.some((t) => t.includes('Group One'))).toBe(false);
-    });
-  });
 });

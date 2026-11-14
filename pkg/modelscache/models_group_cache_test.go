@@ -87,9 +87,8 @@ func newCacheManager(t *testing.T) (*database.ModelsManager, *CachedModelsConfig
 func validGroupRow() models.ModelConfig {
 	return models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
-		Kind:                         models.KindGroup,
-		Internal:                     true,
-		ExcludeFromUltimateSwitching: true,
+		Kind:     models.KindGroup,
+		Internal: true,
 		Members: []models.GroupMember{
 			{ModelID: "coding", Weight: 2},
 			{ModelID: "coding-alt", Weight: 1},

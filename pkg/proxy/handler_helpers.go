@@ -32,16 +32,6 @@ type requestContext struct {
 	// Resolved model config at the boundary (nil for unknown models)
 	resolvedModel *models.ModelConfig
 
-	// remove-external-upstream P1 fixup (leader ruling 2026-10-18): set by
-	// initRequestContext when the boundary unknown/non-internal 404 gate is
-	// DEFERRED because the request carries X-Force-Ultimate-Model — the
-	// force-ultimate interception outranks the gate, and auth has not run
-	// at init time so entitlement cannot be checked there. HandleChat
-	// Completions fires the deferred 404 post-auth iff the request does
-	// NOT qualify for the ultimate path (no ultimate handler, no token, or
-	// a token without ultimate_model_enabled).
-	modelNotFoundDeferred bool
-
 	// Current model index in the fallback chain (set by attemptModel)
 	currentModelIndex int
 
@@ -73,15 +63,25 @@ type requestContext struct {
 	leadingUserRun  string
 	conversationKey string
 
-	// load-balance-groups (plan §3.6.1 Am21 + §3.6.2 Am24): the
-	// modelList rewrite record. modelListOriginal preserves the
-	// PRE-rewrite list (group IDs intact) for the max-ONE re-entry
-	// rebuild; groupPick carries the sticky-pick identity for
-	// metering (Am25) + the Q15 event; groupReentered enforces the
-	// max-ONE rule (a second terminal failure is a real failure).
+	// load-balance-groups (plan §3.6.1 Am21 + §3.6.2 Am24, part-2
+	// amended): the modelList rewrite record. modelListOriginal
+	// preserves the PRE-rewrite list (group IDs intact) for the
+	// re-entry rebuild; groupPick carries the sticky-pick identity
+	// for metering (Am25) + the Q15 event.
+	//
+	// wi-7769a812 part 2 — the max-ONE re-entry latch (groupReentered)
+	// is RETIRED. New invariant: N members = up to N attempts in pool
+	// order, enforced by groupAdvances (bounded by
+	// models.MaxGroupMembers) + groupTriedMembers (a replacement the
+	// pool hands back that this request already tried is refused —
+	// exactly N attempts, then the exhausted event carries the
+	// terminal). Pre-commit only: the re-entry gate reads
+	// streamingNonRetryable (the commit flag — see the LEADER
+	// DECISION 3 OVERTURN note at the gate site in handler.go).
 	modelListOriginal []string
 	groupPick         *groupPickInfo
-	groupReentered    bool
+	groupAdvances     int
+	groupTriedMembers map[string]bool
 
 	// Accumulated response buffers
 	accumulatedResponse  strings.Builder
@@ -120,20 +120,47 @@ type requestContext struct {
 	// so any future reader gets a race-free Load without holding writeMu).
 	// When true: stream is live — no racing / fallback / mid-stream
 	// credential failover after the first forwarded byte. Set on the first
-	// successful client write inside the relay loop (set-site lands in
-	// Phase 2); zero readers exist today.
+	// successful client write of a PAYLOAD chunk inside the relay loop
+	// (handler.go streamResult). Headers, the SSE ": connected" notice,
+	// and heartbeats are NON-COMMITTING framing and never set it.
 	//
-	// INVARIANT (LEADER DECISION 3, real-streaming-default plan §Phase 5
-	// / Deferred #2): the WRITE-ONLY-NESS of this flag is INTENTIONAL.
-	// It is bookkeeping / state documentation — the actual enforcement
-	// invariant lives in the race coordinator's `c.winner != nil` check
-	// (`race_coordinator.go:653-655`) + the locked L4 "no racing /
-	// fallback / mid-stream credential failover after the first forwarded
-	// byte" rule. Do NOT add a consumer / getter just to satisfy
-	// write-only-ness; the flag exists for future readers that need a
-	// happens-before edge (the atomic type) and for state documentation.
-	// If a future PR adds a reader, it MUST document why the coordinator's
-	// winner-nil check is insufficient for that reader's purpose.
+	// HISTORY (LEADER DECISION 3, real-streaming-default plan §Phase 5
+	// / Deferred #2) — OVERTURNED 2026-11-13 (wi-7769a812 part 2,
+	// exhaustive pre-commit group fallback). The original ruling pinned
+	// this flag WRITE-ONLY: "the actual enforcement invariant lives in
+	// the race coordinator's `c.winner != nil` check + the locked L4
+	// rule; if a future PR adds a reader, it MUST document why the
+	// winner-nil check is insufficient for that reader's purpose."
+	// Part 2 adds exactly that reader — the race-handoff group
+	// member-advance gate in HandleChatCompletions — because the
+	// winner-nil check is insufficient BY CONSTRUCTION for it:
+	//
+	//  1. The winner-nil check lives INSIDE the coordinator; the
+	//     member advance is the HANDLER-level re-entry AFTER a
+	//     coordinator resolved with no winner. There is no winner and
+	//     never will be one for the failed coordinator — the check
+	//     cannot express "may we still advance members".
+	//  2. The old proxy for that decision was rc.headersSent — PROVEN
+	//     non-committing: headersSent is set at handler.go (~:759)
+	//     BEFORE the ": connected\n\n" framing write, so gating the
+	//     fallback window on it closes the window on framing-only
+	//     progress (every streaming request would lose member advance
+	//     before a single payload byte existed).
+	//  3. The NEW pre-commit semantics are SAFE to advance on:
+	//     committed ⇔ the FIRST NON-HEARTBEAT upstream payload frame
+	//     is forwarded to the client. Advance happens only BEFORE
+	//     that frame — headers, ": connected", and heartbeats carry
+	//     no model content, so a member switch behind them cannot
+	//     corrupt the stream (the client has received framing only;
+	//     the next member's payload frames flow on the same wire).
+	//     The original Decision-3 assumption — that any reader would
+	//     be a post-commit one-shot switch — no longer holds for
+	//     pre-commit member advance; this atomic Load IS the
+	//     happens-before edge the atomic type was chosen for.
+	//
+	// The coordinator's winner-nil check and the L4 rule are UNCHANGED
+	// for their own purposes (no racing, no mid-stream credential
+	// failover, no winner overwrite after a payload frame).
 	streamingNonRetryable atomic.Bool
 
 	// bufferMode is the per-request delivery mode parsed from the
@@ -153,18 +180,11 @@ type requestContext struct {
 	tokenID   string
 	tokenName string
 
-	// Ultimate model permission (from token)
-	ultimateModelEnabled bool
-	ultimateModelID      string // Per-token override model ID (empty = use global config)
-
 	// InterleavedThinking indicates the client opted into MiniMax
 	// reasoning_details split-mode translation via X-Proxy-Interleaved-Thinking.
 	// True iff the request carried X-Proxy-Interleaved-Thinking: true|1
-	// (case-sensitive lowercase; matches X-Force-Ultimate-Model precedent
-	// at handler.go:465). Drives the race-path gate alongside the credential
-	// MiniMax check. Per B3 (architecture §4), ultimate paths re-parse the
-	// header in ultimatemodel.Execute and pass an explicit parameter down,
-	// rather than reading from rc (which never crosses the package boundary).
+	// (case-sensitive lowercase value semantics). Drives the race-path gate
+	// alongside the credential MiniMax check.
 	interleavedThinking bool
 }
 

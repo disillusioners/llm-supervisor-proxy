@@ -53,6 +53,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -197,11 +198,6 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.ToolRepair = mergeToolRepairConfig(existing.ToolRepair, incoming.ToolRepair)
 	}
 
-	// Ultimate model: check if ultimate model config was provided
-	if isUltimateModelProvided(incoming.UltimateModel) {
-		result.UltimateModel = incoming.UltimateModel
-	}
-
 	// Raw upstream response logging: check if any field was set
 	if incoming.LogRawUpstreamResponse || incoming.LogRawUpstreamOnError || incoming.LogRawUpstreamMaxKB != 0 {
 		result.LogRawUpstreamResponse = incoming.LogRawUpstreamResponse
@@ -209,6 +205,14 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		if incoming.LogRawUpstreamMaxKB != 0 {
 			result.LogRawUpstreamMaxKB = incoming.LogRawUpstreamMaxKB
 		}
+	}
+
+	// wi-7769a812 part 2 / USER RULING D3: skip-cache TTL. 0 means
+	// not sent (same 0-means-not-sent shape as StreamDeadline /
+	// IdleTimeout — a zero-clearing PUT cannot disable the skip cache,
+	// it would only fall back to the 60s default at the Clone seam).
+	if incoming.UpstreamSkipCacheTTL != 0 {
+		result.UpstreamSkipCacheTTL = incoming.UpstreamSkipCacheTTL
 	}
 
 	return result
@@ -271,14 +275,6 @@ func isRaceRetryProvided(cfg config.Config) bool {
 // isIdleTerminationProvided checks if idle termination config was explicitly provided
 func isIdleTerminationProvided(cfg config.Config) bool {
 	return cfg.IdleTerminationEnabled || cfg.IdleTerminationTimeout != 0
-}
-
-// isUltimateModelProvided checks if ultimate model config was explicitly provided
-// by checking if ModelID is non-empty (MaxHash defaults to 100, so 0 means not set)
-func isUltimateModelProvided(um config.UltimateModelConfig) bool {
-	// ModelID is the primary indicator - empty string means feature is disabled
-	// We also check MaxHash to detect if the config was sent at all
-	return um.ModelID != "" || um.MaxHash != 0
 }
 
 // Get returns current configuration
@@ -365,13 +361,6 @@ func (m *ConfigManager) GetLoopDetection() config.LoopDetectionConfig {
 	return m.cfg.LoopDetection
 }
 
-// GetUltimateModel returns the ultimate model configuration
-func (m *ConfigManager) GetUltimateModel() config.UltimateModelConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.UltimateModel
-}
-
 // GetRaceRetryEnabled returns whether race retry is enabled
 func (m *ConfigManager) GetRaceRetryEnabled() bool {
 	m.mu.RLock()
@@ -406,20 +395,6 @@ func (m *ConfigManager) GetRaceMaxBufferBytes() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg.RaceMaxBufferBytes
-}
-
-// GetToolCallBufferDisabled returns whether tool call buffering is disabled
-func (m *ConfigManager) GetToolCallBufferDisabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.ToolCallBufferDisabled
-}
-
-// GetToolCallBufferMaxSize returns the max size for tool call buffer
-func (m *ConfigManager) GetToolCallBufferMaxSize() int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cfg.ToolCallBufferMaxSize
 }
 
 // GetLogRawUpstreamResponse returns whether to log successful upstream responses
@@ -539,8 +514,6 @@ type dbModelRow struct {
 	PeakHourModel    string
 	// Secondary upstream model for retry logic
 	SecondaryUpstreamModel string
-	// Exclude from ultimate model switching
-	ExcludeFromUltimateSwitching interface{} // Can be int64 (SQLite) or bool (PostgreSQL)
 	// Kind discriminator (migration 030): "" = chat (legacy rows carry
 	// NULL, normalized to '' by coalesce(kind, '') in every SELECT),
 	// "image-gen" = image (pkg/models.KindImageGen).
@@ -600,17 +573,11 @@ func (r *dbModelRow) isPeakHourEnabled() bool {
 	}
 }
 
-// isExcludeFromUltimateSwitching converts the ExcludeFromUltimateSwitching field to bool
-func (r *dbModelRow) isExcludeFromUltimateSwitching() bool {
-	switch v := r.ExcludeFromUltimateSwitching.(type) {
-	case bool:
-		return v
-	case int64:
-		return v != 0
-	default:
-		return false
-	}
-}
+// RETIRED: the former ultimate-switching exclusion reader went away
+// with the ultimate model subsystem (wi-7769a812 part 3); the
+// former dbModelRow helper is gone. The retired column stays in the
+// DB, inert (NOT NULL DEFAULT, migration 027 untouched); it is no
+// longer SELECTed, INSERTed, or mapped.
 
 // parseCredentialsJSON parses the credentials_json column into a
 // []models.CredentialRef. House precedent (FallbackChainJSON /
@@ -747,6 +714,26 @@ type ModelsManager struct {
 	// Disabled groups contribute NO entries (a disabled group
 	// must not hijack traffic it isn't serving).
 	claims map[string]string
+
+	// skipCache (wi-7769a812 part 2 / USER RULING D3) is the global
+	// upstream skip registry consulted by the cache-aware group
+	// member re-validation (isServableGroupMember). MAY BE NIL:
+	// unwired (legacy tests / plain NewModelsManager callers)
+	// degrade to the base Am28 checks byte-identically. Injected
+	// from cmd/main.go via SetSkipCache — the SAME instance the
+	// proxy handler marks, so a failure mark benches the member at
+	// selection time for the configured TTL.
+	skipCache *skipcache.Cache
+}
+
+// SetSkipCache wires the global upstream skip cache (wi-7769a812
+// part 2 / D3) into the manager's selection path. Call once at boot,
+// BEFORE the first request; the setter exists so NewModelsManager's
+// signature (and its ~30 test callers) stay untouched.
+func (m *ModelsManager) SetSkipCache(c *skipcache.Cache) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skipCache = c
 }
 
 // Engine returns the underlying *credentiallb.Engine. It is non-nil
@@ -989,7 +976,6 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 			&dbModel.PeakHourTimezone,
 			&dbModel.PeakHourModel,
 			&dbModel.SecondaryUpstreamModel,
-			&dbModel.ExcludeFromUltimateSwitching,
 			&dbModel.Kind,
 			&dbModel.MembersJSON,
 			&dbModel.ShadowModelID,
@@ -999,24 +985,23 @@ func (m *ModelsManager) scanModelsContext(ctx context.Context, query string, arg
 		}
 
 		model := models.ModelConfig{
-			ID:                           dbModel.ID,
-			Name:                         dbModel.Name,
-			Enabled:                      dbModel.isEnabled(),
-			ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-			Internal:                     dbModel.isInternal(),
-			Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
-			InternalBaseURL:              dbModel.InternalBaseURL,
-			InternalModel:                dbModel.InternalModel,
-			PeakHourEnabled:              dbModel.isPeakHourEnabled(),
-			PeakHourStart:                dbModel.PeakHourStart,
-			PeakHourEnd:                  dbModel.PeakHourEnd,
-			PeakHourTimezone:             dbModel.PeakHourTimezone,
-			PeakHourModel:                dbModel.PeakHourModel,
-			SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
-			ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
-			Kind:                         dbModel.Kind,
-			Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
-			ShadowModelID:                dbModel.ShadowModelID,
+			ID:                         dbModel.ID,
+			Name:                       dbModel.Name,
+			Enabled:                    dbModel.isEnabled(),
+			ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+			Internal:                   dbModel.isInternal(),
+			Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
+			InternalBaseURL:            dbModel.InternalBaseURL,
+			InternalModel:              dbModel.InternalModel,
+			PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+			PeakHourStart:              dbModel.PeakHourStart,
+			PeakHourEnd:                dbModel.PeakHourEnd,
+			PeakHourTimezone:           dbModel.PeakHourTimezone,
+			PeakHourModel:              dbModel.PeakHourModel,
+			SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+			Kind:                       dbModel.Kind,
+			Members:                    parseGroupMembersJSON(dbModel.MembersJSON),
+			ShadowModelID:              dbModel.ShadowModelID,
 		}
 
 		// Parse fallback chain
@@ -1085,7 +1070,7 @@ func (m *ModelsManager) getModelRowByID(modelID string) *models.ModelConfig {
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
+		coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE id = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -1094,7 +1079,7 @@ func (m *ModelsManager) getModelRowByID(modelID string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
+			coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 			FROM models WHERE id = $1`
 	}
 
@@ -1118,7 +1103,6 @@ func (m *ModelsManager) getModelRowByID(modelID string) *models.ModelConfig {
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
-		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
 		&dbModel.MembersJSON,
 		&dbModel.ShadowModelID,
@@ -1128,24 +1112,23 @@ func (m *ModelsManager) getModelRowByID(modelID string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:                           dbModel.ID,
-		Name:                         dbModel.Name,
-		Enabled:                      dbModel.isEnabled(),
-		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-		Internal:                     dbModel.isInternal(),
-		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
-		InternalBaseURL:              dbModel.InternalBaseURL,
-		InternalModel:                dbModel.InternalModel,
-		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
-		PeakHourStart:                dbModel.PeakHourStart,
-		PeakHourEnd:                  dbModel.PeakHourEnd,
-		PeakHourTimezone:             dbModel.PeakHourTimezone,
-		PeakHourModel:                dbModel.PeakHourModel,
-		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
-		Kind:                         dbModel.Kind,
-		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
-		ShadowModelID:                dbModel.ShadowModelID,
+		ID:                         dbModel.ID,
+		Name:                       dbModel.Name,
+		Enabled:                    dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                   dbModel.isInternal(),
+		Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:            dbModel.InternalBaseURL,
+		InternalModel:              dbModel.InternalModel,
+		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+		PeakHourStart:              dbModel.PeakHourStart,
+		PeakHourEnd:                dbModel.PeakHourEnd,
+		PeakHourTimezone:           dbModel.PeakHourTimezone,
+		PeakHourModel:              dbModel.PeakHourModel,
+		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+		Kind:                       dbModel.Kind,
+		Members:                    parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:              dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -1171,7 +1154,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
+		coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 		FROM models WHERE name = ?`
 
 	if m.store.Dialect == "postgres" {
@@ -1180,7 +1163,7 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
+			coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')
 			FROM models WHERE name = $1`
 	}
 
@@ -1204,7 +1187,6 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
-		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
 		&dbModel.MembersJSON,
 		&dbModel.ShadowModelID,
@@ -1214,24 +1196,23 @@ func (m *ModelsManager) GetModelByName(modelName string) *models.ModelConfig {
 	}
 
 	model := &models.ModelConfig{
-		ID:                           dbModel.ID,
-		Name:                         dbModel.Name,
-		Enabled:                      dbModel.isEnabled(),
-		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-		Internal:                     dbModel.isInternal(),
-		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
-		InternalBaseURL:              dbModel.InternalBaseURL,
-		InternalModel:                dbModel.InternalModel,
-		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
-		PeakHourStart:                dbModel.PeakHourStart,
-		PeakHourEnd:                  dbModel.PeakHourEnd,
-		PeakHourTimezone:             dbModel.PeakHourTimezone,
-		PeakHourModel:                dbModel.PeakHourModel,
-		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
-		Kind:                         dbModel.Kind,
-		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
-		ShadowModelID:                dbModel.ShadowModelID,
+		ID:                         dbModel.ID,
+		Name:                       dbModel.Name,
+		Enabled:                    dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                   dbModel.isInternal(),
+		Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:            dbModel.InternalBaseURL,
+		InternalModel:              dbModel.InternalModel,
+		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+		PeakHourStart:              dbModel.PeakHourStart,
+		PeakHourEnd:                dbModel.PeakHourEnd,
+		PeakHourTimezone:           dbModel.PeakHourTimezone,
+		PeakHourModel:              dbModel.PeakHourModel,
+		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+		Kind:                       dbModel.Kind,
+		Members:                    parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:              dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -1320,14 +1301,14 @@ const modelSelectColumnsPG = `id, name, enabled, fallback_chain_json, truncate_p
 			coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 			peak_hour_enabled, peak_hour_start, peak_hour_end,
 			coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-			coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, false), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
+			coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
 
 const modelSelectColumnsSQLite = `id, name, enabled, fallback_chain_json, truncate_params_json, created_at, updated_at,
 		coalesce(release_stream_chunk_deadline, 0), coalesce(internal, 0), coalesce(credentials_json, '[]'),
 		coalesce(internal_base_url, ''), coalesce(internal_model, ''),
 		peak_hour_enabled, peak_hour_start, peak_hour_end,
 		coalesce(peak_hour_timezone, ''), coalesce(peak_hour_model, ''),
-		coalesce(secondary_upstream_model, ''), coalesce(exclude_from_ultimate_switching, 0), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
+		coalesce(secondary_upstream_model, ''), coalesce(kind, ''), coalesce(members_json, '[]'), coalesce(shadow_model_id, '')`
 
 // modelSelectQuery returns the dialect-appropriate single-model
 // SELECT used by the strict reads (same shape the legacy GetModel /
@@ -1344,24 +1325,23 @@ func (m *ModelsManager) modelSelectQuery(where string) string {
 // models.ModelConfig shape (shared by the strict single-row reads).
 func dbModelRowToConfig(dbModel *dbModelRow) *models.ModelConfig {
 	model := &models.ModelConfig{
-		ID:                           dbModel.ID,
-		Name:                         dbModel.Name,
-		Enabled:                      dbModel.isEnabled(),
-		ReleaseStreamChunkDeadline:   models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
-		Internal:                     dbModel.isInternal(),
-		Credentials:                  parseCredentialsJSON(dbModel.CredentialsJSON),
-		InternalBaseURL:              dbModel.InternalBaseURL,
-		InternalModel:                dbModel.InternalModel,
-		PeakHourEnabled:              dbModel.isPeakHourEnabled(),
-		PeakHourStart:                dbModel.PeakHourStart,
-		PeakHourEnd:                  dbModel.PeakHourEnd,
-		PeakHourTimezone:             dbModel.PeakHourTimezone,
-		PeakHourModel:                dbModel.PeakHourModel,
-		SecondaryUpstreamModel:       dbModel.SecondaryUpstreamModel,
-		ExcludeFromUltimateSwitching: dbModel.isExcludeFromUltimateSwitching(),
-		Kind:                         dbModel.Kind,
-		Members:                      parseGroupMembersJSON(dbModel.MembersJSON),
-		ShadowModelID:                dbModel.ShadowModelID,
+		ID:                         dbModel.ID,
+		Name:                       dbModel.Name,
+		Enabled:                    dbModel.isEnabled(),
+		ReleaseStreamChunkDeadline: models.Duration(time.Duration(dbModel.ReleaseStreamChunkDeadline) * time.Millisecond),
+		Internal:                   dbModel.isInternal(),
+		Credentials:                parseCredentialsJSON(dbModel.CredentialsJSON),
+		InternalBaseURL:            dbModel.InternalBaseURL,
+		InternalModel:              dbModel.InternalModel,
+		PeakHourEnabled:            dbModel.isPeakHourEnabled(),
+		PeakHourStart:              dbModel.PeakHourStart,
+		PeakHourEnd:                dbModel.PeakHourEnd,
+		PeakHourTimezone:           dbModel.PeakHourTimezone,
+		PeakHourModel:              dbModel.PeakHourModel,
+		SecondaryUpstreamModel:     dbModel.SecondaryUpstreamModel,
+		Kind:                       dbModel.Kind,
+		Members:                    parseGroupMembersJSON(dbModel.MembersJSON),
+		ShadowModelID:              dbModel.ShadowModelID,
 	}
 
 	// Parse fallback chain
@@ -1405,7 +1385,6 @@ func (m *ModelsManager) getModelStrict(ctx context.Context, query, arg string) (
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
-		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
 		&dbModel.MembersJSON,
 		&dbModel.ShadowModelID,
@@ -1489,7 +1468,6 @@ func (m *ModelsManager) GetTruncateParams(modelID string) []string {
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
-		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
 		&dbModel.MembersJSON,
 		&dbModel.ShadowModelID,
@@ -1540,7 +1518,6 @@ func (m *ModelsManager) GetFallbackChain(modelID string) []string {
 		&dbModel.PeakHourTimezone,
 		&dbModel.PeakHourModel,
 		&dbModel.SecondaryUpstreamModel,
-		&dbModel.ExcludeFromUltimateSwitching,
 		&dbModel.Kind,
 		&dbModel.MembersJSON,
 		&dbModel.ShadowModelID,
@@ -1609,7 +1586,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, model.ID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err == nil {
 		return models.ErrDuplicateModelID
 	}
@@ -1648,7 +1625,6 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 		model.PeakHourTimezone,
 		model.PeakHourModel,
 		model.SecondaryUpstreamModel,
-		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 		model.Kind,
 		membersJSON,         // members_json (JSON text, migration 031)
 		model.ShadowModelID, // shadow_model_id (ID-space claim, migration 031)
@@ -1748,7 +1724,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -1785,7 +1761,6 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 		model.PeakHourTimezone,
 		model.PeakHourModel,
 		model.SecondaryUpstreamModel,
-		m.qb.BooleanLiteral(model.ExcludeFromUltimateSwitching),
 		model.Kind,
 		membersJSON,         // members_json (JSON text, migration 031)
 		model.ShadowModelID, // shadow_model_id (ID-space claim, migration 031)
@@ -1827,7 +1802,7 @@ func (m *ModelsManager) RemoveModel(modelID string) error {
 	query := m.qb.GetModelByID()
 	row := m.store.DB.QueryRowContext(context.Background(), query, modelID)
 	var dummy string
-	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
+	err := row.Scan(&dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy)
 	if err != nil {
 		return models.ErrModelNotFound
 	}
@@ -2017,7 +1992,7 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 	// DEAD-POST-P1 (remove-external-upstream): the non-internal
 	// credentials carve-out below existed ONLY for the
 	// ultimate-external D3 provider probe, whose sole reader
-	// (pkg/ultimatemodel/handler_external.go) was deleted with the
+	// (the retired raw-passthrough handler) was deleted with the
 	// external upstream path. With every write stamping internal=true
 	// (P1 task 7) and legacy internal=0 rows disabled by migration 032,
 	// no non-internal model can carry credentials through this
@@ -2541,7 +2516,7 @@ func resolveWithCredential(modelConfig *models.ModelConfig, cred *models.Credent
 // the phase3 model_credential_selected event payload) and NewlyBound
 // (W-1 signal: true ⇔ this call stored a new engine binding — the
 // only way newlyBound flows from the engine's binding-store side
-// effect through to the proxy/ultimatemodel call sites).
+// effect through to the proxy call sites).
 //
 // Phase 3: this is now an alias of models.ResolvedCredential. The
 // canonical declaration lives in pkg/models so the ModelsConfigInterface

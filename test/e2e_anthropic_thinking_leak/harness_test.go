@@ -298,7 +298,7 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	// Real tokenStore parity with the T1 harness (the anthropic endpoint
 	// itself does not gate on it, but the store wiring must be realistic).
 	ctx := context.Background()
-	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", false, "", nil)
+	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", nil)
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}

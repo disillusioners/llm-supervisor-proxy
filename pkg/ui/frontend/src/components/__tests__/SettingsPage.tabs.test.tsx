@@ -73,7 +73,6 @@ function makeProps(overrides: Partial<{
       fixer_model: '',
       fixer_timeout: 0,
     },
-    ultimate_model: { model_id: '', max_hash: 100 },
     updated_at: '',
   };
   return {

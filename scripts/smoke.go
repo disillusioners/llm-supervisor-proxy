@@ -4,7 +4,6 @@
 //	go run scripts/smoke.go -model gpt-4o                    # single model
 //	go run scripts/smoke.go -models gpt-4o,claude-3-5-sonnet  # multiple models
 //	go run scripts/smoke.go -models @models.txt              # models from file
-//	go run scripts/smoke.go -model gpt-4o -ultimate          # force ultimate model path
 package main
 
 import (
@@ -31,7 +30,6 @@ var (
 	model     = flag.String("model", "", "Single model shorthand")
 	outputDir = flag.String("output", "smoke_results", "Output directory")
 	compare   = flag.Bool("compare", true, "Generate comparison report")
-	ultimate  = flag.Bool("ultimate", false, "Force ultimate model path (X-Force-Ultimate-Model header)")
 )
 
 func main() {
@@ -44,11 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode := ""
-	if *ultimate {
-		mode = " (ultimate mode)"
-	}
-	fmt.Printf("Testing %d model(s)%s: %v\n\n", len(modelList), mode, modelList)
+	fmt.Printf("Testing %d model(s): %v\n\n", len(modelList), modelList)
 
 	os.MkdirAll(*outputDir, 0755)
 
@@ -264,9 +258,6 @@ func sendRequest(reqBody map[string]interface{}) (*http.Response, error) {
 	req, _ := http.NewRequest("POST", proxyURL, bytes.NewBuffer(data))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer sk-4de49a4237e09e98c5aa6ffae5f2cb299835b8c4670119f641888c70c63f21b4")
-	if *ultimate {
-		req.Header.Set("X-Force-Ultimate-Model", "true")
-	}
 	return (&http.Client{Timeout: timeout}).Do(req)
 }
 

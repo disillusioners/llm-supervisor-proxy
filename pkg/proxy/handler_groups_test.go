@@ -144,9 +144,8 @@ func seedSelfShadowGroup(t *testing.T, h *groupHarness) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "coding-group", Name: "Coding Group", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "coding", Weight: 1}},
-		ShadowModelID:                "coding",
+		Members:       []models.GroupMember{{ModelID: "coding", Weight: 1}},
+		ShadowModelID: "coding",
 	}); err != nil {
 		t.Fatalf("AddModel(coding-group): %v", err)
 	}
@@ -168,7 +167,6 @@ func seedGroupWithFallbacks(t *testing.T, h *groupHarness) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "g-multi", Name: "Multi", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
 		Members: []models.GroupMember{
 			{ModelID: "m-a", Weight: 3},
 			{ModelID: "m-b", Weight: 2},
@@ -610,8 +608,7 @@ func TestHandlerGroups_Am24_Member429_AbsorbedByCredLB(t *testing.T) {
 	if err := h.mgr.AddModel(models.ModelConfig{
 		ID: "g-int", Name: "G Int", Enabled: true,
 		Kind: models.KindGroup, Internal: true,
-		ExcludeFromUltimateSwitching: true,
-		Members:                      []models.GroupMember{{ModelID: "m-int", Weight: 1}},
+		Members: []models.GroupMember{{ModelID: "m-int", Weight: 1}},
 	}); err != nil {
 		t.Fatalf("AddModel(g-int): %v", err)
 	}

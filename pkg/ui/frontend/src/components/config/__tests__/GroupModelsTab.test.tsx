@@ -101,7 +101,11 @@ describe('GroupModelsTab — list/CRUD shell (load-balance-groups P3.6)', () => 
     const payload = onAddModel.mock.calls[0][0];
     expect(payload.kind).toBe('group');
     expect(payload.internal).toBe(true);
-    expect(payload.exclude_from_ultimate_switching).toBe(true);
+    // Exact key set pins the wire contract: the retired exclusion flag
+    // (former G7 stamp) must stay ABSENT, not merely falsy.
+    expect(Object.keys(payload).sort()).toEqual(
+      ['credentials', 'enabled', 'fallback_chain', 'id', 'internal', 'kind', 'members', 'name', 'shadow_model_id']
+    );
     expect(setStatus).toHaveBeenCalledWith({ type: 'success', message: 'Group model added successfully' });
   });
 

@@ -72,7 +72,7 @@ func TestS1_RequestTranslation_RaceExtModel(t *testing.T) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // TestS3_RequestTranslation_InternalPaths covers race-internal and
-// ultimate-internal (typed translation) plus the non-MiniMax negative.
+// race-internal (typed translation) plus the non-MiniMax negative.
 func TestS3_RequestTranslation_InternalPaths(t *testing.T) {
 	t.Run("race_internal_translated", func(t *testing.T) {
 		env := setupTestEnv(t, okNonStreamHandler(), envOptions{})
@@ -82,17 +82,6 @@ func TestS3_RequestTranslation_InternalPaths(t *testing.T) {
 		}
 		cap := env.mockUp.last()
 		assertTranslatedUpstreamRequest(t, cap.BodyParsed, reasoningMessages, "S3/race-int")
-	})
-
-	t.Run("ultimate_internal_translated", func(t *testing.T) {
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{ultimateModelID: ultIntModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		cap := env.mockUp.last()
-		assertTranslatedUpstreamRequest(t, cap.BodyParsed, reasoningMessages, "S3/ult-int")
-		t.Logf("EVIDENCE S3/ult-int captured-upstream (typed-path translated request): %s", string(cap.Body))
 	})
 
 	t.Run("non_minimax_credential_inert", func(t *testing.T) {
@@ -107,7 +96,7 @@ func TestS3_RequestTranslation_InternalPaths(t *testing.T) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S4 — Non-stream response, external paths (race-ext + ult-ext)
+// S4 — Non-stream response, external paths (race-ext)
 // ═════════════════════════════════════════════════════════════════════════════
 
 // assertDetailsTranslatedResponse is the shared translated-response check:
@@ -142,7 +131,7 @@ func assertDetailsTranslatedResponse(t *testing.T, rrBody map[string]interface{}
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S5 — Non-stream response, internal paths (race-int + ult-int)
+// S5 — Non-stream response, internal paths (race-int)
 // ═════════════════════════════════════════════════════════════════════════════
 
 // TestS5_NonStreamResponse_Internal drives the typed openai.go extraction
@@ -158,16 +147,6 @@ func TestS5_NonStreamResponse_Internal(t *testing.T) {
 		}
 		body := parseJSONBody(t, rr, "S5/race-int")
 		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S5/race-int")
-	})
-
-	t.Run("ultimate_internal_details_to_reasoning_content", func(t *testing.T) {
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, nil), envOptions{ultimateModelID: ultIntModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		body := parseJSONBody(t, rr, "S5/ult-int")
-		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S5/ult-int")
 	})
 
 	t.Run("race_internal_both_fields_single_winner", func(t *testing.T) {
@@ -336,27 +315,6 @@ func TestS6_StreamResponse_RaceExtModel(t *testing.T) {
 		sseAssertWellFormed(t, rr.Body.Bytes(), "S6/framing")
 	})
 
-	t.Run("ult_ext_stream_translated", func(t *testing.T) {
-		up := sseStream(
-			reasoningDetailsChunk(detailEntry("reasoning-text-1", "think-1")),
-			contentChunk("final"),
-			finishChunk,
-			"[DONE]",
-		)
-		env := setupTestEnv(t, streamHandler(up), envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, stream: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		got := reasoningDeltasFromClientStream(t, rr.Body.Bytes())
-		if len(got) != 1 || got[0] != "think-1" {
-			t.Errorf("S6/ult-ext: deltas=%v, want [think-1] — raw=%s", got, rr.Body.String())
-		}
-		if strings.Contains(rr.Body.String(), "reasoning_details") {
-			t.Errorf("S6/ult-ext: client stream leaks reasoning_details")
-		}
-		sseAssertWellFormed(t, rr.Body.Bytes(), "S6/ult-ext")
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -366,7 +324,7 @@ func TestS6_StreamResponse_RaceExtModel(t *testing.T) {
 // TestS7_StreamResponse_Internal drives upstream reasoning_details deltas
 // through the internal OpenAIProvider stream parser
 // (extractReasoningDetailsByChoiceForStream) on race-internal and
-// ultimate-internal.
+// race-internal.
 func TestS7_StreamResponse_Internal(t *testing.T) {
 	streamUp := sseStream(
 		reasoningDetailsChunk(detailEntry("reasoning-text-1", "think-1")),
@@ -392,21 +350,6 @@ func TestS7_StreamResponse_Internal(t *testing.T) {
 		sseAssertWellFormed(t, rr.Body.Bytes(), "S7/race-int")
 	})
 
-	t.Run("ultimate_internal_thinking_events_no_leak", func(t *testing.T) {
-		env := setupTestEnv(t, streamHandler(streamUp), envOptions{ultimateModelID: ultIntModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, stream: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		got := reasoningDeltasFromClientStream(t, rr.Body.Bytes())
-		if len(got) != 2 || got[0] != "think-1" || got[1] != "think-2" {
-			t.Errorf("S7/ult-int: reasoning deltas=%v, want [think-1 think-2] — raw=%s", got, rr.Body.String())
-		}
-		if strings.Contains(rr.Body.String(), "reasoning_details") {
-			t.Errorf("S7/ult-int: client stream leaks reasoning_details — %s", rr.Body.String())
-		}
-		sseAssertWellFormed(t, rr.Body.Bytes(), "S7/ult-int")
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -416,9 +359,9 @@ func TestS7_StreamResponse_Internal(t *testing.T) {
 // TestS8_FlagAbsent_Quadrant: flag ABSENT + MiniMax credential. Post-6829d98
 // the request-side gate widens to (header || non-empty reasoning_content),
 // so the request translates on the three changed paths (race-internal,
-// ultimate-external, ultimate-internal) and stays untouched only on
+// the internal path) and stays untouched only on
 // race-external (path unchanged). Response side: untouched on all four
-// paths — ultimate-external's response translator also widens, but the
+// paths — the retired raw-passthrough response translator also widened, but the
 // fixture response carries no reasoning_details, so TranslateNonStream
 // is a no-op for it (passthrough-thinking survives).
 func TestS8_FlagAbsent_Quadrant(t *testing.T) {
@@ -448,12 +391,6 @@ func TestS8_FlagAbsent_Quadrant(t *testing.T) {
 		assertResponsePassthrough(t, captureResponse(t, rr))
 	})
 	// Contract changed by 6829d98: gate is (header || non-empty reasoning_content) && MiniMax — flag-absent + reasoning-content now translates (incident 2026-09-25).
-	t.Run("ultimate_internal_flag_absent", func(t *testing.T) {
-		env := setupTestEnv(t, reasoningOnlyResp, envOptions{ultimateModelID: ultIntModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, forceUlt: true, messages: reasoningMessages})
-		assertTranslatedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S8/ult-int/request")
-		assertResponsePassthrough(t, captureResponse(t, rr))
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -483,47 +420,6 @@ func TestS9_NonMiniMax_FlagOn(t *testing.T) {
 		body := parseJSONBody(t, rr, "S9/race-int/response")
 		assertDetailsTranslatedResponse(t, body, "think-Athink-B", "S9/race-int/response")
 	})
-	t.Run("ultimate_internal_request_untranslated", func(t *testing.T) {
-		// ultimate-internal model with a non-MiniMax credential: typed
-		// setter gate off; plain reasoning_content is still preserved on
-		// the wire (openai.go hydration).
-		env := setupTestEnv(t, detailsNonStreamHandler(nil, nil, nil), envOptions{ultimateModelID: raceIntModelOpenAI})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-		}
-		assertUntouchedUpstreamRequest(t, env.mockUp.last().BodyParsed, reasoningMessages, "S9/ult-int/request")
-	})
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// S10 — Credential gate: unresolvable credential ⇒ feature inert
-// ═════════════════════════════════════════════════════════════════════════════
-
-// TestS10_CredentialGate_Inert: ultimate-external model with NO resolvable
-// upstream credential (ULTIMATE_MODEL_ID points at a model whose
-// CredentialID does not exist ⇒ upstreamProvider="" ⇒ gate=false).
-func TestS10_CredentialGate_Inert(t *testing.T) {
-	t.Run("ultimate_external_dangling_credential_inert", func(t *testing.T) {
-		// ULTIMATE_MODEL_ID set to a NONEXISTENT model id: Execute fails to
-		// resolve the model and the handler surfaces an error before any
-		// translation. The wire contract: no reasoning_split ever appears.
-		env := setupTestEnv(t, okNonStreamHandler(), envOptions{ultimateModelID: "missing-ultimate-model"})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code != http.StatusOK {
-			// Acceptable: ultimate execution failed with an upstream error.
-			if strings.Contains(rr.Body.String(), "reasoning_split") {
-				t.Errorf("S10/dangling: reasoning_split appeared in error body: %s", rr.Body.String())
-			}
-			return
-		}
-		// If a request DID reach upstream, it must be untranslated.
-		if caps := env.mockUp.snapshot(); len(caps) > 0 {
-			assertUntouchedUpstreamRequest(t, caps[0].BodyParsed, reasoningMessages, "S10/dangling/request")
-		} else {
-			t.Errorf("S10/dangling: expected either an error status or an upstream request; got 200 with no upstream call — body=%s", rr.Body.String())
-		}
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -551,19 +447,6 @@ func TestS11_UpstreamError_CleanFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("ultimate_ext_model_500", func(t *testing.T) {
-		env := setupTestEnv(t, errHandler, envOptions{ultimateModelID: ultExtModel})
-		rr := env.run(chatRequest{model: raceIntModel, token: env.ultimateToken, flag: true, forceUlt: true, messages: reasoningMessages})
-		if rr.Code == http.StatusOK && !strings.Contains(rr.Body.String(), "error") {
-			t.Fatalf("S11/ult-ext: expected error response, got 200 — body=%s", rr.Body.String())
-		}
-		if strings.Contains(rr.Body.String(), "reasoning_details") {
-			t.Errorf("S11/ult-ext: error body leaks reasoning_details: %s", rr.Body.String())
-		}
-		if strings.Contains(rr.Body.String(), "think-A") || strings.Contains(rr.Body.String(), "think-1") {
-			t.Errorf("S11/ult-ext: error body leaks partial reasoning text: %s", rr.Body.String())
-		}
-	})
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
