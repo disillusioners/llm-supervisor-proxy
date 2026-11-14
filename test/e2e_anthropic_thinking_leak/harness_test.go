@@ -295,8 +295,10 @@ func setupTestEnv(t *testing.T, handlerFactory func(*mockUpstream) http.HandlerF
 	proxyCfg := &proxy.Config{ConfigMgr: cfgMgr, ModelsConfig: modelsConfig}
 	handler := proxy.NewHandler(proxyCfg, bus, reqStore, nil, tokenStore, nil, nil, nil)
 
-	// Real tokenStore parity with the T1 harness (the anthropic endpoint
-	// itself does not gate on it, but the store wiring must be realistic).
+	// Real tokenStore parity with the T1 harness: the store is wired into
+	// the handler AND driven requests authenticate with the minted token
+	// (the /v1/messages lane enforces auth since the security hotfix —
+	// defect v191 / anomaly 4a231ed0).
 	ctx := context.Background()
 	token, _, err := tokenStore.CreateToken(ctx, "leak-test-token", nil, "test", nil)
 	if err != nil {
@@ -342,7 +344,6 @@ func (ar anthropicRequest) build(t *testing.T) (*http.Request, *httptest.Respons
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", "leak-spot-check-key")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	for k, v := range ar.extraHeaders {
 		req.Header.Set(k, v)
@@ -352,8 +353,15 @@ func (ar anthropicRequest) build(t *testing.T) (*http.Request, *httptest.Respons
 
 // run drives one request through the full anthropic handler. The recorder
 // body is the client wire.
+//
+// AUTH-HOTFIX: /v1/messages now enforces authentication (401 — chat-lane
+// parity), so every driven request presents the env's REAL minted token.
+// The harness previously sent a dummy "leak-spot-check-key" key and relied
+// on the lane ignoring auth — that reliance encoded the defect this
+// hotfix closes (v191 / anomaly 4a231ed0).
 func (e *testEnv) run(ar anthropicRequest) *httptest.ResponseRecorder {
 	req, rr := ar.build(e.t)
+	req.Header.Set("x-api-key", e.token)
 	e.handler.HandleAnthropicMessages(rr, req)
 	return rr
 }
