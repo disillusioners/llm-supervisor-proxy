@@ -205,3 +205,46 @@ func (st *groupState) soonestCooldownLocked(now time.Time, refs []MemberRef) (st
 	}
 	return best, best != ""
 }
+
+// pickHealthyExcludingLocked is pickHealthyLocked with an additional
+// caller-supplied exclusion set (the ordering sweep's already-
+// classified members). Skips a member when it is engine-cooling OR in
+// exclude — WITHOUT writing any state (read-only demotion walk).
+// When no cooldown rows and no exclusions exist, the prebuilt
+// selector hot path applies; otherwise the renormalized walk runs
+// over the surviving set. Returns "" when nothing survives.
+// Caller holds st.mu (WRITE lock — the per-group RNG is consumed).
+func (st *groupState) pickHealthyExcludingLocked(now time.Time, sel *weightedSelector, refs []MemberRef, exclude map[string]bool) string {
+	if sel == nil || sel.totalWeight <= 0 {
+		return ""
+	}
+	if len(st.cooldowns) == 0 && len(exclude) == 0 {
+		// Hot path: prebuilt prefix-sum selector, zero allocation.
+		return sel.pick(st.rng.Float64() * sel.totalWeight)
+	}
+	// Renormalized walk over the surviving (non-cooling, non-excluded)
+	// set — pool-scoped.
+	total := 0.0
+	for _, ref := range refs {
+		if st.isCoolingLocked(ref.ModelID, now) || exclude[ref.ModelID] {
+			continue
+		}
+		total += ref.Weight
+	}
+	if total <= 0 {
+		return "" // nothing survives in this pool
+	}
+	r := st.rng.Float64() * total
+	cum := 0.0
+	for _, ref := range refs {
+		if st.isCoolingLocked(ref.ModelID, now) || exclude[ref.ModelID] {
+			continue
+		}
+		cum += ref.Weight
+		if r < cum {
+			return ref.ModelID
+		}
+	}
+	// Unreachable given r < total; defensive.
+	return ""
+}

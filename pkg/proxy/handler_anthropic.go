@@ -587,6 +587,13 @@ loop:
 
 			success := h.attemptAnthropicModel(w, arc, modelIndex, currentModel)
 			if success {
+				// WIN-CLEAR (wi-7769a812 part 3): the winning identity
+				// is proven healthy — clear its own live skip marks and
+				// its grouplb member-cooldown row (mirror of the
+				// OpenAI-lane hook; both lanes funnel through
+				// clearWinnerUpstreamSkip). agentic-go WON at 12:49:06
+				// while its marks stayed live — that must not recur.
+				h.clearWinnerUpstreamSkip(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel)
 				return
 			}
 
@@ -2551,6 +2558,12 @@ func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
 // wire-model) and (provider, wire-model) pairs for the config-owned
 // TTL. No-op when the cache is unwired or the attempt failed before
 // resolving an upstream identity.
+//
+//	ORDERING-NOT-FILTERING DOCTRINE (part 3 supersedes the D3
+//	skip/degrade wording): the cache is an optimization, not the
+//	truth: it may reorder candidates, never exclude them — a marked
+//	identity is DEMOTED (soonest-expiring first), never invisible,
+//	and a WIN clears its own marks (clearWinnerUpstreamSkip).
 func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext) {
 	if arc == nil || arc.conf.UpstreamSkipCache == nil {
 		return

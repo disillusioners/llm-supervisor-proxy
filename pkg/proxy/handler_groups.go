@@ -440,9 +440,11 @@ func groupFailMessage(groupID string) string {
 // RETIRED — the caller's gate bounds the member iteration to N
 // attempts for an N-member group (payloadCommitted pre-commit +
 // groupAdvances cap + the groupTriedMembers set here refusing an
-// already-tried replacement), and the member exclusion window handed
-// to the engine is the CONFIG-OWNED skip-cache TTL (D3 — one source
-// of truth with the upstream skip marks). Pre-commit is enforced by
+// already-tried replacement — F3: a TRUE within-request exclusion),
+// and the member exclusion window handed to the engine is the
+// CONFIG-OWNED skip-cache TTL (one source of truth with the upstream
+// skip marks — which, per part 3 ordering-not-filtering, only DEMOTE
+// candidates and never exclude them). Pre-commit is enforced by
 // the CALLER's !arc.payloadCommitted gate (the loop-top guard +
 // re-entry gate); pre-first-byte is inherited from the same flag
 // (headersSent is non-committing — the lazy preamble fires on
@@ -452,26 +454,44 @@ func (h *Handler) tryGroupReentryAnthropic(arc *anthropicRequestContext) bool {
 	if !ok {
 		return false
 	}
-	replacement, pool, avail := gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, arc.groupPick.MemberID, arc.conf.UpstreamSkipCacheTTL)
-	if !avail || replacement == "" {
-		return false
-	}
-	// Exhaustive iteration bookkeeping (part 2): never re-serve a
-	// member this request already attempted.
 	if arc.groupTriedMembers == nil {
 		arc.groupTriedMembers = make(map[string]bool)
 	}
-	if arc.groupTriedMembers[replacement] {
-		log.Printf("[grouplb] anthropic request %s: pool re-offered already-tried member %s — group fallback exhausted", arc.reqID, replacement)
+	// F3 (wi-7769a812 part 3) — bounded offer walk: each refused offer
+	// already failed THIS request, so excluding it genuinely advances
+	// the ordering sweep's head. Mirrors the OpenAI-lane iterate.
+	replacement, pool, avail := "", "", false
+	excludeTarget := arc.groupPick.MemberID
+	for iter := 0; iter <= models.MaxGroupMembers; iter++ {
+		replacement, pool, avail = gr.ExcludeGroupMember(arc.groupPick.GroupID, arc.conversationKey, excludeTarget, arc.conf.UpstreamSkipCacheTTL)
+		if !avail || replacement == "" {
+			return false
+		}
+		if !arc.groupTriedMembers[replacement] {
+			break
+		}
+		log.Printf("[grouplb] anthropic request %s: pool re-offered already-tried member %s — excluding and advancing the ordering scan", arc.reqID, replacement)
+		excludeTarget = replacement
+	}
+	if !avail || replacement == "" || arc.groupTriedMembers[replacement] {
+		log.Printf("[grouplb] anthropic request %s: offer walk exhausted without a fresh member — group fallback exhausted", arc.reqID)
 		return false
 	}
-	arc.groupTriedMembers[replacement] = true
-	arc.groupAdvances++
 	newList, pick, failGroup := h.applyGroupRewrite(&arc.conf, arc.modelListOriginal, arc.conversationKey)
 	if failGroup != "" || pick == nil {
 		log.Printf("[grouplb] anthropic request %s: re-entry rebuild failed for group %s — treating as real failure", arc.reqID, arc.groupPick.GroupID)
 		return false
 	}
+	// F3 post-rebuild guard — the tried-mark lands HERE (after the
+	// guard, on the member actually served) so offer/rebuild agreement
+	// passes and only divergence onto an already-attempted member is
+	// refused (mirror of the OpenAI-lane guard).
+	if arc.groupTriedMembers[pick.MemberID] {
+		log.Printf("[grouplb] anthropic request %s: rebuild re-served already-tried member %s — group fallback exhausted", arc.reqID, pick.MemberID)
+		return false
+	}
+	arc.groupTriedMembers[pick.MemberID] = true
+	arc.groupAdvances++
 	arc.modelList = newList
 	arc.groupPick = pick
 	// Sticky last-success race ORDER (design site (d) — MANDATORY): the
