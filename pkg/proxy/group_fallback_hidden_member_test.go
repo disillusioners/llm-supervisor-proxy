@@ -81,9 +81,9 @@ func rebuildHandlerWithCache(t *testing.T, h *groupHarness, cache *skipcache.Cac
 	mgrCfg := newTestManagerWithConfig(t, h.up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
 	*h.h = *NewHandler(&Config{
-		ConfigMgr:            mgrCfg,
-		ModelsConfig:         h.mgr,
-		UpstreamSkipCache:     cache,
+		ConfigMgr:         mgrCfg,
+		ModelsConfig:      h.mgr,
+		UpstreamSkipCache: cache,
 	}, h.bus, reqStore, nil, nil, nil, h.mgr.Engine(), nil)
 }
 
@@ -103,11 +103,11 @@ func seedT1Group(t *testing.T, h *groupHarness) {
 	}
 
 	type memberSpec struct {
-		id         string
-		weight     float64
-		backup     bool
-		disabled   bool
-		creds      []string
+		id       string
+		weight   float64
+		backup   bool
+		disabled bool
+		creds    []string
 	}
 	specs := []memberSpec{
 		{id: "9router-sonnet", weight: 2.0, backup: true, creds: []string{p5FixtureCredID}},
@@ -125,8 +125,8 @@ func seedT1Group(t *testing.T, h *groupHarness) {
 		if err := h.mgr.AddModel(models.ModelConfig{
 			ID: sp.id, Name: sp.id, Enabled: enabled, Kind: models.KindChat,
 			Internal: true, InternalModel: sp.id,
-			Credentials:    models.TestRefs(sp.creds...),
-			FallbackChain:  fc,
+			Credentials:   models.TestRefs(sp.creds...),
+			FallbackChain: fc,
 		}); err != nil {
 			t.Fatalf("AddModel(%s): %v", sp.id, err)
 		}
@@ -173,10 +173,10 @@ func TestHandlerGroups_HiddenHealthyMember_LogRepro(t *testing.T) {
 	h.mgr.SetSkipCache(cache)
 
 	st := &t1StubState{statuses: map[string]int{
-		"9router-sonnet":    http.StatusServiceUnavailable,
-		"opendesign-flash":  http.StatusPaymentRequired,
-		"agentic-go":        http.StatusTooManyRequests,
-		"agentic-Main":      http.StatusOK,
+		"9router-sonnet":   http.StatusServiceUnavailable,
+		"opendesign-flash": http.StatusPaymentRequired,
+		"agentic-go":       http.StatusTooManyRequests,
+		"agentic-Main":     http.StatusOK,
 	}}
 	h.up.Close()
 	h.up = httptest.NewServer(newT1Stub(st))
@@ -341,7 +341,7 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	st := &t1StubState{statuses: map[string]int{
 		"9router-sonnet":   http.StatusServiceUnavailable,
 		"opendesign-flash": http.StatusPaymentRequired,
-		"agentic-go":       http.StatusOK,  // agentic-go is the healthy winner
+		"agentic-go":       http.StatusOK,                 // agentic-go is the healthy winner
 		"agentic-Main":     http.StatusServiceUnavailable, // FAIL once — forces a second member to serve
 	}}
 	h.up.Close()
@@ -437,10 +437,10 @@ func TestHandlerGroups_CrossPoolExhaustion_BeforeTerminal(t *testing.T) {
 	h.mgr.GroupEngine().InjectAllCoolingForTest("agentic-group")
 
 	st := &t1StubState{statuses: map[string]int{
-		"9router-sonnet":    http.StatusServiceUnavailable,
-		"opendesign-flash":  http.StatusPaymentRequired,
-		"agentic-go":        http.StatusTooManyRequests,
-		"agentic-Main":      http.StatusServiceUnavailable,
+		"9router-sonnet":   http.StatusServiceUnavailable,
+		"opendesign-flash": http.StatusPaymentRequired,
+		"agentic-go":       http.StatusTooManyRequests,
+		"agentic-Main":     http.StatusServiceUnavailable,
 	}}
 	h.up.Close()
 	h.up = httptest.NewServer(newT1Stub(st))
@@ -497,7 +497,7 @@ func TestHandlerGroups_Reentry_NoRePickSameMember(t *testing.T) {
 			ID: id, Name: id, Enabled: true, Kind: models.KindChat,
 			Internal: true, InternalModel: id,
 			Credentials:   models.TestRefs(p5FixtureCredID),
-			FallbackChain:  []string{},
+			FallbackChain: []string{},
 		}); err != nil {
 			t.Fatalf("AddModel(%s): %v", id, err)
 		}
@@ -506,7 +506,7 @@ func TestHandlerGroups_Reentry_NoRePickSameMember(t *testing.T) {
 	if err := h.mgr.UpdateModel("m1", models.ModelConfig{
 		ID: "m1", Name: "m1", Enabled: true, Kind: models.KindChat,
 		Internal: true, InternalModel: "m1",
-		Credentials:  models.TestRefs(p5FixtureCredID),
+		Credentials:   models.TestRefs(p5FixtureCredID),
 		FallbackChain: []string{"m2"},
 	}); err != nil {
 		t.Fatalf("UpdateModel(m1): %v", err)
