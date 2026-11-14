@@ -155,3 +155,58 @@ func TestGroup_SkipCache_NilCacheByteIdentical(t *testing.T) {
 		t.Fatalf("nil-cache pick = %q, want one of the group's members (nil cache must not skip anything)", got)
 	}
 }
+
+// TestGroup_SkipCache_ProviderMarkDoesNotWallSibling (T5, optional
+// guard — provider-family hypothesis REJECTED by live evidence; kept
+// as cheap defense-in-depth). A provider-scope mark must NOT hide a
+// sibling credential on the SAME member (or another member) that
+// still has an unmarked upstream. Desired: ordering-only — the marked
+// provider's creds/members are still attempted (after unmarked).
+func TestGroup_SkipCache_ProviderMarkDoesNotWallSibling(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	cache := skipcache.New()
+	mgr.SetSkipCache(cache)
+
+	// Member with TWO credentials on the same provider (openai), one
+	// of which we will mark at credential scope only is not enough;
+	// we mark at PROVIDER scope to test the wall.
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: "cred-a", Provider: "openai", APIKey: "key-a", BaseURL: "http://upstream-a",
+	}); err != nil {
+		t.Fatalf("AddCredential cred-a: %v", err)
+	}
+	if err := mgr.AddCredential(models.CredentialConfig{
+		ID: "cred-b", Provider: "openai", APIKey: "key-b", BaseURL: "http://upstream-b",
+	}); err != nil {
+		t.Fatalf("AddCredential cred-b: %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "dual", Name: "dual", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "dual-model",
+		Credentials: models.TestRefs("cred-a", "cred-b"),
+	}); err != nil {
+		t.Fatalf("AddModel(dual): %v", err)
+	}
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "dual-group", Name: "dual-group", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dual", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel(dual-group): %v", err)
+	}
+
+	// Mark the WHOLE provider (openai) at provider scope. Under current
+	// (filtering) semantics isServableGroupMember returns false (walled).
+	// Under desired (ordering-only) semantics the member stays servable
+	// because it still has upstream identity (marks order, never filter).
+	cache.Mark(skipcache.ScopeProvider, "openai", "dual-model", time.Minute)
+
+	row := mgr.GetModelNative("dual")
+	if row == nil {
+		t.Fatal("dual row missing")
+	}
+	if !mgr.isServableGroupMember(row) {
+		t.Fatalf("T5 RED: provider-marked member reported unservable — marks must order, never filter")
+	}
+}
