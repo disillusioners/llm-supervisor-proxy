@@ -36,7 +36,7 @@ import (
 )
 
 // Version is set at build time via -ldflags (-X main.Version=<CI run
-// number>). The committed VERSION file this used to be read from is
+// number>). The committed VERSION file this previously read is
 // deleted — a mutable version file and CI-injected versions cannot
 // coexist (the file would silently freeze the badge).
 var Version = "dev"
