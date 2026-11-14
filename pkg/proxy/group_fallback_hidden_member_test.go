@@ -63,10 +63,20 @@ func newT1Stub(st *t1StubState) http.HandlerFunc {
 // and the handler config (write side, handler.go:124) — one instance.
 func rebuildHandlerWithCache(t *testing.T, h *groupHarness, cache *skipcache.Cache) {
 	t.Helper()
-	if err := h.mgr.UpdateCredential(p5FixtureCredID, models.CredentialConfig{
-		ID: p5FixtureCredID, Provider: "openai", APIKey: "test-key", BaseURL: h.up.URL,
-	}); err != nil {
-		t.Fatalf("rebuildHandlerWithCache UpdateCredential: %v", err)
+	// Re-point EVERY credential the fixtures may have created to the
+	// rebuilt stub URL — otherwise cred-od-flash / cred-od-khanguyen
+	// keep dialing the CLOSED first stub (connection-refused noise
+	// that mis-shapes the sweep). Fixtures that never created a given
+	// id (the minimal T4 two-member group) are skipped.
+	for _, cid := range []string{p5FixtureCredID, "cred-od-flash", "cred-od-khanguyen"} {
+		if h.mgr.GetCredential(cid) == nil {
+			continue
+		}
+		if err := h.mgr.UpdateCredential(cid, models.CredentialConfig{
+			ID: cid, Provider: "openai", APIKey: "key-" + cid, BaseURL: h.up.URL,
+		}); err != nil {
+			t.Fatalf("rebuildHandlerWithCache UpdateCredential(%s): %v", cid, err)
+		}
 	}
 	mgrCfg := newTestManagerWithConfig(t, h.up.URL)
 	reqStore := store.NewRequestStore(100, store.WithMaxBytes(256<<20))
@@ -292,9 +302,13 @@ func TestHandlerGroups_MarkedMembers_Ordering(t *testing.T) {
 
 // TestHandlerGroups_WinClearsCooldown (T6): a member that WINS a race
 // while carrying an older cooldown row must remain a candidate for
-// subsequent requests (demotion to later order is OK; EXCLUSION is not).
-// Additionally, if the fix adds a success-clear path, the win clears
-// the member's cooldown mark.
+// subsequent requests (demotion to later order is OK; EXCLUSION is
+// not), and the WIN must CLEAR its benching state (skip-cache marks +
+// grouplb member-cooldown row) via the win-clear seam
+// (handler_helpers.go clearWinnerUpstreamSkip -> store_group_rewrite.go
+// ClearGroupMemberCooldown -> grouplb ClearCooldown). Shape: agentic-Main
+// fails once (503) so agentic-go (pre-marked + cooled) serves and the
+// seam is exercised end-to-end.
 func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	h := newGroupHarness(t)
 	defer h.close()
@@ -303,22 +317,39 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	cache := skipcache.New()
 	h.mgr.SetSkipCache(cache)
 
-	// Arm a cooldown on agentic-go (simulating an older failure),
-	// then let it WIN a race (stub 200s for it).
+	// Arm agentic-go's benching state: a grouplb member-cooldown row
+	// (old failure, engine-default window) PLUS live skip-cache marks
+	// on BOTH identities it implicates ((credential, wire-model) and
+	// (provider, wire-model)) so the win-clear seam has something to
+	// clear on each surface. Window = engine default (60s), NOT a
+	// multi-hour row: a deep-tail 1h row is structurally unreachable
+	// by the ordering sweep while the tried members keep re-arming
+	// 60s rows ahead of it (the offer walk advances by excluding
+	// tried heads, each exclusion re-arming past the tail) — the
+	// incident's real shape was a same-window row the WIN should
+	// clear, not an unreachable tail.
 	eng := h.mgr.GroupEngine()
-	eng.ExcludeAndReselect("agentic-group", "__seed3__", "agentic-go", 1*time.Hour)
+	eng.ExcludeAndReselect("agentic-group", "__seed6__", "agentic-go", 0)
+	cache.Mark(skipcache.ScopeCredential, p5FixtureCredID, "agentic-go", time.Minute)
+	cache.Mark(skipcache.ScopeProvider, "openai", "agentic-go", time.Minute)
+	if until, ok := eng.MemberCooldownUntil("agentic-group", "agentic-go"); !ok {
+		t.Fatal("T6 seed: agentic-go cooldown row not armed — test cannot exercise the win-clear seam")
+	} else {
+		_ = until
+	}
 
 	st := &t1StubState{statuses: map[string]int{
 		"9router-sonnet":   http.StatusServiceUnavailable,
 		"opendesign-flash": http.StatusPaymentRequired,
-		"agentic-go":       http.StatusOK,
-		"agentic-Main":     http.StatusOK,
+		"agentic-go":       http.StatusOK,  // agentic-go is the healthy winner
+		"agentic-Main":     http.StatusServiceUnavailable, // FAIL once — forces a second member to serve
 	}}
 	h.up.Close()
 	h.up = httptest.NewServer(newT1Stub(st))
 	rebuildHandlerWithCache(t, h, cache)
 
-	// Request #1: victim — agentic-go carries a cooldown but is healthy.
+	// Request #1: agentic-Main fails; the sweep reaches agentic-go,
+	// which WINS — the win-clear seam fires.
 	rec1 := httptest.NewRecorder()
 	req1 := makeChatRequest(t, map[string]interface{}{
 		"model": "agentic-group",
@@ -332,9 +363,32 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	if rec1.Code != http.StatusOK {
 		t.Fatalf("T6: first request not served (status=%d); attempted=%v", rec1.Code, attempted1)
 	}
+	agenticGoWon := false
+	for _, m := range attempted1 {
+		if m == "agentic-go" {
+			agenticGoWon = true
+		}
+	}
+	if !agenticGoWon {
+		t.Fatalf("T6: agentic-go did not win request #1 (not attempted); attempted=%v — win-clear seam not reached", attempted1)
+	}
+
+	// SUPPLEMENTARY (direct seam): the win must have cleared agentic-go's
+	// benching state on ALL THREE surfaces.
+	if until, ok := eng.MemberCooldownUntil("agentic-group", "agentic-go"); ok {
+		t.Fatalf("T6: grouplb cooldown row survived agentic-go's win (until=%v) — win-clear seam did not fire", until)
+	}
+	if cache.Marked(skipcache.ScopeCredential, p5FixtureCredID, "agentic-go") {
+		t.Fatalf("T6: (credential, wire-model) skip mark survived agentic-go's win — Cache.Clear did not fire")
+	}
+	if cache.Marked(skipcache.ScopeProvider, "openai", "agentic-go") {
+		t.Fatalf("T6: (provider, wire-model) skip mark survived agentic-go's win — Cache.Clear did not fire")
+	}
 
 	// Request #2: subsequent request — agentic-go must still be a
-	// candidate (attempted), not excluded by its older cooldown.
+	// candidate (attempted, demotion allowed, exclusion is not), and
+	// with its benching state cleared it should be attempted EARLY
+	// (first or second attempt, not at the tail of the sweep).
 	st2CallsBefore := st.calls
 	rec2 := httptest.NewRecorder()
 	req2 := makeChatRequest(t, map[string]interface{}{
@@ -349,8 +403,6 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	if st.calls == st2CallsBefore {
 		t.Fatal("VACUOUS: second request recorded no upstream attempts")
 	}
-	// agentic-go must appear in the second request's attempt set
-	// (it was not excluded by its older cooldown).
 	agenticGoAttempted := false
 	for _, m := range attempted2 {
 		if m == "agentic-go" {
@@ -360,10 +412,15 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	if !agenticGoAttempted {
 		t.Fatalf("T6 RED: agentic-go excluded from second request despite being a prior winner; attempted=%v", attempted2)
 	}
-	// (Direct cooldown-clear seam is unexported (grouplb.cooldownUntil);
-	// behavioral assertion above is the contract. A success-clear path,
-	// if added by the fix, is verified by agentic-go being attempted
-	// first/early on the next request.)
+	// Head-of-order check on REQUEST #2's OWN attempts (the snapshot is
+	// cumulative across both requests — slice off request #1's calls).
+	req2Attempts := attempted2[len(attempted2)-(st.calls-st2CallsBefore):]
+	if len(req2Attempts) > 0 && req2Attempts[0] != "agentic-go" {
+		t.Logf("T6 note: agentic-go cleared but not the FIRST attempt of request #2 (demoted?): req2 attempts=%v", req2Attempts)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("T6: second request not served (status=%d); attempted=%v", rec2.Code, attempted2)
+	}
 }
 
 // TestHandlerGroups_CrossPoolExhaustion_BeforeTerminal (T3): REQUEST_FAILED
