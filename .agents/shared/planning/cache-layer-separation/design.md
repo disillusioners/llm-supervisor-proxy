@@ -70,11 +70,11 @@ them — and it may suppress an ATTEMPT, never a PICK or a CHAIN."*
   (`race_executor.executeInternalRequest`) reorders credential
   preference away from a marked `(credential|provider, model)` pair to
   an unmarked sibling; if every credential is marked it prefers the
-  soonest-expiring mark and STILL attempts (never excludes). Plus
-  `clearWinnerLayerState` (renamed from `clearWinnerUpstreamSkip` by the
-  tidier High-2 pass — the seam clears all three layers). This is the
-  real reader (D1) — it is not
-  "credential selection as before".
+  soonest-expiring mark and STILL attempts (never excludes). This is
+  the real upstream-layer reader (D1) — not "credential selection as
+  before". Plus `clearWinnerLayerState` (renamed from
+  `clearWinnerUpstreamSkip` by the tidier High-2 pass — the seam
+  clears all three layers) on a proven win.
 
 ### Win-clear (per layer)
 

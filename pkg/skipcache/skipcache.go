@@ -167,10 +167,10 @@ type Pair struct {
 // Nil receiver / empty pairs: false.
 //
 // NOTE (wi-4d2c8e17 layer separation): AnyMarked has NO production
-// caller — the retired group-selection health probe was its consumer,
-// and R1 forbids selection from reading this cache. The API is kept
-// (exported surface; pinned by this package's own tests) but nothing
-// outside pkg/skipcache may consult it for selection decisions.
+// caller — the retired group-selection health probe was its consumer.
+// Do NOT use it for selection/health-probing: R1 forbids it (the group
+// pick must never read health marks). It exists only as package API
+// and is pinned by this package's own tests.
 func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 	if c == nil {
 		return false
