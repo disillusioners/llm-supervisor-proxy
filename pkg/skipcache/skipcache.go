@@ -30,10 +30,13 @@
 //	candidates, never exclude them — and it may suppress an ATTEMPT,
 //	never a PICK or a CHAIN.
 //
-// Upstream marks suppress a specific credential's attempt (so
-// credential selection rotates away); they never bench a member from
-// the group pick. A WIN clears the winner's own live marks
-// (Cache.Clear) — a proven-healthy identity must not stay benched.
+// Upstream marks REORDER credential preference in the attempt path
+// (preferUnmarkedUpstreamCredential: an unmarked, non-cooling sibling
+// is preferred; all-marked still attempts the soonest-recovering) —
+// attempt SUPPRESSION is the MODEL layer's job (pkg/modelcache), and
+// neither ever benches a member from the group pick. A WIN clears the
+// winner's own live marks (Cache.Clear) — a proven-healthy identity
+// must not stay benched.
 //
 // Concurrency: the read path is a single RLock map lookup on a
 // composite string key (no allocation on the read path beyond the

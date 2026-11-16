@@ -117,8 +117,23 @@ winning member (proven service; never a health mark).
   added the Anthropic walk's content gate (shared predicate
   `usableModelOutput`; gates the non-stream/buffered delivery sites
   pre-write, and live streams when ZERO payload frames were forwarded).
-  Bounded residual: a live stream that already forwarded a non-ping
-  frame (e.g. `message_stop`) cannot be un-served — it stays served.
+  Fix round #2 outcomes:
+  - D-A FIXED: the internal live path's done arm now sets the commit
+    flag when it writes the FINALIZE frames — the committing frames are
+    `message_delta` + `message_stop` (message_start is framing; the
+    earlier "e.g. message_stop" wording was imprecise about which
+    frames commit). An empty live completion stays SERVED (pre-round
+    behavior) and the double-write window is closed.
+  - D-B FIXED: the Anthropic non-stream gates now honour the race-lane
+    terminal-finish rule (`content_filter` / `length` ⇒ usable, via
+    `openAIBodyTerminalFinish`) — such completions are forwarded, not
+    502-shaped.
+  - DEFERRED (D-C): lane divergence on typed-reasoning / multimodal-only
+    bodies (the Anthropic gates hard-code reasoningDetails=0 and read
+    string-only content — safe direction: the chain serves). Follow-up
+    ticket. Cosmetic residual, recorded only: the internal
+    `cooldownUntil` reader that `Engine.CooldownUntil` delegates to
+    lives in pkg/credentiallb/testhooks.go.
 - **LABELS** Chain hops emit `model_failed` / `model_fallback_attempted`
   / `model_fallback_advanced` / `model_fallback_exhausted` with
   model-only payloads (no `group_id`/`member_id`). The genuine member

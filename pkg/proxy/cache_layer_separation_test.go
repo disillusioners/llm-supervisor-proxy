@@ -1285,3 +1285,172 @@ func TestCacheLayer_R3_FinishReasonWins(t *testing.T) {
 		})
 	}
 }
+
+// ─────────── fix round #2 — D-A double-write, D-B terminal finish ───────────
+
+// anthSSEStub serves per-model SSE (stream) or JSON (non-stream) bodies
+// and records the attempted wire models.
+type anthSSEStub struct {
+	mu     sync.Mutex
+	models []string
+	sse    map[string]string
+	json   map[string]string
+	status map[string]int
+}
+
+func (s *anthSSEStub) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		model, _ := body["model"].(string)
+		stream, _ := body["stream"].(bool)
+		s.mu.Lock()
+		s.models = append(s.models, model)
+		st := s.status[model]
+		var sseB, jsonB string
+		if stream {
+			sseB = s.sse[model]
+		} else {
+			jsonB = s.json[model]
+		}
+		s.mu.Unlock()
+		if st == 0 {
+			st = http.StatusOK
+		}
+		if st >= 400 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(st)
+			_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"stub failure"}}`))
+			return
+		}
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(sseB))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(jsonB))
+	}
+}
+
+func (s *anthSSEStub) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.models))
+	copy(out, s.models)
+	return out
+}
+
+// TestCacheLayer_DA_LiveEmptyStreamSingleWrite: an empty LIVE stream on
+// the head (finish-only) must NOT be followed by a second Anthropic
+// stream from the chain target — the finalize frames commit the client
+// to the first stream and the completion stays served.
+func TestCacheLayer_DA_LiveEmptyStreamSingleWrite(t *testing.T) {
+	h := newGroupHarness(t)
+	defer h.close()
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a1", Name: "a1", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a1",
+		Credentials:   models.TestRefs(p5FixtureCredID),
+		FallbackChain: []string{"a2"},
+	}); err != nil {
+		t.Fatalf("AddModel(a1): %v", err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a2", Name: "a2", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a2",
+		Credentials: models.TestRefs(p5FixtureCredID),
+	}); err != nil {
+		t.Fatalf("AddModel(a2): %v", err)
+	}
+
+	st := &anthSSEStub{
+		sse: map[string]string{
+			// a1: no content chunks — only a finish_reason chunk + DONE.
+			"a1": "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+			// a2: a real content stream (must never be reached).
+			"a2": "data: {\"id\":\"y\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+				"data: {\"id\":\"y\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		},
+	}
+	h.up.Close()
+	h.up = httptest.NewServer(st.handler())
+	h.rebuildHandler(t)
+
+	rec := httptest.NewRecorder()
+	req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+		"model":      "a1",
+		"max_tokens": 16,
+		"stream":     true,
+		"messages":   []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	})
+	h.h.HandleAnthropicMessages(rec, req)
+
+	body := rec.Body.String()
+	starts := strings.Count(body, "event: message_start")
+	stops := strings.Count(body, "event: message_stop")
+	if stops != 1 || starts > 1 {
+		t.Fatalf("client saw %d message_start / %d message_stop events, want ≤1/1 (a single Anthropic stream) — double write; attempted=%v body=%q", starts, stops, st.snapshot(), body)
+	}
+	for _, m := range st.snapshot() {
+		if m == "a2" {
+			t.Fatalf("chain target a2 attempted after the committed empty stream (%v) — the switch window must be closed", st.snapshot())
+		}
+	}
+}
+
+// TestCacheLayer_DB_AnthropicContentFilterForwarded: a content_filter
+// 200 with EMPTY content on the Anthropic internal non-stream lane is
+// the upstream's terminal answer — it must be FORWARDED (win), not
+// failed onto the chain.
+func TestCacheLayer_DB_AnthropicContentFilterForwarded(t *testing.T) {
+	h := newGroupHarness(t)
+	defer h.close()
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a1", Name: "a1", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a1",
+		Credentials:   models.TestRefs(p5FixtureCredID),
+		FallbackChain: []string{"a2"},
+	}); err != nil {
+		t.Fatalf("AddModel(a1): %v", err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a2", Name: "a2", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a2",
+		Credentials: models.TestRefs(p5FixtureCredID),
+	}); err != nil {
+		t.Fatalf("AddModel(a2): %v", err)
+	}
+
+	st := &anthSSEStub{
+		json: map[string]string{
+			"a1": `{"id":"cc","object":"chat.completion","model":"a1","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"content_filter"}]}`,
+		},
+		status: map[string]int{"a2": http.StatusInternalServerError},
+	}
+	h.up.Close()
+	h.up = httptest.NewServer(st.handler())
+	h.rebuildHandler(t)
+
+	rec := httptest.NewRecorder()
+	req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+		"model":      "a1",
+		"max_tokens": 16,
+		"messages":   []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	})
+	req.Header.Set("X-LLMProxy-Buffer-Response", "true") // buffered → the internal non-stream translation site
+	h.h.HandleAnthropicMessages(rec, req)
+
+	for _, m := range st.snapshot() {
+		if m == "a2" {
+			t.Fatalf("chain target a2 attempted (%v) — the content_filter completion must be the win", st.snapshot())
+		}
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("content_filter completion not forwarded (status=%d body=%q)", rec.Code, rec.Body.String())
+	}
+}

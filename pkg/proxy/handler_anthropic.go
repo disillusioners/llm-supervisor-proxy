@@ -1225,12 +1225,15 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 
 	// F3 parity (fix round #1 — Anthropic lane, live internal stream):
 	// a STREAM that carried no usable output (no content/thinking/tool
-	// events) is not a win. Nothing payload-bearing was emitted (the
-	// preamble is framing-only and lazy), so failing the attempt keeps
-	// the pre-commit switch window open and the walk continues.
+	// events) is not a win — UNLESS the finalize frames were already
+	// written (D-A, fix round #2: the done arm commits the client to
+	// this stream once message_delta + message_stop are on the wire);
+	// then the completion stays SERVED and no switch is possible.
+	// Nothing payload-bearing emitted ⇒ failing the attempt keeps the
+	// pre-commit switch window open and the walk continues.
 	// STREAM-only: a non-stream live request never drives the
 	// translator (its usable gate lives in handleNonStream).
-	if arc.isStream && arcTranslator != nil {
+	if arc.isStream && arcTranslator != nil && !arc.payloadCommitted {
 		if st := arcTranslator.State(); st == nil ||
 			!usableModelOutput(st.AccumulatedContent.String(), st.ThinkingContent.String(), len(st.ToolCalls), 0) {
 			log.Printf("[ANTHROPIC] request %s: model %s live internal stream carried no usable output — continuing the fallback walk", arc.reqID, arc.servedModel)
@@ -1271,6 +1274,30 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 }
 
 // handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
+// openAIBodyTerminalFinish reports whether an OpenAI-shaped body's
+// choices carry a TERMINAL finish_reason ("content_filter" / "length").
+// D-B (fix round #2): such a completion — even with empty content — is
+// the upstream's final answer and must be forwarded, mirroring the race
+// lane's responseHasUsableContent rule. Local read of the raw body; the
+// shared extractors deliberately keep their signatures unchanged.
+func openAIBodyTerminalFinish(body []byte) bool {
+	var parsed struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return false
+	}
+	for _, ch := range parsed.Choices {
+		switch ch.FinishReason {
+		case "content_filter", "length":
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
 	debugLog("=== INTERNAL OPENAI RESPONSE ===")
 	debugLog("OpenAI Body: %s", string(openaiBody))
@@ -1281,11 +1308,13 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
 
-	// F3 parity (fix round #1): a content-less 200 is not a usable
-	// win. The gate sits BEFORE any client byte is written, so the
-	// walk can continue into the chain (shared predicate with the race
-	// lane — usableModelOutput).
-	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+	// F3 parity (fix round #1) + D-B (fix round #2): a content-less 200
+	// is not a usable win — EXCEPT the terminal finish_reason shapes
+	// (content_filter / length): that completion IS the upstream's
+	// answer and must be forwarded, mirroring the race lane's rule.
+	// The gate sits BEFORE any client byte is written, so the walk can
+	// continue into the chain (shared predicate usableModelOutput).
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) && !openAIBodyTerminalFinish(openaiBody) {
 		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
 		return false
 	}
@@ -1377,9 +1406,10 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
 
-	// F3 parity (fix round #1): content-less 200 — gate before any
-	// client byte so the walk continues.
-	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+	// F3 parity (fix round #1) + D-B (fix round #2): content-less 200 —
+	// gate before any client byte so the walk continues, with the same
+	// content_filter / length terminal-finish exception as the race lane.
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) && !openAIBodyTerminalFinish(bodyBytes) {
 		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
 		return false
 	}

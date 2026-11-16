@@ -807,6 +807,20 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 							f.Flush()
 						}
 					}
+					// D-A (fix round #2): the FINALIZE frames
+					// (message_delta + message_stop) are payload on the
+					// wire — the client is committed to THIS stream. The
+					// internal live path previously never set the commit
+					// flag, so the fallback walk's switch window stayed
+					// open after these frames and a content-less
+					// completion could be followed by a SECOND Anthropic
+					// stream from the chain target (client-visible
+					// corruption). Committing here keeps an empty live
+					// completion SERVED cleanly (pre-round behavior) and
+					// closes the double-write window.
+					if h.liveArc != nil {
+						h.liveArc.payloadCommitted = true
+					}
 				}
 				return nil
 			}
