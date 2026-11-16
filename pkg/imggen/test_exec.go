@@ -121,6 +121,116 @@ type TestResult struct {
 	FailedCount int
 }
 
+// cannedProbePrompt is the canned prompt of the MiniMax-shaped probe
+// body (the default of ProbeBody). It is deliberately trivial (a
+// single object on a plain white background) so the generation is
+// cheap and fast and the rendering is predictable. The BE owns the
+// body — the FE sends only the row id.
+const cannedProbePrompt = "a small red apple on a plain white background"
+
+// nineRouterProbePrompt is the canned prompt of the 9router probe
+// body — the exact prompt of the operator-verified reference curl
+// family (the 200-b64_json-JPEG verification run). The 9router probe
+// replicates that family VERBATIM (prompt included) so the probe
+// cannot drift from the shape the upstream is known to accept.
+const nineRouterProbePrompt = "A cute cat wearing a hat"
+
+// minimaxProbeBody is the canned MiniMax-shaped probe request (the
+// ProbeBody default). The `model` field carries the PROXY ROW ID
+// (exactly like a real client posting to /v1/image_generation); the
+// MiniMax adapter rewrites that token to the upstream alias
+// (InternalModel) and appends "/image_generation" to the base URL.
+//
+// `response_format: "url"` is pinned: the upstream answers with CDN
+// URLs (not base64 blobs), and the FE renders those URLs directly —
+// the payload stays tiny and no image bytes travel through the proxy.
+//
+// The struct holds only string/int fields, so json.Marshal cannot
+// fail — the body is returned as bytes with no error path.
+func minimaxProbeBody(modelID string) []byte {
+	raw, _ := json.Marshal(struct {
+		Model          string `json:"model"`
+		Prompt         string `json:"prompt"`
+		AspectRatio    string `json:"aspect_ratio"`
+		N              int    `json:"n"`
+		ResponseFormat string `json:"response_format"`
+	}{
+		Model:          modelID,
+		Prompt:         cannedProbePrompt,
+		AspectRatio:    "1:1",
+		N:              1,
+		ResponseFormat: "url",
+	})
+	return raw
+}
+
+// nineRouterProbeShape is the canned 9router probe request — the
+// VERBATIM reference family the operator verified against the real
+// upstream (POST {base}/v1/images/generations → HTTP 200, b64_json
+// JPEG 1024x1024 in 13.9-21.4s): the OpenAI-images keys size /
+// quality / background / image_detail / output_format pinned to
+// their auto/png defaults plus the gateway-native watermark /
+// prompt_extend flags. The `model` field carries the PROXY ROW ID
+// (the 9router adapter rewrites it to InternalModel and appends
+// "/images/generations" to the base URL; it also forces
+// response_format to "b64_json", which the upstream is observed to
+// accept — the verified family carries no response_format of its own).
+type nineRouterProbeShape struct {
+	Model        string `json:"model"`
+	Prompt       string `json:"prompt"`
+	N            int    `json:"n"`
+	Size         string `json:"size"`
+	Quality      string `json:"quality"`
+	Background   string `json:"background"`
+	ImageDetail  string `json:"image_detail"`
+	OutputFormat string `json:"output_format"`
+	Watermark    bool   `json:"watermark"`
+	PromptExtend bool   `json:"prompt_extend"`
+}
+
+// nineRouterProbeBody builds the canned 9router probe body. Struct
+// marshal cannot fail — no error path.
+func nineRouterProbeBody(modelID string) []byte {
+	raw, _ := json.Marshal(nineRouterProbeShape{
+		Model:        modelID,
+		Prompt:       nineRouterProbePrompt,
+		N:            1,
+		Size:         "auto",
+		Quality:      "auto",
+		Background:   "auto",
+		ImageDetail:  "high",
+		OutputFormat: "png",
+		Watermark:    true,
+		PromptExtend: true,
+	})
+	return raw
+}
+
+// ProbeBody is the ADAPTER-OWNED canned-body seam of the image-gen
+// test button (ExecuteTest's caller resolves the row + credential,
+// then asks THIS package for the probe body — pkg/ui never
+// provider-type-switches).
+//
+// Why the switch lives HERE: the probe body is a PROVIDER dialect,
+// not a UI concern. The MiniMax upstream accepts the minimal
+// {model, prompt, aspect_ratio, n, response_format:url} family; the
+// 9router OpenAI-images gateway is probed with the operator-verified
+// reference family (size/quality/background/image_detail/
+// output_format/watermark/prompt_extend) so the probe cannot drift
+// from the shape the upstream is known to accept. A future provider
+// adds a case here — pkg/ui stays untouched.
+//
+// The minimax body is the DEFAULT (any unknown provider gets it), so
+// minimax behavior is byte-identical to the pre-seam canned body.
+func ProbeBody(provider, modelID string) []byte {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case NineRouterProviderName:
+		return nineRouterProbeBody(modelID)
+	default:
+		return minimaxProbeBody(modelID)
+	}
+}
+
 // ExecuteTest runs ONE image-generation request against the upstream
 // and returns the classified outcome.
 //

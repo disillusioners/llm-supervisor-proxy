@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import type { Credential, CredentialRef, DecisionModel } from '../../types';
 import { getCredentials } from '../../hooks/useApi';
 import { MultiCredentialEditor } from './MultiCredentialEditor';
@@ -128,6 +128,31 @@ function filterCredentialsByProvider(
   return all.filter((c) => c.provider === provider);
 }
 
+// Resolve the edit-mode provider from the model's PRIMARY credential.
+//
+// The BE wire DTO (`pkg/ui/server.go` Model) has no `internal_provider`
+// field — the server derives the provider from the primary credential at
+// save time (the decision gate: primary credential provider must be
+// openai|typesafe|openrouter). So the FE must derive it the same way:
+// `initialData.credentials[0].credential_id` -> credential.provider,
+// validated against this form's per-kind PROVIDER_OPTIONS. Unresolvable
+// (no primary ref, unknown id, or a provider outside the kind allowlist)
+// falls back to the per-kind default — the same default
+// `makeInitialState` seeds, so the form never renders a provider the BE
+// would reject.
+function resolveEditProvider(
+  initialData: DecisionModel | undefined,
+  credentials: Credential[],
+): DecisionProvider {
+  const primaryId = initialData?.credentials?.[0]?.credential_id;
+  if (!primaryId) return 'openai';
+  const found = credentials.find((c) => c.id === primaryId);
+  if (!found) return 'openai';
+  return (PROVIDER_OPTIONS as readonly string[]).includes(found.provider)
+    ? (found.provider as DecisionProvider)
+    : 'openai';
+}
+
 export function DecisionModelForm({
   mode,
   initialData,
@@ -152,6 +177,11 @@ export function DecisionModelForm({
     credential_provider?: string;
     internal_provider?: string;
   }>({});
+
+  // One-shot guard for the edit-mode provider hydration below. A ref
+  // (not state) so the hydration does not trigger an extra render; it is
+  // reset whenever initialData changes (a new model is being edited).
+  const providerHydratedRef = useRef(false);
 
   // Fetch credentials on mount. Per plan §6.2 the MultiCredentialEditor
   // is reused unchanged — we filter the `availableCredentials` to the
@@ -187,7 +217,38 @@ export function DecisionModelForm({
   useEffect(() => {
     setFields(makeInitialState(initialData));
     setErrors({});
+    providerHydratedRef.current = false;
   }, [mode, initialData]);
+
+  // Hydrate the edit-mode provider from the model's primary credential
+  // once the credentials list has loaded. `makeInitialState` seeds the
+  // per-kind default because the wire DTO carries no provider; this
+  // effect replaces it with the provider the BE actually derived at save
+  // time, which also re-filters the credential editor (the
+  // "credentials don't populate in edit" half of the bug). The
+  // `loadingCredentials` + non-empty guard mirrors the submit-time race
+  // guard: on a cold mount the fetch has not resolved yet, so the effect
+  // no-ops and retries on the next render.
+  useEffect(() => {
+    if (mode !== 'edit' || !initialData) return;
+    if (loadingCredentials || credentials.length === 0) return;
+    if (providerHydratedRef.current) return;
+    providerHydratedRef.current = true;
+    const resolved = resolveEditProvider(initialData, credentials);
+    setFields((f) => {
+      if (f.internal_provider === resolved) return f;
+      // Refresh the base-url default only when the operator has not
+      // overridden it (mirrors handleProviderChange).
+      const previousDefault = DEFAULT_BASE_URLS[f.internal_provider];
+      const isAtDefault =
+        f.internal_base_url === '' || f.internal_base_url === previousDefault;
+      return {
+        ...f,
+        internal_provider: resolved,
+        internal_base_url: isAtDefault ? DEFAULT_BASE_URLS[resolved] : f.internal_base_url,
+      };
+    });
+  }, [mode, initialData, credentials, loadingCredentials]);
 
   const providerCredentials = filterCredentialsByProvider(credentials, fields.internal_provider);
 
