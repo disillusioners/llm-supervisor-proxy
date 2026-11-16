@@ -1084,6 +1084,40 @@ func (c *CachedModelsConfig) ClearGroupMemberCooldown(groupID, memberID string) 
 	}
 }
 
+// GroupLane forwards the manager-side LANE QUERY (the decision-groups
+// commission's ONE new models-manager method) to the inner manager:
+// the group's lane is inferred by unanimity over its CURRENT member
+// rows.
+//
+// The method deliberately lives OUTSIDE models.GroupRewriter (the
+// OPTIONAL-seam shape keeps the ~11 structural test fakes and the JSON
+// backend valid — the ClearGroupMemberCooldown forward above is the
+// precedent), so this forward mirrors that same structural assertion:
+// the decorator satisfies it, backends without the capability never
+// answer a lane.
+//
+// CRITICAL-FIX (the modelscache-decorator-forward-trap, exact shape of
+// the ClearGroupMemberCooldown note above): production
+// conf.ModelsConfig is *CachedModelsConfig (CACHE_LAYER_ENABLED
+// default ON — cmd/main.go), and without this forward the caller's
+// dynamic assertion fails SILENTLY: every raw-manager repro test
+// stayed green while the production lane never saw a lane (a decision
+// group would be misrouted instead of served). The decorator-through
+// test (pkg/modelscache/models_group_lane_test.go) is the merge gate.
+//
+// The forward is a LANE QUERY — never a health read: this package
+// imports neither the upstream-layer nor the model-layer cache (the
+// package-level layer isolation is a structural property, pinned by
+// TestCacheLayer_Structural_PackageLevelNoCacheImports).
+func (c *CachedModelsConfig) GroupLane(groupID string) (models.GroupLane, bool) {
+	if gl, ok := c.inner.(interface {
+		GroupLane(groupID string) (models.GroupLane, bool)
+	}); ok {
+		return gl.GroupLane(groupID)
+	}
+	return "", false
+}
+
 // GetModelNative serves the load-balance-groups Am22 L1 direct-ID
 // lookup (claims BYPASSED) FROM THE CACHE.
 //

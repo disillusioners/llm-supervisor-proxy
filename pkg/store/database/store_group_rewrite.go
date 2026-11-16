@@ -47,7 +47,7 @@ import (
 func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey string) models.GroupRewriteResult {
 	var res models.GroupRewriteResult
 	out := make([]string, 0, len(modelList)+2)
-	for _, entry := range modelList {
+	for idx, entry := range modelList {
 		// Am22: direct-ID lookup, claims BYPASSED. Entry may be a
 		// group ID, a chat ID, or an unknown/raw name (passthrough
 		// entries — GetModelNative returns nil, entry unchanged).
@@ -57,6 +57,27 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 			continue
 		}
 		res.AnyGroup = true
+		// The rewrite-boundary LANE check (decision-groups
+		// commission): a DECISION-lane group is never a candidate on
+		// this (text) lane — the lane is inferred from the group's
+		// CURRENT members, so a decision member can never enter the
+		// chat race list, not even as a fallback-position entry.
+		//
+		//   - direct-named entry (the requested model IS the group):
+		//     FailedGroupID at the boundary — belt and braces; the
+		//     pre-rewrite misroute guard normally catches it first
+		//     with 400 decision_misroute.
+		//   - fallback-position entry: DROPPED from the execution list
+		//     with a loud log — a healthy chat primary still serves
+		//     (the whole-request failure of the naive shape would
+		//     preserve the very defect this check closes).
+		if lane, laneOK := m.inferGroupLane(row); laneOK && lane == models.GroupLaneDecision {
+			log.Printf("[grouplb] group=%s entry=%d — decision-lane group refused at the rewrite boundary (the text lane never serves a decision member)", row.ID, idx)
+			if idx == 0 {
+				res.FailedGroupID = row.ID
+			}
+			continue
+		}
 		memberID, newlyBound, pool, staleRepaired, ok := m.pickServableGroupMember(row, conversationKey)
 		if !ok {
 			res.FailedGroupID = row.ID
@@ -132,6 +153,17 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 	if m.groupEngine == nil {
 		return "", false, "", false, false
 	}
+	// The group's LANE is computed ONCE per sweep and threaded through
+	// the candidate predicate (decision-groups commission). An
+	// UNRESOLVABLE lane (mixed member kinds — the write-time
+	// homogeneity rule makes it unrepresentable, but a hand-edited or
+	// retyped row can still produce it) fails CLOSED: the group is
+	// not servable and the caller fails clean. Never misrouted.
+	lane, laneOK := m.inferGroupLane(group)
+	if !laneOK {
+		log.Printf("[grouplb] group=%s — unresolvable member lane (mixed kinds): group not servable (fail closed)", group.ID)
+		return "", false, "", false, false
+	}
 	refs := GroupMemberRefs(group.Members)
 	if !m.groupEngine.HasGroup(group.ID) {
 		// Am15 lazy seed — first rewrite after boot.
@@ -162,7 +194,7 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 		}
 		seen[pick] = true
 		row := m.GetModelNative(pick)
-		if !isServableGroupMemberBase(row) {
+		if !isServableGroupMemberBase(row, lane) {
 			m.groupEngine.ExcludeAndReselect(group.ID, conversationKey, pick, 0)
 			continue
 		}
@@ -186,7 +218,7 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 		}
 		seen[pick] = true
 		row := m.GetModelNative(pick)
-		if !isServableGroupMemberBase(row) {
+		if !isServableGroupMemberBase(row, lane) {
 			m.groupEngine.ExcludeAndBackupReselect(group.ID, conversationKey, pick, 0)
 			continue
 		}
@@ -210,7 +242,7 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 			continue
 		}
 		row := m.GetModelNative(r.ModelID)
-		if !isServableGroupMemberBase(row) {
+		if !isServableGroupMemberBase(row, lane) {
 			continue
 		}
 		expiry, benched := m.memberDemotionExpiry(group.ID, row)
@@ -292,22 +324,86 @@ func (m *ModelsManager) memberDemotionExpiry(groupID string, row *models.ModelCo
 }
 
 // isServableGroupMemberBase is the Am28 re-validation predicate: the
-// member row exists, is enabled, and is chat-kind (kind chat or the
-// legacy "" normalization; not group / image-gen / decision — the
-// same text-kind rule as G3/G5 at write time, re-checked at request
-// time to cover member disabled/deleted/retyped between group write
-// and request). HEALTH-AGNOSTIC by design: this is the shape check
-// the D3 degradation also honors (health marks never gate it).
-func isServableGroupMemberBase(row *models.ModelConfig) bool {
+// member row exists, is enabled, and belongs to the group's LANE.
+//
+// The lane is a PARAMETER (decision-groups commission): the chat arm
+// is unchanged (kind chat or the legacy "" normalization — not group /
+// image-gen / decision, the same text-kind rule as G3/G5 at write
+// time), and the decision arm accepts the decision kind ONLY — the
+// legacy "" kind is NEVER accepted as decision (contract 3: a
+// chat-era row must not silently serve the decision lane).
+//
+// The lane is re-checked at request time to cover member
+// disabled/deleted/retyped between group write and request.
+// HEALTH-AGNOSTIC by design: this is the shape check the D3
+// degradation also honors (health marks never gate it).
+func isServableGroupMemberBase(row *models.ModelConfig, lane models.GroupLane) bool {
 	if row == nil || !row.Enabled {
 		return false
 	}
-	switch row.Kind {
-	case "", models.KindChat:
-		return true
+	switch lane {
+	case models.GroupLaneDecision:
+		return row.Kind == models.KindDecision
 	default:
-		return false
+		// Chat lane (and any unknown lane): the historical arm,
+		// byte-for-byte.
+		return row.Kind == "" || row.Kind == models.KindChat
 	}
+}
+
+// inferGroupLane derives a group's LANE from its CURRENT member rows
+// (decision-groups commission). The lane is NEVER trusted from write
+// time — a member may have been retyped, disabled or deleted since
+// the group was written, so the inference reads the CURRENT rows.
+//
+// The member rows are fetched by DIRECT ID (GetModelNative — claims
+// bypassed); a member row that no longer exists is SKIPPED (it is
+// unservable anyway and carries no lane evidence), while a DISABLED
+// row still counts (its kind is readable, and a retyped-but-disabled
+// member must still fail the group closed).
+//
+// ok=false when the group's member kinds are not unanimous (a MIXED
+// group — the write-time homogeneity rule makes it unrepresentable,
+// but a hand-edited row can still produce it) or when no member
+// carries a valid lane.
+func (m *ModelsManager) inferGroupLane(group *models.ModelConfig) (models.GroupLane, bool) {
+	if group == nil || !group.IsGroup() {
+		return "", false
+	}
+	kinds := make([]string, 0, len(group.Members))
+	for _, member := range group.Members {
+		if member.ModelID == "" {
+			continue
+		}
+		row := m.GetModelNative(member.ModelID)
+		if row == nil {
+			continue // vanished member — unservable, no lane evidence
+		}
+		kinds = append(kinds, row.Kind)
+	}
+	return models.UnanimousGroupLane(kinds)
+}
+
+// GroupLane returns the LANE of a group — the decision-groups lane
+// query (the ONE new models-manager method this release spends; see
+// the D-8 one-method budget).
+//
+// The lane is inferred by unanimity over the group's CURRENT member
+// rows (never trusted from write time). ok=false when the group does
+// not exist, is not a group, has no resolvable member, or has MIXED
+// member kinds — the callers treat that as "unknown lane" and fail
+// closed or loud-log (never silently serve).
+//
+// It is deliberately NOT a member of models.GroupRewriter: the
+// optional-seam shape keeps the ~11 structural test fakes and the
+// JSON backend valid (the house pattern — the ClearGroupMemberCooldown
+// forward is the precedent).
+func (m *ModelsManager) GroupLane(groupID string) (models.GroupLane, bool) {
+	row := m.GetModelNative(groupID)
+	if row == nil || !row.IsGroup() {
+		return "", false
+	}
+	return m.inferGroupLane(row)
 }
 
 // isServableGroupMember is the CANDIDATE predicate: the row passes the
@@ -323,8 +419,12 @@ func isServableGroupMemberBase(row *models.ModelConfig) bool {
 // GROUP-owned rotation cooldown participate. Health state reaches
 // execution downstream (attempt suppression + chain walk), never the
 // group pick. Nil row: false (nothing to serve).
+//
+// The chat lane's arm (the text lane's candidate gate) — the decision
+// lane's arm lives in the kind-parameterized base predicate
+// (isServableGroupMemberBase), which takes the expected lane.
 func (m *ModelsManager) isServableGroupMember(row *models.ModelConfig) bool {
-	return isServableGroupMemberBase(row)
+	return isServableGroupMemberBase(row, models.GroupLaneChat)
 }
 
 // defaultRefs / backupRefs split engine refs into their two pools

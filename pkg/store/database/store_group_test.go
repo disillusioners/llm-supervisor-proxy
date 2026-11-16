@@ -22,6 +22,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -1181,5 +1182,328 @@ func TestGroup_C1_MultiDefaultExclusionCascadeToBackup(t *testing.T) {
 	}
 	if pool4 != models.PoolDefault || pick4 == "coding-third" {
 		t.Fatalf("C1 rebase: serve = (%q, %q), want a demoted default (the disabled backup must never serve)", pick4, pool4)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the LANE rules at the manager seam.
+//
+// The lane is inferred from the CURRENT member rows; the candidate
+// predicate is lane-parameterized; a decision-lane group is refused on
+// the text lane's sweep; a mixed-kind group fails CLOSED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// seedDecisionMembers adds two decision-kind members (the decision
+// provider vocabulary is {openai, typesafe, openrouter} — cred-openai
+// qualifies) to a manager.
+func seedDecisionMembers(t *testing.T, mgr *ModelsManager) {
+	t.Helper()
+	for _, m := range []models.ModelConfig{
+		{ID: "dec-a", Name: "Decision A", Enabled: true, Kind: models.KindDecision, Internal: true, InternalModel: "gpt-5", Credentials: models.TestRefs("cred-openai")},
+		{ID: "dec-b", Name: "Decision B", Enabled: true, Kind: models.KindDecision, Internal: true, InternalModel: "gpt-5-mini", Credentials: models.TestRefs("cred-openai")},
+	} {
+		if err := mgr.AddModel(m); err != nil {
+			t.Fatalf("seed decision member %s: %v", m.ID, err)
+		}
+	}
+}
+
+// decisionGroup returns a valid decision-lane group row.
+func decisionGroup() models.ModelConfig {
+	return models.ModelConfig{
+		ID:       "decision-group",
+		Name:     "Decision Group",
+		Enabled:  true,
+		Kind:     models.KindGroup,
+		Internal: true,
+		Members: []models.GroupMember{
+			{ModelID: "dec-a", Weight: 2},
+			{ModelID: "dec-b", Weight: 1},
+		},
+	}
+}
+
+// writeGroupRowRaw writes a group row whose member list is set
+// DIRECTLY in the store — the hand-edited-row shape the write-time
+// validator would reject (a mixed-kind group). The row is created
+// valid first, then members_json is rewritten behind the validator's
+// back; the manager's claim index + group engine are refreshed so the
+// rewrite sees the raw shape.
+func writeGroupRowRaw(t *testing.T, mgr *ModelsManager, groupID string, members []models.GroupMember) {
+	t.Helper()
+	valid := decisionGroup()
+	valid.ID = groupID
+	if err := mgr.AddModel(valid); err != nil {
+		t.Fatalf("seed group %s: %v", groupID, err)
+	}
+	membersJSON, err := json.Marshal(members)
+	if err != nil {
+		t.Fatalf("marshal members: %v", err)
+	}
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if _, err := mgr.store.DB.ExecContext(context.Background(), "UPDATE models SET members_json = ? WHERE id = ?", string(membersJSON), groupID); err != nil {
+		t.Fatalf("raw group row write: %v", err)
+	}
+	mgr.rebuildClaimsLocked()
+	mgr.notifyGroupEngineLocked(models.KindGroup, groupID, members)
+}
+
+// TestGroup_GroupLane_InfersChat — a chat group's lane is chat.
+func TestGroup_GroupLane_InfersChat(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("save chat group: %v", err)
+	}
+	lane, ok := mgr.GroupLane("coding-group")
+	if !ok || lane != models.GroupLaneChat {
+		t.Fatalf("GroupLane(coding-group) = (%q, %v), want (chat, true)", lane, ok)
+	}
+}
+
+// TestGroup_GroupLane_InfersDecision — a decision group's lane is
+// decision.
+func TestGroup_GroupLane_InfersDecision(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	if err := mgr.AddModel(decisionGroup()); err != nil {
+		t.Fatalf("save decision group: %v", err)
+	}
+	lane, ok := mgr.GroupLane("decision-group")
+	if !ok || lane != models.GroupLaneDecision {
+		t.Fatalf("GroupLane(decision-group) = (%q, %v), want (decision, true)", lane, ok)
+	}
+}
+
+// TestGroup_GroupLane_MixedGroupReturnsFalse — a MIXED group (a chat
+// member next to a decision member) has NO resolvable lane, and a
+// non-group / unknown id has none either.
+func TestGroup_GroupLane_MixedGroupReturnsFalse(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+
+	// A mixed group cannot be WRITTEN (the write-time homogeneity
+	// rule) — the manager's write path must reject it.
+	mixed := decisionGroup()
+	mixed.ID = "mixed-group"
+	mixed.Members = []models.GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding", Weight: 1}}
+	if err := mgr.AddModel(mixed); err == nil {
+		t.Fatal("a mixed-kind group must be rejected at write time")
+	}
+
+	// A non-group and an unknown id have no lane.
+	if lane, ok := mgr.GroupLane("coding"); ok {
+		t.Fatalf("GroupLane(coding) = (%q, true), want (ok=false) for a non-group", lane)
+	}
+	if lane, ok := mgr.GroupLane("nope"); ok {
+		t.Fatalf("GroupLane(nope) = (%q, true), want (ok=false) for an unknown id", lane)
+	}
+}
+
+// TestGroup_RewriteGroupEntries_MixedKindGroup_FailsClosed — a
+// mixed-kind group is UNSERVABLE on the sweep (fail closed, never
+// misrouted). The row is written around the validator (a hand-edited
+// row is exactly the shape the runtime net must catch).
+func TestGroup_RewriteGroupEntries_MixedKindGroup_FailsClosed(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	// Write the mixed group straight into the store, bypassing the
+	// write-time validator (the hand-edited-row shape).
+	writeGroupRowRaw(t, mgr, "mixed-group", []models.GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding", Weight: 1}})
+
+	res := mgr.RewriteGroupEntries([]string{"mixed-group"}, "")
+	if res.MemberID != "" {
+		t.Fatalf("a mixed-kind group must not produce a member, got %q", res.MemberID)
+	}
+	if res.FailedGroupID == "" {
+		t.Fatal("a mixed-kind group must fail closed (FailedGroupID set)")
+	}
+}
+
+// TestGroup_RewriteGroupEntries_DecisionGroup_RejectsLegacyEmptyKindMember
+// — the legacy "" kind is NEVER servable as a decision member: a
+// decision group carrying one is mixed ⇒ unservable.
+func TestGroup_RewriteGroupEntries_DecisionGroup_RejectsLegacyEmptyKindMember(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	// coding-alt is the legacy ""-kind member seeded by newGroupManager.
+	writeGroupRowRaw(t, mgr, "decision-legacy-group", []models.GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding-alt", Weight: 1}})
+
+	res := mgr.RewriteGroupEntries([]string{"decision-legacy-group"}, "")
+	if res.MemberID != "" {
+		t.Fatalf("the legacy \"\" member must not be served in a decision group, got member %q", res.MemberID)
+	}
+	if res.FailedGroupID == "" {
+		t.Fatal("a decision group with a legacy \"\" member must fail closed")
+	}
+}
+
+// TestGroup_RewriteGroupEntries_DecisionGroup_RefusedOnTextSweep — the
+// text-lane sweep REFUSES a decision-lane group: no decision member is
+// ever offered to the chat path.
+func TestGroup_RewriteGroupEntries_DecisionGroup_RefusedOnTextSweep(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	if err := mgr.AddModel(decisionGroup()); err != nil {
+		t.Fatalf("save decision group: %v", err)
+	}
+	res := mgr.RewriteGroupEntries([]string{"decision-group"}, "")
+	if res.MemberID != "" {
+		t.Fatalf("the text sweep must not serve a decision member, got %q", res.MemberID)
+	}
+	if res.FailedGroupID != "decision-group" {
+		t.Fatalf("FailedGroupID = %q, want %q (the direct-named refusal)", res.FailedGroupID, "decision-group")
+	}
+	for _, id := range res.ModelList {
+		if id == "dec-a" || id == "dec-b" {
+			t.Fatalf("the execution list must not carry a decision member, got %v", res.ModelList)
+		}
+	}
+}
+
+// TestGroup_RewriteGroupEntries_DecisionGroupInChatChain_BoundaryRefusal
+// — a chat model's fallback_chain naming a decision group: the group is
+// never served on the chat lane (no decision member in the execution
+// list) and the HEALTHY primary still serves (the request does NOT
+// fail). The direct-named case still fails closed.
+func TestGroup_RewriteGroupEntries_DecisionGroupInChatChain_BoundaryRefusal(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	if err := mgr.AddModel(decisionGroup()); err != nil {
+		t.Fatalf("save decision group: %v", err)
+	}
+	// The chat main carries the decision group in its fallback chain.
+	main := models.ModelConfig{ID: "chat-main", Name: "Chat Main", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "glm-5", Credentials: models.TestRefs("cred-openai")}
+	if err := mgr.AddModel(main); err != nil {
+		t.Fatalf("save chat main: %v", err)
+	}
+	main.FallbackChain = []string{"decision-group"}
+	if err := mgr.UpdateModel("chat-main", main); err != nil {
+		t.Fatalf("update chat main: %v", err)
+	}
+
+	res := mgr.RewriteGroupEntries([]string{"chat-main", "decision-group"}, "")
+	if res.FailedGroupID != "" {
+		t.Fatalf("the healthy primary must not fail: FailedGroupID = %q", res.FailedGroupID)
+	}
+	for _, id := range res.ModelList {
+		if id == "dec-a" || id == "dec-b" {
+			t.Fatalf("the execution list must not carry a decision member, got %v", res.ModelList)
+		}
+	}
+	if len(res.ModelList) == 0 || res.ModelList[0] != "chat-main" {
+		t.Fatalf("the chat primary must stay the execution head, got %v", res.ModelList)
+	}
+}
+
+// TestGroup_SweepKindParameterization_MutationControl — the candidate
+// predicate consults the EXPECTED kind: a decision member is servable
+// when the expected kind is decision and NOT servable when it is chat
+// (the mutation control — a kind-agnostic predicate would serve a
+// decision member on the chat lane).
+func TestGroup_SweepKindParameterization_MutationControl(t *testing.T) {
+	decRow := &models.ModelConfig{ID: "dec-a", Enabled: true, Kind: models.KindDecision}
+	chatRow := &models.ModelConfig{ID: "coding", Enabled: true, Kind: models.KindChat}
+	legacyRow := &models.ModelConfig{ID: "coding-alt", Enabled: true, Kind: ""}
+	disabled := &models.ModelConfig{ID: "off", Enabled: false, Kind: models.KindDecision}
+
+	if !isServableGroupMemberBase(decRow, models.GroupLaneDecision) {
+		t.Error("a decision member must be servable when the expected kind is decision")
+	}
+	if isServableGroupMemberBase(decRow, models.GroupLaneChat) {
+		t.Error("a decision member must NOT be servable when the expected kind is chat")
+	}
+	if !isServableGroupMemberBase(chatRow, models.GroupLaneChat) {
+		t.Error("a chat member must be servable when the expected kind is chat")
+	}
+	if isServableGroupMemberBase(chatRow, models.GroupLaneDecision) {
+		t.Error("a chat member must NOT be servable when the expected kind is decision")
+	}
+	// The legacy "" kind is chat-only — never decision.
+	if !isServableGroupMemberBase(legacyRow, models.GroupLaneChat) {
+		t.Error("the legacy \"\" kind must stay servable on the chat lane")
+	}
+	if isServableGroupMemberBase(legacyRow, models.GroupLaneDecision) {
+		t.Error("the legacy \"\" kind must NEVER be servable on the decision lane")
+	}
+	if isServableGroupMemberBase(disabled, models.GroupLaneDecision) {
+		t.Error("a disabled member must never be servable")
+	}
+	if isServableGroupMemberBase(nil, models.GroupLaneDecision) {
+		t.Error("a missing member row must never be servable")
+	}
+}
+
+// TestGroup_AddModel_DecisionMembers_Accepted — a decision-member group
+// saves through AddModel / UpdateModel.
+func TestGroup_AddModel_DecisionMembers_Accepted(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	group := decisionGroup()
+	if err := mgr.AddModel(group); err != nil {
+		t.Fatalf("a decision group must save, got: %v", err)
+	}
+	got := mgr.GetModelNative("decision-group")
+	if got == nil || len(got.Members) != 2 {
+		t.Fatalf("decision group round-trip failed: %+v", got)
+	}
+	group.Name = "Decision Group v2"
+	if err := mgr.UpdateModel("decision-group", group); err != nil {
+		t.Fatalf("a decision group must update, got: %v", err)
+	}
+}
+
+// TestGroup_AddModel_MixedKindMembers_Rejected — the DB write path
+// rejects a mixed-kind group (the canonical validator, reached via
+// validateGroupWrite).
+func TestGroup_AddModel_MixedKindMembers_Rejected(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	mixed := decisionGroup()
+	mixed.ID = "mixed-group"
+	mixed.Members = []models.GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding", Weight: 1}}
+	err := mgr.AddModel(mixed)
+	if err == nil {
+		t.Fatal("the DB write path must reject a mixed-kind group")
+	}
+	if !strings.Contains(err.Error(), "members must all share one kind") {
+		t.Errorf("the rejection %q must carry the homogeneity message", err.Error())
+	}
+}
+
+// TestGroup_AddModel_DecisionMembers_MixedProviders_Accepted — a
+// decision group with an openai member and an openrouter member saves
+// (no provider gate on the GROUP row — a group carries no
+// credentials).
+func TestGroup_AddModel_DecisionMembers_MixedProviders_Accepted(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "cred-openrouter", Provider: "openrouter", APIKey: "k"}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	for _, m := range []models.ModelConfig{
+		{ID: "dec-openai", Name: "Decision OpenAI", Enabled: true, Kind: models.KindDecision, Internal: true, InternalModel: "gpt-5", Credentials: models.TestRefs("cred-openai")},
+		{ID: "dec-openrouter", Name: "Decision OpenRouter", Enabled: true, Kind: models.KindDecision, Internal: true, InternalModel: "anthropic/claude", Credentials: models.TestRefs("cred-openrouter")},
+	} {
+		if err := mgr.AddModel(m); err != nil {
+			t.Fatalf("seed decision member %s: %v", m.ID, err)
+		}
+	}
+	group := models.ModelConfig{
+		ID: "decision-mixed-providers", Name: "Decision Mixed Providers", Enabled: true,
+		Kind: models.KindGroup, Internal: true,
+		Members: []models.GroupMember{{ModelID: "dec-openai", Weight: 1}, {ModelID: "dec-openrouter", Weight: 1}},
+	}
+	if err := mgr.AddModel(group); err != nil {
+		t.Fatalf("a decision group with mixed providers must save (the group row carries no provider), got: %v", err)
 	}
 }
