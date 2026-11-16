@@ -260,7 +260,6 @@ func parseAnthropicReq(m map[string]interface{}) *translator.AnthropicRequest {
 	return &req
 }
 
-
 func TestAnthropicAdapter_WriteNonStreamResponse(t *testing.T) {
 	adapter := NewAnthropicAdapter()
 

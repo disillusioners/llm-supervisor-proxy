@@ -330,5 +330,3 @@ func convertAnthropicMessagesToStoreAdapter(messages []translator.AnthropicMessa
 	}
 	return result
 }
-
-

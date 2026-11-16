@@ -74,6 +74,11 @@ import (
 )
 
 // Config holds runtime configuration for the proxy handler
+// The compile-time proof that the PRODUCTION models binding satisfies
+// the group-lane seam (the decorator-forward trap): a removed forward
+// must break the BUILD, not silently no-op in production.
+var _ groupLaneReader = (*modelscache.CachedModelsConfig)(nil)
+
 type Config struct {
 	ConfigMgr    config.ManagerInterface      // Config manager for dynamic updates
 	ModelsConfig models.ModelsConfigInterface // Models config for fallback chains
@@ -285,6 +290,16 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 	}
 }
 
+// publishDecisionMisrouteEvent emits the telemetry event for a
+// decision-lane misroute refusal (the chat lanes). The event type is
+// lane-scoped: the text lane's own event vocabulary is untouched.
+func (h *Handler) publishDecisionMisrouteEvent(modelID string) {
+	h.publishEvent("decision_misroute", map[string]interface{}{
+		"outcome": "decision_misroute",
+		"model":   modelID,
+	})
+}
+
 // publishGroupHop emits a GROUP-layer member-hop observability event
 // (wi-4d2c8e17 — LABELS). Payload keeps the group vocabulary
 // (group_id / member_id / from_member / to_member / reason); to_member
@@ -388,10 +403,30 @@ func (h *Handler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	// decision models: they are served by /v1/image_generation
 	// and /v1/decisions respectively and must never appear in the
 	// OpenAI-compatible chat pickers (Decision Models / §3.1 site 6).
+	//
+	// Decision-groups commission: a group whose inferred lane is
+	// DECISION is excluded too (it is served by /v1/decisions). The
+	// lane derivation folds over ALL models (not the enabled-only
+	// list): a disabled decision member still counts toward the
+	// group's unanimity, so a group with a disabled decision member
+	// is still a decision group.
+	allModels := cfg.ModelsConfig.GetModels()
+	decisionGroups := map[string]bool{}
+	for _, g := range allModels {
+		if !g.IsGroup() {
+			continue
+		}
+		if lane, ok := groupLaneOf(cfg.ModelsConfig, g.ID); ok && lane == models.GroupLaneDecision {
+			decisionGroups[g.ID] = true
+		}
+	}
 	models := make([]map[string]interface{}, 0, len(enabledModels))
 	for _, m := range enabledModels {
 		if m.IsImageGen() || m.IsDecision() {
 			continue
+		}
+		if decisionGroups[m.ID] {
+			continue // a decision-lane group — served by /v1/decisions
 		}
 		if claimedIDs[m.ID] {
 			continue // shadowed by an enabled group — hidden
@@ -622,6 +657,36 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			"decision models are served by /v1/decisions only",
 			models.ErrorTypeServerError, "decision_misroute")
 		return
+	}
+
+	// Decision-groups commission — the GROUP arm of the misroute
+	// guard: a GROUP whose inferred lane is decision is served by
+	// /v1/decisions only. The guard is ADDITIVE and lane-gated: a
+	// chat group is unaffected (its lane is chat), and the guard runs
+	// BEFORE the group rewrite, so a decision group can never reach
+	// the chat executor (the misroute is structurally impossible).
+	//
+	// The runtime defence-in-depth net: a group inferred as CHAT that
+	// carries a decision member must NEVER silently serve — a loud
+	// 400 + a telemetry event.
+	if rc.resolvedModel != nil && rc.resolvedModel.IsGroup() {
+		groupID := rc.resolvedModel.ID
+		lane, laneOK := groupLaneOf(rc.conf.ModelsConfig, groupID)
+		switch {
+		case laneOK && lane == models.GroupLaneDecision:
+			log.Printf("[decision] rejecting chat misroute to decision group=%s (the group is served by /v1/decisions only)", groupID)
+			h.sendError(w, http.StatusBadRequest,
+				"decision models are served by /v1/decisions only",
+				models.ErrorTypeServerError, "decision_misroute")
+			return
+		case laneOK && lane == models.GroupLaneChat && groupHasDecisionMember(rc.conf.ModelsConfig.GetModels(), groupID):
+			log.Printf("[decision] refusing chat group=%s — the group carries a decision-kind member (the mixed shape must never be served on the chat lane)", groupID)
+			h.publishDecisionMisrouteEvent(groupID)
+			h.sendError(w, http.StatusBadRequest,
+				"decision models are served by /v1/decisions only",
+				models.ErrorTypeServerError, "decision_misroute")
+			return
+		}
 	}
 
 	// Check if this request requires internal authentication

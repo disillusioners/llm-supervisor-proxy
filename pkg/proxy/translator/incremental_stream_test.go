@@ -1176,7 +1176,7 @@ func TestIncrementalStreamTranslator_ProcessEvent_MatchesProcessChunkState(t *te
 	// replay them in the same order ProcessChunk would have seen them.
 	type ev struct {
 		content, reasoning, thinking string
-		toolCalls                   []interface{}
+		toolCalls                    []interface{}
 	}
 	events := []ev{
 		{content: "", reasoning: "", thinking: ""}, // role-only preamble equivalent

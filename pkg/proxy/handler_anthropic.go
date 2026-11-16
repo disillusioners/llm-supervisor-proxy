@@ -81,6 +81,11 @@ func debugLog(format string, args ...interface{}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The compile-time proof that the PRODUCTION models binding satisfies
+// the group-lane seam (the decorator-forward trap): a removed forward
+// must break the BUILD, not silently no-op in production.
+var _ groupLaneReader = (*modelscache.CachedModelsConfig)(nil)
+
 // Anthropic Messages API Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,6 +287,45 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			"model": originalModel,
 		})
 		return
+	}
+
+	// Decision-groups commission — the GROUP arm of the misroute
+	// guard: a GROUP whose inferred lane is decision is served by
+	// /v1/decisions only. ADDITIVE and lane-gated (a chat group is
+	// unaffected), and it runs BEFORE the group rewrite, so a decision
+	// group can never reach the Anthropic executor.
+	//
+	// The runtime defence-in-depth net: a group inferred as CHAT that
+	// carries a decision member must NEVER silently serve.
+	if resolvedModel != nil && resolvedModel.IsGroup() {
+		groupID := resolvedModel.ID
+		lane, laneOK := groupLaneOf(conf.ModelsConfig, groupID)
+		switch {
+		case laneOK && lane == models.GroupLaneDecision:
+			log.Printf("[decision] rejecting anthropic misroute to decision group=%s (the group is served by /v1/decisions only)", groupID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+				"invalid_request_error", "decision_misroute",
+				"decision models are served by /v1/decisions only"))
+			h.publishEvent("decision_misroute", map[string]interface{}{
+				"id":    reqID,
+				"model": originalModel,
+			})
+			return
+		case laneOK && lane == models.GroupLaneChat && groupHasDecisionMember(conf.ModelsConfig.GetModels(), groupID):
+			log.Printf("[decision] refusing anthropic group=%s — the group carries a decision-kind member (the mixed shape must never be served on the chat lane)", groupID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
+				"invalid_request_error", "decision_misroute",
+				"decision models are served by /v1/decisions only"))
+			h.publishEvent("decision_misroute", map[string]interface{}{
+				"id":    reqID,
+				"model": originalModel,
+			})
+			return
+		}
 	}
 
 	// Build model list using resolved config

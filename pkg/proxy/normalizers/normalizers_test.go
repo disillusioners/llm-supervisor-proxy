@@ -8,10 +8,10 @@ func TestFixEmptyRoleNormalizer(t *testing.T) {
 	n := NewFixEmptyRoleNormalizer()
 
 	tests := []struct {
-		name     string
-		input    string
-		want     string
-		wantMod  bool
+		name    string
+		input   string
+		want    string
+		wantMod bool
 	}{
 		{
 			name:    "empty role in delta",

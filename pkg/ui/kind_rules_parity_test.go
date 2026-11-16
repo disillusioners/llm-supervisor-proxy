@@ -36,15 +36,18 @@ package ui
 // unchanged by WS (a); this lock is retained deliberately.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
 // addDecisionCreds seeds three test-credentials — openai (D4
@@ -1001,5 +1004,64 @@ func TestKindRules_Parity_KindImmutability(t *testing.T) {
 	status, errSubstr = putDecisionModel(t, srv.URL, "solo-model", string(soloBody))
 	if status == http.StatusBadRequest {
 		t.Fatalf("a model that is in no group must still retype through the API, got 400: %q", errSubstr)
+	}
+}
+
+// TestDecision_Vocabulary_OutOfSetProvider_Rejected_AtAllGates — a
+// provider OUTSIDE {openai, typesafe, openrouter} is rejected for a
+// decision model at EVERY gate: the canonical rule, the DB write path,
+// the POST mirror and the PUT mirror — the parity across all sites.
+//
+// (The decision-groups commission's vocabulary pin: the credential
+// vocabulary is a SEPARATE map — the two are nested, never crossed.)
+func TestDecision_Vocabulary_OutOfSetProvider_Rejected_AtAllGates(t *testing.T) {
+	// --- The canonical rule (pkg/models) ---
+	decisionModel := models.ModelConfig{
+		ID: "dec-1", Name: "Decision 1", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-6-luna",
+		Credentials: []models.CredentialRef{{CredentialID: "minimax-cred", Weight: 1, Position: 0}},
+	}
+	if err := models.ValidateKindRules(&decisionModel, "minimax"); err == nil {
+		t.Error("the canonical rule must reject an out-of-set decision provider")
+	}
+
+	// --- The DB write path (the real manager) ---
+	dbPath := filepath.Join(t.TempDir(), "vocab.db")
+	t.Setenv("DATABASE_URL", "sqlite:"+dbPath)
+	dbStore, err := database.NewConnection(context.Background())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { dbStore.Close() })
+	if err := dbStore.RunMigrations(context.Background()); err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	mgr, err := database.NewModelsManager(dbStore, nil)
+	if err != nil {
+		t.Fatalf("NewModelsManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	if err := mgr.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"}); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+	if err := mgr.AddModel(decisionModel); err == nil {
+		t.Error("the DB write path must reject an out-of-set decision provider")
+	}
+
+	// --- The POST + PUT mirrors ---
+	ts := newModelTestServer()
+	addDecisionCreds(ts)
+	ts.mockModels.AddCredential(models.CredentialConfig{ID: "minimax-cred", Provider: "minimax", APIKey: "k"})
+	srv := ts.serve()
+	defer srv.Close()
+
+	payload := `{"id":"dec-1","name":"Decision 1","enabled":true,"kind":"decision","internal":true,` +
+		`"internal_model":"gpt-6-luna","credentials":[{"credential_id":"minimax-cred","weight":1,"position":0}]}`
+	status, errSubstr := postDecisionModel(t, srv.URL, payload)
+	if status != http.StatusBadRequest {
+		t.Errorf("the POST mirror must reject an out-of-set decision provider (status=%d, err=%q)", status, errSubstr)
+	}
+	if status, errSubstr = putDecisionModel(t, srv.URL, "dec-1", payload); status != http.StatusBadRequest {
+		t.Errorf("the PUT mirror must reject an out-of-set decision provider (status=%d, err=%q)", status, errSubstr)
 	}
 }
