@@ -3,8 +3,9 @@ package providers
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
+
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credclass"
 )
 
 // Provider defines the interface for AI providers
@@ -222,6 +223,12 @@ func (e *ProviderError) IsRetryable() bool {
 //
 // Returns false for nil errors and for non-*ProviderError errors.
 // Safe to call from any goroutine.
+//
+// DELEGATION (credclass extraction): the vocabulary and the field-level
+// rules live in the leaf package pkg/credclass (stdlib-only) so a lane
+// that cannot import this package classifies with the SAME vocabulary.
+// This wrapper keeps the exported signature and the errors.As unwrap,
+// extracts the four facts, and delegates. Zero behaviour change.
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
@@ -235,78 +242,14 @@ func IsRateLimitError(err error) bool {
 	if !errors.As(err, &pe) || pe == nil {
 		return false
 	}
-	if pe.StatusCode == 429 {
-		return true
-	}
-	if strings.Contains(strings.ToLower(pe.ErrorType), "rate_limit") {
-		return true
-	}
-	switch pe.ErrorCode {
-	case "rate_limit", "rate_limit_error", "rate_limit_exceeded":
-		return true
-	}
-	return false
+	return credclass.IsRateLimit(pe.StatusCode, pe.ErrorType, pe.ErrorCode, pe.Message)
 }
 
-// quotaTypeVocabulary / quotaCodeVocabulary / quotaMessageVocabulary are
-// the quota-class (credit/plan exhaustion) vocabularies consumed by
-// IsQuotaError. Split by FIELD so each field's precision can differ:
-// type/code are structured (low noise ⇒ substring-safe), the message is
-// free text (higher noise ⇒ bounded phrases only).
-//
-// Observed live vocabulary (job 8d852270): HTTP 402 / code 2067 /
-// "Token Plan usage limit" — the code arrives as a NUMBER on the wire
-// (unparseable into the string-typed ErrorCode field), but the message
-// text survives into ProviderError.Message in BOTH wire shapes:
-// OpenAI-shaped bodies decode Message directly; non-OpenAI-shaped bodies
-// fall back to msg = raw body (openai.go:handleError), which still
-// contains the message text. The message vocabulary is therefore the
-// workhorse for numeric-code upstreams.
-var (
-	quotaTypeVocabulary = []string{
-		"quota",
-		"insufficient_credit",
-		"insufficient_quota",
-		"insufficient_balance",
-		"payment_required",
-		"credit_exhausted",
-		"billing",
-	}
-	quotaCodeVocabulary    = quotaTypeVocabulary // structured fields share the set
-	quotaMessageVocabulary = []string{
-		"insufficient credit",
-		"insufficient credits",
-		"insufficient balance",
-		"insufficient quota",
-		"quota exceeded",
-		"quota exhausted",
-		"exceeded your quota",
-		"credit exhausted",
-		"credits exhausted",
-		"out of credit",
-		// W1 (pre-merge review): the former bare "usage limit" phrase was
-		// removed — a PLAIN rate-limit body uses it for per-minute
-		// throttling ("you have reached your usage limit for this
-		// minute"), which must classify rate_limit (60s/Retry-After),
-		// NOT quota. The specific observed live shape replaces it.
-		"token plan usage limit",
-		// "token plan" stays its own status-agnostic phrase BY DESIGN: a
-		// token-plan body means the plan is exhausted at ANY status.
-		"token plan",
-		"payment required",
-	}
-)
-
-// containsAny reports whether the lowercased haystack contains any of the
-// (already-lowercase) vocabulary entries.
-func containsAny(lowered string, vocabulary []string) bool {
-	for _, v := range vocabulary {
-		if strings.Contains(lowered, v) {
-			return true
-		}
-	}
-	return false
-}
+// The quota-class vocabulary tables (quotaTypeVocabulary /
+// quotaCodeVocabulary / quotaMessageVocabulary) and the rate-limit code
+// set moved to the leaf package pkg/credclass (the credclass
+// extraction) — ONE vocabulary, two lanes, no drift. This package
+// delegates; see IsRateLimitError / IsQuotaError below.
 
 // IsQuotaError (layered credential fallback — Fix 1) classifies an error
 // as a QUOTA-class condition: the credential's credit / plan / balance is
@@ -345,6 +288,12 @@ func containsAny(lowered string, vocabulary []string) bool {
 // 401/auth-class errors carry none of the vocabulary — the classifier
 // is silent on them (auth stays terminal; eligibility is never widened
 // to it). Safe to call from any goroutine.
+//
+// DELEGATION (credclass extraction): the vocabulary and the field-level
+// rules live in the leaf package pkg/credclass (stdlib-only) so a lane
+// that cannot import this package classifies with the SAME vocabulary.
+// This wrapper keeps the exported signature and the errors.As unwrap,
+// extracts the four facts, and delegates. Zero behaviour change.
 func IsQuotaError(err error) bool {
 	if err == nil {
 		return false
@@ -356,14 +305,5 @@ func IsQuotaError(err error) bool {
 	if !errors.As(err, &pe) || pe == nil {
 		return false
 	}
-	if pe.StatusCode == 402 {
-		return true
-	}
-	if containsAny(strings.ToLower(pe.ErrorType), quotaTypeVocabulary) {
-		return true
-	}
-	if containsAny(strings.ToLower(pe.ErrorCode), quotaCodeVocabulary) {
-		return true
-	}
-	return containsAny(strings.ToLower(pe.Message), quotaMessageVocabulary)
+	return credclass.IsQuota(pe.StatusCode, pe.ErrorType, pe.ErrorCode, pe.Message)
 }
