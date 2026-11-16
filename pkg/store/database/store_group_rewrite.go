@@ -275,9 +275,11 @@ func seenKeys(seen map[string]bool) []string {
 // consulted here. The group pick answers only the GROUP-layer question
 // ("is this member servable in this group?") from GROUP-owned rotation
 // state; a credential/model health mark must never change WHICH member
-// becomes the head. This file therefore does not import pkg/skipcache
-// or pkg/modelcache — the isolation is a compile-time property, not a
-// rule to remember.
+// becomes the head. This package holds NO reference to either cache:
+// pkg/store/database, pkg/grouplb and pkg/modelscache import neither
+// pkg/skipcache nor pkg/modelcache in any non-test file (pinned by
+// TestCacheLayer_Structural_PackageLevelNoCacheImports). The isolation
+// is a package-level property, not a rule to remember.
 func (m *ModelsManager) memberDemotionExpiry(groupID string, row *models.ModelConfig) (time.Time, bool) {
 	if row == nil {
 		return time.Time{}, false

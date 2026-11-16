@@ -28,12 +28,13 @@ import (
 
 // newSkipCacheGroupManager seeds the canonical two-member span-
 // provider group (coding: openai/glm-5 + coding-alt: zhipu/kimi) and
-// wires a fresh skip cache into the manager.
+// returns a fresh skip cache holding marks (the manager deliberately
+// holds NO reference to it — D2/structural isolation; the marks still
+// prove the pick does not consult it).
 func newSkipCacheGroupManager(t *testing.T) (*ModelsManager, *skipcache.Cache, func()) {
 	t.Helper()
 	mgr, cleanup := newGroupManager(t)
 	cache := skipcache.New()
-	mgr.SetSkipCache(cache)
 	if err := mgr.AddModel(validGroup()); err != nil {
 		cleanup()
 		t.Fatalf("AddModel(group): %v", err)
@@ -140,19 +141,6 @@ func TestGroup_SkipCache_MarkNeverBenchesOrderingSeam(t *testing.T) {
 	}
 }
 
-// TestGroup_SkipCache_NilCacheByteIdentical — a manager without
-// SetSkipCache still serves a member (nil-cache degradation).
-func TestGroup_SkipCache_NilCacheByteIdentical(t *testing.T) {
-	mgr, _, cleanup := newSkipCacheGroupManager(t)
-	defer cleanup()
-	mgr.SetSkipCache(nil) // unwire — the legacy/test main shape
-
-	got := pickOf(t, mgr, "conv-nil-cache")
-	if got != "coding" && got != "coding-alt" {
-		t.Fatalf("nil-cache pick = %q, want one of the group's members", got)
-	}
-}
-
 // TestGroup_SkipCache_ProviderMarkDoesNotWallSibling — a provider
 // mark never reaches the ordering seam (ok=false) and the member stays
 // a servable CANDIDATE (shape predicate true).
@@ -160,7 +148,6 @@ func TestGroup_SkipCache_ProviderMarkDoesNotWallSibling(t *testing.T) {
 	mgr, cleanup := newGroupManager(t)
 	defer cleanup()
 	cache := skipcache.New()
-	mgr.SetSkipCache(cache)
 
 	if err := mgr.AddCredential(models.CredentialConfig{
 		ID: "cred-a", Provider: "openai", APIKey: "key-a", BaseURL: "http://upstream-a",

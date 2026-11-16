@@ -72,21 +72,22 @@ func ParseReset(msg string, now time.Time) (time.Time, bool) {
 }
 
 // wallMarkers identify a MODEL/plan usage wall (not a per-minute
-// throttle). Bounded phrases only — free-text noise must not flip a
-// model off.
+// throttle, and NOT a bare account-quota reset). Bounded, model/plan-
+// scoped phrases only: a bare "…will reset after 4h39m9s" quota body is
+// ACCOUNT-wide (it must stay credential-scoped via the 429/402 upstream
+// classification) and must never mint a model mark (D3). Free-text noise
+// must not flip a model off either.
 var wallMarkers = []string{
-	"usage limit",
-	"will reset",
-	"reset after",
-	"reset at",
-	"reset in",
-	"token plan",
-	"daily limit",
-	"session limit",
-	"plan limit",
-	"limit reached for",
-	"5 hour",
-	"five hour",
+	"usage limit",       // "Usage limit reached for 5 hour"
+	"token plan",        // "Token Plan usage limit"
+	"daily limit",       // "daily limit reached"
+	"session limit",     // "session limit reached"
+	"plan limit",        // "plan limit reached"
+	"weekly limit",      // "weekly limit reached"
+	"week limit",        // "week limit reached"
+	"limit reached for", // "limit reached for 5 hour"
+	"5 hour",            // "for 5 hour" (the observed 5-hour plan wall)
+	"five hour",         // "for five hours"
 }
 
 // throttleMarkers identify a short-horizon rate limit that must stay

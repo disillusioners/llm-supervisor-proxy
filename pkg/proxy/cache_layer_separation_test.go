@@ -19,9 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +208,26 @@ func TestCacheLayer_T_A_MarkedHeadStillPicked_ChainServes(t *testing.T) {
 	}
 	if len(attempted) == 0 || attempted[0] != "coding4" {
 		t.Fatalf("first attempt = %v, want coding4 (head suppressed, chain first)", attempted)
+	}
+
+	// D7c — assert the HEAD identity DIRECTLY from the group-pick event
+	// (newlyBound on this first request), not only via "no backup
+	// attempted". The mark must not change WHICH member was picked.
+	foundHead := false
+	for _, evt := range drainAllEvents(h.bus) {
+		if evt.Type != "model_member_selected" {
+			continue
+		}
+		d, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if asString(d["member_id"]) == "agentic-Main" {
+			foundHead = true
+		}
+	}
+	if !foundHead {
+		t.Fatal("head identity not observable as agentic-Main in model_member_selected — the mark must not change the pick (R1)")
 	}
 }
 
@@ -415,6 +437,7 @@ type sepStatusProvider struct {
 	mu       sync.Mutex
 	calls    []string
 	statuses map[string]int
+	empty    map[string]bool // models that answer 200 with NO usable content
 }
 
 func (p *sepStatusProvider) Name() string { return "sep-status" }
@@ -423,6 +446,7 @@ func (p *sepStatusProvider) ChatCompletion(ctx context.Context, req *providers.C
 	p.mu.Lock()
 	p.calls = append(p.calls, req.Model)
 	status := p.statuses[req.Model]
+	empty := p.empty[req.Model]
 	p.mu.Unlock()
 	if status == 0 {
 		status = http.StatusOK
@@ -430,9 +454,13 @@ func (p *sepStatusProvider) ChatCompletion(ctx context.Context, req *providers.C
 	if status >= 400 {
 		return nil, &providers.ProviderError{Provider: "sep-status", StatusCode: status, Message: "stub failure"}
 	}
+	content := "ok"
+	if empty {
+		content = ""
+	}
 	return &providers.ChatCompletionResponse{
 		ID: "cc", Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model,
-		Choices: []providers.Choice{{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
+		Choices: []providers.Choice{{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: content}, FinishReason: "stop"}},
 		Usage:   providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 	}, nil
 }
@@ -552,14 +580,15 @@ func TestCacheLayer_T_E_SingleModelGetsHedge(t *testing.T) {
 	if got := provider.callCount(); got < 2 {
 		t.Fatalf("upstream calls = %d, want >= 2 (a single-model list must still hedge)", got)
 	}
-	hasSecond := false
+	secondRows := 0
 	for _, row := range spawnOrderSnapshot(coord) {
 		if strings.HasPrefix(row, "second:") {
-			hasSecond = true
+			secondRows++
 		}
 	}
-	if !hasSecond {
-		t.Fatalf("no second (hedge) row spawned for a single-model list; spawns=%v", spawnOrderSnapshot(coord))
+	// D7b: the hedge is BOUNDED — exactly one second row, never more.
+	if secondRows != 1 {
+		t.Fatalf("second (hedge) rows = %d, want exactly 1; spawns=%v", secondRows, spawnOrderSnapshot(coord))
 	}
 }
 
@@ -644,7 +673,6 @@ func TestCacheLayer_GroupPick_StableUnderUpstreamMarks(t *testing.T) {
 	}
 
 	up := skipcache.New()
-	h.mgr.SetSkipCache(up)
 	// A storm of upstream marks on the DEFAULT member's identity.
 	up.Mark(skipcache.ScopeCredential, p5FixtureCredID, "pick-me", time.Hour)
 	up.Mark(skipcache.ScopeProvider, "openai", "pick-me", time.Hour)
@@ -660,21 +688,43 @@ func TestCacheLayer_GroupPick_StableUnderUpstreamMarks(t *testing.T) {
 	}
 }
 
-// TestCacheLayer_Structural_NoCacheImportsInGroupPick pins the
-// compile-time isolation: the group-pick source imports neither cache
-// package, so cross-layer reads are impossible by construction.
-func TestCacheLayer_Structural_NoCacheImportsInGroupPick(t *testing.T) {
-	src, err := os.ReadFile("../store/database/store_group_rewrite.go")
-	if err != nil {
-		t.Fatalf("read group-rewrite source: %v", err)
-	}
-	body := string(src)
-	for _, forbidden := range []string{
+// TestCacheLayer_Structural_PackageLevelNoCacheImports pins the
+// isolation at PACKAGE level (D2): NO non-test file in
+// pkg/store/database, pkg/grouplb or pkg/modelscache imports either
+// cache package. This is stronger than a file-level grep on the group
+// pick — a new file in those packages could otherwise add a
+// `m.skipCache.Marked(...)` call with no import change, defeating the
+// "impossible by construction" claim.
+func TestCacheLayer_Structural_PackageLevelNoCacheImports(t *testing.T) {
+	forbidden := []string{
 		`"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"`,
 		`"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"`,
-	} {
-		if strings.Contains(body, forbidden) {
-			t.Fatalf("store_group_rewrite.go imports %q — the group pick must not be able to read another layer's cache", forbidden)
+	}
+	for _, dir := range []string{"../store/database", "../grouplb", "../modelscache"} {
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			name := d.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				return nil
+			}
+			body, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			for _, f := range forbidden {
+				if strings.Contains(string(body), f) {
+					t.Errorf("%s imports %q — a cross-layer cache read must not be compilable in the group/model-data packages", path, f)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
 		}
 	}
 }
@@ -718,5 +768,127 @@ func TestCacheLayer_Structural_ModelSuppressionKeyedByRow(t *testing.T) {
 		if !strings.Contains(string(src), tc.needle) {
 			t.Fatalf("%s missing the model-layer suppression guard %q", tc.file, tc.needle)
 		}
+	}
+}
+
+// ─────────────────── D1: upstream-layer reader (credential reorder) ───────────────────
+
+// newTwoCredCfg builds a ConfigSnapshot over a 2-credential internal
+// model for the upstream-reorder unit tests.
+func newTwoCredCfg(t *testing.T) (*ConfigSnapshot, *mockModelsConfig) {
+	t.Helper()
+	mock := &mockModelsConfig{}
+	mock.AddCredential(models.CredentialConfig{ID: "cred-A", Provider: "openai", APIKey: "kA", BaseURL: "http://a"})
+	mock.AddCredential(models.CredentialConfig{ID: "cred-B", Provider: "openai", APIKey: "kB", BaseURL: "http://b"})
+	mock.AddModel(models.ModelConfig{
+		ID: "m", Name: "m", Enabled: true, Internal: true, InternalModel: "m",
+		Credentials: models.TestRefs("cred-A", "cred-B"),
+	})
+	cfg := newTestConfigSnapshot("m")
+	cfg.ModelsConfig = mock
+	cfg.UpstreamSkipCache = skipcache.New()
+	return cfg, mock
+}
+
+// TestCacheLayer_D1_UpstreamMarkReordersCredential: a mark on the
+// selected credential makes the attempt prefer an unmarked sibling; an
+// all-marked model still attempts, preferring the soonest-expiring mark.
+func TestCacheLayer_D1_UpstreamMarkReordersCredential(t *testing.T) {
+	cfg, _ := newTwoCredCfg(t)
+	cur := models.ResolvedCredential{CredentialID: "cred-A", Provider: "openai", InternalModel: "m"}
+
+	// A marked (credential scope only) ⇒ reorder to B.
+	cfg.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
+	got := preferUnmarkedUpstreamCredential(cfg, "m", cur)
+	if got.CredentialID != "cred-B" {
+		t.Fatalf("selected credential = %q, want cred-B (unmarked sibling must be preferred while cred-A is marked)", got.CredentialID)
+	}
+
+	// All marked ⇒ still attempt; prefer the soonest-expiring mark.
+	cfg2, _ := newTwoCredCfg(t)
+	cfg2.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
+	cfg2.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-B", "m", time.Minute)
+	got2 := preferUnmarkedUpstreamCredential(cfg2, "m", models.ResolvedCredential{CredentialID: "cred-A", Provider: "openai", InternalModel: "m"})
+	if got2.CredentialID != "cred-B" {
+		t.Fatalf("all-marked selection = %q, want cred-B (soonest-expiring mark; the attempt is NOT excluded)", got2.CredentialID)
+	}
+	if got2.CredentialID == "" {
+		t.Fatal("all-marked must still resolve an attempt")
+	}
+}
+
+// TestCacheLayer_D7a_SuppressedAttemptWritesNoUpstreamMark: a
+// MODEL-layer suppression makes no upstream call, so it must write no
+// UPSTREAM mark (the marks come from observed failures only).
+func TestCacheLayer_D7a_SuppressedAttemptWritesNoUpstreamMark(t *testing.T) {
+	up := skipcache.New()
+	mc := modelcache.New()
+	provider := &sepStatusProvider{statuses: map[string]int{"m1": http.StatusOK, "m2": http.StatusOK}}
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1", chain: []string{"m2"}}, {id: "m2"}},
+		provider, false, false, "conv-nomark",
+		func(cfg *ConfigSnapshot) {
+			cfg.UpstreamSkipCache = up
+			cfg.ModelSkipCache = mc
+		})
+	mc.Mark("m1", 10*time.Minute)
+
+	coord.Start()
+	if winner := coord.WaitForWinner(); winner == nil {
+		t.Fatal("no winner (m2 should serve)")
+	}
+	if up.Marked(skipcache.ScopeCredential, "cred-m1-0", "m1") {
+		t.Fatal("suppressed attempt wrote an upstream credential mark — suppression must not fabricate an upstream failure")
+	}
+	if up.Marked(skipcache.ScopeProvider, "openai", "m1") {
+		t.Fatal("suppressed attempt wrote an upstream provider mark")
+	}
+}
+
+// ─────────────────── D5: non-stream empty 200 does not win ───────────────────
+
+// TestCacheLayer_D5_NonStreamEmpty200DoesNotWin: a non-stream 200 whose
+// message has no usable content (no text, tool_calls or reasoning) must
+// not win; the chain advances to a model that answers with content.
+func TestCacheLayer_D5_NonStreamEmpty200DoesNotWin(t *testing.T) {
+	provider := &sepStatusProvider{
+		statuses: map[string]int{"m1": http.StatusOK, "m2": http.StatusOK},
+		empty:    map[string]bool{"m1": true},
+	}
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1", chain: []string{"m2"}}, {id: "m2"}},
+		provider, false /*non-stream*/, false, "conv-ns-empty",
+		func(cfg *ConfigSnapshot) { cfg.MaxGenerationTime = 5 * time.Second })
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatalf("no winner — non-stream empty 200 hung instead of advancing")
+	}
+	if winner.modelID != "m2" {
+		t.Fatalf("winner = %s, want m2 (empty non-stream 200 must not win)", winner.modelID)
+	}
+}
+
+// ─────────────────── D6: synthetic 429 does not mask co-failure status ───────────────────
+
+// TestCacheLayer_D6_SuppressedHeadDoesNotMask500: suppressed head
+// (fabricated 429) + a real chain 500 must surface 500, not 502 from a
+// status-agreement mismatch.
+func TestCacheLayer_D6_SuppressedHeadDoesNotMask500(t *testing.T) {
+	provider := &sepStatusProvider{statuses: map[string]int{"m1": http.StatusOK, "m2": http.StatusInternalServerError}}
+	mc := modelcache.New()
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1", chain: []string{"m2"}}, {id: "m2"}},
+		provider, false, false, "conv-mask500",
+		func(cfg *ConfigSnapshot) {
+			cfg.ModelSkipCache = mc
+		})
+	mc.Mark("m1", 10*time.Minute)
+	coord.Start()
+	if winner := coord.WaitForWinner(); winner != nil {
+		t.Fatalf("expected no winner, got %s", winner.modelID)
+	}
+	if info := coord.GetFinalErrorInfo(); info.HTTPStatus != http.StatusInternalServerError {
+		t.Fatalf("final status = %d, want 500 (the synthetic suppression 429 must not mask the real chain failure)", info.HTTPStatus)
 	}
 }

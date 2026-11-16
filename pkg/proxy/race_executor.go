@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -18,9 +19,27 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/normalizers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/translator"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolcall"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
+
+// suppressedAttemptError marks a MODEL-layer attempt suppression (a
+// model-attributable wall live). Its 429 is FABRICATED — no upstream
+// answered — so the common-status agreement must ignore it and let a
+// real co-failure's status surface (D6).
+type suppressedAttemptError struct{ model string }
+
+func (e *suppressedAttemptError) Error() string {
+	return fmt.Sprintf("model %s suppressed by model-layer skip cache", e.model)
+}
+
+// isSuppressedAttempt reports whether err is the synthetic suppression
+// marker (never an observed upstream error).
+func isSuppressedAttempt(err error) bool {
+	var s *suppressedAttemptError
+	return errors.As(err, &s)
+}
 
 // newProviderClient is a variable that can be overridden in tests to inject mock providers
 var newProviderClient = providers.NewProvider
@@ -269,6 +288,97 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 	}, true
 }
 
+// preferUnmarkedUpstreamCredential is the UPSTREAM-layer READER
+// (wi-4d2c8e17 — D1). Given the credential the resolver picked, if its
+// (credential|provider, model) pair is marked in the upstream cache and
+// the model has another credential whose pair is unmarked, re-resolve to
+// that unmarked credential. When ALL credentials are marked it prefers
+// the soonest-expiring mark. Marks REORDER credential preference only:
+// an attempt is never excluded (all-marked still attempts) and the
+// group pick / chain membership are untouched. Pure w.r.t. engine state
+// — no cooldown write, no binding change.
+func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, modelID string, cur models.ResolvedCredential) models.ResolvedCredential {
+	cache := cfg.UpstreamSkipCache
+	if cache == nil || cfg.ModelsConfig == nil {
+		return cur
+	}
+	modelCfg := directGetModel(cfg, modelID)
+	if modelCfg == nil || !modelCfg.Internal || len(modelCfg.Credentials) < 2 {
+		return cur
+	}
+	wireModel := cur.InternalModel
+	if wireModel == "" {
+		wireModel = modelID
+	}
+	if !upstreamCredMarked(cache, cur.CredentialID, cur.Provider, wireModel) {
+		return cur
+	}
+
+	var soonestID string
+	var soonestUntil time.Time
+	for _, ref := range modelCfg.Credentials {
+		if ref.CredentialID == "" {
+			continue
+		}
+		provider := ""
+		if cred := cfg.ModelsConfig.GetCredential(ref.CredentialID); cred != nil {
+			provider = cred.Provider
+		}
+		marked, until := upstreamCredMarkState(cache, ref.CredentialID, provider, wireModel)
+		if !marked {
+			if nr, ok := resolveSpecificInternalCredential(cfg, modelID, ref.CredentialID); ok {
+				log.Printf("[SKIP-CACHE] upstream reorder: model=%s marked cred=%s → unmarked cred=%s", modelID, cur.CredentialID, ref.CredentialID)
+				return nr
+			}
+			continue
+		}
+		if soonestID == "" || until.Before(soonestUntil) {
+			soonestID, soonestUntil = ref.CredentialID, until
+		}
+	}
+	// All credentials marked — still attempt, preferring the
+	// soonest-expiring mark (the most likely to recover soonest).
+	if soonestID != "" && soonestID != cur.CredentialID {
+		if nr, ok := resolveSpecificInternalCredential(cfg, modelID, soonestID); ok {
+			log.Printf("[SKIP-CACHE] upstream reorder: model=%s all marked; prefer soonest-expiring cred=%s (expiry in %s)", modelID, soonestID, time.Until(soonestUntil).Round(time.Second))
+			return nr
+		}
+	}
+	return cur
+}
+
+// upstreamCredMarked reports whether the credential/provider identity is
+// marked for the wire model.
+func upstreamCredMarked(cache *skipcache.Cache, credID, provider, wireModel string) bool {
+	marked, _ := upstreamCredMarkState(cache, credID, provider, wireModel)
+	return marked
+}
+
+// upstreamCredMarkState returns (marked, soonest-expiry) across the
+// credential-scope and provider-scope identities for a wire model.
+func upstreamCredMarkState(cache *skipcache.Cache, credID, provider, wireModel string) (bool, time.Time) {
+	if cache == nil || wireModel == "" {
+		return false, time.Time{}
+	}
+	var soonest time.Time
+	marked := false
+	if credID != "" && cache.Marked(skipcache.ScopeCredential, credID, wireModel) {
+		marked = true
+		if t, ok := cache.SoonestExpiry([]skipcache.Pair{{Scope: skipcache.ScopeCredential, ID: credID}}, wireModel); ok {
+			soonest = t
+		}
+	}
+	if provider != "" && cache.Marked(skipcache.ScopeProvider, strings.ToLower(provider), wireModel) {
+		marked = true
+		if t, ok := cache.SoonestExpiry([]skipcache.Pair{{Scope: skipcache.ScopeProvider, ID: strings.ToLower(provider)}}, wireModel); ok {
+			if soonest.IsZero() || t.Before(soonest) {
+				soonest = t
+			}
+		}
+	}
+	return marked, soonest
+}
+
 // toolRepairEventCallback builds the telemetry callback for the race
 // NON-STREAM repairer — the events.ToolRepairEvent ("tool_repair") publish
 // that the stream path exposes through InternalHandler.eventCallback
@@ -336,7 +446,9 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	if cfg.ModelSkipCache.Marked(req.modelID) {
 		req.SetHTTPStatus(http.StatusTooManyRequests)
 		log.Printf("[RACE] attempt %d model %s suppressed by model-layer skip cache (model-attributable wall live) — advancing into chain", req.id, req.modelID)
-		return fmt.Errorf("model %s suppressed by model-layer skip cache", req.modelID)
+		// D6: a distinguishable synthetic error so the fabricated 429
+		// is excluded from the common-status agreement.
+		return &suppressedAttemptError{model: req.modelID}
 	}
 
 	// Check if we should use secondary upstream model (for modelTypeSecond)
@@ -394,6 +506,18 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// Fallback to normal resolution if secondary not used or not configured
 	if !resolvedOK {
 		resolved, resolvedOK = cfg.ModelsConfig.ResolveInternalConfigWithAffinity(req.modelID, req.conversationKey)
+	}
+
+	// D1 (wi-4d2c8e17) — UPSTREAM-layer reader. Reorder credential
+	// PREFERENCE away from a marked (credential|provider, model) pair to
+	// an unmarked credential for the same model; if every credential is
+	// marked, prefer the soonest-expiring mark. This is an ORDERING
+	// input only — an attempt is NEVER excluded (all-marked still
+	// attempts) and the group pick / chain are untouched. Skipped for
+	// the secondary-model hedge (internalModel != "") and for a
+	// credFailover row (its credential was deliberately reselected).
+	if resolvedOK && internalModel == "" && req.reselectedCredentialID == "" {
+		resolved = preferUnmarkedUpstreamCredential(cfg, req.modelID, resolved)
 	}
 
 	// Capture the resolution result for the post-completion publish site
@@ -592,12 +716,62 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 		}
 	}
 
-	// Add as single chunk
-	if buf := upstreamReq.GetBuffer(); !buf.AddContent(data) {
-		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
+	// Add the response as a single chunk. D5 (wi-4d2c8e17): ONLY count
+	// it as model CONTENT when a choice carries usable output (non-empty
+	// text, tool_calls, reasoning content/details). A non-stream 200
+	// whose choices are all empty is framing only — Add (not AddContent)
+	// so the execute()-level empty-response guard treats it as a failure
+	// and the chain advances (mirror of the stream-lane F3 fix).
+	buf := upstreamReq.GetBuffer()
+	if responseHasUsableContent(resp) {
+		if !buf.AddContent(data) {
+			return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
+		}
+	} else {
+		if !buf.Add(data) {
+			return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
+		}
 	}
 
 	return nil
+}
+
+// responseHasUsableContent reports whether a non-stream completion
+// carries forwardable model output: non-empty text content, tool calls,
+// or reasoning content/details. An agentic response with ONLY tool_calls
+// or reasoning IS a legitimate win — text is NOT required (D5).
+func responseHasUsableContent(resp *providers.ChatCompletionResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for i := range resp.Choices {
+		ch := &resp.Choices[i]
+		msg := ch.Message
+		if msg == nil {
+			msg = ch.Delta
+		}
+		if msg == nil {
+			continue
+		}
+		if len(msg.ToolCalls) > 0 || msg.ReasoningContent != "" || len(msg.ReasoningDetails) > 0 {
+			return true
+		}
+		switch c := msg.Content.(type) {
+		case string:
+			if strings.TrimSpace(c) != "" {
+				return true
+			}
+		case []providers.ContentPart:
+			if len(c) > 0 {
+				return true
+			}
+		case []interface{}:
+			if len(c) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handleInternalStream handles streaming requests for internal providers

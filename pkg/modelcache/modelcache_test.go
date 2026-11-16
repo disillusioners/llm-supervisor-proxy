@@ -103,8 +103,12 @@ func TestModelWall(t *testing.T) {
 		hasReset     bool
 	}{
 		{"Usage limit reached for 5 hour. Your limit will reset at 2026-11-16 18:13:33", true, true},
-		{"Unavailable (reset after 62h 45m 6s)", true, true},
+		{"Your weekly limit will reset at 2026-11-16 18:13:33", true, true},
 		{"Token Plan usage limit", true, false},
+		// D3: a bare account-quota reset is ACCOUNT-wide — it must NOT
+		// mint a model mark (it stays credential-scoped upstream).
+		{"You have exhausted your capacity on this model. Your quota will reset after 4h39m9s.", false, false},
+		{"Unavailable (reset after 62h 45m 6s)", false, false},
 		{"you have reached your usage limit for this minute", false, false}, // throttle
 		{"rate limit exceeded, requests per minute", false, false},          // throttle
 		{"invalid api key", false, false},
@@ -121,5 +125,25 @@ func TestModelWall(t *testing.T) {
 		if hasReset && !until.After(now) {
 			t.Errorf("ModelWall(%q) reset %v is not in the future (now %v)", tc.msg, until, now)
 		}
+	}
+}
+
+// TestModelWall_AccountQuotaNotModelMarked is the D3 pin: the real
+// 9router account-wide quota body and a bare reset banner must never
+// classify as a model-attributable wall, while the genuine 5-hour plan
+// wall must.
+func TestModelWall_AccountQuotaNotModelMarked(t *testing.T) {
+	now := time.Now()
+	for _, quota := range []string{
+		"You have exhausted your capacity on this model. Your quota will reset after 4h39m9s.",
+		"Unavailable (reset after 62h 45m 6s)",
+		"quota exceeded; resets at 2026-11-16 18:13:33",
+	} {
+		if attr, _, _ := ModelWall(quota, now); attr {
+			t.Fatalf("account-quota body %q was classified model-attributable (D3 over-breadth)", quota)
+		}
+	}
+	if attr, _, _ := ModelWall("Usage limit reached for 5 hour. Your limit will reset at 2026-11-16 18:13:33", now); !attr {
+		t.Fatal("genuine 5-hour usage wall must be model-attributable")
 	}
 }

@@ -170,7 +170,6 @@ func TestHandlerGroups_HiddenHealthyMember_LogRepro(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	st := &t1StubState{statuses: map[string]int{
 		"9router-sonnet":   http.StatusServiceUnavailable,
@@ -235,7 +234,6 @@ func TestHandlerGroups_MarkedMembers_Ordering(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	// Mark only the backups (cooling); agentic-Main stays UNMARKED
 	// (healthy) so it is an unmarked candidate.
@@ -318,7 +316,6 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	// Arm agentic-go's benching state: a grouplb member-cooldown row
 	// (old failure, engine-default window) PLUS live skip-cache marks
@@ -436,7 +433,6 @@ func TestHandlerGroups_CrossPoolExhaustion_BeforeTerminal(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 	h.mgr.GroupEngine().InjectAllCoolingForTest("agentic-group")
 
 	st := &t1StubState{statuses: map[string]int{
@@ -534,7 +530,6 @@ func TestHandlerGroups_Reentry_NoRePickSameMember(t *testing.T) {
 	h.up.Close()
 	h.up = httptest.NewServer(newT1Stub(st))
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 	rebuildHandlerWithCache(t, h, cache)
 
 	rec := httptest.NewRecorder()

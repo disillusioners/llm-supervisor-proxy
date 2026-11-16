@@ -1348,55 +1348,7 @@ func (c *raceCoordinator) WaitForWinner() *upstreamRequest {
 func (c *raceCoordinator) GetCommonFailureStatus() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if len(c.requests) == 0 {
-		return 0
-	}
-
-	var commonStatus int
-	for _, req := range c.requests {
-		err := req.GetError()
-		if err == nil {
-			return 0 // Not failed yet or didn't fail
-		}
-
-		// First check if we have the HTTP status stored
-		httpStatus := req.GetHTTPStatus()
-		if httpStatus >= 400 {
-			// Use the stored HTTP status directly
-			if commonStatus == 0 {
-				commonStatus = httpStatus
-			} else if commonStatus != httpStatus {
-				return 0 // Mismatch
-			}
-			continue
-		}
-
-		// Fallback: Parse status text like "upstream returned error: 429 Too Many Requests"
-		errStr := err.Error()
-		var status int
-		if strings.Contains(errStr, "upstream returned error: ") {
-			fmt.Sscanf(errStr, "upstream returned error: %d", &status)
-		} else if strings.Contains(errStr, "idle timeout") || strings.Contains(errStr, "context") || strings.Contains(errStr, "timeout") {
-			status = http.StatusGatewayTimeout
-		} else if strings.Contains(errStr, "buffer limit") {
-			status = http.StatusRequestEntityTooLarge
-		} else {
-			status = http.StatusBadGateway
-		}
-
-		if status == 0 {
-			status = http.StatusBadGateway
-		}
-
-		if commonStatus == 0 {
-			commonStatus = status
-		} else if commonStatus != status {
-			return 0 // Mismatch
-		}
-	}
-
-	return commonStatus
+	return c.getCommonFailureStatusLocked()
 }
 
 // RaceStats contains statistics about a completed race
@@ -1488,7 +1440,15 @@ func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
 		err := req.GetError()
 		if err != nil {
 			failedRequests = append(failedRequests, req)
-			lastError = err
+			// D6: prefer a REAL upstream error over a synthetic
+			// suppression marker for the final message.
+			if isSuppressedAttempt(err) {
+				if lastError == nil {
+					lastError = err
+				}
+			} else {
+				lastError = err
+			}
 
 			// Check for 429 rate limit
 			if req.GetHTTPStatus() == http.StatusTooManyRequests {
@@ -1611,7 +1571,15 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 		err := req.GetError()
 		if err != nil {
 			failedRequests = append(failedRequests, req)
-			lastError = err
+			// D6: prefer a REAL upstream error over a synthetic
+			// suppression marker for the final message.
+			if isSuppressedAttempt(err) {
+				if lastError == nil {
+					lastError = err
+				}
+			} else {
+				lastError = err
+			}
 
 			// Check for 429 rate limit
 			if req.GetHTTPStatus() == http.StatusTooManyRequests {
@@ -1701,17 +1669,29 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 	}
 }
 
-// getCommonFailureStatusLocked is the internal version of GetCommonFailureStatus that assumes lock is held
+// getCommonFailureStatusLocked is the internal version of GetCommonFailureStatus that assumes lock is held.
+//
+// D6 (wi-4d2c8e17): a MODEL-layer suppressed attempt carries a
+// FABRICATED 429 (no upstream answered). It is excluded from the
+// status-agreement so a real co-failure's status surfaces (e.g.
+// suppressed head + chain 500 ⇒ 500, not 502). When EVERY failed
+// attempt is suppressed (the whole list is model-walled) the status is
+// the suppression semantic, 429.
 func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 	if len(c.requests) == 0 {
 		return 0
 	}
 
 	var commonStatus int
+	anySuppressed := false
 	for _, req := range c.requests {
 		err := req.GetError()
 		if err == nil {
 			return 0 // Not failed yet or didn't fail
+		}
+		if isSuppressedAttempt(err) {
+			anySuppressed = true
+			continue
 		}
 
 		// First check if we have the HTTP status stored
@@ -1750,6 +1730,9 @@ func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 		}
 	}
 
+	if commonStatus == 0 && anySuppressed {
+		return http.StatusTooManyRequests
+	}
 	return commonStatus
 }
 
@@ -2181,6 +2164,15 @@ func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest
 	ttl := c.cfg.ModelSkipCacheTTL
 	if ttl <= 0 {
 		ttl = modelcache.DefaultTTL
+	}
+	// D4: clamp the FIXED TTL at the runtime seam symmetric with the
+	// reset path (config Validate only runs on Save; a hot-set value
+	// can be out of range).
+	if ttl < time.Minute {
+		ttl = time.Minute
+	}
+	if ttl > 24*time.Hour {
+		ttl = 24 * time.Hour
 	}
 	if hasReset {
 		window := until.Sub(now)

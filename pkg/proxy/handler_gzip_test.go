@@ -174,7 +174,7 @@ func TestGzipMiddleware_OpenAI_NoEncoding_Unchanged(t *testing.T) {
 		seenUpstream, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"id":"cc","object":"chat.completion","model":"test-upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
 	})
 	upstream := httptest.NewServer(upstreamHandler)
 	defer upstream.Close()

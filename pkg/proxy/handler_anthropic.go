@@ -2650,6 +2650,14 @@ func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelK
 			if ttl <= 0 {
 				ttl = modelcache.DefaultTTL
 			}
+			// D4: clamp the fixed TTL at the runtime seam (symmetric
+			// with the reset path).
+			if ttl < time.Minute {
+				ttl = time.Minute
+			}
+			if ttl > 24*time.Hour {
+				ttl = 24 * time.Hour
+			}
 			if hasReset {
 				window := until.Sub(now)
 				if window < time.Minute {

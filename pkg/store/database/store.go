@@ -53,7 +53,6 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -721,25 +720,11 @@ type ModelsManager struct {
 	// must not hijack traffic it isn't serving).
 	claims map[string]string
 
-	// skipCache (wi-7769a812 part 2 / USER RULING D3) is the global
-	// upstream skip registry consulted by the cache-aware group
-	// member re-validation (isServableGroupMember). MAY BE NIL:
-	// unwired (legacy tests / plain NewModelsManager callers)
-	// degrade to the base Am28 checks byte-identically. Injected
-	// from cmd/main.go via SetSkipCache — the SAME instance the
-	// proxy handler marks, so a failure mark benches the member at
-	// selection time for the configured TTL.
-	skipCache *skipcache.Cache
-}
-
-// SetSkipCache wires the global upstream skip cache (wi-7769a812
-// part 2 / D3) into the manager's selection path. Call once at boot,
-// BEFORE the first request; the setter exists so NewModelsManager's
-// signature (and its ~30 test callers) stay untouched.
-func (m *ModelsManager) SetSkipCache(c *skipcache.Cache) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.skipCache = c
+	// wi-4d2c8e17 / D2: the upstream skip cache is deliberately NOT
+	// held here. The group pick cannot read any health cache, and the
+	// manager holds no reference to one — cross-layer reads are
+	// impossible by construction (package-level import pin), not by a
+	// remembered rule.
 }
 
 // Engine returns the underlying *credentiallb.Engine. It is non-nil
