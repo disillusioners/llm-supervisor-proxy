@@ -61,6 +61,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
@@ -538,6 +539,26 @@ loop:
 				break loop
 			}
 
+			// wi-4d2c8e17 / ruling 2 — MODEL-layer attempt suppression
+			// (parity with the OpenAI lane's executor guard). A
+			// model-attributable wall live on this model skips the
+			// attempt at ZERO cost and the walk proceeds INTO the
+			// model's chain. Placed after the commit guard: once the
+			// stream is committed no member/model switch is possible.
+			if arc.conf.ModelSkipCache.Marked(currentModel) {
+				log.Printf("[grouplb] anthropic request %s: model %s suppressed by model-layer skip cache — advancing into chain", arc.reqID, currentModel)
+				arc.servedModel = currentModel
+				arc.lastStatusCode = http.StatusTooManyRequests
+				arc.lastError = []byte("model suppressed by model-layer skip cache")
+				arc.lastAttemptCredentialID = ""
+				arc.lastAttemptProvider = ""
+				arc.lastAttemptModel = ""
+				if arc.conf.stickyActive(arc.conversationKey) {
+					h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
+				}
+				continue
+			}
+
 			// Save mutable arc state for restoration on failure
 			savedIsAnthropicUpstream := arc.isAnthropicUpstream
 			savedTargetURL := arc.targetURL
@@ -596,9 +617,9 @@ loop:
 				// request and its cooldown must survive
 				// (CRITICAL-FIX part 3 review, item 4 — mirror of the
 				// OpenAI-lane hook; both lanes funnel through
-				// clearWinnerUpstreamSkip). agentic-go WON at 12:49:06
+				// clearWinnerLayerState). agentic-go WON at 12:49:06
 				// while its marks stayed live — that must not recur.
-				h.clearWinnerUpstreamSkip(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel, currentModel)
+				h.clearWinnerLayerState(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel, currentModel)
 				return
 			}
 
@@ -608,7 +629,7 @@ loop:
 			// benches the attempt's (credential, wire-model) AND
 			// (provider, wire-model) pair for the config TTL so member
 			// selection becomes health-aware (Phase-0 A2 fix).
-			h.markAnthropicUpstreamSkip(arc)
+			h.markAnthropicUpstreamSkip(arc, currentModel)
 
 			// wi-7769a812 part 2 — P2 fail-fast: a client-attributable
 			// failure (400/413/415/422 / client-cancelled) stops the
@@ -667,30 +688,41 @@ loop:
 		// failure (groupPick nil).
 		if arc.groupPick != nil &&
 			!arc.payloadCommitted &&
-			arc.groupAdvances < models.MaxGroupMembers &&
-			!memberAdvanceBlocked(classifyAnthropicFailure(arc)) {
-			// F3 (CRITICAL-FIX part 3 review, item 3): harvest THIS
-			// walk's attempted set into the within-request tried-set,
-			// mirroring the OpenAI lane's coordinator.AttemptedModelIDs
-			// union (handler.go, winner==nil arm). The walk body above
-			// records nothing, so a member attempted as ANOTHER
-			// member's chain entry was invisible to the tried-set and
-			// could be re-offered as a member head by the re-entry
-			// below — the double-run class. Reaching this gate means
-			// the inner loop exhausted arc.modelList (a break exits
-			// before here), so every current entry — member head AND
-			// chain entries — was attempted THIS request. Non-member
-			// entries are inert here: the set is only consulted
-			// against group-member offers.
-			if arc.groupTriedMembers == nil {
-				arc.groupTriedMembers = make(map[string]bool)
+			arc.groupAdvances < models.MaxGroupMembers {
+			failedGroup := arc.groupPick.GroupID
+			failedMember := arc.groupPick.MemberID
+			fr := classifyAnthropicFailure(arc)
+			if !memberAdvanceBlocked(fr) {
+				// F3 (CRITICAL-FIX part 3 review, item 3): harvest THIS
+				// walk's attempted set into the within-request tried-set,
+				// mirroring the OpenAI lane's coordinator.AttemptedModelIDs
+				// union (handler.go, winner==nil arm). The walk body above
+				// records nothing, so a member attempted as ANOTHER
+				// member's chain entry was invisible to the tried-set and
+				// could be re-offered as a member head by the re-entry
+				// below — the double-run class. Reaching this gate means
+				// the inner loop exhausted arc.modelList (a break exits
+				// before here), so every current entry — member head AND
+				// chain entries — was attempted THIS request. Non-member
+				// entries are inert here: the set is only consulted
+				// against group-member offers.
+				if arc.groupTriedMembers == nil {
+					arc.groupTriedMembers = make(map[string]bool)
+				}
+				for _, attemptedModel := range arc.modelList {
+					arc.groupTriedMembers[attemptedModel] = true
+				}
+				if h.tryGroupReentryAnthropic(arc) {
+					// GROUP-layer observability (wi-4d2c8e17 — LABELS):
+					// the genuine member hop is a GROUP event.
+					h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+					h.publishGroupHop("group_fallback_attempted", failedGroup, failedMember, arc.groupPick.MemberID, fr.String())
+					h.publishGroupHop("group_fallback_advanced", failedGroup, failedMember, arc.groupPick.MemberID, fr.String())
+					continue loop
+				}
 			}
-			for _, attemptedModel := range arc.modelList {
-				arc.groupTriedMembers[attemptedModel] = true
-			}
-			if h.tryGroupReentryAnthropic(arc) {
-				continue loop
-			}
+			h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+			h.publishGroupHop("group_fallback_exhausted", failedGroup, failedMember, "", fr.String())
 		}
 		break
 	}
@@ -749,6 +781,12 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 		// the dispatch ruling — only the credential read + the
 		// rate-limit hook are new).
 		resolved, resolvedOK := arc.conf.ModelsConfig.ResolveInternalConfigWithAffinity(modelConfig.ID, arc.conversationKey)
+		// D1 parity: reorder credential PREFERENCE away from a marked
+		// upstream identity to an unmarked sibling (ordering only —
+		// never excludes the attempt).
+		if resolvedOK {
+			resolved = preferUnmarkedUpstreamCredential(&arc.conf, h.credEngine, modelConfig.ID, resolved)
+		}
 		var cred *models.CredentialConfig
 		if resolvedOK {
 			cred = arc.conf.ModelsConfig.GetCredential(resolved.CredentialID)
@@ -1185,6 +1223,24 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// side channel because the legacy recorder-based path doesn't drive
 	// the translator — that path is unchanged.
 
+	// F3 parity (fix round #1 — Anthropic lane, live internal stream):
+	// a STREAM that carried no usable output (no content/thinking/tool
+	// events) is not a win — UNLESS the finalize frames were already
+	// written (D-A, fix round #2: the done arm commits the client to
+	// this stream once message_delta + message_stop are on the wire);
+	// then the completion stays SERVED and no switch is possible.
+	// Nothing payload-bearing emitted ⇒ failing the attempt keeps the
+	// pre-commit switch window open and the walk continues.
+	// STREAM-only: a non-stream live request never drives the
+	// translator (its usable gate lives in handleNonStream).
+	if arc.isStream && arcTranslator != nil && !arc.payloadCommitted {
+		if st := arcTranslator.State(); st == nil ||
+			!usableModelOutput(st.AccumulatedContent.String(), st.ThinkingContent.String(), len(st.ToolCalls), 0) {
+			log.Printf("[ANTHROPIC] request %s: model %s live internal stream carried no usable output — continuing the fallback walk", arc.reqID, arc.servedModel)
+			return false
+		}
+	}
+
 	// Mirror the translator's accumulated text + tool-calls into the
 	// arc builders (the StreamState is the source of truth; the arc
 	// builders feed finalizeAnthropicSuccess).
@@ -1217,6 +1273,30 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	return true
 }
 
+// openAIBodyTerminalFinish reports whether an OpenAI-shaped body's
+// choices carry a TERMINAL finish_reason ("content_filter" / "length").
+// D-B (fix round #2): such a completion — even with empty content — is
+// the upstream's final answer and must be forwarded, mirroring the race
+// lane's responseHasUsableContent rule. Local read of the raw body; the
+// shared extractors deliberately keep their signatures unchanged.
+func openAIBodyTerminalFinish(body []byte) bool {
+	var parsed struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return false
+	}
+	for _, ch := range parsed.Choices {
+		switch ch.FinishReason {
+		case "content_filter", "length":
+			return true
+		}
+	}
+	return false
+}
+
 // handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
 func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
 	debugLog("=== INTERNAL OPENAI RESPONSE ===")
@@ -1227,6 +1307,17 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+	// F3 parity (fix round #1) + D-B (fix round #2): a content-less 200
+	// is not a usable win — EXCEPT the terminal finish_reason shapes
+	// (content_filter / length): that completion IS the upstream's
+	// answer and must be forwarded, mirroring the race lane's rule.
+	// The gate sits BEFORE any client byte is written, so the walk can
+	// continue into the chain (shared predicate usableModelOutput).
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) && !openAIBodyTerminalFinish(openaiBody) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
 
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(openaiBody, arc.originalModel)
@@ -1257,6 +1348,13 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+	// F3 parity (fix round #1): content-less buffered stream — gate
+	// BEFORE any client byte is written so the walk continues.
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less stream — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
 
 	// Translate buffered OpenAI stream to Anthropic format
 	anthropicEvents, err := translator.TranslateBufferedStream(openaiBody, arc.originalModel)
@@ -1307,6 +1405,14 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+	// F3 parity (fix round #1) + D-B (fix round #2): content-less 200 —
+	// gate before any client byte so the walk continues, with the same
+	// content_filter / length terminal-finish exception as the race lane.
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) && !openAIBodyTerminalFinish(bodyBytes) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
 
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(bodyBytes, arc.originalModel)
@@ -1507,6 +1613,16 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 		arc.clientWriteErr = h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
 	}
 
+	// F3 parity (fix round #1): no payload frame was ever forwarded
+	// (payloadCommitted stays false on a content-less stream — the
+	// translator's synthesized framing deliberately does not commit).
+	// Nothing usable reached the client, so the attempt is a failure and
+	// the walk continues (the pre-commit switch window is open).
+	if !arc.payloadCommitted {
+		log.Printf("[ANTHROPIC] request %s: model %s live stream carried no payload frame — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
+
 	// Persist the assistant message and publish completion.
 	h.finalizeAnthropicSuccess(arc)
 	return true
@@ -1700,6 +1816,15 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			arc.accumulatedResponse.WriteString(content)
 			arc.accumulatedThinking.WriteString(thinking)
 			arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+			// F3 parity (fix round #1): content-less buffered stream.
+			// Headers/framing may already be on the wire, but NO payload
+			// frame has been forwarded — the pre-commit advance window
+			// is open, so the walk continues.
+			if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+				log.Printf("[ANTHROPIC] request %s: model %s answered a content-less stream — continuing the fallback walk", arc.reqID, arc.servedModel)
+				return false
+			}
 
 			// Translate buffered stream and flush
 			anthropicEvents, err := translator.TranslateBufferedStream(buffer.Bytes(), arc.originalModel)
@@ -2156,15 +2281,20 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 		return false
 	}
 
-	// Extract content for storage
+	// Extract content for storage (and the per-attempt usable tally the
+	// F3 gate below reads).
 	var anthropicResp translator.AnthropicResponse
+	blockText, blockThinking := "", ""
+	blockToolCalls := 0
 	if err := json.Unmarshal(bodyBytes, &anthropicResp); err == nil {
 		for _, block := range anthropicResp.Content {
 			switch block.Type {
 			case "text":
 				arc.accumulatedResponse.WriteString(block.Text)
+				blockText += block.Text
 			case "thinking":
 				arc.accumulatedThinking.WriteString(block.Thinking)
+				blockThinking += block.Thinking
 			case "tool_use":
 				inputStr := string(block.Input)
 				arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
@@ -2175,8 +2305,17 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 						Arguments: inputStr,
 					},
 				})
+				blockToolCalls++
 			}
 		}
+	}
+
+	// F3 parity (fix round #1): a 200 whose content blocks carry no
+	// usable output is not a win — gate BEFORE the client write so the
+	// walk continues.
+	if !usableModelOutput(blockText, blockThinking, blockToolCalls, 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
 	}
 
 	// Forward response as-is (last-write outcome gates the sticky record)
@@ -2275,6 +2414,14 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 	if err := scanner.Err(); err != nil {
 		log.Printf("Passthrough stream scanner error: %v", err)
 		arc.deliveryTruncated = true
+	}
+
+	// F3 parity (fix round #1): zero payload frames forwarded — nothing
+	// usable reached the client; fail the attempt so the walk continues
+	// (pre-commit switch window open).
+	if !arc.payloadCommitted {
+		log.Printf("[ANTHROPIC] request %s: model %s passthrough stream carried no payload frame — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
 	}
 
 	h.finalizeAnthropicSuccess(arc)
@@ -2588,24 +2735,37 @@ func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
 //	skip/degrade wording): the cache is an optimization, not the
 //	truth: it may reorder candidates, never exclude them — a marked
 //	identity is DEMOTED (soonest-expiring first), never invisible,
-//	and a WIN clears its own marks (clearWinnerUpstreamSkip).
-func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext) {
+//	and a WIN clears its own marks (clearWinnerLayerState).
+func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelKey string) {
 	if arc == nil || arc.conf.UpstreamSkipCache == nil {
 		return
 	}
 	if !isAnthropicLimitClass(arc) {
 		return
 	}
-	if arc.lastAttemptCredentialID == "" && arc.lastAttemptProvider == "" {
-		return
-	}
 	wireModel := arc.lastAttemptModel
 	if wireModel == "" {
 		wireModel = arc.originalModel
 	}
-	ttl := arc.conf.UpstreamSkipCacheTTL
-	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
-	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+	if arc.lastAttemptCredentialID != "" || arc.lastAttemptProvider != "" {
+		ttl := arc.conf.UpstreamSkipCacheTTL
+		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
+		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+	}
+	// wi-4d2c8e17 / ruling 2 — MODEL layer (parity with the OpenAI
+	// lane's markModelWallForErrorLocked): a model-attributable usage
+	// wall marks the MODEL identity so the walk suppresses that
+	// model's next attempt at zero cost and proceeds into its chain.
+	// Keyed by the ROW identity (modelKey) — the same key the
+	// suppression site reads.
+	if arc.conf.ModelSkipCache != nil && modelKey != "" && len(arc.lastError) > 0 {
+		now := time.Now()
+		// The classify→clamp→mark policy lives in ONE place (tidier
+		// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
+		// [1m,24h] clamp (fixed AND reset windows), and the
+		// MarkUntil-vs-Mark branch.
+		modelcache.ApplyWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
+	}
 }
 
 // anthropicEventIsPing reports whether a translated Anthropic SSE

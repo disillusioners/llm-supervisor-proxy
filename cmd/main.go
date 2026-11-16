@@ -24,6 +24,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/memlimit"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -232,19 +233,27 @@ func main() {
 
 	// Initialize Proxy Config (interface consumers see modelsConfig).
 	// wi-7769a812 part 2 / USER RULING D3 — the global upstream skip
-	// cache: ONE process-wide instance shared by the proxy (marking
-	// on limit-class failures + member-advance gates) and the models
-	// manager (cache-aware member selection). Nil-safe everywhere;
-	// constructed unconditionally so a runtime config flip needs no
-	// restart (the TTL rides the hot ConfigSnapshot).
+	// cache: ONE process-wide instance, written by the proxy on
+	// limit-class failures and read by the attempt path (credential
+	// reordering) + win-clear. It is NOT wired into the models manager:
+	// the group pick never reads it (wi-4d2c8e17 / D2). Nil-safe
+	// everywhere; constructed unconditionally so a runtime config flip
+	// needs no restart (the TTL rides the hot ConfigSnapshot).
 	upstreamSkipCache := skipcache.New()
-	modelsMgr.SetSkipCache(upstreamSkipCache)
+
+	// wi-4d2c8e17 / ruling 2 — the MODEL-layer cache: ONE
+	// process-wide instance, written by model-attributable walls and
+	// read by attempt suppression (both protocol lanes). It is
+	// deliberately NOT wired into the models manager: the group pick
+	// must never read it (layer isolation by construction).
+	modelSkipCache := modelcache.New()
 
 	proxyConfig := &proxy.Config{
 		ConfigMgr:         configMgr,
 		ModelsConfig:      modelsConfig,
 		EventBus:          bus,
 		UpstreamSkipCache: upstreamSkipCache,
+		ModelSkipCache:    modelSkipCache,
 	}
 
 	// Initialize Token Store

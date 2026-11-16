@@ -1,5 +1,18 @@
-// Package skipcache — the global upstream skip cache (wi-7769a812
-// part 2 / USER RULING D3, user-designed, FINAL).
+// Package skipcache — the UPSTREAM-layer health cache (wi-4d2c8e17 /
+// ruling 2; originally wi-7769a812 part 2 / USER RULING D3).
+//
+// LAYER CONTRACT (single source of truth for the three-cache split):
+//
+//	GROUP    — "is this member servable IN THIS GROUP?"  (grouplb policy)
+//	MODEL    — "is this MODEL limited/unavailable?"      (pkg/modelcache)
+//	UPSTREAM — "is this REMOTE/CREDENTIAL working?"      (this package)
+//
+// The layers NEVER read each other's state. THIS cache is WRITTEN by
+// credential/provider failures (a 429/402 on a specific credential, or
+// a provider outage) for a (credential|provider, model) pair, and READ
+// by credential selection + attempt suppression ONLY. It is NEVER read
+// by the group pick (structurally: pkg/store/database's group-rewrite
+// file does not import this package) and never decides membership.
 //
 // A process-wide, in-memory registry of LIMIT-CLASS upstream failures:
 // (credential, model) and (provider, model) pairs are MARKED when an
@@ -10,18 +23,18 @@
 // per-request via the proxy's ConfigSnapshot); the expiry TIME is
 // minted at mark time so every reader sees one consistent window.
 //
-// ORDERING-NOT-FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE):
+// ORDERING-NOT-FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE),
+// extended by the layer separation (wi-4d2c8e17):
 //
 //	The cache is an optimization, not the truth: it may reorder
-//	candidates, never exclude them.
+//	candidates, never exclude them — and it may suppress an ATTEMPT,
+//	never a PICK or a CHAIN.
 //
-// Selection consults the cache ONLY to ORDER: unmarked candidates
-// first (normal pool/weight/sticky order), then marked ones —
-// soonest-expiring first (the most likely-recovered upstream). A
-// marked member is a DEMOTED candidate, never an invisible one: a
-// request may only fail after every member×credential has genuinely
-// failed THIS request, so execution proceeds through the demoted
-// list when the unmarked head cannot serve. A WIN clears the
+// Upstream marks REORDER credential preference in the attempt path
+// (preferUnmarkedUpstreamCredential: an unmarked, non-cooling sibling
+// is preferred; all-marked still attempts the soonest-recovering) —
+// attempt SUPPRESSION is the MODEL layer's job (pkg/modelcache), and
+// neither ever benches a member from the group pick. A WIN clears the
 // winner's own live marks (Cache.Clear) — a proven-healthy identity
 // must not stay benched.
 //
@@ -142,15 +155,22 @@ func (c *Cache) Clear(scope, id, model string) {
 }
 
 // Pair is one (scope, id) candidate to probe for a model — the shape
-// selection call sites build from a member's credential refs.
+// the attempt path's credential-reorder reader
+// (preferUnmarkedUpstreamCredential) builds from a model's credential
+// refs to probe a credential's/provider's live marks.
 type Pair struct {
 	Scope string
 	ID    string
 }
 
-// AnyMarked reports whether ANY of the pairs is marked for model —
-// the "at least one healthy upstream remains" probe. Nil receiver /
-// empty pairs: false.
+// AnyMarked reports whether ANY of the pairs is marked for model.
+// Nil receiver / empty pairs: false.
+//
+// NOTE (wi-4d2c8e17 layer separation): AnyMarked has NO production
+// caller — the retired group-selection health probe was its consumer.
+// Do NOT use it for selection/health-probing: R1 forbids it (the group
+// pick must never read health marks). It exists only as package API
+// and is pinned by this package's own tests.
 func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 	if c == nil {
 		return false
@@ -164,9 +184,10 @@ func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 }
 
 // SoonestExpiry returns the EARLIEST live expiry among the pairs for
-// model — the demoted-sweep ORDERING comparator (unmarked first, then
-// marked soonest-expiring first). ok=false when nothing is marked.
-// Nil receiver: ok=false.
+// model — the recovery-ordering input the attempt path's
+// credential-reorder reader uses to prefer the soonest-recovering
+// candidate when every credential is marked. ok=false when nothing is
+// marked. Nil receiver: ok=false.
 func (c *Cache) SoonestExpiry(pairs []Pair, model string) (time.Time, bool) {
 	if c == nil {
 		return time.Time{}, false

@@ -323,6 +323,11 @@ export type EventType =
   | 'group_fallback_advanced'
   | 'group_fallback_exhausted'
   | 'group_member_failed'
+  // Model-layer chain-fallback observability (wi-4d2c8e17 LABELS)
+  | 'model_failed'
+  | 'model_fallback_attempted'
+  | 'model_fallback_advanced'
+  | 'model_fallback_exhausted'
   | 'internal_error';
 
 export interface EventData {

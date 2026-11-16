@@ -22,6 +22,11 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
+// errContentLessCompletion marks an upstream 200 that carries no
+// forwardable model output (F3 parity, fix round #1). The Anthropic
+// walk treats it as an attempt failure so the fallback chain runs.
+var errContentLessCompletion = errors.New("content-less completion (no usable model output)")
+
 // InternalHandler handles requests to internal providers (bypassing upstream)
 type InternalHandler struct {
 	config        *models.ModelConfig
@@ -472,6 +477,16 @@ func (h *InternalHandler) handleNonStream(ctx context.Context, provider provider
 	// extractOpenAIResponseContentFromJSON + TranslateNonStreamResponse
 	// pass can run on the recorder body).
 	if h.liveArc != nil {
+		// F3 parity (fix round #1 — Anthropic lane, live non-stream
+		// internal variant): a content-less 200 is not a usable win.
+		// Gated BEFORE any client byte is written (this site owns the
+		// wire write in live mode), using the SHARED race-lane
+		// predicate. The caller treats the error as an attempt failure
+		// and the fallback walk continues.
+		if !responseHasUsableContent(resp) {
+			log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", h.liveArc.reqID, h.liveArc.servedModel)
+			return errContentLessCompletion
+		}
 		openaiBytes, terr := json.Marshal(resp)
 		if terr != nil {
 			log.Printf("[DEBUG INTERNAL] live non-stream marshal failed: %v", terr)
@@ -791,6 +806,20 @@ func (h *InternalHandler) handleStream(ctx context.Context, provider providers.P
 						if f, ok := w.(http.Flusher); ok {
 							f.Flush()
 						}
+					}
+					// D-A (fix round #2): the FINALIZE frames
+					// (message_delta + message_stop) are payload on the
+					// wire — the client is committed to THIS stream. The
+					// internal live path previously never set the commit
+					// flag, so the fallback walk's switch window stayed
+					// open after these frames and a content-less
+					// completion could be followed by a SECOND Anthropic
+					// stream from the chain target (client-visible
+					// corruption). Committing here keeps an empty live
+					// completion SERVED cleanly (pre-round behavior) and
+					// closes the double-write window.
+					if h.liveArc != nil {
+						h.liveArc.payloadCommitted = true
 					}
 				}
 				return nil

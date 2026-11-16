@@ -123,7 +123,6 @@ func TestWinClear_ReachesEngineThroughCachedConfig(t *testing.T) {
 	seedWinClearPair(t, h, nil)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 	eng := h.mgr.GroupEngine()
 
 	// Arm the benched winner wc-b: a grouplb cooldown row (engine
