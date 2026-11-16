@@ -214,6 +214,12 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 	if incoming.UpstreamSkipCacheTTL != 0 {
 		result.UpstreamSkipCacheTTL = incoming.UpstreamSkipCacheTTL
 	}
+	// wi-4d2c8e17 / ruling 2: model-layer TTL — same 0-means-not-sent
+	// shape (a zero-clearing PUT falls back to the 15m default at the
+	// Clone seam rather than disabling the model layer).
+	if incoming.ModelSkipCacheTTL != 0 {
+		result.ModelSkipCacheTTL = incoming.ModelSkipCacheTTL
+	}
 
 	return result
 }

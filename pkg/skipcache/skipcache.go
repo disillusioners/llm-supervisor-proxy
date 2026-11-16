@@ -1,5 +1,18 @@
-// Package skipcache — the global upstream skip cache (wi-7769a812
-// part 2 / USER RULING D3, user-designed, FINAL).
+// Package skipcache — the UPSTREAM-layer health cache (wi-4d2c8e17 /
+// ruling 2; originally wi-7769a812 part 2 / USER RULING D3).
+//
+// LAYER CONTRACT (single source of truth for the three-cache split):
+//
+//	GROUP    — "is this member servable IN THIS GROUP?"  (grouplb policy)
+//	MODEL    — "is this MODEL limited/unavailable?"      (pkg/modelcache)
+//	UPSTREAM — "is this REMOTE/CREDENTIAL working?"      (this package)
+//
+// The layers NEVER read each other's state. THIS cache is WRITTEN by
+// credential/provider failures (a 429/402 on a specific credential, or
+// a provider outage) for a (credential|provider, model) pair, and READ
+// by credential selection + attempt suppression ONLY. It is NEVER read
+// by the group pick (structurally: pkg/store/database's group-rewrite
+// file does not import this package) and never decides membership.
 //
 // A process-wide, in-memory registry of LIMIT-CLASS upstream failures:
 // (credential, model) and (provider, model) pairs are MARKED when an
@@ -10,20 +23,17 @@
 // per-request via the proxy's ConfigSnapshot); the expiry TIME is
 // minted at mark time so every reader sees one consistent window.
 //
-// ORDERING-NOT-FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE):
+// ORDERING-NOT-FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE),
+// extended by the layer separation (wi-4d2c8e17):
 //
 //	The cache is an optimization, not the truth: it may reorder
-//	candidates, never exclude them.
+//	candidates, never exclude them — and it may suppress an ATTEMPT,
+//	never a PICK or a CHAIN.
 //
-// Selection consults the cache ONLY to ORDER: unmarked candidates
-// first (normal pool/weight/sticky order), then marked ones —
-// soonest-expiring first (the most likely-recovered upstream). A
-// marked member is a DEMOTED candidate, never an invisible one: a
-// request may only fail after every member×credential has genuinely
-// failed THIS request, so execution proceeds through the demoted
-// list when the unmarked head cannot serve. A WIN clears the
-// winner's own live marks (Cache.Clear) — a proven-healthy identity
-// must not stay benched.
+// Upstream marks suppress a specific credential's attempt (so
+// credential selection rotates away); they never bench a member from
+// the group pick. A WIN clears the winner's own live marks
+// (Cache.Clear) — a proven-healthy identity must not stay benched.
 //
 // Concurrency: the read path is a single RLock map lookup on a
 // composite string key (no allocation on the read path beyond the

@@ -1,34 +1,24 @@
 package proxy
 
-// Group-fallback observability events (wi-7769a812 part 1 — ultimate
-// retirement replacement; part 2 flipped the exhaust arm). The four
-// event types are published from the race-path group advance site
-// (race_coordinator.go Case-1) and are gated on group traffic ONLY
-// (c.groupPick != nil — plain model chains keep the race_*
-// vocabulary untouched).
+// Model + group fallback observability events (wi-4d2c8e17 — LABELS;
+// supersedes the wi-7769a812 group-only vocabulary).
 //
-// Coverage contract (this file is the ONLY regression guard):
+// Contract (this file is the regression guard):
 //
-//	(a) a group ADVANCE publishes group_member_failed +
-//	    group_fallback_attempted + group_fallback_advanced, once per
-//	    failed member, carrying the payload keys group_id / member_id /
-//	    from_member / to_member / reason (+ id) — end-to-end through a
-//	    live coordinator;
-//	(b) a chain END resolves terminally AND — since part 2's
-//	    exhaustive fallback flipped the admission gate
-//	    (chainEndPending) — PUBLISHES member_failed for the chain-end
-//	    member + group_fallback_exhausted, with the publish contract
-//	    (member naming, group_id, classified reason, and the ABSENT
-//	    to_member key) asserted end-to-end;
-//	(c) the exhausted payload contract is pinned at the publisher
-//	    seam as well (the to_member-absent contrast with
-//	    member_failed).
+//	MODEL layer — a CHAIN hop inside a member's pipeline emits
+//	  model_failed / model_fallback_attempted / model_fallback_advanced
+//	  / model_fallback_exhausted, naming MODELS only. It NEVER asserts
+//	  group membership (no group_id / member_id): a chain target may be
+//	  inactive / not group-exposed by design.
 //
-// Part-2 reachability (supersedes the part-1 note): the exhaust arm
-// is LIVE. A chain-end failure that no spawn branch consumes reaches
-// Case-1 once via the chainEndPending gate disjunct, publishes the
-// member_failed + exhausted pair, and latches (chainEndPublished) so
-// the terminal resolves exactly once.
+//	GROUP layer — the genuine member hop (handler re-entry) emits
+//	  group_member_failed / group_fallback_attempted /
+//	  group_fallback_advanced / group_fallback_exhausted, with the
+//	  group vocabulary. Covered by the handler-level group tests.
+//
+// The coordinator-level subtests below drive model_* directly; the
+// third subtest pins the publisher payload contract (exhausted omits
+// to_model).
 
 import (
 	"strings"
@@ -63,19 +53,18 @@ func payloadMap(t *testing.T, evt events.Event) map[string]interface{} {
 	return data
 }
 
-func TestCoordinator_GroupFallbackEvents(t *testing.T) {
-	t.Run("advance publishes member_failed, attempted, advanced per failed member", func(t *testing.T) {
+func TestCoordinator_ModelFallbackEvents(t *testing.T) {
+	t.Run("chain advance publishes model_failed, attempted, advanced per hop", func(t *testing.T) {
 		// Chain m1 → m2 → m3, all single-credential; the provider
 		// quota-fails the first TWO calls (m1, m2) and m3 serves.
 		coord, provider, bus, _ := newLayeredChainEnv(
 			t,
 			[]layeredChainModel{{id: "m1", credCount: 1}, {id: "m2", credCount: 1}, {id: "m3", credCount: 1}},
 			2,
-			"conv-group-fallback-advance",
+			"conv-model-fallback-advance",
 		)
-		// Group-traffic gate: stamp the pick BEFORE Start — the same
-		// shape the handler's applyGroupRewrite produces for a group
-		// whose member list the coordinator received as modelIDs.
+		// Group traffic (the picked member is m1) — model_* events do
+		// not depend on this, but the production shape carries it.
 		coord.groupPick = &groupPickInfo{GroupID: "g-adv", MemberID: "m1", Pool: models.PoolDefault}
 
 		coord.Start()
@@ -91,113 +80,96 @@ func TestCoordinator_GroupFallbackEvents(t *testing.T) {
 		}
 
 		all := drainAllEvents(bus)
-		memberFailed := eventsOfType(all, "group_member_failed")
-		attempted := eventsOfType(all, "group_fallback_attempted")
-		advanced := eventsOfType(all, "group_fallback_advanced")
-		exhausted := eventsOfType(all, "group_fallback_exhausted")
+		modelFailed := eventsOfType(all, "model_failed")
+		attempted := eventsOfType(all, "model_fallback_attempted")
+		advanced := eventsOfType(all, "model_fallback_advanced")
+		exhausted := eventsOfType(all, "model_fallback_exhausted")
 
-		if len(memberFailed) != 2 {
-			t.Fatalf("group_member_failed events = %d, want 2 (one per failed member m1, m2)", len(memberFailed))
+		if len(modelFailed) != 2 {
+			t.Fatalf("model_failed events = %d, want 2 (one per failed hop m1, m2)", len(modelFailed))
 		}
 		if len(attempted) != 2 {
-			t.Fatalf("group_fallback_attempted events = %d, want 2 (m1→m2, m2→m3)", len(attempted))
+			t.Fatalf("model_fallback_attempted events = %d, want 2 (m1→m2, m2→m3)", len(attempted))
 		}
 		if len(advanced) != 2 {
-			t.Fatalf("group_fallback_advanced events = %d, want 2 (m1→m2, m2→m3)", len(advanced))
+			t.Fatalf("model_fallback_advanced events = %d, want 2 (m1→m2, m2→m3)", len(advanced))
 		}
 		if len(exhausted) != 0 {
-			t.Fatalf("group_fallback_exhausted events = %d, want 0 (the chain ended on a WINNER, not exhaustion)", len(exhausted))
+			t.Fatalf("model_fallback_exhausted events = %d, want 0 (the chain ended on a WINNER)", len(exhausted))
 		}
 
-		// First member failure (m1): member_failed names the member in
-		// member_id / from_member — and to_member repeats it (the site
-		// passes the same model id for both — the FAILED member is the
-		// "from" of every event at this site).
-		d := payloadMap(t, memberFailed[0])
-		if got := asString(d["group_id"]); got != "g-adv" {
-			t.Errorf("member_failed[0] group_id = %q, want g-adv", got)
+		d := payloadMap(t, modelFailed[0])
+		if got := asString(d["model_id"]); got != "m1" {
+			t.Errorf("model_failed[0] model_id = %q, want m1", got)
 		}
-		if got := asString(d["member_id"]); got != "m1" {
-			t.Errorf("member_failed[0] member_id = %q, want m1", got)
+		if got := asString(d["from_model"]); got != "m1" {
+			t.Errorf("model_failed[0] from_model = %q, want m1", got)
 		}
-		if got := asString(d["from_member"]); got != "m1" {
-			t.Errorf("member_failed[0] from_member = %q, want m1", got)
+		if _, present := d["group_id"]; present {
+			t.Errorf("model_failed[0] carries group_id — model events must NOT assert group membership")
 		}
-		if got := asString(d["to_member"]); got != "m1" {
-			t.Errorf("member_failed[0] to_member = %q, want m1 (site passes the failed member as both from and to)", got)
+		if _, present := d["member_id"]; present {
+			t.Errorf("model_failed[0] carries member_id — model events must NOT assert group membership")
 		}
 		if got := asString(d["reason"]); !strings.HasPrefix(got, "reason=upstream_4xx") {
-			t.Errorf("member_failed[0] reason = %q, want the classified failureReason line (reason=upstream_4xx … — 402 is upstream_4xx, and the raw upstream body must stay out of the payload shape)", got)
+			t.Errorf("model_failed[0] reason = %q, want the classified failureReason line", got)
 		}
 		if got := asString(d["id"]); got != "layered-test-req" {
-			t.Errorf("member_failed[0] id = %q, want layered-test-req (the coordinator request id rides the payload)", got)
-		}
-		if got := asString(payloadMap(t, memberFailed[1])["member_id"]); got != "m2" {
-			t.Errorf("member_failed[1] member_id = %q, want m2", got)
+			t.Errorf("model_failed[0] id = %q, want layered-test-req", got)
 		}
 
-		// The advance pair events: from = the failed member, to = the
-		// member the chain advanced TO. attempted and advanced fire
-		// TOGETHER per advance with identical routing payloads.
 		for i, want := range [][2]string{{"m1", "m2"}, {"m2", "m3"}} {
 			ad := payloadMap(t, attempted[i])
 			av := payloadMap(t, advanced[i])
 			for _, d := range []map[string]interface{}{ad, av} {
-				if got := asString(d["from_member"]); got != want[0] {
-					t.Errorf("advance event[%d] from_member = %q, want %s", i, got, want[0])
+				if got := asString(d["from_model"]); got != want[0] {
+					t.Errorf("advance event[%d] from_model = %q, want %s", i, got, want[0])
 				}
-				if got := asString(d["to_member"]); got != want[1] {
-					t.Errorf("advance event[%d] to_member = %q, want %s", i, got, want[1])
+				if got := asString(d["to_model"]); got != want[1] {
+					t.Errorf("advance event[%d] to_model = %q, want %s", i, got, want[1])
 				}
-				if got := asString(d["group_id"]); got != "g-adv" {
-					t.Errorf("advance event[%d] group_id = %q, want g-adv", i, got)
+				if got := asString(d["model_id"]); got != want[0] {
+					t.Errorf("advance event[%d] model_id = %q, want %s (model_id tracks the FAILED model)", i, got, want[0])
 				}
-				if got := asString(d["member_id"]); got != want[0] {
-					t.Errorf("advance event[%d] member_id = %q, want %s (member_id tracks the FAILED member)", i, got, want[0])
-				}
-				if got := asString(d["reason"]); !strings.HasPrefix(got, "reason=upstream_4xx") {
-					t.Errorf("advance event[%d] reason = %q, want the classified failureReason line (reason=upstream_4xx …)", i, got)
+				if _, present := d["group_id"]; present {
+					t.Errorf("advance event[%d] carries group_id — model events must NOT assert group membership", i)
 				}
 			}
 		}
 
-		// Publish order within the site: member_failed precedes the
-		// attempted/advanced pair for the same member.
+		// Publish order: model_failed precedes attempted precedes advanced.
 		firstFailed, firstAttempted, firstAdvanced := -1, -1, -1
 		for i, evt := range all {
 			switch evt.Type {
-			case "group_member_failed":
+			case "model_failed":
 				if firstFailed < 0 {
 					firstFailed = i
 				}
-			case "group_fallback_attempted":
+			case "model_fallback_attempted":
 				if firstAttempted < 0 {
 					firstAttempted = i
 				}
-			case "group_fallback_advanced":
+			case "model_fallback_advanced":
 				if firstAdvanced < 0 {
 					firstAdvanced = i
 				}
 			}
 		}
 		if !(firstFailed < firstAttempted && firstAttempted < firstAdvanced) {
-			t.Errorf("event order = member_failed@%d, attempted@%d, advanced@%d — want member_failed first, then attempted, then advanced", firstFailed, firstAttempted, firstAdvanced)
+			t.Errorf("event order = failed@%d attempted@%d advanced@%d — want failed, then attempted, then advanced", firstFailed, firstAttempted, firstAdvanced)
 		}
 	})
 
-	t.Run("chain end publishes member_failed and exhausted terminally", func(t *testing.T) {
-		// Every member fails: m1 and m2 advance (their failures pass
-		// the hoisted admission gate), but the chain-end member's
-		// failure has no advance target — wi-7769a812 part 2 flipped
-		// the gate (chainEndPending), so that failure now reaches the
-		// Case-1 site ONCE and publishes member_failed (m3) +
-		// group_fallback_exhausted (payload contract: to_member
+	t.Run("chain end publishes model_failed and model_fallback_exhausted terminally", func(t *testing.T) {
+		// Every model fails: m1 and m2 advance, the chain-end member's
+		// failure has no advance target — the exhaust arm publishes
+		// model_failed (m3) + model_fallback_exhausted (to_model
 		// ABSENT), then the race resolves all-failed.
 		coord, provider, bus, _ := newLayeredChainEnv(
 			t,
 			[]layeredChainModel{{id: "m1", credCount: 1}, {id: "m2", credCount: 1}, {id: "m3", credCount: 1}},
-			99, // every upstream call fails
-			"conv-group-fallback-chainend",
+			99,
+			"conv-model-fallback-chainend",
 		)
 		coord.groupPick = &groupPickInfo{GroupID: "g-end", MemberID: "m1", Pool: models.PoolDefault}
 
@@ -206,116 +178,83 @@ func TestCoordinator_GroupFallbackEvents(t *testing.T) {
 			t.Fatalf("expected NO winner (every member failed), got model %q", winner.modelID)
 		}
 		if got := provider.callCount(); got != 3 {
-			t.Errorf("upstream calls = %d, want 3 (exactly one model-row per member — chain end schedules NO spawn)", got)
+			t.Errorf("upstream calls = %d, want 3 (exactly one model-row per chain entry — chain end schedules NO spawn)", got)
 		}
 
 		all := drainAllEvents(bus)
-		memberFailed := eventsOfType(all, "group_member_failed")
-		attempted := eventsOfType(all, "group_fallback_attempted")
-		advanced := eventsOfType(all, "group_fallback_advanced")
-		exhausted := eventsOfType(all, "group_fallback_exhausted")
+		modelFailed := eventsOfType(all, "model_failed")
+		attempted := eventsOfType(all, "model_fallback_attempted")
+		advanced := eventsOfType(all, "model_fallback_advanced")
+		exhausted := eventsOfType(all, "model_fallback_exhausted")
 
-		if len(memberFailed) != 3 {
-			t.Fatalf("group_member_failed events = %d, want 3 (m1, m2, AND the chain-end member m3 — part 2 made the exhaust arm live)", len(memberFailed))
+		if len(modelFailed) != 3 {
+			t.Fatalf("model_failed events = %d, want 3 (m1, m2, AND the chain-end m3 — the exhaust arm is live)", len(modelFailed))
 		}
 		if len(attempted) != 2 || len(advanced) != 2 {
-			t.Fatalf("advance events = attempted:%d advanced:%d, want 2/2 (m1→m2, m2→m3 only — the chain-end member advances NOWHERE)", len(attempted), len(advanced))
+			t.Fatalf("advance events = attempted:%d advanced:%d, want 2/2 (m1→m2, m2→m3 only)", len(attempted), len(advanced))
 		}
 		if len(exhausted) != 1 {
-			t.Fatalf("group_fallback_exhausted events = %d, want exactly 1 (the chainEndPending one-shot — a second publish would mean the latch leaked)", len(exhausted))
+			t.Fatalf("model_fallback_exhausted events = %d, want exactly 1 (one-shot latch)", len(exhausted))
 		}
 
-		// The chain-end member_failed names m3.
-		if got := asString(payloadMap(t, memberFailed[2])["member_id"]); got != "m3" {
-			t.Errorf("member_failed[2] member_id = %q, want m3 (the chain-end member)", got)
+		if got := asString(payloadMap(t, modelFailed[2])["model_id"]); got != "m3" {
+			t.Errorf("model_failed[2] model_id = %q, want m3 (the chain-end model)", got)
 		}
 
-		// The exhausted event: names the failed chain-end member and
-		// the group, carries the classified reason — and NO to_member
-		// key (nothing to advance to; the key is omitted, not empty).
 		d := payloadMap(t, exhausted[0])
-		if got := asString(d["group_id"]); got != "g-end" {
-			t.Errorf("exhausted group_id = %q, want g-end", got)
+		if got := asString(d["model_id"]); got != "m3" {
+			t.Errorf("exhausted model_id = %q, want m3", got)
 		}
-		if got := asString(d["member_id"]); got != "m3" {
-			t.Errorf("exhausted member_id = %q, want m3", got)
+		if got := asString(d["from_model"]); got != "m3" {
+			t.Errorf("exhausted from_model = %q, want m3", got)
 		}
-		if got := asString(d["from_member"]); got != "m3" {
-			t.Errorf("exhausted from_member = %q, want m3", got)
-		}
-		if _, present := d["to_member"]; present {
-			t.Errorf("exhausted payload carries to_member = %v — want the key ABSENT (no advance target)", d["to_member"])
+		if _, present := d["to_model"]; present {
+			t.Errorf("exhausted payload carries to_model = %v — want the key ABSENT (no advance target)", d["to_model"])
 		}
 		if got := asString(d["reason"]); !strings.HasPrefix(got, "reason=upstream_4xx") {
-			t.Errorf("exhausted reason = %q, want the classified failureReason line (reason=upstream_4xx …)", got)
-		}
-
-		// The advance payloads still name the group and carry the
-		// classified reason for the two real advances.
-		for i, wantTo := range []string{"m2", "m3"} {
-			ad := payloadMap(t, attempted[i])
-			if got := asString(ad["group_id"]); got != "g-end" {
-				t.Errorf("attempted[%d] group_id = %q, want g-end", i, got)
-			}
-			if got := asString(ad["to_member"]); got != wantTo {
-				t.Errorf("attempted[%d] to_member = %q, want %s", i, got, wantTo)
-			}
+			t.Errorf("exhausted reason = %q, want the classified failureReason line", got)
 		}
 	})
 
-	t.Run("exhausted publish contract omits to_member", func(t *testing.T) {
-		// Pins the exhausted payload shape at the publisher seam (the
-		// end-to-end arm is part-2-live; see the file-header note).
-		// publishGroupFallback is the single publish path for all four
-		// event types — asserting it here covers the one payload
-		// difference the live advance subtests cannot reach: the
-		// exhausted event carries NO to_member key.
+	t.Run("exhausted publish contract omits to_model", func(t *testing.T) {
 		coord, _, bus, _ := newLayeredChainEnv(
 			t,
 			[]layeredChainModel{{id: "m-last", credCount: 1}},
 			0,
-			"conv-group-fallback-contract",
+			"conv-model-fallback-contract",
 		)
 		coord.groupPick = &groupPickInfo{GroupID: "g-contract", MemberID: "m-last", Pool: models.PoolDefault}
 
 		reason := `reason=upstream_4xx status=402 detail="quota-scripted: Token Plan usage limit"`
-		coord.publishGroupFallback("group_member_failed", "m-last", "m-last", "", reason)
-		coord.publishGroupFallback("group_fallback_exhausted", "m-last", "", "", reason)
+		coord.publishModelFallback("model_failed", "m-last", "m-last", reason)
+		coord.publishModelFallback("model_fallback_exhausted", "m-last", "", reason)
 
 		all := drainAllEvents(bus)
-		memberFailed := eventsOfType(all, "group_member_failed")
-		exhausted := eventsOfType(all, "group_fallback_exhausted")
-		if len(memberFailed) != 1 || len(exhausted) != 1 {
-			t.Fatalf("published events = member_failed:%d exhausted:%d, want 1/1", len(memberFailed), len(exhausted))
+		modelFailed := eventsOfType(all, "model_failed")
+		exhausted := eventsOfType(all, "model_fallback_exhausted")
+		if len(modelFailed) != 1 || len(exhausted) != 1 {
+			t.Fatalf("published events = model_failed:%d exhausted:%d, want 1/1", len(modelFailed), len(exhausted))
 		}
 
-		// exhausted: names the failed member and the group, carries the
-		// classified reason verbatim — and NO to_member key (nothing to
-		// advance to; the key is omitted, not empty).
 		d := payloadMap(t, exhausted[0])
-		if got := asString(d["group_id"]); got != "g-contract" {
-			t.Errorf("exhausted group_id = %q, want g-contract", got)
+		if got := asString(d["model_id"]); got != "m-last" {
+			t.Errorf("exhausted model_id = %q, want m-last", got)
 		}
-		if got := asString(d["member_id"]); got != "m-last" {
-			t.Errorf("exhausted member_id = %q, want m-last", got)
+		if got := asString(d["from_model"]); got != "m-last" {
+			t.Errorf("exhausted from_model = %q, want m-last", got)
 		}
-		if got := asString(d["from_member"]); got != "m-last" {
-			t.Errorf("exhausted from_member = %q, want m-last", got)
-		}
-		if _, present := d["to_member"]; present {
-			t.Errorf("exhausted payload carries to_member = %v — want the key ABSENT (no advance target)", d["to_member"])
+		if _, present := d["to_model"]; present {
+			t.Errorf("exhausted payload carries to_model = %v — want the key ABSENT", d["to_model"])
 		}
 		if got := asString(d["reason"]); got != reason {
-			t.Errorf("exhausted reason = %q, want the classified failureReason line passed through verbatim (%q)", got, reason)
+			t.Errorf("exhausted reason = %q, want %q", got, reason)
 		}
 		if got := asString(d["id"]); got != "layered-test-req" {
 			t.Errorf("exhausted id = %q, want layered-test-req", got)
 		}
-		// member_failed at the same seam keeps to_member (the failed
-		// member itself) — the contrast IS the contract.
-		fd := payloadMap(t, memberFailed[0])
-		if got := asString(fd["to_member"]); got != "m-last" {
-			t.Errorf("member_failed to_member = %q, want m-last (present, unlike exhausted)", got)
+		fd := payloadMap(t, modelFailed[0])
+		if got := asString(fd["to_model"]); got != "m-last" {
+			t.Errorf("model_failed to_model = %q, want m-last (present, unlike exhausted)", got)
 		}
 	})
 }

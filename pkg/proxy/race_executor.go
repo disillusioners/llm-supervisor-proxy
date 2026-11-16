@@ -324,6 +324,21 @@ func toolRepairEventCallback(cfg *ConfigSnapshot, reqID int) toolrepair.RepairEv
 // convertToProviderRequest's caller (W6) which decides whether to call
 // the translator.
 func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []byte, req *upstreamRequest, interleaved bool) error {
+	// wi-4d2c8e17 / ruling 2 — MODEL-layer attempt suppression. A
+	// model-attributable wall live on this model means the attempt is
+	// skipped at ZERO cost (no upstream call) and the walk proceeds
+	// INTO the model's chain. The group pick already chose this model
+	// (policy-pure); suppression never changes the pick. A synthetic
+	// plain error (NOT a *providers.ProviderError) keeps the failure
+	// rotation-INELIGIBLE (no credential thrash) while remaining
+	// advance-worthy (not client-attributable) — so the coordinator's
+	// Case-1 advances to the chain target.
+	if cfg.ModelSkipCache.Marked(req.modelID) {
+		req.SetHTTPStatus(http.StatusTooManyRequests)
+		log.Printf("[RACE] attempt %d model %s suppressed by model-layer skip cache (model-attributable wall live) — advancing into chain", req.id, req.modelID)
+		return fmt.Errorf("model %s suppressed by model-layer skip cache", req.modelID)
+	}
+
 	// Check if we should use secondary upstream model (for modelTypeSecond)
 	useSecondary := req.UseSecondaryUpstream()
 
@@ -578,7 +593,7 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 	}
 
 	// Add as single chunk
-	if buf := upstreamReq.GetBuffer(); !buf.Add(data) {
+	if buf := upstreamReq.GetBuffer(); !buf.AddContent(data) {
 		return fmt.Errorf("buffer limit exceeded: non-streaming response for model %s", internalModel)
 	}
 
@@ -695,7 +710,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if modified {
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
-			if !buf.Add(normalizedLine) {
+			if !buf.AddContent(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded: content chunk for model %s", internalModel)
 			}
 			firstChunk = false
@@ -771,7 +786,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 
 				// Add all chunks to buffer
 				for _, chunk := range chunksToEmit {
-					if !buf.Add(chunk) {
+					if !buf.AddContent(chunk) {
 						return fmt.Errorf("buffer limit exceeded: tool_call chunk for model %s", internalModel)
 					}
 				}
@@ -801,7 +816,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if modified {
 				log.Printf("[DEBUG] Race attempt %d (internal): normalized chunk by %s", upstreamReq.id, normalizerName)
 			}
-			if !buf.Add(normalizedLine) {
+			if !buf.AddContent(normalizedLine) {
 				return fmt.Errorf("buffer limit exceeded: thinking chunk for model %s", internalModel)
 			}
 
@@ -810,7 +825,7 @@ func handleInternalStream(ctx context.Context, provider providers.Provider, req 
 			if toolCallBuffer != nil {
 				flushChunks := toolCallBuffer.Flush()
 				for _, chunk := range flushChunks {
-					if !buf.Add(chunk) {
+					if !buf.AddContent(chunk) {
 						log.Printf("[WARN] Race attempt %d (internal): failed to flush tool call chunk", upstreamReq.id)
 					}
 				}

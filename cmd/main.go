@@ -24,6 +24,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/mcp"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/memlimit"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/middleware/gzipmw"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy"
@@ -240,11 +241,19 @@ func main() {
 	upstreamSkipCache := skipcache.New()
 	modelsMgr.SetSkipCache(upstreamSkipCache)
 
+	// wi-4d2c8e17 / ruling 2 — the MODEL-layer cache: ONE
+	// process-wide instance, written by model-attributable walls and
+	// read by attempt suppression (both protocol lanes). It is
+	// deliberately NOT wired into the models manager: the group pick
+	// must never read it (layer isolation by construction).
+	modelSkipCache := modelcache.New()
+
 	proxyConfig := &proxy.Config{
 		ConfigMgr:         configMgr,
 		ModelsConfig:      modelsConfig,
 		EventBus:          bus,
 		UpstreamSkipCache: upstreamSkipCache,
+		ModelSkipCache:    modelSkipCache,
 	}
 
 	// Initialize Token Store

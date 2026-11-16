@@ -215,31 +215,44 @@ collect:
 		t.Errorf("model_member_failover events = %d, want exactly 2 (one per re-entry)", failovers)
 	}
 
-	// The exhausted event: one per member coordinator (each member's
-	// own chain ended), ALL with to_member ABSENT.
+	// The chain-end event (MODEL layer — wi-4d2c8e17 LABELS): one per
+	// member coordinator (each member's own chain ended), ALL with
+	// to_model ABSENT. The GROUP-layer exhaustion fires exactly once —
+	// when the handler's member walk finds no replacement.
 	all := drainAllEvents(h.bus)
-	exhausted := eventsOfType(all, "group_fallback_exhausted")
-	if len(exhausted) != 3 {
-		t.Fatalf("group_fallback_exhausted events = %d, want 3 (one per member's chain-end)", len(exhausted))
+	modelExhausted := eventsOfType(all, "model_fallback_exhausted")
+	if len(modelExhausted) != 3 {
+		t.Fatalf("model_fallback_exhausted events = %d, want 3 (one per member's chain-end)", len(modelExhausted))
 	}
-	members := map[string]bool{}
-	for _, evt := range exhausted {
+	models := map[string]bool{}
+	for _, evt := range modelExhausted {
 		d, ok := evt.Data.(map[string]interface{})
 		if !ok {
-			t.Fatalf("exhausted payload not a map: %T", evt.Data)
+			t.Fatalf("model exhausted payload not a map: %T", evt.Data)
 		}
-		if _, present := d["to_member"]; present {
-			t.Errorf("exhausted payload for member %v carries to_member=%v — want the key ABSENT (payload contract)", d["member_id"], d["to_member"])
+		if _, present := d["to_model"]; present {
+			t.Errorf("model exhausted payload for %v carries to_model=%v — want the key ABSENT (payload contract)", d["model_id"], d["to_model"])
 		}
-		members[asString(d["member_id"])] = true
+		models[asString(d["model_id"])] = true
 	}
 	for _, want := range []string{"x-one", "x-two", "x-three"} {
-		if !members[want] {
-			t.Errorf("exhausted events name %v — missing %s", members, want)
+		if !models[want] {
+			t.Errorf("model exhausted events name %v — missing %s", models, want)
 		}
 	}
-	if got := asString(payloadMap(t, exhausted[0])["reason"]); !strings.HasPrefix(got, "reason=upstream_5xx") {
-		t.Errorf("exhausted reason = %q, want the classified 502 line (reason=upstream_5xx …)", got)
+	groupExhausted := eventsOfType(all, "group_fallback_exhausted")
+	if len(groupExhausted) != 1 {
+		t.Fatalf("group_fallback_exhausted events = %d, want exactly 1 (the genuine member exhaustion)", len(groupExhausted))
+	}
+	gd := payloadMap(t, groupExhausted[0])
+	if _, present := gd["to_member"]; present {
+		t.Errorf("group exhausted payload carries to_member=%v — want the key ABSENT", gd["to_member"])
+	}
+	if got := asString(gd["member_id"]); got != "x-three" {
+		t.Errorf("group exhausted member_id = %q, want x-three (the last failed member)", got)
+	}
+	if got := asString(payloadMap(t, modelExhausted[0])["reason"]); !strings.HasPrefix(got, "reason=upstream_5xx") {
+		t.Errorf("model exhausted reason = %q, want the classified 502 line (reason=upstream_5xx …)", got)
 	}
 }
 
@@ -345,11 +358,11 @@ func TestCoordinator_FiveXX_AdvancesTheChain(t *testing.T) {
 	}
 
 	all := drainAllEvents(bus)
-	if got := len(eventsOfType(all, "group_fallback_attempted")); got != 2 {
-		t.Errorf("group_fallback_attempted = %d, want 2 (m1→m2, m2→m3 — the chain advanced on non-client-attributable failures)", got)
+	if got := len(eventsOfType(all, "model_fallback_attempted")); got != 2 {
+		t.Errorf("model_fallback_attempted = %d, want 2 (m1→m2, m2→m3 — the chain advanced on non-client-attributable failures)", got)
 	}
-	if got := len(eventsOfType(all, "group_fallback_exhausted")); got != 0 {
-		t.Errorf("group_fallback_exhausted = %d, want 0 (the chain ended on a winner)", got)
+	if got := len(eventsOfType(all, "model_fallback_exhausted")); got != 0 {
+		t.Errorf("model_fallback_exhausted = %d, want 0 (the chain ended on a winner)", got)
 	}
 	spawns := recordSpawns(all)
 	if n := countByType(spawns, "cred_failover"); n != 0 {

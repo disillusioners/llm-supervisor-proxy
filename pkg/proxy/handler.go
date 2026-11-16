@@ -61,6 +61,7 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/proxy/token"
@@ -88,6 +89,14 @@ type Config struct {
 	// requests, no per-request capture semantics (unlike credEngine's
 	// constructor-only law — the cache holds no per-request state).
 	UpstreamSkipCache *skipcache.Cache
+
+	// ModelSkipCache (wi-4d2c8e17 / ruling 2) is the MODEL-layer
+	// registry — "is this MODEL limited/unavailable?" — written by
+	// model-attributable walls and read by attempt suppression only.
+	// MAY BE NIL (legacy/test embeddings degrade byte-identically).
+	// Global layer separation: it is never consulted by the group
+	// pick (which does not import modelcache).
+	ModelSkipCache *modelcache.Cache
 }
 
 // Clone returns a snapshot of the current config values
@@ -101,6 +110,12 @@ func (c *Config) Clone() ConfigSnapshot {
 	ttl := cfg.UpstreamSkipCacheTTL.Duration()
 	if ttl <= 0 {
 		ttl = skipcache.DefaultTTL
+	}
+	// wi-4d2c8e17 / ruling 2: normalize the model-layer fixed TTL at
+	// the same seam (readers never see 0/negative).
+	modelTTL := cfg.ModelSkipCacheTTL.Duration()
+	if modelTTL <= 0 {
+		modelTTL = modelcache.DefaultTTL
 	}
 	return ConfigSnapshot{
 		IdleTimeout:              cfg.IdleTimeout.Duration(),
@@ -122,6 +137,8 @@ func (c *Config) Clone() ConfigSnapshot {
 		IdleTerminationTimeout:   cfg.IdleTerminationTimeout.Duration(),
 		UpstreamSkipCacheTTL:     ttl,
 		UpstreamSkipCache:        c.UpstreamSkipCache,
+		ModelSkipCacheTTL:        modelTTL,
+		ModelSkipCache:           c.ModelSkipCache,
 		EventBus:                 c.EventBus,
 	}
 }
@@ -164,6 +181,13 @@ type ConfigSnapshot struct {
 	// feature off (nil-receiver-safe degradation everywhere).
 	UpstreamSkipCacheTTL time.Duration
 	UpstreamSkipCache    *skipcache.Cache
+
+	// wi-4d2c8e17 / ruling 2 — the MODEL-layer cache ("is this MODEL
+	// limited/unavailable?") + its CONFIG-OWNED fixed TTL
+	// (hot-normalized at Clone). Read by attempt suppression only;
+	// never by the group pick. Nil = feature off.
+	ModelSkipCacheTTL time.Duration
+	ModelSkipCache    *modelcache.Cache
 
 	// Event Bus for publishing events during request handling
 	EventBus *events.Bus
@@ -259,6 +283,25 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 			Data:      data,
 		})
 	}
+}
+
+// publishGroupHop emits a GROUP-layer member-hop observability event
+// (wi-4d2c8e17 — LABELS). Payload keeps the group vocabulary
+// (group_id / member_id / from_member / to_member / reason); to_member
+// is ABSENT on an exhaustion event. Paired with the coordinator's
+// model_* chain events so chain targets are never mislabeled as
+// members.
+func (h *Handler) publishGroupHop(eventType, groupID, fromMember, toMember, reason string) {
+	data := map[string]interface{}{
+		"group_id":    groupID,
+		"member_id":   fromMember,
+		"from_member": fromMember,
+		"reason":      reason,
+	}
+	if toMember != "" {
+		data["to_member"] = toMember
+	}
+	h.publishEvent(eventType, data)
 }
 
 // saveRawResponse saves the raw upstream response to disk and emits an event.
@@ -1023,10 +1066,25 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			//   stop honestly — no more members, no more models.
 			if rc.groupPick != nil &&
 				!rc.streamingNonRetryable.Load() &&
-				rc.groupAdvances < models.MaxGroupMembers &&
-				!memberAdvanceBlocked(coordinator.FinalFailureReason()) &&
-				h.tryGroupReentry(rc) {
-				continue
+				rc.groupAdvances < models.MaxGroupMembers {
+				// GROUP-layer observability (wi-4d2c8e17 — LABELS): the
+				// GENUINE member hop is a GROUP event. Chain hops inside
+				// the member pipeline emit model_* from the coordinator;
+				// HERE we emit group_* only when the member pipeline is
+				// exhausted and the handler actually walks to another
+				// member (or finds none). Capture the failed member
+				// BEFORE tryGroupReentry mutates rc.groupPick.
+				failedGroup := rc.groupPick.GroupID
+				failedMember := rc.groupPick.MemberID
+				fr := coordinator.FinalFailureReason()
+				if !memberAdvanceBlocked(fr) && h.tryGroupReentry(rc) {
+					h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+					h.publishGroupHop("group_fallback_attempted", failedGroup, failedMember, rc.groupPick.MemberID, fr.String())
+					h.publishGroupHop("group_fallback_advanced", failedGroup, failedMember, rc.groupPick.MemberID, fr.String())
+					continue
+				}
+				h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+				h.publishGroupHop("group_fallback_exhausted", failedGroup, failedMember, "", fr.String())
 			}
 			log.Printf("All models failed for request %s (Race Retry)", rc.reqID)
 			h.handleRaceFailure(w, rc, coordinator, heartbeatCancel, "all_models_failed")

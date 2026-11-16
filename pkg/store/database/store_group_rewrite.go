@@ -23,12 +23,10 @@ package database
 import (
 	"log"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/grouplb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
-	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
 )
 
 // RewriteGroupEntries implements models.GroupRewriter (Am21). See
@@ -86,12 +84,17 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 }
 
 // pickServableGroupMember picks the sticky member for the group and
-// re-validates it (Am28 shape gates) — now under ORDERING-NOT-
-// FILTERING (wi-7769a812 part 3 — P0 fix, USER-AUTHORITATIVE):
+// re-validates it (Am28 shape gates) — now under the LAYER SEPARATION
+// (wi-4d2c8e17 / ruling 1+2), which supersedes the skip-cache
+// ordering of wi-7769a812 part 3:
 //
-//	The cache is an optimization, not the truth: it may reorder
-//	candidates, never exclude them.
+//	The group pick is POLICY (pools, weights, sticky) and the cache
+//	must not decide it. A health mark (upstream or model layer) never
+//	changes WHICH member becomes the head; it only suppresses that
+//	member's ATTEMPT downstream and lets the walk proceed into its
+//	chain.
 //
+// The sweep now orders on the GROUP-owned rotation cooldown only.
 // Four phases, one request:
 //
 //	Phase 1 — DEFAULT pool via engine offers (sticky binding /
@@ -101,19 +104,17 @@ func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey 
 //	            Am28 exclusion — engine skip-and-reselect KEPT
 //	            (cooldown write is honest bookkeeping for a row that
 //	            cannot serve at all);
-//	          • skip-marked or engine-cooling → DEMOTED into the
-//	            bucket — NO cooldown write (a demotion must not
-//	            poison the next re-entry's engine view — that write
-//	            fed the incident's marked-member bounce);
+//	          • engine-cooling → DEMOTED into the bucket (group-owned
+//	            rotation state — NEVER a skip/model health mark);
 //	          • otherwise → SERVED (head of the order).
 //	Phase 2 — BACKUP pool: identical classification via the backup
 //	          picker.
 //	Phase 3 — COMPLETENESS sweep: every ref not yet classified is
-//	          enumerated directly and demoted with its earliest live
-//	          expiry (skip mark ∨ engine cooldown; a healthy-but-
-//	          unoffered member anchors at "now"). This is what makes
-//	          the demoted list END-TO-END: nothing servable can be
-//	          left undiscovered behind the engine's offer loop.
+//	          enumerated directly and demoted with its live rotation
+//	          expiry (engine cooldown; a healthy-but-unoffered member
+//	          anchors at "now"). This is what makes the demoted list
+//	          END-TO-END: nothing servable can be left undiscovered
+//	          behind the engine's offer loop.
 //	Phase 4 — the demoted sweep EXECUTES: sorted by (expiry asc, ref
 //	          order asc) the head is SERVED — flows into the race
 //	          list like any other pick (the superseded D3 "degrade"
@@ -265,20 +266,26 @@ func seenKeys(seen map[string]bool) []string {
 	return keys
 }
 
-// memberDemotionExpiry returns the member's earliest live benching
-// expiry — the soonest skip mark across its upstream identities and
-// its grouplb engine cooldown, whichever recovers first. ok=false
-// when the member is neither skip-marked nor cooling (an unbenched
-// candidate).
+// memberDemotionExpiry returns the member's live benching expiry — the
+// grouplb engine's rotation cooldown only. ok=false when the member is
+// not cooling (an unbenched candidate).
+//
+// LAYER SEPARATION (wi-4d2c8e17 / ruling 1+2 — STRUCTURAL): the
+// UPSTREAM-layer skip cache and the MODEL-layer cache are NEVER
+// consulted here. The group pick answers only the GROUP-layer question
+// ("is this member servable in this group?") from GROUP-owned rotation
+// state; a credential/model health mark must never change WHICH member
+// becomes the head. This file therefore does not import pkg/skipcache
+// or pkg/modelcache — the isolation is a compile-time property, not a
+// rule to remember.
 func (m *ModelsManager) memberDemotionExpiry(groupID string, row *models.ModelConfig) (time.Time, bool) {
 	if row == nil {
 		return time.Time{}, false
 	}
-	best, ok := m.memberSoonestSkipExpiry(row)
-	if cdUntil, cooling := m.groupEngine.MemberCooldownUntil(groupID, row.ID); cooling && (!ok || cdUntil.Before(best)) {
-		best, ok = cdUntil, true
+	if cdUntil, cooling := m.groupEngine.MemberCooldownUntil(groupID, row.ID); cooling {
+		return cdUntil, true
 	}
-	return best, ok
+	return time.Time{}, false
 }
 
 // isServableGroupMemberBase is the Am28 re-validation predicate: the
@@ -300,56 +307,21 @@ func isServableGroupMemberBase(row *models.ModelConfig) bool {
 	}
 }
 
-// isServableGroupMember is the CANDIDATE predicate (wi-7769a812
-// part 3 — P0 fix): the row passes the BASE Am28 shape gates (exists,
-// enabled, chat-kind) — full stop.
+// isServableGroupMember is the CANDIDATE predicate: the row passes the
+// BASE Am28 shape gates (exists, enabled, chat-kind) — full stop.
 //
-//	ORDERING-NOT-FILTERING DOCTRINE: the cache is an optimization,
-//	not the truth: it may reorder candidates, never exclude them.
+//	ORDERING-NOT-FILTERING DOCTRINE (wi-7769a812 part 3), extended by
+//	the layer separation (wi-4d2c8e17): the cache is an optimization,
+//	not the truth: it may reorder candidates, never exclude them —
+//	and it may suppress an ATTEMPT, never a PICK or a CHAIN.
 //
-// The part-2 cache-aware arms (every-credential-marked ⇒ member
-// invisible) are RETIRED — that predicate converted a health MARK
-// into member NON-EXISTENCE and is the root cause of the incident
-// (two servable members hidden behind credential-scoped marks).
-// Health state now reaches selection only through
-// memberDemotionExpiry (the ordering key): a marked member is DEMOTED
-// to the tail of the candidate order, never removed from it. Nil row:
-// false (nothing to serve).
+// A HEALTH mark (upstream or model layer) is invisible to this
+// predicate AND to the ordering key: only base-shape gates + the
+// GROUP-owned rotation cooldown participate. Health state reaches
+// execution downstream (attempt suppression + chain walk), never the
+// group pick. Nil row: false (nothing to serve).
 func (m *ModelsManager) isServableGroupMember(row *models.ModelConfig) bool {
 	return isServableGroupMemberBase(row)
-}
-
-// memberWireModel is the skip-cache model key for a member row: the
-// upstream model name the executor would send (InternalModel), or
-// the row ID when no explicit upstream name is configured.
-func memberWireModel(row *models.ModelConfig) string {
-	if row.InternalModel != "" {
-		return row.InternalModel
-	}
-	return row.ID
-}
-
-// memberSoonestSkipExpiry returns the earliest live skip-cache expiry
-// across the member's upstream identities — one input to
-// memberDemotionExpiry's ordering key: the member's soonest live mark
-// sorts it to the demoted bucket's tail head (ORDERING-NOT-FILTERING;
-// the part-2 "D3 degradation anchor: ONE honest attempt" framing is
-// retired — there is no special degrade mode, only the ordering
-// sweep). ok=false when the member has no live marks (or the cache is
-// unwired).
-func (m *ModelsManager) memberSoonestSkipExpiry(row *models.ModelConfig) (time.Time, bool) {
-	if m.skipCache == nil || row == nil || len(row.Credentials) == 0 {
-		return time.Time{}, false
-	}
-	model := memberWireModel(row)
-	pairs := make([]skipcache.Pair, 0, len(row.Credentials)*2)
-	for _, ref := range row.Credentials {
-		pairs = append(pairs, skipcache.Pair{Scope: skipcache.ScopeCredential, ID: ref.CredentialID})
-		if cred := m.GetCredential(ref.CredentialID); cred != nil && cred.Provider != "" {
-			pairs = append(pairs, skipcache.Pair{Scope: skipcache.ScopeProvider, ID: strings.ToLower(cred.Provider)})
-		}
-	}
-	return m.skipCache.SoonestExpiry(pairs, model)
 }
 
 // defaultRefs / backupRefs split engine refs into their two pools

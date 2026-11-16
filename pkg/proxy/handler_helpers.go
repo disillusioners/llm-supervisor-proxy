@@ -868,6 +868,8 @@ func (h *Handler) clearWinnerUpstreamSkip(conf *ConfigSnapshot, groupPick *group
 	if conf == nil {
 		return
 	}
+	// UPSTREAM layer — clear the winning credential/provider rows for
+	// the winning wire model.
 	if conf.UpstreamSkipCache != nil && wireModel != "" {
 		if credentialID != "" {
 			conf.UpstreamSkipCache.Clear(skipcache.ScopeCredential, credentialID, wireModel)
@@ -876,6 +878,16 @@ func (h *Handler) clearWinnerUpstreamSkip(conf *ConfigSnapshot, groupPick *group
 			conf.UpstreamSkipCache.Clear(skipcache.ScopeProvider, strings.ToLower(provider), wireModel)
 		}
 	}
+	// MODEL layer (wi-4d2c8e17 / ruling 2) — clear the winning MODEL's
+	// own row (keyed by row identity, the suppression key). A proven
+	// healthy attempt is evidence the model is not walled.
+	if conf.ModelSkipCache != nil && winnerModelID != "" {
+		conf.ModelSkipCache.Clear(winnerModelID)
+	}
+	// GROUP layer — reset only the WINNER's rotation row (proven
+	// service restores it to the head of the rotation). This is policy
+	// rotation state, never a health mark; group membership/pools are
+	// untouched.
 	if groupPick != nil && groupPick.GroupID != "" && winnerModelID != "" {
 		if gcm, ok := conf.ModelsConfig.(interface {
 			ClearGroupMemberCooldown(groupID, memberID string)

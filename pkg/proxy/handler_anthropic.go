@@ -61,6 +61,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
@@ -538,6 +539,26 @@ loop:
 				break loop
 			}
 
+			// wi-4d2c8e17 / ruling 2 — MODEL-layer attempt suppression
+			// (parity with the OpenAI lane's executor guard). A
+			// model-attributable wall live on this model skips the
+			// attempt at ZERO cost and the walk proceeds INTO the
+			// model's chain. Placed after the commit guard: once the
+			// stream is committed no member/model switch is possible.
+			if arc.conf.ModelSkipCache.Marked(currentModel) {
+				log.Printf("[grouplb] anthropic request %s: model %s suppressed by model-layer skip cache — advancing into chain", arc.reqID, currentModel)
+				arc.servedModel = currentModel
+				arc.lastStatusCode = http.StatusTooManyRequests
+				arc.lastError = []byte("model suppressed by model-layer skip cache")
+				arc.lastAttemptCredentialID = ""
+				arc.lastAttemptProvider = ""
+				arc.lastAttemptModel = ""
+				if arc.conf.stickyActive(arc.conversationKey) {
+					h.stickyEngine.InvalidateOnFailure(arc.conversationKey, currentModel)
+				}
+				continue
+			}
+
 			// Save mutable arc state for restoration on failure
 			savedIsAnthropicUpstream := arc.isAnthropicUpstream
 			savedTargetURL := arc.targetURL
@@ -608,7 +629,7 @@ loop:
 			// benches the attempt's (credential, wire-model) AND
 			// (provider, wire-model) pair for the config TTL so member
 			// selection becomes health-aware (Phase-0 A2 fix).
-			h.markAnthropicUpstreamSkip(arc)
+			h.markAnthropicUpstreamSkip(arc, currentModel)
 
 			// wi-7769a812 part 2 — P2 fail-fast: a client-attributable
 			// failure (400/413/415/422 / client-cancelled) stops the
@@ -667,30 +688,41 @@ loop:
 		// failure (groupPick nil).
 		if arc.groupPick != nil &&
 			!arc.payloadCommitted &&
-			arc.groupAdvances < models.MaxGroupMembers &&
-			!memberAdvanceBlocked(classifyAnthropicFailure(arc)) {
-			// F3 (CRITICAL-FIX part 3 review, item 3): harvest THIS
-			// walk's attempted set into the within-request tried-set,
-			// mirroring the OpenAI lane's coordinator.AttemptedModelIDs
-			// union (handler.go, winner==nil arm). The walk body above
-			// records nothing, so a member attempted as ANOTHER
-			// member's chain entry was invisible to the tried-set and
-			// could be re-offered as a member head by the re-entry
-			// below — the double-run class. Reaching this gate means
-			// the inner loop exhausted arc.modelList (a break exits
-			// before here), so every current entry — member head AND
-			// chain entries — was attempted THIS request. Non-member
-			// entries are inert here: the set is only consulted
-			// against group-member offers.
-			if arc.groupTriedMembers == nil {
-				arc.groupTriedMembers = make(map[string]bool)
+			arc.groupAdvances < models.MaxGroupMembers {
+			failedGroup := arc.groupPick.GroupID
+			failedMember := arc.groupPick.MemberID
+			fr := classifyAnthropicFailure(arc)
+			if !memberAdvanceBlocked(fr) {
+				// F3 (CRITICAL-FIX part 3 review, item 3): harvest THIS
+				// walk's attempted set into the within-request tried-set,
+				// mirroring the OpenAI lane's coordinator.AttemptedModelIDs
+				// union (handler.go, winner==nil arm). The walk body above
+				// records nothing, so a member attempted as ANOTHER
+				// member's chain entry was invisible to the tried-set and
+				// could be re-offered as a member head by the re-entry
+				// below — the double-run class. Reaching this gate means
+				// the inner loop exhausted arc.modelList (a break exits
+				// before here), so every current entry — member head AND
+				// chain entries — was attempted THIS request. Non-member
+				// entries are inert here: the set is only consulted
+				// against group-member offers.
+				if arc.groupTriedMembers == nil {
+					arc.groupTriedMembers = make(map[string]bool)
+				}
+				for _, attemptedModel := range arc.modelList {
+					arc.groupTriedMembers[attemptedModel] = true
+				}
+				if h.tryGroupReentryAnthropic(arc) {
+					// GROUP-layer observability (wi-4d2c8e17 — LABELS):
+					// the genuine member hop is a GROUP event.
+					h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+					h.publishGroupHop("group_fallback_attempted", failedGroup, failedMember, arc.groupPick.MemberID, fr.String())
+					h.publishGroupHop("group_fallback_advanced", failedGroup, failedMember, arc.groupPick.MemberID, fr.String())
+					continue loop
+				}
 			}
-			for _, attemptedModel := range arc.modelList {
-				arc.groupTriedMembers[attemptedModel] = true
-			}
-			if h.tryGroupReentryAnthropic(arc) {
-				continue loop
-			}
+			h.publishGroupHop("group_member_failed", failedGroup, failedMember, "", fr.String())
+			h.publishGroupHop("group_fallback_exhausted", failedGroup, failedMember, "", fr.String())
 		}
 		break
 	}
@@ -2589,23 +2621,49 @@ func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
 //	truth: it may reorder candidates, never exclude them — a marked
 //	identity is DEMOTED (soonest-expiring first), never invisible,
 //	and a WIN clears its own marks (clearWinnerUpstreamSkip).
-func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext) {
+func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelKey string) {
 	if arc == nil || arc.conf.UpstreamSkipCache == nil {
 		return
 	}
 	if !isAnthropicLimitClass(arc) {
 		return
 	}
-	if arc.lastAttemptCredentialID == "" && arc.lastAttemptProvider == "" {
-		return
-	}
 	wireModel := arc.lastAttemptModel
 	if wireModel == "" {
 		wireModel = arc.originalModel
 	}
-	ttl := arc.conf.UpstreamSkipCacheTTL
-	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
-	arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+	if arc.lastAttemptCredentialID != "" || arc.lastAttemptProvider != "" {
+		ttl := arc.conf.UpstreamSkipCacheTTL
+		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
+		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+	}
+	// wi-4d2c8e17 / ruling 2 — MODEL layer (parity with the OpenAI
+	// lane's markModelWallForErrorLocked): a model-attributable usage
+	// wall marks the MODEL identity so the walk suppresses that
+	// model's next attempt at zero cost and proceeds into its chain.
+	// Keyed by the ROW identity (modelKey) — the same key the
+	// suppression site reads.
+	if arc.conf.ModelSkipCache != nil && modelKey != "" && len(arc.lastError) > 0 {
+		now := time.Now()
+		if attributable, until, hasReset := modelcache.ModelWall(string(arc.lastError), now); attributable {
+			ttl := arc.conf.ModelSkipCacheTTL
+			if ttl <= 0 {
+				ttl = modelcache.DefaultTTL
+			}
+			if hasReset {
+				window := until.Sub(now)
+				if window < time.Minute {
+					window = time.Minute
+				}
+				if window > 24*time.Hour {
+					window = 24 * time.Hour
+				}
+				arc.conf.ModelSkipCache.MarkUntil(modelKey, now.Add(window))
+			} else {
+				arc.conf.ModelSkipCache.Mark(modelKey, ttl)
+			}
+		}
+	}
 }
 
 // anthropicEventIsPing reports whether a translated Anthropic SSE
