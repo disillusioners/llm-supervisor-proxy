@@ -10,6 +10,12 @@ const (
 	ErrorTypeContextOverflow     = "context_length_exceeded"
 	ErrorTypeUpstreamError       = "upstream_error"
 	ErrorTypeServerError         = "server_error"
+	// ErrorTypeInvalidRequest is the client-attributable envelope type:
+	// a 400/413/415/422 the CLIENT payload caused. wi-4d2c8e17 F2 —
+	// the coordinator must surface that status to the caller instead
+	// of masking it as a 502/timeout (retrying the same bytes on
+	// another member is guaranteed thrash).
+	ErrorTypeInvalidRequest = "invalid_request_error"
 )
 
 // Error code constants (for error.code field - triggers OpenCode retry detection)

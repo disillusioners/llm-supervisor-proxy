@@ -59,8 +59,10 @@ func newT1Stub(st *t1StubState) http.HandlerFunc {
 }
 
 // rebuildHandlerWithCache mirrors groupHarness.rebuildHandler but wires
-// a shared skip cache into both the manager (read side, store.go:729)
-// and the handler config (write side, handler.go:124) — one instance.
+// a shared skip cache into the handler config only (proxy.Config's
+// UpstreamSkipCache — the marking + credential-reorder side). The
+// manager holds NO cache reference since the layer separation (the
+// group pick cannot read it).
 func rebuildHandlerWithCache(t *testing.T, h *groupHarness, cache *skipcache.Cache) {
 	t.Helper()
 	// Re-point EVERY credential the fixtures may have created to the
@@ -170,7 +172,6 @@ func TestHandlerGroups_HiddenHealthyMember_LogRepro(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	st := &t1StubState{statuses: map[string]int{
 		"9router-sonnet":   http.StatusServiceUnavailable,
@@ -235,7 +236,6 @@ func TestHandlerGroups_MarkedMembers_Ordering(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	// Mark only the backups (cooling); agentic-Main stays UNMARKED
 	// (healthy) so it is an unmarked candidate.
@@ -308,7 +308,7 @@ func TestHandlerGroups_MarkedMembers_Ordering(t *testing.T) {
 // subsequent requests (demotion to later order is OK; EXCLUSION is
 // not), and the WIN must CLEAR its benching state (skip-cache marks +
 // grouplb member-cooldown row) via the win-clear seam
-// (handler_helpers.go clearWinnerUpstreamSkip -> store_group_rewrite.go
+// (handler_helpers.go clearWinnerLayerState -> store_group_rewrite.go
 // ClearGroupMemberCooldown -> grouplb ClearCooldown). Shape: agentic-Main
 // fails once (503) so agentic-go (pre-marked + cooled) serves and the
 // seam is exercised end-to-end.
@@ -318,7 +318,6 @@ func TestHandlerGroups_WinClearsCooldown(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 
 	// Arm agentic-go's benching state: a grouplb member-cooldown row
 	// (old failure, engine-default window) PLUS live skip-cache marks
@@ -436,7 +435,6 @@ func TestHandlerGroups_CrossPoolExhaustion_BeforeTerminal(t *testing.T) {
 	seedT1Group(t, h)
 
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 	h.mgr.GroupEngine().InjectAllCoolingForTest("agentic-group")
 
 	st := &t1StubState{statuses: map[string]int{
@@ -534,7 +532,6 @@ func TestHandlerGroups_Reentry_NoRePickSameMember(t *testing.T) {
 	h.up.Close()
 	h.up = httptest.NewServer(newT1Stub(st))
 	cache := skipcache.New()
-	h.mgr.SetSkipCache(cache)
 	rebuildHandlerWithCache(t, h, cache)
 
 	rec := httptest.NewRecorder()

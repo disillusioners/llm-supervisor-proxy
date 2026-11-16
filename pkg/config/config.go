@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -118,6 +119,16 @@ type Config struct {
 	// (the flat 60s grouplb cooldown is retired for the failure path —
 	// the proxy passes this TTL to ExcludeGroupMember).
 	UpstreamSkipCacheTTL Duration `json:"upstream_skip_cache_ttl,omitempty"`
+
+	// wi-4d2c8e17 / ruling 2 — ModelSkipCacheTTL is the FIXED window
+	// the MODEL layer benches a model when it is model-attributable
+	// limited (a plan/usage wall) but the upstream message names no
+	// parseable reset instant. When the banner DOES name a reset, the
+	// mark runs until that instant (clamped to 24h) instead. Owned by
+	// the model layer only; never consulted by the group pick or by
+	// credential rotation. Default 15m, clamp [1m, 24h]; hot-readable
+	// (proxy ConfigSnapshot per request — no restart).
+	ModelSkipCacheTTL Duration `json:"model_skip_cache_ttl,omitempty"`
 
 	// Idle Termination
 	IdleTerminationEnabled bool     `json:"idle_termination_enabled"`
@@ -253,6 +264,9 @@ var Defaults = Config{
 	CredentialQuotaCooldown: Duration(credentiallb.DefaultQuotaCooldown),
 	// wi-7769a812 part 2 / USER RULING D3: skip-cache TTL default 60s.
 	UpstreamSkipCacheTTL: Duration(60 * time.Second),
+	// wi-4d2c8e17 / ruling 2: model-layer fixed TTL default 15m
+	// (quota-class horizon). Reset-named walls override per mark.
+	ModelSkipCacheTTL: Duration(15 * time.Minute),
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -360,6 +374,20 @@ func (c *Config) Validate() error {
 		}
 		if c.UpstreamSkipCacheTTL > Duration(time.Hour) {
 			return errors.New("upstream_skip_cache_ttl must be at most 1h when set")
+		}
+	}
+	// wi-4d2c8e17 / ruling 2: ModelSkipCacheTTL is the model-layer
+	// fixed window (reset-named walls override per mark). Clamp
+	// [1m, 24h]: floor keeps a sub-minute value from flapping a model
+	// back in between two requests of a walled plan; ceiling keeps a
+	// typo from benching a model for days. 0 falls back to the 15m
+	// default at the proxy Clone seam.
+	if c.ModelSkipCacheTTL > 0 {
+		if c.ModelSkipCacheTTL < Duration(modelcache.MinMarkWindow) {
+			return errors.New("model_skip_cache_ttl must be at least 1m when set")
+		}
+		if c.ModelSkipCacheTTL > Duration(modelcache.MaxMarkWindow) {
+			return errors.New("model_skip_cache_ttl must be at most 24h when set")
 		}
 	}
 	if c.MaxStreamBufferSize < 0 {

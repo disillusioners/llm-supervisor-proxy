@@ -456,6 +456,26 @@ func (e *Engine) OnCredentialDeleted(credentialID string) {
 	}
 }
 
+// CooldownUntil reports the credential's live cooldown expiry for
+// (modelID, credID) — the exported read-only cooldown reader. ok=false
+// when no live cooldown row exists (absent, expired, or swept). Nil
+// receiver: ok=false.
+//
+// Consumers outside the package consult this to keep selection-time
+// reordering consistent with GetOrSelect's own cooldown awareness
+// (wi-4d2c8e17 review #2: the proxy's upstream reorder reader must not
+// prefer a quota-cooled credential over a healthy sibling).
+func (e *Engine) CooldownUntil(modelID, credID string) (time.Time, bool) {
+	if e == nil {
+		return time.Time{}, false
+	}
+	until := e.cooldownUntil(modelID, credID)
+	if until.IsZero() || !until.After(time.Now()) {
+		return time.Time{}, false
+	}
+	return until, true
+}
+
 // Stop terminates the janitor goroutine. Idempotent (sync.Once +
 // closed-channel ack). After Stop, GetOrSelect still works (lazy
 // expiry only) but the janitor no longer sweeps. Nil receiver: no-op.

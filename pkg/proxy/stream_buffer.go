@@ -78,6 +78,7 @@ type streamBuffer struct {
 	notifyCh  chan struct{} // Capacity 1 - signals new data available
 	err       error         // Final error (if any)
 	totalLen  int64         // Total bytes buffered (atomic access)
+	contentN  int64         // Count of MODEL-CONTENT chunks (atomic; F3)
 	maxBytes  int64         // Maximum bytes to buffer (memory protection)
 	overflow  uint32        // atomic: 1 if maxBytes exceeded
 	completed int32         // Atomic: 1 when stream done
@@ -149,6 +150,30 @@ func (sb *streamBuffer) Add(line []byte) bool {
 	}
 
 	return true
+}
+
+// AddContent appends a MODEL-CONTENT chunk (content / tool_call /
+// thinking delta, or a non-stream response body) and records it as
+// forwardable model output. F3 (wi-4d2c8e17): a content-less 200 that
+// only emits finish + [DONE] framing must NOT be declared a winner, so
+// the winner gate consults HasModelContent — framing chunks use Add,
+// content chunks use AddContent. Returns false on overflow / nil.
+func (sb *streamBuffer) AddContent(line []byte) bool {
+	if !sb.Add(line) {
+		return false
+	}
+	atomic.AddInt64(&sb.contentN, 1)
+	return true
+}
+
+// HasModelContent reports whether at least one forwardable model-content
+// chunk has been buffered (distinct from framing bytes — TotalLen
+// counts those too). Nil receiver: false.
+func (sb *streamBuffer) HasModelContent() bool {
+	if sb == nil {
+		return false
+	}
+	return atomic.LoadInt64(&sb.contentN) > 0
 }
 
 // Close marks the buffer as complete. Thread-safe.

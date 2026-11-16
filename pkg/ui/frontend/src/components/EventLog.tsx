@@ -158,6 +158,16 @@ const EVENT_MESSAGES: Record<EventType, (event: Event) => string> = {
     `Group fallback advanced: ${e.data?.group_id || '?'} ${e.data?.from_member || '?'} -> ${e.data?.to_member || '?'}`,
   group_fallback_exhausted: (e) =>
     `Group fallback exhausted: ${e.data?.group_id || '?'} advance ended after ${e.data?.from_member || '?'} — no untried target or client-attributable failure (see reason)`,
+  model_failed: (e) => {
+    const reason = e.data?.reason ? ` (${e.data.reason})` : '';
+    return `Model failed: ${e.data?.model_id || '?'}${reason}`;
+  },
+  model_fallback_attempted: (e) =>
+    `Model fallback attempted: ${e.data?.from_model || '?'} -> ${e.data?.to_model || '?'}`,
+  model_fallback_advanced: (e) =>
+    `Model fallback advanced: ${e.data?.from_model || '?'} -> ${e.data?.to_model || '?'}`,
+  model_fallback_exhausted: (e) =>
+    `Model fallback exhausted: advance ended after ${e.data?.from_model || '?'} — no chain target or client-attributable failure (see reason)`,
   internal_error: (e) => `Internal error: ${e.data?.error || 'Unknown error'}`,
 };
 
@@ -197,6 +207,10 @@ const EVENT_COLORS: Record<EventType, string> = {
   group_fallback_advanced: 'text-green-400',
   group_fallback_exhausted: 'text-red-400',
   group_member_failed: 'text-red-400',
+  model_failed: 'text-red-400',
+  model_fallback_attempted: 'text-orange-400',
+  model_fallback_advanced: 'text-green-400',
+  model_fallback_exhausted: 'text-red-400',
   stream_normalize: 'text-amber-400',
   race_started: 'text-cyan-400',
   race_spawn: 'text-blue-400',
@@ -246,6 +260,10 @@ const EVENT_TYPE_LABELS: Record<EventType, string> = {
   group_fallback_advanced: 'GROUP_FALLBACK_ADVANCED',
   group_fallback_exhausted: 'GROUP_FALLBACK_EXHAUSTED',
   group_member_failed: 'GROUP_MEMBER_FAILED',
+  model_failed: 'MODEL_FAILED',
+  model_fallback_attempted: 'MODEL_FALLBACK_ATTEMPTED',
+  model_fallback_advanced: 'MODEL_FALLBACK_ADVANCED',
+  model_fallback_exhausted: 'MODEL_FALLBACK_EXHAUSTED',
   race_started: 'RACE_STARTED',
   race_spawn: 'RACE_SPAWN',
   race_winner_selected: 'RACE_WINNER',

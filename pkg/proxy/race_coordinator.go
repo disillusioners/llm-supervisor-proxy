@@ -77,6 +77,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/providers"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
@@ -282,9 +283,9 @@ type raceCoordinator struct {
 
 	// wi-7769a812 part 2 — the EXHAUST-ARM FLIP latch (see the gate
 	// comment in manage()): true once the Case-1 site has published
-	// the chain-end member_failed + group_fallback_exhausted pair for
-	// this coordinator. One-shot per request; mutated only from
-	// manage() under c.mu.
+	// the chain-end model_failed + model_fallback_exhausted pair for
+	// this coordinator (wi-4d2c8e17 LABELS: chain hops emit model_*).
+	// One-shot per request; mutated only from manage() under c.mu.
 	chainEndPublished bool
 
 	// wi-7769a812 part 2 — the classified reason of the LATEST failed
@@ -418,8 +419,17 @@ func (c *raceCoordinator) spawn(mType upstreamModelType, triggerInfo spawnTrigge
 		}
 		modelID = c.models[0]
 	case modelTypeSecond:
-		if idx >= len(c.models) {
-			log.Printf("[RACE] Cannot spawn second: only %d model(s) available", len(c.models))
+		// F1/R5 (wi-4d2c8e17): the hedge must be consumable even for a
+		// SINGLE-model list (a member whose chain is empty still gets
+		// its own resilience consumed before the group judges it
+		// failed). The secondary upstream re-drives models[0] on the
+		// model's secondary credential/model (credential-level hedge),
+		// so it does not widen model coverage — the old
+		// `idx >= len(c.models)` window check wrongly closed it for
+		// len==1. Case 2 only fires with exactly one running request,
+		// so at most one hedge row is ever created.
+		if len(c.models) == 0 {
+			log.Printf("[RACE] Cannot spawn second: no model available")
 			return
 		}
 		modelID = c.models[0]
@@ -634,9 +644,15 @@ func (c *raceCoordinator) manage() {
 					// keeps the IsCompleted gate verbatim.
 					var eligible bool
 					if c.liveFirstByteGate {
-						eligible = req.GetError() == nil && req.GetBuffer().TotalLen() > 0
+						// F3 (wi-4d2c8e17): "forwardable data" means
+						// real MODEL CONTENT, not framing. A
+						// content-less 200 that emits only finish +
+						// [DONE] bumps TotalLen but must NOT win.
+						eligible = req.GetError() == nil && req.GetBuffer().HasModelContent()
 					} else {
-						eligible = req.IsCompleted() && req.GetError() == nil
+						// Buffered / non-stream: completed AND has
+						// actual content (F3 — same empty-200 guard).
+						eligible = req.IsCompleted() && req.GetError() == nil && req.GetBuffer().HasModelContent()
 					}
 					if eligible {
 						// We found a potential winner!
@@ -699,8 +715,8 @@ func (c *raceCoordinator) manage() {
 			// group-fallback-exhaust-arm-unreachable-p1). Part 2's
 			// exhaustive fallback makes the arm live: a chain-end failure
 			// that no spawn branch will consume must STILL reach Case-1
-			// once, to publish member_failed + group_fallback_exhausted
-			// (payload contract: to_member ABSENT). chainEndPublished is
+			// once, to publish model_failed + model_fallback_exhausted
+			// (payload contract: to_model ABSENT). chainEndPublished is
 			// a one-shot latch under c.mu — after the publish, the gate
 			// shuts again and the all-failed resolution below proceeds.
 			chainEndPending := modelAttempts >= len(c.models) && !c.chainEndPublished
@@ -827,14 +843,16 @@ func (c *raceCoordinator) manage() {
 							// guaranteed-400 bytes.
 							if hasAdvance && !memberAdvanceBlocked(failReason) {
 								log.Printf("[RACE] Latest request %d failed: %s, spawning fallback directly", latestReq.id, failReason)
-								// Group-fallback observability (wi-7769a812
-								// part 1): member_failed + attempted +
-								// advanced fire together at the advance
-								// decision; Part 2 keeps the emission while
-								// making the path exhaustive on both routes.
-								c.publishGroupFallback("group_member_failed", latestReq.modelID, latestReq.modelID, "", failReason.String())
-								c.publishGroupFallback("group_fallback_attempted", latestReq.modelID, advanceTarget, "", failReason.String())
-								c.publishGroupFallback("group_fallback_advanced", latestReq.modelID, advanceTarget, "", failReason.String())
+								// MODEL-layer observability (wi-4d2c8e17 —
+								// LABELS): a CHAIN hop is a MODEL fallback,
+								// not a group-member event. Emits the
+								// model_* vocabulary and NEVER asserts
+								// group membership (no group_id /
+								// member_id) — the chain target may not be
+								// a group member at all.
+								c.publishModelFallback("model_failed", latestReq.modelID, latestReq.modelID, failReason.String())
+								c.publishModelFallback("model_fallback_attempted", latestReq.modelID, advanceTarget, failReason.String())
+								c.publishModelFallback("model_fallback_advanced", latestReq.modelID, advanceTarget, failReason.String())
 								shouldSpawn = true
 								triggerInfo = spawnTriggerInfo{
 									trigger:       triggerMainError,
@@ -844,16 +862,13 @@ func (c *raceCoordinator) manage() {
 								}
 							} else {
 								log.Printf("[RACE] Latest request %d failed: %s; advance ended — no untried target or client-attributable failure; chain end, terminal", latestReq.id, failReason)
-								// Group-fallback observability: the failed
-								// member was the chain's LAST (or not in the
-								// chain, or the failure is client-attributable
-								// and the chain MUST NOT advance) — the
-								// group's fallback is exhausted. The publish
-								// is the one-shot consumption of this tick's
-								// chainEndPending gate admission (the flip
-								// comment at the gate).
-								c.publishGroupFallback("group_member_failed", latestReq.modelID, latestReq.modelID, "", failReason.String())
-								c.publishGroupFallback("group_fallback_exhausted", latestReq.modelID, "", "", failReason.String())
+								// MODEL-layer observability: the failed model
+								// was the chain's LAST (or not in the chain,
+								// or the failure is client-attributable and
+								// the chain MUST NOT advance) — the MODEL
+								// fallback is exhausted (not the group's).
+								c.publishModelFallback("model_failed", latestReq.modelID, latestReq.modelID, failReason.String())
+								c.publishModelFallback("model_fallback_exhausted", latestReq.modelID, "", failReason.String())
 								c.chainEndPublished = true
 							}
 						}
@@ -936,7 +951,17 @@ func (c *raceCoordinator) manage() {
 			// last) is TERMINAL — no spawn is scheduled and the
 			// all-failed resolution below fires; the legacy c.models[1]
 			// mapping survives only on the idle-timeout path.
-			if c.winner == nil && !spawnedCredFailover && modelAttempts >= len(c.models) {
+			// F2 (wi-4d2c8e17) — the terminal resolution must ALSO fire
+			// when the chain-end latch is set, even though
+			// modelAttempts < len(c.models). A client-attributable
+			// head failure (400/413/415/422/cancel) legitimately STOPS
+			// the chain (P2 fail-fast) without spawning the remaining
+			// models; the old `modelAttempts >= len` gate then never
+			// opened, nothing armed, and the manage loop spun to the
+			// hard deadline returning "Request timeout" instead of the
+			// upstream 400. c.chainEndPublished is the one-shot latch
+			// the else-branch above sets for exactly that terminal.
+			if c.winner == nil && !spawnedCredFailover && (modelAttempts >= len(c.models) || c.chainEndPublished) {
 				allFailed := true
 				for _, r := range c.requests {
 					if !r.IsDone() || r.GetError() == nil {
@@ -1253,6 +1278,15 @@ func (c *raceCoordinator) execute(req *upstreamRequest) {
 
 	err := executeRequest(ctx, c.cfg, c.req, c.rawBody, req, c.interleaved, c.conversationKey, c.engine, publish)
 
+	// F3 (wi-4d2c8e17): a completed attempt with NO forwardable model
+	// content (an empty 200 that emitted only finish + [DONE] framing)
+	// is NOT a usable success. Treat it as a failure so the chain
+	// advances instead of the empty payload being declared a winner
+	// (or, after the winner-gate fix, hanging the race).
+	if err == nil && !req.GetBuffer().HasModelContent() {
+		err = fmt.Errorf("empty upstream response (no model content)")
+	}
+
 	if err != nil {
 		req.MarkFailed(err)
 		// Sticky last-success invalidation (winner-matched inside the
@@ -1314,55 +1348,7 @@ func (c *raceCoordinator) WaitForWinner() *upstreamRequest {
 func (c *raceCoordinator) GetCommonFailureStatus() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if len(c.requests) == 0 {
-		return 0
-	}
-
-	var commonStatus int
-	for _, req := range c.requests {
-		err := req.GetError()
-		if err == nil {
-			return 0 // Not failed yet or didn't fail
-		}
-
-		// First check if we have the HTTP status stored
-		httpStatus := req.GetHTTPStatus()
-		if httpStatus >= 400 {
-			// Use the stored HTTP status directly
-			if commonStatus == 0 {
-				commonStatus = httpStatus
-			} else if commonStatus != httpStatus {
-				return 0 // Mismatch
-			}
-			continue
-		}
-
-		// Fallback: Parse status text like "upstream returned error: 429 Too Many Requests"
-		errStr := err.Error()
-		var status int
-		if strings.Contains(errStr, "upstream returned error: ") {
-			fmt.Sscanf(errStr, "upstream returned error: %d", &status)
-		} else if strings.Contains(errStr, "idle timeout") || strings.Contains(errStr, "context") || strings.Contains(errStr, "timeout") {
-			status = http.StatusGatewayTimeout
-		} else if strings.Contains(errStr, "buffer limit") {
-			status = http.StatusRequestEntityTooLarge
-		} else {
-			status = http.StatusBadGateway
-		}
-
-		if status == 0 {
-			status = http.StatusBadGateway
-		}
-
-		if commonStatus == 0 {
-			commonStatus = status
-		} else if commonStatus != status {
-			return 0 // Mismatch
-		}
-	}
-
-	return commonStatus
+	return c.getCommonFailureStatusLocked()
 }
 
 // RaceStats contains statistics about a completed race
@@ -1454,7 +1440,15 @@ func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
 		err := req.GetError()
 		if err != nil {
 			failedRequests = append(failedRequests, req)
-			lastError = err
+			// D6: prefer a REAL upstream error over a synthetic
+			// suppression marker for the final message.
+			if isSuppressedAttempt(err) {
+				if lastError == nil {
+					lastError = err
+				}
+			} else {
+				lastError = err
+			}
 
 			// Check for 429 rate limit
 			if req.GetHTTPStatus() == http.StatusTooManyRequests {
@@ -1533,6 +1527,12 @@ func (c *raceCoordinator) GetFinalErrorInfo() FinalErrorInfo {
 	case http.StatusGatewayTimeout: // 504
 		errType = models.ErrorTypeUpstreamError
 		errCode = ""
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity: // 400/413/415/422
+		// F2 (wi-4d2c8e17) — client-attributable: surface the upstream
+		// status to the caller verbatim instead of masking it as a
+		// 502/timeout. The chain correctly stopped (P2 fail-fast).
+		errType = models.ErrorTypeInvalidRequest
+		errCode = ""
 	default:
 		// httpStatus 0 means mismatched statuses (e.g., 429 + context canceled)
 		// Default to BadGateway to ensure valid HTTP status
@@ -1571,7 +1571,15 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 		err := req.GetError()
 		if err != nil {
 			failedRequests = append(failedRequests, req)
-			lastError = err
+			// D6: prefer a REAL upstream error over a synthetic
+			// suppression marker for the final message.
+			if isSuppressedAttempt(err) {
+				if lastError == nil {
+					lastError = err
+				}
+			} else {
+				lastError = err
+			}
 
 			// Check for 429 rate limit
 			if req.GetHTTPStatus() == http.StatusTooManyRequests {
@@ -1640,6 +1648,11 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 	case http.StatusGatewayTimeout:
 		errType = models.ErrorTypeUpstreamError
 		errCode = ""
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity: // 400/413/415/422
+		// F2 (wi-4d2c8e17) — client-attributable passthrough (mirror of
+		// GetFinalErrorInfo).
+		errType = models.ErrorTypeInvalidRequest
+		errCode = ""
 	default:
 		// httpStatus 0 means mismatched statuses (e.g., 429 + context canceled)
 		// Default to BadGateway to ensure valid HTTP status
@@ -1656,17 +1669,29 @@ func (c *raceCoordinator) getFinalErrorInfoLocked() FinalErrorInfo {
 	}
 }
 
-// getCommonFailureStatusLocked is the internal version of GetCommonFailureStatus that assumes lock is held
+// getCommonFailureStatusLocked is the internal version of GetCommonFailureStatus that assumes lock is held.
+//
+// D6 (wi-4d2c8e17): a MODEL-layer suppressed attempt carries a
+// FABRICATED 429 (no upstream answered). It is excluded from the
+// status-agreement so a real co-failure's status surfaces (e.g.
+// suppressed head + chain 500 ⇒ 500, not 502). When EVERY failed
+// attempt is suppressed (the whole list is model-walled) the status is
+// the suppression semantic, 429.
 func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 	if len(c.requests) == 0 {
 		return 0
 	}
 
 	var commonStatus int
+	anySuppressed := false
 	for _, req := range c.requests {
 		err := req.GetError()
 		if err == nil {
 			return 0 // Not failed yet or didn't fail
+		}
+		if isSuppressedAttempt(err) {
+			anySuppressed = true
+			continue
 		}
 
 		// First check if we have the HTTP status stored
@@ -1705,6 +1730,9 @@ func (c *raceCoordinator) getCommonFailureStatusLocked() int {
 		}
 	}
 
+	if commonStatus == 0 && anySuppressed {
+		return http.StatusTooManyRequests
+	}
 	return commonStatus
 }
 
@@ -2015,37 +2043,34 @@ func (c *raceCoordinator) publishCredentialFailover(modelID, fromID, toID string
 	})
 }
 
-// publishGroupFallback (wi-7769a812 part 1 — replacement observability
-// for the retired escalation subsystem) publishes one of the group-fallback
-// events from the EXISTING race-path group fallback/advance site.
-// Fired ONLY for group traffic (c.groupPick != nil) — plain model
-// chains keep their existing race_* event vocabulary untouched.
-// Event types (single source of truth with the FE EventLog renderers):
+// publishModelFallback (wi-4d2c8e17 — LABELS) publishes one of the
+// MODEL-fallback events for a CHAIN hop inside the coordinator. It is
+// the MODEL layer's observability: it names MODELS only and NEVER
+// asserts group membership (no group_id / member_id) — a chain target
+// may be inactive / not group-exposed by design, so claiming
+// membership there would be a lie. Event types (single source of truth
+// with the FE EventLog renderers):
 //
-//	group_member_failed     — a group member's attempt failed
-//	group_fallback_attempted — a fallback to the next member was decided
-//	group_fallback_advanced  — the chain actually advanced to that member
-//	group_fallback_exhausted — no advance target: the group's fallback
-//	                           chain is exhausted (terminal for this path)
+//	model_failed              — a chain attempt failed
+//	model_fallback_attempted  — a fallback to the next chain model was decided
+//	model_fallback_advanced   — the chain actually advanced to that model
+//	model_fallback_exhausted  — no chain advance target (terminal for the chain)
 //
-// Bounded + redacted by construction (ids + the classified reason
-// token only — no upstream error bodies).
-func (c *raceCoordinator) publishGroupFallback(eventType, fromMember, toMember, groupIDOverride, reason string) {
-	if c.eventBus == nil || c.groupPick == nil {
+// GROUP-level events (group_member_failed / group_fallback_*) are
+// published by the HANDLER's member re-entry, on the real member hop —
+// not here. Bounded + redacted by construction (ids + the classified
+// reason token only — no upstream error bodies).
+func (c *raceCoordinator) publishModelFallback(eventType, fromModel, toModel, reason string) {
+	if c.eventBus == nil {
 		return
 	}
-	gp := c.groupPick
 	data := map[string]interface{}{
-		"group_id":    gp.GroupID,
-		"member_id":   fromMember,
-		"from_member": fromMember,
-		"reason":      reason,
+		"model_id":   fromModel,
+		"from_model": fromModel,
+		"reason":     reason,
 	}
-	if toMember != "" {
-		data["to_member"] = toMember
-	}
-	if groupIDOverride != "" {
-		data["group_id"] = groupIDOverride
+	if toModel != "" {
+		data["to_model"] = toModel
 	}
 	if c.requestID != "" {
 		data["id"] = c.requestID
@@ -2071,13 +2096,13 @@ func (c *raceCoordinator) publishGroupFallback(eventType, fromMember, toMember, 
 // for the CONFIG-OWNED TTL (hot snapshot value; Clone normalizes to
 // the 60s default).
 //
-//	ORDERING-NOT-FILTERING DOCTRINE (part 3 supersedes the D3
-//	"skip-while-alternatives / degrade-to-soonest" wording): the
-//	cache is an optimization, not the truth: it may reorder
-//	candidates, never exclude them. Selection orders unmarked
-//	candidates first, then these marks soonest-expiring first; a
-//	marked member is a demoted candidate, never an invisible one.
-//	A WIN clears the winner's own marks (clearWinnerUpstreamSkip).
+//	LAYER-SEPARATED DOCTRINE (wi-4d2c8e17; supersedes the part-3
+//	group-ordering wording): the cache is an optimization, not the
+//	truth: it may reorder candidates, never exclude them — and it may
+//	suppress an ATTEMPT, never a PICK or a CHAIN. These marks are the
+//	UPSTREAM layer: they reorder credential preference in the attempt
+//	path (preferUnmarkedUpstreamCredential) and never touch the group
+//	pick. A WIN clears the winner's own marks (clearWinnerLayerState).
 //
 // Called from the Case-1 site with c.mu held (the _Locked suffix
 // documents the call discipline, not the cache's own lock).
@@ -2105,6 +2130,37 @@ func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
 	ttl := c.cfg.UpstreamSkipCacheTTL
 	cache.Mark(skipcache.ScopeCredential, credID, wireModel, ttl)
 	cache.Mark(skipcache.ScopeProvider, provider, wireModel, ttl)
+
+	// wi-4d2c8e17 / ruling 2 — MODEL layer. A model-attributable
+	// usage wall (the model's own plan/session limit, e.g. "Usage
+	// limit reached for 5 hour. Your limit will reset at …") marks
+	// the MODEL identity; the chain layer then SUPPRESSES that
+	// model's next attempt at zero cost and proceeds into its chain.
+	// Credential-scoped 429s do NOT reach here (ModelWall's
+	// throttle-marker guard keeps per-minute limits upstream-scoped).
+	// Keyed by the ROW identity (latestReq.modelID) — the same key
+	// the attempt-suppression site reads.
+	c.markModelWallForErrorLocked(latestReq, latestReq.modelID)
+}
+
+// markModelWallForErrorLocked classifies the attempt's failure as a
+// MODEL-attributable wall and, when it is, marks the model layer for
+// the reset instant (clamped [1m,24h]) or the configured fixed TTL
+// when no reset parses. modelKey is the ROW identity the suppression
+// site reads. Caller holds c.mu (call discipline only).
+func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest, modelKey string) {
+	if c.cfg.ModelSkipCache == nil || modelKey == "" {
+		return
+	}
+	err := latestReq.GetError()
+	if err == nil {
+		return
+	}
+	// The classify→clamp→mark policy lives in ONE place (tidier
+	// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
+	// [1m,24h] clamp (fixed AND reset windows), and the
+	// MarkUntil-vs-Mark branch.
+	modelcache.ApplyWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
 }
 
 // FinalFailureReason (wi-7769a812 part 2) exposes the classified
