@@ -415,4 +415,118 @@ describe('DecisionModelForm — payload, validation, per-provider base URL (Deci
       });
     });
   });
+
+  describe('provider-on-edit hydration (primary credential derivation)', () => {
+    it('edit-load with a saved openrouter row selects openrouter and populates openrouter credentials', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      // Real wire shape: the Model DTO carries NO internal_provider.
+      const initial: DecisionModel = {
+        id: 'or-edit',
+        name: 'OpenRouter Edit',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'decision',
+        internal: true,
+        internal_model: 'typesafe/jev-1.13',
+        internal_base_url: 'https://openrouter.ai/api',
+        credentials: [{ credential_id: 'cred-or-1', weight: 1, position: 0 }],
+      };
+      const { container } = render(
+        <DecisionModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      // The provider dropdown must reflect the primary credential's
+      // provider (openrouter), not the per-kind default (openai).
+      const providerSelect = container.querySelector(
+        '[data-testid="decision-form-provider-select"]',
+      ) as HTMLSelectElement;
+      expect(providerSelect.value).toBe('openrouter');
+
+      // The credential editor must be filtered to openrouter, so the saved
+      // primary credential is present (and openai/typesafe are not).
+      const credSelect = Array.from(container.querySelectorAll('select')).find(
+        (s) => s.getAttribute('data-testid') !== 'decision-form-provider-select',
+      ) as HTMLSelectElement;
+      const optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-or-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(false);
+      expect(optTexts.some((t) => t.includes('cred-ts-1'))).toBe(false);
+      expect(credSelect.value).toBe('cred-or-1');
+
+      // Submitting round-trips the derived provider.
+      const submit = container.querySelector('[data-testid="decision-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+      await waitFor(() => {
+        expect(onSave).toHaveBeenCalledTimes(1);
+      });
+      expect((onSave as Mock).mock.calls[0][0].internal_provider).toBe('openrouter');
+    });
+
+    it('edit-load falls back to the per-kind default when the primary credential cannot be resolved', async () => {
+      const initial: DecisionModel = {
+        id: 'missing-cred',
+        name: 'Missing Cred',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'decision',
+        internal: true,
+        internal_model: 'gpt-6-luna',
+        internal_base_url: '',
+        // Primary credential id absent from the fetched list (deleted /
+        // stale row) — unresolvable, so the default stands.
+        credentials: [{ credential_id: 'cred-does-not-exist', weight: 1, position: 0 }],
+      };
+      const { container } = render(
+        <DecisionModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const providerSelect = container.querySelector(
+        '[data-testid="decision-form-provider-select"]',
+      ) as HTMLSelectElement;
+      expect(providerSelect.value).toBe('openai');
+    });
+
+    it('add mode is unchanged: default provider openai, credentials filtered to openai', async () => {
+      const { container } = render(
+        <DecisionModelForm
+          mode="add"
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const providerSelect = container.querySelector(
+        '[data-testid="decision-form-provider-select"]',
+      ) as HTMLSelectElement;
+      expect(providerSelect.value).toBe('openai');
+
+      const addCredBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+      ) as HTMLButtonElement;
+      fireEvent.click(addCredBtn);
+      const credSelect = Array.from(container.querySelectorAll('select')).find(
+        (s) => s.getAttribute('data-testid') !== 'decision-form-provider-select',
+      ) as HTMLSelectElement;
+      const optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-or-1'))).toBe(false);
+      expect(optTexts.some((t) => t.includes('cred-ts-1'))).toBe(false);
+    });
+  });
 });
