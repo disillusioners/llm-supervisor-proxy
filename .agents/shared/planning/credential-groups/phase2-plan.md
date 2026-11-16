@@ -179,7 +179,7 @@ In the Provider cell (`CredentialsTab.tsx:186-190`), after the provider badge, r
 
 Mirrors `CredentialsTab.tsx`'s three-state shape (list ↔ inline form ↔ modal).
 
-- **Props:** `{ groups: CredentialGroup[]; models: Model[]; usedBy: Record<string, Model[]>; onInlineAndDelete: (group: CredentialGroup) => Promise<void>; status; setStatus }`.
+- **Props:** `{ groups: CredentialGroup[]; models: Model[]; usedBy: Record<string, string[]>; onInlineAndDelete: (group: CredentialGroup) => Promise<void>; status; setStatus }` — `usedBy` maps group id → **model-ID strings** (the same `Record<groupId, string[]>` shape the container derives, §1.3); the **tab** resolves IDs → display names via its own `models` prop.
 - **Self-fetch:** `getCredentials()` on mount (mirrors `CredentialsTab.tsx:42-55`) for the member picker.
 - **List** (`data-testid="credential-groups-list"`): table ID / Name / Provider / Members / Used by / Actions; row `data-testid="credential-group-row-<id>"`; "Used by N models" badge `data-testid="credential-group-used-by-<id>"` (from `usedBy[id]?.length`).
 - **CTA** "Add Credential Group" → inline `CredentialGroupForm` (mirrors `showForm`/`formMode` state at `:31-33`).
@@ -301,7 +301,7 @@ export async function updateCredentialGroup(id: string, group: Partial<Credentia
 export async function deleteCredentialGroup(id: string): Promise<void>
 ```
 
-- URLs: `GET/POST /fe/api/credential-groups`, `GET/PUT/DELETE /fe/api/credential-groups/{id}/` (trailing slash — ServeMux prefix-subtree, precedent `server.go:197`; A-12.vi). No `/{id}/used-by` route — `used_by` is server-side on list+detail (A-10).
+- URLs (**one canonical form**, matching phase1 §f): `GET/POST /fe/api/credential-groups`, `GET/PUT/DELETE /fe/api/credential-groups/{id}` — **request paths WITHOUT trailing slash**. The trailing slash exists ONLY in the server's ServeMux registration string `"/fe/api/credential-groups/"` (the subtree pattern that routes `{id}` requests; precedent `server.go:197`; A-12.vi). ServeMux semantics note (load-bearing): the exact list pattern is ALSO registered, so Go's implicit subtree redirect never fires for the list path; an id-less trailing-slash request (`…/credential-groups/`) reaches the `{id}` handler with an empty id → **400 missing-id** under A-9. No `/{id}/used-by` route — `used_by` is server-side on list+detail (A-10).
 - Bare `{"error":"<string>"}` envelope on failure; `throw new Error(err.error || '...')` (mirrors `:984-987`). **FE branches on STATUS CODES only** (A-9): never parse error message text; never assume the body is JSON beyond the bare `{"error"}` envelope (a `text/plain` body throws `SyntaxError`). Groups are fetched **uncached**, mirroring the credentials functions (`getCredentials` is a direct fetch, `:962-966`).
 - **Every mutation calls `invalidateModelCaches()`** — the quadruple delete at `:971-976` is the canonical contract; a group rename/delete changes the flat lists.
 - Fetch-stub test coverage: `useApiCredentialGroups.test.ts` mirrors `useApiCredentials.test.ts:56` (`MODEL_KEYS`) and asserts all four keys are cleared after each group mutation.
@@ -338,7 +338,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 | T-E | `config/__tests__/CredentialsTab.test.tsx` **(EXTEND)** | E1 group badges render per credential row from `groupMemberships`; E2 no badges when the map is empty/undefined; E3 credential delete modal lists the credential's groups; E4 existing 9router + ModelForm tests **unchanged and green** | 4 |
 | T-F | `config/__tests__/MultiCredentialEditor.mixed.test.tsx` **(NEW)** | F1 group option renders distinctly (`🗂️` + provider); F2 group selectable on row 0; F3 group disabled on row >0 when providers differ; F4 group disabled when already selected on another row; F5 credential disabled when row-0 is a group of another provider; F6 weight input applies to the group row; F7 selecting a group writes `group_id` + empty `credential_id`; F8 **regression:** a plain credential list renders and submits byte-identically (no `group_id` in the payload) | 8 |
 | T-G | `config/__tests__/ModelForm.mixed.test.tsx` **(NEW)** | G1 hydration of a group ref; G2 submit validation: empty ref, duplicate ref, 9router group; G3 Test button sends the group id as `credential_id` when the primary is a group; G4 `canTestConnection` true for a group primary; G5 primary display shows the group badge + provider; G6 legacy `credential_id` shim still works | 8 |
-| T-H | `hooks/__tests__/useApiCredentialGroups.test.ts` **(NEW)** | H1 each group mutation clears the four model-list cache keys; H2 error envelope parsed (status-code branching, no message-text parsing); H3 list carries server-side `used_by`; H4 uncached fetch parity | 2 |
+| T-H | `hooks/__tests__/useApiCredentialGroups.test.ts` **(NEW)** | H1 each group mutation clears the four model-list cache keys; H2 error envelope parsed (status-code branching, no message-text parsing); H3 list carries server-side `used_by`; H4 uncached fetch parity; H5 **URL-form pin (A-12.vi):** detail calls use `/fe/api/credential-groups/{id}` with **no trailing slash** — the fetch-stub asserts the exact URL and that the `{id}` request form reaches the registered subtree handler (the trailing slash lives only in the registration string) | 2 |
 | T-I | `components/__tests__/SettingsPage.tabs.test.tsx` **(NO EDIT)** | stays green unchanged — the top-level bar still has 11 tabs in order; the credentials branch mounts the container | 3 |
 | T-J | `config/__tests__/DecisionModelForm.test.tsx`, `ImgGenModelForm.test.tsx` **(NO EDIT)** | stay green unchanged — the shared editor's new prop is optional and unset | 8 |
 
@@ -352,7 +352,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 | A-12.iii (member-overlap warn-only = backend invariant R-6) | T-F (warn-only hint) — stated as backend invariant, not FE gap | §1.7 |
 | A-12.iv (new test files type-clean; pre/post per-file tsc delta on 9 baseline files) | §6.1 procedure + gate task 9 | §6.1 |
 | A-12.v (drop false `w-40` precedent citation) | doc-only; no test | §1.3 |
-| A-12.vi (trailing-slash route registration) | §4 contract text + §3 URLs | §3, §4 |
+| A-12.vi (trailing-slash registration; no-slash request URLs) | T-H (H5: `{id}` requests use the no-slash form and reach the registered subtree handler) + §4 contract text + §3 URLs | §3, §4 |
 
 **Regression pin (locked):** a model with a plain credential list behaves byte-identically — covered by T-F8 + T-G6 + the unchanged `CredentialsTab.test.tsx` / `SettingsPage.tabs.test.tsx` / Decision+ImgGen form suites.
 

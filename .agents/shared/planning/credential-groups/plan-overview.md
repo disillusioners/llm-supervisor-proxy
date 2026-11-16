@@ -96,7 +96,7 @@ Full detail: phase1 §h, phase2 §5, phase3 §4 (with coverage-closure check §4
 
 ## Ship runbook
 
-See `phase3-plan.md` §5 (T-0..T-9): freeze tip → local release gate → land (explicit-SHA pushes, 8 ⛔ USER-AUTHORIZED GATE markers) → pre-deploy baseline + pre-flight dump → CI watch → image verify (marker `CREATE TABLE IF NOT EXISTS credential_groups`, negative control verified 0 on live `fd1649c`) → **daoduc first, primary last** → live scenario → rollback documented-before-deploy. GitOps pins move together; `main` untouched. NEVER push without explicit user instruction.
+See `phase3-plan.md` §5 (T-0..T-9): freeze tip → local release gate → land (explicit-SHA pushes, ⛔ USER-AUTHORIZED GATE markers) → pre-deploy baseline + pre-flight dump → CI watch → image verify (marker `CREATE TABLE IF NOT EXISTS credential_groups`; negative control re-derived against the live tag at execution time — baseline v195 @ `8d434ba`) → **daoduc first, primary last** → live scenario → rollback documented-before-deploy. GitOps pins move together; `main` untouched. NEVER push without explicit user instruction.
 
 ## Leader rulings (FINAL — recorded at the 2026-11-16 integration pass)
 

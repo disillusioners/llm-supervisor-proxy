@@ -247,6 +247,7 @@ New file `credential_group.go` (house style: `store_group_rewrite.go`, `store_gr
 - **group writes take `groupsMu.Lock()` at the swap** — never `m.mu`.
 - Why a dedicated lock: flatten is called from sites that already hold `m.mu.Lock()` (the AddModel/UpdateModel engine-notify spans at `store.go:1632`/`:1768`, the `RemoveCredential` span at `store.go:2381`) → an `m.mu.RLock()` inside flatten **self-deadlocks** (Go `RWMutex` is non-reentrant; documented precedent `store.go:2076-2079`). The alternative (lock-free map access) is a **fatal concurrent-map read** on the resolve-hot path (`store.go:2543`/`:2679`) — a process crash on the critical substrate.
 - **Internal lock-free accessors**: membership lookups that are invoked from inside a held `m.mu.Lock()` span (notably `GroupsContainingCredential` called by `RemoveCredential`) use a **lock-free internal accessor** that does not take `m.mu.RLock()` and does not re-enter `groupsMu` while it is held.
+- **Reconciliation (read-rule vs write-rule, so §c.1 and §c.3 cannot be misread as contradicting):** the bullets above govern the **read path** — *flatten never takes `m.mu`* (it would self-deadlock inside the held `m.mu.Lock()` spans). Group **writes** are the other half of A-3 (§c.3): they hold `m.mu` for the whole validate → SQL → swap → fan-out span **and** take `groupsMu` at the swap — both locks, strict order `m.mu` → `groupsMu`, reverse never occurs. Complementary halves of one discipline.
 
 **c.2 CRUD** (mirror credential CRUD `store.go:2302`/`:2332`/`:2380`):
 - `AddCredentialGroup(g)`: validate → `INSERT` → swap `m.groups[g.ID]` under `groupsMu.Lock()` → **fan-out** (A-15i: an added group can be referenced by a model row written by direct SQL / DB restore / the R-1 repair dance, which never passed through `AddCredentialGroup`; one reverse lookup on a rare admin op closes the hole).
@@ -561,7 +562,7 @@ Phase 1 is done when: migration 033 applies idempotently on **SQLite** (A-6i) an
 | **A-7** | §c.7; T-18b; T-31 | shadow `models.credential_id` stays `PrimaryCredentialID()`-derived → **empty** for group-ref-first models; never the group id |
 | **A-8** | §d.1; T-23e; T-32 | flatten fails closed: only same-provider members expand; divergent member skipped + WARN |
 | **A-9** | §f (A-9 para); T-28; T-33 | bare `{"error"}` JSON at **every** error site incl. 405 + missing-id; `errors.Is` sentinels; FE branches on status only |
-| **A-10** | §f (list + detail rows); T-37 | `used_by` carried on **list and detail** server-side; no `/{id}/used-by` route (phase2 has 7 stale refs to fix) |
+| **A-10** | §f (list + detail rows); T-37 | `used_by` carried on **list and detail** server-side; no `/{id}/used-by` route (phase2's stale refs swept at the integration pass — **0 remain**, grep-verified) |
 | **A-11** | §f (A-11 para); T-28b; T-34 | `handleTestModel` (`server.go:2053-2078`) expands a group id → first flattened member |
 | **A-12(vi)** | §f route block; T-27 | `{id}` handler registers with the literal trailing slash `"/fe/api/credential-groups/"` |
 | **A-14** | §Locked representation (preserved); T-27b; T-35 | copy paths stay `copy(dst, src)` over the value struct → `GroupID` survives with zero edits; only the stale doc comments are refreshed |
