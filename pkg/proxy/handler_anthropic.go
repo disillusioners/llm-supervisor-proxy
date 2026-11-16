@@ -781,6 +781,12 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 		// the dispatch ruling — only the credential read + the
 		// rate-limit hook are new).
 		resolved, resolvedOK := arc.conf.ModelsConfig.ResolveInternalConfigWithAffinity(modelConfig.ID, arc.conversationKey)
+		// D1 parity: reorder credential PREFERENCE away from a marked
+		// upstream identity to an unmarked sibling (ordering only —
+		// never excludes the attempt).
+		if resolvedOK {
+			resolved = preferUnmarkedUpstreamCredential(&arc.conf, modelConfig.ID, resolved)
+		}
 		var cred *models.CredentialConfig
 		if resolvedOK {
 			cred = arc.conf.ModelsConfig.GetCredential(resolved.CredentialID)
