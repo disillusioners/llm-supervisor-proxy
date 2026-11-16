@@ -207,7 +207,7 @@ Mirrors `CredentialsTab.tsx`'s three-state shape (list ↔ inline form ↔ modal
 `CredentialGroupMemberPicker` mirrors `MultiCredentialEditor.tsx`'s row idiom:
 
 - Ordered rows: `<select>` of credentials **filtered to `provider`**, + remove button + up/down reorder buttons.
-- `MAX_GROUP_MEMBERS = 16` (mirrors `GroupMemberEditor.tsx:6`; a FE guard — the backend 64 KB cap is the authority).
+- `MAX_GROUP_MEMBERS = 16` (FE guard **mirroring the backend authority** `MaxCredentialGroupMembers = 16` — binding adjudication I-5; the 64 KB body cap is transport-only, NOT the member-count authority).
 - Placeholder "Select a credential"; the picker shows `{cred.id} ({cred.provider})` (same label grammar as `MultiCredentialEditor.tsx:154`).
 - No weight input (weight lives on the model's group ref).
 
@@ -368,7 +368,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 - **Procedure:** `cd pkg/ui/frontend && npx tsc --noEmit | grep "error TS" | wc -l` after FE edits. **If the count or file-set moves**, update the per-file lines + footer in the same commit with an amendment note (`tsc-baseline.txt:3-9` precedent). Do **not** opportunistically fix the 19 frozen errors.
 
 ### 6.2 Static zero-mod proof
-- `vite build` writes the TRACKED `pkg/ui/static/` (`vite.config.ts:7-9`). Zero-mod proof = `find pkg/ui/static -type f | sort | xargs sha256sum` before vs after a build with **no FE source change**; byte-identity is the mechanism claim (content-hashed names legitimately differ on real builds). The glob `sha256sum pkg/ui/static/**/*` is **broken** under default bash (globstar off) — it provably hashes 3 of 4 files, silently omitting `index.html`, the embed entry point (`server.go:88`) — verified by execution (A-13). This belongs to phase3's gate; phase2 only requires that the FE changes are real (so the static tree *will* change).
+- `vite build` writes the TRACKED `pkg/ui/static/` (`vite.config.ts:7-9`). Zero-mod proof = `find pkg/ui/static -type f | sort | xargs -r sha256sum` before vs after a build with **no FE source change**; byte-identity is the mechanism claim (content-hashed names legitimately differ on real builds). The glob `sha256sum pkg/ui/static/**/*` is **broken** under default bash (globstar off) — it provably hashes 3 of 4 files, silently omitting `index.html`, the embed entry point (`server.go:88`) — verified by execution (A-13). This belongs to phase3's gate; phase2 only requires that the FE changes are real (so the static tree *will* change).
 
 ### 6.3 Test runner
 - `cd pkg/ui/frontend && npx vitest run` (or `npm test`). All suites in §5 green; `-run` splits on `/` (bare subtest names select zero tests).
@@ -377,7 +377,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 
 ## 7. Merge-conflict disclosure (credential-groups × decision-groups) — SEMANTIC merge
 
-Their lane lands in `latest` later; **our lane ships first**. Conflicts are resolved when the decision lane lands. **Upgrade (claim-6 correction 7):** both lanes add a container + left vertical nav to the same `SettingsPage` area and new types to the same `types.ts` cluster — the merge is **semantic**, not merely textual. The decision lane's new files are `DecisionModelsContainer.tsx`, `groupLane.ts`, and `__tests__/DecisionModelsContainer.test.tsx` (their phase2-plan §1.1); ours are `CredentialsContainer.tsx`, `CredentialGroupsTab.tsx`, `CredentialGroupForm.tsx`, `CredentialGroupMemberPicker.tsx`. Both containers use the `border-l-2`/`aria-current` idiom (our §1.3 / their §2.1) — at merge time this must be reconciled as a **shared convention** (one Tailwind class set, one aria-current rule), not two parallel implementations. Disclosed:
+**Sequence-independent (C-note5):** EITHER lane may land in `latest` first — this disclosure holds in BOTH orders; whichever lane lands SECOND resolves the textual conflicts at its own gate (do not assume the decision lane waits for us, nor we for it). **Upgrade (claim-6 correction 7):** both lanes add a container + left vertical nav to the same `SettingsPage` area and new types to the same `types.ts` cluster — the merge is **semantic**, not merely textual. The decision lane's new files are `DecisionModelsContainer.tsx`, `groupLane.ts`, and `__tests__/DecisionModelsContainer.test.tsx` (their phase2-plan §1.1); ours are `CredentialsContainer.tsx`, `CredentialGroupsTab.tsx`, `CredentialGroupForm.tsx`, `CredentialGroupMemberPicker.tsx`. Both containers use the `border-l-2`/`aria-current` idiom (our §1.3 / their §2.1) — at merge time this must be reconciled as a **shared convention** (one Tailwind class set, one aria-current rule), not two parallel implementations. Disclosed:
 
 | File | Risk | Why | Resolution strategy at merge time |
 |---|---|---|---|
@@ -442,6 +442,10 @@ Their lane lands in `latest` later; **our lane ships first**. Conflicts are reso
 | 6 | `CredentialGroupForm.tsx` | 2, 5 | T-C green |
 | 7 | `CredentialGroupsTab.tsx` (list, CRUD, used-by, 409 + inline-then-delete) | 3, 6 | T-B green |
 | 8 | `MultiCredentialEditor.tsx` + `ModelForm.tsx` mixed picker | 1, 2 | T-F, T-G green; T-J (Decision/ImgGen) green unchanged |
+
+**Coupling notes (approver iteration 001):**
+- **No new top-level tab (C-note6):** this lane adds **NO new SettingsPage top-level tab** — the 11-tab bar and its adjacency pin (T-I) are untouched; "Credential Groups" lives strictly INSIDE the credentials container's left sub-nav.
+- **C6 vs phase1 empty-group rule (B-note4):** the FE form enforces ≥1 member at creation (T-C C6) as a deliberately **stricter-than-API** UX rule; the API allows empty groups (phase1 empty-group pin). Documented divergence, not a contradiction — the FE never submits an empty group; the API tolerates one.
 | 9 | Gate: tsc parity, static zero-mod handoff, full `vitest run` | 1–8 | SC8–SC10 |
 
 **Exit criterion:** tasks 1–9 green, §4 integration notes delivered to the planner, and the merge-conflict disclosure (§7) recorded for the decision-lane landing.
@@ -463,7 +467,7 @@ Their lane lands in `latest` later; **our lane ships first**. Conflicts are reso
 - **OQ-1 — group-list refetch ownership.** Should `CredentialGroupsTab` own the groups fetch (self-fetch, mirroring `CredentialsTab`) or should the container own it and pass `groups` + a `refetchGroups` callback? This plan assumes the **container owns the fetch** (it needs `groups` for the badge map and `usedBy`). If phase1/phase3 prefer self-fetch, the container drops to a pure nav and `CredentialsTab`/`CredentialGroupsTab` each fetch — a one-file change. **Recommendation: container owns it** (one fetch, one source of truth).
 - **OQ-2 — `CredentialRef` discriminator.** Confirm `group_id?: string` vs a `kind` field vs group-id-in-`credential_id`. FE adapter is one line either way; the component tree is unchanged. **Recommendation: `group_id?: string`** (additive, mirrors `credential_id` style, omitted ⇒ plain ref).
 - **OQ-3 — group refetch after save.** Does the backend return the created/updated group (201/204 conventions as credentials, `:2462-2530`/`:2630-2651`)? If 204, the FE re-fetches the list. Confirm in phase1.
-- **OQ-4 — member cap.** `MAX_GROUP_MEMBERS = 16` is a FE guard; confirm the backend 64 KB cap is the only authority (no separate count limit).
+- **OQ-4 — member cap — RESOLVED (binding adjudication I-5):** backend authority = `MaxCredentialGroupMembers = 16` (validated at group write, mirroring the `MaxGroupMembers` house precedent) plus expanded model list ≤ `MaxCredentialRefs` 16; the FE `MAX_GROUP_MEMBERS = 16` guard mirrors it; the 64 KB cap is transport-only.
 
 ---
 
