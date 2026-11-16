@@ -50,6 +50,11 @@ keep-first), applied at:
 That is ~8 call sites, all in ONE file (store.go), all inside ModelsManager. Nothing in
 pkg/proxy, pkg/credentiallb, pkg/stickyorder, pkg/skipcache, pkg/grouplb, or pkg/modelscache
 changes for resolution.
+> **CORRECTED by architecture-recommendation.md A-1/A-2 (c92d719):** the seam is **9 store
+> sites + 1 decorator site** (add the legacy 5-tuple resolver `store.go:2444` + the
+> self-contained decorator twin `modelscache/models.go:750`), and the raw-list gates in
+> pkg/proxy + pkg/ui (A-2) DO change — they consume a flattened view. See the folded
+> phase1-plan.md §d for the binding shape.
 
 ### Why there and not elsewhere
 - **Not in pkg/proxy**: the proxy never sees `[]CredentialRef`. Every runtime consumer
@@ -276,6 +281,7 @@ forbidden cache packages in their own packages — the same trick applies.
    (pkg/models/copy.go:102-130 — credential refs copied verbatim :129-130, group rows not
    copyable :112-114) both enumerate fields explicitly. A new `credential_groups` field must
    be added to both or copy/clone semantics silently lose it.
+   > **CORRECTED by architecture-recommendation.md A-14 (c92d719): both copy paths copy the CredentialRef value struct verbatim — GroupID survives with no edits; §e.7's "must be added to both" is wrong.**
 8. **Cap semantics**: `MaxCredentialRefs = 16` (config.go:84) is enforced on RAW refs
    (store.go:1956). A flattened expansion can exceed 16; the engine has no cap but weights
    must be >0 (selector newWeightedSelector selector.go:28; validation :1948). Plan must
