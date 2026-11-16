@@ -76,12 +76,6 @@ const imgGenTestMaxMessageLen = 500
 // only {"model_id": "..."}.
 const imgGenTestMaxBodyBytes = 64 * 1024
 
-// imgGenTestPrompt is the canned prompt of the probe. It is
-// deliberately trivial (a single object on a plain background) so
-// the generation is cheap and fast and the rendering is
-// predictable. The BE owns the body — the FE sends only the row id.
-const imgGenTestPrompt = "a small red apple on a plain white background"
-
 // imgGenTestProbeGate is the process-wide single-flight guard for
 // the image-generation test probe (one probe at a time).
 type imgGenTestProbeGate struct {
@@ -195,25 +189,6 @@ type ImgGenTestResponse struct {
 	DurationMS int64 `json:"duration_ms,omitempty"`
 }
 
-// imgGenTestBody is the canned minimal image-generation request.
-//
-// The `model` field carries the PROXY ROW ID (exactly like a real
-// client posting to /v1/image_generation); the MiniMax adapter
-// rewrites that token to the upstream alias (InternalModel) and
-// appends "/image_generation" to the base URL.
-//
-// `response_format: "url"` is pinned: the upstream answers with
-// CDN URLs (not base64 blobs), and the FE renders those URLs
-// directly — the payload stays tiny and no image bytes travel
-// through the proxy.
-type imgGenTestBody struct {
-	Model          string `json:"model"`
-	Prompt         string `json:"prompt"`
-	AspectRatio    string `json:"aspect_ratio"`
-	N              int    `json:"n"`
-	ResponseFormat string `json:"response_format"`
-}
-
 // handleImgGenTest handles POST /fe/api/image_generation/test.
 //
 // Response contract:
@@ -320,7 +295,12 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- Canned body ------------------------------------------------
-	rawBody := buildImgGenTestBody(modelID)
+	// ADAPTER-OWNED: the probe body is a provider dialect, so the
+	// imggen package owns it (imggen.ProbeBody — pkg/ui never
+	// provider-type-switches). MiniMax rows get the minimal
+	// minimax-shaped family (unchanged); 9router rows get the
+	// operator-verified OpenAI-images reference family.
+	rawBody := imggen.ProbeBody(cred.Provider, modelID)
 
 	// ---- Single-flight guard -----------------------------------------
 	// One probe at a time, process-wide. The loser is rejected
@@ -375,23 +355,6 @@ func (s *Server) handleImgGenTest(w http.ResponseWriter, r *http.Request) {
 		resp.ImageCount, resp.DurationMS, resp.Success, resp.Error)
 
 	writeImgGenTestJSON(w, resp)
-}
-
-// buildImgGenTestBody builds the canned minimal image-generation
-// request for the given proxy row id.
-//
-// The struct holds only string/int fields, so json.Marshal cannot
-// fail — the body is returned as bytes with no error path.
-func buildImgGenTestBody(modelID string) []byte {
-	body := imgGenTestBody{
-		Model:          modelID,
-		Prompt:         imgGenTestPrompt,
-		AspectRatio:    "1:1",
-		N:              1,
-		ResponseFormat: "url",
-	}
-	raw, _ := json.Marshal(body)
-	return raw
 }
 
 // truncateImgGenTestMessage caps the upstream message AND the
