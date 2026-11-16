@@ -1,4 +1,6 @@
 # Credential Groups — SEAM RESEARCH (read-only, worktree wt-cred-groups @ 2b987bf)
+> **SUPERSEDED by binding addendum A-3** (`architecture-recommendation.md`, c92d719): the `m.mu` lock guidance here is replaced by the dedicated **`groupsMu sync.RWMutex`** discipline — read paths take `groupsMu.RLock()`; group writes hold `m.mu` for the whole span and take `groupsMu` at the swap (order `m.mu` → `groupsMu`); lookups called under a held `m.mu` use lock-free internal accessors. See phase1-plan.md §c.1.
+
 
 Commission: management-only bundling of same-provider credentials referenced by models.
 At model-resolution time the model's credential list is FLATTENED (groups expand in place,

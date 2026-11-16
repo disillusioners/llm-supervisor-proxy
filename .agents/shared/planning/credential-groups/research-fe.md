@@ -1,4 +1,6 @@
 # credential-groups — FE Research (read-only, frontend explorer)
+> **SUPERSEDED by binding addendum A-12** (`architecture-recommendation.md`, c92d719): the `w-40` precedent cited below is **FALSE** (zero `w-40` tokens in `src/`), and the container must forward **`status` AND `setStatus`** to `CredentialsTab` — see phase2-plan.md §1.3/§1.7.
+
 
 Date: 2026-11-16 (UTC) · Worktree: `/home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-cred-groups` · Branch `feature/credential-groups` @ `2b987bf` (== origin/latest at creation, ZERO commits — reflog-verified)
 Method: read-only reads + `.git` reflog/pointer reads. NO builds, NO tests, NO git mutations. Sibling worktrees inspected read-only.

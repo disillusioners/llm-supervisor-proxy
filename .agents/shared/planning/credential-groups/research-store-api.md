@@ -1,4 +1,6 @@
 # Research: STORE / SCHEMA / API / NAMING — credential-groups commission
+> **SUPERSEDED by binding addendum A-9** (`architecture-recommendation.md`, c92d719): the 'errors are ALWAYS bare `{"error"}`' statement below is OVERSTATED — the credentials precedent mixes `http.Error` **text/plain** bodies (`server.go:2529`/`:2538`/`:2654`); the NEW endpoints must use bare JSON at **every** error site incl. 405 + missing-id (the FE's `res.json()` throws on text/plain). See phase1-plan.md §f.
+
 
 _Worktree `llm-supervisor-proxy-wt-cred-groups`, branch `feature/credential-groups`, base `2b987bf` (= origin/latest). Read-only. All citations file:line verified against this worktree 2026-11-16._
 

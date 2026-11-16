@@ -65,7 +65,7 @@ Clicking the top-level **"Credentials"** tab shows a container with a **vertical
 | `useProviders()` is the provider vocabulary, cached 60 s | `useApi.ts:1016-1048` |
 | types.ts mirrors Go wire structs verbatim, snake_case, doc comments citing commissions; the `Group*` cluster is the model-group namespace | `types.ts:11-16` (`Credential`), `:21-25` (`CredentialRef`), `:107-154` (`Model`), `:133` (`credentials?`), `:182-192` (`GroupMember`/`GroupModel`) |
 | Decision-lane sub-tab idiom (spec only, zero commits) | `../llm-supervisor-proxy-wt-decision-groups/.agents/shared/planning/decision-groups/phase2-plan.md:106-157` (markup), `:139-148` (class derivation), `:352` (test conventions) |
-| tsc frozen baseline: 19 errors / 9 files; `SettingsPage.tsx` 6, `ModelsTab.tsx` 6, `CredentialsTab.tsx` 1, `ModelForm.tsx` 1, + 5 single-error files | `pkg/ui/frontend/tsc-baseline.txt:14-27` |
+| tsc frozen baseline (**the PRE-MOVE baseline** — re-frozen after the container move, §6.1): 19 errors / 9 files; `SettingsPage.tsx` 6, `ModelsTab.tsx` 6, `CredentialsTab.tsx` 1, `ModelForm.tsx` 1, + 5 single-error files | `pkg/ui/frontend/tsc-baseline.txt:14-27` |
 | vitest: happy-dom, globals off, tests at `src/**/__tests__/**/*.test.{ts,tsx}` | `pkg/ui/frontend/vitest.config.ts:11`, `:13` |
 | Static build writes the TRACKED `pkg/ui/static/` | `pkg/ui/frontend/vite.config.ts:7-9` |
 
@@ -143,6 +143,7 @@ Clicking the top-level **"Credentials"** tab shows a container with a **vertical
 **Container data flow:**
 - Props include `status` **and** `setStatus` (A-12.i) — both are forwarded to `CredentialsTab`; the mount move must not drop `status` (SettingsPage.tsx:649 passes only `setStatus` today; CredentialsTab.tsx:7-8/:28 takes both).
 - `useEffect` on mount → `getCredentialGroups()` → `groups` (uncached).
+- **tsc baseline impact (approver iteration-002):** `SettingsPage.tsx` has **no `status` value**, so this container move RELOCATES/REMOVES one of its 6 frozen errors ⇒ the baseline MUST be re-frozen after the move (§6.1) — the pre-move 19/9 is not the acceptance criterion.
 - `groupMemberships: Record<credentialId, string[]>` derived from `groups` (credential id → group names) — passed to `CredentialsTab`.
 - `usedBy: Record<groupId, string[]>` derived from the (uncached) groups list's server-side `used_by` (A-10) — model ids resolved to names via the chat `models` prop for display only; **not** derived from the 15s-TTL models cache. Passed to `CredentialGroupsTab`.
 - `handleInlineAndDelete(group)` — the 409 recovery action (§1.6).
@@ -301,7 +302,7 @@ export async function updateCredentialGroup(id: string, group: Partial<Credentia
 export async function deleteCredentialGroup(id: string): Promise<void>
 ```
 
-- URLs (**one canonical form**, matching phase1 §f): `GET/POST /fe/api/credential-groups`, `GET/PUT/DELETE /fe/api/credential-groups/{id}` — **request paths WITHOUT trailing slash**. The trailing slash exists ONLY in the server's ServeMux registration string `"/fe/api/credential-groups/"` (the subtree pattern that routes `{id}` requests; precedent `server.go:197`; A-12.vi). ServeMux semantics note (load-bearing): the exact list pattern is ALSO registered, so Go's implicit subtree redirect never fires for the list path; an id-less trailing-slash request (`…/credential-groups/`) reaches the `{id}` handler with an empty id → **400 missing-id** under A-9. No `/{id}/used-by` route — `used_by` is server-side on list+detail (A-10).
+- URLs (**one canonical form**, matching phase1 §f): `GET/POST /fe/api/credential-groups`, `GET/PUT/DELETE /fe/api/credential-groups/{id}` — **request paths WITHOUT trailing slash**. The trailing slash exists ONLY in the server's ServeMux registration string `"/fe/api/credential-groups/"` (the subtree pattern that routes `{id}` requests; precedent `server.go:197`; A-12.vi). ServeMux semantics note (load-bearing): the exact list pattern is ALSO registered, so Go's implicit subtree redirect never fires for the list path; an id-less trailing-slash request (`…/credential-groups/`) reaches the `{id}` handler with an empty id → **400 missing-id** under A-9 (canonical status contract: §4 / phase1 §f — validation 400, not-found 404, empty-id 400). No `/{id}/used-by` route — `used_by` is server-side on list+detail (A-10).
 - Bare `{"error":"<string>"}` envelope on failure; `throw new Error(err.error || '...')` (mirrors `:984-987`). **FE branches on STATUS CODES only** (A-9): never parse error message text; never assume the body is JSON beyond the bare `{"error"}` envelope (a `text/plain` body throws `SyntaxError`). Groups are fetched **uncached**, mirroring the credentials functions (`getCredentials` is a direct fetch, `:962-966`).
 - **Every mutation calls `invalidateModelCaches()`** — the quadruple delete at `:971-976` is the canonical contract; a group rename/delete changes the flat lists.
 - Fetch-stub test coverage: `useApiCredentialGroups.test.ts` mirrors `useApiCredentials.test.ts:56` (`MODEL_KEYS`) and asserts all four keys are cleared after each group mutation.
@@ -310,7 +311,7 @@ export async function deleteCredentialGroup(id: string): Promise<void>
 
 ## 4. Backend contract + integration notes (cross-phase — planner reconciles)
 
-Plan FE against the phase1 shape: `CredentialGroup {id, name, provider, members: [credential_id...] (ordered), used_by?: string[] (server-side on list+detail), timestamps}`; `POST` validates same-provider + member existence; 64 KB cap; bare error envelope at **every** error site incl. 405/missing-id (A-9 — text/plain breaks `res.json()`); 201/204 conventions as credentials; `DELETE` → 409 naming referencing models; `{id}` routes registered with the literal trailing slash (A-12.vi); **no `/{id}/used-by` route** (A-10); credential `DELETE` → 409 when a group member or model-referenced.
+Plan FE against the phase1 shape: `CredentialGroup {id, name, provider, members: [credential_id...] (ordered), used_by?: string[] (server-side on list+detail), timestamps}`; `POST` validates same-provider + member existence; 64 KB cap; bare error envelope at **every** error site incl. 405/missing-id (A-9 — text/plain breaks `res.json()`); 201/204 conventions as credentials; `DELETE` → 409 naming referencing models; `{id}` routes registered with the literal trailing slash (A-12.vi); **no `/{id}/used-by` route** (A-10); credential `DELETE` → 409 when a group member or model-referenced. **Canonical status contract (phase1 §f is authoritative — approver iteration-002):** payload validation rejection (incl. a model ref naming a missing group) → **400**; a **well-formed** `{id}` naming no group → **404**; an **empty/missing** `{id}` path segment → **400** (malformed request, A-9); group referenced by ≥1 model → **409**; wrong method → **405**. The FE branches on status codes only, never on message text.
 
 **Integration note 1 — `CredentialRef` discriminator (OQ-2).** The FE needs a discriminator to render group refs distinctly and to submit them. This plan assumes the additive `group_id?: string` (§2). If phase1 chooses a different discriminator (e.g. `kind: 'credential' | 'credential_group'`, or the group id in `credential_id` with a separate marker), the FE adapter is a one-line change in `MultiCredentialEditor` + `ModelForm`; the component tree is unchanged. **Flagged for the planner.**
 
@@ -361,10 +362,10 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 ## 6. Gate mechanics
 
 ### 6.1 tsc baseline parity
-- `tsc-baseline.txt` freezes 19 errors / 9 files; the verifier asserts total + file-set + per-file counts (`src/utils/__tests__/tsc-baseline.test.ts:139-157`).
+- `tsc-baseline.txt` freezes 19 errors / 9 files (**the PRE-MOVE baseline** — it is re-frozen after the container move, see the re-freeze procedure below); the verifier asserts total + file-set + per-file counts (`src/utils/__tests__/tsc-baseline.test.ts:139-157`).
 - **New clean files change nothing** (no `error TS` lines → never enter `perFile`).
-- **Expected verdict:** unchanged 19/9. The edits to `SettingsPage.tsx` (6), `CredentialsTab.tsx` (1), `ModelForm.tsx` (1) are additive; `MultiCredentialEditor.tsx` is currently clean and must stay clean.
-- **Pre/post per-file delta check (A-12.iv):** capture `npx tsc --noEmit` output **before** FE edits and **after**, then diff per-file counts for the 9 baseline files. An **accidental fix** of a frozen error in `CredentialsTab.tsx`(1)/`ModelForm.tsx`(1)/`SettingsPage.tsx`(6) is a gate failure with a confusing verdict — the count drops and the verifier fails, but the "fix" looks like progress. Treat any per-file count **decrease** as a failure, not a win, unless the baseline is re-frozen with an amendment note in the same commit.
+- **Expected verdict: parity against the RE-FROZEN baseline — NOT the stale 19/9** (approver iteration-002 load-bearing). `SettingsPage.tsx` has **no `status` value**, so the mandated container move RELOCATES/REMOVES one of its 6 frozen errors ⇒ the hard-coded 19/9 is **unreachable** and would false-fail a re-frozen baseline. **Re-freeze procedure (mandatory after the container move):** (1) `npx tsc --noEmit | grep "error TS"` → re-freeze `tsc-baseline.txt` (per-file counts + `TOTAL_ERRORS`/`TOTAL_FILES` footer) via the documented mechanism (`tsc-baseline.txt:3-9` precedent); (2) commit the **updated baseline AND the `tsc-baseline.test.ts` re-assertion together** in the same commit; (3) the gate compares against the **re-frozen** baseline, with the delta **explicitly justified** as the intentional container move (one-line amendment note in the baseline file). The stale 19/9 is **not** an acceptance criterion. The edits to `CredentialsTab.tsx` (1) and `ModelForm.tsx` (1) are additive; `MultiCredentialEditor.tsx` is currently clean and must stay clean.
+- **Pre/post per-file delta check (A-12.iv):** capture `npx tsc --noEmit` output **before** FE edits and **after**, then diff per-file counts for the 9 baseline files. An **accidental fix** of a frozen error in `CredentialsTab.tsx`(1)/`ModelForm.tsx`(1)/`SettingsPage.tsx`(6) is a gate failure with a confusing verdict — the count drops and the verifier fails, but the "fix" looks like progress. Treat any per-file count **decrease** as a failure, not a win, unless the baseline is re-frozen with an amendment note in the same commit. The pre/post delta runs against the **re-frozen** baseline; the intentional container-move delta is the ONE sanctioned change.
 - **Procedure:** `cd pkg/ui/frontend && npx tsc --noEmit | grep "error TS" | wc -l` after FE edits. **If the count or file-set moves**, update the per-file lines + footer in the same commit with an amendment note (`tsc-baseline.txt:3-9` precedent). Do **not** opportunistically fix the 19 frozen errors.
 
 ### 6.2 Static zero-mod proof
@@ -422,7 +423,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 | SC5 | Mixed picker: group option distinct, same-provider + no-duplicate parity, weight on the ref | T-F1–F7 | all green |
 | SC6 | Plain credential list is byte-identical | T-F8, T-G6 + unchanged Decision/ImgGen/Credentials suites | all green |
 | SC7 | Group mutations invalidate the four model-list caches | `useApiCredentialGroups.test.ts` H1 | all four keys cleared |
-| SC8 | tsc baseline parity | `npx tsc --noEmit | grep "error TS" \| wc -l` + `tsc-baseline.test.ts` | 19 errors / same 9 files (or a documented re-freeze) |
+| SC8 | tsc baseline parity | `npx tsc --noEmit | grep "error TS" \| wc -l` + `tsc-baseline.test.ts` | parity against the **RE-FROZEN** baseline (per-file counts + file-set + footer), with the delta justified as the intentional container move — NOT the stale 19/9 |
 | SC9 | FE suite green | `npx vitest run` | 0 failures |
 | SC10 | Top-level tab bar unchanged | `SettingsPage.tabs.test.tsx` without edit | green |
 | SC11 | No `Group*` symbol renamed/added by this lane | `git diff` symbol audit | only `CredentialGroup*` added |
@@ -452,6 +453,8 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 
 ---
 
+**Deferred by design (implementation-time notes — NOT re-planned here):** the §10 table break (cosmetic rendering only); Go-only anti-vacuity markers on the FE lane (the FE lane's non-vacuity is proven by the vitest probe in F-5 / T-2.7 — no Go-style marker needed).
+
 ## Coupling
 
 - **Tight with phase1 (backend):** the `CredentialGroup` wire shape, the `CredentialRef` discriminator, the `handleTestModel` group expansion, the server-side `used_by` + trailing-slash contract (A-9/A-10/A-12.vi). §4 notes 1–4 are the seam.
@@ -473,7 +476,7 @@ House conventions (`vitest.config.ts:11`, `:13`; `phase2-plan.md:352`): `describ
 
 ## Not verified
 
-- `vite build`, `tsc --noEmit`, and `vitest` were **not run** (forbidden by the task). The tsc verdict (19/9 unchanged) is a static expectation, not a measurement.
+- `vite build`, `tsc --noEmit`, and `vitest` were **not run** (forbidden by the task). The tsc verdict is a static expectation, not a measurement; the baseline must be **RE-FROZEN** after the container move (§6.1) — the pre-move 19/9 is **not** the acceptance criterion.
 - The exact frozen error text in `CredentialsTab.tsx` / `ModelForm.tsx` / `SettingsPage.tsx` was not enumerated; the per-file counts are from `tsc-baseline.txt`.
 - The backend contract in §4 is the phase1 plan's shape, not a shipped API; the `/fe/api/credential-groups` routes do not exist at `2b987bf`.
 - The decision lane's phase2-plan was read for the idiom only; its committed state (zero commits) is per `research-fe.md:27-43`.
