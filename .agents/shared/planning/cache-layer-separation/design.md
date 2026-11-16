@@ -95,6 +95,10 @@ winning member (proven service; never a health mark).
 - **Upstream reader is an ordering input only.** It reorders credential
   preference; it never excludes an attempt and never touches the group
   pick or chain membership.
+- **Deferred (follow-up): no per-credential FE observability on an
+  upstream reorder.** The substituted credential is not surfaced via
+  `model_credential_selected` (matches the existing cred-failover
+  precedent); flagged for a later observability pass.
 
 ## Adjacent fixes (in scope)
 

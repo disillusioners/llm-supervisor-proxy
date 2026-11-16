@@ -19,11 +19,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -438,6 +441,7 @@ type sepStatusProvider struct {
 	calls    []string
 	statuses map[string]int
 	empty    map[string]bool // models that answer 200 with NO usable content
+	toolOnly map[string]bool // models that answer 200 with ONLY tool_calls (no text)
 }
 
 func (p *sepStatusProvider) Name() string { return "sep-status" }
@@ -447,12 +451,30 @@ func (p *sepStatusProvider) ChatCompletion(ctx context.Context, req *providers.C
 	p.calls = append(p.calls, req.Model)
 	status := p.statuses[req.Model]
 	empty := p.empty[req.Model]
+	toolOnly := p.toolOnly[req.Model]
 	p.mu.Unlock()
 	if status == 0 {
 		status = http.StatusOK
 	}
 	if status >= 400 {
 		return nil, &providers.ProviderError{Provider: "sep-status", StatusCode: status, Message: "stub failure"}
+	}
+	if toolOnly {
+		return &providers.ChatCompletionResponse{
+			ID: "cc", Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model,
+			Choices: []providers.Choice{{
+				Index: 0,
+				Message: &providers.ChatMessage{
+					Role: "assistant",
+					ToolCalls: []providers.ToolCall{{
+						ID: "call_1", Type: "function",
+						Function: providers.ToolCallFunction{Name: "get_weather", Arguments: `{"city":"x"}`},
+					}},
+				},
+				FinishReason: "tool_calls",
+			}},
+			Usage: providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		}, nil
 	}
 	content := "ok"
 	if empty {
@@ -688,6 +710,24 @@ func TestCacheLayer_GroupPick_StableUnderUpstreamMarks(t *testing.T) {
 	}
 }
 
+// parsedImportPaths returns the unquoted import paths of a Go file
+// (import block only, via go/parser ImportsOnly). Comments are ignored,
+// so a comment that merely writes a fully-qualified path never matches.
+func parsedImportPaths(path string) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(file.Imports))
+	for _, spec := range file.Imports {
+		if imp, uerr := strconv.Unquote(spec.Path.Value); uerr == nil {
+			out = append(out, imp)
+		}
+	}
+	return out, nil
+}
+
 // TestCacheLayer_Structural_PackageLevelNoCacheImports pins the
 // isolation at PACKAGE level (D2): NO non-test file in
 // pkg/store/database, pkg/grouplb or pkg/modelscache imports either
@@ -695,10 +735,15 @@ func TestCacheLayer_GroupPick_StableUnderUpstreamMarks(t *testing.T) {
 // pick — a new file in those packages could otherwise add a
 // `m.skipCache.Marked(...)` call with no import change, defeating the
 // "impossible by construction" claim.
+//
+// The check PARSES the import block (go/parser, ImportsOnly) rather than
+// grepping raw text: a comment that merely writes the fully-qualified
+// path can no longer false-fail the pin, while a real import is still
+// caught (see TestCacheLayer_Structural_ImportParserIsCommentAware).
 func TestCacheLayer_Structural_PackageLevelNoCacheImports(t *testing.T) {
-	forbidden := []string{
-		`"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"`,
-		`"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"`,
+	forbidden := map[string]bool{
+		"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache":  true,
+		"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache": true,
 	}
 	for _, dir := range []string{"../store/database", "../grouplb", "../modelscache"} {
 		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -712,13 +757,13 @@ func TestCacheLayer_Structural_PackageLevelNoCacheImports(t *testing.T) {
 			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				return nil
 			}
-			body, rerr := os.ReadFile(path)
-			if rerr != nil {
-				return rerr
+			imports, perr := parsedImportPaths(path)
+			if perr != nil {
+				return fmt.Errorf("parse %s: %w", path, perr)
 			}
-			for _, f := range forbidden {
-				if strings.Contains(string(body), f) {
-					t.Errorf("%s imports %q — a cross-layer cache read must not be compilable in the group/model-data packages", path, f)
+			for _, imp := range imports {
+				if forbidden[imp] {
+					t.Errorf("%s imports %q — a cross-layer cache read must not be compilable in the group/model-data packages", path, imp)
 				}
 			}
 			return nil
@@ -726,6 +771,48 @@ func TestCacheLayer_Structural_PackageLevelNoCacheImports(t *testing.T) {
 		if err != nil {
 			t.Fatalf("walk %s: %v", dir, err)
 		}
+	}
+}
+
+// TestCacheLayer_Structural_ImportParserIsCommentAware proves the pin's
+// two required properties: a quoted forbidden path inside a COMMENT is
+// ignored, and a REAL import of the same path is detected.
+func TestCacheLayer_Structural_ImportParserIsCommentAware(t *testing.T) {
+	dir := t.TempDir()
+	forbiddenPath := "github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache"
+
+	commentOnly := filepath.Join(dir, "comment_only.go")
+	body := "package x\n\n// note: this package must not import \"" + forbiddenPath + "\" ever\nimport \"fmt\"\n"
+	if err := os.WriteFile(commentOnly, []byte(body), 0o644); err != nil {
+		t.Fatalf("write comment-only fixture: %v", err)
+	}
+	imps, err := parsedImportPaths(commentOnly)
+	if err != nil {
+		t.Fatalf("parse comment-only: %v", err)
+	}
+	for _, imp := range imps {
+		if imp == forbiddenPath {
+			t.Fatalf("comment text was treated as an import — the pin is comment-unaware")
+		}
+	}
+
+	realImport := filepath.Join(dir, "real_import.go")
+	body2 := "package x\nimport _ \"" + forbiddenPath + "\"\n"
+	if err := os.WriteFile(realImport, []byte(body2), 0o644); err != nil {
+		t.Fatalf("write real-import fixture: %v", err)
+	}
+	imps2, err := parsedImportPaths(realImport)
+	if err != nil {
+		t.Fatalf("parse real-import: %v", err)
+	}
+	found := false
+	for _, imp := range imps2 {
+		if imp == forbiddenPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a real import of the forbidden path was NOT detected — the pin cannot catch a cross-layer read")
 	}
 }
 
@@ -890,5 +977,135 @@ func TestCacheLayer_D6_SuppressedHeadDoesNotMask500(t *testing.T) {
 	}
 	if info := coord.GetFinalErrorInfo(); info.HTTPStatus != http.StatusInternalServerError {
 		t.Fatalf("final status = %d, want 500 (the synthetic suppression 429 must not mask the real chain failure)", info.HTTPStatus)
+	}
+}
+
+// ─────────────── D1 wiring pin: the attempt path consults the reader ───────────────
+
+// keyRecordingProvider answers every attempt with usable content; the
+// API key each attempt used is captured by the newProviderClient closure
+// (a credential's APIKey is the only per-credential observable there).
+type keyRecordingProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *keyRecordingProvider) Name() string { return "key-rec" }
+
+func (p *keyRecordingProvider) ChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (*providers.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return &providers.ChatCompletionResponse{
+		Model:   req.Model,
+		Choices: []providers.Choice{{Message: &providers.ChatMessage{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
+	}, nil
+}
+
+func (p *keyRecordingProvider) StreamChatCompletion(ctx context.Context, req *providers.ChatCompletionRequest) (<-chan providers.StreamEvent, error) {
+	return nil, &providers.ProviderError{StatusCode: 500, Message: "not stream"}
+}
+
+func (p *keyRecordingProvider) IsRetryable(err error) bool { return true }
+
+// TestCacheLayer_D1_Wiring_AttemptPrefersUnmarkedCredential pins that
+// the OpenAI attempt path actually CALLS the upstream reorder reader
+// (race_executor.go:520): the engine binding points at cred-A, cred-A is
+// upstream-marked, and the attempt must reach the upstream on cred-B's
+// key.
+func TestCacheLayer_D1_Wiring_AttemptPrefersUnmarkedCredential(t *testing.T) {
+	mock := &mockModelsConfig{}
+	mock.AddCredential(models.CredentialConfig{ID: "cred-A", Provider: "openai", APIKey: "api-key-A", BaseURL: "http://a"})
+	mock.AddCredential(models.CredentialConfig{ID: "cred-B", Provider: "openai", APIKey: "api-key-B", BaseURL: "http://b"})
+	mock.AddModel(models.ModelConfig{
+		ID: "m1", Name: "m1", Enabled: true, Internal: true, InternalModel: "m1",
+		Credentials: models.TestRefs("cred-A", "cred-B"),
+	})
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 11, 60*time.Second)
+	t.Cleanup(engine.Stop)
+	engine.RebindFromStore("m1", models.TestRefs("cred-A", "cred-B"))
+	// Force the engine to bind cred-A: cool cred-B so the healthy pick is A.
+	engine.InjectAllCoolingForTest("m1", "cred-A")
+	resolver := &engineBackedResolver{mockModelsConfig: mock, engine: engine}
+
+	provider := &keyRecordingProvider{}
+	var seenKeys []string
+	orig := newProviderClient
+	newProviderClient = func(providerType, apiKey, baseURL string) (providers.Provider, error) {
+		seenKeys = append(seenKeys, apiKey)
+		return provider, nil
+	}
+	t.Cleanup(func() { newProviderClient = orig })
+
+	up := skipcache.New()
+	up.Mark(skipcache.ScopeCredential, "cred-A", "m1", 10*time.Minute)
+
+	cfg := newTestConfigSnapshot("m1")
+	cfg.ModelsConfig = resolver
+	cfg.UpstreamSkipCache = up
+	cfg.MaxGenerationTime = 5 * time.Second
+	cfg.StreamDeadline = 5 * time.Second
+	raw := []byte(`{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	coord := newRaceCoordinatorWithEvents(context.Background(), cfg, newTestRequest(), raw, []string{"m1"}, events.NewBus(), "d1-wire", false, engine, "conv-d1-wire", false, nil)
+
+	coord.Start()
+	if w := coord.WaitForWinner(); w == nil {
+		t.Fatal("no winner on the D1 wiring request")
+	}
+	if len(seenKeys) == 0 {
+		t.Fatal("provider client was never constructed — no attempt ran")
+	}
+	if seenKeys[0] != "api-key-B" {
+		t.Fatalf("attempt used api key %q, want api-key-B — the attempt path did NOT consult the upstream reorder reader", seenKeys[0])
+	}
+}
+
+// ─────────────── D5 pin: tool-calls-only non-stream response WINS ───────────────
+
+// TestCacheLayer_D5_ToolCallsOnlyWins: a non-stream 200 with ONLY
+// tool_calls (no text) is a legitimate usable win — it must NOT be
+// treated as "empty" and advance. Pins responseHasUsableContent against
+// a future "require text" regression that would break agentic traffic.
+func TestCacheLayer_D5_ToolCallsOnlyWins(t *testing.T) {
+	provider := &sepStatusProvider{toolOnly: map[string]bool{"m1": true}}
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1", chain: []string{"m2"}}, {id: "m2"}},
+		provider, false, false, "conv-tool-only",
+		func(cfg *ConfigSnapshot) { cfg.MaxGenerationTime = 5 * time.Second })
+	coord.Start()
+	winner := coord.WaitForWinner()
+	if winner == nil {
+		t.Fatal("no winner — a tool-calls-only non-stream response must win")
+	}
+	if winner.modelID != "m1" {
+		t.Fatalf("winner = %s, want m1 (tool-calls-only is usable content; must not advance)", winner.modelID)
+	}
+}
+
+// ─────────────── D6 pin: all-suppressed ⇒ 429 ───────────────
+
+// TestCacheLayer_D6_AllSuppressedReturns429: when EVERY attempt is
+// model-suppressed (no real upstream failure), the final status is the
+// suppression semantic 429 — never 0/502.
+func TestCacheLayer_D6_AllSuppressedReturns429(t *testing.T) {
+	provider := &sepStatusProvider{}
+	mc := modelcache.New()
+	coord, _ := newSepCoord(t,
+		[]sepModel{{id: "m1"}},
+		provider, false, false, "conv-all-suppressed",
+		func(cfg *ConfigSnapshot) {
+			cfg.ModelSkipCache = mc
+			cfg.MaxGenerationTime = 5 * time.Second
+		})
+	mc.Mark("m1", 10*time.Minute)
+	coord.Start()
+	if w := coord.WaitForWinner(); w != nil {
+		t.Fatalf("expected no winner, got %s", w.modelID)
+	}
+	if got := provider.callCount(); got != 0 {
+		t.Fatalf("upstream calls = %d, want 0 (every attempt suppressed)", got)
+	}
+	if info := coord.GetFinalErrorInfo(); info.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("final status = %d, want 429 (all-suppressed)", info.HTTPStatus)
 	}
 }
