@@ -42,7 +42,7 @@ hand-off and the engine is group-blind by construction.
   at models.go:737. `CACHE_LAYER_ENABLED` defaults ON (cmd/main.go:170).
 
 ### THE seam, stated once
-ONE helper in pkg/store/database (e.g. `flattenedCredentialRefs(model) []models.CredentialRef`
+ONE helper in pkg/store/database (e.g. `FlattenCredentialRefs(model) []models.CredentialRef`
 — expands `credential_groups` refs in place via a group→member-credential-IDs lookup, dedup
 keep-first), applied at:
 1. the five binding sites above (pass flattened refs instead of `model.Credentials`),
@@ -52,8 +52,9 @@ keep-first), applied at:
 That is ~8 call sites, all in ONE file (store.go), all inside ModelsManager. Nothing in
 pkg/proxy, pkg/credentiallb, pkg/stickyorder, pkg/skipcache, pkg/grouplb, or pkg/modelscache
 changes for resolution.
-> **CORRECTED by architecture-recommendation.md A-1/A-2 (c92d719):** the seam is **9 store
-> sites + 1 decorator site** (add the legacy 5-tuple resolver `store.go:2444` + the
+> **CORRECTED by architecture-recommendation.md A-1/A-2 (c92d719):** the seam is **8 store
+> application sites + 1 decorator site** (9 application points — authoritative census:
+> `phase1-plan.md` §d.2; `store.go:1834` RemoveModel = NO CHANGE) (add the legacy 5-tuple resolver `store.go:2444` + the
 > self-contained decorator twin `modelscache/models.go:750`), and the raw-list gates in
 > pkg/proxy + pkg/ui (A-2) DO change — they consume a flattened view. See the folded
 > phase1-plan.md §d for the binding shape.
@@ -184,7 +185,7 @@ raw-manager tests (which construct ModelsManager directly) pass green.
    and be deleted, leaving a dangling group member. The guard must also consult group
    memberships (store-layer, where the tables live).
 5. Optional membership mutators (or fold into UpdateCredentialGroup).
-6. Optional FE-preview accessor `FlattenedCredentialRefs(modelID)` (display-only).
+6. Optional FE-preview accessor `FlattenCredentialRefs(modelID)` (display-only).
 
 ### Cache invalidation mechanics the group writes must ride
 - Decorator mutators swap cache synchronously (AddModel :804-826; UpdateModel :838-871
