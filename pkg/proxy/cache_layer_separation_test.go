@@ -837,7 +837,7 @@ func TestCacheLayer_WinClear_PerLayer(t *testing.T) {
 
 	conf := &ConfigSnapshot{UpstreamSkipCache: up, ModelSkipCache: mc}
 	h := &Handler{}
-	h.clearWinnerUpstreamSkip(conf, nil, "cred-1", "openai", "wire-m", "row-m")
+	h.clearWinnerLayerState(conf, nil, "cred-1", "openai", "wire-m", "row-m")
 
 	if up.Marked(skipcache.ScopeCredential, "cred-1", "wire-m") {
 		t.Fatal("upstream credential mark survived the win")

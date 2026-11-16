@@ -960,7 +960,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			if winnerWireModel == "" {
 				winnerWireModel = winner.modelID
 			}
-			h.clearWinnerUpstreamSkip(&rc.conf, rc.groupPick, winner.resolved.CredentialID, winner.resolved.Provider, winnerWireModel, winner.modelID)
+			h.clearWinnerLayerState(&rc.conf, rc.groupPick, winner.resolved.CredentialID, winner.resolved.Provider, winnerWireModel, winner.modelID)
 			defer func() {
 				if winner.cancel != nil {
 					winner.cancel()

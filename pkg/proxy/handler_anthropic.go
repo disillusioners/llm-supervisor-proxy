@@ -617,9 +617,9 @@ loop:
 				// request and its cooldown must survive
 				// (CRITICAL-FIX part 3 review, item 4 — mirror of the
 				// OpenAI-lane hook; both lanes funnel through
-				// clearWinnerUpstreamSkip). agentic-go WON at 12:49:06
+				// clearWinnerLayerState). agentic-go WON at 12:49:06
 				// while its marks stayed live — that must not recur.
-				h.clearWinnerUpstreamSkip(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel, currentModel)
+				h.clearWinnerLayerState(&arc.conf, arc.groupPick, arc.lastAttemptCredentialID, arc.lastAttemptProvider, arc.lastAttemptModel, currentModel)
 				return
 			}
 
@@ -1273,7 +1273,6 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	return true
 }
 
-// handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
 // openAIBodyTerminalFinish reports whether an OpenAI-shaped body's
 // choices carry a TERMINAL finish_reason ("content_filter" / "length").
 // D-B (fix round #2): such a completion — even with empty content — is
@@ -1298,6 +1297,7 @@ func openAIBodyTerminalFinish(body []byte) bool {
 	return false
 }
 
+// handleAnthropicInternalNonStreamResponse handles non-streaming internal responses
 func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter, openaiBody []byte, arc *anthropicRequestContext) bool {
 	debugLog("=== INTERNAL OPENAI RESPONSE ===")
 	debugLog("OpenAI Body: %s", string(openaiBody))
@@ -2735,7 +2735,7 @@ func classifyAnthropicFailure(arc *anthropicRequestContext) failureReason {
 //	skip/degrade wording): the cache is an optimization, not the
 //	truth: it may reorder candidates, never exclude them — a marked
 //	identity is DEMOTED (soonest-expiring first), never invisible,
-//	and a WIN clears its own marks (clearWinnerUpstreamSkip).
+//	and a WIN clears its own marks (clearWinnerLayerState).
 func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelKey string) {
 	if arc == nil || arc.conf.UpstreamSkipCache == nil {
 		return
@@ -2760,32 +2760,11 @@ func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelK
 	// suppression site reads.
 	if arc.conf.ModelSkipCache != nil && modelKey != "" && len(arc.lastError) > 0 {
 		now := time.Now()
-		if attributable, until, hasReset := modelcache.ModelWall(string(arc.lastError), now); attributable {
-			ttl := arc.conf.ModelSkipCacheTTL
-			if ttl <= 0 {
-				ttl = modelcache.DefaultTTL
-			}
-			// D4: clamp the fixed TTL at the runtime seam (symmetric
-			// with the reset path).
-			if ttl < time.Minute {
-				ttl = time.Minute
-			}
-			if ttl > 24*time.Hour {
-				ttl = 24 * time.Hour
-			}
-			if hasReset {
-				window := until.Sub(now)
-				if window < time.Minute {
-					window = time.Minute
-				}
-				if window > 24*time.Hour {
-					window = 24 * time.Hour
-				}
-				arc.conf.ModelSkipCache.MarkUntil(modelKey, now.Add(window))
-			} else {
-				arc.conf.ModelSkipCache.Mark(modelKey, ttl)
-			}
-		}
+		// The classify→clamp→mark policy lives in ONE place (tidier
+		// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
+		// [1m,24h] clamp (fixed AND reset windows), and the
+		// MarkUntil-vs-Mark branch.
+		modelcache.ApplyWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/toolrepair"
 )
 
@@ -382,10 +383,10 @@ func (c *Config) Validate() error {
 	// typo from benching a model for days. 0 falls back to the 15m
 	// default at the proxy Clone seam.
 	if c.ModelSkipCacheTTL > 0 {
-		if c.ModelSkipCacheTTL < Duration(time.Minute) {
+		if c.ModelSkipCacheTTL < Duration(modelcache.MinMarkWindow) {
 			return errors.New("model_skip_cache_ttl must be at least 1m when set")
 		}
-		if c.ModelSkipCacheTTL > Duration(24*time.Hour) {
+		if c.ModelSkipCacheTTL > Duration(modelcache.MaxMarkWindow) {
 			return errors.New("model_skip_cache_ttl must be at most 24h when set")
 		}
 	}

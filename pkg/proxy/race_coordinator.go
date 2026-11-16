@@ -283,9 +283,9 @@ type raceCoordinator struct {
 
 	// wi-7769a812 part 2 — the EXHAUST-ARM FLIP latch (see the gate
 	// comment in manage()): true once the Case-1 site has published
-	// the chain-end member_failed + group_fallback_exhausted pair for
-	// this coordinator. One-shot per request; mutated only from
-	// manage() under c.mu.
+	// the chain-end model_failed + model_fallback_exhausted pair for
+	// this coordinator (wi-4d2c8e17 LABELS: chain hops emit model_*).
+	// One-shot per request; mutated only from manage() under c.mu.
 	chainEndPublished bool
 
 	// wi-7769a812 part 2 — the classified reason of the LATEST failed
@@ -715,8 +715,8 @@ func (c *raceCoordinator) manage() {
 			// group-fallback-exhaust-arm-unreachable-p1). Part 2's
 			// exhaustive fallback makes the arm live: a chain-end failure
 			// that no spawn branch will consume must STILL reach Case-1
-			// once, to publish member_failed + group_fallback_exhausted
-			// (payload contract: to_member ABSENT). chainEndPublished is
+			// once, to publish model_failed + model_fallback_exhausted
+			// (payload contract: to_model ABSENT). chainEndPublished is
 			// a one-shot latch under c.mu — after the publish, the gate
 			// shuts again and the all-failed resolution below proceeds.
 			chainEndPending := modelAttempts >= len(c.models) && !c.chainEndPublished
@@ -2102,7 +2102,7 @@ func (c *raceCoordinator) publishModelFallback(eventType, fromModel, toModel, re
 //	suppress an ATTEMPT, never a PICK or a CHAIN. These marks are the
 //	UPSTREAM layer: they reorder credential preference in the attempt
 //	path (preferUnmarkedUpstreamCredential) and never touch the group
-//	pick. A WIN clears the winner's own marks (clearWinnerUpstreamSkip).
+//	pick. A WIN clears the winner's own marks (clearWinnerLayerState).
 //
 // Called from the Case-1 site with c.mu held (the _Locked suffix
 // documents the call discipline, not the cache's own lock).
@@ -2156,36 +2156,11 @@ func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest
 	if err == nil {
 		return
 	}
-	now := time.Now()
-	attributable, until, hasReset := modelcache.ModelWall(err.Error(), now)
-	if !attributable {
-		return
-	}
-	ttl := c.cfg.ModelSkipCacheTTL
-	if ttl <= 0 {
-		ttl = modelcache.DefaultTTL
-	}
-	// D4: clamp the FIXED TTL at the runtime seam symmetric with the
-	// reset path (config Validate only runs on Save; a hot-set value
-	// can be out of range).
-	if ttl < time.Minute {
-		ttl = time.Minute
-	}
-	if ttl > 24*time.Hour {
-		ttl = 24 * time.Hour
-	}
-	if hasReset {
-		window := until.Sub(now)
-		if window < time.Minute {
-			window = time.Minute
-		}
-		if window > 24*time.Hour {
-			window = 24 * time.Hour
-		}
-		c.cfg.ModelSkipCache.MarkUntil(modelKey, now.Add(window))
-		return
-	}
-	c.cfg.ModelSkipCache.Mark(modelKey, ttl)
+	// The classify→clamp→mark policy lives in ONE place (tidier
+	// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
+	// [1m,24h] clamp (fixed AND reset windows), and the
+	// MarkUntil-vs-Mark branch.
+	modelcache.ApplyWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
 }
 
 // FinalFailureReason (wi-7769a812 part 2) exposes the classified

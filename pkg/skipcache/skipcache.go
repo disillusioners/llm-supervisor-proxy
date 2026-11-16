@@ -155,15 +155,22 @@ func (c *Cache) Clear(scope, id, model string) {
 }
 
 // Pair is one (scope, id) candidate to probe for a model — the shape
-// selection call sites build from a member's credential refs.
+// the attempt path's credential-reorder reader
+// (preferUnmarkedUpstreamCredential) builds from a model's credential
+// refs to probe a credential's/provider's live marks.
 type Pair struct {
 	Scope string
 	ID    string
 }
 
-// AnyMarked reports whether ANY of the pairs is marked for model —
-// the "at least one healthy upstream remains" probe. Nil receiver /
-// empty pairs: false.
+// AnyMarked reports whether ANY of the pairs is marked for model.
+// Nil receiver / empty pairs: false.
+//
+// NOTE (wi-4d2c8e17 layer separation): AnyMarked has NO production
+// caller — the retired group-selection health probe was its consumer,
+// and R1 forbids selection from reading this cache. The API is kept
+// (exported surface; pinned by this package's own tests) but nothing
+// outside pkg/skipcache may consult it for selection decisions.
 func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 	if c == nil {
 		return false
@@ -177,9 +184,10 @@ func (c *Cache) AnyMarked(pairs []Pair, model string) bool {
 }
 
 // SoonestExpiry returns the EARLIEST live expiry among the pairs for
-// model — the demoted-sweep ORDERING comparator (unmarked first, then
-// marked soonest-expiring first). ok=false when nothing is marked.
-// Nil receiver: ok=false.
+// model — the recovery-ordering input the attempt path's
+// credential-reorder reader uses to prefer the soonest-recovering
+// candidate when every credential is marked. ok=false when nothing is
+// marked. Nil receiver: ok=false.
 func (c *Cache) SoonestExpiry(pairs []Pair, model string) (time.Time, bool) {
 	if c == nil {
 		return time.Time{}, false
