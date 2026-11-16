@@ -471,7 +471,7 @@ DTO: `CredentialGroup{ID, Name, Provider, Members []string, UsedBy []string}` �
 | **T-36** | **A-15 — fan-out completeness** | T-13 | **`AddCredentialGroup` fans out too** (a model referencing the new group via direct SQL / restore / repair gets a fresh flat list); api_key rotation needs **no** fan-out (engine holds refs only); the drain path self-heals (re-reads model + current group state per event) |
 | **T-37** | **A-10 — `used_by` on list + detail** | T-28 | `GET /fe/api/credential-groups` and `GET /fe/api/credential-groups/{id}` both carry server-side `used_by`; **no** `/{id}/used-by` route exists |
 
-**Anti-vacuous:** every ADDED `func Test` must show a literal `--- PASS` (PACKS.md:15). gofmt zero-new-drift via line-set diff vs base `2b987bf` (not hunk overlap). **Addendum closure:** every addendum folded in (A-1, A-2, A-3, A-4, A-5, A-6i, A-6ii, A-7, A-8, A-9, A-11, A-14, A-15) has ≥1 matrix row above; A-10 covered by T-37, A-12(vi) by T-28/T-33 + §f.
+**Anti-vacuous:** every ADDED `func Test` must show a literal `--- PASS` (PACKS.md:15). gofmt zero-new-drift via line-set diff vs base `2b987bf` (not hunk overlap). **Addendum closure:** every addendum folded in (A-1, A-2, A-3, A-4, A-5, A-6i, A-6ii, A-7, A-8, A-9, A-11, A-14, A-15) has ≥1 matrix row above; A-10 covered by T-37, A-12(vi) proven by **phase2 T-H (H5)** — the useApi URL-form pin that `{id}` requests reach the registered trailing-slash subtree handler (phase2-plan.md §5) — plus this phase's §f registration spec.
 
 ---
 
