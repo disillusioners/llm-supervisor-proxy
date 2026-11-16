@@ -330,8 +330,17 @@ func validateDecisionRules(m *ModelConfig, internalProvider string) error {
 //     (Credentials[0]).
 type CredentialRef struct {
 	CredentialID string `json:"credential_id"`
+	GroupID      string `json:"group_id,omitempty"`
 	Weight       int    `json:"weight"`
 	Position     int    `json:"position"`
+}
+
+// IsGroupRef reports whether r references a credential group rather
+// than a single credential. A ref is exactly one of direct
+// (CredentialID != "", GroupID == "") or group (GroupID != "",
+// CredentialID == "").
+func (r CredentialRef) IsGroupRef() bool {
+	return r.GroupID != ""
 }
 
 // ModelConfig represents the configuration for a single model.
@@ -1038,6 +1047,9 @@ func (mc *ModelsConfig) Validate() error {
 			seen := make(map[string]bool, len(model.Credentials))
 			var primaryCred *CredentialConfig
 			for idx, ref := range model.Credentials {
+				if ref.GroupID != "" {
+					return fmt.Errorf("model %s: credentials[%d]: credential groups are supported only in the database config backend", model.ID, idx)
+				}
 				if ref.CredentialID == "" {
 					return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
 				}
@@ -1423,4 +1435,23 @@ func (mc *ModelsConfig) RemoveCredential(id string) error {
 	}
 
 	return mc.Credentials.RemoveCredential(id)
+}
+
+// Credential group stubs (JSON twin — DB-backed only). Seven of the eight
+// return empty/nil; FlattenCredentialRefs returns the raw list (identity
+// fallback) so A-2 gates never read a zero-length flat view.
+func (mc *ModelsConfig) GetCredentialGroup(id string) *CredentialGroupConfig { return nil }
+func (mc *ModelsConfig) GetCredentialGroups() []CredentialGroupConfig        { return nil }
+func (mc *ModelsConfig) AddCredentialGroup(g CredentialGroupConfig) error    { return nil }
+func (mc *ModelsConfig) UpdateCredentialGroup(id string, g CredentialGroupConfig) error {
+	return nil
+}
+func (mc *ModelsConfig) RemoveCredentialGroup(id string) error              { return nil }
+func (mc *ModelsConfig) ModelsUsingCredentialGroup(groupID string) []string { return nil }
+func (mc *ModelsConfig) GroupsContainingCredential(credID string) []string  { return nil }
+func (mc *ModelsConfig) FlattenCredentialRefs(model *ModelConfig) []CredentialRef {
+	if model == nil {
+		return nil
+	}
+	return model.Credentials
 }

@@ -70,6 +70,22 @@ func (s *stubModelsConfig) ResolveInternalConfigWithAffinity(string, string) (mo
 	return models.ResolvedCredential{}, false
 }
 
+func (s *stubModelsConfig) GetCredentialGroup(string) *models.CredentialGroupConfig { return nil }
+func (s *stubModelsConfig) GetCredentialGroups() []models.CredentialGroupConfig     { return nil }
+func (s *stubModelsConfig) AddCredentialGroup(models.CredentialGroupConfig) error   { return nil }
+func (s *stubModelsConfig) UpdateCredentialGroup(string, models.CredentialGroupConfig) error {
+	return nil
+}
+func (s *stubModelsConfig) RemoveCredentialGroup(string) error         { return nil }
+func (s *stubModelsConfig) ModelsUsingCredentialGroup(string) []string { return nil }
+func (s *stubModelsConfig) GroupsContainingCredential(string) []string { return nil }
+func (s *stubModelsConfig) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
+	if model == nil {
+		return nil
+	}
+	return model.Credentials
+}
+
 // newImgGenFilterHarness constructs a handler + a stub config
 // that returns the given enabled models from GetEnabledModels.
 func newImgGenFilterHarness(t *testing.T, enabled []models.ModelConfig) (*Handler, *httptest.Server) {

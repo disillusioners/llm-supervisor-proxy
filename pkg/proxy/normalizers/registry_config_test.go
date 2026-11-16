@@ -59,10 +59,10 @@ func (m *mockModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversati
 
 func (m *mockModelsConfig) AddModelForTest(id string, internal bool) {
 	m.models[id] = &models.ModelConfig{
-		ID:           id,
-		Name:         id,
-		Enabled:      true,
-		Internal:     internal,
+		ID:          id,
+		Name:        id,
+		Enabled:     true,
+		Internal:    internal,
 		Credentials: models.TestRefs("cred-1"),
 	}
 }
@@ -84,6 +84,22 @@ func (m *mockModelsConfig) UpdateCredential(id string, cred models.CredentialCon
 	return nil
 }
 func (m *mockModelsConfig) RemoveCredential(id string) error { return nil }
+
+func (m *mockModelsConfig) GetCredentialGroup(id string) *models.CredentialGroupConfig { return nil }
+func (m *mockModelsConfig) GetCredentialGroups() []models.CredentialGroupConfig        { return nil }
+func (m *mockModelsConfig) AddCredentialGroup(g models.CredentialGroupConfig) error    { return nil }
+func (m *mockModelsConfig) UpdateCredentialGroup(id string, g models.CredentialGroupConfig) error {
+	return nil
+}
+func (m *mockModelsConfig) RemoveCredentialGroup(id string) error              { return nil }
+func (m *mockModelsConfig) ModelsUsingCredentialGroup(groupID string) []string { return nil }
+func (m *mockModelsConfig) GroupsContainingCredential(credID string) []string  { return nil }
+func (m *mockModelsConfig) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
+	if model == nil {
+		return nil
+	}
+	return model.Credentials
+}
 
 // mockToolCallRepairNormalizer is a test double implementing StreamNormalizer
 type mockToolCallRepairNormalizer struct {
