@@ -31,12 +31,13 @@ deadline.
 |----------|-----------------------------------------|-----------------------------------------|---------------------------------|-----|
 | GROUP    | is this member servable in this group?  | group policy facts only (membership, pools, grouplb rotation) | the group pick ONLY | policy lifetime / engine rotation |
 | MODEL    | is this MODEL limited/unavailable?      | model-attributable walls (`pkg/modelcache`) | model/chain attempt suppression ONLY | reset instant (clamp 1m..24h) or fixed `model_skip_cache_ttl` (15m) |
-| UPSTREAM | is this remote/credential working?      | credential/provider failures (`pkg/skipcache`) | credential selection + attempt suppression ONLY | 60s / quota 15m (as before) |
+| UPSTREAM | is this remote/credential working?      | credential/provider failures (`pkg/skipcache`) | attempt path: credential RE-ORDERING (prefer an unmarked sibling; all-marked still attempts, soonest-expiring first) + win-clear ONLY | 60s / quota 15m (as before) |
 
 **Structural invariant.** The group pick cannot read another layer —
-`pkg/store/database/store_group_rewrite.go` imports neither
-`pkg/skipcache` nor `pkg/modelcache` (pinned by
-`TestCacheLayer_Structural_NoCacheImportsInGroupPick`). The v193
+NO non-test file in `pkg/store/database`, `pkg/grouplb` or
+`pkg/modelscache` imports `pkg/skipcache` or `pkg/modelcache` (pinned by
+`TestCacheLayer_Structural_PackageLevelNoCacheImports`), and the data
+manager holds no cache reference at all. The v193
 four-phase sweep survives, but its ordering key is now the **grouplb
 rotation cooldown only**; upstream/model marks never demote or filter.
 
@@ -65,13 +66,35 @@ them — and it may suppress an ATTEMPT, never a PICK or a CHAIN."*
   (`ModelSkipCache.Marked(req.modelID)`) and the Anthropic walk
   (`ModelSkipCache.Marked(currentModel)`). A synthetic plain error keeps
   it rotation-ineligible but advance-worthy, so the chain is entered.
-- Upstream: credential selection (as before) + `clearWinnerUpstreamSkip`.
+- Upstream: `preferUnmarkedUpstreamCredential` in the attempt path
+  (`race_executor.executeInternalRequest`) reorders credential
+  preference away from a marked `(credential|provider, model)` pair to
+  an unmarked sibling; if every credential is marked it prefers the
+  soonest-expiring mark and STILL attempts (never excludes). Plus
+  `clearWinnerUpstreamSkip`. This is the real reader (D1) — it is not
+  "credential selection as before".
 
 ### Win-clear (per layer)
 
 A proven WIN clears: UPSTREAM rows for the winning credential/provider,
 MODEL row for the winning model, and the GROUP *rotation* row for the
 winning member (proven service; never a health mark).
+
+### Acknowledged design notes
+
+- **Group-layer rotation row** is the single acknowledged *health-derived*
+  artifact that lives inside the group layer: it is post-R3 rotation
+  bookkeeping written only by `ExcludeGroupMember` on a genuine
+  end-to-end member failure, and it is cleared for the proven winner as
+  policy restoration. It is deliberately retained (not re-litigated) —
+  it is not a skip-cache health mark.
+- **Model layer keyed by ROW identity.** Two rows that share one
+  upstream plan rediscover the same wall independently (each mints its
+  own row-level mark). The per-row cost is accepted — row identity is
+  the stable execution key and avoids wire-name/row-ID mismatches.
+- **Upstream reader is an ordering input only.** It reorders credential
+  preference; it never excludes an attempt and never touches the group
+  pick or chain membership.
 
 ## Adjacent fixes (in scope)
 
