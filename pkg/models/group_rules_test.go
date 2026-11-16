@@ -461,3 +461,192 @@ func TestValidateGroupMembers_BackupOnly_D2(t *testing.T) {
 		}
 	})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — the LANE rules (G3 widened + homogeneity +
+// lane-matched shadow target).
+//
+// The rules are LANE-WORDED: the group's lane is derived from its members,
+// and every kind error is worded with that lane. The CHAT wording is
+// byte-identical to the historical text (the text lane's messages are
+// untouched) — the pins below assert both arms.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// decisionGroupFixture returns a fully valid DECISION group (two
+// decision-kind members) plus the collection it lives in.
+func decisionGroupFixture() (ModelConfig, []ModelConfig) {
+	memberA := ModelConfig{ID: "dec-a", Name: "Decision A", Enabled: true, Kind: KindDecision, Internal: true, InternalModel: "gpt-5", Credentials: []CredentialRef{{CredentialID: "cred-openai", Weight: 1, Position: 0}}}
+	memberB := ModelConfig{ID: "dec-b", Name: "Decision B", Enabled: true, Kind: KindDecision, Internal: true, InternalModel: "gpt-5-mini", Credentials: []CredentialRef{{CredentialID: "cred-openai", Weight: 1, Position: 0}}}
+	group := ModelConfig{
+		ID:       "decision-group",
+		Name:     "Decision Group",
+		Enabled:  true,
+		Kind:     KindGroup,
+		Internal: true,
+		Members:  []GroupMember{{ModelID: "dec-a", Weight: 2}, {ModelID: "dec-b", Weight: 1}},
+	}
+	collection := []ModelConfig{memberA, memberB, group}
+	return group, collection
+}
+
+// TestValidateGroupMembers_DecisionMembers_Accepted — a group whose
+// members are decision-kind models validates clean (the D-1 widening:
+// one group entity, one member list, two lanes).
+func TestValidateGroupMembers_DecisionMembers_Accepted(t *testing.T) {
+	group, collection := decisionGroupFixture()
+	if err := ValidateKindRules(&group, ""); err != nil {
+		t.Errorf("decision group should pass validateGroupRules, got: %v", err)
+	}
+	if err := ValidateGroupMembers(&group, collection); err != nil {
+		t.Errorf("decision group with decision members should pass ValidateGroupMembers, got: %v", err)
+	}
+}
+
+// TestValidateGroupMembers_MixedKindMembers_Rejected — a chat member
+// next to a decision member is rejected with the DEDICATED homogeneity
+// message (not the member-kind message).
+func TestValidateGroupMembers_MixedKindMembers_Rejected(t *testing.T) {
+	group, collection := decisionGroupFixture()
+	// Splice a chat member into the decision group.
+	chatMember := ModelConfig{ID: "coding", Name: "Coding", Enabled: true, Kind: KindChat, Internal: true, InternalModel: "glm-5"}
+	collection = append(collection, chatMember)
+	group.Members = []GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding", Weight: 1}}
+
+	err := ValidateGroupMembers(&group, collection)
+	if err == nil {
+		t.Fatal("mixed-kind group must be rejected")
+	}
+	if !strings.Contains(err.Error(), "members must all share one kind (chat or decision)") {
+		t.Errorf("mixed-kind error %q must carry the dedicated homogeneity message", err.Error())
+	}
+	// The message names the offending member.
+	if !strings.Contains(err.Error(), "coding") {
+		t.Errorf("mixed-kind error %q must name the offending member", err.Error())
+	}
+}
+
+// TestValidateGroupMembers_DecisionGroup_RejectsChatMember — the
+// bidirectional rule: a chat-kind member cannot join a decision
+// group (mixed ⇒ rejected).
+func TestValidateGroupMembers_DecisionGroup_RejectsChatMember(t *testing.T) {
+	group, collection := decisionGroupFixture()
+	chatMember := ModelConfig{ID: "coding", Name: "Coding", Enabled: true, Kind: KindChat, Internal: true, InternalModel: "glm-5"}
+	collection = append(collection, chatMember)
+	group.Members = []GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "coding", Weight: 1}}
+
+	if err := ValidateGroupMembers(&group, collection); err == nil {
+		t.Fatal("a chat member must not join a decision group")
+	}
+}
+
+// TestValidateGroupMembers_LegacyEmptyKind_IsChatLane — the legacy
+// "" kind is CHAT: a group of legacy members is a chat group, and
+// mixing a legacy member into a decision group is rejected.
+func TestValidateGroupMembers_LegacyEmptyKind_IsChatLane(t *testing.T) {
+	if lane, ok := MemberLane(""); !ok || lane != GroupLaneChat {
+		t.Fatalf("MemberLane(\"\") = (%q, %v), want (chat, true)", lane, ok)
+	}
+	if lane, ok := MemberLane(KindChat); !ok || lane != GroupLaneChat {
+		t.Fatalf("MemberLane(chat) = (%q, %v), want (chat, true)", lane, ok)
+	}
+	if lane, ok := MemberLane(KindDecision); !ok || lane != GroupLaneDecision {
+		t.Fatalf("MemberLane(decision) = (%q, %v), want (decision, true)", lane, ok)
+	}
+	if _, ok := MemberLane(KindImageGen); ok {
+		t.Fatal("MemberLane(image-gen) must not be a valid lane")
+	}
+	if lane, ok := UnanimousGroupLane([]string{KindChat, ""}); !ok || lane != GroupLaneChat {
+		t.Fatalf("UnanimousGroupLane([chat,\"\"]) = (%q, %v), want (chat, true)", lane, ok)
+	}
+	if _, ok := UnanimousGroupLane([]string{KindChat, KindDecision}); ok {
+		t.Fatal("UnanimousGroupLane([chat,decision]) must be (ok=false)")
+	}
+
+	// The write-time arm: a legacy member next to a decision member is
+	// rejected (the legacy "" never enters a decision group).
+	group, collection := decisionGroupFixture()
+	legacy := ModelConfig{ID: "legacy", Name: "Legacy", Enabled: true, Kind: "", Internal: true, InternalModel: "glm-5"}
+	collection = append(collection, legacy)
+	group.Members = []GroupMember{{ModelID: "dec-a", Weight: 1}, {ModelID: "legacy", Weight: 1}}
+	if err := ValidateGroupMembers(&group, collection); err == nil {
+		t.Fatal("a legacy \"\" member must not join a decision group")
+	}
+}
+
+// TestValidateGroupMembers_DecisionGroup_ShadowTargetMustMatchLane —
+// the shadow target must belong to the group's lane: a decision group
+// with a chat shadow target is rejected; a decision shadow target is
+// accepted; a CHAT group with a decision shadow target keeps the
+// historical chat wording.
+func TestValidateGroupMembers_DecisionGroup_ShadowTargetMustMatchLane(t *testing.T) {
+	group, collection := decisionGroupFixture()
+	chatMember := ModelConfig{ID: "coding", Name: "Coding", Enabled: true, Kind: KindChat, Internal: true, InternalModel: "glm-5"}
+	collection = append(collection, chatMember)
+
+	// Mismatched shadow target on a decision group.
+	group.ShadowModelID = "coding"
+	err := ValidateGroupMembers(&group, collection)
+	if err == nil {
+		t.Fatal("a decision group with a chat shadow target must be rejected")
+	}
+	if !strings.Contains(err.Error(), "must reference a decision-kind model") {
+		t.Errorf("shadow error %q must name the decision lane", err.Error())
+	}
+
+	// Matched shadow target on a decision group — accepted.
+	group.ShadowModelID = "dec-b"
+	if err := ValidateGroupMembers(&group, collection); err != nil {
+		t.Errorf("a decision group with a decision shadow target must be accepted, got: %v", err)
+	}
+
+	// The chat arm keeps its historical wording, byte-identical.
+	chatGroup, chatCollection := groupBaseFixture()
+	chatCollection = append(chatCollection, ModelConfig{ID: "dec-c", Name: "Decision C", Enabled: true, Kind: KindDecision, Internal: true, InternalModel: "gpt-5"})
+	chatGroup.ShadowModelID = "dec-c"
+	err = ValidateGroupMembers(&chatGroup, chatCollection)
+	if err == nil {
+		t.Fatal("a chat group with a decision shadow target must be rejected")
+	}
+	if !strings.Contains(err.Error(), "must reference a chat-kind model (got kind \"decision\")") {
+		t.Errorf("chat shadow error %q must keep the historical chat wording", err.Error())
+	}
+}
+
+// TestValidateGroupMembers_InactiveChainOnlyTarget_Accepted — R4: an
+// INACTIVE / chain-only model is a VALID chain target, never a defect
+// ("disabled-but-chain-referenced" is not a data problem). The write
+// path must ACCEPT it — the test fails if validation rejects it.
+func TestValidateGroupMembers_InactiveChainOnlyTarget_Accepted(t *testing.T) {
+	inactive := ModelConfig{ID: "chain-only", Name: "Chain Only", Enabled: false, Kind: KindChat, Internal: true, InternalModel: "glm-5"}
+	main := ModelConfig{
+		ID: "chain-main", Name: "Chain Main", Enabled: true, Kind: KindChat, Internal: true,
+		InternalModel: "glm-5", FallbackChain: []string{"chain-only"},
+	}
+	collection := []ModelConfig{inactive, main}
+
+	// The chain target is accepted — no rejection, no auto-enable.
+	if err := ValidateKindRules(&main, "openai"); err != nil {
+		t.Fatalf("a model with an inactive chain target must be accepted, got: %v", err)
+	}
+	if main.Enabled != true {
+		t.Fatal("validation must never flip enabled")
+	}
+	if inactive.Enabled {
+		t.Fatal("the chain-only target must stay inactive")
+	}
+
+	// The group side: the inactive model is a valid KIND, so it may be
+	// referenced as a member (candidacy is a request-time question —
+	// the disabled row is simply not offered), and adding it to a
+	// group never auto-enables it.
+	group := ModelConfig{
+		ID: "chain-group", Name: "Chain Group", Enabled: true, Kind: KindGroup, Internal: true,
+		Members: []GroupMember{{ModelID: "chain-only", Weight: 1}},
+	}
+	if err := ValidateGroupMembers(&group, collection); err != nil {
+		t.Fatalf("adding an inactive member must be accepted (never auto-enabled, never a defect), got: %v", err)
+	}
+	if inactive.Enabled {
+		t.Fatal("adding a member to a group must never auto-enable it")
+	}
+}
