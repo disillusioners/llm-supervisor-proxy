@@ -111,6 +111,14 @@ winning member (proven service; never a health mark).
   win: `streamBuffer.HasModelContent` gates the winner predicate, and a
   completed attempt with no content is treated as a failure so the chain
   advances (no hang).
+  CORRECTION HISTORY (fix round #1): the original F3 gate covered the
+  RACE lane only (stream + non-stream winner selection); the earlier
+  "both lanes" phrasing in review chatter was over-reach. Fix round #1
+  added the Anthropic walk's content gate (shared predicate
+  `usableModelOutput`; gates the non-stream/buffered delivery sites
+  pre-write, and live streams when ZERO payload frames were forwarded).
+  Bounded residual: a live stream that already forwarded a non-ping
+  frame (e.g. `message_stop`) cannot be un-served — it stays served.
 - **LABELS** Chain hops emit `model_failed` / `model_fallback_attempted`
   / `model_fallback_advanced` / `model_fallback_exhausted` with
   model-only payloads (no `group_id`/`member_id`). The genuine member

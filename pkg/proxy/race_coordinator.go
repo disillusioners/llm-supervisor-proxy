@@ -2096,13 +2096,13 @@ func (c *raceCoordinator) publishModelFallback(eventType, fromModel, toModel, re
 // for the CONFIG-OWNED TTL (hot snapshot value; Clone normalizes to
 // the 60s default).
 //
-//	ORDERING-NOT-FILTERING DOCTRINE (part 3 supersedes the D3
-//	"skip-while-alternatives / degrade-to-soonest" wording): the
-//	cache is an optimization, not the truth: it may reorder
-//	candidates, never exclude them. Selection orders unmarked
-//	candidates first, then these marks soonest-expiring first; a
-//	marked member is a demoted candidate, never an invisible one.
-//	A WIN clears the winner's own marks (clearWinnerUpstreamSkip).
+//	LAYER-SEPARATED DOCTRINE (wi-4d2c8e17; supersedes the part-3
+//	group-ordering wording): the cache is an optimization, not the
+//	truth: it may reorder candidates, never exclude them — and it may
+//	suppress an ATTEMPT, never a PICK or a CHAIN. These marks are the
+//	UPSTREAM layer: they reorder credential preference in the attempt
+//	path (preferUnmarkedUpstreamCredential) and never touch the group
+//	pick. A WIN clears the winner's own marks (clearWinnerUpstreamSkip).
 //
 // Called from the Case-1 site with c.mu held (the _Locked suffix
 // documents the call discipline, not the cache's own lock).

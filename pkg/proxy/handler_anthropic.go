@@ -785,7 +785,7 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 		// upstream identity to an unmarked sibling (ordering only —
 		// never excludes the attempt).
 		if resolvedOK {
-			resolved = preferUnmarkedUpstreamCredential(&arc.conf, modelConfig.ID, resolved)
+			resolved = preferUnmarkedUpstreamCredential(&arc.conf, h.credEngine, modelConfig.ID, resolved)
 		}
 		var cred *models.CredentialConfig
 		if resolvedOK {
@@ -1223,6 +1223,21 @@ func (h *Handler) doAnthropicInternalRequest(w http.ResponseWriter, arc *anthrop
 	// side channel because the legacy recorder-based path doesn't drive
 	// the translator — that path is unchanged.
 
+	// F3 parity (fix round #1 — Anthropic lane, live internal stream):
+	// a STREAM that carried no usable output (no content/thinking/tool
+	// events) is not a win. Nothing payload-bearing was emitted (the
+	// preamble is framing-only and lazy), so failing the attempt keeps
+	// the pre-commit switch window open and the walk continues.
+	// STREAM-only: a non-stream live request never drives the
+	// translator (its usable gate lives in handleNonStream).
+	if arc.isStream && arcTranslator != nil {
+		if st := arcTranslator.State(); st == nil ||
+			!usableModelOutput(st.AccumulatedContent.String(), st.ThinkingContent.String(), len(st.ToolCalls), 0) {
+			log.Printf("[ANTHROPIC] request %s: model %s live internal stream carried no usable output — continuing the fallback walk", arc.reqID, arc.servedModel)
+			return false
+		}
+	}
+
 	// Mirror the translator's accumulated text + tool-calls into the
 	// arc builders (the StreamState is the source of truth; the arc
 	// builders feed finalizeAnthropicSuccess).
@@ -1266,6 +1281,15 @@ func (h *Handler) handleAnthropicInternalNonStreamResponse(w http.ResponseWriter
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
 
+	// F3 parity (fix round #1): a content-less 200 is not a usable
+	// win. The gate sits BEFORE any client byte is written, so the
+	// walk can continue into the chain (shared predicate with the race
+	// lane — usableModelOutput).
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
+
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(openaiBody, arc.originalModel)
 	if err != nil {
@@ -1295,6 +1319,13 @@ func (h *Handler) handleAnthropicInternalStreamResponse(w http.ResponseWriter, o
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+	// F3 parity (fix round #1): content-less buffered stream — gate
+	// BEFORE any client byte is written so the walk continues.
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less stream — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
 
 	// Translate buffered OpenAI stream to Anthropic format
 	anthropicEvents, err := translator.TranslateBufferedStream(openaiBody, arc.originalModel)
@@ -1345,6 +1376,13 @@ func (h *Handler) handleAnthropicNonStreamResponse(w http.ResponseWriter, resp *
 	arc.accumulatedResponse.WriteString(content)
 	arc.accumulatedThinking.WriteString(thinking)
 	arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+	// F3 parity (fix round #1): content-less 200 — gate before any
+	// client byte so the walk continues.
+	if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
 
 	// Translate to Anthropic format
 	anthropicResp, err := translator.TranslateNonStreamResponse(bodyBytes, arc.originalModel)
@@ -1545,6 +1583,16 @@ func (h *Handler) handleAnthropicLiveStreamResponse(w http.ResponseWriter, resp 
 		arc.clientWriteErr = h.sendAnthropicSSEError(w, "api_error", "Stream ended unexpectedly")
 	}
 
+	// F3 parity (fix round #1): no payload frame was ever forwarded
+	// (payloadCommitted stays false on a content-less stream — the
+	// translator's synthesized framing deliberately does not commit).
+	// Nothing usable reached the client, so the attempt is a failure and
+	// the walk continues (the pre-commit switch window is open).
+	if !arc.payloadCommitted {
+		log.Printf("[ANTHROPIC] request %s: model %s live stream carried no payload frame — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
+	}
+
 	// Persist the assistant message and publish completion.
 	h.finalizeAnthropicSuccess(arc)
 	return true
@@ -1738,6 +1786,15 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 			arc.accumulatedResponse.WriteString(content)
 			arc.accumulatedThinking.WriteString(thinking)
 			arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, toolCalls...)
+
+			// F3 parity (fix round #1): content-less buffered stream.
+			// Headers/framing may already be on the wire, but NO payload
+			// frame has been forwarded — the pre-commit advance window
+			// is open, so the walk continues.
+			if !usableModelOutput(content, thinking, len(toolCalls), 0) {
+				log.Printf("[ANTHROPIC] request %s: model %s answered a content-less stream — continuing the fallback walk", arc.reqID, arc.servedModel)
+				return false
+			}
 
 			// Translate buffered stream and flush
 			anthropicEvents, err := translator.TranslateBufferedStream(buffer.Bytes(), arc.originalModel)
@@ -2194,15 +2251,20 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 		return false
 	}
 
-	// Extract content for storage
+	// Extract content for storage (and the per-attempt usable tally the
+	// F3 gate below reads).
 	var anthropicResp translator.AnthropicResponse
+	blockText, blockThinking := "", ""
+	blockToolCalls := 0
 	if err := json.Unmarshal(bodyBytes, &anthropicResp); err == nil {
 		for _, block := range anthropicResp.Content {
 			switch block.Type {
 			case "text":
 				arc.accumulatedResponse.WriteString(block.Text)
+				blockText += block.Text
 			case "thinking":
 				arc.accumulatedThinking.WriteString(block.Thinking)
+				blockThinking += block.Thinking
 			case "tool_use":
 				inputStr := string(block.Input)
 				arc.accumulatedToolCalls = append(arc.accumulatedToolCalls, store.ToolCall{
@@ -2213,8 +2275,17 @@ func (h *Handler) handlePassthroughNonStreamResponse(w http.ResponseWriter, resp
 						Arguments: inputStr,
 					},
 				})
+				blockToolCalls++
 			}
 		}
+	}
+
+	// F3 parity (fix round #1): a 200 whose content blocks carry no
+	// usable output is not a win — gate BEFORE the client write so the
+	// walk continues.
+	if !usableModelOutput(blockText, blockThinking, blockToolCalls, 0) {
+		log.Printf("[ANTHROPIC] request %s: model %s answered a content-less 200 — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
 	}
 
 	// Forward response as-is (last-write outcome gates the sticky record)
@@ -2313,6 +2384,14 @@ func (h *Handler) handlePassthroughStreamResponse(w http.ResponseWriter, resp *h
 	if err := scanner.Err(); err != nil {
 		log.Printf("Passthrough stream scanner error: %v", err)
 		arc.deliveryTruncated = true
+	}
+
+	// F3 parity (fix round #1): zero payload frames forwarded — nothing
+	// usable reached the client; fail the attempt so the walk continues
+	// (pre-commit switch window open).
+	if !arc.payloadCommitted {
+		log.Printf("[ANTHROPIC] request %s: model %s passthrough stream carried no payload frame — continuing the fallback walk", arc.reqID, arc.servedModel)
+		return false
 	}
 
 	h.finalizeAnthropicSuccess(arc)

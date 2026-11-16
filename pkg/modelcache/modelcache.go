@@ -45,7 +45,7 @@ const DefaultTTL = 15 * time.Minute
 // Cache is the model-layer registry. Nil-receiver-safe.
 type Cache struct {
 	mu     sync.RWMutex
-	marked map[string]time.Time // model (wire identity) → expiry
+	marked map[string]time.Time // model (ROW identity — the suppression key) → expiry
 }
 
 // New returns an empty cache.

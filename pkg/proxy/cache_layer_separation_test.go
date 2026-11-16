@@ -440,8 +440,9 @@ type sepStatusProvider struct {
 	mu       sync.Mutex
 	calls    []string
 	statuses map[string]int
-	empty    map[string]bool // models that answer 200 with NO usable content
-	toolOnly map[string]bool // models that answer 200 with ONLY tool_calls (no text)
+	empty    map[string]bool   // models that answer 200 with NO usable content
+	toolOnly map[string]bool   // models that answer 200 with ONLY tool_calls (no text)
+	finish   map[string]string // models that answer with an explicit finish_reason
 }
 
 func (p *sepStatusProvider) Name() string { return "sep-status" }
@@ -452,12 +453,20 @@ func (p *sepStatusProvider) ChatCompletion(ctx context.Context, req *providers.C
 	status := p.statuses[req.Model]
 	empty := p.empty[req.Model]
 	toolOnly := p.toolOnly[req.Model]
+	finish := p.finish[req.Model]
 	p.mu.Unlock()
 	if status == 0 {
 		status = http.StatusOK
 	}
 	if status >= 400 {
 		return nil, &providers.ProviderError{Provider: "sep-status", StatusCode: status, Message: "stub failure"}
+	}
+	if finish != "" {
+		return &providers.ChatCompletionResponse{
+			ID: "cc", Object: "chat.completion", Created: time.Now().Unix(), Model: req.Model,
+			Choices: []providers.Choice{{Index: 0, Message: &providers.ChatMessage{Role: "assistant", Content: ""}, FinishReason: finish}},
+			Usage:   providers.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		}, nil
 	}
 	if toolOnly {
 		return &providers.ChatCompletionResponse{
@@ -886,7 +895,7 @@ func TestCacheLayer_D1_UpstreamMarkReordersCredential(t *testing.T) {
 
 	// A marked (credential scope only) ⇒ reorder to B.
 	cfg.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
-	got := preferUnmarkedUpstreamCredential(cfg, "m", cur)
+	got := preferUnmarkedUpstreamCredential(cfg, nil, "m", cur)
 	if got.CredentialID != "cred-B" {
 		t.Fatalf("selected credential = %q, want cred-B (unmarked sibling must be preferred while cred-A is marked)", got.CredentialID)
 	}
@@ -895,7 +904,7 @@ func TestCacheLayer_D1_UpstreamMarkReordersCredential(t *testing.T) {
 	cfg2, _ := newTwoCredCfg(t)
 	cfg2.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
 	cfg2.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-B", "m", time.Minute)
-	got2 := preferUnmarkedUpstreamCredential(cfg2, "m", models.ResolvedCredential{CredentialID: "cred-A", Provider: "openai", InternalModel: "m"})
+	got2 := preferUnmarkedUpstreamCredential(cfg2, nil, "m", models.ResolvedCredential{CredentialID: "cred-A", Provider: "openai", InternalModel: "m"})
 	if got2.CredentialID != "cred-B" {
 		t.Fatalf("all-marked selection = %q, want cred-B (soonest-expiring mark; the attempt is NOT excluded)", got2.CredentialID)
 	}
@@ -1107,5 +1116,172 @@ func TestCacheLayer_D6_AllSuppressedReturns429(t *testing.T) {
 	}
 	if info := coord.GetFinalErrorInfo(); info.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("final status = %d, want 429 (all-suppressed)", info.HTTPStatus)
+	}
+}
+
+// ─────────── fix round #1 — review items #1/#2/#3 ───────────
+
+// anthEmptyStub serves per-model OpenAI JSON bodies (the internal
+// Anthropic lane talks OpenAI to the upstream).
+type anthEmptyStub struct {
+	mu     sync.Mutex
+	models []string
+	bodies map[string]string
+}
+
+func (s *anthEmptyStub) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		model, _ := body["model"].(string)
+		s.mu.Lock()
+		s.models = append(s.models, model)
+		b := s.bodies[model]
+		s.mu.Unlock()
+		if b == "" {
+			b = stubUpstreamBody(model, "hi")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(b))
+	}
+}
+
+func (s *anthEmptyStub) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.models))
+	copy(out, s.models)
+	return out
+}
+
+// TestCacheLayer_R1_AnthropicEmpty200ContinuesWalk (#1): F3 parity — a
+// content-less 200 in the Anthropic walk must NOT end the walk; the
+// chain target serves.
+func TestCacheLayer_R1_AnthropicEmpty200ContinuesWalk(t *testing.T) {
+	h := newGroupHarness(t)
+	defer h.close()
+
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a1", Name: "a1", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a1",
+		Credentials:   models.TestRefs(p5FixtureCredID),
+		FallbackChain: []string{"a2"},
+	}); err != nil {
+		t.Fatalf("AddModel(a1): %v", err)
+	}
+	if err := h.mgr.AddModel(models.ModelConfig{
+		ID: "a2", Name: "a2", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "a2",
+		Credentials: models.TestRefs(p5FixtureCredID),
+	}); err != nil {
+		t.Fatalf("AddModel(a2): %v", err)
+	}
+
+	st := &anthEmptyStub{bodies: map[string]string{
+		"a1": `{"id":"cc","object":"chat.completion","model":"a1","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`,
+	}}
+	h.up.Close()
+	h.up = httptest.NewServer(st.handler())
+	h.rebuildHandler(t) // re-points the fixture credential at the live stub
+
+	rec := httptest.NewRecorder()
+	req := makeAnthropicRequestNoAuth(t, map[string]interface{}{
+		"model":      "a1",
+		"max_tokens": 16,
+		"messages":   []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	})
+	h.h.HandleAnthropicMessages(rec, req)
+
+	attempted := st.snapshot()
+	sawA2 := false
+	for _, m := range attempted {
+		if m == "a2" {
+			sawA2 = true
+		}
+	}
+	if !sawA2 {
+		t.Fatalf("content-less 200 on a1 ended the walk (attempted=%v) — the chain target a2 was never attempted", attempted)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request not served (status=%d)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "hi") {
+		t.Fatalf("client did not receive a2's content (body=%q)", rec.Body.String())
+	}
+}
+
+// TestCacheLayer_R2_ReorderRespectsCredentialCooldown (#2): a quota-
+// COOLING credential is skipped in the reorder preference (a healthy
+// sibling wins), and when every candidate is marked-or-cooling the
+// attempt still fires on the soonest-recovering one.
+func TestCacheLayer_R2_ReorderRespectsCredentialCooldown(t *testing.T) {
+	mock := &mockModelsConfig{}
+	for _, id := range []string{"cred-A", "cred-B", "cred-C"} {
+		mock.AddCredential(models.CredentialConfig{ID: id, Provider: "openai", APIKey: "k-" + id, BaseURL: "http://" + id})
+	}
+	mock.AddModel(models.ModelConfig{
+		ID: "m", Name: "m", Enabled: true, Internal: true, InternalModel: "m",
+		Credentials: models.TestRefs("cred-A", "cred-B", "cred-C"),
+	})
+	engine := credentiallb.NewEngine(time.Hour, time.Hour, 5, 60*time.Second)
+	t.Cleanup(engine.Stop)
+	engine.RebindFromStore("m", models.TestRefs("cred-A", "cred-B", "cred-C"))
+	// cred-B is quota-COOLING but UNMARKED in the skip cache.
+	engine.InjectAllCoolingForTest("m", "cred-A", "cred-C")
+
+	cfg := newTestConfigSnapshot("m")
+	cfg.ModelsConfig = mock
+	cfg.UpstreamSkipCache = skipcache.New()
+	cfg.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
+	cur := models.ResolvedCredential{CredentialID: "cred-A", Provider: "openai", InternalModel: "m"}
+
+	got := preferUnmarkedUpstreamCredential(cfg, engine, "m", cur)
+	if got.CredentialID != "cred-C" {
+		t.Fatalf("reorder preferred %q — a COOLING credential (cred-B) must be skipped in favour of the healthy cred-C", got.CredentialID)
+	}
+
+	// All candidates marked-or-cooling: still attempts, preferring the
+	// soonest-recovering (cred-B/cred-C's ~60s cooldown beats cred-A's
+	// 10m mark). A second engine cools BOTH siblings so no candidate is
+	// clean.
+	engine2 := credentiallb.NewEngine(time.Hour, time.Hour, 6, 60*time.Second)
+	t.Cleanup(engine2.Stop)
+	engine2.RebindFromStore("m", models.TestRefs("cred-A", "cred-B", "cred-C"))
+	engine2.InjectAllCoolingForTest("m", "cred-A") // cools cred-B AND cred-C
+	cfg2 := newTestConfigSnapshot("m")
+	cfg2.ModelsConfig = mock
+	cfg2.UpstreamSkipCache = skipcache.New()
+	cfg2.UpstreamSkipCache.Mark(skipcache.ScopeCredential, "cred-A", "m", 10*time.Minute)
+	got2 := preferUnmarkedUpstreamCredential(cfg2, engine2, "m", cur)
+	if got2.CredentialID != "cred-B" && got2.CredentialID != "cred-C" {
+		t.Fatalf("all-cooling selection = %q, want cred-B or cred-C (a cooling candidate is still attempted — never excluded)", got2.CredentialID)
+	}
+	if got2.CredentialID == "" {
+		t.Fatal("all-cooling must still resolve an attempt")
+	}
+}
+
+// TestCacheLayer_R3_FinishReasonWins (#3): a `content_filter` (or
+// `length`) completion with EMPTY content is the upstream's terminal
+// answer — it must WIN, not trade the client a 502.
+func TestCacheLayer_R3_FinishReasonWins(t *testing.T) {
+	for _, finish := range []string{"content_filter", "length"} {
+		fin := finish
+		t.Run(fin, func(t *testing.T) {
+			provider := &sepStatusProvider{finish: map[string]string{"m1": fin}}
+			coord, _ := newSepCoord(t,
+				[]sepModel{{id: "m1", chain: []string{"m2"}}, {id: "m2"}},
+				provider, false, false, "conv-finish-"+fin,
+				func(cfg *ConfigSnapshot) { cfg.MaxGenerationTime = 5 * time.Second })
+			coord.Start()
+			winner := coord.WaitForWinner()
+			if winner == nil {
+				t.Fatal("no winner — the filtered/length completion must win")
+			}
+			if winner.modelID != "m1" {
+				t.Fatalf("winner = %s, want m1 (a %s completion with empty content is the answer to forward)", winner.modelID, fin)
+			}
+		})
 	}
 }

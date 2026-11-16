@@ -289,15 +289,18 @@ func resolveSpecificInternalCredential(cfg *ConfigSnapshot, modelID, credentialI
 }
 
 // preferUnmarkedUpstreamCredential is the UPSTREAM-layer READER
-// (wi-4d2c8e17 — D1). Given the credential the resolver picked, if its
-// (credential|provider, model) pair is marked in the upstream cache and
-// the model has another credential whose pair is unmarked, re-resolve to
-// that unmarked credential. When ALL credentials are marked it prefers
-// the soonest-expiring mark. Marks REORDER credential preference only:
-// an attempt is never excluded (all-marked still attempts) and the
-// group pick / chain membership are untouched. Pure w.r.t. engine state
-// — no cooldown write, no binding change.
-func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, modelID string, cur models.ResolvedCredential) models.ResolvedCredential {
+// (wi-4d2c8e17 — D1, review #2). Given the credential the resolver
+// picked, if its (credential|provider, model) pair is marked in the
+// upstream cache and the model has another SERVABLE credential (unmarked
+// AND not engine-cooling — quota cooldowns are respected exactly like
+// GetOrSelect does), re-resolve to that credential. When no candidate is
+// clean it prefers the soonest-recovering one (min of skip-mark expiry
+// and engine cooldown expiry). Reordering only: an attempt is never
+// excluded (all-marked/all-cooling still attempts) and the group pick /
+// chain membership are untouched. Pure w.r.t. engine state — no cooldown
+// write, no binding change. engine MAY be nil (legacy/test embeddings:
+// cooldown awareness off, marks still honored).
+func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, engine *credentiallb.Engine, modelID string, cur models.ResolvedCredential) models.ResolvedCredential {
 	cache := cfg.UpstreamSkipCache
 	if cache == nil || cfg.ModelsConfig == nil {
 		return cur
@@ -324,23 +327,28 @@ func preferUnmarkedUpstreamCredential(cfg *ConfigSnapshot, modelID string, cur m
 		if cred := cfg.ModelsConfig.GetCredential(ref.CredentialID); cred != nil {
 			provider = cred.Provider
 		}
-		marked, until := upstreamCredMarkState(cache, ref.CredentialID, provider, wireModel)
-		if !marked {
+		marked, markUntil := upstreamCredMarkState(cache, ref.CredentialID, provider, wireModel)
+		coolingUntil, cooling := engine.CooldownUntil(modelID, ref.CredentialID)
+		if !marked && !cooling {
 			if nr, ok := resolveSpecificInternalCredential(cfg, modelID, ref.CredentialID); ok {
-				log.Printf("[SKIP-CACHE] upstream reorder: model=%s marked cred=%s → unmarked cred=%s", modelID, cur.CredentialID, ref.CredentialID)
+				log.Printf("[SKIP-CACHE] upstream reorder: model=%s marked cred=%s → unmarked servable cred=%s", modelID, cur.CredentialID, ref.CredentialID)
 				return nr
 			}
 			continue
 		}
-		if soonestID == "" || until.Before(soonestUntil) {
-			soonestID, soonestUntil = ref.CredentialID, until
+		eff := markUntil
+		if cooling && (eff.IsZero() || coolingUntil.Before(eff)) {
+			eff = coolingUntil
+		}
+		if soonestID == "" || eff.Before(soonestUntil) {
+			soonestID, soonestUntil = ref.CredentialID, eff
 		}
 	}
-	// All credentials marked — still attempt, preferring the
-	// soonest-expiring mark (the most likely to recover soonest).
+	// No clean candidate — still attempt, preferring the
+	// soonest-recovering one (skip mark ∨ engine cooldown).
 	if soonestID != "" && soonestID != cur.CredentialID {
 		if nr, ok := resolveSpecificInternalCredential(cfg, modelID, soonestID); ok {
-			log.Printf("[SKIP-CACHE] upstream reorder: model=%s all marked; prefer soonest-expiring cred=%s (expiry in %s)", modelID, soonestID, time.Until(soonestUntil).Round(time.Second))
+			log.Printf("[SKIP-CACHE] upstream reorder: model=%s no clean candidate; prefer soonest-recovering cred=%s (recovery in %s)", modelID, soonestID, time.Until(soonestUntil).Round(time.Second))
 			return nr
 		}
 	}
@@ -517,7 +525,7 @@ func executeInternalRequest(ctx context.Context, cfg *ConfigSnapshot, rawBody []
 	// the secondary-model hedge (internalModel != "") and for a
 	// credFailover row (its credential was deliberately reselected).
 	if resolvedOK && internalModel == "" && req.reselectedCredentialID == "" {
-		resolved = preferUnmarkedUpstreamCredential(cfg, req.modelID, resolved)
+		resolved = preferUnmarkedUpstreamCredential(cfg, req.engine, req.modelID, resolved)
 	}
 
 	// Capture the resolution result for the post-completion publish site
@@ -736,16 +744,36 @@ func handleInternalNonStream(ctx context.Context, provider providers.Provider, r
 	return nil
 }
 
+// usableModelOutput is the ONE usable-content predicate shared by BOTH
+// protocol lanes (F3 parity — the race lane's winner gate and the
+// Anthropic walk's content gate). Semantics: non-empty text, tool calls,
+// or reasoning output are a usable win. An agentic response with ONLY
+// tool_calls or reasoning IS a legitimate win — text is NOT required.
+func usableModelOutput(text, reasoning string, toolCalls, reasoningDetails int) bool {
+	if strings.TrimSpace(text) != "" || strings.TrimSpace(reasoning) != "" {
+		return true
+	}
+	return toolCalls > 0 || reasoningDetails > 0
+}
+
 // responseHasUsableContent reports whether a non-stream completion
-// carries forwardable model output: non-empty text content, tool calls,
-// or reasoning content/details. An agentic response with ONLY tool_calls
-// or reasoning IS a legitimate win — text is NOT required (D5).
+// carries forwardable model output. Delegates to usableModelOutput per
+// choice (the shared lane predicate), plus the finish_reason shapes a
+// client must still receive (fix-round #1): a `content_filter` (or
+// `length`) completion IS the answer the upstream gave — withholding it
+// would trade a filtered/empty-but-terminal completion for a 502.
 func responseHasUsableContent(resp *providers.ChatCompletionResponse) bool {
 	if resp == nil {
 		return false
 	}
 	for i := range resp.Choices {
 		ch := &resp.Choices[i]
+		switch ch.FinishReason {
+		case "content_filter", "length":
+			// The upstream delivered its terminal answer (possibly with
+			// empty content) — that IS the completion to forward.
+			return true
+		}
 		msg := ch.Message
 		if msg == nil {
 			msg = ch.Delta
@@ -753,14 +781,10 @@ func responseHasUsableContent(resp *providers.ChatCompletionResponse) bool {
 		if msg == nil {
 			continue
 		}
-		if len(msg.ToolCalls) > 0 || msg.ReasoningContent != "" || len(msg.ReasoningDetails) > 0 {
+		if usableModelOutput(contentString(msg.Content), msg.ReasoningContent, len(msg.ToolCalls), len(msg.ReasoningDetails)) {
 			return true
 		}
 		switch c := msg.Content.(type) {
-		case string:
-			if strings.TrimSpace(c) != "" {
-				return true
-			}
 		case []providers.ContentPart:
 			if len(c) > 0 {
 				return true
@@ -772,6 +796,15 @@ func responseHasUsableContent(resp *providers.ChatCompletionResponse) bool {
 		}
 	}
 	return false
+}
+
+// contentString extracts the string form of a ChatMessage Content when
+// it is one (multimodal arrays are handled by the caller).
+func contentString(content interface{}) string {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // handleInternalStream handles streaming requests for internal providers

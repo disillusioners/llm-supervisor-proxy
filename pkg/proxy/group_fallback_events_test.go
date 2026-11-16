@@ -137,6 +137,14 @@ func TestCoordinator_ModelFallbackEvents(t *testing.T) {
 			}
 		}
 
+		// fix round #1 / review #5 — chain hops NEVER emit group_* events
+		// (membership is asserted only on the genuine member hop).
+		for _, groupType := range []string{"group_member_failed", "group_fallback_attempted", "group_fallback_advanced", "group_fallback_exhausted"} {
+			if got := len(eventsOfType(all, groupType)); got != 0 {
+				t.Errorf("%s events = %d, want 0 on chain hops (group events belong to the handler member-hop sites)", groupType, got)
+			}
+		}
+
 		// Publish order: model_failed precedes attempted precedes advanced.
 		firstFailed, firstAttempted, firstAdvanced := -1, -1, -1
 		for i, evt := range all {

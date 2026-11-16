@@ -246,9 +246,10 @@ func (m *ModelsManager) pickServableGroupMember(group *models.ModelConfig, conve
 }
 
 // demotedMember is one base-servable member the ordering sweep
-// benched (skip-marked and/or engine-cooling): a real candidate,
-// demoted — never excluded (ordering-not-filtering doctrine). idx is
-// the member's configured position — the deterministic tie-break.
+// benched (GROUP-owned engine rotation cooldown — the only benching
+// input since the layer separation): a real candidate, demoted — never
+// excluded. idx is the member's configured position — the deterministic
+// tie-break.
 type demotedMember struct {
 	memberID string
 	expiry   time.Time

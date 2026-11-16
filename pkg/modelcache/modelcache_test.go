@@ -109,6 +109,11 @@ func TestModelWall(t *testing.T) {
 		// mint a model mark (it stays credential-scoped upstream).
 		{"You have exhausted your capacity on this model. Your quota will reset after 4h39m9s.", false, false},
 		{"Unavailable (reset after 62h 45m 6s)", false, false},
+		// fix round #1 / #4: MIXED bodies — a wall phrase plus account-
+		// quota vocabulary is an account wall wearing a plan phrase; the
+		// quota veto wins.
+		{"Usage limit reached for 5 hour. Your quota will reset after 4h39m9s.", false, false},
+		{"usage limit reached; quota exceeded; resets at 2026-11-16 18:13:33", false, false},
 		{"you have reached your usage limit for this minute", false, false}, // throttle
 		{"rate limit exceeded, requests per minute", false, false},          // throttle
 		{"invalid api key", false, false},
@@ -138,6 +143,9 @@ func TestModelWall_AccountQuotaNotModelMarked(t *testing.T) {
 		"You have exhausted your capacity on this model. Your quota will reset after 4h39m9s.",
 		"Unavailable (reset after 62h 45m 6s)",
 		"quota exceeded; resets at 2026-11-16 18:13:33",
+		// fix round #1 / #4: mixed wall-phrase + quota-vocabulary bodies.
+		"Usage limit reached for 5 hour. Your quota will reset after 4h39m9s.",
+		"usage limit reached; quota exceeded; resets at 2026-11-16 18:13:33",
 	} {
 		if attr, _, _ := ModelWall(quota, now); attr {
 			t.Fatalf("account-quota body %q was classified model-attributable (D3 over-breadth)", quota)

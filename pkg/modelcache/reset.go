@@ -101,10 +101,39 @@ var throttleMarkers = []string{
 	"per hour",
 }
 
+// quotaVetoMarkers identify ACCOUNT-scoped credit/quota vocabulary. They
+// are checked AFTER the throttle markers and BEFORE the wall markers
+// (fix round #1 / #4): a MIXED body that carries BOTH a wall phrase and
+// account-quota vocabulary ("usage limit reached … your quota will reset
+// after 4h39m9s") is an account-wide quota body wearing a wall phrase —
+// the veto wins and NO model mark is minted (a model mark on an account
+// wall would suppress the model across ALL its credentials for hours,
+// unhealable by win-clear). The discrimination is vocabulary-scoped: the
+// genuine plan wall says "Your LIMIT will reset", never "quota".
+var quotaVetoMarkers = []string{
+	"quota will reset",
+	"quota reset",
+	"your quota",
+	"quota exceeded",
+	"quota exhausted",
+	"exceeded your quota",
+	"exhausted your capacity",
+	"insufficient credit",
+	"insufficient credits",
+	"insufficient balance",
+	"out of credit",
+	"payment required",
+	"billing",
+}
+
 // ModelWall classifies a message as a model-attributable usage wall.
 // attributable reports the classification; when the message also names
 // a reset instant, (until, hasReset) carry it (future-only). Callers
 // apply DefaultTTL when attributable && !hasReset.
+//
+// Veto ORDER (fix round #1 / #4): throttle markers → quota-veto markers
+// → wall markers. Both veto families win over a wall phrase, so mixed
+// bodies never mint a model mark.
 func ModelWall(msg string, now time.Time) (attributable bool, until time.Time, hasReset bool) {
 	if msg == "" {
 		return false, time.Time{}, false
@@ -112,6 +141,11 @@ func ModelWall(msg string, now time.Time) (attributable bool, until time.Time, h
 	lower := strings.ToLower(msg)
 	for _, t := range throttleMarkers {
 		if strings.Contains(lower, t) {
+			return false, time.Time{}, false
+		}
+	}
+	for _, q := range quotaVetoMarkers {
+		if strings.Contains(lower, q) {
 			return false, time.Time{}, false
 		}
 	}

@@ -71,10 +71,12 @@ func TestHandlerGroups_AnthropicReentry_PublishesEventMemberFailover(t *testing.
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Minimal Anthropic /v1/messages non-stream response shape
-		// so the Anthropic adapter's translation path returns a
-		// 200 to the client.
-		_, _ = w.Write([]byte(`{"id":"msg-stub","type":"message","role":"assistant","model":"stub-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+		// OpenAI-shaped completion body with content. (Fix round #1:
+		// the fixture used to serve a minimal Anthropic-shaped body that
+		// parses to ZERO OpenAI choices — it passed only under the
+		// retired any-200-wins semantics; the F3 content gate now
+		// (correctly) treats such a body as content-less.)
+		_, _ = w.Write([]byte(stubUpstreamBody("stub-model", "ok")))
 	}))
 	h.rebuildHandler(t)
 

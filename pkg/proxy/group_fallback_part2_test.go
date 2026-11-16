@@ -259,6 +259,35 @@ collect:
 	if got := asString(payloadMap(t, modelExhausted[0])["reason"]); !strings.HasPrefix(got, "reason=upstream_5xx") {
 		t.Errorf("model exhausted reason = %q, want the classified 502 line (reason=upstream_5xx …)", got)
 	}
+
+	// fix round #1 / review #5 — assert the GENUINE member-hop trio
+	// (published by the handler's re-entry, asserted by no test before):
+	// 2 advances ⇒ attempted+advanced pairs with the full group payload
+	// vocabulary; 3 member_failed (2 advances + the final exhaustion).
+	memberFailed := eventsOfType(all, "group_member_failed")
+	if len(memberFailed) != 3 {
+		t.Fatalf("group_member_failed events = %d, want 3 (one per advance + the final exhaustion)", len(memberFailed))
+	}
+	attemptedHops := eventsOfType(all, "group_fallback_attempted")
+	advancedHops := eventsOfType(all, "group_fallback_advanced")
+	if len(attemptedHops) != 2 || len(advancedHops) != 2 {
+		t.Fatalf("member-hop pair = attempted:%d advanced:%d, want 2/2 (one per real re-entry)", len(attemptedHops), len(advancedHops))
+	}
+	for i, evt := range attemptedHops {
+		d := payloadMap(t, evt)
+		for _, key := range []string{"group_id", "member_id", "from_member", "to_member", "reason"} {
+			if _, present := d[key]; !present {
+				t.Errorf("group_fallback_attempted[%d] missing payload key %q (got %v)", i, key, d)
+			}
+		}
+		if got := asString(d["group_id"]); got != "g-exh" {
+			t.Errorf("group_fallback_attempted[%d] group_id = %q, want g-exh", i, got)
+		}
+		ad := payloadMap(t, advancedHops[i])
+		if got := asString(ad["to_member"]); got == "" || got == asString(d["from_member"]) {
+			t.Errorf("advanced[%d] to_member = %q — must name a DIFFERENT member than from_member", i, got)
+		}
+	}
 }
 
 // TestHandlerGroups_ClientAttributable400_FailsFast — the P2
