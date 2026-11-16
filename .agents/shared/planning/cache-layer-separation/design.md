@@ -127,7 +127,18 @@ winning member (proven service; never a health mark).
   - D-B FIXED: the Anthropic non-stream gates now honour the race-lane
     terminal-finish rule (`content_filter` / `length` ⇒ usable, via
     `openAIBodyTerminalFinish`) — such completions are forwarded, not
-    502-shaped.
+    502-shaped. RESIDUAL (same family as D-C): the fix is NON-STREAM
+    only — on the Anthropic STREAM lanes (buffered + the live internal
+    gate) a content_filter/length completion with no content still
+    fails the gate and advances to the chain (the completion is
+    dropped, not forwarded — safe direction, the chain serves a real
+    answer); per-chunk finish reasons are not plumbed there.
+  - RESIDUAL (translation/passthrough live paths): on those paths
+    `message_start` COMMITS (their commit site counts any forwarded
+    non-ping frame), so the zero-payload-frame gate is inert there —
+    a stream that already forwarded a frame stays SERVED and cannot be
+    switched. (Scoped: the INTERNAL live path's committing frames are
+    now the finalize frames per D-A above.)
   - DEFERRED (D-C): lane divergence on typed-reasoning / multimodal-only
     bodies (the Anthropic gates hard-code reasoningDetails=0 and read
     string-only content — safe direction: the chain serves). Follow-up
