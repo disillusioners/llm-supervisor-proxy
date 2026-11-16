@@ -1,5 +1,7 @@
 package models
 
+import "fmt"
+
 // Group-lane primitives for the decision-groups commission.
 //
 // A group's LANE is never persisted: it is DERIVED from the group's
@@ -84,8 +86,7 @@ func GroupLanesOf(kinds []string) []GroupLane {
 	return lanes
 }
 
-// UnanimousGroupLane folds the given member kinds into the single lane
-// they share — the SINGLE-SOURCE-OF-TRUTH fold (the canonical
+// UnanimousGroupLane folds the given member kinds into the single lane// they share — the SINGLE-SOURCE-OF-TRUTH fold (the canonical
 // validator, the admin-API mirrors and the request-time inference all
 // use it, so the lane can never drift between them).
 //
@@ -97,4 +98,31 @@ func UnanimousGroupLane(kinds []string) (GroupLane, bool) {
 		return "", false
 	}
 	return lanes[0], true
+}
+
+// EffectiveKind normalizes a model kind for an EFFECTIVE-KIND
+// comparison: the legacy "" kind IS the chat kind (the same
+// normalization MemberLane applies).
+//
+// The kind-immutability guard (ADR-1) compares EFFECTIVE kinds: a
+// group member whose kind is rewritten from "chat" to the legacy ""
+// is NOT retyped (the effective kind is unchanged), while a member
+// rewritten from "decision" to "chat" (or to "") IS retyped.
+func EffectiveKind(kind string) string {
+	if kind == "" {
+		return KindChat
+	}
+	return kind
+}
+
+// KindChangeGroupMemberMessage is the ADR-1 rejection message for a
+// kind change on a group member — the SINGLE source of truth for the
+// text, shared by the canonical write path (pkg/store/database) and
+// the API mirror (pkg/ui) so the two can never drift.
+//
+// The message names BOTH ids (actionable, not generic):
+//
+//	model <member-id>: kind cannot be changed while it is a member of group <group-id> (remove it from the group first)
+func KindChangeGroupMemberMessage(memberID, groupID string) string {
+	return fmt.Sprintf("model %s: kind cannot be changed while it is a member of group %s (remove it from the group first)", memberID, groupID)
 }

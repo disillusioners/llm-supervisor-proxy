@@ -1507,3 +1507,139 @@ func TestGroup_AddModel_DecisionMembers_MixedProviders_Accepted(t *testing.T) {
 		t.Fatalf("a decision group with mixed providers must save (the group row carries no provider), got: %v", err)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// decision-groups commission — ADR-1's kind-immutability guard for
+// group members (the retyping site is the fence).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestUpdateModel_KindChange_GroupMember_Rejected — retyping a member
+// of ANY group is refused; the stored kind is unchanged; the group
+// resolution is unchanged afterwards.
+func TestUpdateModel_KindChange_GroupMember_Rejected(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("save chat group: %v", err)
+	}
+
+	// Retype the chat member "coding" to a decision model.
+	retype := models.ModelConfig{
+		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.UpdateModel("coding", retype); err == nil {
+		t.Fatal("retyping a group member must be refused")
+	}
+	// The stored kind is unchanged.
+	row := mgr.GetModelNative("coding")
+	if row == nil {
+		t.Fatal("member row missing after the refused retyping")
+	}
+	if row.Kind != models.KindChat {
+		t.Fatalf("the stored kind changed despite the refusal: %q", row.Kind)
+	}
+	// The group resolution is unchanged.
+	lane, ok := mgr.GroupLane("coding-group")
+	if !ok || lane != models.GroupLaneChat {
+		t.Fatalf("GroupLane(coding-group) = (%q, %v), want (chat, true) after the refused retyping", lane, ok)
+	}
+	res := mgr.RewriteGroupEntries([]string{"coding-group"}, "")
+	if res.MemberID != "coding" {
+		t.Fatalf("the group resolution changed after the refused retyping: %+v", res)
+	}
+}
+
+// TestUpdateModel_KindChange_GroupMember_RejectionNamesGroupAndMember
+// — the rejection names BOTH the group id and the member id.
+func TestUpdateModel_KindChange_GroupMember_RejectionNamesGroupAndMember(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	if err := mgr.AddModel(validGroup()); err != nil {
+		t.Fatalf("save chat group: %v", err)
+	}
+	retype := models.ModelConfig{
+		ID: "coding", Name: "Coding", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}
+	err := mgr.UpdateModel("coding", retype)
+	if err == nil {
+		t.Fatal("retyping a group member must be refused")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "coding") {
+		t.Errorf("the rejection %q must name the member id", msg)
+	}
+	if !strings.Contains(msg, "coding-group") {
+		t.Errorf("the rejection %q must name the group id", msg)
+	}
+	if !strings.Contains(msg, "kind cannot be changed while it is a member of group") {
+		t.Errorf("the rejection %q must carry the ADR-1 message", msg)
+	}
+}
+
+// TestUpdateModel_KindChange_NonMember_Succeeds — the guard is SCOPED:
+// a model that is not a member of any group still retypes.
+func TestUpdateModel_KindChange_NonMember_Succeeds(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	// A standalone model (in no group).
+	if err := mgr.AddModel(models.ModelConfig{
+		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "glm-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}); err != nil {
+		t.Fatalf("seed solo model: %v", err)
+	}
+	retype := models.ModelConfig{
+		ID: "solo", Name: "Solo", Enabled: true, Kind: models.KindDecision,
+		Internal: true, InternalModel: "gpt-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.UpdateModel("solo", retype); err != nil {
+		t.Fatalf("a model that is in no group must still retype, got: %v", err)
+	}
+	row := mgr.GetModelNative("solo")
+	if row == nil || row.Kind != models.KindDecision {
+		t.Fatalf("the retype did not take: %+v", row)
+	}
+}
+
+// TestGroup_SingleMemberDecisionGroup_MemberRetypeRefused — the
+// hole-closure case: a SINGLE-member decision group whose member is
+// retyped to chat is refused (without the guard, the group would
+// silently re-lane to chat).
+func TestGroup_SingleMemberDecisionGroup_MemberRetypeRefused(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	single := decisionGroup()
+	single.ID = "single-decision-group"
+	single.Members = []models.GroupMember{{ModelID: "dec-a", Weight: 1}}
+	if err := mgr.AddModel(single); err != nil {
+		t.Fatalf("save single-member decision group: %v", err)
+	}
+	lane, ok := mgr.GroupLane("single-decision-group")
+	if !ok || lane != models.GroupLaneDecision {
+		t.Fatalf("GroupLane(single-decision-group) = (%q, %v), want (decision, true)", lane, ok)
+	}
+
+	retype := models.ModelConfig{
+		ID: "dec-a", Name: "Decision A", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "glm-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.UpdateModel("dec-a", retype); err == nil {
+		t.Fatal("retyping a single-member decision group's member must be refused")
+	}
+	row := mgr.GetModelNative("dec-a")
+	if row == nil || row.Kind != models.KindDecision {
+		t.Fatalf("the member's kind changed despite the refusal: %+v", row)
+	}
+	lane, ok = mgr.GroupLane("single-decision-group")
+	if !ok || lane != models.GroupLaneDecision {
+		t.Fatalf("the group re-laned despite the refusal: (%q, %v)", lane, ok)
+	}
+}

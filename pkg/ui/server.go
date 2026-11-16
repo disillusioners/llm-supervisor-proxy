@@ -909,6 +909,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			// uniqueness scan) against the live model set.
 			existingModels := s.modelsConfig.GetModels()
 			seenMembers := make(map[string]bool, len(newModel.Members))
+			memberKinds := make([]string, 0, len(newModel.Members))
 			for idx, member := range newModel.Members {
 				if member.ModelID == "" {
 					groupReject(fmt.Sprintf(`kind "group" members[%d].model_id is empty`, idx))
@@ -938,10 +939,36 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					groupReject(fmt.Sprintf(`kind "group" member %q is itself a group (flat membership only — group-as-member is forbidden)`, member.ModelID))
 					return
 				}
-				if target.Kind != "" && target.Kind != models.KindChat {
-					groupReject(fmt.Sprintf(`kind "group" member %q must be a chat-kind model (got kind %q)`, member.ModelID, target.Kind))
+				memberKinds = append(memberKinds, target.Kind)
+			}
+			// The group's LANE (decision-groups commission) — derived
+			// from the members, never persisted. A MIXED-kind group is
+			// rejected with a dedicated message; the member-kind error
+			// is worded with the group's lane (the CHAT wording is
+			// byte-identical to the historical text).
+			groupLane := models.GroupLaneChat
+			for _, kind := range memberKinds {
+				if lane, ok := models.MemberLane(kind); ok {
+					groupLane = lane
+					break
+				}
+			}
+			if lanes := models.GroupLanesOf(memberKinds); len(lanes) > 1 {
+				for idx, kind := range memberKinds {
+					lane, ok := models.MemberLane(kind)
+					if !ok || lane == groupLane {
+						continue
+					}
+					groupReject(fmt.Sprintf(`kind "group" members must all share one kind (chat or decision) — member %q has kind %q`, newModel.Members[idx].ModelID, kind))
 					return
 				}
+			}
+			for idx, kind := range memberKinds {
+				if _, ok := models.MemberLane(kind); ok {
+					continue
+				}
+				groupReject(fmt.Sprintf(`kind "group" member %q must be a %s-kind model (got kind %q)`, newModel.Members[idx].ModelID, groupLane, kind))
+				return
 			}
 			if newModel.ShadowModelID != "" {
 				var shadowTarget *models.ModelConfig
@@ -956,11 +983,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model, not a group`, newModel.ShadowModelID))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model, not a group`, newModel.ShadowModelID, groupLane))
 					return
 				}
-				if shadowTarget.Kind != "" && shadowTarget.Kind != models.KindChat {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model (got kind %q)`, newModel.ShadowModelID, shadowTarget.Kind))
+				if shadowLane, ok := models.MemberLane(shadowTarget.Kind); !ok || shadowLane != groupLane {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model (got kind %q)`, newModel.ShadowModelID, groupLane, shadowTarget.Kind))
 					return
 				}
 				// G8 uniqueness scan — no OTHER enabled group claims
@@ -1352,6 +1379,24 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		// be empty on a sparse PUT).
 		updatedModel.ID = id
 
+		// ADR-1 — the kind-immutability guard for group members (the
+		// API mirror of the canonical write-path guard): a model that
+		// is a member of ANY group has an immutable kind — the lane of
+		// a group is inferred from its members, so a retyping member
+		// could silently re-lane the group. The rejection names BOTH
+		// ids and rides the group-save rejection family (the bare
+		// {"error":"…"} envelope, 400).
+		//
+		// It runs BEFORE the credential gate: a retyping attempt is
+		// refused on the group commitment itself, whatever else the
+		// payload carries.
+		if err := guardGroupMemberKindChange(s.modelsConfig.GetModels(), id, updatedModel.Kind); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
 		// load-balance-groups / P1.6 + §5.2: PUT-inline mirror of
 		// models.validateGroupRules + models.ValidateGroupMembers
 		// (G1-G8) — identical rule set to the POST mirror above and
@@ -1411,6 +1456,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			// row of this group is skipped by route id.
 			existingModels := s.modelsConfig.GetModels()
 			seenMembers := make(map[string]bool, len(updatedModel.Members))
+			memberKinds := make([]string, 0, len(updatedModel.Members))
 			for idx, member := range updatedModel.Members {
 				if member.ModelID == "" {
 					groupReject(fmt.Sprintf(`kind "group" members[%d].model_id is empty`, idx))
@@ -1440,10 +1486,34 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 					groupReject(fmt.Sprintf(`kind "group" member %q is itself a group (flat membership only — group-as-member is forbidden)`, member.ModelID))
 					return
 				}
-				if target.Kind != "" && target.Kind != models.KindChat {
-					groupReject(fmt.Sprintf(`kind "group" member %q must be a chat-kind model (got kind %q)`, member.ModelID, target.Kind))
+				memberKinds = append(memberKinds, target.Kind)
+			}
+			// The group's LANE (decision-groups commission) — the PUT
+			// twin of the POST mirror (helper ≡ POST ≡ PUT is the
+			// parity discipline; see kind_rules_parity_test.go).
+			groupLane := models.GroupLaneChat
+			for _, kind := range memberKinds {
+				if lane, ok := models.MemberLane(kind); ok {
+					groupLane = lane
+					break
+				}
+			}
+			if lanes := models.GroupLanesOf(memberKinds); len(lanes) > 1 {
+				for idx, kind := range memberKinds {
+					lane, ok := models.MemberLane(kind)
+					if !ok || lane == groupLane {
+						continue
+					}
+					groupReject(fmt.Sprintf(`kind "group" members must all share one kind (chat or decision) — member %q has kind %q`, updatedModel.Members[idx].ModelID, kind))
 					return
 				}
+			}
+			for idx, kind := range memberKinds {
+				if _, ok := models.MemberLane(kind); ok {
+					continue
+				}
+				groupReject(fmt.Sprintf(`kind "group" member %q must be a %s-kind model (got kind %q)`, updatedModel.Members[idx].ModelID, groupLane, kind))
+				return
 			}
 			if updatedModel.ShadowModelID != "" {
 				var shadowTarget *models.ModelConfig
@@ -1458,11 +1528,11 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model, not a group`, updatedModel.ShadowModelID))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model, not a group`, updatedModel.ShadowModelID, groupLane))
 					return
 				}
-				if shadowTarget.Kind != "" && shadowTarget.Kind != models.KindChat {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a chat-kind model (got kind %q)`, updatedModel.ShadowModelID, shadowTarget.Kind))
+				if shadowLane, ok := models.MemberLane(shadowTarget.Kind); !ok || shadowLane != groupLane {
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q must reference a %s-kind model (got kind %q)`, updatedModel.ShadowModelID, groupLane, shadowTarget.Kind))
 					return
 				}
 				// G8 uniqueness scan — no OTHER enabled group claims
@@ -2653,4 +2723,44 @@ func (s *Server) handleCredentialDetail(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// guardGroupMemberKindChange rejects a KIND CHANGE for a model that is
+// a member of any group (ADR-1 — the decision-groups commission).
+//
+// This is the API-side mirror of the canonical write-path guard
+// (pkg/store/database/store_kind_guard.go); the two are parity-pinned
+// (kind_rules_parity_test.go). The rejection names BOTH the member and
+// the group and rides the group-save rejection family (400 + the bare
+// {"error":"…"} envelope).
+//
+// The membership is derived from the live model set (the already
+// forwarded GetModels — no new manager method is spent here).
+func guardGroupMemberKindChange(all []models.ModelConfig, modelID, newKind string) error {
+	currentKind := ""
+	found := false
+	for _, row := range all {
+		if row.ID == modelID {
+			currentKind = row.Kind
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil // unknown row — the store reports it
+	}
+	if models.EffectiveKind(currentKind) == models.EffectiveKind(newKind) {
+		return nil
+	}
+	for _, group := range all {
+		if !group.IsGroup() {
+			continue
+		}
+		for _, member := range group.Members {
+			if member.ModelID == modelID {
+				return errors.New(models.KindChangeGroupMemberMessage(modelID, group.ID))
+			}
+		}
+	}
+	return nil
 }
