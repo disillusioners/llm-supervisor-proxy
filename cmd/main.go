@@ -336,6 +336,33 @@ func main() {
 		return modelsConfig.ResolveInternalConfigWithAffinity(modelID, modelID)
 	}))
 
+	// Decision GROUPS (the decision-groups commission) — the group's
+	// seams:
+	//
+	//   SetModelsConfig — the models manager (the group-lane query +
+	//   the live model set). The production binding is the CACHED
+	//   decorator, so the lane query must be forwarded by it (the
+	//   decorator-forward trap).
+	//   SetCredentialEngine — the credential engine (the
+	//   per-credential rotation + the cooling reader). The engine
+	//   keeps owning the per-class cooldown policy.
+	//   SetUpstreamSkipCache / SetModelSkipCache — the PROCESS-WIDE
+	//   health layers (one answer about one credential; the fence is
+	//   LAYER separation, not instance separation).
+	//   SetSkipCacheTTL — the config-owned mark window (the same
+	//   config key the text lane reads; hot — read per mark).
+	decisionHandler.SetModelsConfig(modelsConfig)
+	decisionHandler.SetCredentialEngine(credLB)
+	decisionHandler.SetUpstreamSkipCache(upstreamSkipCache)
+	decisionHandler.SetModelSkipCache(modelSkipCache)
+	decisionHandler.SetSkipCacheTTL(func() time.Duration {
+		ttl := configMgr.Get().UpstreamSkipCacheTTL.Duration()
+		if ttl <= 0 {
+			ttl = skipcache.DefaultTTL
+		}
+		return ttl
+	})
+
 	// Setup Server
 	mux := http.NewServeMux()
 

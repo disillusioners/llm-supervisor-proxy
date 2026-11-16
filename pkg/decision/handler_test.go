@@ -2286,3 +2286,36 @@ func TestValidator_SafetyIdentifier_Under128(t *testing.T) {
 // ---------- Suppress unused-import noise ----------
 
 var _ = log.Printf
+
+// TestPackage_ImportGuard_GroupPolicyFiles_NoCacheImports is the
+// FILE-LEVEL mirror of the layer-separation AST pin.
+//
+// The upstream pin forbids the health caches in the manager / engine /
+// decorator packages — the group pick can therefore never compile a
+// cross-layer read. The decision lane's PICK and WALK files carry the
+// same property by this file-level pin: they import NO health cache
+// (the caches belong to the attempt-suppression stage alone).
+//
+// The pick must stay policy-only: a credential-layer state change can
+// never alter the group pick.
+func TestPackage_ImportGuard_GroupPolicyFiles_NoCacheImports(t *testing.T) {
+	// The decision pick/walk files (the policy facts + the member
+	// walk). The suppression seam is deliberately NOT in this set —
+	// it owns the health-layer reads.
+	pickWalkFiles := []string{"policy.go", "group.go"}
+	banned := []string{
+		"github.com/disillusioners/llm-supervisor-proxy/pkg/skipcache",
+		"github.com/disillusioners/llm-supervisor-proxy/pkg/modelcache",
+	}
+	for _, name := range pickWalkFiles {
+		src, err := readFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, bannedPath := range banned {
+			if strings.Contains(string(src), bannedPath) {
+				t.Errorf("%s references the health-layer cache %q — the decision pick/walk files must stay policy-only (the caches belong to the attempt-suppression stage)", name, bannedPath)
+			}
+		}
+	}
+}

@@ -58,8 +58,10 @@ import (
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/auth"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/events"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
@@ -108,6 +110,49 @@ type Handler struct {
 	usage             *usage.Counter
 	resolveModel      modelResolver
 	resolveCredential credentialResolver
+
+	// modelsConfig is the OPTIONAL seam to the models manager (the
+	// decision-groups commission): it answers the GROUP LANE query
+	// and supplies the live model set. The seam is optional by
+	// design — a handler built without it keeps the pre-group
+	// behaviour exactly (the group branch fails CLOSED).
+	modelsConfig models.ModelsConfigInterface
+
+	// credEngine is the OPTIONAL slice of the credential engine the
+	// decision lane uses: the per-credential rotation (the exclusion
+	// that seeds the per-class cooldown) and the cooling reader.
+	credEngine credentialEngine
+
+	// suppression owns the decision lane's health-layer handles (the
+	// attempt-suppression seam). Nil-safe everywhere.
+	suppression suppressionSeam
+}
+
+// groupLaneSeam is the OPTIONAL lane-query seam (the decision-groups
+// commission's ONE new models-manager method, forwarded by the
+// decorator). It lives OUTSIDE models.ModelsConfigInterface on
+// purpose: the optional-seam shape keeps the structural test fakes
+// and the JSON backend valid.
+type groupLaneSeam interface {
+	GroupLane(groupID string) (models.GroupLane, bool)
+}
+
+// The compile-time proof that the PRODUCTION models binding satisfies
+// the lane seam: the production conf.ModelsConfig is
+// *modelscache.CachedModelsConfig (CACHE_LAYER_ENABLED defaults ON),
+// so a REMOVED decorator forward must break the BUILD, not silently
+// no-op in production while the raw-manager tests stay green (the
+// modelscache-decorator-forward-trap, exact shape).
+var _ groupLaneSeam = (*modelscache.CachedModelsConfig)(nil)
+
+// credentialEngine is the slice of the credential engine the decision
+// lane uses. The engine owns the per-class cooldown policy (the
+// quota/rate-limit policy stays in the credential layer); the lane
+// only asks it to exclude a failed credential and to read the cooling
+// state.
+type credentialEngine interface {
+	ExcludeAndReselectForClass(modelID, conversationKey, excludedCredID string, class credentiallb.FailureClass, retryAfter time.Duration) (string, credentiallb.ReselectMode)
+	CooldownUntil(modelID, credID string) (time.Time, bool)
 }
 
 // configGetter is the slice of config.ManagerInterface this
@@ -263,6 +308,15 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !model.IsDecision() {
+		// The GROUP branch (the decision-groups commission): a GROUP
+		// whose inferred lane is decision is served here. The gate is
+		// EXTENDED, never widened blindly — a chat model, an image-gen
+		// model, an unknown kind and a chat-lane group all keep the
+		// existing 400 decision_misroute below.
+		if model.IsGroup() && h.groupIsDecisionLane(model.ID) {
+			h.serveDecisionGroup(w, r, model, authToken, &req, rawBody, startTime)
+			return
+		}
 		log.Printf("[decision] rejecting decision-route post to non-decision kind model=%s (kind=%s)", model.ID, model.Kind)
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
 			"outcome":         "decision_misroute",
@@ -749,6 +803,55 @@ func (h *Handler) SetCredentialResolver(fn credentialResolver) {
 		return
 	}
 	h.resolveCredential = fn
+}
+
+// SetModelsConfig wires the models manager seam (the decision-groups
+// commission): the group-lane query + the live model set. Nil-safe —
+// a handler without the seam keeps the pre-group behaviour (the group
+// branch fails CLOSED).
+func (h *Handler) SetModelsConfig(cfg models.ModelsConfigInterface) {
+	if h == nil {
+		return
+	}
+	h.modelsConfig = cfg
+}
+
+// SetCredentialEngine wires the credential engine seam (the
+// per-credential rotation + the cooling reader). Nil-safe.
+func (h *Handler) SetCredentialEngine(engine credentialEngine) {
+	if h == nil {
+		return
+	}
+	h.credEngine = engine
+}
+
+// groupLane resolves the group's lane through the OPTIONAL seam.
+func (h *Handler) groupLane(groupID string) (models.GroupLane, bool) {
+	if h == nil || h.modelsConfig == nil {
+		return "", false
+	}
+	gl, ok := h.modelsConfig.(groupLaneSeam)
+	if !ok {
+		return "", false
+	}
+	return gl.GroupLane(groupID)
+}
+
+// groupIsDecisionLane is the group branch's entry gate: the group
+// must be a DECISION-lane group.
+//
+// The seam is OPTIONAL: an absent seam (or an unresolvable lane — a
+// mixed-kind group) fails CLOSED — the caller keeps the existing 400
+// decision_misroute path — and the refusal is logged LOUDLY, because
+// a missing decorator forward would otherwise be a SILENT no-op in
+// production.
+func (h *Handler) groupIsDecisionLane(groupID string) bool {
+	lane, ok := h.groupLane(groupID)
+	if !ok {
+		log.Printf("[decision] group=%s: the group-lane seam is absent or the lane is unresolvable — failing closed (a group is never served without a resolved lane)", groupID)
+		return false
+	}
+	return lane == models.GroupLaneDecision
 }
 
 func (h *Handler) safeResolveModel(modelID string) (*models.ModelConfig, bool) {
