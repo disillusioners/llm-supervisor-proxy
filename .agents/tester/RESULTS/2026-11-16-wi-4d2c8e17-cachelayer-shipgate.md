@@ -81,3 +81,31 @@ Full release-gate suite WAS warranted: production routing-correctness fix shippi
 
 ## Quarantine Status
 5 rows active, ZERO new quarantines this gate; httpbin redirect pair reconfirmed (sole B + make-test failures, pkg/mcp tree-hash identical to base). See QUARANTINE.md row 2026-11-06 for the updated tally.
+
+---
+
+## DELTA VERIFY — fix round #2 (range 7213796..06575ad, appended 2026-11-16)
+
+**Verdict: DELTA-PASS — the SHIP-GATE-PASS @ 7213796/30e3ec4 extends to tip `06575ad791686fe2891de9e48ca23c9e075fd1b7`.** Delta is NON-BEHAVIORAL; focused pass only (no full battery re-run), per commission.
+
+**Range:** 2 commits — `c26996e` (refactor: single-source model-wall policy + truthful win-clear seam) + `06575ad` (docs rewrap). Diff: 10 files, +137/−104 (432 diff lines, audited hunk-by-hunk).
+
+### Δ1 — Diff audit: NON-BEHAVIORAL
+- **ApplyWall equivalence (crux) PROVEN:** new `pkg/modelcache/policy.go:31-60` owns classify→attributable→reset-clamp→MarkUntil / fallback+clamp→Mark, **semantically identical** to BOTH former inline blocks (`race_coordinator.markModelWallForErrorLocked` @7213796 AND `handler_anthropic.markAnthropicUpstreamSkip` @7213796), which were themselves equivalent to each other. All surfaces checked: classification order, attributable predicate, clamp bounds (`MinMarkWindow`=1m / `MaxMarkWindow`=24h — values identical to former literals), cache key (ROW identity), `now` capture point, fallback DefaultTTL(15m) path, event/error shapes (untouched). New `ApplyWall` nil/empty guards behaviorally redundant (no-op callee semantics proven). Both lanes are thin callers — exactly 2 `ApplyWall(` call sites, zero leftover inline policy, `ModelWall` single caller.
+- **config.go:** literals → `modelcache.MinMarkWindow/MaxMarkWindow` reuse; `Validate` → `Manager.Save` still **REJECTS** out-of-range `model_skip_cache_ttl` (`errors.New`, unchanged control flow) — no clamp-at-save introduced.
+- **Rename `clearWinnerUpstreamSkip`→`clearWinnerLayerState`:** complete — 2 live (handler.go:963, handler_anthropic.go:622) + 1 test (cache_layer_separation_test.go:840) call sites; old name retains ZERO live refs (2 doc-only historical mentions); function body **byte-identical** with the name normalized (same args; clears the same three layers — new doc is truthful).
+- **`06575ad` alone:** comment/markdown only (design.md + skipcache.go doc), zero code lines; the strengthened `AnyMarked` R1-note verified factually true (no production caller).
+- **Blob identity:** `pkg/modelcache/modelcache_test.go` d2d1821f… **IDENTICAL**; `pkg/proxy/win_clear_winner_identity_test.go` 8dfc8c40… **IDENTICAL** (untouched); `pkg/proxy/cache_layer_separation_test.go` differs by **exactly one line** = the mandated rename call site (all assertions unchanged) — deviation accounted by design, ruling pins unedited.
+- **FE untouched** (`git diff --name-only … -- pkg/ui` empty); gofmt zero-drift at both ends; no unused imports; source-scan pin `Structural_ModelSuppressionKeyedByRow` holds (readers survive; extraction moved only mark calls).
+
+### Δ2 — Targeted re-run @ 06575ad
+- **Pack A full** (`timeout 300` + `-timeout=240s`, `-count=1 -v`, HOME-quarantined): **EXIT=0, WALL=132s, 1274 PASS / 0 FAIL / 11 pre-existing skips** — count-identical to the ship-gate A run. Flake adjudication NOT TRIGGERED.
+- **Protected pins, literal evidence:** `=== RUN`/`--- PASS: TestWinClear_ClearsWinnerMemberNotFailedHead (0.43s)` (Pack A log :6664/:6684); `--- PASS: TestModelWall (0.00s)` + `--- PASS: TestModelWall_AccountQuotaNotModelMarked (0.00s)` (explicit pkg/modelcache run, EXIT=0; zero `no tests to run` — false-green trap checked).
+- **gofmt -l on all 9 touched .go files: EMPTY.**
+
+### Warnings (recorded, non-blocking)
+1. Dev claimed "~9 touched files" — actual **10** (the extra is `pkg/proxy/handler.go`, the second live rename call site; benign).
+2. `modelcache.ApplyWall` — the new single-source owner of the entire mark policy — ships with **no direct test pin** (pre-existing condition: the former inline code was equally unpinned; not a regression). **Recommend a direct ApplyWall pin (reset-parse clamp window, fallback TTL, attributable veto) as a fast follow-up before/soon-after landing.**
+3. Zero flake adjudications; quarantine registry unchanged by this delta.
+
+Instance IDs (delta pass): gate-cachelayer-delta-diff 671e9e04 · gate-cachelayer-delta-rerun cea5b7d6.
