@@ -161,7 +161,14 @@ export function CredentialGroupsTab({
       if (e instanceof ApiError && e.status === 409) {
         // Re-read the (uncached) group list and take the blocked group's
         // server-side `used_by` from the RETURNED array.
-        const fresh = await onRefreshGroups();
+        let fresh: CredentialGroup[] = [];
+        try {
+          fresh = await onRefreshGroups();
+        } catch {
+          // The re-read failed — the block is still reported, the model
+          // list is simply unknown.
+          fresh = [];
+        }
         const blocked = fresh.find((g) => g.id === target.id);
         setBlockedModelIds(blocked?.used_by || []);
         setStatus({ type: 'error', message: CREDENTIAL_GROUP_IN_USE_MESSAGE });
