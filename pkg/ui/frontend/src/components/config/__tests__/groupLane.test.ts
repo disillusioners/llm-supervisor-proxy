@@ -39,6 +39,13 @@ function makeGroup(members: { model_id: string; weight: number }[]): GroupModel 
   } as GroupModel;
 }
 
+// A kind OUTSIDE the FE's vocabulary — the server does not recognise
+// it either, so its member carries NO lane evidence (models.MemberLane
+// returns ok=false for any unknown kind). The FE's Model.kind is a
+// closed union, so the value is declared as a plain string and cast at
+// the single use site.
+const legacyKind: string = 'legacy-kind';
+
 // A kind index over a plain id→kind map.
 function index(entries: Record<string, string>): Map<string, string> {
   return new Map(Object.entries(entries));
@@ -193,5 +200,47 @@ describe('groupLane — the client-side lane inference (decision-groups, phase 2
     // models.UnanimousGroupLane :96-99).
     const onlyNoLane = makeGroup([{ model_id: 'img-1', weight: 1 }]);
     expect(inferGroupLane(onlyNoLane, kindIndex)).toBeNull();
+
+    // A kind OUTSIDE the vocabulary is the same case: the server's
+    // models.MemberLane returns ok=false for ANY kind it does not
+    // recognise and models.GroupLanesOf ignores it (pkg/models/group_lane.go
+    // :46-55 and :67-71) — the member carries NO lane evidence, so the
+    // surviving members decide.
+    const legacyIndex = index({ 'chat-1': 'chat', 'legacy-1': legacyKind });
+    const withLegacyKind = makeGroup([
+      { model_id: 'chat-1', weight: 1 },
+      { model_id: 'legacy-1', weight: 1 },
+    ]);
+    expect(inferGroupLane(withLegacyKind, legacyIndex)).toBe('chat');
+    // A group whose ONLY member has an out-of-vocabulary kind has an
+    // EMPTY surviving set — no lane is present at all, so the lane is
+    // unknown (server models.UnanimousGroupLane :96-99).
+    const onlyLegacyKind = makeGroup([{ model_id: 'legacy-1', weight: 1 }]);
+    expect(inferGroupLane(onlyLegacyKind, legacyIndex)).toBeNull();
+
+    // The INDEX must carry the RAW kind: the FE normalises a kind only
+    // where the server normalises it (the legacy "" kind IS chat) —
+    // normalising an UNKNOWN kind into a chat vote would make the FE
+    // answer "chat" for a member the server ignores. The server reads
+    // the member row's kind verbatim (store_group_rewrite.go :378-384
+    // hands the raw kind to models.MemberLane), so the index must too.
+    const built = buildKindIndex({
+      models: [
+        makeModel({ id: 'dec-1', name: 'Dec One', kind: 'decision' }),
+        makeModel({ id: 'legacy-1', name: 'Legacy One', kind: legacyKind as Model['kind'] }),
+      ],
+    });
+    expect(built.get('legacy-1')).toBe(legacyKind);
+    // The fold over the BUILT index ignores the out-of-vocabulary member
+    // instead of counting it as a chat vote (a chat vote here would make
+    // the surviving set MIXED and the lane unknown — the FE would answer
+    // "unknown" where the server answers "decision").
+    const builtMixed = makeGroup([
+      { model_id: 'dec-1', weight: 1 },
+      { model_id: 'legacy-1', weight: 1 },
+    ]);
+    expect(inferGroupLane(builtMixed, built)).toBe('decision');
+    const builtOnlyLegacy = makeGroup([{ model_id: 'legacy-1', weight: 1 }]);
+    expect(inferGroupLane(builtOnlyLegacy, built)).toBeNull();
   });
 });

@@ -16,6 +16,15 @@ export type ModelKind = 'chat' | 'image-gen' | 'decision' | 'group';
 // (pkg/models/config.go EffectiveKind / pkg/models/group_lane.go
 // MemberLane) — a chat-era row must never be read as a decision row.
 //
+// WARNING — this helper is the LEGACY-KIND normalisation, NOT the lane
+// fold. It must NOT be used to decide a member's lane: it maps an
+// unrecognised kind to the chat default, while the server's
+// models.MemberLane (pkg/models/group_lane.go :46-55) returns ok=false
+// for such a kind and models.GroupLanesOf (:67-71) IGNORES the member
+// (it is unservable, not a lane vote). The lane fold therefore decides
+// FROM THE RAW KIND — buildKindIndex stores the raw kind for exactly
+// this reason, and memberLane (below) applies the server's rule.
+//
 // The FE's typed data cannot produce a kind outside the vocabulary
 // (Model.kind is a closed union), so the fallback branch is defensive
 // only: an unrecognised kind normalises to the legacy chat default.
@@ -58,6 +67,14 @@ export interface KindIndexSources {
 // buildKindIndex maps model_id → kind across the union of the supplied
 // lists.
 //
+// The KIND IS THE RAW KIND. The lane fold decides a member's lane FROM
+// the raw kind (memberLane below is the mirror of the server's
+// models.MemberLane), so the index must NOT normalise a kind before
+// the fold: the server reads the member row's kind verbatim
+// (pkg/store/database/store_group_rewrite.go :378-384 hands the raw
+// kind to models.MemberLane), and a kind it does not recognise yields
+// NO lane evidence — it is ignored, never a chat vote.
+//
 // Precedence: the NARROW server-prefiltered lists win over the
 // unfiltered one. Each hook's mutation deletes the shared 'models'
 // cache key but only refetches ITS OWN list, so a just-created
@@ -71,7 +88,12 @@ export function buildKindIndex(sources: KindIndexSources): Map<string, string> {
   const index = new Map<string, string>();
   const apply = (list: Model[] | undefined, kind: string | undefined) => {
     for (const m of list ?? []) {
-      index.set(m.id, kind ?? normalizeKind(m.kind));
+      // The narrow lists carry their own literal kind (the hook that
+      // fetched them is server-prefiltered by kind); the unfiltered list
+      // carries the row's OWN kind — kept RAW, because the lane fold
+      // reads the raw kind (an unknown kind must yield no lane
+      // evidence, exactly as models.MemberLane does on the server).
+      index.set(m.id, kind ?? (m.kind ?? ''));
     }
   };
   apply(sources.models, undefined);
