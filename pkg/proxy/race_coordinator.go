@@ -765,7 +765,7 @@ func (c *raceCoordinator) manage() {
 						// credFailoverPlanLocked site (:1823-era precedent):
 						// the row is DONE-failed here, its executor write
 						// long since retired.
-						c.markUpstreamSkipLocked(latestReq)
+						modelScope, modelMarked, upstreamDemoted := c.markUpstreamSkipLocked(latestReq)
 
 						// ── HOISTED CRED-FAILOVER BRANCH (Round 3c C1;
 						// Tasks 18-20; layered credential fallback Fix 1) ──
@@ -780,6 +780,29 @@ func (c *raceCoordinator) manage() {
 						// BEFORE model switching — per model, not just
 						// for models[0] (Fix 2).
 						plan := c.credFailoverPlanLocked(latestReq)
+						// [MODEL-SKIP] — emitted AFTER the rotation
+						// decision and with the REAL outcome: the
+						// credential-layer cooldown exists only when the
+						// rotation actually happened (the F-8 shape: the
+						// rotation budget can be spent before the
+						// exclusion is written).
+						if upstreamDemoted && !modelMarked {
+							var rotation string
+							var cooldown time.Duration
+							if plan != nil {
+								rotation = plan.credentialID
+								cooldown = plan.cooldown
+							}
+							logModelScopeSkip(modelScopeSkipLog{
+								lane:        "race",
+								model:       latestReq.modelID,
+								credID:      latestReq.resolved.CredentialID,
+								scope:       modelScope,
+								upstreamTTL: c.cfg.UpstreamSkipCacheTTL,
+								rotation:    rotation,
+								cooldown:    cooldown,
+							})
+						}
 						if plan != nil {
 							c.mu.Unlock()
 							c.publishCredentialFailover(latestReq.modelID, plan.fromCredentialID, plan.credentialID, plan)
@@ -2126,13 +2149,13 @@ func (c *raceCoordinator) publishModelFallback(eventType, fromModel, toModel, re
 // latestReq.resolved is read the same way credFailoverPlanLocked
 // reads it (attempt DONE-failed — the executor's resolution write
 // has long since landed).
-func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
+func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) (scope modelcache.Scope, modelMarked bool, upstreamDemoted bool) {
 	cache := c.cfg.UpstreamSkipCache
 	if cache == nil {
-		return
+		return modelcache.ScopeUnknown, false, false
 	}
 	if classifyCredFailure(latestReq.GetError()) == credFailoverNone {
-		return
+		return modelcache.ScopeUnknown, false, false
 	}
 	credID := latestReq.resolved.CredentialID
 	provider := strings.ToLower(latestReq.resolved.Provider)
@@ -2147,17 +2170,31 @@ func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
 	ttl := c.cfg.UpstreamSkipCacheTTL
 	cache.Mark(skipcache.ScopeCredential, credID, wireModel, ttl)
 	cache.Mark(skipcache.ScopeProvider, provider, wireModel, ttl)
+	upstreamDemoted = ttl > 0
 
-	// wi-4d2c8e17 / ruling 2 — MODEL layer. A model-attributable
-	// usage wall (the model's own plan/session limit, e.g. "Usage
-	// limit reached for 5 hour. Your limit will reset at …") marks
-	// the MODEL identity; the chain layer then SUPPRESSES that
-	// model's next attempt at zero cost and proceeds into its chain.
-	// Credential-scoped 429s do NOT reach here (ModelWall's
-	// throttle-marker guard keeps per-minute limits upstream-scoped).
+	// wi-4d2c8e17 / ruling 2 — MODEL layer. A MODEL-SCOPED wall (the
+	// wall's subject is the MODEL itself) marks the MODEL identity; the
+	// chain layer then SUPPRESSES that model's next attempt at zero
+	// cost and proceeds into its chain.
+	//
+	// wi-4b8d21e7 / ruling 2026-11-17 — MINT-SCOPE: an ACCOUNT-scoped
+	// body (the Token-Plan class, the quota/credit family, the "your
+	// plan" family — every observed limit body names the ACCOUNT) must
+	// NOT mark the model layer: the account ≈ the credential, so a
+	// walled account must not hide the model's healthy sibling
+	// credentials. Such a body stays at the CREDENTIAL layer (the
+	// quota cooldown) and the UPSTREAM layer (the demotion written
+	// above). The scope decision lives in pkg/modelcache (scope.go).
+	//
+	// NOTE (review S-8): the "Usage limit reached for 5 hour. Your
+	// limit will reset at …" body is ScopeACCOUNT — it names the
+	// account's 5-hour usage window ("your limit"), NOT the model — so
+	// it is NOT an example of a model-scoped body.
+	//
 	// Keyed by the ROW identity (latestReq.modelID) — the same key
 	// the attempt-suppression site reads.
-	c.markModelWallForErrorLocked(latestReq, latestReq.modelID)
+	scope, modelMarked = c.markModelWallForErrorLocked(latestReq, latestReq.modelID)
+	return scope, modelMarked, upstreamDemoted
 }
 
 // markModelWallForErrorLocked classifies the attempt's failure as a
@@ -2165,19 +2202,36 @@ func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
 // the reset instant (clamped [1m,24h]) or the configured fixed TTL
 // when no reset parses. modelKey is the ROW identity the suppression
 // site reads. Caller holds c.mu (call discipline only).
-func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest, modelKey string) {
+//
+// MINT-SCOPE (wi-4b8d21e7, user ruling 2026-11-17): an ACCOUNT-scoped
+// body NEVER marks the model layer. The account ≈ the credential — a
+// walled account is a walled credential, and the model's OTHER
+// credentials must stay reachable. The scope decision lives in
+// pkg/modelcache (scope.go); the classify→clamp→mark policy lives in
+// ONE place (tidier High-1): modelcache.ApplyScopedWall owns the
+// scope gate, the DefaultTTL fallback, the [1m,24h] clamp (fixed AND
+// reset windows) and the MarkUntil-vs-Mark branch.
+//
+// This is the 03:56:55Z incident's fix site: a Token-Plan (account)
+// body used to mark the MODEL, and the same request's credential-
+// failover attempt was then suppressed at zero cost by the model-layer
+// read site (race_executor.go) — one dry account hid the model's
+// healthy sibling credential.
+func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest, modelKey string) (modelcache.Scope, bool) {
 	if c.cfg.ModelSkipCache == nil || modelKey == "" {
-		return
+		return modelcache.ScopeUnknown, false
 	}
 	err := latestReq.GetError()
 	if err == nil {
-		return
+		return modelcache.ScopeUnknown, false
 	}
-	// The classify→clamp→mark policy lives in ONE place (tidier
-	// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
-	// [1m,24h] clamp (fixed AND reset windows), and the
-	// MarkUntil-vs-Mark branch.
-	modelcache.ApplyWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
+	// The empty-message guard: a failure with no message carries no
+	// vocabulary at all — it must not be classified (and the Anthropic
+	// lane already guards it).
+	if err.Error() == "" {
+		return modelcache.ScopeUnknown, false
+	}
+	return modelcache.ApplyScopedWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
 }
 
 // FinalFailureReason (wi-7769a812 part 2) exposes the classified

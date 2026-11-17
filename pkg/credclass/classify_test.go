@@ -9,6 +9,11 @@ import (
 // provider lane delegates to this package; the decision lane consumes
 // it directly). Every exported vocabulary entry must classify its own
 // class, and must NOT classify the other class.
+//
+// The quota table is the NARROWED one (wi-4b8d21e7 — the dropped
+// spellings no longer classify as quota; see the vocabulary doc in
+// classify.go for the runtime consequence). The exact set is pinned by
+// providers.TestQuotaVocabulary_IsLocked, which reads these tables.
 
 // TestCredClass_IsQuota_VocabularyTable pins every quota vocabulary
 // entry: each type/code/message entry classifies quota; a plain
@@ -32,9 +37,10 @@ func TestCredClass_IsQuota_VocabularyTable(t *testing.T) {
 		{"type insufficient_credit mixed case", 400, "Insufficient_Credit", "", "", true},
 		{"type billing", 400, "billing_not_active", "", "", true},
 		{"type payment_required", 400, "payment_required", "", "", true},
-		{"type credit_exhausted", 400, "credit_exhausted", "", "", true},
-		{"type insufficient_balance", 400, "insufficient_balance", "", "", true},
+		{"type credit_exhausted is DROPPED", 400, "credit_exhausted", "", "", false},
+		{"type insufficient_balance is DROPPED", 400, "insufficient_balance", "", "", false},
 		{"type quota", 400, "quota", "", "", true},
+		{"type resource_exhausted", 400, "resource_exhausted", "", "", true},
 
 		// Every code-vocabulary entry (the code set shares the type set).
 		{"code quota", 400, "", "quota", "", true},
@@ -43,20 +49,31 @@ func TestCredClass_IsQuota_VocabularyTable(t *testing.T) {
 
 		// Every message-vocabulary entry.
 		{"message insufficient credit", 400, "", "", "you have insufficient credit", true},
+		// The space spelling "insufficient credits" STILL matches — the retained
+		// "insufficient credit" hits it via Contains (only the underscore
+		// spelling "insufficient_credits" is truly gone).
 		{"message insufficient credits", 400, "", "", "insufficient credits", true},
-		{"message insufficient balance", 400, "", "", "insufficient balance", true},
-		{"message insufficient quota", 400, "", "", "insufficient quota", true},
+		{"message insufficient balance is DROPPED", 400, "", "", "insufficient balance", false},
+		{"message insufficient quota is DROPPED", 400, "", "", "insufficient quota", false},
 		{"message quota exceeded", 429, "", "", "quota exceeded", true},
 		{"message quota exhausted", 429, "", "", "monthly quota exhausted", true},
-		{"message exceeded your quota", 429, "", "", "you have exceeded your quota", true},
-		{"message credit exhausted", 400, "", "", "credit exhausted", true},
-		{"message credits exhausted", 400, "", "", "credits exhausted", true},
-		{"message out of credit", 400, "", "", "you are out of credit", true},
+		{"message exceeded your quota is DROPPED", 429, "", "", "you have exceeded your quota", false},
+		{"message credit exhausted is DROPPED", 400, "", "", "credit exhausted", false},
+		{"message credits exhausted is DROPPED", 400, "", "", "credits exhausted", false},
+		{"message out of credit is DROPPED", 400, "", "", "you are out of credit", false},
 		{"message token plan usage limit", 429, "", "", "Token Plan usage limit exceeded", true},
 		{"message payment required", 400, "", "", "payment required", true},
+		{"message your quota will reset", 429, "", "", "your quota will reset", true},
+		{"message your limit will reset", 429, "", "", "your limit will reset", true},
+		{"message exhausted your capacity", 429, "", "", "exhausted your capacity", true},
 
 		// The two live-shape cases the extraction must keep.
 		{"plain usage limit stays NON-quota", 429, "", "", "you have reached your usage limit for this minute", false},
+		// The NARROWING consequence (wi-4b8d21e7): a dropped spelling on a
+		// live body classifies by the STATUS ladder, never by the dropped
+		// text — a 429 carrying it is rate-limit (60s/Retry-After), NOT
+		// quota (15m); any other status is not limit-class at all.
+		{"dropped spelling on a 429 is NOT quota", 429, "", "", "insufficient balance, please top up", false},
 		{"token plan is status-agnostic (200)", 200, "", "", "token plan exhausted", true},
 		{"token plan is status-agnostic (429)", 429, "", "", "token plan exhausted", true},
 

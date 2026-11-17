@@ -920,10 +920,29 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				// (models.ModelsConfigInterface) — pkg/proxy never
 				// imports pkg/store/database.
 				flatCredentialCount(arc.conf.ModelsConfig, modelConfig) > 1 {
-				reselected, mode := h.credEngine.ExcludeAndReselect(
+				// wi-4b8d21e7 (F-3) — MINT-SCOPE at the CREDENTIAL
+				// layer: an ACCOUNT-quota body must seed the QUOTA
+				// cooldown (config credential_quota_cooldown, default
+				// 15m), not the flat rate-limit policy (60s /
+				// Retry-After). A walled ACCOUNT that returns to the
+				// pool after 60s is the "cooldown trap" the quota class
+				// exists to remove (pkg/credentiallb/failure_class.go)
+				// — the account recovers on a TOP-UP, not on a short
+				// timer. The upstream-auth case (401/403) keeps the
+				// rate-limit policy.
+				// The PROXY-side class vocabulary (the same one the race
+				// lane and the internal twin use): it drives the event
+				// reason AND the engine's cooldown policy.
+				pclass := credFailoverRateLimit
+				if isAnthropicQuotaFailure(arc) {
+					pclass = credFailoverQuota
+				}
+				cooldown := effectiveCooldown(h.credEngine, pclass, arc.retryAfter)
+				reselected, mode := h.credEngine.ExcludeAndReselectForClass(
 					modelConfig.ID,
 					arc.conversationKey,
 					resolved.CredentialID,
+					pclass.toEngineClass(),
 					arc.retryAfter,
 				)
 				switch mode {
@@ -950,9 +969,17 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 					if newKey == "" {
 						break
 					}
-					log.Printf("[LB-FAILOVER] anthropic-passthrough: model=%s rate-limited on cred=%s; failing over to cred=%s", modelConfig.ID, resolved.CredentialID, reselected)
+					log.Printf("[LB-FAILOVER] anthropic-passthrough: model=%s %s on cred=%s; failing over to cred=%s (class=%s, cooldown=%s)", modelConfig.ID, pclass.readable(), resolved.CredentialID, reselected, pclass, cooldown)
+					// The REAL outcome — recorded for the operator-facing
+					// [MODEL-SKIP] line (review S-5).
+					arc.lastFailover = &anthropicFailoverInfo{
+						fromCredentialID: resolved.CredentialID,
+						toCredentialID:   reselected,
+						class:            pclass,
+						cooldown:         cooldown,
+					}
 					// Task 20 — model_credential_failover event.
-					h.publishAnthropicCredentialFailover(modelConfig.ID, resolved.CredentialID, reselected, arc.retryAfter)
+					h.publishAnthropicCredentialFailover(modelConfig.ID, resolved.CredentialID, reselected, arc.retryAfter, pclass, cooldown)
 					// Re-apply with the reselected credential: API key
 					// AND the new credential's base URL (a failover
 					// credential may live on a different deployment).
@@ -1920,6 +1947,15 @@ func (h *Handler) handleAnthropicStreamResponse(w http.ResponseWriter, resp *htt
 // ─────────────────────────────────────────────────────────────────────────────
 
 // anthropicRequestContext holds state for an Anthropic request
+// anthropicFailoverInfo records one credential rotation performed by
+// the Anthropic passthrough branch (wi-4b8d21e7, review S-5).
+type anthropicFailoverInfo struct {
+	fromCredentialID string
+	toCredentialID   string
+	class            credFailoverClass
+	cooldown         time.Duration
+}
+
 type anthropicRequestContext struct {
 	conf                ConfigSnapshot
 	targetURL           string
@@ -1962,6 +1998,15 @@ type anthropicRequestContext struct {
 	lastAttemptCredentialID string
 	lastAttemptProvider     string
 	lastAttemptModel        string
+
+	// lastFailover (wi-4b8d21e7, review S-5) — the credential rotation
+	// the passthrough branch performed on THIS attempt: the account it
+	// moved AWAY from, the account it moved to, the failure class and
+	// the cooldown the engine ACTUALLY seeded. The operator-facing
+	// [MODEL-SKIP] line and the model_credential_failover event report
+	// the REAL outcome — not an assumption about which layer was
+	// touched. nil when no rotation happened.
+	lastFailover *anthropicFailoverInfo
 
 	// anthropicRequestContext P2 group fields (Am21/Am24 mirror of
 	// requestContext): original list preserved for the re-entry
@@ -2525,19 +2570,23 @@ func convertAnthropicMessagesToStore(messages []translator.AnthropicMessage) []s
 
 // publishAnthropicCredentialFailover (Phase 3 / Task 20 / R3-8) emits
 // the model_credential_failover event from the anthropic-passthrough
-// branch with the canonical payload shape. cooldown_ms mirrors the
-// engine's effective seed (retryAfter when present, else the 60s
-// default); attempt_index is 1 (single retry per hook fire).
-func (h *Handler) publishAnthropicCredentialFailover(modelID, fromID, toID string, retryAfter time.Duration) {
-	cooldown := credentiallb.DefaultCooldown
-	if retryAfter > 0 {
-		cooldown = retryAfter
-	}
+// branch with the canonical payload shape. attempt_index is 1 (single
+// retry per hook fire).
+//
+// wi-4b8d21e7 (review S-5): reason and cooldown_ms carry the REAL
+// values — the failure CLASS vocabulary (the same one the race lane and
+// the internal twin publish: "rate_limit" / "quota_exceeded") and the
+// EFFECTIVE cooldown the engine seeded (the quota class seeds the long
+// quota cooldown, not the flat 60s default). The previous payload
+// hard-coded reason="rate_limit" and cooldown_ms=60000 while the
+// engine benched the account for 15m — the FE EventLog renders those
+// fields, so the operator saw a policy that never ran.
+func (h *Handler) publishAnthropicCredentialFailover(modelID, fromID, toID string, retryAfter time.Duration, class credFailoverClass, cooldown time.Duration) {
 	h.publishEvent(credentiallb.EventCredentialFailover, map[string]interface{}{
 		"model_id":           modelID,
 		"from_credential_id": fromID,
 		"to_credential_id":   toID,
-		"reason":             "rate_limit",
+		"reason":             class.String(),
 		"retry_after_ms":     retryAfter.Milliseconds(),
 		"cooldown_ms":        cooldown.Milliseconds(),
 		"attempt_index":      1,
@@ -2673,10 +2722,130 @@ func anthropicStoreUpstreamFailure(arc *anthropicRequestContext, err error) {
 	}
 }
 
+// anthropicQuotaBody is the DECODED upstream error body the Anthropic
+// lane classifies on (wi-4b8d21e7, review S-2).
+//
+// DECODE-FIRST: the classification reads the DECODED fields — the
+// top-level type/code/message/status and the nested error.{type,code,
+// message}. The raw-body scan is the FALLBACK for a body that does not
+// decode (a non-JSON body, a JSON array, a truncated document).
+//
+// Why decode-first: the raw-body scan was wrong in BOTH directions —
+// over-bench (a quota phrase in ANY field of an otherwise healthy
+// answer flipped a healthy credential to the 15m quota cooldown) and
+// under-bench (a JSON-escaped marker — "token\u0020plan" — never
+// matched the raw text while the DECODED message does).
+//
+// The code fields are json.RawMessage because the observed 9router
+// shape carries a NUMERIC code (429) — a string-typed field would
+// fail the whole decode and lose the message.
+type anthropicQuotaBody struct {
+	Type    string          `json:"type"`
+	Status  string          `json:"status"`
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
+	Error   *struct {
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+	} `json:"error"`
+}
+
+// jsonScalarString renders a decoded JSON scalar as a string. A raw
+// JSON string is unquoted; a number keeps its digits ("429"); anything
+// else is empty.
+func jsonScalarString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String()
+	}
+	return ""
+}
+
+// firstNonEmpty returns the first non-empty argument.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// anthropicQuotaFields decodes the upstream error body's quota
+// vocabulary fields. ok=false when the body does not decode as a JSON
+// object — the caller then falls back to the raw-body scan.
+func anthropicQuotaFields(body []byte) (errType, errCode, message string, ok bool) {
+	var doc anthropicQuotaBody
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return "", "", "", false
+	}
+	errType = doc.Type
+	errCode = jsonScalarString(doc.Code)
+	message = doc.Message
+	if doc.Error != nil {
+		errType = firstNonEmpty(errType, doc.Error.Type)
+		errCode = firstNonEmpty(errCode, jsonScalarString(doc.Error.Code))
+		message = firstNonEmpty(message, doc.Error.Message)
+	}
+	// The Google-style "status" field carries the observed 9router
+	// resource wall ("status":"RESOURCE_EXHAUSTED"); it is a TYPE-shaped
+	// token, so it folds into the type slot.
+	errType = firstNonEmpty(errType, doc.Status)
+	return errType, errCode, message, true
+}
+
+// anthropicCredentialAttributableStatus reports whether an upstream
+// status may be attributed to the CREDENTIAL (the account) rather than
+// to the client's request.
+//
+// wi-4b8d21e7 (review S-3): the MESSAGE-driven quota path is gated on
+// it. A 400/422 (and any other client-attributable 4xx) carrying a
+// quota PHRASE must NOT rotate or bench a credential — the upstream was
+// complaining about the REQUEST, not about the account. The pre-branch
+// behavior is restored exactly for that path (the base classifies a
+// 400+Token-Plan body as NOT limit-class: no rotation, no cooldown).
+//
+// The STRUCTURED path (the body's type/code says quota) is NOT gated:
+// that behavior predates this branch and is left untouched.
+func anthropicCredentialAttributableStatus(status int) bool {
+	switch status {
+	case http.StatusPaymentRequired, // 402
+		http.StatusTooManyRequests, // 429
+		http.StatusUnauthorized,    // 401
+		http.StatusForbidden:       // 403
+		return true
+	default:
+		return false
+	}
+}
+
 // isAnthropicQuotaFailure classifies the stored anthropic error as
-// QUOTA-class (402 / quota vocabulary in the body) — the D3
-// limit-class sibling of isAnthropicRateLimit. HTTP-200-with-embedded
-// quota text is OUT OF SCOPE, same as the rate-limit R3-1 pinning.
+// QUOTA-class — the D3 limit-class sibling of isAnthropicRateLimit.
+// HTTP-200-with-embedded quota text is OUT OF SCOPE, same as the
+// rate-limit R3-1 pinning.
+//
+// ONE CANONICAL CLASSIFIER (wi-4b8d21e7, review S-4): the lane calls
+// providers.ClassifyQuotaBody — the SAME vocabulary the chat lane
+// uses. The local list it carried (and the bare "insufficient"/"credit"
+// /"billing"/"payment" substring checks) is GONE: it drifted from the
+// chat lane in both directions (code=payment_required was QUOTA in the
+// race lane and NOT quota here; code=credit_balance_too_low was the
+// mirror image) and it classified an INVENTED token
+// ("insufficient_parameters" — a CLIENT error, never a quota).
+//
+// The ACCOUNT-quota MESSAGE vocabulary is included (review S-1): the
+// observed z.ai Token-Plan body and the 9router account-quota body
+// carry their class in the MESSAGE, and a body that is not recognized
+// as a quota would seed the flat 60s rate-limit cooldown — the walled
+// account re-enters the pool after a minute (the cooldown trap).
 func isAnthropicQuotaFailure(arc *anthropicRequestContext) bool {
 	if arc == nil {
 		return false
@@ -2687,37 +2856,26 @@ func isAnthropicQuotaFailure(arc *anthropicRequestContext) bool {
 	if len(arc.lastError) == 0 {
 		return false
 	}
-	var body struct {
-		Type  string `json:"type"`
-		Code  string `json:"code"`
-		Error struct {
-			Type string `json:"type"`
-			Code string `json:"code"`
-		} `json:"error"`
+	errType, errCode, message, decoded := anthropicQuotaFields(arc.lastError)
+	if !decoded {
+		// FALLBACK ONLY (decode failure): the raw-body scan. The
+		// message path is status-gated like the decoded one.
+		return providers.IsQuotaMessage(string(arc.lastError)) &&
+			anthropicCredentialAttributableStatus(arc.lastStatusCode)
 	}
-	if err := json.Unmarshal(arc.lastError, &body); err != nil {
+	switch providers.ClassifyQuotaBody(errType, errCode, message) {
+	case providers.QuotaBodyStructured:
+		// The structured signal is precise and PRE-EXISTING: it is not
+		// status-gated (a body whose TYPE says quota is an account
+		// wall whatever the status).
+		return true
+	case providers.QuotaBodyMessage:
+		// The message signal is free text: it only rotates/benches on a
+		// CREDENTIAL-attributable status (review S-3).
+		return anthropicCredentialAttributableStatus(arc.lastStatusCode)
+	default:
 		return false
 	}
-	quotaVocab := func(s string) bool {
-		s = strings.ToLower(s)
-		return strings.Contains(s, "quota") ||
-			strings.Contains(s, "insufficient") ||
-			strings.Contains(s, "credit") ||
-			strings.Contains(s, "billing") ||
-			strings.Contains(s, "payment")
-	}
-	if quotaVocab(body.Type) || quotaVocab(body.Error.Type) {
-		return true
-	}
-	switch body.Code {
-	case "insufficient_credits", "credit_balance_too_low", "billing_error", "quota_exceeded":
-		return true
-	}
-	switch body.Error.Code {
-	case "insufficient_credits", "credit_balance_too_low", "billing_error", "quota_exceeded":
-		return true
-	}
-	return false
 }
 
 // isAnthropicLimitClass is the anthropic-route LIMIT-CLASS check
@@ -2793,24 +2951,53 @@ func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelK
 	if wireModel == "" {
 		wireModel = arc.originalModel
 	}
+	upstreamDemoted := false
 	if arc.lastAttemptCredentialID != "" || arc.lastAttemptProvider != "" {
 		ttl := arc.conf.UpstreamSkipCacheTTL
 		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeCredential, arc.lastAttemptCredentialID, wireModel, ttl)
 		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
+		upstreamDemoted = ttl > 0
 	}
 	// wi-4d2c8e17 / ruling 2 — MODEL layer (parity with the OpenAI
-	// lane's markModelWallForErrorLocked): a model-attributable usage
-	// wall marks the MODEL identity so the walk suppresses that
-	// model's next attempt at zero cost and proceeds into its chain.
-	// Keyed by the ROW identity (modelKey) — the same key the
-	// suppression site reads.
+	// lane's markModelWallForErrorLocked): a MODEL-SCOPED wall marks
+	// the MODEL identity so the walk suppresses that model's next
+	// attempt at zero cost and proceeds into its chain. Keyed by the
+	// ROW identity (modelKey) — the same key the suppression site
+	// reads.
+	//
+	// MINT-SCOPE (wi-4b8d21e7, user ruling 2026-11-17): an
+	// ACCOUNT-scoped body (the Token-Plan class, any quota / credit /
+	// balance vocabulary) NEVER marks the model layer — the account ≈
+	// the credential, so the model's sibling credentials must stay
+	// reachable. The scope decision lives in pkg/modelcache (scope.go).
 	if arc.conf.ModelSkipCache != nil && modelKey != "" && len(arc.lastError) > 0 {
 		now := time.Now()
 		// The classify→clamp→mark policy lives in ONE place (tidier
-		// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
-		// [1m,24h] clamp (fixed AND reset windows), and the
-		// MarkUntil-vs-Mark branch.
-		modelcache.ApplyWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
+		// High-1): modelcache.ApplyScopedWall owns the scope gate, the
+		// DefaultTTL fallback, the [1m,24h] clamp (fixed AND reset
+		// windows) and the MarkUntil-vs-Mark branch.
+		scope, modelMarked := modelcache.ApplyScopedWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
+		// [MODEL-SKIP] — the Anthropic lane reaches this site AFTER
+		// the attempt, so the credential rotation has already happened
+		// (the passthrough branch retries inside the attempt): the
+		// line can name the REAL outcome.
+		if upstreamDemoted && !modelMarked {
+			var rotation string
+			var cooldown time.Duration
+			if arc.lastFailover != nil {
+				rotation = arc.lastFailover.toCredentialID
+				cooldown = arc.lastFailover.cooldown
+			}
+			logModelScopeSkip(modelScopeSkipLog{
+				lane:        "anthropic",
+				model:       modelKey,
+				credID:      arc.lastAttemptCredentialID,
+				scope:       scope,
+				upstreamTTL: arc.conf.UpstreamSkipCacheTTL,
+				rotation:    rotation,
+				cooldown:    cooldown,
+			})
+		}
 	}
 }
 

@@ -269,6 +269,14 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 	// Fix 1 — the cooldown policy is per CLASS: rate-limit keeps the
 	// 60s/Retry-After shape; quota seeds the engine's long configured
 	// quota cooldown (config credential_quota_cooldown, default 15m).
+	//
+	// wi-4b8d21e7 — this lane mints the CREDENTIAL layer only: it has
+	// no model-layer mark site (the non-race twin never suppressed a
+	// model attempt, so the 03:56:55Z incident shape — an account
+	// body's model mark hiding a healthy sibling credential — cannot
+	// occur here). An ACCOUNT-quota body therefore lands exactly where
+	// it belongs: the credential-layer cooldown, with the sibling
+	// rotation this call performs.
 	cooldown := effectiveCooldown(h.credEngine, class, providerErr.RetryAfter)
 
 	reselected, mode := h.credEngine.ExcludeAndReselectForClass(

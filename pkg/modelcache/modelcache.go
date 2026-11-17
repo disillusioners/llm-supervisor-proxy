@@ -11,13 +11,20 @@
 //	UPSTREAM — "is this REMOTE/CREDENTIAL working?"      (pkg/skipcache)
 //
 // The layers NEVER read each other's state. This cache is WRITTEN by
-// model-attributable failures only (the model's own plan/usage wall —
-// e.g. an upstream "Usage limit reached for 5 hour. Your limit will
-// reset at …" body) and READ by the model/chain layer only (suppress
-// that model's ATTEMPT at zero cost and proceed INTO its fallback
-// chain). It is NEVER read by the group pick — by construction the
-// group-pick code path does not import this package (see
+// MODEL-SCOPED failures only — a wall whose subject is the MODEL itself
+// ("a wall that would apply no matter which credential serves it") —
+// and READ by the model/chain layer only (suppress that model's
+// ATTEMPT at zero cost and proceed INTO its fallback chain). It is
+// NEVER read by the group pick — by construction the group-pick code
+// path does not import this package (see
 // pkg/store/database/store_group_rewrite.go).
+//
+// MINT-SCOPE (wi-4b8d21e7, user ruling 2026-11-17): an ACCOUNT-scoped
+// body — the Token-Plan class, any quota / credit / balance / "your
+// plan" vocabulary — NEVER mints a model mark here. The account ≈ the
+// credential: a walled account is a walled credential, and the model's
+// sibling credentials must stay reachable. Scope.go owns that decision
+// and ApplyScopedWall is the only mint entry point.
 //
 // DOCTRINE (extends pkg/skipcache verbatim):
 //

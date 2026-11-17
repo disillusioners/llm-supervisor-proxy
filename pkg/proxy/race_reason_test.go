@@ -658,4 +658,6 @@ func TestRaceSpawnEvent_ReasonAdditiveOnly(t *testing.T) {
 		t.Errorf("trigger_reason = %q, want the bounded detail", tr)
 	}
 	t.Logf("race_spawn (main_error) payload=%v", failData)
+
+	joinSpawnedExecutors(coord) // keep spawned executors inside this test (race gate)
 }
