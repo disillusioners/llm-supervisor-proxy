@@ -1,5 +1,20 @@
 import type { Model, GroupModel, GroupLane } from '../../types';
 
+// ─── READ FIRST — the legacy-kind normalisation is NOT the lane fold ────────
+// WARNING — normalizeKind (below) is the LEGACY-KIND normalisation, NOT the
+// lane fold. It must NOT be used to decide a member's lane: it maps an
+// unrecognised kind to the chat default, while the server's
+// models.MemberLane (pkg/models/group_lane.go :46-55) returns ok=false
+// for such a kind and models.GroupLanesOf (:67-71) IGNORES the member
+// (it is unservable, not a lane vote). The lane fold therefore decides
+// FROM THE RAW KIND — buildKindIndex stores the raw kind for exactly
+// this reason, and memberLane (below) applies the server's rule.
+//
+// normalizeKind is exported for the E1 pin ONLY — zero production callers;
+// deleting it requires deleting the two E1 assertions in the same commit;
+// it must NEVER decide a lane.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // The lane vocabulary is owned by types.ts (GroupLane); it is re-exported
 // here so the group surfaces import the type and the helpers from ONE
 // module (the same reason the helper lives beside the components that
@@ -13,17 +28,11 @@ export type ModelKind = 'chat' | 'image-gen' | 'decision' | 'group';
 
 // normalizeKind applies the legacy-kind normalisation: an absent /
 // empty kind IS chat. It mirrors the server's normalisation
-// (pkg/models/config.go EffectiveKind / pkg/models/group_lane.go
+// (pkg/models/group_lane.go:111 EffectiveKind / pkg/models/group_lane.go
 // MemberLane) — a chat-era row must never be read as a decision row.
 //
-// WARNING — this helper is the LEGACY-KIND normalisation, NOT the lane
-// fold. It must NOT be used to decide a member's lane: it maps an
-// unrecognised kind to the chat default, while the server's
-// models.MemberLane (pkg/models/group_lane.go :46-55) returns ok=false
-// for such a kind and models.GroupLanesOf (:67-71) IGNORES the member
-// (it is unservable, not a lane vote). The lane fold therefore decides
-// FROM THE RAW KIND — buildKindIndex stores the raw kind for exactly
-// this reason, and memberLane (below) applies the server's rule.
+// The invariant that keeps this helper OUT of the lane fold is stated in
+// the FILE HEADER — read it before using this function.
 //
 // The FE's typed data cannot produce a kind outside the vocabulary
 // (Model.kind is a closed union), so the fallback branch is defensive
@@ -154,10 +163,17 @@ export function inferGroupLane(
 }
 
 // The three buckets the parent hands to the two group surfaces.
+//
+// The buckets are typed as the ACTUAL INPUT (Model[]), not as
+// GroupModel[]: splitGroupsByLane receives Model[] and Model.kind is
+// OPTIONAL, so a GroupModel[] bucket would assert a kind the input never
+// guaranteed (the old `as GroupModel` cast). Both consumers already take
+// Model[] (SettingsPage.tsx hands GroupModelsTab.models the chat+unknown
+// spread and DecisionModelsContainer.groups the decision bucket).
 export interface GroupLaneSplit {
-  chat: GroupModel[];
-  decision: GroupModel[];
-  unknown: GroupModel[];
+  chat: Model[];
+  decision: Model[];
+  unknown: Model[];
 }
 
 // splitGroupsByLane buckets the group list by the inferred lane.
@@ -182,7 +198,12 @@ export function splitGroupsByLane(
   const split: GroupLaneSplit = { chat: [], decision: [], unknown: [] };
   for (const group of groups) {
     const lane = inferGroupLane(group, kindIndex);
-    const row = group as GroupModel;
+    // The row is a Model — Model.kind is OPTIONAL, so the old
+    // `as GroupModel` assertion claimed a kind the input never
+    // guaranteed. The alias is kept (typed as the ACTUAL input type)
+    // so the emitted bundle stays byte-identical: the change is
+    // type-level only, with zero runtime effect.
+    const row: Model = group;
     if (lane === 'decision') split.decision.push(row);
     else if (lane === 'chat') split.chat.push(row);
     else split.unknown.push(row);
