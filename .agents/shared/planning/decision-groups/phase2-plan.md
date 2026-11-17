@@ -884,6 +884,15 @@ titles carry the ids. The contract:
    id of exactly one test, so phase 3's per-token grep fires on a real pass line (`✓ … <id> — …`)
    and can never be satisfied by a file path or a passing neighbour.
 
+6. **Forward note (label-namespace collision — NOT a defect in this contract):** upstream's
+   credential-groups commission **reused the A1-A13 / B1-C7 / D1-D4 / E1-E3 label space** in 5 of
+   **their** files, so a whole-log census can match 2–3 lines for 35 of our tokens. **Our contract
+   holds** — each of our 48 tokens has exactly one line across **our 8 files** — so phase 3's census
+   is **file-scoped** (each token is censused only within the file this contract assigns it), which
+   is a **text-only** gate change. **Renaming our 48 titles into a `DG-` namespace would be a SOURCE
+   change and belongs to a FUTURE TEST-ONLY COMMISSION** — it is explicitly out of scope here (no
+   source change, no test-title change in this release).
+
 ### 4. Warning 12 — fixed-constants copy: **lane-gated**
 
 

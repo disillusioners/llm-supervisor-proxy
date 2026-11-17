@@ -174,3 +174,154 @@
   says 5 lists 6) — totals still reconcile to 74 (64 A + 10 B). PENDING G4 resolution.
 - B6 non-vacuous: real config exists 1677B mtime 2026-10-18, sha256 68a06693... captured BEFORE runs.
 - origin/latest moved to dd8c585 (dispatch said >=0c4a7d7) — post-merge re-gate still required.
+
+## ===== POST-MERGE RE-RUN (merged tree 5ffcbe3) =====
+
+### MERGED Pack A (mg-packa) — PASS
+exit 0, 140s wall; 9/9 pkgs ok; 1395 top-level PASS / 0 FAIL / 11 SKIP; proxy 130.867s, store/database
+50.592s (up from 38.259s — upstream's added tests), decision 1.514s, ui 6.590s; 2422 top-level executions;
+pkg/decision 249 top-level (160 decision-named) => the decision lane is exercised, not stubbed.
+GOTCHA (institutionalise): a naive `grep -c FAIL` returns 775 — ALL of them the substring "FAILOVER"
+inside test names. The anchored `^--- FAIL:` returns 0. Any future gate grepping failures naively will
+read this suite as catastrophically broken. Hermeticity: real config sha identical before/after.
+
+### MERGED Pack B (mg-packb) — exit 1, PASS-with-quarantine
+34 pkgs (no new packages); 1151 PASS / 2 FAIL / 1 SKIP; exit 1, 61s; sole failures = the same 2 httpbin
+tests at the SAME signature (:1864/:1904, 403) => identical to pre-merge + the 2026-11-14/2026-11-16 gates;
+3/3 isolated re-runs fail identically; TOCTOU + usage-stress did NOT fire; real config hash unchanged.
+
+### MERGED anti-vacuous (mg-antivac) — Go 74/74 GREEN; FE 48/48 PASS-with-collision
+STEP 1: anti-vacuous OK 74/74, MISS 0; 0 SKIP; 0 FAIL; A_only=64 B_only=10 BOTH=0 NONE=0 not-exactly-once=0.
+  Naive-grep trap quantified: naive `grep -c FAIL` = A 775 / B 2204 (FAILOVER = 2202 of B's hits);
+  anchored `^--- FAIL:` = A 0 / B 2.
+STEP 2: 5 withdrawn names ABSENT from the merged diff, from HEAD source, and from both logs.
+STEP 3: expected=74, added vs dd8c585=74, removed=0, absent=0, unlisted=0 — EXACT.
+STEP 4: upstream added 103 names; collision with our 74 = 0 (comm -12 empty); 0 upstream names in both logs.
+  PASS-share accounting A+B: top-level PASS 2546 (2529 distinct) = our 74 + upstream-added 103 + baseline 2352.
+  The 17 duplicate names across A+B are all upstream/baseline; 0 are ours.
+STEP 5: per-file attribution IDENTICAL to the known-correct pre-merge split (0 deviation); the merge moved NONE
+  of our 74 between files; all 13 defining files exist at MERGED.
+STEP 6: 0 collisions at MERGED_BASE or OUR_ANCHOR; 5 prefix-pair families (incl. the pre-existing
+  TestHandleModels_FilterDecision trap, which EXISTS in the merged tree at handle_models_imggen_test.go:155 and
+  PASSes in A.log:1680) — all neutralised by the end-anchor (unanchored 2 -> anchored 1).
+STEP 7 (FE): 48/48 tokens matched, 0 at n=0, 35 at n>1 (upstream reused A1-A13/B1-B7/B9/C1-C7/D1-D4/E1-E3 in
+  5 upstream files, our-diff-added-lines = 0 for all 5); total x lines = 0; 416/416 tests pass.
+  FILE ATTRIBUTION: all 48 of our tokens have EXACTLY ONE line in OUR 8 files (sum 48, 48 distinct lines,
+  0 tokens credited solely by a foreign file). All 5 colliding files are 100% upstream's.
+STEP 8: A PASS=1395/FAIL=0/SKIP=11; B PASS=1151/FAIL=2/SKIP=1; our 74 absent from the PASS set = 0.
+  Merge integrity: all 103/103 upstream-added names still defined at MERGED and still have a PASS line.
+  The 2 FAILs are defined at MERGED_BASE, pkg/mcp has 0 files in our diff, neither name is ours.
+
+*** ADJUDICATION OF THE WORKER'S "RED-1" (it applied a criterion I set, stricter than the corpus's) ***
+The corpus's own FE anti-vacuous rule (phase3 step 6) is a PRESENCE check — each token must yield an OK,
+and "a MISS on any token => the gate fails". On the merged tree: 48/48 OK, 0 MISS, 0 x lines, 416/416 tests
+pass, every case file-attributed to OUR files => THE CORPUS'S FE GATE IS SATISFIED.
+The "exactly 1 over the whole log" property was the worker's/my stricter addition; it is a MEANS, not the
+contract end. The FE anti-vacuous gate is therefore GREEN ON THE CONTRACT, with:
+  - AMBER (gate mechanics, house): the standing whole-log "each token hits exactly 1" census (POK
+    fe-gate-05-token-census-grep) is NO LONGER SATISFIABLE tree-wide and must become FILE-SCOPED
+    (census within our 8 files) — it yields 48/48 at n=1 each with no source change.
+  - RECOMMENDATION (future, test-only): namespace our labels (DG-A1 etc.) to restore tree-wide uniqueness.
+  - No vacuity, no missing case, no double-crediting WITHIN our files.
+Treated consistently with the Go-side prefix pairs, which were classified "found but safe" pre-merge.
+
+### MERGED FE gates (mg-fe) — G9/G10/G11 ALL GREEN + 1 CROSS-FEATURE TOKEN COLLISION
+G9 vitest: exit 0; "Test Files 38 passed (38)"; "Tests 416 passed (416)"; x lines = 0; v lines = 416.
+  38 files ran (upstream's credential-groups FE files added 9 new test files vs the pre-merge 29).
+  TOKEN CENSUS: all 48 tokens n>=1, but many n=2 (B6=3, C6=3, D1=3, D2=3).
+  CAUSE: upstream v195's credential-groups FE tests REUSE the same A/B/C/D/E case-id letters in DIFFERENT
+  files (CredentialsContainer A1-A13; CredentialGroupsTab B1-B7/B9; CredentialGroupForm C1-C7;
+  CredentialGroupMemberPicker D1-D4; CredentialsTab E1-E3) — plus intra-file duplicates in upstream's files.
+  FILE ATTRIBUTION proves OUR 48 are each satisfied by OUR own file:
+    A1-A13 -> DecisionModelsContainer.test.tsx (ours) + CredentialsContainer.test.tsx (upstream)
+    B1-B7,B9 -> GroupModelsTab.decisionLane.test.tsx (ours) + CredentialGroupsTab.test.tsx (upstream)
+    C1-C7 -> GroupMemberEditor.decisionLane.test.tsx (ours) + CredentialGroupForm.test.tsx (upstream)
+    D1-D4 -> GroupModelForm.decisionLane.test.tsx (ours) + CredentialGroupMemberPicker.test.tsx (upstream)
+    D5-D10, E4-E8 -> ours only (GroupModelForm.decisionLane.test.tsx, groupLane.test.ts)
+    E1-E3 -> groupLane.test.ts (ours) + CredentialsTab.test.tsx (upstream)
+    T1 -> GroupMemberEditor.test.tsx (ours)   F1 -> EventLog.test.tsx (ours)   V1 -> DecisionModelForm.test.tsx (ours)
+  => OUR 48 cases each exist in OUR files and PASS. The corpus's §4a rule #4 ("no other text in the suite may
+  match another case's token") is now violated BY UPSTREAM's ids, not by ours. AMBER (namespacing DG-A1 is a
+  separate future test-only commission), NOT a RED.
+G10 tsc: exit 2; baseline sha 1bc60a57... IDENTICAL before/after; per-file counts identical on all 9 files;
+  FILE-SET delta EMPTY both ways; TOTAL_ERRORS=18 (was 19 pre-merge) TOTAL_FILES=9, actual == baseline.
+  ATTRIBUTION: OURS (dd8c585..HEAD) touched tsc-baseline.txt = EMPTY; UPSTREAM (a2952a9..dd8c585) changed it
+  (1 file, +13/-3 — SettingsPage 6->5, TOTAL 19->18) — the credential-groups FE lane A.
+G11 vite: "G11 OK: rebuild is byte-identical to the committed assets" (4 files, identical sha256);
+  porcelain EMPTY (no restore needed). THE MERGE COMMIT 5ffcbe3 carried BOTH a FE-source change AND a
+  pkg/ui/static change (pairing rule satisfied) => ITEM 4 PROVEN: the merge resolved build artifacts by
+  REBUILDING from the merged source, not by picking a side.
+  Assets at HEAD: SettingsPage-BDCXaBm2.js, index-DdLeb6Xb.js, index-Diz8jSFK.css, index.html.
+  NOTE: node_modules was pre-existing; no fresh `npm ci` reproducibility check was run (separate scope).
+
+B-1 G5: ./cmd = 26,700,265 B (26M) sha d563df8d...; root stub 3,730,294 B (3.6M); both exit 0.
+  NOTED: local binary sha != the KV CI sha dc3f53c4... — cause is ONLY the `-ldflags -X main.Version` stamp
+  (Makefile:34) vs a plain go build (version degrades to "dev"); CI injects APP_VERSION=run_number.
+  TREE IDENTITY IDENTICAL: 5ffcbe3^{tree} == 3cf3cb8^{tree} == origin/master^{tree} == ea57ec7...
+B-2 G6: build ./... exit 0, 0-byte diagnostics.  B-3 G7: vet exit 0, 0-byte diagnostics.
+B-4 G8 layer 2: 3 greps EMPTY (exit 1); wired Makefile:54/:59/:64 + @go test ./... at :68; Makefile untouched by
+  the merge (both diffs empty); NEGATIVE CONTROL FIRES on a comment-quoted banned path.
+B-5 G8 layer 1: 4/4 literal PASS incl. TestPackage_ImportGuard_GroupPolicyFiles_NoCacheImports; exit 0.
+B-6 marker: pkg/decision/group.go:57 (comment :23); binary=1, root-stub=0. Live negative control NOT claimed.
+B-7 doctrine: pinned literal (154 B, 2 lines, em-dash) byte-identical in suppression.go:8 and policy.go:17
+  (cmp exit 0 both); skipcache holds only re-wrapped paraphrases (:29-31, :144-146); the merged pinned test
+  still reads suppression.go/policy.go and PASSES (both subtests); nothing written under pkg/.
+B-8 B1 RE-VERIFICATION ON THE MERGED TREE:
+  * The WORKFLOW did NOT change: docker-ci.yml byte-identical across a2952a9..HEAD (all three diffs empty).
+    The pre-merge premise "the merge may have changed the workflow" is DISPROVED.
+  * All 5 publish gates still `github.event_name == 'push'` (:110 Login, :117 Buildx, :121 Extract-metadata
+    = the step that computes the tags, :136 build-and-push, :153 scan); push:true :141; the per-SHA tag is
+    computed INSIDE the :121-gated step => a non-push event yields no tags and no per-SHA tag.
+  * *** B1's SUBSTANCE IS FIXED IN THE MERGED CORPUS *** — rung 2 (:1269) is now the NON-ZERO-DELTA CONTENT
+    RETRIGGER, states "NOT --allow-empty", and explicitly refutes the old claim ("a --allow-empty retrigger
+    is therefore USELESS — it is the exact trap this rung previously encoded"). The §8/:338 and §10/:360 rows
+    are now STRUCK THROUGH + marked SUPERSEDED (B1, tester gate RED).
+  * *** BUT 3 RESIDUAL LIVE ROWS STILL PRESCRIBE THE FALSE ACTION ***
+      - phase3-plan.md:1272  (the W4 summary row) — still says "empty-commit retrigger as the autonomous
+        emergency fallback"
+      - phase3-plan.md:1501  (risk register R6 — THE ROW AN OPERATOR ACTS ON UNDER STALL PRESSURE) — still
+        says "the empty-commit retrigger to master"
+      - architecture-recommendation.md:491 — un-marked, normative, asserts "a manual run is a first-class
+        recovery path" (the opposite of the corrected truth)
+    => B1 verdict moves RED -> AMBER (mechanism correct, residue live). NOT fully green.
+  * NEW FACT: the corpus is now TRACKED (committed in 1f6fa2b "docs(decision-groups): the planning corpus,
+    the gate artifacts and the tracking notes"), NOT untracked — so the pre-merge corpus text is NOT
+    git-diff-recoverable (single commit) and the B1 correction cannot be diff-proven, only the merged state
+    assessed. sha of phase3-plan.md = b2a5de2f77a7e67dd13475e252c0b5fe38dab12537cc3a4b411e5e45d6c46e8b
+  * Minor: the corpus cites `docker-ci.yml:13-16` for the paths filter; the real block is :14-16 (:13 is a
+    branch pattern). And "Do **not** ship an unbuilt sha" is BOLD-SPLIT => `grep -i 'do not ship'` returns 0;
+    `grep -F 'ship an unbuilt sha'` hits. The guard survives but is not plainly greppable.
+
+S0 topology: merge parents 1f6fa2b + dd8c585 confirmed; all 4 bases ancestors; dd8c585..HEAD=31 (our 30 +
+merge) => diff dd8c585..HEAD IS our contribution; tree(promo 3cf3cb8)==tree(latest 5ffcbe3)=ea57ec7 YES.
+S1 gofmt: base dd8c585 flagged 46, base a2952a9 flagged 47, head 46 => NEW drift 0 vs BOTH; touched _test.go 0.
+  The 47->46 drop is upstream's fix to pkg/proxy/normalizers/registry_config_test.go (the merge took
+  upstream's fixed side). Drift went DOWN, never up.
+S2 G13: OURS (dd8c585..HEAD) = 0 changed files on k8s/ .github/ migrations/ migrate.go pkg/config/.
+  UPSTREAM (a2952a9..dd8c585) brought pkg/config/config.go (+87), 2 pkg/config test files, migrate.go (+5),
+  and migration 033 (4 SQL files: postgres+sqlite up/down). B4 re-check: bare `migrations/` = 0 files,
+  real `pkg/store/database/migrations/` = 84 files.
+S3 TIER-1: 10 files blob-IDENTICAL at all four revisions (a2952a9/dd8c585/1f6fa2b/HEAD).
+  ITEM 2 VERDICT: our contribution to pkg/grouplb/engine_test.go = 0 (a2952a9..1f6fa2b EMPTY; blob
+  27a910b30f at anchor AND our tip); merge TOOK UPSTREAM'S SIDE (HEAD blob c50a936937 == dd8c585's).
+  *** PREMISE CORRECTION (anomaly ada0a10f): it is NOT "rename only" — the renamed test's assertion was
+  INVERTED (!after.After(before) -> !after.Equal(before): "must REFRESH boundAt" -> "must NOT refresh
+  createdAt (absolute lifetime)") + 2 message-text assertion changes. Upstream's sliding->absolute TTL
+  semantics. Attribution and fence verdict unaffected. ***
+S4 TIER-2 + ITEM 3: all 8 files — 0 removed test funcs, 0 assertion-guard hits, 0 removed lines.
+  The single removed line in store_group_test.go is UPSTREAM'S COMMENT line; our delta vs dd8c585 removes 0.
+  *** PREMISE CORRECTION (anomaly 3e788787): upstream grew the INTERFACE (models.ModelsConfigInterface +9
+  credential-group methods); the stub is OUR file (absent at both a2952a9 and dd8c585) and THE MERGE
+  COMMIT 5ffcbe3 added the 9 no-op adapters to it (35 insertions, 0 deletions). All 9 have 0 direct call
+  sites => compile-time interface satisfiers. ***
+S5 ITEM 1: added vs dd8c585 = 74; removed = 0; absent = 0; unlisted = 0; upstream added 103 names,
+  collision with our 74 = 0 BOTH directions; all 74 new at dd8c585 and defined exactly once at HEAD;
+  5 withdrawn names absent from diff AND HEAD.
+S6 pkg/ui/static: the MERGE commit carried BOTH a FE-source change AND a pkg/ui/static change. HEAD's
+  bundle is a REBUILD (new content hashes on 2 of 4 assets), NOT a byte-copy of either parent. Static proof
+  HEAD carries BOTH feature sets: "Decision Model"=10, "Decision Group"=3 (ours) AND "Credential Groups"=3,
+  "/fe/api/credential-groups"=1 (upstream's). CSS byte-identical to upstream's. index.html a fresh manifest
+  pointing at both HEAD assets. Byte-identity rebuild proof = the FE worker's.
+S7 B5 re-proof: positive 1 hit, negative 0, worktree untouched.
+Deletion accounting: dd8c585..HEAD = +19796/-271; excluding pkg/ui/static = +19783/-258; NO test assertion
+deleted (independently confirmed: 0 removed test funcs + 0 assertion-guard hits).
