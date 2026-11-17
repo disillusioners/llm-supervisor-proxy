@@ -28,14 +28,15 @@ export function normalizeKind(kind?: string): ModelKind {
 }
 
 // The lane a member kind votes for — the FE's mirror of the server's
-// models.MemberLane:
+// models.MemberLane (pkg/models/group_lane.go :46-55):
 //
 //   '' / 'chat'   → chat     (the legacy "" kind IS chat)
 //   'decision'    → decision
 //   anything else → null     (image-gen / group belong to NO lane —
 //                              they are not members in either lane)
 //
-// A null lane is "no lane evidence", NOT a vote for the other lane.
+// A null lane is "no lane evidence", NOT a vote for the other lane:
+// the server ignores such a member (models.GroupLanesOf :67-71).
 function memberLane(kind: string): 'chat' | 'decision' | null {
   if (kind === '' || kind === 'chat') return 'chat';
   if (kind === 'decision') return 'decision';
@@ -82,45 +83,52 @@ export function buildKindIndex(sources: KindIndexSources): Map<string, string> {
 
 // inferGroupLane derives a group's LANE from its CURRENT member rows.
 //
-// The lane is NEVER persisted and NEVER trusted from write time (the
-// ruling's D-2): it is inferred, client-side, by unanimity over the
-// member rows the FE can currently resolve.
+// The SERVER's fold is the runtime truth — it is what actually
+// decides which lane serves a group — so this function mirrors it
+// function for function, case for case. The FE's job is to display
+// what the server will actually do.
 //
-//   - zero members            → 'chat' (a legacy / pre-homogeneity
-//                               row: it must never vanish from the tab
-//                               where it has always lived)
-//   - every member is chat    → 'chat'
-//   - every member is decision→ 'decision'
-//   - a mixed set             → null (undecidable — fail closed)
-//   - an unresolvable member  → null (undecidable — fail closed)
-//   - a member of no lane     → null (image-gen / group are never
-//                               members in either lane)
+// The server's fold (pkg/store/database/store_group_rewrite.go
+// inferGroupLane :369-385) folds over the group's member rows and
+// hands the kinds to models.UnanimousGroupLane
+// (pkg/models/group_lane.go :95-101):
+//
+//   - a member with an EMPTY id → skipped, no lane evidence
+//     (server :375-377)
+//   - a member id that resolves to NO row (a VANISHED member) →
+//     skipped, no lane evidence (server :378-381; the
+//     collection-shaped twin pkg/models/group_lane.go :147-150)
+//   - a member whose kind belongs to NO lane (image-gen, group) →
+//     skipped, no lane evidence: models.MemberLane :46-55 returns
+//     ok=false for such a kind and models.GroupLanesOf :67-71
+//     ignores it (an unservable member is not a lane vote)
+//   - the SURVIVING members then vote: exactly ONE lane → that
+//     lane (server :96-99); ZERO surviving lanes (an EMPTY surviving
+//     set) or TWO lanes (a MIXED surviving set) → unknown.
 //
 // null means "unknown lane": the row is not silently dropped — it
 // stays visible in the TEXT tab, where the operator can repair it.
+// The server fails such a group CLOSED at pick time
+// (pkg/store/database/store_group_rewrite.go :162-166); the FE
+// mirrors the FOLD, not that consequence.
 export function inferGroupLane(
   group: GroupModel | Model,
   kindIndex: Map<string, string>,
 ): GroupLane | null {
   const members = group.members ?? [];
-  if (members.length === 0) return 'chat';
+  const lanes = new Set<'chat' | 'decision'>();
 
-  let sawChat = false;
-  let sawDecision = false;
   for (const member of members) {
-    if (member.model_id === '') continue; // an unpicked row carries no lane evidence
+    if (member.model_id === '') continue; // server :375-377 — an unpicked row carries no lane evidence
     const raw = kindIndex.get(member.model_id);
-    if (raw === undefined) return null; // unresolvable member id — undecidable
+    if (raw === undefined) continue; // server :378-381 — a vanished member carries no lane evidence
     const lane = memberLane(raw);
-    if (lane === null) return null; // a member of no lane — undecidable
-    if (lane === 'chat') sawChat = true;
-    else sawDecision = true;
+    if (lane === null) continue; // server :67-71 — a member of no lane is ignored, not a vote
+    lanes.add(lane);
   }
 
-  if (sawChat && sawDecision) return null; // mixed — undecidable
-  if (sawDecision) return 'decision';
-  if (sawChat) return 'chat';
-  return null;
+  if (lanes.size !== 1) return null; // server :96-99 — empty (0) or mixed (2) surviving set → unknown
+  return lanes.has('decision') ? 'decision' : 'chat';
 }
 
 // The three buckets the parent hands to the two group surfaces.
@@ -136,6 +144,11 @@ export interface GroupLaneSplit {
 // chat + unknown, the decision lane receives decision only. A group
 // the FE cannot classify stays in the text tab — next to its
 // historical home, where the operator can repair it.
+//
+// "Unknown" is the FE's mirror of the server's UNRESOLVED lane
+// (pkg/store/database/store_group_rewrite.go :162-166 — the server
+// fails such a group closed at pick time; the FE mirrors the fold,
+// not that consequence).
 //
 // The split is DISPLAY-ONLY. The server stays authoritative on every
 // write (the widened group validators decide legality), and the

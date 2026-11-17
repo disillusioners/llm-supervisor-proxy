@@ -242,12 +242,18 @@ export function GroupModelForm({
     //
     // The stored group's lane is computed with the SAME helper the
     // parent uses for the split (inferGroupLane), so the guard and the
-    // split can never disagree.
+    // split can never disagree. The helper mirrors the server's fold
+    // (pkg/models/group_lane.go :95-101 over
+    // pkg/store/database/store_group_rewrite.go :369-385): a member
+    // the FE cannot resolve (a vanished row) and a member whose kind
+    // belongs to no lane (image-gen / group) carry NO lane evidence
+    // and are skipped — the SURVIVING members decide.
     //   - kindIndex supplied → block ONLY when the stored lane is
     //     KNOWN and differs from this form's lane. An UNKNOWN lane
-    //     (mixed or unresolvable members) is NOT blocked: it is the
-    //     row the operator most needs to REPAIR, and blocking it
-    //     would leave delete + recreate as the only path.
+    //     (a MIXED surviving set or an EMPTY surviving set) is NOT
+    //     blocked: it is the row the operator most needs to REPAIR,
+    //     and blocking it would leave delete + recreate as the only
+    //     path.
     //   - kindIndex absent → the conservative fallback: a stored
     //     member that is not one of this lane's models means the
     //     stored group belongs to the other lane.

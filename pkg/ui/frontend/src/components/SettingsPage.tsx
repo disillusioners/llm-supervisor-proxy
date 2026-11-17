@@ -303,6 +303,15 @@ export function SettingsPage({
   // over the group's CURRENT member rows. The lane is never persisted
   // and never travels on the wire.
   //
+  // The fold MIRRORS the server's (pkg/models/group_lane.go :95-101
+  // over pkg/store/database/store_group_rewrite.go :369-385): a member
+  // row the FE cannot resolve (a vanished member) and a member whose
+  // kind belongs to no lane (image-gen / group) carry NO lane evidence
+  // and are skipped — the SURVIVING members decide. A mixed surviving
+  // set (or an empty one) is an UNKNOWN lane; the server fails such a
+  // group closed at pick time (store_group_rewrite.go :162-166), while
+  // the FE mirrors the fold, not that consequence.
+  //
   // The index is built from the NARROW server-prefiltered lists (each
   // hook fetches only its own slice, so the unfiltered `models` array
   // can be stale for a model that was just created on another lane) —
@@ -318,8 +327,9 @@ export function SettingsPage({
   });
   const groupLaneSplit = splitGroupsByLane(groupModels, kindIndex);
   // The text tab keeps chat + unknown — NO row is ever invisible in
-  // both tabs: a group the FE cannot classify stays in the text tab,
-  // where the operator can repair it.
+  // both tabs: a group the FE cannot classify (a mixed or empty
+  // surviving member set) stays in the text tab, where the operator
+  // can repair it.
   const chatLaneGroups = [...groupLaneSplit.chat, ...groupLaneSplit.unknown];
 
   // Loop Detection handler

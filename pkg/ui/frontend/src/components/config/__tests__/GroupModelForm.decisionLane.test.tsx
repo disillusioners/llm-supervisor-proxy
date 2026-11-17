@@ -173,9 +173,11 @@ describe('GroupModelForm — the decision lane (decision-groups, phase 2)', () =
 
   it('D2 — a staged member that is not decision-kind is rejected before the round trip', async () => {
     const onSave = vi.fn();
-    // A MIXED stored group (one chat member + one unresolvable member):
-    // the lane is UNKNOWN, so the lane-consistency guard does not fire
-    // and the homogeneity mirror owns the rejection.
+    // A MIXED stored group (one decision member + one chat member + one
+    // vanished member): the vanished member carries no lane evidence
+    // (server :378-381) and the SURVIVING set is mixed, so the lane is
+    // UNKNOWN (server :96-99) — the lane-consistency guard does not
+    // fire and the homogeneity mirror owns the rejection.
     const { container } = render(
       <GroupModelForm
         {...makeProps({
@@ -183,6 +185,7 @@ describe('GroupModelForm — the decision lane (decision-groups, phase 2)', () =
           onSave,
           initialData: makeGroup({
             members: [
+              { model_id: 'dec-1', weight: 1 },
               { model_id: 'chat-1', weight: 1 },
               { model_id: 'ghost', weight: 1 },
             ],
@@ -340,6 +343,38 @@ describe('GroupModelForm — the decision lane (decision-groups, phase 2)', () =
       'This is a decision group',
     );
     expect(onSave).not.toHaveBeenCalled();
+
+    // The same holds when ONE member row VANISHED: the vanished row
+    // carries no lane evidence (the server skips it — store_group_rewrite.go
+    // :378-381) and the SURVIVING decision member still decides the
+    // lane, so the group stays known-lane and is blocked too.
+    const onSaveVanished = vi.fn();
+    const { container: c2 } = render(
+      <GroupModelForm
+        {...makeProps({
+          mode: 'edit',
+          lane: 'chat',
+          laneModels: chatModels,
+          onSave: onSaveVanished,
+          initialData: makeGroup({
+            members: [
+              { model_id: 'dec-1', weight: 1 },
+              { model_id: 'ghost', weight: 1 },
+            ],
+          }),
+          groups: [],
+        })}
+      />,
+    );
+
+    fireEvent.click(c2.querySelector('[data-testid="group-form-submit"]')!);
+    await waitFor(() =>
+      expect(c2.querySelector('[data-testid="group-form-lane-error"]')).not.toBeNull(),
+    );
+    expect(c2.querySelector('[data-testid="group-form-lane-error"]')!.textContent).toContain(
+      'This is a decision group',
+    );
+    expect(onSaveVanished).not.toHaveBeenCalled();
   });
 
   it('D6b — a known-lane chat group opened in the decision form is blocked', async () => {
@@ -367,11 +402,12 @@ describe('GroupModelForm — the decision lane (decision-groups, phase 2)', () =
 
   it('D6c — an unknown-lane group opened in the text form is not blocked', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
-    // An unresolvable member id ⇒ the stored lane is UNKNOWN ⇒ the
-    // guard does not fire: the submit proceeds and the server's
-    // validators decide (the row is the one an operator needs to
-    // REPAIR — blocking it would leave delete + recreate as the only
-    // path).
+    // An EMPTY surviving set ⇒ the stored lane is UNKNOWN ⇒ the guard
+    // does not fire: every member row vanished, so no member votes and
+    // the server's fold yields no lane at all (models.UnanimousGroupLane
+    // :96-99). The submit proceeds and the server's validators decide
+    // (the row is the one an operator needs to REPAIR — blocking it
+    // would leave delete + recreate as the only path).
     const { container } = render(
       <GroupModelForm
         {...makeProps({
@@ -389,6 +425,34 @@ describe('GroupModelForm — the decision lane (decision-groups, phase 2)', () =
     fireEvent.click(container.querySelector('[data-testid="group-form-submit"]')!);
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(container.querySelector('[data-testid="group-form-lane-error"]')).toBeNull();
+
+    // The other unknown shape: a MIXED surviving set (a chat member
+    // next to a decision member) is unknown too — the server's fold
+    // finds two valid lanes and no unanimity (server :96-99). It is
+    // NOT blocked either.
+    const onSaveMixed = vi.fn().mockResolvedValue(undefined);
+    const { container: c2 } = render(
+      <GroupModelForm
+        {...makeProps({
+          mode: 'edit',
+          lane: 'chat',
+          laneModels: chatModels,
+          kindIndex: makeKindIndex({ 'dec-1': 'decision', 'chat-1': 'chat' }),
+          onSave: onSaveMixed,
+          initialData: makeGroup({
+            members: [
+              { model_id: 'dec-1', weight: 1 },
+              { model_id: 'chat-1', weight: 1 },
+            ],
+          }),
+          groups: [],
+        })}
+      />,
+    );
+
+    fireEvent.click(c2.querySelector('[data-testid="group-form-submit"]')!);
+    await waitFor(() => expect(onSaveMixed).toHaveBeenCalledTimes(1));
+    expect(c2.querySelector('[data-testid="group-form-lane-error"]')).toBeNull();
   });
 
   it('D6d — with the kind index absent the conservative fallback blocks the submit', async () => {
