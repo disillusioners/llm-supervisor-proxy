@@ -57,6 +57,7 @@ type groupPolicy struct {
 // group.
 func buildGroupPolicy(group *models.ModelConfig, rows []models.ModelConfig, lane models.GroupLane) groupPolicy {
 	if group == nil {
+		// Contract: a nil group yields an EMPTY policy — defensive only, unreachable via the public path (the caller dereferences the group first).
 		return groupPolicy{Lane: lane}
 	}
 	policy := groupPolicy{GroupID: group.ID, Lane: lane}

@@ -363,12 +363,13 @@ func (h *Handler) exhaustDecisionGroup(w http.ResponseWriter, groupID string, at
 // keys through this one builder, so the two can never drift).
 //
 // Note on attempted vs members_attempted: both increment at the same
-// two sites today (the in-loop attempt at :185-186 and the OQ-1 lift
-// at :246-247), so they are EQUAL for every walk. They would diverge
-// only under a per-distinct-member count during within-member
-// rotation (a member that rotates across two credentials would then
-// contribute 2 to attempted but 1 to members_attempted). The leader
-// rejected dropping either (ADR-20 additive rule); both are published.
+// two sites today (the in-loop attempt at :194-195 and the hoisted
+// OQ-1-lift accounting at :259-260), so they are EQUAL for every walk.
+// They would diverge only under a per-distinct-member count during
+// within-member rotation (a member that rotates across two
+// credentials would then contribute 2 to attempted but 1 to
+// members_attempted). The leader rejected dropping either (ADR-20
+// additive rule); both are published.
 func withDecisionAccounting(base map[string]interface{}, attempted, skipped, membersAttempted int) map[string]interface{} {
 	base["attempted"] = attempted
 	base["skipped"] = skipped
