@@ -4,6 +4,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
@@ -14,16 +15,16 @@ import (
 // through the same constructor (W8: constructor-arg cooldown TTL, not
 // a setter).
 const (
-	DefaultBindingTTL     = 24 * time.Hour
+	DefaultBindingTTL     = 30 * time.Minute
 	DefaultSweepInterval  = 5 * time.Minute
 	DefaultCooldown       = 60 * time.Second
 	DefaultCredentialSeed = int64(0) // 0 = time-based seed
 )
 
 // Engine maintains (modelID, conversationKey) → credentialID bindings
-// with sliding-idle-TTL eviction and weighted-random selection for
-// new bindings, plus the Round-3 per-(model, credential) cooldown map
-// driving rate-limit failover.
+// with absolute-lifetime (createdAt) eviction and weighted-random
+// selection for new bindings, plus the Round-3 per-(model, credential)
+// cooldown map driving rate-limit failover.
 //
 // Concurrency: safe for concurrent use. All exported methods are
 // thread-safe and nil-safe on a nil receiver.
@@ -36,7 +37,7 @@ type Engine struct {
 	mu     sync.RWMutex // outer lock: guards the models map
 	models map[string]*modelState
 
-	ttl             time.Duration // sliding IDLE TTL per binding (#10)
+	ttl             atomic.Int64  // absolute lifetime TTL (createdAt + ttl)
 	sweepInt        time.Duration // janitor cadence
 	defaultCooldown time.Duration // fallback cooldown when retryAfter <= 0 (Round 3)
 	// quotaCooldown is the per-class cooldown for the quota
@@ -69,10 +70,10 @@ type Engine struct {
 	sweepHook   func()
 }
 
-// NewEngine constructs an Engine. ttl is the sliding idle TTL on each
-// binding (suggested 24h): boundAt is refreshed on every in-TTL
-// GetOrSelect hit and the binding is eligible for expiry only after
-// now-boundAt > ttl of consecutive idle. sweepInterval is the janitor
+// NewEngine constructs an Engine. ttl is the absolute lifetime on each
+// binding (production 30m): createdAt is stamped once at bind and NEVER
+// refreshed on a hit; the binding is expired (and deleted on read)
+// once now-createdAt > ttl. sweepInterval is the janitor
 // cadence (suggested 5m); rngSeed seeds the per-model weighted-random
 // RNGs (0 = time-based seed); defaultCooldown seeds cooldowns when
 // ExcludeAndReselect's retryAfter is <= 0 (production passes
@@ -95,7 +96,6 @@ func NewEngine(ttl, sweepInterval time.Duration, rngSeed int64, defaultCooldown 
 	}
 	e := &Engine{
 		models:          make(map[string]*modelState),
-		ttl:             ttl,
 		sweepInt:        sweepInterval,
 		defaultCooldown: defaultCooldown,
 		quotaCooldown:   DefaultQuotaCooldown,
@@ -103,6 +103,7 @@ func NewEngine(ttl, sweepInterval time.Duration, rngSeed int64, defaultCooldown 
 		stopCh:          make(chan struct{}),
 		sweepDone:       make(chan struct{}),
 	}
+	e.ttl.Store(int64(ttl))
 	go e.runJanitor()
 	return e
 }
@@ -122,7 +123,7 @@ func modelRNGSeed(rngSeed int64, modelID string) int64 {
 }
 
 // runJanitor is the single background sweep goroutine. It sweeps BOTH
-// expired cooldowns and idle-expired bindings in ONE pass (R3-4: no
+// expired cooldowns and lifetime-expired bindings in ONE pass (R3-4: no
 // second goroutine, no second ticker), under the E-1 discipline:
 // outer RLock for the whole walk + per-model write locks one at a
 // time, so reads proceed concurrently with the sweep.
@@ -145,7 +146,7 @@ func (e *Engine) runJanitor() {
 // silently stops the janitor — the next tick runs another sweep.
 //
 // Sweep order within a model: cooldowns first (cheaper map), then
-// bindings (sliding-TTL check) — per the Round-3b janitor note.
+// bindings (absolute-lifetime check) — per the Round-3b janitor note.
 func (e *Engine) sweepOnce() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -166,7 +167,7 @@ func (e *Engine) sweepOnce() {
 		}
 		evicted := 0
 		for key, b := range st.bindings {
-			if b.expired(e.ttl, now) {
+			if b.expired(time.Duration(e.ttl.Load()), now) {
 				delete(st.bindings, key)
 				st.bindingsCount--
 				evicted++
@@ -174,7 +175,7 @@ func (e *Engine) sweepOnce() {
 		}
 		st.mu.Unlock()
 		if evicted > 0 {
-			log.Printf("[DEBUG] [credentiallb] janitor evicted %d idle bindings for model state", evicted)
+			log.Printf("[DEBUG] [credentiallb] janitor evicted %d lifetime-expired bindings for model state", evicted)
 		}
 	}
 	e.mu.RUnlock()
@@ -207,15 +208,15 @@ func (e *Engine) getSweepHook() func() {
 //     to pre-LB behavior, zero engine overhead. The fast path ignores
 //     cooldowns (single-credential models never enter the failover
 //     path; ExcludeAndReselect returns ReselectNone for them).
-//   - Binding lookup applies the #10 sliding-idle check
-//     (now-boundAt > ttl ⇒ drop + re-pick), the defensive
+//   - Binding lookup applies the absolute-lifetime (createdAt) check
+//     (now-createdAt > ttl ⇒ drop + re-pick), the defensive
 //     still-in-config check (design note #2), and the skip-cooling
 //     check (a bound credential that went cooling is dropped and
 //     re-picked — selection NEVER returns a cooling credential except
 //     the explicit all-cooling soonest-expiry path below).
 //   - Empty conversationKey (W-2): NO binding stored, fresh weighted
 //     pick per call, newlyBound=false, Misses ticks. The ""-as-own-
-//     bucket reading is REMOVED (silent 24h hotspot).
+//     bucket reading is REMOVED (silent TTL hotspot).
 //   - All-cooling (F.4 availability ruling): when every configured
 //     credential is cooling, returns the SOONEST-expiring credential
 //     with newlyBound=false and NO binding stored, emitting the
@@ -256,26 +257,25 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 		st.mu.RLock()
 		hitCred, hit := "", false
 		if b, ok := st.bindings[conversationKey]; ok &&
-			!b.expired(e.ttl, now) &&
+			!b.expired(time.Duration(e.ttl.Load()), now) &&
 			credentialInRefs(st.credentials, b.credentialID) &&
 			!st.isCoolingLocked(b.credentialID, now) {
 			hitCred, hit = b.credentialID, true
 		}
 		st.mu.RUnlock()
 		if hit {
-			// Upgrade to the write lock for the #10 boundAt refresh
-			// (a value write cannot race under RLock), re-verifying
-			// the binding survived the lock transition AND has not
-			// been marked cooling in the gap (Item 1 TOCTOU: a
-			// concurrent ExcludeAndReselect could have just
-			// started a cooldown on b.credentialID between the
-			// RLock release and this Lock acquire).
+			// Read path: re-verify under the write lock. There is no
+			// createdAt refresh any more; the lock re-verifies that the
+			// binding survived the lock transition AND has not been
+			// marked cooling in the gap (Item 1 TOCTOU: a concurrent
+			// ExcludeAndReselect could have just started a cooldown on
+			// b.credentialID between the RLock release and this Lock
+			// acquire).
 			st.mu.Lock()
 			if b, ok := st.bindings[conversationKey]; ok &&
 				b.credentialID == hitCred &&
-				!b.expired(e.ttl, now) &&
+				!b.expired(time.Duration(e.ttl.Load()), now) &&
 				!st.isCoolingLocked(b.credentialID, now) {
-				b.boundAt = now
 				st.hitsTotal++
 				st.mu.Unlock()
 				return hitCred, false, nil
@@ -294,17 +294,16 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 
 	if conversationKey != "" {
 		if b, ok := st.bindings[conversationKey]; ok {
-			valid := !b.expired(e.ttl, now) &&
+			valid := !b.expired(time.Duration(e.ttl.Load()), now) &&
 				credentialInRefs(st.credentials, b.credentialID) &&
 				!st.isCoolingLocked(b.credentialID, now)
 			if valid {
 				// Another goroutine bound this key between our phases;
 				// treat as a hit (W-1: not newly bound by THIS call).
-				b.boundAt = now
 				st.hitsTotal++
 				return b.credentialID, false, nil
 			}
-			// Stale / idle-expired / orphaned / cooling: drop lazily.
+			// Stale / lifetime-expired / orphaned / cooling: drop lazily.
 			delete(st.bindings, conversationKey)
 			st.bindingsCount--
 		}
@@ -341,7 +340,7 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 		return pick, false, nil
 	}
 
-	st.bindings[conversationKey] = &binding{credentialID: pick, boundAt: now}
+	st.bindings[conversationKey] = &binding{credentialID: pick, createdAt: now}
 	st.bindingsCount++
 	log.Printf("[credentiallb] model=%s conv=%s→cred=%s newlyBound=true", modelID, conversationKey, pick)
 	return pick, true, nil
@@ -350,7 +349,7 @@ func (e *Engine) GetOrSelect(modelID, conversationKey string) (credentialID stri
 // OnModelChanged rebuilds the per-model selector (cumulative prefix
 // sums over the new weights) and FILTERS existing bindings (E-2):
 // preserves any binding whose credentialID still appears in refs —
-// keeping its boundAt untouched (the sliding idle window survives a
+// keeping its createdAt untouched (the absolute lifetime window survives a
 // weight nudge); drops only orphan bindings (whose credential was
 // removed). This is NOT clear-all: routine weight changes preserve
 // cache affinity for every surviving conversation.
@@ -493,7 +492,7 @@ func (e *Engine) Stop() {
 // Field names pinned (#5 + R3-8): Hits, Misses, Bindings, Failovers,
 // Cooldowns — no aliases.
 type EngineStats struct {
-	Hits      uint64 // in-TTL lookup hits (sliding-TTL refreshes)
+	Hits      uint64 // in-TTL lookup hits (no createdAt refresh)
 	Misses    uint64 // lookups that performed a credential selection (healthy fresh pick, empty-key fresh pick, OR the all-cooling soonest-expiry path); excludes the E-3 single-credential fast path and the ErrNoCredentials no-pick terminal
 	Bindings  uint64 // current binding-map size for this model (O(1) via the bindingsCount mirror)
 	Failovers uint64 // R3-8 monotonic counter — ticks once per NON-no-op failover (actual rebind or empty-key healthy pick; B2 no-ops and SoonestExpiry picks do NOT tick)
@@ -774,12 +773,11 @@ func (e *Engine) excludeAndReselectWithCooldown(
 		return pick, ReselectHealthy
 	}
 
-	// (4)+(5) Single rebind map write; the rebind REFRESHES boundAt
-	// (#10 — a rebind is a binding write; the sliding idle window
-	// restarts for the NEW credential).
+	// (4)+(5) Single rebind map write; the rebind stamps a FRESH
+	// createdAt (a rebind is a NEW bind, starting a new absolute window).
 	if _, exists := st.bindings[conversationKey]; !exists {
 		st.bindingsCount++
 	}
-	st.bindings[conversationKey] = &binding{credentialID: pick, boundAt: now}
+	st.bindings[conversationKey] = &binding{credentialID: pick, createdAt: now}
 	return pick, ReselectHealthy
 }

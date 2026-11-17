@@ -220,6 +220,18 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.ModelSkipCacheTTL = incoming.ModelSkipCacheTTL
 	}
 
+	// Hash-sticky conversation bindings: same 0-means-not-sent shape
+	// (a zero-clearing PUT preserves the existing TTL rather than
+	// disabling the layer; if BOTH sides are zero — a stored config
+	// predating the knob — the boot seam's SetBindingTTL ignores the
+	// zero and the engine keeps its 30m constructor default).
+	if incoming.GroupBindingTTL != 0 {
+		result.GroupBindingTTL = incoming.GroupBindingTTL
+	}
+	if incoming.ModelBindingTTL != 0 {
+		result.ModelBindingTTL = incoming.ModelBindingTTL
+	}
+
 	return result
 }
 
@@ -685,10 +697,11 @@ func marshalCredentialsJSON(refs []models.CredentialRef) string {
 // test are deleted together).
 //
 // Phase 2 wiring: ModelsManager OWNS the credentiallb.Engine —
-// constructed in NewModelsManager (24h TTL / 5m sweep / time-seeded
-// RNG / 60s default cooldown), seeded via RebindFromStore for every
-// persisted model at startup, invalidated after every successful
-// credentials write, and exposed to Phase 3 via the typed Engine()
+// constructed in NewModelsManager (30m absolute-lifetime TTL / 5m
+// sweep / time-seeded RNG / 60s default cooldown), seeded via
+// RebindFromStore for every persisted model at startup, invalidated
+// after every successful credentials write, and exposed to Phase 3 via
+// the typed Engine()
 // accessor (for the proxy.NewHandler 7th constructor arg). The
 // engine itself never imports pkg/events: ModelsManager subscribes
 // to model.credentials.changed ON BEHALF of the engine (P2-3) and
@@ -766,8 +779,8 @@ func (m *ModelsManager) GroupEngine() *grouplb.Engine {
 // NewModelsManager creates a new database-backed models manager with
 // an owned credential-LB engine (Phase 2).
 //
-// The engine is constructed with the production defaults (24h
-// sliding-idle TTL, 5m janitor sweep, time-based RNG seed, 60s
+// The engine is constructed with the production defaults (30m
+// absolute-lifetime TTL, 5m janitor sweep, time-based RNG seed, 60s
 // default cooldown) and seeded from the persisted models via
 // RebindFromStore (startup rebind — last call wins, no bindings
 // exist yet).
@@ -1680,7 +1693,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 // notifyGroupEngineLocked feeds the grouplb engine's survivor filter
 // after a successful group write (AddModel / UpdateModel): selector
 // rebuilt over the new member list; bindings whose member was
-// removed are dropped; boundAt of surviving bindings is preserved
+// removed are dropped; createdAt of surviving bindings is preserved
 // (E-2 semantics — weight nudges keep affinity). Nil/empty members on
 // a group row deletes the group's engine state. Non-group rows are a
 // no-op. The engine methods are nil-safe, so hand-constructed

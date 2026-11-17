@@ -67,11 +67,11 @@ func TestEngine_Cooldown_RetryAfterSeeding(t *testing.T) {
 	}
 }
 
-// TestEngine_Cooldown_NeverTouchesBoundAt — R3-4/#10 interplay: a
+// TestEngine_Cooldown_NeverTouchesCreatedAt — R3-4/#10 interplay: a
 // cooldown does NOT drop or expire the binding for a conversation
 // still pinned to the cooling credential (the binding map entry
-// survives with its idle clock intact; only selection skips it).
-func TestEngine_Cooldown_NeverTouchesBoundAt(t *testing.T) {
+// survives with its createdAt intact; only selection skips it).
+func TestEngine_Cooldown_NeverTouchesCreatedAt(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour, 7, time.Hour)
 	e.RebindFromStore("m", models.TestRefs("A", "B"))
 	e.InjectPreconditionStateForTest("m", "k", "A")
@@ -139,7 +139,7 @@ func TestEngine_ExcludeAndReselect_RebindsConversation(t *testing.T) {
 			t.Fatalf("conversation not re-pinned: call %d got %s want %s", i, id, newID)
 		}
 		if newly {
-			t.Fatalf("post-rebind hit reported newlyBound (boundAt refresh missed): call %d", i)
+			t.Fatalf("post-rebind hit reported newlyBound (rebind did not stick): call %d", i)
 		}
 	}
 	// The rebind counts as a binding write: exactly one binding.

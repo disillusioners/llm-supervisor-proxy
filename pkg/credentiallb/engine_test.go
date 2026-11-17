@@ -110,7 +110,7 @@ func TestEngine_TTL_LazyExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !newly {
-		t.Fatalf("idle-expired binding reused: id=%s newlyBound=false", id)
+		t.Fatalf("lifetime-expired binding reused: id=%s newlyBound=false", id)
 	}
 	st := e.Stats()["m"]
 	if st.Misses != 2 {
@@ -118,41 +118,38 @@ func TestEngine_TTL_LazyExpiry(t *testing.T) {
 	}
 }
 
-// TestEngine_TTL_SlidingRefresh — #10 (leader-ruled): boundAt is
-// REFRESHED on every in-TTL hit; expiry requires ttl of CONSECUTIVE
-// idle. Timeline: ttl=300ms; bind at t0; hit at ~150ms (refresh);
-// third call at ~300ms — beyond t0+ttl but within 300ms of the
-// refreshed boundAt ⇒ must still be a HIT.
-func TestEngine_TTL_SlidingRefresh(t *testing.T) {
+// TestEngine_TTL_AbsoluteExpiry — absolute lifetime: createdAt is
+// stamped ONCE at bind and NEVER refreshed on hit; expiry is
+// createdAt + ttl regardless of traffic. Timeline: ttl=300ms;
+// bind at t0; hit at ~150ms (no refresh); third call at ~300ms —
+// beyond t0+ttl ⇒ binding expired ⇒ rebind (newlyBound=true).
+func TestEngine_TTL_AbsoluteExpiry(t *testing.T) {
 	e := newTestEngine(t, 300*time.Millisecond, time.Hour, 7, time.Minute)
 	seed3(e, "m")
 	if _, newly, _ := e.GetOrSelect("m", "conv-S"); !newly {
 		t.Fatal("first call must bind")
 	}
 	time.Sleep(150 * time.Millisecond)
-	id, newly, _ := e.GetOrSelect("m", "conv-S")
+	_, newly, _ := e.GetOrSelect("m", "conv-S")
 	if newly {
 		t.Fatal("in-TTL hit must not re-bind")
 	}
-	time.Sleep(150 * time.Millisecond) // 300ms total — past the ORIGINAL boundAt
+	time.Sleep(150 * time.Millisecond) // 300ms total — past the (unrefreshed) createdAt+ttl
 	id2, newly2, _ := e.GetOrSelect("m", "conv-S")
-	if newly2 {
-		t.Fatalf("sliding TTL violated: binding expired despite in-window refresh (id=%s)", id2)
-	}
-	if id2 != id {
-		t.Fatalf("credential changed on refresh hit: %s vs %s", id2, id)
+	if !newly2 {
+		t.Fatalf("absolute TTL violated: binding did not expire after createdAt+ttl (id=%s)", id2)
 	}
 	st := e.Stats()["m"]
-	if st.Hits != 2 {
-		t.Fatalf("hits: got %d want 2", st.Hits)
+	if st.Hits != 1 {
+		t.Fatalf("hits: got %d want 1 (one in-TTL hit, no refresh)", st.Hits)
 	}
-	if st.Misses != 1 {
-		t.Fatalf("misses: got %d want 1 (the initial bind only)", st.Misses)
+	if st.Misses != 2 {
+		t.Fatalf("misses: got %d want 2 (initial bind + rebind after expiry)", st.Misses)
 	}
 }
 
 // TestEngine_Janitor_SweepsExpiredBindings — the janitor proactively
-// evicts idle-expired bindings WITHOUT any lookup traffic.
+// evicts lifetime-expired bindings WITHOUT any lookup traffic.
 func TestEngine_Janitor_SweepsExpiredBindings(t *testing.T) {
 	e := newTestEngine(t, 50*time.Millisecond, 20*time.Millisecond, 7, time.Minute)
 	seed3(e, "m")
@@ -166,7 +163,7 @@ func TestEngine_Janitor_SweepsExpiredBindings(t *testing.T) {
 	}
 	time.Sleep(150 * time.Millisecond) // expiry at 50ms; sweeps at 60/80/100/120/140ms
 	if got := e.Stats()["m"].Bindings; got != 0 {
-		t.Fatalf("janitor did not evict idle bindings: %d remain", got)
+		t.Fatalf("janitor did not evict lifetime-expired bindings: %d remain", got)
 	}
 }
 
@@ -191,9 +188,20 @@ func TestEngine_Janitor_SweepsExpiredBindings(t *testing.T) {
 // the original fixed-iteration design completed all 20k reads in
 // <100ms.
 func TestEngine_E1_SweepConcurrency(t *testing.T) {
-	e := newTestEngine(t, 30*time.Millisecond, 5*time.Millisecond, 7, time.Minute)
-	// 20 models × 100 bindings = sweeping work, constantly expiring +
-	// reseeded by readers.
+	// ABSOLUTE-LIFETIME note: the TTL must outlive the measurement
+	// window. Under the old sliding semantics a 30ms TTL worked here
+	// because every hit refreshed createdAt; under absolute semantics a
+	// 30ms TTL would rebind all 20×100 bindings every 30ms (fresh pick
+	// + log line each), and the churn — not the sweep — would dominate
+	// the read-throughput floor. A 1h TTL keeps every binding in-window
+	// for the whole run so this test measures what it exists to
+	// measure: reads proceeding concurrently with the janitor's sweep
+	// walk (the sweep still visits every binding each 5ms pass).
+	// Absolute expiry churn itself is covered by the short-TTL
+	// acceptance tests.
+	e := newTestEngine(t, time.Hour, 5*time.Millisecond, 7, time.Minute)
+	// 20 models × 100 bindings = sweeping work: the janitor walks the
+	// full binding map every 5ms pass while readers hammer it.
 	for m := 0; m < 20; m++ {
 		mid := "m" + itoa(m)
 		seed3(e, mid)
@@ -262,7 +270,7 @@ func TestEngine_E1_SweepConcurrency(t *testing.T) {
 }
 
 // TestEngine_E2_FilterSurvivors — E-2: OnModelChanged PRESERVES
-// bindings whose credential survives a reweight (boundAt untouched)
+// bindings whose credential survives a reweight (createdAt untouched)
 // and drops only orphans.
 func TestEngine_E2_FilterSurvivors(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour, 7, time.Minute)
