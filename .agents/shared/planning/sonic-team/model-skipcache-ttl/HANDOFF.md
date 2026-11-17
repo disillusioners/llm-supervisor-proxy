@@ -1,96 +1,76 @@
-# HANDOFF — model-skipcache-ttl
+# HANDOFF — model-skipcache-ttl (rev 2: re-dispatch #1, max-1 fix round)
 
 HANDOFF_PATH = .agents/shared/planning/sonic-team/model-skipcache-ttl/HANDOFF.md
-Feature branch: `fix/model-skipcache-ttl` (base `origin/latest` a2952a9, tree-identical to `origin/master` 8d434ba)
+Feature branch: `fix/model-skipcache-ttl` (base `origin/latest` a2952a9 → rev1 ship d22f697 → rev2 fix tip)
 Commission: model-layer skip-cache bug investigation + TTL cap (USER OVERRIDE of project routing — see §7)
+Verdicts that drove rev2: TEST: PASS (sonic-tester 2267a03f) · REVIEW: NEEDS-REVISION (sonic-reviewer b9fc4ab1, F1+F2) · both fixed in this round.
 
 ## Files touched across modules
 
-**Module A — mscttl-modelcache** (`fix/mscttl-modelcache` @ 5fa87db, merged 406d737)
-- `pkg/modelcache/modelcache.go` — `DefaultTTL` 15m → 30m + doc.
-- `pkg/modelcache/policy.go` — `ApplyWall` caps a parsed-reset window at the configured knob; no-parse path uses the knob; floor/ceiling doc.
-- `pkg/modelcache/modelcache_test.go` — +7 tests (cap, sooner-reset, no-reset knob, floor, knob ceiling, expiry/retry, live-body classification pin).
+**Module A — mscttl-modelcache** (`5fa87db`, merged rev1): `pkg/modelcache/modelcache.go` (DefaultTTL 15m→30m), `pkg/modelcache/policy.go` (ApplyWall caps parsed-reset at the knob; floor 1m; knob clamped [1m,24h]), `pkg/modelcache/modelcache_test.go` (+7 tests).
+**Module A-fix — mscttl-f2-modelcache** (`968acf4`, merged rev2): `pkg/modelcache/modelcache_test.go` — F2: the four absolute-reset fixtures anchored in UTC (`now := time.Now().UTC().Truncate(time.Second)` at the CappedAtKnob / SoonerReset / Floor / Expiry sites). Anchoring the VARIABLE, not the format call, is load-bearing: a `.UTC()` render with a local `now` would flip the window arithmetic negative.
+**Module B — mscttl-config** (`4fb9b16`, merged rev1): `pkg/config/config.go` (default 30m; fallback+cap comments), `pkg/config/config_test.go` (+3 tests).
+**Module B-fix — mscttl-f1-store** (`82a58c6`, merged rev2): `pkg/store/database/store.go` — F1: merge-seam comment `s/15m/30m/` (1 line; presence-detection at :219 untouched). Cross-module doc reference the 3-way split missed; sweep found no other stale model-layer "15m".
+**Module C — mscttl-pins** (`668b52a`, merged rev1): `pkg/proxy/model_skipcache_ttl_test.go` (NEW, 2 tests).
 
-**Module B — mscttl-config** (`fix/mscttl-config` @ 4fb9b16, merged 3e18886)
-- `pkg/config/config.go` — `ModelSkipCacheTTL` default 15m → 30m; field/Defaults/Validate comments now state "fixed fallback AND cap".
-- `pkg/config/config_test.go` — +3 tests (default 30m, Validate bounds, other-knobs-unmoved).
+Net rev2 delta vs rev1 ship: 2 files, +5/−5 — zero production behavior change (comment + test-render only).
 
-**Module C — mscttl-pins** (`fix/mscttl-pins` @ 668b52a, merged ea32a36)
-- `pkg/proxy/model_skipcache_ttl_test.go` — NEW file, 2 tests.
-
-Not touched: `MarkUntil` never-shorten, `Mark`/`Marked`/`Until`/`Clear`, wall/throttle/veto vocabulary, the suppression sites, win-clear, `MODEL_FALLBACK_*` vocabulary, `pkg/skipcache` (upstream 60s), credential quota cooldown (15m), group member cooldown, request-hash binding lane, group-pick policy.
+Not touched: `ParseReset` production (stop-gate), `MarkUntil` never-shorten, vocabulary, suppression sites, win-clear, `MODEL_FALLBACK_*`, `pkg/skipcache` (60s), quota cooldown (15m), group cooldown, request-hash binding lane, group pick.
 
 ## What changed
 
-The model-layer mark window is now `min(parsed reset window, configured model_skip_cache_ttl)` with floor `MinMarkWindow` (1m) and the 24h hard ceiling still applied to the knob itself. A stated reset sooner than the cap is honored exactly; a wall body with no parseable reset uses the knob (default now 30m). Previously a parsed reset was clamped only at 24h, so a 5-hour plan wall put a model on the bench for ~5h.
-
-`model_skip_cache_ttl` is now documented (and behaves) as BOTH the fixed fallback window and the cap. `Validate` bounds are unchanged: [1m, 24h].
+The model-layer mark window is `min(parsed reset window, configured model_skip_cache_ttl)` with floor 1m and the 24h hard ceiling on the knob. A sooner stated reset is honored exactly; a no-parse wall uses the knob (default now 30m). `model_skip_cache_ttl` is documented and behaves as BOTH fixed fallback and cap; `Validate` bounds unchanged [1m, 24h]. Previously a parsed reset was clamped only at 24h — a 5-hour plan wall benched a model for ~5h. Rev2 corrects one stale cross-module doc claim (F1) and makes the absolute-reset test fixtures TZ-portable (F2) so `make test` is green on non-UTC hosts (the operator is UTC+7).
 
 ## What is UNTESTED
 
-- **Live post-deploy behaviour**: no in-memory introspection endpoint exists, so the deployed cap can only be evidenced indirectly (suppression cadence per model in pod logs after the rollout + process restart clearing old marks).
-- **`go test -race`** and a full `pkg/proxy` race run were not executed; `make test` (no `-race`) passed `pkg/proxy` 133.8s.
-- **The timezone hypothesis (§ Known risks) is UNPROVEN**: the body that minted agentic-Main/quick-main's long mark rotated out of the kubelet log; `--since=9h` returned only 00:32Z onward.
-- **The mint-scope question (account-plan body → model mark) is untested by design**: changing it is a mark-write semantics change and was left to adjudication (STOP GATE honoured).
-- **Config source on deploy**: the live primary returned `model_skip_cache_ttl=15m0s`. Whether that is the resolved default or an explicit stored value is not distinguishable from `GET /fe/api/config`; if the DB row is explicit, the deployed cap stays 15m (tighter, still bounded) and the new 30m default only applies to fresh configs.
-- No FE change; FE gate not run (not required).
+- `go test -race` was not run in either round.
+- FE gate not run (no FE files touched).
+- Live-cache introspection: no endpoint exists; post-deploy evidence is indirect (suppression cadence in pod logs + knob readback).
+- The timezone question is UNPROVEN in production: the minting body that benched agentic-Main/quick-main rotated out of the kubelet log. `ParseReset` still parses absolute strings as UTC by documented assumption (stop-gate held).
+- The Token-Plan mint-scope question (account body → model mark) is untested by design — adjudication-owned.
+- No change needs a store/database behavioral test: F1 is comment-only (Pack A re-ran the full store suite regardless: ok 38.6s).
 
 ## Known risks
 
-1. **The cap does not fix mint scope.** Live 2026-11-17 evidence: an ACCOUNT/plan body — `openai: Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more usage. (2056)` — classifies as model-attributable by design (`TestModelWall` asserts `"Token Plan usage limit"` → attributable) and mints a MODEL mark. At 03:56:55Z this suppressed the *same request's* credential-failover attempt (coding4, cred minimax-company → failover to minimax-mindspath → `attempt 1 model coding4 suppressed by model-layer skip cache`), i.e. the failover credential was never tried. Fixing that changes mark-write semantics → adjudication-owned follow-up.
-2. **Raising the fixed fallback 15m → 30m doubles the bench window for the no-parse class** (the Token Plan bodies above). This is the ruled policy, but it is a real operational trade-off and must be stated: for that class the change is a regression in blast radius even as it fixes the parsed-reset class.
-3. **`ParseReset` parses absolute reset strings as UTC by documented assumption.** z.ai (the credential behind both long-marked models) is a UTC+8 provider. If it emits local time, an 8h overshoot is possible; the cap now bounds any such overshoot to 30m, but the parse assumption itself is unfixed.
-4. **Relative resets are now capped too**: a body like `reset after 62h 45m 6s` previously produced a 24h mark, now ≤30m. Intended per ruling, but a genuine multi-day outage will re-attempt every 30m.
-5. **Hidden long marks vanish only on process restart** (in-memory map): the deploy is itself the flush. A rollout that does not restart the pod would leave pre-existing long marks live.
-6. **A sooner-than-cap reset is honored exactly** — so a pathological upstream emitting `reset in 1s` re-attempts every minute (floor), not immediately. Accepted per ruling.
-7. Investigative residue: `explore()` (the one bounded knowledge call at plan-open) **timed out after 300s with no payload**, so no stored KB experience reached the briefs; `pok_query` and the project blueprint were used instead.
+1. Mint scope (rev1, still open): `Token Plan usage limit reached … purchase Credits` mints a MODEL mark by design (pinned by `TestModelWall`); at 03:56:55Z it suppressed the same request's credential-failover attempt. Semantics change → user ruling needed.
+2. The fixed fallback rose 15m→30m: the no-parse class (Token Plan bodies) is benched twice as long as before. Ruled policy; the real fix for that class is risk #1.
+3. `ParseReset` UTC assumption unfixed (stop-gate): a UTC+8 upstream emitting local absolute resets still overshoots — now bounded by the 30m cap. Follow-up: capture a z.ai reset body and add an explicit zone-aware parse.
+4. Relative resets are capped too (a `reset after 62h` body now ≤30m, was 24h) — intended, but a genuine multi-day outage re-attempts every 30m.
+5. In-memory marks die only on process restart — the rev1 deploy already flushed both hosts; rev2's redeploy re-flushes.
+6. dcs GitOps pins were NOT pushed: prepare-only (see §7 report). Until the user authorizes the dcs push, any apply of `infranstructure/k8s/llmproxy/rancher-local-ensem-dev/deployment.yaml` or a helm reuse of `values-pinned.yaml` rolls a host back to `8d434ba` and re-opens the live bug.
+7. Process note: the plan-open `explore()` timed out (no KB payload); `pok_query` + blueprint carried the briefs instead.
 
 ## How to verify
 
-On the merged tree (`.agents/…` worktree or a fresh sibling off the feature branch):
+On the merged tree (fresh sibling off the branch, or the integration worktree):
 
 ```
 export PATH=/home/nea/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.linux-amd64/bin:$PATH
-export GOTOOLCHAIN=local GOPATH=/home/nea/go GOMODCACHE=/home/nea/go/pkg/mod GOCACHE=/home/nea/.cache/go-build
-export HOME=$(mktemp -d)
-gofmt -l pkg/modelcache pkg/config/config.go pkg/config/config_test.go pkg/proxy/model_skipcache_ttl_test.go   # empty
-go test ./pkg/modelcache/ -v                     # 8 tests incl. the 7 added
-go test ./pkg/config/ -v                         # includes the 3 added
-go test ./pkg/proxy/ -run 'TestModelSkipCache_' -v
-go test ./pkg/modelcache/ ./pkg/config/ ./pkg/proxy/   # package-level gate
-make test                                        # full gate; expected sole FAIL = quarantined pkg/mcp httpbin pair
+export GOTOOLCHAIN=local GOPATH=/home/nea/go GOMODCACHE=/home/nea/go/pkg/mod GOCACHE=/home/nea/.cache/go-build HOME=$(mktemp -d)
+gofmt -l pkg/modelcache pkg/config/config.go pkg/config/config_test.go pkg/proxy/model_skipcache_ttl_test.go pkg/store/database/store.go   # empty
+TZ=Asia/Ho_Chi_Minh go test -count=1 ./pkg/modelcache/ ./pkg/config/   # ok (rev2 F2 proof)
+TZ=Etc/UTC           go test -count=1 ./pkg/modelcache/ ./pkg/config/   # ok
+TZ=Asia/Ho_Chi_Minh go test ./pkg/proxy/ -run 'TestModelSkipCache_' -v  # 2× --- PASS
+timeout 300 go test -count=1 -timeout=240s ./pkg/proxy/... ./pkg/store/... ./pkg/decision/... ./pkg/ui/... ./cmd/...        # Pack A EXIT 0
+timeout 300 go test -count=1 -timeout=240s $(go list ./... | grep -vE 'github\.com/disillusioners/llm-supervisor-proxy/(cmd|pkg/(proxy|store|decision|ui))(/|$)')  # Pack B: only the 2 quarantined pkg/mcp httpbin tests may fail (QUARANTINE.md row 11)
 ```
+Rev2 gate results (this tree): Pack A EXIT=0 (9 pkgs ok; proxy 130.7s, store/database 38.6s); Pack B 38 ok, sole FAILs = the quarantined pair; TZ proofs green in both zones; gofmt clean on all 7 touched files.
 
-Expected evidence of the new policy (package tests):
-- `TestApplyWall_ResetWindowCappedAtKnob` — a 5h reset with knob 30m expires at now+30m.
-- `TestApplyWall_SoonerResetHonored` — a 10m reset stays 10m.
-- `TestApplyWall_NoResetUsesKnob` — no reset → knob (30m).
-- `TestApplyWall_ResetFloorOneMinute`, `TestApplyWall_KnobAboveHardCeilingClamped`.
-- `TestCache_ExpiryThenRetryIsImmediate` — expired mark ⇒ `Marked()==false` on the next request.
-- `TestModelSkipCache_SuppressedAttemptDoesNotExtendMark`, `TestModelSkipCache_MarkedModelStillPicked_ChainServes`.
-
-Post-deploy (primary, then backup):
-```
-kubectl -n llmproxy get deploy llm-supervisor-proxy -o jsonpath='{.spec.template.spec.containers[0].image}'
-kubectl -n llmproxy logs deploy/llm-supervisor-proxy --since=60m | grep -c "suppressed by model-layer"
-kubectl -n llmproxy logs deploy/llm-supervisor-proxy --since=60m | grep "suppressed by model-layer" \
-  | awk '{print $4}' | sort | uniq -c      # cadence per model; no model should show a >30m continuous bench
-```
-Pass condition: the two formerly long-benched models (`agentic-Main`, `quick-main`) resume upstream attempts within ≤30m of the rollout, and no model shows a suppression run longer than 30m.
+Post-deploy: digest-bound pods, healthz 200, `model_skip_cache_ttl=30m0s` on both hosts, suppression count 0, agentic-Main winning.
 
 ## Bash-raises used
 
-none. Every synchronous bash call stayed under the frozen 600s rule; the full `make test` gate ran as a background `proc` job (1500s auto-kill), so no `[sonic-bash-rule-v1]` raise was consumed.
+none (both rounds). All synchronous bash calls stayed under the frozen 600s rule; Pack A/B gates and the rev1 `make test` ran as background `proc` jobs (auto-kill ≤1500s/700s), so no `[sonic-bash-rule-v1]` raise was consumed.
 
 ## Complexity self-assessment
 
-**medium.** Clamp/policy change plus a config default and test pins across three disjoint modules; no mark-write semantics, no routing/fallback/auth change. The investigation was heavy, the diff is not (311 insertions / 34 deletions over 6 files, 4 of them tests).
+**medium** (unchanged across rounds; rev2 is a 5-line doc/test correction on a shipped, tested change — no complexity escalation).
 
 **ROUTING OVERRIDE (recorded verbatim, original rule kept visible).** Project metadata for llm-supervisor-proxy states: *"ALL llmproxy work routes to the EXPERT team (agent_id=leader) — NEVER sonic-leader/sonic-developer"*, scope *"every commission, hotfix and read-only investigation"*, source *Emperor directive 2026-11-16*, criterion *"CRITICALITY, not complexity. Do not downgrade a task because it looks simple or small."* The user explicitly authorized **this** commission on the sonic team for speed (2026-11-17) and instructed that the override be recorded with the original rule visible. The verdict above is the honest sonic-lane assessment; it does not downgrade the criticality of the substrate.
 
-**Root-cause verdicts from live evidence** (primary pod `llm-supervisor-proxy-9785fcb45-cr75b`, image tag `8d434ba`, log window 00:32–04:53Z, 65,406 lines):
-- (a) self-refreshing mark — **DISPROVEN.** `suppressedAttemptError` is neither `*providers.ProviderError` nor quota/rate-limit, `markUpstreamSkipLocked` early-returns on `credFailoverNone`, and the synthetic string matches no `wallMarker` (verified by the added `TestModelWall_LiveBodies_ClassificationPin` sibling cases + 244 observed suppresssions with no re-mark).
-- (b) reset-parse timezone — **leading hazard, unproven for this incident**: every long-benched model sits on the UTC+8 z.ai credential, but the minting body is rotated out of the log; reported as a follow-up, not asserted.
-- (c) TTL from wrong window — **disproven as stated, corrected**: the literal "5 hour" is only a classifier, BUT the accompanying `reset at …` instant *is* parsed and became the TTL (~5h, ≤24h). That is the actual over-suppression and is what this change caps.
-- (d) scope mismatch — **DISPROVEN** (row identity on both the mark and the read key).
-- **Actual observed root cause of the symptom**: model-layer marks carried parsed-reset windows of hours. `agentic-Main` was suppressed continuously for >4h11m with **zero provider calls** in the window (`grep -c "Race attempt .*model=agentic"` = 0) while the live knob was 15m; `quick-main` 02:26:38→04:53:00. The exact 04:11:40Z symptom reproduces in the log: agentic-Main suppressed → synthetic 429 → fallback coding4 also suppressed → agentic-go served.
+**Root-cause verdicts from live evidence** (primary pod, image tag `8d434ba`, log window 00:32–04:53Z, 65,406 lines):
+- (a) self-refreshing mark — **DISPROVEN** (synthetic error classifies `credFailoverNone`, matches no wallMarker; 244 suppressions with no re-mark).
+- (b) reset-parse timezone — **leading hazard, unproven for this incident** (minting body rotated out; every long-benched model sits on the UTC+8 z.ai cred). Follow-up, not a guess.
+- (c) TTL from wrong window — **disproven as stated, corrected**: the literal "5 hour" is only a classifier, but the body's `reset at …` instant *is* parsed and became the TTL (~5h, ≤24h) — the actual over-suppression, now capped.
+- (d) scope mismatch — **DISPROVEN** (row identity on both key sides).
+- Observed: agentic-Main suppressed >4h11m with **zero provider calls** while the live knob was 15m; quick-main 02:26:38→04:53:00; the 04:11:40Z symptom reproduces verbatim. Post-rev1-deploy proof: suppressions 0 on both hosts, glm-5.3/-flash attempts resumed, agentic-Main won 15 requests in 8 minutes.
