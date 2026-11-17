@@ -44,6 +44,14 @@ import (
 // computed on the group row; a fallback-reached group shares the
 // main model's key space, documented). GroupID/MemberID report the
 // FIRST group entry's pick (the direct/main group).
+// Lane-fold mirror (decision-groups commission): the server-side
+// fold above is mirrored on the FE at
+// pkg/ui/frontend/src/components/config/groupLane.ts (inferGroupLane /
+// groupLaneOf). Any change to the server fold MUST be mirrored in the
+// FE twin in the same commit — the two must not ship different answers
+// (ADR-19). The parity test pins the server-side POST≡PUT≡canonical
+// trio; the FE side is pinned by its own vitest battery.
+
 func (m *ModelsManager) RewriteGroupEntries(modelList []string, conversationKey string) models.GroupRewriteResult {
 	var res models.GroupRewriteResult
 	out := make([]string, 0, len(modelList)+2)

@@ -946,20 +946,14 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			// rejected with a dedicated message; the member-kind error
 			// is worded with the group's lane (the CHAT wording is
 			// byte-identical to the historical text).
-			groupLane := models.GroupLaneChat
-			for _, kind := range memberKinds {
-				if lane, ok := models.MemberLane(kind); ok {
-					groupLane = lane
-					break
-				}
-			}
+			groupLane := models.DeriveGroupLane(memberKinds)
 			if lanes := models.GroupLanesOf(memberKinds); len(lanes) > 1 {
 				for idx, kind := range memberKinds {
 					lane, ok := models.MemberLane(kind)
 					if !ok || lane == groupLane {
 						continue
 					}
-					groupReject(fmt.Sprintf(`kind "group" members must all share one kind (chat or decision) — member %q has kind %q`, newModel.Members[idx].ModelID, kind))
+					groupReject(models.MixedGroupMembersError(newModel.ID, newModel.Members[idx].ModelID, kind))
 					return
 				}
 			}
@@ -967,7 +961,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				if _, ok := models.MemberLane(kind); ok {
 					continue
 				}
-				groupReject(fmt.Sprintf(`kind "group" member %q must be a %s-kind model (got kind %q)`, newModel.Members[idx].ModelID, groupLane, kind))
+				groupReject(models.InvalidMemberKindError(newModel.ID, newModel.Members[idx].ModelID, string(groupLane), kind))
 				return
 			}
 			if newModel.ShadowModelID != "" {
@@ -979,7 +973,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if shadowTarget == nil {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing chat-kind model)`, newModel.ShadowModelID))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing %s-kind model)`, newModel.ShadowModelID, groupLane))
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {
@@ -1507,20 +1501,14 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 			// The group's LANE (decision-groups commission) — the PUT
 			// twin of the POST mirror (helper ≡ POST ≡ PUT is the
 			// parity discipline; see kind_rules_parity_test.go).
-			groupLane := models.GroupLaneChat
-			for _, kind := range memberKinds {
-				if lane, ok := models.MemberLane(kind); ok {
-					groupLane = lane
-					break
-				}
-			}
+			groupLane := models.DeriveGroupLane(memberKinds)
 			if lanes := models.GroupLanesOf(memberKinds); len(lanes) > 1 {
 				for idx, kind := range memberKinds {
 					lane, ok := models.MemberLane(kind)
 					if !ok || lane == groupLane {
 						continue
 					}
-					groupReject(fmt.Sprintf(`kind "group" members must all share one kind (chat or decision) — member %q has kind %q`, updatedModel.Members[idx].ModelID, kind))
+					groupReject(models.MixedGroupMembersError(updatedModel.ID, updatedModel.Members[idx].ModelID, kind))
 					return
 				}
 			}
@@ -1528,7 +1516,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				if _, ok := models.MemberLane(kind); ok {
 					continue
 				}
-				groupReject(fmt.Sprintf(`kind "group" member %q must be a %s-kind model (got kind %q)`, updatedModel.Members[idx].ModelID, groupLane, kind))
+				groupReject(models.InvalidMemberKindError(updatedModel.ID, updatedModel.Members[idx].ModelID, string(groupLane), kind))
 				return
 			}
 			if updatedModel.ShadowModelID != "" {
@@ -1540,7 +1528,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if shadowTarget == nil {
-					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing chat-kind model)`, updatedModel.ShadowModelID))
+					groupReject(fmt.Sprintf(`kind "group" shadow_model_id %q does not exist (must reference an existing %s-kind model)`, updatedModel.ShadowModelID, groupLane))
 					return
 				}
 				if shadowTarget.Kind == models.KindGroup {

@@ -1,5 +1,12 @@
 package models
 
+// Lane-fold mirror (decision-groups commission): the fold primitives
+// in this file (MemberLane, GroupLanesOf, UnanimousGroupLane,
+// GroupLaneFromCollection) are mirrored on the FE at
+// pkg/ui/frontend/src/components/config/groupLane.ts. Any change to
+// the server fold MUST be mirrored in the FE twin in the same commit
+// — the two must not ship different answers (ADR-19).
+
 import "fmt"
 
 // Group-lane primitives for the decision-groups commission.
@@ -86,7 +93,8 @@ func GroupLanesOf(kinds []string) []GroupLane {
 	return lanes
 }
 
-// UnanimousGroupLane folds the given member kinds into the single lane// they share — the SINGLE-SOURCE-OF-TRUTH fold (the canonical
+// UnanimousGroupLane folds the given member kinds into the single lane
+// they share — the SINGLE-SOURCE-OF-TRUTH fold (the canonical
 // validator, the admin-API mirrors and the request-time inference all
 // use it, so the lane can never drift between them).
 //
@@ -151,6 +159,34 @@ func GroupLaneFromCollection(group ModelConfig, collection []ModelConfig) (Group
 		kinds = append(kinds, row.Kind)
 	}
 	return UnanimousGroupLane(kinds)
+}
+
+// DeriveGroupLane returns the group's lane: the first VALID member's
+// lane, defaulting to GroupLaneChat when no member carries a valid
+// kind. Single source for the lane derivation used by
+// ValidateGroupMembers and the POST/PUT admin-API mirrors.
+func DeriveGroupLane(memberKinds []string) GroupLane {
+	groupLane := GroupLaneChat
+	for _, kind := range memberKinds {
+		if lane, ok := MemberLane(kind); ok {
+			groupLane = lane
+			break
+		}
+	}
+	return groupLane
+}
+
+// MixedGroupMembersError is the shared rejection message for a
+// mixed-kind group (the canonical validator + the POST/PUT mirrors
+// all use it — ONE vocabulary).
+func MixedGroupMembersError(groupID, memberID, kind string) string {
+	return fmt.Sprintf("model %s: kind %q members must all share one kind (chat or decision) — member %q has kind %q", groupID, KindGroup, memberID, kind)
+}
+
+// InvalidMemberKindError is the shared rejection message for a member
+// whose kind belongs to no lane.
+func InvalidMemberKindError(groupID, memberID, groupLane, kind string) string {
+	return fmt.Sprintf("model %s: kind %q member %q must be a %s-kind model (got kind %q)", groupID, KindGroup, memberID, groupLane, kind)
 }
 
 // ValidateFallbackChainLanes refuses a model's fallback chain that

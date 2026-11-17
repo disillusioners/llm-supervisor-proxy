@@ -206,16 +206,7 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 	for _, target := range memberRows {
 		memberKinds = append(memberKinds, target.Kind)
 	}
-	// The group's lane = the first VALID member's lane (chat when no
-	// member carries a valid kind — the historical chat wording is the
-	// default when the lane is unknown).
-	groupLane := GroupLaneChat
-	for _, target := range memberRows {
-		if lane, ok := MemberLane(target.Kind); ok {
-			groupLane = lane
-			break
-		}
-	}
+	groupLane := DeriveGroupLane(memberKinds)
 	lanes := GroupLanesOf(memberKinds)
 	if len(lanes) > 1 {
 		// MIXED lanes — a dedicated message (not the member-kind
@@ -226,7 +217,7 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 			if !ok || lane == groupLane {
 				continue
 			}
-			return fmt.Errorf("model %s: kind %q members must all share one kind (chat or decision) — member %q has kind %q", m.ID, KindGroup, m.Members[idx].ModelID, target.Kind)
+			return fmt.Errorf("%s", MixedGroupMembersError(m.ID, m.Members[idx].ModelID, target.Kind))
 		}
 		// Unreachable in practice (len(lanes) > 1 implies a
 		// disagreeing member exists) — kept as a defensive fallback
@@ -240,7 +231,7 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 		if _, ok := MemberLane(target.Kind); ok {
 			continue
 		}
-		return fmt.Errorf("model %s: kind %q member %q must be a %s-kind model (got kind %q)", m.ID, KindGroup, m.Members[idx].ModelID, groupLane, target.Kind)
+		return fmt.Errorf("%s", InvalidMemberKindError(m.ID, m.Members[idx].ModelID, string(groupLane), target.Kind))
 	}
 
 	// G8 collection half — shadow-target integrity + uniqueness.
@@ -251,7 +242,7 @@ func ValidateGroupMembers(m *ModelConfig, collection []ModelConfig) error {
 	if m.ShadowModelID != "" {
 		target, exists := byID[m.ShadowModelID]
 		if !exists {
-			return fmt.Errorf("model %s: kind %q shadow_model_id %q does not exist (must reference an existing chat-kind model)", m.ID, KindGroup, m.ShadowModelID)
+			return fmt.Errorf("model %s: kind %q shadow_model_id %q does not exist (must reference an existing %s-kind model)", m.ID, KindGroup, m.ShadowModelID, groupLane)
 		}
 		if target.Kind == KindGroup {
 			return fmt.Errorf("model %s: kind %q shadow_model_id %q must reference a %s-kind model, not a group", m.ID, KindGroup, m.ShadowModelID, groupLane)
