@@ -74,6 +74,19 @@ type fakeStrictSource struct {
 		modelsUsingGroupsAll               int
 		modelsUsingCredGroup               int
 		flattenCredRefs                    int
+		// E-1..E-8 delegation counters (T-18 cache-strategy matrix).
+		// The strict twins are counted separately from their
+		// non-strict counterparts: the decorator reads GROUPS through
+		// the strict twin (the snapshot read) and the SINGLE group
+		// through the strict twin on a cache miss.
+		getGroupStrict       int
+		getGroupsStrict      int
+		getGroup             int
+		getGroups            int
+		addGroup             int
+		updateGroup          int
+		removeGroup          int
+		groupsContainingCred int
 	}
 
 	// groupsAll is the CONFIGURED return of ModelsUsingCredentialGroupsAll
@@ -246,6 +259,7 @@ func (f *fakeStrictSource) GetCredentialStrict(ctx context.Context, id string) (
 func (f *fakeStrictSource) GetCredentialGroupStrict(ctx context.Context, id string) (*models.CredentialGroupConfig, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.getGroupStrict++
 	if f.groupErr != nil {
 		return nil, f.groupErr
 	}
@@ -261,6 +275,7 @@ func (f *fakeStrictSource) GetCredentialGroupStrict(ctx context.Context, id stri
 func (f *fakeStrictSource) GetCredentialGroupsStrict(ctx context.Context) ([]models.CredentialGroupConfig, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.getGroupsStrict++
 	if f.groupErr != nil {
 		return nil, f.groupErr
 	}
@@ -478,6 +493,7 @@ func (f *fakeStrictSource) RemoveCredential(id string) error {
 func (f *fakeStrictSource) GetCredentialGroup(id string) *models.CredentialGroupConfig {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.getGroup++
 	for i := range f.groups {
 		if f.groups[i].ID == id {
 			cp := f.groups[i]
@@ -490,6 +506,7 @@ func (f *fakeStrictSource) GetCredentialGroup(id string) *models.CredentialGroup
 func (f *fakeStrictSource) GetCredentialGroups() []models.CredentialGroupConfig {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.getGroups++
 	out := make([]models.CredentialGroupConfig, len(f.groups))
 	copy(out, f.groups)
 	return out
@@ -498,6 +515,7 @@ func (f *fakeStrictSource) GetCredentialGroups() []models.CredentialGroupConfig 
 func (f *fakeStrictSource) AddCredentialGroup(g models.CredentialGroupConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.addGroup++
 	f.groups = append(f.groups, g)
 	return nil
 }
@@ -505,6 +523,7 @@ func (f *fakeStrictSource) AddCredentialGroup(g models.CredentialGroupConfig) er
 func (f *fakeStrictSource) UpdateCredentialGroup(id string, g models.CredentialGroupConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.updateGroup++
 	for i := range f.groups {
 		if f.groups[i].ID == id {
 			f.groups[i] = g
@@ -517,6 +536,7 @@ func (f *fakeStrictSource) UpdateCredentialGroup(id string, g models.CredentialG
 func (f *fakeStrictSource) RemoveCredentialGroup(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.removeGroup++
 	for i := range f.groups {
 		if f.groups[i].ID == id {
 			f.groups = append(f.groups[:i], f.groups[i+1:]...)
@@ -556,6 +576,7 @@ func (f *fakeStrictSource) ModelsUsingCredentialGroupsAll() map[string][]string 
 func (f *fakeStrictSource) GroupsContainingCredential(credID string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.counts.groupsContainingCred++
 	var out []string
 	for _, g := range f.groups {
 		for _, m := range g.Members {
@@ -1605,4 +1626,308 @@ func TestCachedModelsConfig_GetCredentialGroup_DelegatesOnCacheMiss(t *testing.T
 	// second call hits the cache (no additional strict delegation needed
 	// is NOT required; the priming path delegates once). We only assert
 	// the first call returned the group.
+}
+
+// ── T-18 cache-strategy matrix: E-1..E-8 + the 2 strict twins ───────────────
+//
+// The plan's §e table assigns each credential-group forward a CACHE
+// STRATEGY. This block asserts the delegation count that strategy
+// implies, so a strategy change surfaces as a FAILING TEST instead of a
+// silent behaviour change.
+//
+//	E-1 GetCredentialGroup          cached map + neg
+//	E-2 GetCredentialGroups         cached slice
+//	E-3 AddCredentialGroup          write-through
+//	E-4 UpdateCredentialGroup       write-through
+//	E-5 RemoveCredentialGroup       write-through
+//	E-6 ModelsUsingCredentialGroup  read-through   (covered above)
+//	E-7 GroupsContainingCredential  read-through
+//	E-8 FlattenCredentialRefs       read-through   (covered above)
+//	strict twin 1 GetCredentialGroupStrict   (E-1's miss path)
+//	strict twin 2 GetCredentialGroupsStrict  (the snapshot read)
+//
+// Every test drives the decorator with a 1-hour reconcile interval so
+// the background reconciler never ticks mid-assertion.
+
+// TestCachedModelsConfig_GetCredentialGroup_CacheStrategy (E-1 — "cached
+// map + neg"): a HIT is served from the decorator's mirror with NO inner
+// call at all; a MISS strict-fills from the inner EXACTLY ONCE and the
+// filled value lands in the mirror (the next read is a hit again).
+func TestCachedModelsConfig_GetCredentialGroup_CacheStrategy(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{{ID: "g1", Name: "G1", Provider: "openai"}}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	// HIT: the boot snapshot primed g1 into the mirror.
+	strictBefore := inner.counts.getGroupStrict
+	nonStrictBefore := inner.counts.getGroup
+	g := c.GetCredentialGroup("g1")
+	if g == nil || g.ID != "g1" {
+		t.Fatalf("GetCredentialGroup(g1) = %+v, want g1", g)
+	}
+	if inner.counts.getGroupStrict != strictBefore {
+		t.Fatalf("strict-fill delegations on a cache HIT = %d, want 0 (the mirror must serve it)",
+			inner.counts.getGroupStrict-strictBefore)
+	}
+	if inner.counts.getGroup != nonStrictBefore {
+		t.Fatalf("inner calls on a cache HIT = %d, want 0 (the mirror must serve it)",
+			inner.counts.getGroup-nonStrictBefore)
+	}
+
+	// MISS: g2 is written straight to the inner AFTER the boot
+	// snapshot, so the mirror does not hold it.
+	inner.mu.Lock()
+	inner.groups = append(inner.groups, models.CredentialGroupConfig{ID: "g2", Name: "G2", Provider: "openai"})
+	inner.mu.Unlock()
+
+	strictBefore2 := inner.counts.getGroupStrict
+	g2 := c.GetCredentialGroup("g2")
+	if g2 == nil || g2.ID != "g2" {
+		t.Fatalf("GetCredentialGroup(g2) = %+v, want g2 (the miss path must strict-fill)", g2)
+	}
+	if inner.counts.getGroupStrict != strictBefore2+1 {
+		t.Fatalf("strict-fill delegations on a cache MISS = %d, want exactly 1",
+			inner.counts.getGroupStrict-strictBefore2)
+	}
+
+	// The filled value is now MIRRORED: the next read must not
+	// delegate again.
+	strictBefore3 := inner.counts.getGroupStrict
+	g2b := c.GetCredentialGroup("g2")
+	if g2b == nil || g2b.ID != "g2" {
+		t.Fatalf("GetCredentialGroup(g2) second read = %+v, want g2", g2b)
+	}
+	if inner.counts.getGroupStrict != strictBefore3 {
+		t.Fatalf("strict-fill delegations after the fill = %d, want 0 (the miss path must land in the mirror)",
+			inner.counts.getGroupStrict-strictBefore3)
+	}
+}
+
+// TestCachedModelsConfig_GetCredentialGroups_CacheStrategy (E-2 — "cached
+// slice"): the decorator serves the group LIST from its snapshot slice —
+// it never calls the inner source at all, neither the strict twin nor the
+// non-strict one.
+func TestCachedModelsConfig_GetCredentialGroups_CacheStrategy(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{
+			{ID: "g1", Name: "G1", Provider: "openai"},
+			{ID: "g2", Name: "G2", Provider: "openai"},
+		}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	nonStrictBefore := inner.counts.getGroups
+	strictBefore := inner.counts.getGroupsStrict
+	got := c.GetCredentialGroups()
+	if len(got) != 2 {
+		t.Fatalf("GetCredentialGroups len = %d, want 2 (the snapshot slice must be served)", len(got))
+	}
+	if inner.counts.getGroups != nonStrictBefore {
+		t.Fatalf("non-strict group-list calls = %d, want 0 (the cached slice must be served)",
+			inner.counts.getGroups-nonStrictBefore)
+	}
+	if inner.counts.getGroupsStrict != strictBefore {
+		t.Fatalf("strict group-list calls = %d, want 0 (the cached slice must be served)",
+			inner.counts.getGroupsStrict-strictBefore)
+	}
+
+	// A second read is still served from the slice.
+	got2 := c.GetCredentialGroups()
+	if len(got2) != 2 {
+		t.Fatalf("GetCredentialGroups second read len = %d, want 2", len(got2))
+	}
+	if inner.counts.getGroups != nonStrictBefore {
+		t.Fatalf("non-strict group-list calls after a second read = %d, want 0",
+			inner.counts.getGroups-nonStrictBefore)
+	}
+	if inner.counts.getGroupsStrict != strictBefore {
+		t.Fatalf("strict group-list calls after a second read = %d, want 0",
+			inner.counts.getGroupsStrict-strictBefore)
+	}
+}
+
+// TestCachedModelsConfig_AddCredentialGroup_WriteThrough (E-3 — "write-
+// through"): the decorator delegates the ADD to the inner store EXACTLY
+// ONCE and then updates its OWN mirror — the value is afterwards served
+// from the mirror with no further inner read.
+func TestCachedModelsConfig_AddCredentialGroup_WriteThrough(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	before := inner.counts.addGroup
+	if err := c.AddCredentialGroup(models.CredentialGroupConfig{ID: "g-new", Name: "G New", Provider: "openai"}); err != nil {
+		t.Fatalf("AddCredentialGroup: %v", err)
+	}
+	if inner.counts.addGroup != before+1 {
+		t.Fatalf("inner add delegations = %d, want exactly 1", inner.counts.addGroup-before)
+	}
+
+	// The MIRROR was updated: the single-group read is a HIT (no
+	// strict-fill) and returns the new group.
+	strictBefore := inner.counts.getGroupStrict
+	g := c.GetCredentialGroup("g-new")
+	if g == nil || g.ID != "g-new" {
+		t.Fatalf("GetCredentialGroup(g-new) = %+v, want the written-through group", g)
+	}
+	if inner.counts.getGroupStrict != strictBefore {
+		t.Fatalf("strict-fill delegations after a write-through = %d, want 0 (the mirror must serve it)",
+			inner.counts.getGroupStrict-strictBefore)
+	}
+
+	// The SLICE mirror carries it too.
+	found := false
+	for _, gg := range c.GetCredentialGroups() {
+		if gg.ID == "g-new" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("the group slice mirror was not updated by the write-through")
+	}
+}
+
+// TestCachedModelsConfig_UpdateCredentialGroup_WriteThrough (E-4 —
+// "write-through"): the decorator delegates the UPDATE to the inner store
+// EXACTLY ONCE and then replaces the entry in its OWN mirror.
+func TestCachedModelsConfig_UpdateCredentialGroup_WriteThrough(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{{ID: "g1", Name: "Old Name", Provider: "openai"}}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	before := inner.counts.updateGroup
+	if err := c.UpdateCredentialGroup("g1", models.CredentialGroupConfig{ID: "g1", Name: "New Name", Provider: "openai"}); err != nil {
+		t.Fatalf("UpdateCredentialGroup: %v", err)
+	}
+	if inner.counts.updateGroup != before+1 {
+		t.Fatalf("inner update delegations = %d, want exactly 1", inner.counts.updateGroup-before)
+	}
+
+	// The MIRROR carries the new value, served without an inner read.
+	strictBefore := inner.counts.getGroupStrict
+	g := c.GetCredentialGroup("g1")
+	if g == nil || g.Name != "New Name" {
+		t.Fatalf("GetCredentialGroup(g1) = %+v, want Name %q", g, "New Name")
+	}
+	if inner.counts.getGroupStrict != strictBefore {
+		t.Fatalf("strict-fill delegations after a write-through = %d, want 0 (the mirror must serve it)",
+			inner.counts.getGroupStrict-strictBefore)
+	}
+}
+
+// TestCachedModelsConfig_RemoveCredentialGroup_WriteThrough (E-5 —
+// "write-through"): the decorator delegates the REMOVE to the inner store
+// EXACTLY ONCE and then EVICTS the entry from its OWN mirror.
+func TestCachedModelsConfig_RemoveCredentialGroup_WriteThrough(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{{ID: "g1", Name: "G1", Provider: "openai"}}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	before := inner.counts.removeGroup
+	if err := c.RemoveCredentialGroup("g1"); err != nil {
+		t.Fatalf("RemoveCredentialGroup: %v", err)
+	}
+	if inner.counts.removeGroup != before+1 {
+		t.Fatalf("inner remove delegations = %d, want exactly 1", inner.counts.removeGroup-before)
+	}
+
+	// The MIRROR was evicted: the slice no longer carries the group,
+	// and the slice read costs no inner call.
+	nonStrictBefore := inner.counts.getGroups
+	for _, gg := range c.GetCredentialGroups() {
+		if gg.ID == "g1" {
+			t.Fatal("the group slice mirror still carries the removed group")
+		}
+	}
+	if inner.counts.getGroups != nonStrictBefore {
+		t.Fatalf("non-strict group-list calls = %d, want 0 (the cached slice must be served)",
+			inner.counts.getGroups-nonStrictBefore)
+	}
+
+	// The single-group read now MISSES (the mirror was evicted) and
+	// returns nil — the inner no longer holds the group either.
+	if g := c.GetCredentialGroup("g1"); g != nil {
+		t.Fatalf("GetCredentialGroup(g1) after remove = %+v, want nil", g)
+	}
+}
+
+// TestCachedModelsConfig_GroupsContainingCredential_DelegatesOnce (E-7 —
+// "read-through"): the decorator delegates the reverse lookup to the
+// inner store EXACTLY ONCE per call — it is not cached, so a second call
+// delegates again.
+func TestCachedModelsConfig_GroupsContainingCredential_DelegatesOnce(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{
+			{ID: "g1", Name: "G1", Provider: "openai", Members: []string{"cred-1"}},
+		}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	before := inner.counts.groupsContainingCred
+	got := c.GroupsContainingCredential("cred-1")
+	if inner.counts.groupsContainingCred != before+1 {
+		t.Fatalf("delegations = %d, want exactly 1", inner.counts.groupsContainingCred-before)
+	}
+	if len(got) != 1 || got[0] != "g1" {
+		t.Fatalf("GroupsContainingCredential(cred-1) = %v, want [g1]", got)
+	}
+
+	// read-through, not cached: a second call delegates again.
+	before2 := inner.counts.groupsContainingCred
+	c.GroupsContainingCredential("cred-1")
+	if inner.counts.groupsContainingCred != before2+1 {
+		t.Fatalf("second-call delegations = %d, want exactly 1", inner.counts.groupsContainingCred-before2)
+	}
+}
+
+// TestCachedModelsConfig_GetCredentialGroupsStrict_SnapshotDelegatesOnce
+// (strict twin 2): the decorator's SNAPSHOT read pulls the group list
+// through the STRICT twin EXACTLY ONCE per snapshot — once at boot
+// priming and once per reconcile tick — and never through the non-strict
+// twin.
+func TestCachedModelsConfig_GetCredentialGroupsStrict_SnapshotDelegatesOnce(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds(),
+		groups: []models.CredentialGroupConfig{{ID: "g1", Name: "G1", Provider: "openai"}}}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	if inner.counts.getGroupsStrict != 1 {
+		t.Fatalf("boot strict group-list delegations = %d, want exactly 1", inner.counts.getGroupsStrict)
+	}
+
+	c.reconcileOnce()
+	if inner.counts.getGroupsStrict != 2 {
+		t.Fatalf("strict group-list delegations after one reconcile tick = %d, want exactly 2 (boot + 1 tick)",
+			inner.counts.getGroupsStrict)
+	}
+
+	if inner.counts.getGroups != 0 {
+		t.Fatalf("non-strict group-list calls = %d, want 0 (the decorator must read groups through the strict twin)",
+			inner.counts.getGroups)
+	}
+}
+
+// TestCachedModelsConfig_GetCredentialGroupStrict_DelegatesOnceOnMiss
+// (strict twin 1): the decorator's SINGLE-group read goes through the
+// STRICT twin EXACTLY ONCE per cache miss — and NEVER through the
+// non-strict twin.
+func TestCachedModelsConfig_GetCredentialGroupStrict_DelegatesOnceOnMiss(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	c := mustWrap(t, inner, Options{ReconcileInterval: time.Hour})
+
+	// The group is written straight to the inner AFTER boot → a miss.
+	inner.mu.Lock()
+	inner.groups = append(inner.groups, models.CredentialGroupConfig{ID: "g1", Name: "G1", Provider: "openai"})
+	inner.mu.Unlock()
+
+	strictBefore := inner.counts.getGroupStrict
+	nonStrictBefore := inner.counts.getGroup
+	g := c.GetCredentialGroup("g1")
+	if g == nil || g.ID != "g1" {
+		t.Fatalf("GetCredentialGroup(g1) = %+v, want g1", g)
+	}
+	if inner.counts.getGroupStrict != strictBefore+1 {
+		t.Fatalf("strict twin delegations = %d, want exactly 1", inner.counts.getGroupStrict-strictBefore)
+	}
+	if inner.counts.getGroup != nonStrictBefore {
+		t.Fatalf("non-strict group calls = %d, want 0 (the decorator must read a single group through the strict twin)",
+			inner.counts.getGroup-nonStrictBefore)
+	}
 }

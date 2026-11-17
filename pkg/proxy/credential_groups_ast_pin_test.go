@@ -295,3 +295,376 @@ func relPath(root, path string) string {
 	}
 	return path
 }
+
+// ── T-29 hardening: the NEGATIVE binding check ─────────────────────────────
+//
+// The pkg/proxy exemption above (groupIDProxyAllowedBase) is a BASE-NAME
+// allowlist: {"groupPick", "pick", "gp", "res"} plus a "*.groupPick"
+// field access. A base-name allowlist cannot see what the name is BOUND
+// TO. A future `pick := someCredentialRef` in pkg/proxy would make
+// `pick.GroupID` a models.CredentialRef.GroupID read that the
+// exemption silently waves through — a narrow but real hole in the
+// feature's central structural invariant.
+//
+// The check below closes it with go/ast only (no new dependency): for
+// every scanned pkg/proxy file it collects the LOCAL BINDINGS of the
+// exempted base identifiers — var declarations, := / = assignments,
+// range bindings, function parameters and struct fields — and fails the
+// pin when an exempted identifier is bound to a models.CredentialRef (or
+// to a pointer to one), or to a type whose field set includes a
+// CredentialRef GroupID field.
+//
+// The genuine load-balance-group bindings are unaffected: pick / gp /
+// res / groupPick are groupPickInfo (or *groupPickInfo, or
+// models.GroupRewriteResult), and their GroupID field is a STRING —
+// not a models.CredentialRef.
+
+// exemptGroupIDBaseNames are the base identifiers the pkg/proxy .GroupID
+// exemption accepts (the Ident case of groupIDProxyAllowedBase). The
+// negative binding check polices exactly this set.
+var exemptGroupIDBaseNames = map[string]bool{
+	"groupPick": true,
+	"pick":      true,
+	"gp":        true,
+	"res":       true,
+}
+
+// modelsImportPath is the package the CredentialRef type is declared in.
+const modelsImportPath = "github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+
+// scannedPkgFile is one scanned file with the package path the .GroupID
+// read pin derives for it (the same normalisation that pin uses).
+type scannedPkgFile struct {
+	rel     string
+	pkgPath string
+	file    *ast.File
+	fset    *token.FileSet
+}
+
+// modelsQualifierForFile returns the identifiers that may qualify the
+// models package in this file (its import name or alias) and whether the
+// package is dot-imported.
+func modelsQualifierForFile(file *ast.File) (map[string]bool, bool) {
+	qual := map[string]bool{}
+	dotImported := false
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != modelsImportPath {
+			continue
+		}
+		if imp.Name == nil {
+			qual["models"] = true
+			continue
+		}
+		if imp.Name.Name == "." {
+			dotImported = true
+			continue
+		}
+		qual[imp.Name.Name] = true
+	}
+	return qual, dotImported
+}
+
+// isCredentialRefTypeExpr reports whether a type expression denotes
+// models.CredentialRef (or a pointer to it).
+func isCredentialRefTypeExpr(expr ast.Expr, qual map[string]bool, dotImported bool) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return dotImported && e.Name == "CredentialRef"
+	case *ast.SelectorExpr:
+		if e.Sel == nil || e.Sel.Name != "CredentialRef" {
+			return false
+		}
+		x, ok := e.X.(*ast.Ident)
+		return ok && qual[x.Name]
+	case *ast.StarExpr:
+		return isCredentialRefTypeExpr(e.X, qual, dotImported)
+	}
+	return false
+}
+
+// exprBoundType extracts the type expression an assignment binds, when
+// it is syntactically evident: a composite literal, an address-of a
+// composite literal, or a single-value call to a package-local function
+// with a declared result type.
+func exprBoundType(rhs ast.Expr, localFuncs map[string]ast.Expr) ast.Expr {
+	switch e := rhs.(type) {
+	case *ast.CompositeLit:
+		return e.Type
+	case *ast.UnaryExpr:
+		if e.Op == token.AND {
+			return exprBoundType(e.X, localFuncs)
+		}
+	case *ast.CallExpr:
+		if id, ok := e.Fun.(*ast.Ident); ok {
+			return localFuncs[id.Name]
+		}
+	}
+	return nil
+}
+
+// exemptedCredentialRefBindings returns a violation string for every
+// local binding of an exempted base identifier whose declared type is a
+// models.CredentialRef (or a pointer to one), or a type whose field set
+// includes a CredentialRef GroupID field.
+//
+// The type lookup is SYNTACTIC: a binding whose type is only inferable
+// (e.g. `pick := someFunc()` with a multi-value call) is NOT resolved
+// and therefore not reported. That is deliberate — a structural pin must
+// never false-positive on the genuine load-balance-group bindings.
+func exemptedCredentialRefBindings(sf scannedPkgFile, qual map[string]bool, dotImported bool,
+	localFuncs map[string]ast.Expr, structGroupID map[string]ast.Expr) []string {
+	var out []string
+	report := func(name string, typ ast.Expr, pos token.Pos) {
+		if name == "" || !exemptGroupIDBaseNames[name] || typ == nil {
+			return
+		}
+		line := sf.fset.Position(pos).Line
+		if isCredentialRefTypeExpr(typ, qual, dotImported) {
+			out = append(out, fmt.Sprintf("%s:%d %q is bound to a models.CredentialRef — the .GroupID base-name exemption would wave through a credential-group read",
+				sf.rel, line, name))
+			return
+		}
+		// A type whose field set includes a CredentialRef GroupID field.
+		var typeName string
+		switch t := typ.(type) {
+		case *ast.Ident:
+			typeName = t.Name
+		case *ast.SelectorExpr:
+			if t.Sel != nil {
+				typeName = t.Sel.Name
+			}
+		}
+		if typeName == "" {
+			return
+		}
+		if fieldType, ok := structGroupID[typeName]; ok &&
+			isCredentialRefTypeExpr(fieldType, qual, dotImported) {
+			out = append(out, fmt.Sprintf("%s:%d %q is bound to %s, whose GroupID field is a models.CredentialRef — the .GroupID base-name exemption would wave through a credential-group read",
+				sf.rel, line, name, typeName))
+		}
+	}
+
+	ast.Inspect(sf.file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			// var pick models.CredentialRef
+			for _, name := range node.Names {
+				report(name.Name, node.Type, name.Pos())
+			}
+		case *ast.AssignStmt:
+			// pick := models.CredentialRef{...} / pick = models.CredentialRef{...}
+			// A multi-value assignment (one RHS, several LHS) binds
+			// types that are NOT syntactically evident — skip it.
+			if len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, lhs := range node.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				report(id.Name, exprBoundType(node.Rhs[i], localFuncs), id.Pos())
+			}
+		case *ast.RangeStmt:
+			// for pick := range xs
+			if node.Tok == token.DEFINE && node.Key != nil {
+				if id, ok := node.Key.(*ast.Ident); ok {
+					report(id.Name, nil, id.Pos())
+				}
+			}
+		case *ast.Field:
+			// function parameters and struct fields
+			for _, name := range node.Names {
+				report(name.Name, node.Type, name.Pos())
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// scanPkgFiles walks pkg/ exactly like the .GroupID read pin does and
+// returns the parsed non-test files with their derived package path.
+func scanPkgFiles(t *testing.T, root string) []scannedPkgFile {
+	t.Helper()
+	pkgRoot := filepath.Join(root, "pkg")
+	var out []scannedPkgFile
+	err := filepath.WalkDir(pkgRoot, func(path string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		pkgPath := "pkg"
+		if len(parts) >= 2 {
+			pkgPath = parts[0] + "/" + parts[1]
+		}
+		if len(parts) >= 3 && parts[1] == "store" {
+			pkgPath = "pkg/store/" + parts[2]
+		}
+		if len(parts) >= 3 && parts[1] == "ui" {
+			pkgPath = "pkg/ui"
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.AllErrors)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		out = append(out, scannedPkgFile{rel: rel, pkgPath: pkgPath, file: file, fset: fset})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk pkg: %v", err)
+	}
+	return out
+}
+
+// collectTypeAndFuncIndex indexes the package-local struct types (by
+// their GroupID field type) and the package-local functions (by their
+// first result type) for the binding-type resolution.
+func collectTypeAndFuncIndex(sf scannedPkgFile, structGroupID map[string]ast.Expr, localFuncs map[string]ast.Expr) {
+	for _, decl := range sf.file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv != nil || d.Type.Results == nil || len(d.Type.Results.List) == 0 {
+				continue
+			}
+			localFuncs[d.Name.Name] = d.Type.Results.List[0].Type
+		case *ast.GenDecl:
+			if d.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range d.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok {
+					continue
+				}
+				for _, fld := range st.Fields.List {
+					for _, fname := range fld.Names {
+						if fname.Name == "GroupID" {
+							structGroupID[ts.Name.Name] = fld.Type
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestCredentialGroups_Structural_ExemptedGroupIDBasesAreNotCredentialRefs
+// closes the one hole in the pkg/proxy .GroupID exemption: the
+// exemption is a BASE-NAME allowlist, so it cannot distinguish a
+// load-balance-group variable from a models.CredentialRef variable.
+//
+// It collects the local bindings of the exempted base identifiers and
+// fails the pin when one of them is bound to a models.CredentialRef (or
+// to a type whose field set includes a CredentialRef GroupID field).
+func TestCredentialGroups_Structural_ExemptedGroupIDBasesAreNotCredentialRefs(t *testing.T) {
+	root := credGroupRepoRoot(t)
+	scanned := scanPkgFiles(t, root)
+
+	// Index the local struct types + functions of the packages that can
+	// appear in a binding's declared type.
+	structGroupID := map[string]ast.Expr{}
+	localFuncs := map[string]ast.Expr{}
+	for _, sf := range scanned {
+		if sf.pkgPath == "pkg/proxy" || sf.pkgPath == "pkg/models" {
+			collectTypeAndFuncIndex(sf, structGroupID, localFuncs)
+		}
+	}
+
+	var violations []string
+	for _, sf := range scanned {
+		if sf.pkgPath != "pkg/proxy" {
+			continue
+		}
+		qual, dotImported := modelsQualifierForFile(sf.file)
+		violations = append(violations,
+			exemptedCredentialRefBindings(sf, qual, dotImported, localFuncs, structGroupID)...)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("structural pin: an exempted .GroupID base identifier is bound to a models.CredentialRef:\n  %s",
+			strings.Join(violations, "\n  "))
+	}
+}
+
+// TestCredentialGroups_Structural_ExemptedBindingCheck_FlagsViolation
+// proves the negative binding check is NON-VACUOUS: a source that binds
+// an exempted base identifier to a models.CredentialRef MUST be flagged,
+// while the genuine load-balance-group shape MUST NOT be.
+func TestCredentialGroups_Structural_ExemptedBindingCheck_FlagsViolation(t *testing.T) {
+	const violatingSrc = `package proxy
+
+import "github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+
+func violator(pick models.CredentialRef) string {
+	return pick.GroupID
+}
+`
+	const violatingVarSrc = `package proxy
+
+import "github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+
+func violatorVar() string {
+	res := models.CredentialRef{GroupID: "g1"}
+	return res.GroupID
+}
+`
+	const legitimateSrc = `package proxy
+
+type groupPickInfo struct {
+	GroupID  string
+	MemberID string
+}
+
+func legit(pick groupPickInfo, res groupPickInfo, groupPick *groupPickInfo) string {
+	return pick.GroupID + res.GroupID + groupPick.GroupID
+}
+`
+	structGroupID := map[string]ast.Expr{}
+	localFuncs := map[string]ast.Expr{}
+
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"parameter binding", violatingSrc},
+		{"var binding", violatingVarSrc},
+	} {
+		sf := parseSyntheticPkgFile(t, tc.name+".go", tc.src)
+		qual, dotImported := modelsQualifierForFile(sf.file)
+		violations := exemptedCredentialRefBindings(sf, qual, dotImported, localFuncs, structGroupID)
+		if len(violations) == 0 {
+			t.Fatalf("the negative binding check did NOT flag a models.CredentialRef bound to an exempted base identifier (%s) — the check is vacuous", tc.name)
+		}
+	}
+
+	sf := parseSyntheticPkgFile(t, "legitimate.go", legitimateSrc)
+	qual, dotImported := modelsQualifierForFile(sf.file)
+	if violations := exemptedCredentialRefBindings(sf, qual, dotImported, localFuncs, structGroupID); len(violations) != 0 {
+		t.Fatalf("the negative binding check flagged the legitimate load-balance-group bindings: %v", violations)
+	}
+}
+
+// parseSyntheticPkgFile parses an in-memory source as a pkg/proxy file.
+func parseSyntheticPkgFile(t *testing.T, name, src string) scannedPkgFile {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, src, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse synthetic %s: %v", name, err)
+	}
+	return scannedPkgFile{rel: name, pkgPath: "pkg/proxy", file: file, fset: fset}
+}
