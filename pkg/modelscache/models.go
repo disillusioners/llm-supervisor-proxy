@@ -160,7 +160,9 @@ func NewCachedModelsConfig(inner strictSource, opts Options) (*CachedModelsConfi
 	// first snapshot read, so direct-SQL/restore/repair writes are
 	// visible at boot. Optional interface: tolerated when absent.
 	if gr, ok := c.inner.(groupRebuilder); ok && gr != nil {
-		_ = gr.RebuildCredentialGroupsFromDB()
+		if err := gr.RebuildCredentialGroupsFromDB(); err != nil {
+			log.Printf("[WARN] [cache] boot: rebuild credential groups from DB failed (%v)", err)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), o.StrictFillTimeout)
@@ -744,6 +746,10 @@ func (c *CachedModelsConfig) AddCredentialGroup(g models.CredentialGroupConfig) 
 	if err != nil {
 		log.Printf("[WARN] [cache] AddCredentialGroup: re-read persisted row failed (%v) — mirroring caller value", err)
 		stored = &g
+		if stored.ID == "" {
+			log.Printf("[WARN] [cache] AddCredentialGroup: effective group id is empty — skipping mirror update")
+			return nil
+		}
 	}
 	cp := deepCopyCredentialGroupConfig(stored)
 	c.mu.Lock()
@@ -789,6 +795,10 @@ func (c *CachedModelsConfig) UpdateCredentialGroup(id string, g models.Credentia
 		stored = &g
 		if stored.ID == "" {
 			stored.ID = id
+		}
+		if stored.ID == "" {
+			log.Printf("[WARN] [cache] UpdateCredentialGroup: effective group id is empty — skipping mirror update")
+			return nil
 		}
 	}
 	cp := deepCopyCredentialGroupConfig(stored)
