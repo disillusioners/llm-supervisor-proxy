@@ -156,7 +156,7 @@ func TestModelWall_AccountQuotaNotModelMarked(t *testing.T) {
 // TestApplyWall_ResetWindowCappedAtKnob: a parsed 5h reset is capped at the
 // configured knob (30m).
 func TestApplyWall_ResetWindowCappedAtKnob(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Hour).Format("2006-01-02 15:04:05")
 	c := New()
 	ApplyWall(c, "m", msg, 30*time.Minute, now)
@@ -173,7 +173,7 @@ func TestApplyWall_ResetWindowCappedAtKnob(t *testing.T) {
 // TestApplyWall_SoonerResetHonored: a stated reset sooner than the cap is
 // honored exactly (not extended to the knob).
 func TestApplyWall_SoonerResetHonored(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(10*time.Minute).Format("2006-01-02 15:04:05")
 	c := New()
 	ApplyWall(c, "m", msg, 30*time.Minute, now)
@@ -204,7 +204,7 @@ func TestApplyWall_NoResetUsesKnob(t *testing.T) {
 
 // TestApplyWall_ResetFloorOneMinute: a sub-minute reset is floored at 1m.
 func TestApplyWall_ResetFloorOneMinute(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Second).Format("2006-01-02 15:04:05")
 	c := New()
 	ApplyWall(c, "m", msg, 30*time.Minute, now)
@@ -236,7 +236,7 @@ func TestApplyWall_KnobAboveHardCeilingClamped(t *testing.T) {
 // TestCache_ExpiryThenRetryIsImmediate: an expired mark must not suppress.
 func TestCache_ExpiryThenRetryIsImmediate(t *testing.T) {
 	// (a) capped expiry already in the past -> no suppression.
-	now := time.Now().Truncate(time.Second).Add(-31 * time.Minute)
+	now := time.Now().UTC().Truncate(time.Second).Add(-31 * time.Minute)
 	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(40*time.Minute).Format("2006-01-02 15:04:05")
 	c := New()
 	ApplyWall(c, "m", msg, 30*time.Minute, now)
