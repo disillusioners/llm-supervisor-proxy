@@ -61,7 +61,7 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
       expect(badge).not.toBeNull();
     });
     const badge = container.querySelector('[data-testid="model-form-primary-group-badge"]');
-    expect(badge!.textContent).toContain('🗂️ Group: OpenAI Pool');
+    expect(badge!.textContent).toContain('🗂️ Credential group: OpenAI Pool');
   });
 
   it('G6: legacy credential_id shim still works', async () => {
@@ -123,7 +123,7 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     expect(saveBtn.disabled).toBe(false);
     fireEvent.click(saveBtn);
     await waitFor(() => {
-      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('please select a credential or group') });
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('please select a credential or credential group') });
     });
     expect(onSave).not.toHaveBeenCalled();
   });

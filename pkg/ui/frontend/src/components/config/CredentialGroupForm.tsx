@@ -55,11 +55,11 @@ export function CredentialGroupForm({
     const trimmedName = name.trim();
 
     if (!trimmedId) {
-      setError('Group ID is required');
+      setError('Credential group ID is required');
       return;
     }
     if (!trimmedName) {
-      setError('Group name is required');
+      setError('Credential group name is required');
       return;
     }
     // Unfilled rows ('') are dropped before validation.
@@ -106,7 +106,7 @@ export function CredentialGroupForm({
       </h3>
       <form onSubmit={handleSubmit} class="space-y-4">
         <div>
-          <label class="block text-sm font-medium text-gray-300 mb-1">Group ID</label>
+          <label class="block text-sm font-medium text-gray-300 mb-1">Credential group ID</label>
           <input
             type="text"
             value={id}

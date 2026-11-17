@@ -360,7 +360,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
       for (let i = 0; i < formData.credentials.length; i++) {
         const row = formData.credentials[i];
         if (!row.credential_id && !row.group_id) {
-          throw new Error(`Credential row ${i + 1}: please select a credential or group`);
+          throw new Error(`Credential row ${i + 1}: please select a credential or credential group`);
         }
         // Resolve provider: credential → credentials.find; group → groups.find.
         if (row.group_id) {
@@ -627,7 +627,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
                   data-testid="model-form-primary-group-badge"
                   class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-900/50 text-indigo-300 border border-indigo-700"
                 >
-                  🗂️ Group: {selectedGroup.name}
+                  🗂️ Credential group: {selectedGroup.name}
                 </span>
               )}
             </div>

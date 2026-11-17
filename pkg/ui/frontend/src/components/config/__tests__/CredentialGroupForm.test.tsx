@@ -280,7 +280,7 @@ describe('CredentialGroupForm (credential-groups commission)', () => {
       { target: { value: 'cred-oai-1' } },
     );
     fireEvent.submit(formEl(container));
-    expect(errorText(container)).toContain('Group ID is required');
+    expect(errorText(container)).toContain('Credential group ID is required');
     expect(onSave).not.toHaveBeenCalled();
   });
 });

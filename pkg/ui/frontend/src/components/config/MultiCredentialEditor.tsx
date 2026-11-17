@@ -168,7 +168,7 @@ export function MultiCredentialEditor({
                         data-testid="credential-group-ref-badge"
                         class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 border border-indigo-700"
                       >
-                        🗂️ Group
+                        🗂️ Credential group
                       </span>
                     )}
                 </div>
@@ -282,7 +282,7 @@ export function MultiCredentialEditor({
                 class="text-xs text-yellow-400 mt-1"
                 data-testid="credential-group-member-overlap-warn"
               >
-                Credential {h.credId} is already included via group {h.groupName}
+                Credential {h.credId} is already included via credential group {h.groupName}
               </p>
             ));
           })()}

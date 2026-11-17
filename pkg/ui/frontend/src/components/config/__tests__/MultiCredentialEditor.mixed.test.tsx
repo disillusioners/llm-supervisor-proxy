@@ -179,7 +179,7 @@ describe('MultiCredentialEditor — mixed credential/group picker (T-F)', () => 
     );
     const badge = container.querySelector('[data-testid="credential-group-ref-badge"]');
     expect(badge).not.toBeNull();
-    expect(badge!.textContent).toContain('🗂️ Group');
+    expect(badge!.textContent).toContain('🗂️ Credential group');
   });
 
   it('F8 regression: plain credential list renders byte-identically (no group_id in payload)', () => {
@@ -312,6 +312,6 @@ describe('MultiCredentialEditor — mixed credential/group picker (T-F)', () => 
     // cred-oai-1 is a member of group-oai selected on another row → hint
     const hint = container.querySelector('[data-testid="credential-group-member-overlap-warn"]');
     expect(hint).not.toBeNull();
-    expect(hint!.textContent).toContain('Credential cred-oai-1 is already included via group OpenAI Pool');
+    expect(hint!.textContent).toContain('Credential cred-oai-1 is already included via credential group OpenAI Pool');
   });
 });
