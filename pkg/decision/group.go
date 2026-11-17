@@ -130,6 +130,9 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 	var winner *memberAttempt
 	var headSuppressed *policyMember
 	var headCred models.ResolvedCredential
+	var lastFailure *memberAttempt
+	hasSuppressedOnly := false
+	dcGrantedMember := ""
 
 	for idx := range order {
 		candidate := order[idx]
@@ -164,9 +167,10 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			triedPairs[pairKey] = true
 
 			wireModel := h.decisionMarkKey(candidate.ID)
-			suppressed, reason := h.attemptSuppressed(candidate.ID, cred, wireModel)
+			suppressed, reason, honestAttempt := h.attemptSuppressed(candidate.ID, cred, wireModel, &dcGrantedMember)
 			if suppressed {
 				skipped++
+				hasSuppressedOnly = true
 				if idx == 0 && headSuppressed == nil {
 					headSuppressed = &candidate
 					headCred = cred
@@ -198,6 +202,8 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				winner = &res
 				break
 			}
+			lf := res
+			lastFailure = &lf
 			if res.failure.mark {
 				h.suppression.markLimit(candidate.ID, cred.CredentialID, cred.Provider, wireModel)
 			}
@@ -216,9 +222,9 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				return
 			}
 			if res.failure.rotate {
-				// Rotation-eligible: the member's next credential is
-				// attempted before the walk advances (the member's own
-				// resilience is consumed first).
+				if honestAttempt {
+					break
+				}
 				h.rotateMemberCredential(candidate.ID, cred, res.failure.class)
 				continue
 			}
@@ -241,6 +247,8 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				attempted++
 				membersAttempted++
 			} else {
+				lf := res
+				lastFailure = &lf
 				if res.failure.mark {
 					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, h.decisionMarkKey(headSuppressed.ID))
 				}
@@ -248,11 +256,22 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 					h.failFastDecisionGroup(w, groupID, res)
 					return
 				}
+				attempted++
+				membersAttempted++
 			}
 		}
 	}
 
 	if winner == nil {
+		// B1: the envelope fires only when every member was
+		// genuinely attempted-and-failed. A member that was only
+		// SUPPRESSED (never attempted) must not count as a failure:
+		// if a genuine failure exists, fail with that failure's error
+		// instead of the exhaustion envelope.
+		if hasSuppressedOnly && lastFailure != nil {
+			h.failFastDecisionGroup(w, groupID, *lastFailure)
+			return
+		}
 		h.exhaustDecisionGroup(w, groupID, attempted, skipped, membersAttempted, startTime)
 		return
 	}
@@ -349,17 +368,17 @@ func (h *Handler) failFastDecisionGroup(w http.ResponseWriter, groupID string, r
 // as a skip (never a failure). The all-credentials-cooling case (the
 // member's own resilience) gets exactly ONE honest attempt: the cache
 // is never a failure oracle at any layer.
-func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredential, wireModel string) (bool, string) {
+func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredential, wireModel string, dcGranted *string) (bool, string, bool) {
 	// No health layer wired ⇒ nothing can suppress an attempt (the
 	// lane degrades to "always attempt"; the demotion path still runs
 	// when a layer IS wired).
 	if h.suppression.upstream == nil && h.suppression.model == nil {
-		return false, ""
+		return false, "", false
 	}
 	marked := h.suppression.credentialMarked(cred.CredentialID, cred.Provider, wireModel)
 	modelMarked := h.suppression.modelMarked(memberID)
 	if !marked && !modelMarked {
-		return false, ""
+		return false, "", false
 	}
 	// The member-level symmetry (ADR-15's D-C): when EVERY credential
 	// of the member is unavailable — cooling OR marked in the
@@ -368,12 +387,20 @@ func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredent
 	// at any layer: a mark/cooling record cannot, by itself, remove
 	// the member's last attempt.
 	if h.memberFullyUnavailable(memberID) {
-		return false, "all_credentials_unavailable"
+		// Per-member latch + per-request cap (B2, rulings Q1+Q2):
+		// at most one honest attempt per member AND at most one per
+		// request (the first fully-unavailable member in policy order).
+		// A later fully-unavailable member is skipped zero-cost.
+		if *dcGranted != "" {
+			return true, "all_credentials_unavailable_already_granted", false
+		}
+		*dcGranted = memberID
+		return false, "all_credentials_unavailable", true
 	}
 	if modelMarked {
-		return true, "model_layer_mark"
+		return true, "model_layer_mark", false
 	}
-	return true, "upstream_layer_mark"
+	return true, "upstream_layer_mark", false
 }
 
 // memberFullyUnavailable reports whether EVERY credential of the member
