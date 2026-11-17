@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,11 +36,26 @@ var ErrNoMembers = errors.New("grouplb: group has no members")
 // constructs the engine with all three; tests pass short values
 // through the same constructor.
 const (
-	DefaultBindingTTL     = 24 * time.Hour
+	DefaultBindingTTL     = 30 * time.Minute
 	DefaultSweepInterval  = 5 * time.Minute
 	DefaultCooldown       = 60 * time.Second
 	DefaultMemberSeed     = int64(0) // 0 = time-based seed
 	DefaultMaxGroupMember = 16       // informational mirror of models.MaxGroupMembers
+
+	// Binding TTL clamp bounds (absolute lifetime per binding). The
+	// values MUST stay equal to credentiallb.BindingTTLFloor/Ceiling —
+	// the duplication is FORCED: the Am31 import-purity pin forbids
+	// this package from importing pkg/credentiallb (see
+	// TestEngine_ZeroCredentialImportGuard). Do NOT "dedupe" by
+	// importing credentiallb — that breaks the pin.
+	// BindingTTLFloor is the minimum binding TTL (1m).
+	BindingTTLFloor = time.Minute
+	// BindingTTLCeiling is the maximum binding TTL (24h).
+	BindingTTLCeiling = 24 * time.Hour
+	// BindingTTLMinGranularity is the smallest TTL the engine honours
+	// verbatim; a value below it is meaningless noise and is floored to
+	// BindingTTLFloor (1m).
+	BindingTTLMinGranularity = time.Millisecond
 )
 
 // MemberRef is the engine's view of one group member: a real proxy
@@ -73,9 +89,9 @@ func retryAfterIf(retryAfter, fallback time.Duration) time.Duration {
 }
 
 // Engine maintains (groupID, conversationKey) → memberID bindings
-// with sliding-idle-TTL eviction and weighted-random selection for
-// new bindings, plus the per-(group, member) cooldown map driving
-// group-level exclude-and-reselect (Am24).
+// with absolute-lifetime (createdAt) eviction and weighted-random
+// selection for new bindings, plus the per-(group, member) cooldown map
+// driving group-level exclude-and-reselect (Am24).
 //
 // Mechanical clone of credentiallb.Engine reduced to the member axis:
 // concurrency-safe, all exported methods thread-safe and nil-safe on
@@ -113,7 +129,7 @@ type Engine struct {
 	mu     sync.RWMutex // outer lock: guards the groups map
 	groups map[string]*groupState
 
-	ttl             time.Duration // sliding IDLE TTL per binding (#10)
+	ttl             atomic.Int64  // absolute lifetime TTL (createdAt + ttl)
 	sweepInt        time.Duration // janitor cadence
 	defaultCooldown time.Duration // fallback cooldown when retryAfter <= 0
 	rngSeed         int64
@@ -133,8 +149,8 @@ type Engine struct {
 	sweepHook   func()
 }
 
-// NewEngine constructs an Engine. ttl is the sliding idle TTL on each
-// binding (production 24h); sweepInterval the janitor cadence
+// NewEngine constructs an Engine. ttl is the absolute lifetime on each
+// binding (production 30m); sweepInterval the janitor cadence
 // (production 5m); rngSeed seeds the per-group weighted-random RNGs
 // (0 = time-based); defaultCooldown seeds cooldowns when
 // ExcludeAndReselect's retryAfter <= 0 (production 60s).
@@ -155,13 +171,13 @@ func NewEngine(ttl, sweepInterval time.Duration, rngSeed int64, defaultCooldown 
 	}
 	e := &Engine{
 		groups:          make(map[string]*groupState),
-		ttl:             ttl,
 		sweepInt:        sweepInterval,
 		defaultCooldown: defaultCooldown,
 		rngSeed:         rngSeed,
 		stopCh:          make(chan struct{}),
 		sweepDone:       make(chan struct{}),
 	}
+	e.ttl.Store(int64(ttl))
 	go e.runJanitor()
 	return e
 }
@@ -181,7 +197,7 @@ func groupRNGSeed(rngSeed int64, groupID string) int64 {
 }
 
 // runJanitor is the single background sweep goroutine (R3-4 carried):
-// sweeps BOTH expired cooldowns and idle-expired bindings in ONE
+// sweeps BOTH expired cooldowns and lifetime-expired bindings in ONE
 // pass, under the E-1 discipline: outer RLock for the whole walk +
 // per-group write locks one at a time, so reads proceed concurrently
 // with the sweep.
@@ -202,7 +218,7 @@ func (e *Engine) runJanitor() {
 // sweepOnce performs one janitor pass wrapped in defer/recover + WARN
 // (E-4 hardening carried): a panic no longer silently stops the
 // janitor — the next tick runs another sweep. Sweep order within a
-// group: cooldowns first (cheaper map), then bindings (sliding-TTL
+// group: cooldowns first (cheaper map), then bindings (absolute-lifetime
 // check).
 func (e *Engine) sweepOnce() {
 	defer func() {
@@ -224,14 +240,14 @@ func (e *Engine) sweepOnce() {
 		}
 		evicted := 0
 		for key, b := range st.bindings {
-			if b.expired(e.ttl, now) {
+			if b.expired(time.Duration(e.ttl.Load()), now) {
 				delete(st.bindings, key)
 				st.bindingsCount--
 				evicted++
 			}
 		}
 		for key, b := range st.backupBindings {
-			if b.expired(e.ttl, now) {
+			if b.expired(time.Duration(e.ttl.Load()), now) {
 				delete(st.backupBindings, key)
 				st.backupBindingsCount--
 				evicted++
@@ -239,7 +255,7 @@ func (e *Engine) sweepOnce() {
 		}
 		st.mu.Unlock()
 		if evicted > 0 {
-			log.Printf("[DEBUG] [grouplb] janitor evicted %d idle bindings for group state", evicted)
+			log.Printf("[DEBUG] [grouplb] janitor evicted %d lifetime-expired bindings for group state", evicted)
 		}
 	}
 	e.mu.RUnlock()
@@ -368,7 +384,7 @@ func (e *Engine) DefaultPoolHealthy(groupID string) bool {
 //     engine overhead. The fast path ignores cooldowns (a
 //     single-member group never has an alternative;
 //     ExcludeAndReselect returns ReselectNone for it).
-//   - Binding lookup applies the #10 sliding-idle check, the
+//   - Binding lookup applies the absolute-lifetime (createdAt) check, the
 //     defensive still-in-config check, and the skip-cooling check (a
 //     bound member that went cooling is dropped and re-picked —
 //     selection NEVER returns a cooling member except the explicit
@@ -474,23 +490,22 @@ func (e *Engine) getOrSelect(groupID, conversationKey string) pickOutcome {
 		st.mu.RLock()
 		hitMember, hit := "", false
 		if b, ok := st.bindings[conversationKey]; ok &&
-			!b.expired(e.ttl, now) &&
+			!b.expired(time.Duration(e.ttl.Load()), now) &&
 			memberInRefs(st.members, b.memberID) &&
 			!st.isCoolingLocked(b.memberID, now) {
 			hitMember, hit = b.memberID, true
 		}
 		st.mu.RUnlock()
 		if hit {
-			// Upgrade to the write lock for the #10 boundAt refresh,
-			// re-verifying the binding survived the lock transition
-			// AND has not been marked cooling in the gap (Item 1
-			// TOCTOU carried).
+			// Read path: re-verify under the write lock. There is no
+			// createdAt refresh any more; the lock re-verifies that the
+			// binding survived the lock transition AND has not been
+			// marked cooling in the gap (Item 1 TOCTOU carried).
 			st.mu.Lock()
 			if b, ok := st.bindings[conversationKey]; ok &&
 				b.memberID == hitMember &&
-				!b.expired(e.ttl, now) &&
+				!b.expired(time.Duration(e.ttl.Load()), now) &&
 				!st.isCoolingLocked(b.memberID, now) {
-				b.boundAt = now
 				st.mu.Unlock()
 				return pickOutcome{memberID: hitMember}
 			}
@@ -514,14 +529,13 @@ func (e *Engine) getOrSelect(groupID, conversationKey string) pickOutcome {
 			// grandfathered; a member that LEFT the group does
 			// not, so the binding is discarded and re-picked.
 			exists := memberInRefs(st.members, b.memberID)
-			valid := !b.expired(e.ttl, now) &&
+			valid := !b.expired(time.Duration(e.ttl.Load()), now) &&
 				exists &&
 				!st.isCoolingLocked(b.memberID, now)
 			if valid {
 				// Another goroutine bound this key between our
 				// phases; treat as a hit (W-1: not newly bound by
 				// THIS call).
-				b.boundAt = now
 				return pickOutcome{memberID: b.memberID}
 			}
 			if !exists {
@@ -534,7 +548,7 @@ func (e *Engine) getOrSelect(groupID, conversationKey string) pickOutcome {
 				log.Printf("[grouplb] group=%s conv=%s binding=stale member=%s (member no longer configured) — re-picking",
 					groupID, conversationKey, b.memberID)
 			}
-			// Stale / idle-expired / orphaned / cooling: drop lazily.
+			// Stale / lifetime-expired / orphaned / cooling: drop lazily.
 			// Guarded by the row-presence check ⇒ the count
 			// decrement happens at most once per row, so the
 			// OnGroupChanged push-layer drop and this pull-layer
@@ -564,7 +578,7 @@ func (e *Engine) getOrSelect(groupID, conversationKey string) pickOutcome {
 		return pickOutcome{memberID: pick, staleRepaired: staleRepaired}
 	}
 
-	st.bindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.bindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 	st.bindingsCount++
 	log.Printf("[grouplb] group=%s conv=%s→member=%s newlyBound=true", groupID, conversationKey, pick)
 	return pickOutcome{memberID: pick, newlyBound: true, staleRepaired: staleRepaired}
@@ -573,7 +587,7 @@ func (e *Engine) getOrSelect(groupID, conversationKey string) pickOutcome {
 // OnGroupChanged rebuilds the per-group selector (cumulative prefix
 // sums over the new weights) and FILTERS existing bindings (E-2
 // survivor filter): preserves any binding whose memberID still
-// appears in refs — keeping its boundAt untouched (the sliding idle
+// appears in refs — keeping its createdAt untouched (the absolute lifetime
 // window survives a weight nudge); drops only orphan bindings (whose
 // member was removed). This is NOT clear-all: routine weight changes
 // preserve affinity for every surviving conversation.
@@ -827,13 +841,13 @@ func (e *Engine) ExcludeAndReselect(
 		return pick, ReselectHealthy
 	}
 
-	// (4) Single rebind map write; the rebind REFRESHES boundAt (#10
-	// — a rebind is a binding write; the sliding idle window restarts
-	// for the NEW member).
+	// (4) Single rebind map write; the rebind stamps a FRESH createdAt
+	// (a rebind is a NEW bind, starting a new absolute window for the
+	// NEW member).
 	if _, exists := st.bindings[conversationKey]; !exists {
 		st.bindingsCount++
 	}
-	st.bindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.bindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 	return pick, ReselectHealthy
 }
 
@@ -941,8 +955,7 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 		// only member, breaking the grandfathering ruling.
 		if b, ok := st.backupBindings[conversationKey]; ok {
 			exists := memberInRefs(st.members, b.memberID)
-			if exists && !b.expired(e.ttl, now) {
-				b.boundAt = now
+			if exists && !b.expired(time.Duration(e.ttl.Load()), now) {
 				st.mu.Unlock()
 				return pickOutcome{memberID: b.memberID}
 			}
@@ -973,7 +986,7 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 			if _, exists := st.backupBindings[conversationKey]; !exists {
 				st.backupBindingsCount++
 			}
-			st.backupBindings[conversationKey] = &binding{memberID: fastID, boundAt: now}
+			st.backupBindings[conversationKey] = &binding{memberID: fastID, createdAt: now}
 			st.mu.Unlock()
 			log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, fastID)
 			return pickOutcome{memberID: fastID, newlyBound: true, staleRepaired: staleRepaired}
@@ -999,11 +1012,10 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 			// group does not, so the binding is discarded and
 			// re-picked among the remaining backups.
 			exists := memberInRefs(st.members, b.memberID)
-			valid := !b.expired(e.ttl, now) &&
+			valid := !b.expired(time.Duration(e.ttl.Load()), now) &&
 				exists &&
 				!st.isCoolingLocked(b.memberID, now)
 			if valid {
-				b.boundAt = now
 				return pickOutcome{memberID: b.memberID}
 			}
 			if !exists {
@@ -1044,7 +1056,7 @@ func (e *Engine) pickBackupMember(groupID, conversationKey string) pickOutcome {
 	if _, exists := st.backupBindings[conversationKey]; !exists {
 		st.backupBindingsCount++
 	}
-	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.backupBindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 	log.Printf("[grouplb] group=%s pool=backup conv=%s→member=%s newlyBound=true", groupID, conversationKey, pick)
 	return pickOutcome{memberID: pick, newlyBound: true, staleRepaired: staleRepaired}
 }
@@ -1164,7 +1176,7 @@ func (e *Engine) ExcludeAndBackupReselect(
 	if _, exists := st.backupBindings[conversationKey]; !exists {
 		st.backupBindingsCount++
 	}
-	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.backupBindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 	return pick, ReselectHealthy
 }
 
@@ -1225,7 +1237,7 @@ func (e *Engine) RebindPast(groupID, conversationKey string, excludeIDs []string
 	if _, exists := st.bindings[conversationKey]; !exists {
 		st.bindingsCount++
 	}
-	st.bindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.bindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 }
 
 // RebindBackupPast is RebindPast for the BACKUP-pool binding map
@@ -1262,7 +1274,7 @@ func (e *Engine) RebindBackupPast(groupID, conversationKey string, excludeIDs []
 	if _, exists := st.backupBindings[conversationKey]; !exists {
 		st.backupBindingsCount++
 	}
-	st.backupBindings[conversationKey] = &binding{memberID: pick, boundAt: now}
+	st.backupBindings[conversationKey] = &binding{memberID: pick, createdAt: now}
 }
 
 // ClearCooldown removes groupID's cooldown row for memberID — the

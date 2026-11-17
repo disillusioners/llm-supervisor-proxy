@@ -7,25 +7,26 @@ import (
 )
 
 // binding is a single (conversationKey → memberID) pin with its
-// sliding-idle-TTL anchor (clone of credentiallb/binding.go, keyed by
+// absolute-lifetime anchor (clone of credentiallb/binding.go, keyed by
 // member MODEL ID instead of credential ID).
 //
-// #10 (leader-ruled, carried): boundAt is REFRESHED on every in-TTL
-// GetOrSelect hit and by every ExcludeAndReselect rebind; the binding
-// is eligible for expiry only after now-boundAt > ttl of CONSECUTIVE
-// IDLE. The TTL is an /idle/ ceiling, not a /lifetime/ ceiling.
+// createdAt is stamped ONCE at bind/rebind. It is NEVER refreshed
+// on a GetOrSelect hit — a continuously-hit conversation must not pin
+// a member forever. A binding is expired (and DELETED from the map on
+// read) once now-createdAt > ttl; after that the layer's default
+// selection runs exactly as if no binding ever existed.
 //
-// A cooldown NEVER touches boundAt — the cooldown map on groupState
+// A cooldown NEVER touches createdAt — the cooldown map on groupState
 // is separate state.
 type binding struct {
-	memberID string
-	boundAt  time.Time
+	memberID  string
+	createdAt time.Time
 }
 
-// expired reports whether the binding has been idle longer than ttl
+// expired reports whether the binding's absolute lifetime has elapsed
 // as of now (lazy-expiry predicate; the janitor applies the same one).
 func (b *binding) expired(ttl time.Duration, now time.Time) bool {
-	return now.Sub(b.boundAt) > ttl
+	return now.Sub(b.createdAt) > ttl
 }
 
 // groupState is the per-group engine state. Guarded by its own
@@ -76,8 +77,8 @@ type groupState struct {
 	// backupBindings maps conversationKey → binding for the BACKUP
 	// pool. Separate from `bindings`; never cross-referenced (a
 	// conversation that never fell back never sees this map; one
-	// that did keeps its backup binding per-pool, refreshed on
-	// every in-TTL hit, same sliding-idle-TTL semantics).
+	// that did keeps its backup binding per-pool, absolute-lifetime
+	// semantics (no refresh on hit).
 	backupBindings map[string]*binding
 
 	// cooldowns maps memberID → cooldownUntil. Separate from
@@ -247,4 +248,48 @@ func (st *groupState) pickHealthyExcludingLocked(now time.Time, sel *weightedSel
 	}
 	// Unreachable given r < total; defensive.
 	return ""
+}
+
+// SetBindingTTL installs the engine's absolute-lifetime TTL for
+// conversation bindings (createdAt + ttl). Nil-safe. The TTL lives
+// in an atomic.Int64, so the setter needs no mutex — the atomic IS
+// the guard, and the hot path reads it lock-free. Semantics:
+//
+//   - d <= 0: IGNORED — the current TTL is kept (a mis-wired or
+//     hand-edited config degrades to the prior value, never to 0).
+//   - d > BindingTTLCeiling (24h): clamped down to 24h.
+//   - 0 < d < BindingTTLMinGranularity (1ms): meaningless noise —
+//     RAISED to BindingTTLFloor (1m).
+//   - BindingTTLMinGranularity <= d < BindingTTLFloor: honoured
+//     VERBATIM — an operator may deliberately ask for a sub-minute
+//     affinity window (short-lived sessions, tests).
+//
+// Safe for concurrent use. Boot-captured in production (cmd/main.go).
+func (e *Engine) SetBindingTTL(d time.Duration) {
+	if e == nil {
+		return
+	}
+	if d <= 0 {
+		return
+	}
+	if d > BindingTTLCeiling {
+		d = BindingTTLCeiling
+	}
+	if d < BindingTTLMinGranularity {
+		d = BindingTTLFloor
+	}
+	e.ttl.Store(int64(d))
+}
+
+// BindingTTL returns the engine's effective binding TTL. Nil-safe;
+// the package default when unset (zero-value engine).
+func (e *Engine) BindingTTL() time.Duration {
+	if e == nil {
+		return DefaultBindingTTL
+	}
+	v := e.ttl.Load()
+	if v <= 0 {
+		return DefaultBindingTTL
+	}
+	return time.Duration(v)
 }

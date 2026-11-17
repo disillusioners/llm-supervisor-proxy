@@ -77,12 +77,12 @@ func (e *Engine) cooldownUntil(groupID, memberID string) time.Time {
 	return st.cooldowns[memberID] // zero value when absent
 }
 
-// bindingBoundAtForTest is the binding-state reader hook — the #10
-// sliding-idle-TTL counterpart of cooldownUntil above. It returns the
-// binding's boundAt anchor for (groupID, convKey) and whether a
+// bindingCreatedAtForTest is the binding-state reader hook — the
+// absolute-lifetime counterpart of cooldownUntil above. It returns the
+// binding's createdAt anchor for (groupID, convKey) and whether a
 // binding row exists (absent, or lazily expired / janitor-swept).
 // Read-only, referenced only from tests.
-func (e *Engine) bindingBoundAtForTest(groupID, convKey string) (time.Time, bool) {
+func (e *Engine) bindingCreatedAtForTest(groupID, convKey string) (time.Time, bool) {
 	if e == nil {
 		return time.Time{}, false
 	}
@@ -98,7 +98,7 @@ func (e *Engine) bindingBoundAtForTest(groupID, convKey string) (time.Time, bool
 	if !ok {
 		return time.Time{}, false
 	}
-	return b.boundAt, true
+	return b.createdAt, true
 }
 
 // forceCooldownExpiryForTest fast-forwards the cooldown row for
@@ -123,7 +123,7 @@ func (e *Engine) forceCooldownExpiryForTest(groupID, memberID string) {
 }
 
 // InjectPreconditionStateForTest primes the binding map so that
-// bindings[convKey] = memberID (boundAt = now). Used to drive the B2
+// bindings[convKey] = memberID (createdAt = now). Used to drive the B2
 // precondition-WIN path (binding == excludedMemberID, rebind
 // proceeds) AND the precondition-LOSE no-op path (binding !=
 // excludedMemberID, ExcludeAndReselect returns the unchanged binding)
@@ -144,12 +144,12 @@ func (e *Engine) InjectPreconditionStateForTest(groupID, convKey, memberID strin
 	if _, exists := st.bindings[convKey]; !exists {
 		st.bindingsCount++
 	}
-	st.bindings[convKey] = &binding{memberID: memberID, boundAt: time.Now()}
+	st.bindings[convKey] = &binding{memberID: memberID, createdAt: time.Now()}
 }
 
 // InjectBackupPreconditionStateForTest primes the BACKUP-pool
 // binding map (backupBindings) so that backupBindings[convKey] =
-// memberID (boundAt = now) — the backup-pool twin of
+// memberID (createdAt = now) — the backup-pool twin of
 // InjectPreconditionStateForTest.
 //
 // group-backup-members / D8: the D8 tests need to place a binding
@@ -175,7 +175,7 @@ func (e *Engine) InjectBackupPreconditionStateForTest(groupID, convKey, memberID
 	if _, exists := st.backupBindings[convKey]; !exists {
 		st.backupBindingsCount++
 	}
-	st.backupBindings[convKey] = &binding{memberID: memberID, boundAt: time.Now()}
+	st.backupBindings[convKey] = &binding{memberID: memberID, createdAt: time.Now()}
 }
 
 // InjectSingleMemberExclusionForTest truncates the group's engine

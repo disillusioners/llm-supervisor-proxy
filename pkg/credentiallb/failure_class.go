@@ -62,6 +62,21 @@ const (
 	QuotaCooldownCeiling = 24 * time.Hour
 )
 
+const (
+	// Binding TTL clamp bounds (absolute lifetime per binding).
+	// config.Validate() mirrors THESE for group_binding_ttl /
+	// model_binding_ttl (single source of truth); the engine seam
+	// deliberately honours sub-floor values verbatim (see SetBindingTTL).
+	// BindingTTLFloor is the minimum binding TTL (1m).
+	BindingTTLFloor = time.Minute
+	// BindingTTLCeiling is the maximum binding TTL (24h).
+	BindingTTLCeiling = 24 * time.Hour
+	// BindingTTLMinGranularity is the smallest TTL the engine honours
+	// verbatim; a value below it is meaningless noise and is floored to
+	// BindingTTLFloor (1m).
+	BindingTTLMinGranularity = time.Millisecond
+)
+
 // SetQuotaCooldown installs the engine's quota-class cooldown. Nil-safe.
 // Values <= 0 reset to DefaultQuotaCooldown (a mis-wired or hand-edited
 // config degrades to sane behavior — same discipline as NewEngine).
