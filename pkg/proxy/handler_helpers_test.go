@@ -172,45 +172,45 @@ func TestExtractUsageFromChunk(t *testing.T) {
 // (content extracted, thinking empty).
 func TestExtractNonStreamContent(t *testing.T) {
 	tests := []struct {
-		name         string
-		body         string
-		wantContent  string
+		name        string
+		body        string
+		wantContent string
 		wantThinking string
 	}{
 		{
-			name:         "reasoning_content top-level",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning_content":"thought-A"}}]}`,
-			wantContent:  "answer",
+			name: "reasoning_content top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning_content":"thought-A"}}]}`,
+			wantContent: "answer",
 			wantThinking: "thought-A",
 		},
 		{
-			name:         "reasoning top-level",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning":"thought-B"}}]}`,
-			wantContent:  "answer",
+			name: "reasoning top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","reasoning":"thought-B"}}]}`,
+			wantContent: "answer",
 			wantThinking: "thought-B",
 		},
 		{
-			name:         "thinking top-level",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"answer","thinking":"thought-C"}}]}`,
-			wantContent:  "answer",
+			name: "thinking top-level",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","thinking":"thought-C"}}]}`,
+			wantContent: "answer",
 			wantThinking: "thought-C",
 		},
 		{
-			name:         "provider_specific_fields.reasoning_content",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"answer","provider_specific_fields":{"reasoning_content":"thought-D"}}}]}`,
-			wantContent:  "answer",
+			name: "provider_specific_fields.reasoning_content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"answer","provider_specific_fields":{"reasoning_content":"thought-D"}}}]}`,
+			wantContent: "answer",
 			wantThinking: "thought-D",
 		},
 		{
-			name:         "none - legacy plain content",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"plain answer"}}]}`,
-			wantContent:  "plain answer",
+			name: "none - legacy plain content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"plain answer"}}]}`,
+			wantContent: "plain answer",
 			wantThinking: "",
 		},
 		{
-			name:         "empty content + reasoning_content",
-			body:         `{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"thought-E"}}]}`,
-			wantContent:  "",
+			name: "empty content + reasoning_content",
+			body: `{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"thought-E"}}]}`,
+			wantContent: "",
 			wantThinking: "thought-E",
 		},
 	}

@@ -141,7 +141,7 @@ func TestHandlerCounterIntegration(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials:   models.TestRefs("test-credential"), // Reference the credential
+		Credentials: models.TestRefs("test-credential"), // Reference the credential
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -304,7 +304,7 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		Name:          "Test Model",
 		Enabled:       true,
 		Internal:      true,
-		Credentials:   models.TestRefs("test-credential"),
+		Credentials: models.TestRefs("test-credential"),
 		InternalModel: "test-model",
 	})
 	if err != nil {
@@ -397,3 +397,4 @@ func TestHandlerCounterIntegration_MultipleRequests(t *testing.T) {
 		t.Errorf("total_tokens = %d, want 450", totalTok)
 	}
 }
+

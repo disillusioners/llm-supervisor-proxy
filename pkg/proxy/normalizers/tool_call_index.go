@@ -10,10 +10,10 @@ import (
 // chunks and assigns indices based on when each new tool call first appears.
 //
 // State tracking:
-//   - First chunk with tool_calls: index = 0
-//   - Subsequent chunks: increment index when new tool call ID appears
-//   - State is stored in NormalizeContext.SeenToolCallIDs to avoid race conditions
-//     when multiple streams are processed concurrently
+// - First chunk with tool_calls: index = 0
+// - Subsequent chunks: increment index when new tool call ID appears
+// - State is stored in NormalizeContext.SeenToolCallIDs to avoid race conditions
+//   when multiple streams are processed concurrently
 type FixMissingToolCallIndexNormalizer struct{}
 
 // NewFixMissingToolCallIndexNormalizer creates a new FixMissingToolCallIndexNormalizer

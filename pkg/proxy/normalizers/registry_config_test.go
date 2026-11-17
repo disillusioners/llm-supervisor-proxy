@@ -59,10 +59,10 @@ func (m *mockModelsConfig) ResolveInternalConfigWithAffinity(modelID, conversati
 
 func (m *mockModelsConfig) AddModelForTest(id string, internal bool) {
 	m.models[id] = &models.ModelConfig{
-		ID:          id,
-		Name:        id,
-		Enabled:     true,
-		Internal:    internal,
+		ID:           id,
+		Name:         id,
+		Enabled:      true,
+		Internal:     internal,
 		Credentials: models.TestRefs("cred-1"),
 	}
 }
