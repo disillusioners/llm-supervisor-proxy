@@ -585,6 +585,9 @@ func TestCredentialGroup_StoreValidation_GroupRules(t *testing.T) {
 	if !strings.Contains(err.Error(), "g-ghost") {
 		t.Fatalf("AddModel err = %q, want it to name the missing group 'g-ghost'", err.Error())
 	}
+	if !strings.Contains(err.Error(), "credential group") {
+		t.Fatalf("AddModel err = %q, want the qualified 'credential group' literal", err.Error())
+	}
 
 	// The happy path still works (a chat model with a group ref).
 	if err := mgr.AddModel(models.ModelConfig{
