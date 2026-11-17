@@ -296,7 +296,6 @@ func TestHandleChatCompletions_RejectsDecisionGroupMisroute(t *testing.T) {
 	}
 }
 
-
 // newCachedProxyModels builds the PRODUCTION models binding — a real
 // models manager over a migrated SQLite store plus the CACHED
 // decorator over it (CACHE_LAYER_ENABLED defaults ON in production).
