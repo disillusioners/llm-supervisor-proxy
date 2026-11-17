@@ -1082,6 +1082,22 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// The write-time half of the rewrite-boundary lane check
+		// (the decision-groups commission): a chat model's
+		// fallback chain must not name a DECISION-lane group (the
+		// chat lane would carry the decision member into its race
+		// list). Runs at the top level so it applies to every kind,
+		// not only the kind-specific branches.
+		if err := models.ValidateFallbackChainLanes(&models.ModelConfig{
+			ID:            newModel.ID,
+			Kind:          newModel.Kind,
+			FallbackChain: newModel.FallbackChain,
+		}, s.modelsConfig.GetModels()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 		if newModel.Kind == models.KindImageGen {
 			if !newModel.Internal {
 				w.Header().Set("Content-Type", "application/json")
@@ -1210,21 +1226,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{
 					"error": "kind \"decision\" does not support fallback_chain",
 				})
-				return
-			}
-			// The write-time half of the rewrite-boundary lane check
-			// (the decision-groups commission): a chat model's
-			// fallback chain must not name a DECISION-lane group (the
-			// chat lane would carry the decision member into its race
-			// list).
-			if err := models.ValidateFallbackChainLanes(&models.ModelConfig{
-				ID:            newModel.ID,
-				Kind:          newModel.Kind,
-				FallbackChain: newModel.FallbackChain,
-			}, s.modelsConfig.GetModels()); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
 			// D6
@@ -1634,6 +1635,20 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// The write-time half of the rewrite-boundary lane check
+		// (the decision-groups commission): a chat model's
+		// fallback chain must not name a DECISION-lane group. Runs
+		// at the top level so it applies to every kind.
+		if err := models.ValidateFallbackChainLanes(&models.ModelConfig{
+			ID:            updatedModel.ID,
+			Kind:          updatedModel.Kind,
+			FallbackChain: updatedModel.FallbackChain,
+		}, s.modelsConfig.GetModels()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 		if updatedModel.Kind == models.KindImageGen {
 			if !updatedModel.Internal {
 				w.Header().Set("Content-Type", "application/json")
@@ -1669,19 +1684,6 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]string{"error": "kind \"image-gen\" does not support fallback_chain"})
-				return
-			}
-			// The write-time half of the rewrite-boundary lane check
-			// (the decision-groups commission): a chat model's
-			// fallback chain must not name a DECISION-lane group.
-			if err := models.ValidateFallbackChainLanes(&models.ModelConfig{
-				ID:            updatedModel.ID,
-				Kind:          updatedModel.Kind,
-				FallbackChain: updatedModel.FallbackChain,
-			}, s.modelsConfig.GetModels()); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
 			if updatedModel.SecondaryUpstreamModel != "" {
