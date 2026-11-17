@@ -65,6 +65,13 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
+// decisionMisrouteCode is the machine-readable code for a decision-lane
+// misroute (a chat/Anthropic request naming a decision-lane group).
+// Named once per package; the pkg/proxy copy is a separate const
+// (packages do not import each other — the import guard forbids it)
+// carrying the same value + a cross-referencing comment.
+const decisionMisrouteCode = "decision_misroute"
+
 // Constants
 
 const (
@@ -319,14 +326,14 @@ func (h *Handler) HandleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[decision] rejecting decision-route post to non-decision kind model=%s (kind=%s)", model.ID, model.Kind)
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
-			"outcome":         "decision_misroute",
+			"outcome":         decisionMisrouteCode,
 			"model":           modelID,
 			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIErrorWithCode(w, http.StatusBadRequest,
 			fmt.Sprintf("decision models are served by /v1/decisions only (got kind %q)", model.Kind),
-			"decision_misroute")
+			decisionMisrouteCode)
 		return
 	}
 

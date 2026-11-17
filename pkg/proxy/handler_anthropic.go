@@ -81,11 +81,6 @@ func debugLog(format string, args ...interface{}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The compile-time proof that the PRODUCTION models binding satisfies
-// the group-lane seam (the decorator-forward trap): a removed forward
-// must break the BUILD, not silently no-op in production.
-var _ groupLaneReader = (*modelscache.CachedModelsConfig)(nil)
-
 // Anthropic Messages API Handler
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -280,9 +275,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
-			"invalid_request_error", "decision_misroute",
+			"invalid_request_error", decisionMisrouteCode,
 			"decision models are served by /v1/decisions only"))
-		h.publishEvent("decision_misroute", map[string]interface{}{
+		h.publishEvent(decisionMisrouteCode, map[string]interface{}{
 			"id":    reqID,
 			"model": originalModel,
 		})
@@ -306,9 +301,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
-				"invalid_request_error", "decision_misroute",
+				"invalid_request_error", decisionMisrouteCode,
 				"decision models are served by /v1/decisions only"))
-			h.publishEvent("decision_misroute", map[string]interface{}{
+			h.publishEvent(decisionMisrouteCode, map[string]interface{}{
 				"id":    reqID,
 				"model": originalModel,
 			})
@@ -318,9 +313,9 @@ func (h *Handler) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(models.NewAnthropicError(
-				"invalid_request_error", "decision_misroute",
+				"invalid_request_error", decisionMisrouteCode,
 				"decision models are served by /v1/decisions only"))
-			h.publishEvent("decision_misroute", map[string]interface{}{
+			h.publishEvent(decisionMisrouteCode, map[string]interface{}{
 				"id":    reqID,
 				"model": originalModel,
 			})

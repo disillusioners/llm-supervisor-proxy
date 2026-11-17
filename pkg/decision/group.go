@@ -102,14 +102,14 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 	if !ok || lane != models.GroupLaneDecision {
 		log.Printf("[decision] group=%s refused: the group lane is not decision (lane=%q resolved=%v) — failing closed", groupID, lane, ok)
 		h.publishEvent(eventTypeDecision, map[string]interface{}{
-			"outcome":         "decision_misroute",
+			"outcome":         decisionMisrouteCode,
 			"model":           groupID,
 			"duration_ms":     time.Since(startTime).Milliseconds(),
 			"upstream_status": 0,
 		})
 		h.openAIErrorWithCode(w, http.StatusBadRequest,
 			fmt.Sprintf("decision models are served by /v1/decisions only (group %q is not a decision group)", groupID),
-			"decision_misroute")
+			decisionMisrouteCode)
 		return
 	}
 
@@ -131,7 +131,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 	var headSuppressed *policyMember
 	var headCred models.ResolvedCredential
 	var lastFailure *memberAttempt
-	hasSuppressedOnly := false
+	anySuppressed := false
 	// granted = the members that already received a D-C honest attempt
 	// in THIS request (the per-member latch; the per-request cap is
 	// derived from it — the FIRST fully-unavailable member in policy
@@ -175,7 +175,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			suppressed, reason := h.attemptSuppressed(candidate.ID, cred, wireModel, granted)
 			if suppressed {
 				skipped++
-				hasSuppressedOnly = true
+				anySuppressed = true
 				if idx == 0 && headSuppressed == nil {
 					headSuppressed = &candidate
 					headCred = cred
@@ -252,6 +252,10 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			// The honest attempt IS a real attempt: the accounting
 			// increments BEFORE it, so a client-attributable failure
 			// (the fail-fast below) reports it honestly (R-5).
+			// No per-attempt events here by design — only the terminal
+			// event (the in-loop attempt publishes member_attempted /
+			// the outcome; the honest attempt's outcome is relayed by
+			// the terminal fail-fast or the exhaustion envelope).
 			attempted++
 			membersAttempted++
 			res := h.attemptDecisionMember(headSuppressed.ID, headCred, req, rawBody, r)
@@ -277,7 +281,8 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 		// SUPPRESSED (never attempted) must not count as a failure:
 		// if a genuine failure exists, fail with that failure's error
 		// instead of the exhaustion envelope.
-		if hasSuppressedOnly && lastFailure != nil {
+		// a suppression means "all members failed" would overclaim.
+		if anySuppressed && lastFailure != nil {
 			h.failFastDecisionGroup(w, groupID, *lastFailure, attempted, skipped, membersAttempted, startTime)
 			return
 		}
@@ -356,6 +361,14 @@ func (h *Handler) exhaustDecisionGroup(w http.ResponseWriter, groupID string, at
 // event payload — the SINGLE SOURCE of the counter key spelling (the
 // fail-fast event and the exhaustion envelope both publish these three
 // keys through this one builder, so the two can never drift).
+//
+// Note on attempted vs members_attempted: both increment at the same
+// two sites today (the in-loop attempt at :185-186 and the OQ-1 lift
+// at :246-247), so they are EQUAL for every walk. They would diverge
+// only under a per-distinct-member count during within-member
+// rotation (a member that rotates across two credentials would then
+// contribute 2 to attempted but 1 to members_attempted). The leader
+// rejected dropping either (ADR-20 additive rule); both are published.
 func withDecisionAccounting(base map[string]interface{}, attempted, skipped, membersAttempted int) map[string]interface{} {
 	base["attempted"] = attempted
 	base["skipped"] = skipped
@@ -583,6 +596,7 @@ func (h *Handler) attemptDecisionMember(memberID string, cred models.ResolvedCre
 	upstreamURL, upstreamBody, err := provider.BuildUpstream(cred, req, rawBody)
 	if err != nil {
 		res.failure = &memberFailure{outcome: "build_failed", advance: true}
+		res.err = err
 		return res
 	}
 
@@ -592,6 +606,7 @@ func (h *Handler) attemptDecisionMember(memberID string, cred models.ResolvedCre
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
 	if err != nil {
 		res.failure = &memberFailure{outcome: "request_build_failed", advance: true}
+		res.err = err
 		return res
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
@@ -614,6 +629,7 @@ func (h *Handler) attemptDecisionMember(memberID string, cred models.ResolvedCre
 			outcome = "deadline"
 		}
 		res.failure = &memberFailure{outcome: outcome, advance: true}
+		res.err = err
 		return res
 	}
 	defer resp.Body.Close()
@@ -622,6 +638,7 @@ func (h *Handler) attemptDecisionMember(memberID string, cred models.ResolvedCre
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
 	if err != nil {
 		res.failure = &memberFailure{outcome: "upstream_read_failed", advance: true}
+		res.err = err
 		return res
 	}
 	if len(respBody) > maxResponseBodyBytes {
@@ -633,12 +650,14 @@ func (h *Handler) attemptDecisionMember(memberID string, cred models.ResolvedCre
 	typedResp, outcome, err := provider.InspectResponse(respBody, req)
 	if err != nil {
 		res.failure = &memberFailure{outcome: "inspect_error", advance: true}
+		res.err = err
 		return res
 	}
 	res.typed = typedResp
 	res.outcome = outcome
 	if outcome == nil {
 		res.failure = &memberFailure{outcome: "inspect_error", advance: true}
+		res.err = err
 		return res
 	}
 	// The handler stamps the RAW upstream status — the adapter seam

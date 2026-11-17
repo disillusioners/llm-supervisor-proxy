@@ -1840,6 +1840,17 @@ func TestDecision_DoctrineLine_PinnedVerbatimAtSeam(t *testing.T) {
 	if !strings.Contains(string(src), doctrine) {
 		t.Fatalf("the doctrine line must be present VERBATIM in suppression.go — the seam that decides attempt-vs-skip")
 	}
+
+	t.Run("policy_go_copy", func(t *testing.T) {
+		// The doctrine's second verbatim copy (policy.go) must match.
+		src2, err := os.ReadFile("policy.go")
+		if err != nil {
+			t.Fatalf("read policy.go: %v", err)
+		}
+		if !strings.Contains(string(src2), doctrine) {
+			t.Fatalf("the doctrine line must be present VERBATIM in policy.go (the second production copy)")
+		}
+	})
 }
 
 // TestDecision_Group_ThroughCachedConfig — the PRODUCTION binding (a

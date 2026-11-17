@@ -56,10 +56,10 @@ type groupPolicy struct {
 // shadow-claimed member must resolve to ITSELF, not to the claiming
 // group.
 func buildGroupPolicy(group *models.ModelConfig, rows []models.ModelConfig, lane models.GroupLane) groupPolicy {
-	policy := groupPolicy{GroupID: group.ID, Lane: lane}
 	if group == nil {
-		return policy
+		return groupPolicy{Lane: lane}
 	}
+	policy := groupPolicy{GroupID: group.ID, Lane: lane}
 	byID := make(map[string]models.ModelConfig, len(rows))
 	for _, row := range rows {
 		byID[row.ID] = row

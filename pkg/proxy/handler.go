@@ -73,12 +73,18 @@ import (
 	usage "github.com/disillusioners/llm-supervisor-proxy/pkg/usage"
 )
 
-// Config holds runtime configuration for the proxy handler
+// decisionMisrouteCode is the machine-readable code for a decision-lane
+// misroute. The pkg/decision package carries its own copy of the
+// same value (packages do not import each other — the import guard
+// forbids it); the two must stay in sync by hand.
+const decisionMisrouteCode = "decision_misroute"
+
 // The compile-time proof that the PRODUCTION models binding satisfies
 // the group-lane seam (the decorator-forward trap): a removed forward
 // must break the BUILD, not silently no-op in production.
 var _ groupLaneReader = (*modelscache.CachedModelsConfig)(nil)
 
+// Config holds runtime configuration for the proxy handler
 type Config struct {
 	ConfigMgr    config.ManagerInterface      // Config manager for dynamic updates
 	ModelsConfig models.ModelsConfigInterface // Models config for fallback chains
@@ -294,8 +300,8 @@ func (h *Handler) publishEvent(eventType string, data interface{}) {
 // decision-lane misroute refusal (the chat lanes). The event type is
 // lane-scoped: the text lane's own event vocabulary is untouched.
 func (h *Handler) publishDecisionMisrouteEvent(modelID string) {
-	h.publishEvent("decision_misroute", map[string]interface{}{
-		"outcome": "decision_misroute",
+	h.publishEvent(decisionMisrouteCode, map[string]interface{}{
+		"outcome": decisionMisrouteCode,
 		"model":   modelID,
 	})
 }
@@ -655,7 +661,7 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[decision] rejecting chat misroute to decision model=%s (model is served by /v1/decisions only)", rc.resolvedModel.ID)
 		h.sendError(w, http.StatusBadRequest,
 			"decision models are served by /v1/decisions only",
-			models.ErrorTypeServerError, "decision_misroute")
+			models.ErrorTypeServerError, decisionMisrouteCode)
 		return
 	}
 
@@ -677,14 +683,14 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			log.Printf("[decision] rejecting chat misroute to decision group=%s (the group is served by /v1/decisions only)", groupID)
 			h.sendError(w, http.StatusBadRequest,
 				"decision models are served by /v1/decisions only",
-				models.ErrorTypeServerError, "decision_misroute")
+				models.ErrorTypeServerError, decisionMisrouteCode)
 			return
 		case laneOK && lane == models.GroupLaneChat && groupHasDecisionMember(rc.conf.ModelsConfig.GetModels(), groupID):
 			log.Printf("[decision] refusing chat group=%s — the group carries a decision-kind member (the mixed shape must never be served on the chat lane)", groupID)
 			h.publishDecisionMisrouteEvent(groupID)
 			h.sendError(w, http.StatusBadRequest,
 				"decision models are served by /v1/decisions only",
-				models.ErrorTypeServerError, "decision_misroute")
+				models.ErrorTypeServerError, decisionMisrouteCode)
 			return
 		}
 	}
