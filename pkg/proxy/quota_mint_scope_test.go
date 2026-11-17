@@ -30,8 +30,9 @@ package proxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -45,30 +46,12 @@ import (
 
 // quotaScopeEnv is the shared state of the quota-scope harness: the
 // API key of every upstream call, in order.
+//
+// The recorder itself is the SHARED upstreamCallRecorder (see
+// upstream_call_recorder_test.go) — the Anthropic-lane harness uses the
+// same one, so the two lanes cannot drift apart in what they observe.
 type quotaScopeEnv struct {
-	mu    sync.Mutex
-	calls []string
-}
-
-func (e *quotaScopeEnv) record(apiKey string) {
-	e.mu.Lock()
-	e.calls = append(e.calls, apiKey)
-	e.mu.Unlock()
-}
-
-func (e *quotaScopeEnv) calledKeys() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return append([]string{}, e.calls...)
-}
-
-func (e *quotaScopeEnv) called(apiKey string) bool {
-	for _, k := range e.calledKeys() {
-		if k == apiKey {
-			return true
-		}
-	}
-	return false
+	upstreamCallRecorder
 }
 
 // quotaScopeProvider serves ONE credential. A WALLED credential answers
@@ -135,6 +118,16 @@ func newQuotaScopeEnv(t *testing.T, chain []layeredChainModel, walledCredIDs map
 	engine := credentiallb.NewEngine(time.Hour, time.Hour, 42, 60*time.Second)
 	t.Cleanup(engine.Stop)
 
+	// The credentials point at a LOCAL stub server. The stubbed
+	// provider never uses it, but a spawn that resolves AFTER the
+	// newProviderClient stub is restored would otherwise build a REAL
+	// client and attempt an OUTBOUND request (the review's stray-attempt
+	// risk). With a local endpoint the late resolve is harmless.
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(stub.Close)
+
 	modelIDs := make([]string, 0, len(chain))
 	for _, m := range chain {
 		ids := make([]string, 0, m.credCount)
@@ -142,7 +135,7 @@ func newQuotaScopeEnv(t *testing.T, chain []layeredChainModel, walledCredIDs map
 			id := "cred-" + m.id + "-" + string(rune('A'+i))
 			ids = append(ids, id)
 			mock.AddCredential(models.CredentialConfig{
-				ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: "http://upstream-" + id,
+				ID: id, Provider: "openai", APIKey: "key-" + id, BaseURL: stub.URL,
 			})
 		}
 		mock.AddModel(models.ModelConfig{
@@ -353,12 +346,39 @@ func TestQuotaMintScope_AllCooling_OneHonestAttemptSoonestRecovering(t *testing.
 // request the binding must point at the SIBLING credential (the
 // credential moved) while the MEMBER (the model) is unchanged — member
 // affinity with credential mobility.
+//
+// THE OBSERVATION IS READ-ONLY (review B-1): the binding is read with
+// credentiallb.Engine.BoundCredentialForTest, NOT with GetOrSelect.
+// GetOrSelect is get-or-SELECT — a cooling binding is dropped and a
+// fresh pick is written — so a GetOrSelect-based assertion writes the
+// state it then asserts: it cannot distinguish "the failover rebound
+// the key" from "my observation re-picked it". Deleting the engine's
+// rebind write leaves a GetOrSelect-based test PASSING; the read-only
+// observation fails it (the bound credential stays the walled one).
+//
+// TWO-POINT OBSERVATION: BEFORE the request the key is bound to the
+// walled credential; AFTER the request the SAME key is bound to the
+// healthy sibling.
+//
+// The rebind's "was this a first binding" flag is deliberately NOT
+// pinned here: the standing ruling keeps "one rebind per active
+// conversation per 30m" as intended behavior, and this assertion must
+// not constrain it.
 func TestQuotaMintScope_HashBoundMemberAutoSwitch(t *testing.T) {
 	const convKey = "conv-quota-mint-scope-hash-bound"
 	coord, env, engine, _, _ := newQuotaScopeEnv(t,
 		[]layeredChainModel{{id: "m1", credCount: 2}, {id: "m2", credCount: 2}},
 		map[string]bool{"cred-m1-A": true},
 		"cred-m1-A", convKey)
+
+	// BEFORE — the hash is bound to the WALLED credential (read-only).
+	before, bound := engine.BoundCredentialForTest("m1", convKey)
+	if !bound {
+		t.Fatal("no hash binding before the request — the conversation key must be bound to a credential")
+	}
+	if before != "cred-m1-A" {
+		t.Fatalf("hash-bound credential BEFORE = %q, want cred-m1-A (the walled account)", before)
+	}
 
 	coord.Start()
 	winner := coord.WaitForWinner()
@@ -371,16 +391,16 @@ func TestQuotaMintScope_HashBoundMemberAutoSwitch(t *testing.T) {
 	if !env.called("key-cred-m1-B") {
 		t.Fatalf("the sibling credential was never called (calls=%v)", env.calledKeys())
 	}
-	// The hash binding MOVED to the healthy sibling — the credential is
-	// the mobile part of the binding.
-	bound, newlyBound, err := engine.GetOrSelect("m1", convKey)
-	if err != nil {
-		t.Fatalf("GetOrSelect after the failover: %v", err)
+	// AFTER — the SAME key is bound to the healthy sibling: the
+	// credential is the mobile part of the binding, the member (the
+	// model) is not.
+	after, bound := engine.BoundCredentialForTest("m1", convKey)
+	if !bound {
+		t.Fatal("no hash binding after the request")
 	}
-	if bound != "cred-m1-B" {
-		t.Fatalf("hash-bound credential = %q, want cred-m1-B — the binding must follow the auto-switch", bound)
+	if after != "cred-m1-B" {
+		t.Fatalf("hash-bound credential AFTER = %q, want cred-m1-B — the binding must follow the auto-switch", after)
 	}
-	_ = newlyBound
 }
 
 // TestQuotaMintScope_PerCredentialQuotaRotationRegression is the

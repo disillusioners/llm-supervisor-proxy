@@ -103,6 +103,38 @@ func (e *Engine) bindingCreatedAtForTest(modelID, convKey string) (time.Time, bo
 	return b.createdAt, true
 }
 
+// BoundCredentialForTest returns the credential the (modelID, convKey)
+// binding currently points at, and whether a binding row exists.
+//
+// READ-ONLY BY CONTRACT: it never writes, never rebinds, and never
+// refreshes the binding's createdAt anchor. It exists because
+// GetOrSelect is get-or-SELECT — a cooling binding is DROPPED and a
+// fresh pick is written (engine.go, the full path) — so a test that
+// observes the binding through GetOrSelect WRITES the state it then
+// asserts, and cannot distinguish "the failover rebound the key" from
+// "my observation re-picked it". This hook observes without mutating.
+//
+// Nil-safe: a nil engine, an unknown model or an unbound key report
+// ("", false).
+func (e *Engine) BoundCredentialForTest(modelID, convKey string) (string, bool) {
+	if e == nil {
+		return "", false
+	}
+	e.mu.RLock()
+	st := e.models[modelID]
+	e.mu.RUnlock()
+	if st == nil {
+		return "", false
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	b, ok := st.bindings[convKey]
+	if !ok {
+		return "", false
+	}
+	return b.credentialID, true
+}
+
 // forceCooldownExpiryForTest fast-forwards the cooldown row for
 // (modelID, credID) to the past so the read-time check treats it as
 // expired immediately and the next janitor sweep removes the row
