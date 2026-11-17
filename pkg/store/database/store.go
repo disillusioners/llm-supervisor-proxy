@@ -2097,7 +2097,13 @@ func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
 	for _, c := range creds {
 		credentialIDs[c.ID] = true
 	}
-	return m.validateModelAgainstCredentials(model, credentialIDs)
+	if err := m.validateModelAgainstCredentials(model, credentialIDs); err != nil {
+		return err
+	}
+	// The write-time half of the rewrite-boundary lane check: a chat
+	// model's fallback chain must not name a DECISION-lane group (the
+	// chat lane would carry the decision member into its race list).
+	return models.ValidateFallbackChainLanes(&model, m.GetModels())
 }
 
 // validateGroupWrite is the group-row counterpart of

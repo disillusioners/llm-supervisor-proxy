@@ -1380,14 +1380,30 @@ func TestGroup_RewriteGroupEntries_DecisionGroupInChatChain_BoundaryRefusal(t *t
 		t.Fatalf("save decision group: %v", err)
 	}
 	// The chat main carries the decision group in its fallback chain.
+	// The WRITE-TIME rule rejects that shape (the write-time half of
+	// the rewrite-boundary lane check).
 	main := models.ModelConfig{ID: "chat-main", Name: "Chat Main", Enabled: true, Kind: models.KindChat, Internal: true, InternalModel: "glm-5", Credentials: models.TestRefs("cred-openai")}
 	if err := mgr.AddModel(main); err != nil {
 		t.Fatalf("save chat main: %v", err)
 	}
 	main.FallbackChain = []string{"decision-group"}
-	if err := mgr.UpdateModel("chat-main", main); err != nil {
-		t.Fatalf("update chat main: %v", err)
+	if err := mgr.UpdateModel("chat-main", main); err == nil {
+		t.Fatal("the write-time rule must reject a chat model whose chain names a decision-lane group")
 	}
+	// The runtime net (defence in depth): a HAND-EDITED row (the shape
+	// the write-time rule cannot stop) is still refused at the rewrite
+	// boundary — the decision group never enters the chat execution
+	// list, and the healthy primary still serves.
+	chainJSON, err := json.Marshal([]string{"decision-group"})
+	if err != nil {
+		t.Fatalf("marshal chain: %v", err)
+	}
+	mgr.mu.Lock()
+	if _, err := mgr.store.DB.ExecContext(context.Background(), "UPDATE models SET fallback_chain_json = ? WHERE id = ?", string(chainJSON), "chat-main"); err != nil {
+		mgr.mu.Unlock()
+		t.Fatalf("raw chat main chain: %v", err)
+	}
+	mgr.mu.Unlock()
 
 	res := mgr.RewriteGroupEntries([]string{"chat-main", "decision-group"}, "")
 	if res.FailedGroupID != "" {
@@ -1545,9 +1561,19 @@ func TestUpdateModel_KindChange_GroupMember_Rejected(t *testing.T) {
 	if !ok || lane != models.GroupLaneChat {
 		t.Fatalf("GroupLane(coding-group) = (%q, %v), want (chat, true) after the refused retyping", lane, ok)
 	}
+	// The group still resolves to a CHAT member (the pick is the
+	// engine's weighted offer, so the identity may vary — the
+	// invariant is that the group is still chat-served).
 	res := mgr.RewriteGroupEntries([]string{"coding-group"}, "")
-	if res.MemberID != "coding" {
+	if res.MemberID != "coding" && res.MemberID != "coding-alt" {
 		t.Fatalf("the group resolution changed after the refused retyping: %+v", res)
+	}
+	member := mgr.GetModelNative(res.MemberID)
+	if member == nil {
+		t.Fatalf("the served member row is missing: %+v", res)
+	}
+	if lane, ok := models.MemberLane(member.Kind); !ok || lane != models.GroupLaneChat {
+		t.Fatalf("the served member must still be chat-lane (the legacy empty kind IS chat): %+v", member)
 	}
 }
 
@@ -1641,5 +1667,47 @@ func TestGroup_SingleMemberDecisionGroup_MemberRetypeRefused(t *testing.T) {
 	lane, ok = mgr.GroupLane("single-decision-group")
 	if !ok || lane != models.GroupLaneDecision {
 		t.Fatalf("the group re-laned despite the refusal: (%q, %v)", lane, ok)
+	}
+}
+
+// TestUpdateModel_FallbackChain_DecisionGroupTarget_Rejected — the
+// write-time half of the rewrite-boundary lane check: a chat model's
+// fallback chain must not name a DECISION-lane group (the chat lane
+// would carry the decision member into its race list).
+func TestUpdateModel_FallbackChain_DecisionGroupTarget_Rejected(t *testing.T) {
+	mgr, cleanup := newGroupManager(t)
+	defer cleanup()
+	seedDecisionMembers(t, mgr)
+	if err := mgr.AddModel(decisionGroup()); err != nil {
+		t.Fatalf("save decision group: %v", err)
+	}
+
+	// A chat model whose fallback chain names the decision group.
+	main := models.ModelConfig{
+		ID: "chat-main", Name: "Chat Main", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "glm-5",
+		Credentials:   models.TestRefs("cred-openai"),
+		FallbackChain: []string{"decision-group"},
+	}
+	err := mgr.AddModel(main)
+	if err == nil {
+		t.Fatal("a chat model whose fallback chain names a decision-lane group must be rejected")
+	}
+	if !strings.Contains(err.Error(), "decision-group") {
+		t.Errorf("the rejection %q must name the decision group", err.Error())
+	}
+
+	// The same rule on the UPDATE path.
+	other := models.ModelConfig{
+		ID: "chat-other", Name: "Chat Other", Enabled: true, Kind: models.KindChat,
+		Internal: true, InternalModel: "glm-5",
+		Credentials: models.TestRefs("cred-openai"),
+	}
+	if err := mgr.AddModel(other); err != nil {
+		t.Fatalf("save chat model: %v", err)
+	}
+	other.FallbackChain = []string{"decision-group"}
+	if err := mgr.UpdateModel("chat-other", other); err == nil {
+		t.Fatal("the update path must reject the decision-lane chain target too")
 	}
 }

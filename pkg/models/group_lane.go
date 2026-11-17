@@ -126,3 +126,59 @@ func EffectiveKind(kind string) string {
 func KindChangeGroupMemberMessage(memberID, groupID string) string {
 	return fmt.Sprintf("model %s: kind cannot be changed while it is a member of group %s (remove it from the group first)", memberID, groupID)
 }
+
+// GroupLaneFromCollection derives a group's lane from the model
+// COLLECTION (the group's current member rows are looked up by id).
+//
+// It is the collection-shaped twin of the manager's request-time
+// inference: both fold the CURRENT member kinds (never the write-time
+// value). A vanished member contributes no lane evidence; a disabled
+// member still counts (its kind is readable).
+func GroupLaneFromCollection(group ModelConfig, collection []ModelConfig) (GroupLane, bool) {
+	if !group.IsGroup() {
+		return "", false
+	}
+	byID := make(map[string]ModelConfig, len(collection))
+	for _, row := range collection {
+		byID[row.ID] = row
+	}
+	kinds := make([]string, 0, len(group.Members))
+	for _, member := range group.Members {
+		row, ok := byID[member.ModelID]
+		if !ok {
+			continue // vanished member — no lane evidence
+		}
+		kinds = append(kinds, row.Kind)
+	}
+	return UnanimousGroupLane(kinds)
+}
+
+// ValidateFallbackChainLanes refuses a model's fallback chain that
+// names a DECISION-lane group.
+//
+// The write-time half of the rewrite-boundary lane check: a chat lane
+// must never carry a decision group in its chain (the decision member
+// would enter the chat race list). The rule is lane-gated — a chain
+// target that is not a decision group is untouched (the historical
+// existence-only check still applies).
+func ValidateFallbackChainLanes(m *ModelConfig, collection []ModelConfig) error {
+	if m == nil || len(m.FallbackChain) == 0 {
+		return nil
+	}
+	if m.IsGroup() {
+		return nil // a group carries no fallback_chain (G6)
+	}
+	for _, targetID := range m.FallbackChain {
+		for _, row := range collection {
+			if row.ID != targetID || !row.IsGroup() {
+				continue
+			}
+			lane, ok := GroupLaneFromCollection(row, collection)
+			if !ok || lane != GroupLaneDecision {
+				continue // an unknown / chat-lane group — untouched
+			}
+			return fmt.Errorf("model %s: fallback_chain must not reference the decision-lane group %q (a decision group is served by /v1/decisions only)", m.ID, targetID)
+		}
+	}
+	return nil
+}
