@@ -153,3 +153,99 @@ This document was corrected in the FE test-hardening session:
 3. The document was RELABELLED as an **EARLY EXTRA PASS**: the
    authoritative phase3 zero-mod proof belongs to the TESTER GATE
    (`phase2-plan.md` §6.2). This file is a pre-gate data point only.
+
+
+---
+
+## Appendix (2026-11-17, O-10 — ModelForm credential-group kind gate) — post-change static re-record
+
+**EARLY EXTRA PASS — NOT the release gate.** This appendix is an ADDITIONAL
+pre-gate data point; it does NOT replace, weaken or pre-empt the
+authoritative phase3 static zero-mod proof, which remains the **TESTER
+GATE**'s (`phase2-plan.md` §6.2). The framing and the correction log above
+stand unchanged.
+
+The O-10 FE change (the chat model form now offers credential-group options
+to CHAT-kind models only) alters the built SPA, so the tracked embed tree
+was rebuilt and committed (`14db293 build(credential-groups): rebuild the
+embedded SPA for the ModelForm kind gate`), and a FRESH zero-mod cycle was
+recorded below.
+
+### Commands (run from the repo root unless noted)
+
+```sh
+# BEFORE (committed tree)
+find pkg/ui/static -type f | sort | xargs -r sha256sum
+
+# build cycle
+cd pkg/ui/frontend && npm run build
+cd /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-cred-groups
+
+# AFTER
+find pkg/ui/static -type f | sort | xargs -r sha256sum
+
+# post-build worktree check
+git status --porcelain -- pkg/ui/static/
+```
+
+### BEFORE (4-line hash listing — committed tree after the O-10 rebuild)
+
+```
+ca607d01fcf80a07e8f3bcc86f348817d6022a89ecf17c3c2d8fb14711fb8dde  pkg/ui/static/assets/SettingsPage-DdTORRXZ.js
+73eec8c1383440be383c0eba001b97047b1738a32df746d87716293e6e8a5872  pkg/ui/static/assets/index-CLCWY7h7.js
+a14e8d1c97d05d693b2d14399b254824b77f1d92af9a7fefdd2f87e2b7f993b2  pkg/ui/static/assets/index-Diz8jSFK.css
+44b10be7d2545f01d4e014dfa24f51932d90d1a6c30d56beb919a4a58cd5ab60  pkg/ui/static/index.html
+```
+
+### Build output (fresh cycle)
+
+```
+✓ 60 modules transformed.
+rendering chunks...
+computing gzip size...
+../static/index.html                         0.55 kB │ gzip:   0.35 kB
+../static/assets/index-Diz8jSFK.css         52.83 kB │ gzip:   8.82 kB
+../static/assets/SettingsPage-DdTORRXZ.js  205.65 kB │ gzip:  38.03 kB
+../static/assets/index-CLCWY7h7.js         313.51 kB │ gzip: 103.86 kB
+✓ built in 4.06s
+```
+
+### AFTER (4-line hash listing — after the fresh build)
+
+```
+ca607d01fcf80a07e8f3bcc86f348817d6022a89ecf17c3c2d8fb14711fb8dde  pkg/ui/static/assets/SettingsPage-DdTORRXZ.js
+73eec8c1383440be383c0eba001b97047b1738a32df746d87716293e6e8a5872  pkg/ui/static/assets/index-CLCWY7h7.js
+a14e8d1c97d05d693b2d14399b254824b77f1d92af9a7fefdd2f87e2b7f993b2  pkg/ui/static/assets/index-Diz8jSFK.css
+44b10be7d2545f01d4e014dfa24f51932d90d1a6c30d56beb919a4a58cd5ab60  pkg/ui/static/index.html
+```
+
+### Post-build worktree check (recorded verbatim)
+
+Command (repo root):
+
+```
+git status --porcelain -- pkg/ui/static/
+```
+
+Output:
+
+```
+```
+
+(EMPTY — the command printed nothing. The build rewrote the tracked embed
+in place and left the tree byte-identical to the committed state; no
+modified, no added and no untracked file under `pkg/ui/static/`.)
+
+### Result
+
+- diff (BEFORE vs AFTER) = empty → byte-identical.
+- The tracked embed is exactly **4** files (3 under `pkg/ui/static/assets/`
+  + `pkg/ui/static/index.html`) — `find pkg/ui/static -type f | wc -l` = 4.
+- The content-hashed asset names changed vs the phase-2 section above
+  (`SettingsPage-JML8-Hqt.js` → `SettingsPage-DdTORRXZ.js`,
+  `index-Df2Aqyha.js` → `index-CLCWY7h7.js`) because the FE sources
+  changed; the CSS asset (`index-Diz8jSFK.css`, sha256 `a14e8d1c…`) and
+  the file COUNT (4) are unchanged.
+- `git status --porcelain -- pkg/ui/static/` = EMPTY after the build.
+- All four tracked files are listed by the sanctioned command form; the
+  globstar form is not used anywhere in this document.
