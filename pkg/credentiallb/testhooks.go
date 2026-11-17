@@ -77,14 +77,14 @@ func (e *Engine) cooldownUntil(modelID, credID string) time.Time {
 	return st.cooldowns[credID] // zero value when absent
 }
 
-// bindingBoundAtForTest is the binding-state reader hook — the #10
-// sliding-idle-TTL counterpart of cooldownUntil above. It returns
-// the binding's boundAt anchor for (modelID, convKey) and whether a
+// bindingCreatedAtForTest is the binding-state reader hook — the
+// absolute-lifetime counterpart of cooldownUntil above. It returns the
+// binding's createdAt anchor for (modelID, convKey) and whether a
 // binding row exists (absent, or lazily expired / janitor-swept).
-// Phase 5 Task 44 (W7-3) uses it to pin that an in-TTL GetOrSelect
-// hit REFRESHES boundAt (strict increase); it is read-only, like
+// Absolute lifetime: an in-TTL GetOrSelect hit does NOT refresh
+// createdAt (it stays unchanged); read-only, like
 // cooldownUntil, and referenced only from tests.
-func (e *Engine) bindingBoundAtForTest(modelID, convKey string) (time.Time, bool) {
+func (e *Engine) bindingCreatedAtForTest(modelID, convKey string) (time.Time, bool) {
 	if e == nil {
 		return time.Time{}, false
 	}
@@ -100,7 +100,7 @@ func (e *Engine) bindingBoundAtForTest(modelID, convKey string) (time.Time, bool
 	if !ok {
 		return time.Time{}, false
 	}
-	return b.boundAt, true
+	return b.createdAt, true
 }
 
 // forceCooldownExpiryForTest fast-forwards the cooldown row for
@@ -126,7 +126,7 @@ func (e *Engine) forceCooldownExpiryForTest(modelID, credID string) {
 }
 
 // InjectPreconditionStateForTest primes the binding map so that
-// bindings[convKey] = credentialID (boundAt = now). Used to drive the
+// bindings[convKey] = credentialID (createdAt = now). Used to drive the
 // B2 precondition-WIN path (binding == excludedCredID, rebind
 // proceeds) AND the precondition-LOSE no-op path (binding !=
 // excludedCredID, ExcludeAndReselect returns the unchanged binding)
@@ -147,7 +147,7 @@ func (e *Engine) InjectPreconditionStateForTest(modelID, convKey, credentialID s
 	if _, exists := st.bindings[convKey]; !exists {
 		st.bindingsCount++
 	}
-	st.bindings[convKey] = &binding{credentialID: credentialID, boundAt: time.Now()}
+	st.bindings[convKey] = &binding{credentialID: credentialID, createdAt: time.Now()}
 }
 
 // InjectSingleCredExclusionForTest truncates the model's engine state

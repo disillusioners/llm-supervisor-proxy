@@ -39,7 +39,7 @@
 // weighted selector (O(log k) pick, weight<=0 ⇒ nil selector); E-1
 // two-level locking with optimistic read + write-upgrade re-verify;
 // E-3 n==1 fast path (day-1 single-member groups get zero engine
-// overhead); 24h sliding idle TTL + 5-minute janitor + 60s default
+// overhead); 30m absolute lifetime + 5-minute janitor + 60s default
 // cooldown (USER-DECIDED, Q3); ExcludeAndReselect semantics
 // (rebind-only-if-bound-to-failed, all-cooling ⇒ soonest-expiry
 // fall-through); testhooks.go cloned 1:1 (all 7 seams, Am14) so race

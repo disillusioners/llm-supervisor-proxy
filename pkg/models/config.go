@@ -330,8 +330,17 @@ func validateDecisionRules(m *ModelConfig, internalProvider string) error {
 //     (Credentials[0]).
 type CredentialRef struct {
 	CredentialID string `json:"credential_id"`
+	GroupID      string `json:"group_id,omitempty"`
 	Weight       int    `json:"weight"`
 	Position     int    `json:"position"`
+}
+
+// IsGroupRef reports whether r references a credential group rather
+// than a single credential. A ref is exactly one of direct
+// (CredentialID != "", GroupID == "") or group (GroupID != "",
+// CredentialID == "").
+func (r CredentialRef) IsGroupRef() bool {
+	return r.GroupID != ""
 }
 
 // ModelConfig represents the configuration for a single model.
@@ -462,6 +471,27 @@ type ModelsConfigInterface interface {
 	AddCredential(cred CredentialConfig) error
 	UpdateCredential(id string, cred CredentialConfig) error
 	RemoveCredential(id string) error
+
+	// Credential groups (DB-backed only; JSON twin returns stubs)
+	GetCredentialGroup(id string) *CredentialGroupConfig
+	GetCredentialGroups() []CredentialGroupConfig
+	AddCredentialGroup(g CredentialGroupConfig) error
+	UpdateCredentialGroup(id string, g CredentialGroupConfig) error
+	RemoveCredentialGroup(id string) error
+	ModelsUsingCredentialGroup(groupID string) []string
+	// ModelsUsingCredentialGroupsAll is the BATCHED group-usage scan:
+	// group id → the model ids referencing it, computed in ONE pass
+	// over the model table (never one scan per group).
+	//
+	// It lives on the INTERFACE (not manager-only) so the production
+	// binding — the modelscache decorator — serves the used_by surface
+	// from the authoritative DB pass instead of deriving it from the
+	// decorator's reconciled model-list snapshot (which is refreshed
+	// only on the decorator's reconcile tick, so it can lag a model
+	// written directly to the DB).
+	ModelsUsingCredentialGroupsAll() map[string][]string
+	GroupsContainingCredential(credID string) []string
+	FlattenCredentialRefs(model *ModelConfig) []CredentialRef
 
 	// Internal config resolution
 	ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool)
@@ -1038,6 +1068,9 @@ func (mc *ModelsConfig) Validate() error {
 			seen := make(map[string]bool, len(model.Credentials))
 			var primaryCred *CredentialConfig
 			for idx, ref := range model.Credentials {
+				if ref.GroupID != "" {
+					return fmt.Errorf("model %s: credentials[%d]: credential groups are supported only in the database config backend", model.ID, idx)
+				}
 				if ref.CredentialID == "" {
 					return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
 				}
@@ -1423,4 +1456,29 @@ func (mc *ModelsConfig) RemoveCredential(id string) error {
 	}
 
 	return mc.Credentials.RemoveCredential(id)
+}
+
+// Credential group stubs (JSON twin — DB-backed only). Eight of the nine
+// return empty/nil; FlattenCredentialRefs returns the raw list (identity
+// fallback) so A-2 gates never read a zero-length flat view.
+func (mc *ModelsConfig) GetCredentialGroup(id string) *CredentialGroupConfig { return nil }
+func (mc *ModelsConfig) GetCredentialGroups() []CredentialGroupConfig        { return nil }
+func (mc *ModelsConfig) AddCredentialGroup(g CredentialGroupConfig) error    { return nil }
+func (mc *ModelsConfig) UpdateCredentialGroup(id string, g CredentialGroupConfig) error {
+	return nil
+}
+func (mc *ModelsConfig) RemoveCredentialGroup(id string) error              { return nil }
+func (mc *ModelsConfig) ModelsUsingCredentialGroup(groupID string) []string { return nil }
+func (mc *ModelsConfig) GroupsContainingCredential(credID string) []string  { return nil }
+
+// ModelsUsingCredentialGroupsAll returns nil on the JSON twin: the JSON
+// backend has no credential groups at all, so there is no group usage to
+// report (the UI's one-pass model-list fallback covers this path).
+func (mc *ModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string { return nil }
+
+func (mc *ModelsConfig) FlattenCredentialRefs(model *ModelConfig) []CredentialRef {
+	if model == nil {
+		return nil
+	}
+	return model.Credentials
 }

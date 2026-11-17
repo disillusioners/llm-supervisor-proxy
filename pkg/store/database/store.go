@@ -220,6 +220,18 @@ func mergeConfig(existing, incoming config.Config) config.Config {
 		result.ModelSkipCacheTTL = incoming.ModelSkipCacheTTL
 	}
 
+	// Hash-sticky conversation bindings: same 0-means-not-sent shape
+	// (a zero-clearing PUT preserves the existing TTL rather than
+	// disabling the layer; if BOTH sides are zero — a stored config
+	// predating the knob — the boot seam's SetBindingTTL ignores the
+	// zero and the engine keeps its 30m constructor default).
+	if incoming.GroupBindingTTL != 0 {
+		result.GroupBindingTTL = incoming.GroupBindingTTL
+	}
+	if incoming.ModelBindingTTL != 0 {
+		result.ModelBindingTTL = incoming.ModelBindingTTL
+	}
+
 	return result
 }
 
@@ -685,10 +697,11 @@ func marshalCredentialsJSON(refs []models.CredentialRef) string {
 // test are deleted together).
 //
 // Phase 2 wiring: ModelsManager OWNS the credentiallb.Engine —
-// constructed in NewModelsManager (24h TTL / 5m sweep / time-seeded
-// RNG / 60s default cooldown), seeded via RebindFromStore for every
-// persisted model at startup, invalidated after every successful
-// credentials write, and exposed to Phase 3 via the typed Engine()
+// constructed in NewModelsManager (30m absolute-lifetime TTL / 5m
+// sweep / time-seeded RNG / 60s default cooldown), seeded via
+// RebindFromStore for every persisted model at startup, invalidated
+// after every successful credentials write, and exposed to Phase 3 via
+// the typed Engine()
 // accessor (for the proxy.NewHandler 7th constructor arg). The
 // engine itself never imports pkg/events: ModelsManager subscribes
 // to model.credentials.changed ON BEHALF of the engine (P2-3) and
@@ -725,6 +738,25 @@ type ModelsManager struct {
 	// manager holds no reference to one — cross-layer reads are
 	// impossible by construction (package-level import pin), not by a
 	// remembered rule.
+	//
+	// credential-groups commission (phase1 WU-3 / A-3): the credential
+	// group cache. m.groups is the FLATTEN AUTHORITY — the in-memory
+	// group set every resolution path expands against (zero-DB by
+	// contract). It is guarded by a DEDICATED groupsMu, NOT by m.mu:
+	// the flatten is called from sites that already hold m.mu.Lock()
+	// (the AddModel / UpdateModel engine-notify, the group-write
+	// fan-out, RemoveCredential) and Go's RWMutex is non-reentrant — an
+	// m.mu.RLock() inside the flatten would self-deadlock, while a
+	// lock-free map read on the resolve-hot path is a fatal
+	// concurrent-map read (a process crash on the critical substrate).
+	//
+	// Lock order is strictly m.mu → groupsMu; the reverse never occurs.
+	// groupMemberProviders is the member-credential → provider snapshot
+	// used by the A-8 fail-closed expand (a member whose provider
+	// diverges from the group's is skipped, never expanded).
+	groupsMu             sync.RWMutex
+	groups               map[string]models.CredentialGroupConfig
+	groupMemberProviders map[string]string
 }
 
 // Engine returns the underlying *credentiallb.Engine. It is non-nil
@@ -747,8 +779,8 @@ func (m *ModelsManager) GroupEngine() *grouplb.Engine {
 // NewModelsManager creates a new database-backed models manager with
 // an owned credential-LB engine (Phase 2).
 //
-// The engine is constructed with the production defaults (24h
-// sliding-idle TTL, 5m janitor sweep, time-based RNG seed, 60s
+// The engine is constructed with the production defaults (30m
+// absolute-lifetime TTL, 5m janitor sweep, time-based RNG seed, 60s
 // default cooldown) and seeded from the persisted models via
 // RebindFromStore (startup rebind — last call wins, no bindings
 // exist yet).
@@ -774,6 +806,8 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 			grouplb.DefaultMemberSeed,
 			grouplb.DefaultCooldown,
 		),
+		groups:               make(map[string]models.CredentialGroupConfig),
+		groupMemberProviders: make(map[string]string),
 	}
 
 	// load-balance-groups / P2.10 — restart cold-start documentation
@@ -783,10 +817,21 @@ func NewModelsManager(store *Store, eventBus *events.Bus) (*ModelsManager, error
 	// behavior is documented, not engineered around.
 	log.Printf("[grouplb] sticky group bindings are in-memory only — a restart clears all conversation affinity; in-flight conversations re-roll to a fresh member on their next request")
 
+	// credential-groups (phase1 WU-3 / T-11): rebuild the in-memory
+	// group cache from the DB BEFORE the startup rebind — the engine
+	// must be seeded with the FLATTENED credential lists (a group ref
+	// expands in place at its reference position). A failure here
+	// degrades to "group refs fail closed" (WARN + no members expanded)
+	// — never to a silent wrong list.
+	if err := m.rebuildCredentialGroupsCache(context.Background()); err != nil {
+		log.Printf("[WARN] [credential-groups] credential group cache rebuild failed at startup (%v) — credential group refs fail closed until the next rebuild", err)
+	}
+
 	// Startup rebind: seed engine state for every persisted model so
 	// the first request after boot resolves without a cold miss.
 	for _, mc := range m.GetModels() {
-		m.engine.RebindFromStore(mc.ID, mc.Credentials)
+		mcCopy := mc
+		m.engine.RebindFromStore(mcCopy.ID, m.FlattenCredentialRefs(&mcCopy))
 	}
 
 	// load-balance-groups §3.4: build the ID-space claim index at
@@ -864,7 +909,7 @@ func (m *ModelsManager) drainCredentialsChanged(ch chan events.Event) {
 			m.engine.OnModelChanged(modelID, nil)
 			continue
 		}
-		m.engine.OnModelChanged(modelID, mc.Credentials)
+		m.engine.OnModelChanged(modelID, m.FlattenCredentialRefs(mc))
 	}
 }
 
@@ -1629,7 +1674,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 	// bus broadcast for the on-behalf-of-the-engine drain loop.
 	// Engine methods are nil-safe, so a hand-constructed manager
 	// without an engine is fine here.
-	m.engine.OnModelChanged(model.ID, model.Credentials)
+	m.engine.OnModelChanged(model.ID, m.FlattenCredentialRefs(&model))
 	m.publishCredentialsChanged(model.ID)
 
 	// load-balance-groups §3.4 + §3.5: refresh the claim index after
@@ -1648,7 +1693,7 @@ func (m *ModelsManager) AddModel(model models.ModelConfig) error {
 // notifyGroupEngineLocked feeds the grouplb engine's survivor filter
 // after a successful group write (AddModel / UpdateModel): selector
 // rebuilt over the new member list; bindings whose member was
-// removed are dropped; boundAt of surviving bindings is preserved
+// removed are dropped; createdAt of surviving bindings is preserved
 // (E-2 semantics — weight nudges keep affinity). Nil/empty members on
 // a group row deletes the group's engine state. Non-group rows are a
 // no-op. The engine methods are nil-safe, so hand-constructed
@@ -1765,7 +1810,7 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	// write (E-2 filter-survivors) + bus broadcast. Holding m.mu here
 	// is safe: Bus.Publish sends are non-blocking and the drain loop
 	// only takes m.mu.RLock (no publish→drain cycle).
-	m.engine.OnModelChanged(model.ID, model.Credentials)
+	m.engine.OnModelChanged(model.ID, m.FlattenCredentialRefs(&model))
 	m.publishCredentialsChanged(model.ID)
 
 	// load-balance-groups §3.4: refresh the claim index (claim
@@ -1853,9 +1898,11 @@ func (m *ModelsManager) Validate() error {
 		modelIDs[model.ID] = true
 	}
 
-	// Build set of valid credential IDs
+	// Build set of valid credential IDs (and the credential snapshot the
+	// group-aware validator needs for its provider-parity rule).
+	credentials := m.GetCredentials()
 	credentialIDs := make(map[string]bool)
-	for _, cred := range m.GetCredentials() {
+	for _, cred := range credentials {
 		credentialIDs[cred.ID] = true
 	}
 
@@ -1891,7 +1938,7 @@ func (m *ModelsManager) Validate() error {
 		// Phase-1 W4 hardening: per-model rules are shared with the
 		// single-write AddModel/UpdateModel path via
 		// validateModelAgainstCredentials (see below).
-		if err := m.validateModelAgainstCredentials(model, credentialIDs); err != nil {
+		if err := m.validateModelAgainstCredentials(model, credentialIDs, credentials); err != nil {
 			return err
 		}
 	}
@@ -1919,6 +1966,11 @@ func (m *ModelsManager) Validate() error {
 // m.GetCredential — the canonical lookup against the persisted
 // credential row.
 //
+// `credentials` is the same snapshot as full configs (id + provider) —
+// the group-aware validator (models.ValidateCredentialRefs) needs the
+// PROVIDER of every referenced credential to enforce the same-provider
+// invariant across a mixed direct/group list.
+//
 // Cheap guards (empty ID / Name, duplicate / not-found) are NOT
 // re-run here — those live in AddModel / UpdateModel (write path) and
 // Validate (bulk path iterates `modelList` from the same source).
@@ -1927,7 +1979,7 @@ func (m *ModelsManager) Validate() error {
 // path emits, so downstream callers (pkg/ui/server.go surfaces, the
 // ModelsConfigInterface.Save callers, the existing 9-case validation
 // matrix test) keep matching.
-func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig, credentialIDs map[string]bool) error {
+func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig, credentialIDs map[string]bool, credentials []models.CredentialConfig) error {
 	if model.Internal {
 		// Phase 1: internal models must carry at least one credential ref.
 		// Empty Credentials ⇒ keep the legacy error text verbatim so
@@ -1939,6 +1991,14 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 		// Per-ref validation (Task 6 validation matrix).
 		seen := make(map[string]bool, len(model.Credentials))
 		for idx, ref := range model.Credentials {
+			// credential-groups: a GROUP ref carries no credential id
+			// (the locked representation) — the legacy per-ref checks
+			// below apply to DIRECT refs only; the group ref is
+			// validated by the group-aware validator further down
+			// (R-1/R-3/R-4/R-5 + the provider-parity rule).
+			if ref.IsGroupRef() {
+				continue
+			}
 			if ref.CredentialID == "" {
 				return fmt.Errorf("model %s: credentials[%d].credential_id is empty", model.ID, idx)
 			}
@@ -1978,6 +2038,20 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 
 		if model.InternalModel == "" {
 			return fmt.Errorf("model %s: internal_model is required when internal is true", model.ID)
+		}
+
+		// credential-groups (phase1 §b / T-9): the group-aware
+		// model-ref rules (R-1..R-7) — the group-aware twin of the
+		// legacy per-ref checks above. It runs LAST so every legacy
+		// error text keeps its priority (the 9-case validation matrix
+		// asserts on those texts verbatim).
+		//
+		// The group set is the FLATTEN AUTHORITY (m.groups) — what
+		// validates is what resolves. The model kind is passed
+		// explicitly: the R-5 rule (non-chat kinds forbid group refs)
+		// only fires when the kind is known.
+		if err := m.validateGroupAwareCredentialRefs(model, credentials); err != nil {
+			return err
 		}
 	}
 	// DEAD-POST-P1 (remove-external-upstream): the non-internal
@@ -2058,6 +2132,45 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 	return nil
 }
 
+// validateGroupAwareCredentialRefs runs the credential-group model-ref
+// rules (R-1..R-7 of phase1 §b) against the in-memory group map (the
+// FLATTEN AUTHORITY — what validates is what resolves) and the
+// credential snapshot.
+//
+// The rules it enforces:
+// R-1 — a ref is exactly one of direct / group (both-set and
+// neither-set are rejected);
+// R-3 — a group ref must name an existing group and carry weight > 0;
+// R-4 — the EXPANDED list (direct refs + group members) must not
+// exceed models.MaxCredentialRefs — the raw cap is checked separately;
+// R-5 — non-chat kinds forbid group refs;
+// plus the same-provider invariant across a mixed direct/group list.
+//
+// The kind is passed EXPLICITLY: without it the R-5 rule can never fire
+// (an empty kind defaults to "chat", where groups are allowed).
+func (m *ModelsManager) validateGroupAwareCredentialRefs(model models.ModelConfig, credentials []models.CredentialConfig) error {
+	groups := m.credentialGroupSnapshot()
+
+	// R-5 — enforced HERE, against the real kind constants. The shared
+	// validator's own non-chat check is a redundant backstop; the
+	// authoritative check must name the real kind ("image-gen"), so it
+	// lives on this side of the seam.
+	for idx, ref := range model.Credentials {
+		if !ref.IsGroupRef() {
+			continue
+		}
+		switch model.Kind {
+		case models.KindDecision, models.KindImageGen, models.KindGroup:
+			return fmt.Errorf("model %s: credentials[%d]: credential group refs are not allowed for kind %q", model.ID, idx, model.Kind)
+		}
+	}
+
+	if err := models.ValidateCredentialRefs(model.Credentials, groups, credentials, model.Kind); err != nil {
+		return fmt.Errorf("model %s: %w", model.ID, err)
+	}
+	return nil
+}
+
 // validateBeforeWrite runs the per-model validation rules from
 // validateModelAgainstCredentials against a fresh credential-IDs
 // snapshot, BEFORE acquiring the write lock. The snapshot is built
@@ -2078,6 +2191,21 @@ func (m *ModelsManager) validateModelAgainstCredentials(model models.ModelConfig
 // reachable and make groups unsavable. Both production write sites
 // (AddModel + UpdateModel) funnel through this one chokepoint.
 func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
+	// credential-groups (phase1 §b R-5): group refs are forbidden on
+	// non-chat kinds. The gate sits BEFORE the kind routing so a
+	// group-kind row is covered too (kind=="group" routes to the
+	// load-balance-group validators and never reaches the credential
+	// validator).
+	for idx, ref := range model.Credentials {
+		if !ref.IsGroupRef() {
+			continue
+		}
+		switch model.Kind {
+		case models.KindDecision, models.KindImageGen, models.KindGroup:
+			return fmt.Errorf("model %s: credentials[%d]: credential group refs are not allowed for kind %q", model.ID, idx, model.Kind)
+		}
+	}
+
 	// Am23 kind-routing — the branch precedes the Internal gate.
 	if model.Kind == models.KindGroup {
 		return m.validateGroupWrite(model)
@@ -2087,7 +2215,7 @@ func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
 	for _, c := range creds {
 		credentialIDs[c.ID] = true
 	}
-	return m.validateModelAgainstCredentials(model, credentialIDs)
+	return m.validateModelAgainstCredentials(model, credentialIDs, creds)
 }
 
 // validateGroupWrite is the group-row counterpart of
@@ -2350,6 +2478,20 @@ func (m *ModelsManager) UpdateCredential(id string, cred models.CredentialConfig
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// credential-groups (phase1 §c.4 / T-17): a provider change on a
+	// GROUPED credential breaks the same-provider invariant of every
+	// group that lists it as a member — block it at the source (the
+	// error names the group). The lookups take groupsMu only, so they
+	// are safe inside this m.mu.Lock() span (lock order m.mu → groupsMu).
+	if currentProvider := m.credentialProviderNoLock(id); currentProvider != "" && !strings.EqualFold(currentProvider, cred.Provider) {
+		for _, g := range m.credentialGroupsContainingCredential(id) {
+			if !strings.EqualFold(g.Provider, cred.Provider) {
+				return fmt.Errorf("credential '%s' cannot change provider from %q to %q — it is a member of credential group '%s' whose provider is %q",
+					id, currentProvider, cred.Provider, g.ID, g.Provider)
+			}
+		}
+	}
+
 	var query string
 	if m.store.Dialect == PostgreSQL {
 		query = `UPDATE credentials SET provider = $1, api_key = $2, base_url = $3, updated_at = NOW() WHERE id = $4`
@@ -2377,18 +2519,42 @@ func (m *ModelsManager) UpdateCredential(id string, cred models.CredentialConfig
 // == id`, the new guard catches it on `Credentials[i].CredentialID == id`
 // (any ref). Phase 2's engine invalidation hook follows the same
 // pattern.
+//
+// credential-groups (phase1 §c.4 / T-16): the guard ALSO covers the
+// group-membership surface — a credential that is a member of any
+// credential group cannot be deleted (the message names BOTH surfaces:
+// the referencing models and the groups). Without this the guard has a
+// hole: a group-only credential escapes the model scan and becomes a
+// dangling group member.
 func (m *ModelsManager) RemoveCredential(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if credential is in use
+	// Check if credential is in use by a model
 	modelList, _ := m.scanModels(m.qb.GetAllModels())
+	var usedByModels []string
 	for _, model := range modelList {
 		for _, ref := range model.Credentials {
 			if ref.CredentialID == id {
-				return fmt.Errorf("credential '%s' is in use by model '%s': %w", id, model.ID, models.ErrCredentialInUse)
+				usedByModels = append(usedByModels, model.ID)
+				break
 			}
 		}
+	}
+
+	// ... and by a credential group (lock-free with respect to m.mu —
+	// this span holds m.mu.Lock()).
+	usedByGroups := m.GroupsContainingCredential(id)
+
+	if len(usedByModels) > 0 || len(usedByGroups) > 0 {
+		surfaces := make([]string, 0, 2)
+		if len(usedByModels) > 0 {
+			surfaces = append(surfaces, fmt.Sprintf("model '%s'", strings.Join(usedByModels, "', '")))
+		}
+		if len(usedByGroups) > 0 {
+			surfaces = append(surfaces, fmt.Sprintf("credential group '%s'", strings.Join(usedByGroups, "', '")))
+		}
+		return fmt.Errorf("credential '%s' is in use by %s: %w", id, strings.Join(surfaces, " and "), models.ErrCredentialInUse)
 	}
 
 	var query string
@@ -2455,7 +2621,17 @@ func (m *ModelsManager) ResolveInternalConfig(modelID string) (provider, apiKey,
 		return "", "", "", "", false
 	}
 
-	primaryCredentialID := modelConfig.PrimaryCredentialID()
+	// credential-groups (phase1 §d.2 site 8 / T-23b): flatten BEFORE
+	// the PrimaryCredentialID() read. A group-primary model has an
+	// EMPTY Credentials[0].CredentialID (the locked representation) —
+	// reading it raw would resolve the GROUP id as a credential and
+	// degrade the provider to "unknown" (a SILENT failure: the only
+	// production consumer is normalizers.DetectProvider).
+	flatRefs := m.FlattenCredentialRefs(modelConfig)
+	primaryCredentialID := ""
+	if len(flatRefs) > 0 {
+		primaryCredentialID = flatRefs[0].CredentialID
+	}
 	if primaryCredentialID == "" {
 		return "", "", "", "", false
 	}
@@ -2560,12 +2736,23 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 		return ResolvedCredential{}, false
 	}
 
+	// credential-groups (phase1 §d.2 site 6 / T-21 + §d.3): FLATTEN
+	// BEFORE every len-branch. A model whose RAW list is a single group
+	// ref would otherwise take the ==1 fast path and resolve the GROUP
+	// id (an empty CredentialID under the locked representation) as a
+	// credential → credentials-table miss → ok=false → 502 (the E-3
+	// trap). The flattened slice is what the branches read.
+	flatRefs := m.FlattenCredentialRefs(modelConfig)
+
 	// Nil engine (hand-constructed instances) and empty credential
 	// lists both degrade to the legacy single-credential shape:
 	// PrimaryCredentialID → GetCredential → shared resolver. With no
 	// primary configured this is ok=false, identical to today.
-	if m.engine == nil || len(modelConfig.Credentials) == 0 {
-		primaryID := modelConfig.PrimaryCredentialID()
+	if m.engine == nil || len(flatRefs) == 0 {
+		primaryID := ""
+		if len(flatRefs) > 0 {
+			primaryID = flatRefs[0].CredentialID
+		}
 		if primaryID == "" {
 			return ResolvedCredential{}, false
 		}
@@ -2585,8 +2772,8 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinity(modelID, conversationK
 	}
 
 	// E-3 single-credential fast path: NO engine call, NO map writes.
-	if len(modelConfig.Credentials) == 1 {
-		fastID := modelConfig.Credentials[0].CredentialID
+	if len(flatRefs) == 1 {
+		fastID := flatRefs[0].CredentialID
 		cred := m.GetCredential(fastID)
 		if cred == nil {
 			return ResolvedCredential{}, false
@@ -2714,11 +2901,21 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.M
 		}, true
 	}
 
+	// credential-groups (phase1 §d.2 site 7 / T-22 + §d.3): FLATTEN
+	// BEFORE every len-branch (the E-3 trap: a single raw group ref
+	// would otherwise resolve the GROUP id as a credential → 502).
+	// The flatten reads the in-memory group map only — this resolver
+	// stays ZERO-DB (phase1 §d.4).
+	flatRefs := m.FlattenCredentialRefs(modelConfig)
+
 	// Nil engine (hand-constructed instances) and empty credential
 	// lists both degrade to the legacy single-credential shape —
 	// identical to ResolveInternalConfigWithAffinity.
-	if m.engine == nil || len(modelConfig.Credentials) == 0 {
-		primaryID := modelConfig.PrimaryCredentialID()
+	if m.engine == nil || len(flatRefs) == 0 {
+		primaryID := ""
+		if len(flatRefs) > 0 {
+			primaryID = flatRefs[0].CredentialID
+		}
 		if primaryID == "" {
 			return ResolvedCredential{}, false
 		}
@@ -2726,8 +2923,8 @@ func (m *ModelsManager) ResolveInternalConfigWithAffinityCached(cached *models.M
 	}
 
 	// E-3 single-credential fast path: NO engine call, NO map writes.
-	if len(modelConfig.Credentials) == 1 {
-		return resolveSingle(modelConfig.Credentials[0].CredentialID)
+	if len(flatRefs) == 1 {
+		return resolveSingle(flatRefs[0].CredentialID)
 	}
 
 	// 2+ credentials: engine path (affinity for non-empty keys, fresh

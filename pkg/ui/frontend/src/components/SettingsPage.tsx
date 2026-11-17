@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useCallback } from 'preact/hooks';
 import { route } from 'preact-router';
 import type { AppConfig, ConfigUpdateResponse, Model, ApiToken, LoopDetectionConfig, ToolRepairConfig } from '../types';
 import { ProxySettings } from './config/ProxySettings';
@@ -6,7 +6,7 @@ import { ModelsTab } from './config/ModelsTab';
 import { ImgGenModelsTab } from './config/ImgGenModelsTab';
 import { DecisionModelsTab } from './config/DecisionModelsTab';
 import { GroupModelsTab } from './config/GroupModelsTab';
-import { CredentialsTab } from './config/CredentialsTab';
+import { CredentialsContainer } from './config/CredentialsContainer';
 import { LoopDetectionSettings } from './config/LoopDetectionSettings';
 import { ToolRepairSettings } from './config/ToolRepairSettings';
 import { TokenList } from './tokens/TokenList';
@@ -109,7 +109,7 @@ export function SettingsPage({
   const [wrapTarget, setWrapTarget] = useState<Model | null>(null);
 
   // Helper to add a toast
-  const addToast = (type: ToastData['type'], message: string, restartRequired?: boolean) => {
+  const addToast = useCallback((type: ToastData['type'], message: string, restartRequired?: boolean) => {
     const newToast: ToastData = {
       id: generateToastId(),
       type,
@@ -117,7 +117,7 @@ export function SettingsPage({
       restartRequired,
     };
     setToasts(prev => [...prev, newToast]);
-  };
+  }, []);
 
   // Helper to dismiss a toast
   const dismissToast = (id: string) => {
@@ -125,11 +125,11 @@ export function SettingsPage({
   };
 
   // Create a setStatus-like function for child components
-  const setStatusWrapper = (status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => {
+  const setStatusWrapper = useCallback((status: { type: 'success' | 'error'; message: string; restartRequired?: boolean } | null) => {
     if (status) {
       addToast(status.type, status.message, status.restartRequired);
     }
-  };
+  }, [addToast]);
 
   // Proxy Settings state
   const [port, setPort] = useState<number>(8089);
@@ -442,6 +442,7 @@ export function SettingsPage({
               : 'text-gray-400 hover:text-white'
               }`}
             onClick={() => setActiveTab('credentials')}
+            data-tab-id="credentials"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
@@ -645,8 +646,16 @@ export function SettingsPage({
           )}
 
           {activeTab === 'credentials' && (
-            <CredentialsTab
-              setStatus={setStatusWrapper}
+            /* credential-groups commission (2026-11-16) — the credentials
+               area is a container with a vertical sub-nav (Credentials |
+               Credential Groups). The container declares its OWN
+               status/setStatus (SettingsPage has no `status` value to
+               hand down — only setStatusWrapper) and owns the group
+               fetch. The top-level tab bar is unchanged (11 tabs). */
+            <CredentialsContainer
+              models={models}
+              onUpdateModel={onUpdateModel}
+              setStatusWrapper={setStatusWrapper}
             />
           )}
 

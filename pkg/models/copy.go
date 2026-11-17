@@ -169,8 +169,9 @@ func copyStringSlice(src []string) []string {
 }
 
 // copyCredentialRefs clones a credential-ref slice. A ref carries
-// only (credential_id, weight, position) — NO secret material — so the
-// element copy is a full clone.
+// (credential_id, group_id, weight, position) — NO secret material — so
+// the element copy is a full clone. GroupID survives because this is a
+// plain copy(dst, src) over the value struct (A-14).
 func copyCredentialRefs(src []CredentialRef) []CredentialRef {
 	if src == nil {
 		return nil

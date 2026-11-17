@@ -28,7 +28,7 @@
 //
 //	credentialID, newlyBound, err := e.GetOrSelect(modelID, conversationKey)
 //
-// NewEngine starts a background janitor goroutine (sliding-idle TTL
+// NewEngine starts a background janitor goroutine (absolute-lifetime TTL
 // sweep + cooldown expiry sweep in ONE pass). Stop terminates it;
 // Stop is idempotent and acknowledges exit via an internal done
 // channel. After Stop, GetOrSelect still works (lazy expiry only).
@@ -44,7 +44,8 @@
 //     nil/absent state, OnCredentialDeleted scans) take the outer Lock.
 //   - Each modelState owns its own RWMutex. GetOrSelect's happy path
 //     reads under modelState RLock and upgrades to the write Lock for
-//     the sliding-TTL boundAt refresh (#10) and for first selection.
+//     the TOCTOU re-verify and for first selection (no createdAt
+//     refresh exists — the read does not mutate the binding).
 //   - The janitor takes the OUTER RLock for the whole walk and each
 //     per-model write lock one at a time — reads proceed concurrently
 //     with the sweep (E-1; an outer write lock would stall all reads

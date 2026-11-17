@@ -13,7 +13,7 @@
 // invalidation). Splitting it per domain is a known follow-up — the
 // probe helpers move with it; it is deliberately NOT done here.
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
+import type { RequestListItem, RequestDetail, AppConfig, ConfigUpdateResponse, Model, ApiToken, Credential, CredentialGroup, Provider, UsageResponse, UsageToken, UsageSummary, ModelUsageResponse, MCPServer, MCPServerStatus, MCPServerTestResult, CreateMCPServerRequest, DecisionTestResult, ImgGenTestResult } from '../types';
 import { defaultAPICache } from '../utils/apiCache';
 
 const API_BASE = '/fe/api';
@@ -959,6 +959,19 @@ export function useTokens() {
 // four explicit deletes are the canonical contract — see the
 // `useApi.ts` quadruple-delete sites (3 sibling hooks x 3 ops =
 // 9 sites) and the package test in useApiCredentials.test.ts.
+/**
+ * A status-bearing error. The credential-group flows branch on the HTTP
+ * status code; the message is for humans only.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+    this.name = 'ApiError';
+  }
+}
+
 export async function getCredentials(): Promise<Credential[]> {
   const res = await fetch('/fe/api/credentials');
   if (!res.ok) throw new Error('Failed to fetch credentials');
@@ -982,8 +995,8 @@ export async function createCredential(cred: Credential): Promise<Credential> {
     body: JSON.stringify(cred),
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to create credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to create credential', res.status);
   }
   invalidateModelCaches();
   return res.json();
@@ -996,8 +1009,8 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
     body: JSON.stringify(cred),
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to update credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to update credential', res.status);
   }
   invalidateModelCaches();
   return res.json();
@@ -1006,8 +1019,112 @@ export async function updateCredential(id: string, cred: Credential): Promise<Cr
 export async function deleteCredential(id: string): Promise<void> {
   const res = await fetch(`/fe/api/credentials/${id}`, { method: 'DELETE' });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to delete credential');
+    const err = await parseErrorBody(res);
+    throw new ApiError(err?.error || 'Failed to delete credential', res.status);
+  }
+  invalidateModelCaches();
+}
+
+// ── Credential Groups API (credential-groups commission — 2026-11-16) ──────
+//
+// A credential group is a named, ordered bundle of SAME-PROVIDER
+// credentials. Grouping is management-only: at model resolution the
+// group expands in place (dedup keep-first) and the flat credential
+// list is what selection sees.
+//
+// URL FORM (one canonical form, matching the phase1 §f contract): the
+// request paths carry NO trailing slash. The trailing slash exists
+// ONLY in the server's ServeMux registration string
+// ("/fe/api/credential-groups/" — the subtree pattern that routes the
+// {id} requests). Groups are fetched UNCACHED, mirroring getCredentials
+// (the group list is the source of truth for the badge map and the
+// "used by" map — never the 15s-TTL models cache).
+//
+// ERROR CONTRACT: the /fe/api/* envelope is a bare {"error":"<string>"}
+// object, but a body is not guaranteed to be JSON (the credentials
+// precedent mixes text/plain http.Error bodies, and a text/plain body
+// makes res.json() throw SyntaxError). The body parse is therefore
+// GUARDED, and every group mutation throws an ApiError that CARRIES
+// the HTTP status — the delete-block flow branches on the status code
+// (409 = referenced by ≥1 model), never on the message text.
+
+/**
+ * The operator-facing message for a blocked credential-group delete
+ * (HTTP 409). A NAMED FE message source: the server's error string is
+ * never parsed to decide what the operator is told.
+ */
+export const CREDENTIAL_GROUP_IN_USE_MESSAGE =
+  'This credential group is still referenced by one or more models. Inline its members into those models, then delete the group.';
+
+const CREDENTIAL_GROUPS_PATH = '/fe/api/credential-groups';
+
+/** Parse an error body defensively — a text/plain body must not throw. */
+async function parseErrorBody(res: Response): Promise<{ error?: string } | null> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function getCredentialGroups(): Promise<CredentialGroup[]> {
+  const res = await fetch(CREDENTIAL_GROUPS_PATH);
+  if (!res.ok) {
+    const body = await parseErrorBody(res);
+    throw new ApiError(
+      body?.error || `Failed to fetch credential groups (HTTP ${res.status})`,
+      res.status,
+    );
+  }
+  const data = await res.json().catch(() => null);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createCredentialGroup(group: CredentialGroup): Promise<CredentialGroup> {
+  const res = await fetch(CREDENTIAL_GROUPS_PATH, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(group),
+  });
+  if (!res.ok) {
+    const body = await parseErrorBody(res);
+    throw new ApiError(
+      body?.error || `Failed to create credential group (HTTP ${res.status})`,
+      res.status,
+    );
+  }
+  invalidateModelCaches();
+  return res.json();
+}
+
+export async function updateCredentialGroup(
+  id: string,
+  group: Partial<CredentialGroup>,
+): Promise<CredentialGroup> {
+  const res = await fetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(group),
+  });
+  if (!res.ok) {
+    const body = await parseErrorBody(res);
+    throw new ApiError(
+      body?.error || `Failed to update credential group (HTTP ${res.status})`,
+      res.status,
+    );
+  }
+  invalidateModelCaches();
+  return res.json();
+}
+
+export async function deleteCredentialGroup(id: string): Promise<void> {
+  const res = await fetch(`${CREDENTIAL_GROUPS_PATH}/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = await parseErrorBody(res);
+    throw new ApiError(
+      body?.error || `Failed to delete credential group (HTTP ${res.status})`,
+      res.status,
+    );
   }
   invalidateModelCaches();
 }

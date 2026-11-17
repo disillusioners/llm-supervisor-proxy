@@ -256,7 +256,13 @@ func (h *InternalHandler) HandleRequest(ctx context.Context, requestBody map[str
 		// under the rate-limit policy (60s / Retry-After).
 		class = credFailoverRateLimit
 	}
-	if len(h.config.Credentials) <= 1 {
+	// A-2 (credential-groups / T-23d): the multi-credential gate reads
+	// the FLATTENED credential count — a group-primary model has ONE
+	// raw ref but N members, so the rotation must NOT be switched off.
+	// The seam is reached through h.resolver
+	// (models.ModelsConfigInterface) — pkg/proxy never imports
+	// pkg/store/database.
+	if flatCredentialCount(h.resolver, h.config) <= 1 {
 		return err
 	}
 

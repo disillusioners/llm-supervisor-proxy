@@ -75,6 +75,11 @@ var migrations = []migration{
 	// append the 032 files are silently inert and legacy external
 	// rows stay on the 404 path.
 	{"032", "032_internal_only_data.up"},
+	// Amendment-1 trap (fifth occurrence): this registry is an ordered
+	// slice, NOT a directory scanner; this append activates the 033 SQL
+	// files. Without this append the 033 files are silently inert and
+	// credential groups are unavailable.
+	{"033", "033_add_credential_groups.up"},
 }
 
 // RunMigrations executes database schema migrations

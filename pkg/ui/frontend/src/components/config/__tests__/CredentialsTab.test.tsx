@@ -90,3 +90,84 @@ describe('CredentialsTab & ModelForm 9router integration (B1)', () => {
     expect(credOptions.some((t) => t.includes('cred-9r-1'))).toBe(false);
   });
 });
+
+// credential-groups commission (2026-11-16) — T-E: the group-membership
+// badges in the credential list and the group line in the credential
+// delete modal. The badge data comes from the container's UNCACHED group
+// list (the `groupMemberships` map), never from the models cache.
+describe('CredentialsTab group badges (credential-groups T-E)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('E1 — one badge is rendered per credential group the credential belongs to', async () => {
+    const { container } = render(
+      <CredentialsTab
+        status={null}
+        setStatus={vi.fn()}
+        groupMemberships={{ 'cred-oai-1': ['OpenAI Pool', 'Backup Pool'] }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="credential-group-badge"]')).not.toBeNull();
+    });
+    const badges = Array.from(container.querySelectorAll('[data-testid="credential-group-badge"]'));
+    expect(badges).toHaveLength(2);
+    expect(badges.map((b) => b.textContent)).toEqual(['🗂️ OpenAI Pool', '🗂️ Backup Pool']);
+    // The badge sits on the credential's own row.
+    const row = container.textContent?.includes('cred-oai-1') ? badges : [];
+    expect(row.length).toBe(2);
+  });
+
+  it('E2 — no badges are rendered when the membership map is empty or undefined', async () => {
+    const { container: withEmpty } = render(
+      <CredentialsTab status={null} setStatus={vi.fn()} groupMemberships={{}} />,
+    );
+    await waitFor(() => {
+      expect(withEmpty.textContent).toContain('cred-oai-1');
+    });
+    expect(withEmpty.querySelectorAll('[data-testid="credential-group-badge"]')).toHaveLength(0);
+    cleanup();
+
+    const { container: withUndefined } = render(
+      <CredentialsTab status={null} setStatus={vi.fn()} />,
+    );
+    await waitFor(() => {
+      expect(withUndefined.textContent).toContain('cred-oai-1');
+    });
+    expect(withUndefined.querySelectorAll('[data-testid="credential-group-badge"]')).toHaveLength(0);
+  });
+
+  it('E3 — the credential delete modal lists the credential groups', async () => {
+    const { container } = render(
+      <CredentialsTab
+        status={null}
+        setStatus={vi.fn()}
+        groupMemberships={{ 'cred-oai-1': ['OpenAI Pool'] }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('cred-oai-1');
+    });
+
+    // Open the delete modal for the openai credential (the first row).
+    const deleteButtons = Array.from(
+      container.querySelectorAll('[title="Delete credential"]'),
+    ) as HTMLButtonElement[];
+    expect(deleteButtons.length).toBeGreaterThan(0);
+    fireEvent.click(deleteButtons[0]);
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="credential-group-delete-impact"]')).not.toBeNull();
+    });
+    const impact = container.querySelector('[data-testid="credential-group-delete-impact"]')!;
+    expect(impact.textContent).toContain('Member of credential group');
+    expect(impact.textContent).toContain('OpenAI Pool');
+  });
+});

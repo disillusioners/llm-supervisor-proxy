@@ -243,3 +243,26 @@ func TestValidateCopyID_AcceptsPlainID(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildModelCopy_PreservesCredentialRefGroupID (T-14 / T-35 / A-14):
+// a credential ref carrying a group_id must survive BuildModelCopy
+// verbatim — the copy builder stays a plain copy(dst, src) over the
+// value struct and must not enumerate fields (which would silently drop
+// group_id and break group-referencing models on copy).
+func TestBuildModelCopy_PreservesCredentialRefGroupID(t *testing.T) {
+	src := copySourceFixture()
+	src.Credentials = []CredentialRef{{GroupID: "g-1", Weight: 3, Position: 2}}
+	cp, err := BuildModelCopy(src, "copy-model")
+	if err != nil {
+		t.Fatalf("BuildModelCopy returned error: %v", err)
+	}
+	if len(cp.Credentials) != 1 {
+		t.Fatalf("Credentials len = %d, want 1", len(cp.Credentials))
+	}
+	if cp.Credentials[0].GroupID != "g-1" {
+		t.Fatalf("GroupID = %q, want %q (group ref dropped by copy)", cp.Credentials[0].GroupID, "g-1")
+	}
+	if cp.Credentials[0].Weight != 3 || cp.Credentials[0].Position != 2 {
+		t.Fatalf("weight/position = %d/%d, want 3/2", cp.Credentials[0].Weight, cp.Credentials[0].Position)
+	}
+}
