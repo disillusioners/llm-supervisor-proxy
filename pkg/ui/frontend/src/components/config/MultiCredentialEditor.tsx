@@ -1,8 +1,9 @@
-import type { Credential, CredentialRef } from '../../types';
+import type { Credential, CredentialRef, CredentialGroup } from '../../types';
 
 interface MultiCredentialEditorProps {
   credentials: CredentialRef[];
   availableCredentials: Credential[];
+  availableGroups?: CredentialGroup[];
   loading: boolean;
   onChange(next: CredentialRef[]): void;
   onNavigateToCredentials?: () => void;
@@ -18,16 +19,21 @@ const MAX_CREDENTIALS = 16;
 export function MultiCredentialEditor({
   credentials,
   availableCredentials,
+  availableGroups = [],
   loading,
   onChange,
   onNavigateToCredentials,
 }: MultiCredentialEditorProps) {
-  const handleCredentialChange = (index: number, credentialId: string) => {
+  const groupIds = new Set(availableGroups.map((g) => g.id));
+
+  const handleCredentialChange = (index: number, value: string) => {
+    const isGroup = groupIds.has(value);
     const next = credentials.map((row, i) =>
       i === index
         ? {
             ...row,
-            credential_id: credentialId,
+            credential_id: isGroup ? '' : value,
+            group_id: isGroup ? value : undefined,
             // Default weight to 1 when the user picks a credential on a fresh row.
             weight: row.weight && row.weight > 0 ? row.weight : 1,
           }
@@ -62,10 +68,14 @@ export function MultiCredentialEditor({
   };
 
   // Row 0 defines the required provider for all other rows.
-  const primaryCred = availableCredentials.find(
-    (c) => c.id === credentials[0]?.credential_id,
-  );
-  const primaryProvider = primaryCred?.provider;
+  const primaryRef = credentials[0];
+  const primaryGroup = primaryRef?.group_id
+    ? availableGroups.find((g) => g.id === primaryRef.group_id)
+    : undefined;
+  const primaryCred = !primaryRef?.group_id
+    ? availableCredentials.find((c) => c.id === primaryRef?.credential_id)
+    : undefined;
+  const primaryProvider = primaryGroup?.provider ?? primaryCred?.provider;
 
   const isOptionDisabled = (
     rowIndex: number,
@@ -85,6 +95,30 @@ export function MultiCredentialEditor({
       primaryProvider &&
       credProvider &&
       credProvider !== primaryProvider
+    ) {
+      return {
+        disabled: true,
+        title: 'All credentials must share the same provider',
+      };
+    }
+    return { disabled: false };
+  };
+
+  const isGroupOptionDisabled = (
+    rowIndex: number,
+    group: CredentialGroup,
+  ): { disabled: boolean; title?: string } => {
+    const usedElsewhere = credentials.some(
+      (row, i) => i !== rowIndex && row.group_id === group.id,
+    );
+    if (usedElsewhere) {
+      return { disabled: true, title: 'Already selected in another row' };
+    }
+    if (
+      rowIndex > 0 &&
+      primaryProvider &&
+      group.provider &&
+      group.provider !== primaryProvider
     ) {
       return {
         disabled: true,
@@ -124,11 +158,22 @@ export function MultiCredentialEditor({
               class="flex items-center gap-2 bg-gray-900/40 border border-gray-700 rounded-md p-2"
             >
               <div class="flex-1">
-                <label class="block text-[10px] uppercase tracking-wide text-gray-500 mb-0.5">
-                  {index === 0 ? 'Primary' : `Credential ${index + 1}`}
-                </label>
+                <div class="flex items-center gap-2 mb-0.5">
+                  <label class="block text-[10px] uppercase tracking-wide text-gray-500">
+                    {index === 0 ? 'Primary' : `Credential ${index + 1}`}
+                  </label>
+                  {(row.credential_id || row.group_id) &&
+                    groupIds.has((row.credential_id || row.group_id) as string) && (
+                      <span
+                        data-testid="credential-group-ref-badge"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 border border-indigo-700"
+                      >
+                        🗂️ Group
+                      </span>
+                    )}
+                </div>
                 <select
-                  value={row.credential_id}
+                  value={row.credential_id || row.group_id || ''}
                   onChange={(e) =>
                     handleCredentialChange(
                       index,
@@ -152,6 +197,19 @@ export function MultiCredentialEditor({
                         title={state.title}
                       >
                         {cred.id} ({cred.provider || 'unknown'})
+                      </option>
+                    );
+                  })}
+                  {availableGroups.map((group) => {
+                    const state = isGroupOptionDisabled(index, group);
+                    return (
+                      <option
+                        key={`group-${group.id}`}
+                        value={group.id}
+                        disabled={state.disabled}
+                        title={state.title}
+                      >
+                        🗂️ {group.name} ({group.provider})
                       </option>
                     );
                   })}
@@ -194,6 +252,40 @@ export function MultiCredentialEditor({
               </button>
             </div>
           ))}
+
+          {(() => {
+            const overlapHints: { credId: string; groupName: string }[] = [];
+            const seen = new Set<string>();
+            credentials.forEach((row, rowIndex) => {
+              if (!row.credential_id) return;
+              credentials.forEach((otherRow, otherIndex) => {
+                if (otherIndex === rowIndex) return;
+                if (!otherRow.group_id) return;
+                const g = availableGroups.find(
+                  (gr) => gr.id === otherRow.group_id,
+                );
+                if (g && g.members.includes(row.credential_id)) {
+                  const key = row.credential_id + '|' + g.name;
+                  if (seen.has(key)) return;
+                  seen.add(key);
+                  overlapHints.push({
+                    credId: row.credential_id,
+                    groupName: g.name,
+                  });
+                }
+              });
+            });
+            if (overlapHints.length === 0) return null;
+            return overlapHints.map((h, i) => (
+              <p
+                key={i}
+                class="text-xs text-yellow-400 mt-1"
+                data-testid="credential-group-member-overlap-warn"
+              >
+                Credential {h.credId} is already included via group {h.groupName}
+              </p>
+            ));
+          })()}
 
           <button
             type="button"
