@@ -198,10 +198,23 @@ export type ImgGenModel = Model & { kind: 'image-gen' };
 // DecisionModelsTab / DecisionModelForm surface.
 export type DecisionModel = Model & { kind: 'decision' };
 
+// GroupLane — which lane a group (and therefore each of its members)
+// belongs to. 'chat' is the legacy default lane: a model row with an
+// absent / "" kind IS chat (the server's legacy-kind normalisation).
+// 'decision' is the decision-model lane.
+//
+// Additive only — no existing type changes. The lane is NEVER
+// persisted and NEVER travels on the wire (ruling D-2): it is
+// INFERRED at display time from the group's current member rows (see
+// components/config/groupLane.ts), and the server stays authoritative
+// on every write.
+export type GroupLane = 'chat' | 'decision';
+
 // GroupMember — one (model, weight) entry of a group's flat member list
 // (load-balance-groups / Round-2 membership pivot). JSON tags mirror the
 // Go GroupMember struct verbatim: `model_id` references models.id of an
-// EXISTING chat-kind model (app-level FK, G3; groups carry no
+// EXISTING model OF THIS GROUP'S LANE (chat-kind or decision-kind — an
+// absent / "" kind counts as chat; app-level FK, G3; groups carry no
 // credentials); `weight` is a positive float driving the sticky weighted
 // picker (higher = picked more often; G3: weight > 0).
 //

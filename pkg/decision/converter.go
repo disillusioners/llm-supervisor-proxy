@@ -28,6 +28,25 @@ import (
 type Outcome struct {
 	RelayStatus int
 	Reason      string
+
+	// UpstreamStatus is the RAW upstream HTTP status of the attempt
+	// (decision-groups commission). The adapter seam never sees the
+	// status (its signature carries the body only), so the HANDLER
+	// stamps it onto the Outcome the adapter returned — the Outcome
+	// is the material the lane classifies on (status + error
+	// envelope). Additive: zero on every pre-existing path.
+	UpstreamStatus int
+
+	// ErrorType / ErrorCode / ErrorMessage carry the upstream error
+	// envelope's fields — both adapters already parse them (the
+	// OpenAI wire shape {"error":{"type","code","message"}} and the
+	// System One twin). They are the classification input that
+	// survives the adapter's 502 collapse: the lane needs the
+	// envelope's vocabulary (quota / rate-limit / auth) to decide
+	// whether the member rotates, advances or fails fast.
+	ErrorType    string
+	ErrorCode    string
+	ErrorMessage string
 }
 
 // UpstreamProvider is the per-decision-provider seam (Decision

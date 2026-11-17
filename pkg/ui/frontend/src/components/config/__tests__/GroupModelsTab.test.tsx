@@ -21,7 +21,7 @@ function makeGroup(overrides: Partial<GroupModel> = {}): GroupModel {
   } as GroupModel;
 }
 
-const chatModels = [
+const laneModels = [
   makeModel({ id: 'coding', name: 'Coding' }),
   makeModel({ id: 'helper', name: 'Helper' }),
 ];
@@ -29,7 +29,8 @@ const chatModels = [
 function makeProps(overrides: Record<string, unknown> = {}) {
   return {
     models: [] as Model[],
-    chatModels,
+    lane: 'chat' as const,
+    laneModels,
     onAddModel: vi.fn(),
     onUpdateModel: vi.fn(),
     onDeleteModel: vi.fn(),

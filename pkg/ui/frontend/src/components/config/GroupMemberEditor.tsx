@@ -1,4 +1,4 @@
-import type { Model, GroupMember } from '../../types';
+import type { Model, GroupMember, GroupLane } from '../../types';
 
 // MAX_GROUP_MEMBERS mirrors the Go models.MaxGroupMembers constant
 // (G2 cap — the same 16 ceiling as MaxCredentialRefs / the
@@ -7,19 +7,29 @@ export const MAX_GROUP_MEMBERS = 16;
 
 interface GroupMemberEditorProps {
   members: GroupMember[];
-  // Chat-kind models only — the parent (GroupModelForm) filters the
-  // useModels() list BEFORE handing it down (plan §6.2 / Am30: members
-  // are PROXY MODEL IDs of existing chat-kind models; image-gen,
-  // decision, and group rows are never valid members).
-  chatModels: Model[];
+  // Which lane this group belongs to. REQUIRED (not defaulted): a
+  // defaulted lane would let a call site silently fall back to 'chat'
+  // and render a chat-only picker for a decision group — a visible but
+  // confusing failure. A required prop makes every call site state
+  // its lane, and a missed call site is a compile error.
+  lane: GroupLane;
+  // The models OF THIS LANE (the parent picks the feed: chat-kind rows
+  // for the chat lane, the server-prefiltered ?kind=decision list for
+  // the decision lane). Feeds the member picker.
+  laneModels: Model[];
   onChange: (next: GroupMember[]) => void;
 }
 
-// GroupMemberEditor — rows of {chat-kind model picker, weight number
+// GroupMemberEditor — rows of {lane model picker, weight number
 // input, remove button} (load-balance-groups / plan §6.2, Round-2
 // Am30 simplified editor: members are full model rows with their own
 // credentials, so there are NO credential fields here — groups carry
 // none by design).
+//
+// ONE component, TWO filtered feeds (the ruling's contract 26): the
+// `lane` prop picks which feed the picker offers — the chat lane's
+// chat-kind rows, or the decision lane's decision-kind AND enabled
+// rows. There is no separate decision-lane editor.
 //
 // Discipline mirrors MultiCredentialEditor:
 //   - Add is disabled at MAX_GROUP_MEMBERS (16); the form's submit
@@ -32,12 +42,22 @@ interface GroupMemberEditorProps {
 //     duplicate is rejected server-side by G4 with a house 400 —
 //     the warn-hint keeps the operator informed without inventing a
 //     client-side hard block the BE does not have).
-export function GroupMemberEditor({ members, chatModels, onChange }: GroupMemberEditorProps) {
-  // Defensive chat-kind filter (belt-and-suspenders on top of the
-  // parent's filter — same shape as TokenForm's chatModels): members
-  // are chat models only, so non-chat rows never render as options
-  // even if a future caller hands the unfiltered list through.
-  const pickerModels = chatModels.filter((m) => !m.kind || m.kind === 'chat');
+export function GroupMemberEditor({ members, lane, laneModels, onChange }: GroupMemberEditorProps) {
+  // Defensive lane filter (belt-and-suspenders on top of the parent's
+  // filter — same shape as TokenForm's chatModels): members are lane
+  // models only, so foreign rows never render as options even if a
+  // future caller hands the unfiltered list through.
+  //
+  // LANE-GATED (ADR-9 / AC-R12): the chat arm is the historical
+  // predicate, CHARACTER-FOR-CHARACTER (no enabled filter — the text
+  // lane still offers inactive chat models). The decision arm adds the
+  // candidate-eligibility clause (ADR-7 / AC-R6): an inactive model is
+  // a valid CHAIN target but NOT a group candidate, so it never
+  // appears here.
+  const pickerModels =
+    lane === 'chat'
+      ? laneModels.filter((m) => !m.kind || m.kind === 'chat')
+      : laneModels.filter((m) => m.kind === 'decision' && m.enabled);
 
   const addMember = () => {
     if (members.length >= MAX_GROUP_MEMBERS) return;
@@ -88,7 +108,7 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
     <div data-testid="group-member-editor">
       <div class="space-y-2">
         {members.map((member, index) => {
-          const selected = chatModels.find((m) => m.id === member.model_id);
+          const selected = laneModels.find((m) => m.id === member.model_id);
           return (
             <div
               key={index}
@@ -102,7 +122,9 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
                 class="flex-1 px-2 py-1.5 bg-gray-800 border border-gray-600 rounded-md text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
                 data-testid="group-member-model-select"
               >
-                <option value="">Select a chat model…</option>
+                <option value="">
+                  {lane === 'chat' ? 'Select a chat model…' : 'Select a decision model…'}
+                </option>
                 {pickerModels.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name} ({m.id})
@@ -186,8 +208,23 @@ export function GroupMemberEditor({ members, chatModels, onChange }: GroupMember
         </svg>
         Add Member
       </button>
+      {/* Member hint — LANE-AWARE. The chat arm is the historical text
+          byte-for-byte (ADR-9 / AC-R12: this release must not change
+          text-lane behaviour). The decision arm drops the promises that
+          are false on this lane: there is NO fallback chain and NO
+          racing engine here (ADR-11 OQ-2 / OQ-3 option (a)) — a
+          member's resilience is per-credential attempts WITHIN the
+          member. */}
       <p class="text-xs text-gray-400 mt-1">
-        Add up to {MAX_GROUP_MEMBERS} chat models. Higher weight = more requests routed to that member. Members run their own full pipeline (credentials, fallback, race). Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — same weighted-random + sticky rules apply among backups.
+        {lane === 'chat' ? (
+          <>
+            Add up to {MAX_GROUP_MEMBERS} chat models. Higher weight = more requests routed to that member. Members run their own full pipeline (credentials, fallback, race). Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — same weighted-random + sticky rules apply among backups.
+          </>
+        ) : (
+          <>
+            Add up to {MAX_GROUP_MEMBERS} decision models. Higher weight = more requests routed to that member. Each member runs its own credentials; resilience is per-credential attempts within the member. There is no fallback chain on this lane (deliberately not built) and no racing — 'racing consumed' means the member loop reached its end. Tick <em>Backup</em> on a member to keep it as a recourse-tier candidate: it is served only after every non-backup (default) member in the request's exclusion set has failed — same weighted-random + sticky rules apply among backups.
+          </>
+        )}
       </p>
     </div>
   );

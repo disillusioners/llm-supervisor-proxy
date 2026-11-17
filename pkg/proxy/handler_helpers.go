@@ -902,3 +902,60 @@ func (h *Handler) clearWinnerLayerState(conf *ConfigSnapshot, groupPick *groupPi
 		}
 	}
 }
+
+// groupLaneReader is the OPTIONAL group-lane seam (the
+// decision-groups commission's one new models-manager method,
+// forwarded by the modelscache decorator).
+//
+// The seam lives OUTSIDE models.ModelsConfigInterface on purpose: the
+// optional-seam shape keeps the structural test fakes and the JSON
+// backend valid. The production binding is the CACHED decorator
+// (CACHE_LAYER_ENABLED defaults ON), so a MISSING forward would be a
+// SILENT no-op in production while the raw-manager tests stayed green
+// (the modelscache-decorator-forward-trap) — hence the compile-time
+// assertions at every consumer site.
+type groupLaneReader interface {
+	GroupLane(groupID string) (models.GroupLane, bool)
+}
+
+// groupLaneOf resolves a group's lane through the optional seam.
+//
+// ok=false means "unknown" — the group is not a group, its lane is
+// unresolvable, or the seam is absent. The consumers treat an unknown
+// lane as "not excluded" (today's behaviour preserved) — EXCEPT the
+// chat lanes, which additionally refuse a group that carries a
+// DECISION member (the runtime defence-in-depth net: a chat-inferred
+// group must never silently serve a decision member).
+func groupLaneOf(modelsCfg models.ModelsConfigInterface, groupID string) (models.GroupLane, bool) {
+	if modelsCfg == nil {
+		return "", false
+	}
+	gl, ok := modelsCfg.(groupLaneReader)
+	if !ok {
+		return "", false
+	}
+	return gl.GroupLane(groupID)
+}
+
+// groupHasDecisionMember reports whether the group carries at least
+// one decision-kind member (the write-time homogeneity rule makes the
+// shape unrepresentable; a hand-edited or legacy row can still
+// produce it).
+func groupHasDecisionMember(rows []models.ModelConfig, groupID string) bool {
+	for _, group := range rows {
+		if group.ID != groupID || !group.IsGroup() {
+			continue
+		}
+		for _, member := range group.Members {
+			for _, row := range rows {
+				if row.ID != member.ModelID {
+					continue
+				}
+				if lane, ok := models.MemberLane(row.Kind); ok && lane == models.GroupLaneDecision {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}

@@ -1748,6 +1748,16 @@ func (m *ModelsManager) UpdateModel(modelID string, model models.ModelConfig) er
 	// same rationale as AddModel above).
 	model.Internal = true
 
+	// ADR-1 — the kind-immutability guard for group members: a model
+	// that is a member of ANY group has an immutable kind (the lane of
+	// a group is inferred from its members, so a retyping member
+	// could silently re-lane the group). The rejection names both the
+	// member and the group. Scoped: a model that is in no group still
+	// retypes freely.
+	if err := m.validateKindChange(modelID, model.Kind); err != nil {
+		return err
+	}
+
 	// Phase-1 W4 hardening — validate before write.
 	if err := m.validateBeforeWrite(model); err != nil {
 		return err
@@ -2215,7 +2225,13 @@ func (m *ModelsManager) validateBeforeWrite(model models.ModelConfig) error {
 	for _, c := range creds {
 		credentialIDs[c.ID] = true
 	}
-	return m.validateModelAgainstCredentials(model, credentialIDs, creds)
+	if err := m.validateModelAgainstCredentials(model, credentialIDs, creds); err != nil {
+		return err
+	}
+	// The write-time half of the rewrite-boundary lane check: a chat
+	// model's fallback chain must not name a DECISION-lane group (the
+	// chat lane would carry the decision member into its race list).
+	return models.ValidateFallbackChainLanes(&model, m.GetModels())
 }
 
 // validateGroupWrite is the group-row counterpart of

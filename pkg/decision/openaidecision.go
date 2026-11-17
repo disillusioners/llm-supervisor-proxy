@@ -170,6 +170,13 @@ func (p *openaiDecisionProvider) InspectResponse(respBytes []byte, originalReq *
 		return nil, &Outcome{
 			RelayStatus: 502,
 			Reason:      fmt.Sprintf("openai-decision returned error envelope (code=%q, type=%q)", errEnv.Error.Code, errEnv.Error.Type),
+			// The envelope's fields travel with the Outcome: the lane
+			// classifies the failure on them (the decision-groups
+			// commission) — the adapter's 502 collapse must not lose
+			// the vocabulary.
+			ErrorType:    errEnv.Error.Type,
+			ErrorCode:    errEnv.Error.Code,
+			ErrorMessage: errEnv.Error.Message,
 		}, nil
 	}
 
