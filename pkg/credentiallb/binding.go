@@ -9,24 +9,25 @@ import (
 )
 
 // binding is a single (conversationKey → credentialID) pin with its
-// sliding-idle-TTL anchor.
+// absolute-lifetime anchor.
 //
-// #10 (leader-ruled): boundAt is REFRESHED on every in-TTL
-// GetOrSelect hit and by every ExcludeAndReselect rebind; the binding
-// is eligible for expiry only after now-boundAt > ttl of CONSECUTIVE
-// IDLE. The TTL is an /idle/ ceiling, not a /lifetime/ ceiling.
+// createdAt is stamped ONCE at bind/rebind. It is NEVER refreshed
+// on a GetOrSelect hit — a continuously-hit conversation must not pin
+// a credential forever. A binding is expired (and DELETED from the map
+// on read) once now-createdAt > ttl; after that the layer's default
+// selection runs exactly as if no binding ever existed.
 //
-// A cooldown (R3-4) NEVER touches boundAt — the cooldown map on
+// A cooldown (R3-4) NEVER touches createdAt — the cooldown map on
 // modelState is separate state.
 type binding struct {
 	credentialID string
-	boundAt      time.Time
+	createdAt    time.Time
 }
 
-// expired reports whether the binding has been idle longer than ttl
+// expired reports whether the binding's absolute lifetime has elapsed
 // as of now (lazy-expiry predicate; the janitor applies the same one).
 func (b *binding) expired(ttl time.Duration, now time.Time) bool {
-	return now.Sub(b.boundAt) > ttl
+	return now.Sub(b.createdAt) > ttl
 }
 
 // modelState is the per-model engine state. Guarded by its own
@@ -166,4 +167,48 @@ func (st *modelState) soonestCooldownLocked(now time.Time) (string, bool) {
 		}
 	}
 	return best, best != ""
+}
+
+// SetBindingTTL installs the engine's absolute-lifetime TTL for
+// conversation bindings (createdAt + ttl). Nil-safe. The TTL lives
+// in an atomic.Int64, so the setter needs no mutex — the atomic IS
+// the guard, and the hot path reads it lock-free. Semantics:
+//
+//   - d <= 0: IGNORED — the current TTL is kept (a mis-wired or
+//     hand-edited config degrades to the prior value, never to 0).
+//   - d > BindingTTLCeiling (24h): clamped down to 24h.
+//   - 0 < d < BindingTTLMinGranularity (1ms): meaningless noise —
+//     RAISED to BindingTTLFloor (1m).
+//   - BindingTTLMinGranularity <= d < BindingTTLFloor: honoured
+//     VERBATIM — an operator may deliberately ask for a sub-minute
+//     affinity window (short-lived sessions, tests).
+//
+// Safe for concurrent use. Boot-captured in production (cmd/main.go).
+func (e *Engine) SetBindingTTL(d time.Duration) {
+	if e == nil {
+		return
+	}
+	if d <= 0 {
+		return
+	}
+	if d > BindingTTLCeiling {
+		d = BindingTTLCeiling
+	}
+	if d < BindingTTLMinGranularity {
+		d = BindingTTLFloor
+	}
+	e.ttl.Store(int64(d))
+}
+
+// BindingTTL returns the engine's effective binding TTL. Nil-safe;
+// the package default when unset (zero-value engine).
+func (e *Engine) BindingTTL() time.Duration {
+	if e == nil {
+		return DefaultBindingTTL
+	}
+	v := e.ttl.Load()
+	if v <= 0 {
+		return DefaultBindingTTL
+	}
+	return time.Duration(v)
 }

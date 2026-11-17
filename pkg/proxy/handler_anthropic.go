@@ -912,7 +912,14 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				(isAnthropicLimitClass(arc) || isAnthropicUpstreamAuth(arc)) &&
 				h.credEngine != nil &&
 				resolvedOK &&
-				len(modelConfig.Credentials) > 1 {
+				// A-2 (credential-groups / T-23d): the multi-credential
+				// gate reads the FLATTENED credential count — a
+				// group-primary model has ONE raw ref but N members,
+				// so the rotation must NOT be switched off. The seam is
+				// reached through arc.conf.ModelsConfig
+				// (models.ModelsConfigInterface) — pkg/proxy never
+				// imports pkg/store/database.
+				flatCredentialCount(arc.conf.ModelsConfig, modelConfig) > 1 {
 				reselected, mode := h.credEngine.ExcludeAndReselect(
 					modelConfig.ID,
 					arc.conversationKey,

@@ -438,7 +438,7 @@ func TestGroup_EngineLifecycle(t *testing.T) {
 
 // TestGroup_OnGroupChanged_SurvivorFilter — group writes (Add +
 // Update) drive OnGroupChanged: selector rebuild + orphan-binding
-// drop. The "boundAt preserved on surviving bindings" half is
+// drop. The "createdAt preserved on surviving bindings" half is
 // covered in pkg/grouplb/binding_test.go (same engine, internal
 // access); here the observable side effect: after a member is
 // removed, a fresh key does not pick that member, and a pick on the

@@ -1824,7 +1824,15 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	// conjunct is GONE — every resolvable model is internal by
 	// construction (the boundary 404 gate rejects the rest), so
 	// credential failover eligibility keys on credential count only.
-	if modelCfg == nil || len(modelCfg.Credentials) <= 1 {
+	if modelCfg == nil {
+		return false
+	}
+	// A-2 (credential-groups / T-23d): the credential count comes from
+	// the FLATTENED list — a single GROUP ref with N members is a
+	// MULTI-credential model (raw len 1 ⇒ failover was silently
+	// disabled for every group-primary model).
+	flatCreds := flatCredentialRefs(c.cfg.ModelsConfig, modelCfg)
+	if len(flatCreds) <= 1 {
 		return false
 	}
 	// W3: once the single SoonestExpiry attempt is spent FOR THIS
@@ -1842,7 +1850,11 @@ func (c *raceCoordinator) credFailoverEligibleLocked() bool {
 	// chain inherited the first model's spend and got ZERO rotations
 	// (the documented WIP limitation in
 	// TestHandler_TwoModelFallback429_WrongModelRegression).
-	return c.failoverAttemptsByModel[latest.modelID] < len(modelCfg.Credentials)-1
+	//
+	// A-2 (credential-groups / T-23d): the budget counts the FLATTENED
+	// credentials (members−1), so a group-primary model gets a real
+	// rotation budget instead of 0.
+	return c.failoverAttemptsByModel[latest.modelID] < len(flatCreds)-1
 }
 
 // fallbackAdvanceTargetLocked (layered credential fallback — Fix 2)
@@ -1988,6 +2000,11 @@ func (c *raceCoordinator) credFailoverPlanLocked(latestReq *upstreamRequest) *cr
 // eligibility gate above: the budget is derived from the ATTEMPT's
 // own model row, so a member ID claimed by its own group is counted
 // from the member (not from the credential-less group row).
+//
+// A-2 (credential-groups / T-23d): the count is the FLATTENED one —
+// the log line ("[LB-FAILOVER] rotation %d/%d") must not lie about a
+// group-primary model (raw len 1 ⇒ "rotation 1/0"). LOG-ONLY: no
+// behaviour change.
 func modelBudget(c *raceCoordinator, modelID string) int {
 	if c.cfg == nil || c.cfg.ModelsConfig == nil {
 		return 0
@@ -1996,7 +2013,7 @@ func modelBudget(c *raceCoordinator, modelID string) int {
 	if mc == nil {
 		return 0
 	}
-	return len(mc.Credentials) - 1
+	return len(flatCredentialRefs(c.cfg.ModelsConfig, mc)) - 1
 }
 
 // publishCredentialFailover (Task 20 / R3-8) emits the canonical

@@ -136,6 +136,41 @@ func (s *stubGroupModels) GroupLane(groupID string) (models.GroupLane, bool) {
 	return lane, ok
 }
 
+// The credential-group surface of models.ModelsConfigInterface.
+//
+// The credential-groups commission (v195, origin/latest) GREW that
+// interface with nine credential-group methods, so this seam no longer
+// satisfied it and the package's TEST build broke on the merge:
+//
+//	*stubGroupModels does not implement models.ModelsConfigInterface
+//	(missing method AddCredentialGroup)
+//
+// These nine methods are the MECHANICAL adapter for that growth and
+// mirror the no-op pattern upstream used for every other stub in the
+// tree (pkg/ui/handlers_models_test.go, pkg/proxy/internal_handler_test.go,
+// pkg/proxy/handle_models_imggen_test.go, pkg/proxy/normalizers/...):
+// the stub carries no credential groups, so every accessor returns the
+// empty value.
+//
+// ADDITIONS ONLY — no pre-existing stub method was removed, renamed or
+// re-signed (the Tier-2 fence), and no assertion-bearing line was
+// touched.
+func (s *stubGroupModels) GetCredentialGroup(string) *models.CredentialGroupConfig { return nil }
+func (s *stubGroupModels) GetCredentialGroups() []models.CredentialGroupConfig     { return nil }
+func (s *stubGroupModels) AddCredentialGroup(models.CredentialGroupConfig) error   { return nil }
+func (s *stubGroupModels) UpdateCredentialGroup(string, models.CredentialGroupConfig) error {
+	return nil
+}
+func (s *stubGroupModels) RemoveCredentialGroup(string) error         { return nil }
+func (s *stubGroupModels) ModelsUsingCredentialGroup(string) []string { return nil }
+func (s *stubGroupModels) ModelsUsingCredentialGroupsAll() map[string][]string {
+	return nil
+}
+func (s *stubGroupModels) GroupsContainingCredential(string) []string { return nil }
+func (s *stubGroupModels) FlattenCredentialRefs(*models.ModelConfig) []models.CredentialRef {
+	return nil
+}
+
 // newGroupEnv builds the group test env.
 func newGroupEnv(t *testing.T, fixtures []groupMemberFixture) *groupEnv {
 	t.Helper()

@@ -131,13 +131,14 @@ func TestMigration028_Backfill(t *testing.T) {
 
 	// Run 001..027 + 029..031 (insert two test rows first against a
 	// pre-028 schema, then run 028 to verify the backfill). The loop
-	// pattern `len(migrations)-1` excludes the most-recent entry
-	// (032 post-P4); benign because 031 columns are additive (the
-	// pre-028 fixture inserts do not reference them).
+	// pattern `len(migrations)-2` excludes the two most-recent
+	// entries (032 post-P4 and 033 credential groups); benign
+	// because 031 columns are additive (the pre-028 fixture
+	// inserts do not reference them).
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-1; i++ {
+	for i := 0; i < len(migrations)-2; i++ {
 		// Skip 028 — we want a pre-028 schema.
 		if migrations[i].version == "028" {
 			continue
@@ -242,13 +243,13 @@ func TestMigration028_EscapeSafeBackfill(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Run 001..027 + 029..031 (the loop pattern `len(migrations)-1`
-	// excludes the most-recent entry — 032 post-P4; benign because
-	// 031 columns are additive).
+	// Run 001..027 + 029..031 (the loop pattern `len(migrations)-2`
+	// excludes the two most-recent entries — 032 post-P4 and 033
+	// credential groups; benign because 031 columns are additive).
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-1; i++ {
+	for i := 0; i < len(migrations)-2; i++ {
 		if migrations[i].version == "028" {
 			continue
 		}
@@ -513,13 +514,13 @@ func TestMigration028_FileLevelTransactionSQLite_Rollback(t *testing.T) {
 
 	// Bring up migrations 001..027 + 029..031 only (skip 028 — we want
 	// to test the column-add step in isolation, against a pre-028
-	// schema). The loop pattern `len(migrations)-1` excludes the
-	// most-recent entry — 032 post-P4; benign because 031 columns
-	// are additive.
+	// schema). The loop pattern `len(migrations)-2` excludes the two most-recent
+	// entries — 032 post-P4 and 033 credential groups; benign because
+	// 031 columns are additive.
 	if err := store.ensureMigrationsTable(ctx); err != nil {
 		t.Fatalf("ensureMigrationsTable: %v", err)
 	}
-	for i := 0; i < len(migrations)-1; i++ {
+	for i := 0; i < len(migrations)-2; i++ {
 		if migrations[i].version == "028" {
 			continue
 		}
@@ -972,5 +973,56 @@ func TestMigration032_ForwardFreshDB(t *testing.T) {
 	const expectedResidual = 2
 	if residualNonInternal != expectedResidual {
 		t.Errorf("residual non-internal count: got %d, want %d (glm-4.5-air + glm-5 land on DISABLE)", residualNonInternal, expectedResidual)
+	}
+}
+
+func TestMigration033_ForwardFreshDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	store, err := newSQLiteConnectionAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	if err := store.RunMigrations(ctx); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	versions, err := store.GetAppliedMigrations(ctx)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations: %v", err)
+	}
+	found := false
+	for _, v := range versions {
+		if v == "033" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("schema_migrations missing 033 (registry append missing) — applied versions: %v", versions)
+	}
+
+	// credential_groups table must exist.
+	var tbl string
+	err = store.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='credential_groups'").Scan(&tbl)
+	if err != nil || tbl != "credential_groups" {
+		t.Fatalf("credential_groups table missing: %v", err)
+	}
+
+	// index must exist.
+	var idx string
+	err = store.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_credential_groups_provider'").Scan(&idx)
+	if err != nil || idx != "idx_credential_groups_provider" {
+		t.Fatalf("idx_credential_groups_provider index missing: %v", err)
+	}
+
+	// Idempotent re-run: a second Initialize / RunMigrations must not error.
+	if err := store.RunMigrations(ctx); err != nil {
+		t.Fatalf("second RunMigrations (idempotency): %v", err)
 	}
 }

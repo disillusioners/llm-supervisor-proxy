@@ -154,6 +154,15 @@ func main() {
 	// The knob is captured at BOOT — restart to apply.
 	if credLB != nil {
 		credLB.SetQuotaCooldown(configMgr.Get().CredentialQuotaCooldown.Duration())
+		// Hash-sticky conversation bindings: absolute lifetime per
+		// layer (createdAt + TTL). Boot-captured — restart to
+		// apply. Model layer lives on the credential engine.
+		credLB.SetBindingTTL(configMgr.Get().ModelBindingTTL.Duration())
+	}
+	// Group layer is independent of the credential engine (per-layer
+	// independence contract): apply even when credLB is nil.
+	if ge := modelsMgr.GroupEngine(); ge != nil {
+		ge.SetBindingTTL(configMgr.Get().GroupBindingTTL.Duration())
 	}
 
 	// Phase 3 — the interface-typed modelsConfig used by proxyConfig +

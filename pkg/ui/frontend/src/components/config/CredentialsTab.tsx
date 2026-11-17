@@ -6,6 +6,14 @@ import { getCredentials, createCredential, updateCredential, deleteCredential, u
 interface CredentialsTabProps {
   status: { type: 'success' | 'error'; message: string } | null;
   setStatus: (status: { type: 'success' | 'error'; message: string } | null) => void;
+  /** credential-groups commission — credential id → group names. */
+  groupMemberships?: Record<string, string[]>;
+}
+
+// credential-groups commission (2026-11-16) — the group names a
+// credential belongs to (from the container's UNCACHED group list).
+function groupNamesFor(map: Record<string, string[]> | undefined, id: string): string[] {
+  return map?.[id] ?? [];
 }
 
 // Provider color mapping (frontend-specific styling)
@@ -25,7 +33,7 @@ function getProviderColorClass(color: string): string {
   return PROVIDER_COLORS[color] || 'bg-gray-900/50 text-gray-300 border-gray-800/40';
 }
 
-export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
+export function CredentialsTab({ status, setStatus, groupMemberships }: CredentialsTabProps) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -40,18 +48,22 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
 
   // Fetch credentials on mount
   useEffect(() => {
+    let cancelled = false;
     const fetchCredentials = async () => {
       try {
         setLoading(true);
         const data = await getCredentials();
-        setCredentials(data || []);
+        if (!cancelled) setCredentials(data || []);
       } catch (e) {
-        setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to fetch credentials' });
+        if (!cancelled) setStatus({ type: 'error', message: e instanceof Error ? e.message : 'Failed to fetch credentials' });
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
-    fetchCredentials();
+    void fetchCredentials();
+    return () => {
+      cancelled = true;
+    };
   }, [setStatus]);
 
   const handleOpenAdd = () => {
@@ -187,6 +199,17 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
                           <span class={`inline-flex items-center text-xs px-2 py-1 rounded border ${getProviderColorClass(providers.find(p => p.type === cred.provider)?.color || 'gray')}`}>
                             {escapeHtml(providers.find(p => p.type === cred.provider)?.name || cred.provider)}
                           </span>
+                          {/* credential-groups commission — one badge per
+                              credential group this credential belongs to. */}
+                          {groupNamesFor(groupMemberships, cred.id).map((name) => (
+                            <span
+                              key={name}
+                              data-testid="credential-group-badge"
+                              class="inline-flex items-center text-xs px-2 py-1 rounded border bg-purple-900/50 text-purple-300 border-purple-800/40 mt-1"
+                            >
+                              🗂️ {escapeHtml(name)}
+                            </span>
+                          ))}
                         </td>
                         <td class="py-3 px-2">
                           <span class="text-gray-400 font-mono text-sm">
@@ -265,6 +288,13 @@ export function CredentialsTab({ status, setStatus }: CredentialsTabProps) {
             <p class="text-gray-300 mb-6">
               Are you sure you want to delete <span class="font-semibold text-white">"{credentialToDelete.id}"</span>? This action cannot be undone.
             </p>
+            {/* credential-groups commission — the operator sees the group
+                surface before deleting a credential that belongs to one. */}
+            {groupNamesFor(groupMemberships, credentialToDelete.id).length > 0 && (
+              <p class="text-yellow-300 text-sm mb-4" data-testid="credential-group-delete-impact">
+                Member of credential group: {groupNamesFor(groupMemberships, credentialToDelete.id).map((name) => escapeHtml(name)).join(', ')}
+              </p>
+            )}
             <div class="flex gap-3 w-full">
               <button
                 onClick={() => setCredentialToDelete(null)}

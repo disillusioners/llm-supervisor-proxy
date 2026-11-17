@@ -7,21 +7,20 @@ import (
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/credentiallb"
 )
 
-func TestBinding_Expired_SlidingIdle(t *testing.T) {
+func TestBinding_Expired_AbsoluteLifetime(t *testing.T) {
 	now := time.Now()
-	b := &binding{memberID: "m", boundAt: now}
+	b := &binding{memberID: "m", createdAt: now}
 	if b.expired(time.Hour, now) {
 		t.Error("fresh binding must not be expired")
 	}
 	if !b.expired(time.Hour, now.Add(time.Hour+time.Millisecond)) {
-		t.Error("binding idle beyond ttl must be expired")
+		t.Error("binding beyond absolute ttl must be expired")
 	}
-	// Idle ceiling, not lifetime: an OLD binding whose boundAt was
-	// recently REFRESHED is not expired (the idle window restarts
-	// on refresh).
-	b.boundAt = now.Add(-5 * time.Millisecond)
-	if b.expired(time.Hour, now) {
-		t.Error("refreshed boundAt must reset the idle window")
+	// Absolute lifetime: an OLD binding is expired even if it was
+	// recently "hit" — createdAt is never refreshed on read.
+	b.createdAt = now.Add(-5 * time.Millisecond)
+	if !b.expired(time.Hour, now.Add(time.Hour+time.Millisecond)) {
+		t.Error("absolute createdAt must expire after ttl regardless of hits")
 	}
 }
 

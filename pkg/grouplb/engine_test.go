@@ -252,20 +252,20 @@ func TestEngine_OnGroupChanged_SurvivorFilter(t *testing.T) {
 	e.InjectPreconditionStateForTest("g1", "conv-drops", "member-b")
 
 	// member-b removed — its binding drops; member-a's survives with
-	// boundAt intact (weight nudges keep affinity).
-	before, _ := e.bindingBoundAtForTest("g1", "conv-stays")
+	// createdAt intact (weight nudges keep affinity).
+	before, _ := e.bindingCreatedAtForTest("g1", "conv-stays")
 
 	e.OnGroupChanged("g1", []MemberRef{{ModelID: "member-a", Weight: 5}})
 
 	if got := e.bindingsCountForTest("g1"); got != 1 {
 		t.Fatalf("survivor filter: bindingsCount=%d, want 1 (orphan dropped)", got)
 	}
-	if _, ok := e.bindingBoundAtForTest("g1", "conv-drops"); ok {
+	if _, ok := e.bindingCreatedAtForTest("g1", "conv-drops"); ok {
 		t.Fatal("binding to removed member must be dropped")
 	}
-	after, okAfter := e.bindingBoundAtForTest("g1", "conv-stays")
+	after, okAfter := e.bindingCreatedAtForTest("g1", "conv-stays")
 	if !okAfter || !before.Equal(after) {
-		t.Fatalf("surviving binding must keep boundAt (%v → %v, ok=%v)", before, after, okAfter)
+		t.Fatalf("surviving binding must keep createdAt (%v → %v, ok=%v)", before, after, okAfter)
 	}
 
 	// Empty refs (group removed / member-less) ⇒ state deleted.
@@ -279,7 +279,7 @@ func TestEngine_OnGroupChanged_SurvivorFilter(t *testing.T) {
 }
 
 func TestEngine_JanitorTTLSweep(t *testing.T) {
-	// Short idle TTL (15ms) + manual sweep — deterministic, no
+	// Short lifetime TTL (15ms) + manual sweep — deterministic, no
 	// sleeping on the janitor ticker.
 	e := newTestEngine(t, 15*time.Millisecond, time.Hour)
 	e.OnGroupChanged("g1", refs2())
@@ -291,12 +291,12 @@ func TestEngine_JanitorTTLSweep(t *testing.T) {
 		t.Fatalf("in-TTL sweep must keep the binding; got %d", got)
 	}
 
-	// Idle beyond TTL (bounded sleep < the 50ms cooldown; still
-	// deterministic for the BINDING sweep — boundAt is 15ms old).
+	// Past the absolute TTL (bounded sleep < the 50ms cooldown; still
+	// deterministic for the BINDING sweep — createdAt is 15ms old).
 	time.Sleep(20 * time.Millisecond)
 	e.sweepOnceForTest()
 	if got := e.bindingsCountForTest("g1"); got != 0 {
-		t.Fatalf("idle-expired binding must be swept; got %d", got)
+		t.Fatalf("lifetime-expired binding must be swept; got %d", got)
 	}
 }
 
@@ -355,12 +355,12 @@ func TestEngine_ConcurrentGetOrSelect(t *testing.T) {
 	wg.Wait()
 }
 
-func TestEngine_BoundAtRefreshedOnHit(t *testing.T) {
+func TestEngine_CreatedAtNotRefreshedOnHit(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 	e.OnGroupChanged("g1", refs2())
 	e.InjectPreconditionStateForTest("g1", "conv-key", "member-a")
 
-	before, ok := e.bindingBoundAtForTest("g1", "conv-key")
+	before, ok := e.bindingCreatedAtForTest("g1", "conv-key")
 	if !ok {
 		t.Fatal("precondition binding missing")
 	}
@@ -368,12 +368,12 @@ func TestEngine_BoundAtRefreshedOnHit(t *testing.T) {
 	if _, _, err := e.GetOrSelect("g1", "conv-key"); err != nil {
 		t.Fatalf("hit: %v", err)
 	}
-	after, ok := e.bindingBoundAtForTest("g1", "conv-key")
+	after, ok := e.bindingCreatedAtForTest("g1", "conv-key")
 	if !ok {
 		t.Fatal("binding vanished on hit")
 	}
-	if !after.After(before) {
-		t.Fatalf("in-TTL hit must REFRESH boundAt (#10): %v → %v", before, after)
+	if !after.Equal(before) {
+		t.Fatalf("in-TTL hit must NOT refresh createdAt (absolute lifetime): %v → %v", before, after)
 	}
 }
 

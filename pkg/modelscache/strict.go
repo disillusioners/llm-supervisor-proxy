@@ -24,6 +24,10 @@ type strictSource interface {
 	GetModelByNameStrict(ctx context.Context, modelName string) (*models.ModelConfig, error)
 	GetCredentialStrict(ctx context.Context, id string) (*models.CredentialConfig, error)
 
+	// Strict credential-group reads — error-propagating twins.
+	GetCredentialGroupStrict(ctx context.Context, id string) (*models.CredentialGroupConfig, error)
+	GetCredentialGroupsStrict(ctx context.Context) ([]models.CredentialGroupConfig, error)
+
 	// Strict list reads — error-propagating bulk scans.
 	GetModelsStrict(ctx context.Context) ([]models.ModelConfig, error)
 	GetEnabledModelsStrict(ctx context.Context) ([]models.ModelConfig, error)

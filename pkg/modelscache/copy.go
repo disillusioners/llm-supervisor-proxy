@@ -21,6 +21,10 @@ func copyStrings(src []string) []string {
 	return dst
 }
 
+// copyCredentialRefs clones a credential-ref slice. A ref carries
+// (credential_id, group_id, weight, position) — NO secret material — so
+// the element copy is a full clone. GroupID survives because this is a
+// plain copy(dst, src) over the value struct (A-14).
 func copyCredentialRefs(src []models.CredentialRef) []models.CredentialRef {
 	if src == nil {
 		return nil
@@ -104,4 +108,28 @@ func rebuildSnapshotsLocked(modelsByID map[string]*models.ModelConfig) ([]models
 		}
 	}
 	return all, enabled
+}
+
+// deepCopyCredentialGroupConfig clones a CredentialGroupConfig including
+// its Members slice.
+func deepCopyCredentialGroupConfig(g *models.CredentialGroupConfig) *models.CredentialGroupConfig {
+	if g == nil {
+		return nil
+	}
+	cp := *g
+	cp.Members = copyStrings(g.Members)
+	return &cp
+}
+
+// deepCopyCredentialGroupConfigs clones a whole snapshot.
+func deepCopyCredentialGroupConfigs(gs []models.CredentialGroupConfig) []models.CredentialGroupConfig {
+	if gs == nil {
+		return nil
+	}
+	dst := make([]models.CredentialGroupConfig, len(gs))
+	for i := range gs {
+		cp := deepCopyCredentialGroupConfig(&gs[i])
+		dst[i] = *cp
+	}
+	return dst
 }

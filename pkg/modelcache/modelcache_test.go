@@ -151,7 +151,124 @@ func TestModelWall_AccountQuotaNotModelMarked(t *testing.T) {
 			t.Fatalf("account-quota body %q was classified model-attributable (D3 over-breadth)", quota)
 		}
 	}
-	if attr, _, _ := ModelWall("Usage limit reached for 5 hour. Your limit will reset at 2026-11-16 18:13:33", now); !attr {
-		t.Fatal("genuine 5-hour usage wall must be model-attributable")
+}
+
+// TestApplyWall_ResetWindowCappedAtKnob: a parsed 5h reset is capped at the
+// configured knob (30m).
+func TestApplyWall_ResetWindowCappedAtKnob(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Hour).Format("2006-01-02 15:04:05")
+	c := New()
+	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	until, ok := c.Until("m")
+	if !ok {
+		t.Fatal("expected mark")
+	}
+	want := now.Add(30 * time.Minute)
+	if !until.Equal(want) {
+		t.Fatalf("until = %v, want %v", until, want)
+	}
+}
+
+// TestApplyWall_SoonerResetHonored: a stated reset sooner than the cap is
+// honored exactly (not extended to the knob).
+func TestApplyWall_SoonerResetHonored(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(10*time.Minute).Format("2006-01-02 15:04:05")
+	c := New()
+	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	until, ok := c.Until("m")
+	if !ok {
+		t.Fatal("expected mark")
+	}
+	want := now.Add(10 * time.Minute)
+	if !until.Equal(want) {
+		t.Fatalf("until = %v, want %v", until, want)
+	}
+}
+
+// TestApplyWall_NoResetUsesKnob: no parseable reset uses the knob as the
+// fixed window.
+func TestApplyWall_NoResetUsesKnob(t *testing.T) {
+	now := time.Now()
+	c := New()
+	ApplyWall(c, "m", "Token Plan usage limit", 30*time.Minute, now)
+	until, ok := c.Until("m")
+	if !ok {
+		t.Fatal("expected mark")
+	}
+	if d := until.Sub(now); d < 29*time.Minute || d > 31*time.Minute {
+		t.Fatalf("until-now = %v, want ~30m", d)
+	}
+}
+
+// TestApplyWall_ResetFloorOneMinute: a sub-minute reset is floored at 1m.
+func TestApplyWall_ResetFloorOneMinute(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(5*time.Second).Format("2006-01-02 15:04:05")
+	c := New()
+	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	until, ok := c.Until("m")
+	if !ok {
+		t.Fatal("expected mark")
+	}
+	want := now.Add(time.Minute)
+	if !until.Equal(want) {
+		t.Fatalf("until = %v, want %v", until, want)
+	}
+}
+
+// TestApplyWall_KnobAboveHardCeilingClamped: a knob above the 24h hard
+// ceiling is clamped to 24h.
+func TestApplyWall_KnobAboveHardCeilingClamped(t *testing.T) {
+	now := time.Now()
+	c := New()
+	ApplyWall(c, "m", "Token Plan usage limit", 48*time.Hour, now)
+	until, ok := c.Until("m")
+	if !ok {
+		t.Fatal("expected mark")
+	}
+	if d := until.Sub(now); d < 23*time.Hour || d > 25*time.Hour {
+		t.Fatalf("until-now = %v, want ~24h", d)
+	}
+}
+
+// TestCache_ExpiryThenRetryIsImmediate: an expired mark must not suppress.
+func TestCache_ExpiryThenRetryIsImmediate(t *testing.T) {
+	// (a) capped expiry already in the past -> no suppression.
+	now := time.Now().UTC().Truncate(time.Second).Add(-31 * time.Minute)
+	msg := "Usage limit reached for 5 hour. Your limit will reset at " + now.Add(40*time.Minute).Format("2006-01-02 15:04:05")
+	c := New()
+	ApplyWall(c, "m", msg, 30*time.Minute, now)
+	if c.Marked("m") {
+		t.Fatal("expired mark should not suppress")
+	}
+	// (b) live short mark expires.
+	c2 := New()
+	c2.Mark("m", 30*time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	if c2.Marked("m") {
+		t.Fatal("expired short mark should not suppress")
+	}
+}
+
+// TestModelWall_LiveBodies_ClassificationPin documents the live mint: both
+// live 2026-11-17 bodies classify attributable=true, hasReset=false.
+// classification semantics are adjudication-owned; this pin only documents
+// current behavior.
+func TestModelWall_LiveBodies_ClassificationPin(t *testing.T) {
+	now := time.Now()
+	bodies := []string{
+		"openai: Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more usage. (2056)",
+		"openai: The Token Plan usage limit has been reached. To avoid interruption, please upgrade your plan or buy credits and turn on auto consumption. (2067)",
+	}
+	for _, b := range bodies {
+		attr, _, hasReset := ModelWall(b, now)
+		if !attr {
+			t.Fatalf("body %q should be attributable", b)
+		}
+		if hasReset {
+			t.Fatalf("body %q should have no reset", b)
+		}
 	}
 }
