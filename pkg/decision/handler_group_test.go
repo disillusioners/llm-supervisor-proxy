@@ -55,6 +55,13 @@ type groupMemberFixture struct {
 	// (credential|provider, wire-model) — distinct wire models keep
 	// the members' marks distinct).
 	InternalModel string
+	// ExtraCredentialIDs are ADDITIONAL credential refs on the member
+	// row (the member's own credential multiplicity — ADR-6 / AC-R4).
+	// The credential resolver keeps answering the PRIMARY ref; the
+	// extras exist so a fixture can express "this member has another
+	// credential" (e.g. a member whose only marked credential must NOT
+	// be in the D-C state).
+	ExtraCredentialIDs []string
 }
 
 // groupEnv is the decision-lane group test environment: one fake
@@ -181,6 +188,10 @@ func newGroupEnv(t *testing.T, fixtures []groupMemberFixture) *groupEnv {
 		if wireModel == "" {
 			wireModel = "gpt-6-luna"
 		}
+		refs := []models.CredentialRef{{CredentialID: credID, Weight: 1, Position: 0}}
+		for i, extra := range f.ExtraCredentialIDs {
+			refs = append(refs, models.CredentialRef{CredentialID: extra, Weight: 1, Position: i + 1})
+		}
 		members = append(members, models.ModelConfig{
 			ID:            f.ID,
 			Name:          f.ID,
@@ -188,7 +199,7 @@ func newGroupEnv(t *testing.T, fixtures []groupMemberFixture) *groupEnv {
 			Enabled:       f.Enabled,
 			Internal:      true,
 			InternalModel: wireModel,
-			Credentials:   []models.CredentialRef{{CredentialID: credID, Weight: 1, Position: 0}},
+			Credentials:   refs,
 		})
 		groupMembers = append(groupMembers, models.GroupMember{ModelID: f.ID, Weight: f.Weight, BackupOnly: f.BackupOnly})
 	}
@@ -239,8 +250,10 @@ func newGroupEnv(t *testing.T, fixtures []groupMemberFixture) *groupEnv {
 				wireModel = "gpt-6-luna"
 			}
 			return models.ResolvedCredential{
-				Provider:      "openai",
-				APIKey:        "sk-cred",
+				Provider: "openai",
+				// The bearer carries the credential id — a test can
+				// assert WHICH credential an attempt used.
+				APIKey:        "sk-" + credID,
 				BaseURL:       env.upstreams[id].URL,
 				InternalModel: wireModel,
 				CredentialID:  credID,
@@ -800,10 +813,13 @@ func TestDecision_Group_401_RotatesWithinMember(t *testing.T) {
 func TestDecision_Group_PickAttemptSkipEventOutcomes(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		{ID: "dec-a", Weight: 1, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 200, Body: decisionBody()},
 	})
 	env.handler.SetUpstreamSkipCache(cache)
-	// Mark the member's credential ⇒ the attempt is suppressed.
+	// Mark the member's credential ⇒ the attempt is suppressed. (The
+	// member carries a SECOND, available credential ⇒ it is not in the
+	// D-C state — the escape applies only when EVERY credential of the
+	// member is unavailable.)
 	cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
 	env.send(t)
 	if !env.hasOutcome("member_suppressed") {
@@ -860,11 +876,12 @@ func (e *stubCredEngine) excludedPair(modelID, credID string) bool {
 func TestDecision_Group_PolicyPick_IgnoresMarks(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		{ID: "dec-a", Weight: 1, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 200, Body: decisionBody()},
 		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
 	})
 	env.handler.SetUpstreamSkipCache(cache)
-	// Mark the default member BEFORE the request.
+	// Mark the default member BEFORE the request. (Its second
+	// credential is available ⇒ the member is not in the D-C state.)
 	cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
 
 	// The pick is policy: the head is still dec-a (the default pool),
@@ -893,7 +910,7 @@ func TestDecision_Group_PolicyPick_IgnoresMarks(t *testing.T) {
 func TestDecision_Group_MarkedHead_ZeroUpstreamCallSkip(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 1, Enabled: true, Status: 200, Body: decisionBody()},
+		{ID: "dec-a", Weight: 1, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 200, Body: decisionBody()},
 		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
 	})
 	env.handler.SetUpstreamSkipCache(cache)
@@ -945,7 +962,7 @@ func TestDecision_Group_AllMarked_PolicyHeadHonestAttempt(t *testing.T) {
 func TestDecision_Group_AttemptOrder_PolicyOrderMinusMarked(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
+		{ID: "dec-a", Weight: 1, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
 		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
 		{ID: "dec-c", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
 	})
@@ -1078,24 +1095,71 @@ func TestDecision_Group_NoCooldownWriteOnSuppressedPick(t *testing.T) {
 // — with EVERY credential of a member cooling, the member still gets
 // exactly ONE honest attempt (the cache is never a failure oracle).
 func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt(t *testing.T) {
-	cache := skipcache.New()
-	engine := newStubCredEngine()
-	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 1, Enabled: true, Status: 500, Body: decisionErrorBody("boom", "server_error", "boom")},
-		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
-	})
-	env.handler.SetUpstreamSkipCache(cache)
-	env.handler.SetCredentialEngine(engine)
-	// dec-a's only credential is cooling (the engine says so).
-	engine.excluded["dec-a|cred-dec-a"] = true
+	// The D-C escape (ADR-15): when EVERY credential of a member is
+	// UNAVAILABLE — cooling (the credential engine's rotation state)
+	// OR marked in the UPSTREAM layer (the shared, process-wide skip
+	// cache) — the member still gets EXACTLY ONE honest attempt on its
+	// POLICY-FIRST credential. The cache is never a failure oracle at
+	// any layer: a mark/cooling record cannot, by itself, remove the
+	// member's last attempt.
+	//
+	// BOTH unavailability kinds are covered here (subtests — the
+	// top-level name count stays at 74).
+	runCase := func(t *testing.T, seed func(engine *stubCredEngine, cache *skipcache.Cache)) {
+		t.Helper()
+		cache := skipcache.New()
+		engine := newStubCredEngine()
+		env := newGroupEnv(t, []groupMemberFixture{
+			// The D-C member: TWO credential refs — BOTH are made
+			// unavailable by the subtest's seed.
+			{ID: "dec-a", Weight: 1, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 503, Body: decisionErrorBody("boom", "server_error", "boom")},
+			// The next member (the backup pool) — it serves after the
+			// D-C member's genuine failure.
+			{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		env.handler.SetCredentialEngine(engine)
+		seed(engine, cache)
 
-	rec := env.send(t)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (the cooling member still gets its honest attempt); body=%s", rec.Code, rec.Body.String())
+		rec := env.send(t)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (the D-C member's honest attempt failed ⇒ the member failed ⇒ the loop advanced); body=%s", rec.Code, rec.Body.String())
+		}
+		// EXACTLY ONE upstream call: the honest attempt happened (and
+		// the 5xx advances immediately — no within-member rotation).
+		if env.hitsFor("dec-a") != 1 {
+			t.Fatalf("the D-C member must get exactly ONE honest attempt, got %d upstream hits", env.hitsFor("dec-a"))
+		}
+		// ON THE POLICY-FIRST CREDENTIAL: the upstream saw that
+		// credential's bearer (the first ref by position).
+		if got := env.fakes["dec-a"].lastAuthH; got != "Bearer sk-cred-dec-a" {
+			t.Fatalf("the honest attempt must use the member's POLICY-FIRST credential, got %q", got)
+		}
+		// The genuine per-AM-4 failure ⇒ the member failed and the
+		// loop advanced to the next member.
+		if env.hitsFor("dec-b") != 1 {
+			t.Fatalf("the loop must advance to the next member after the D-C member's genuine failure, got %d hits", env.hitsFor("dec-b"))
+		}
 	}
-	if env.hitsFor("dec-a") != 1 {
-		t.Fatalf("the cooling member must get exactly ONE honest attempt, got %d hits", env.hitsFor("dec-a"))
-	}
+
+	t.Run("cooling", func(t *testing.T) {
+		// EVERY credential of the member is COOLING (the credential
+		// engine's own rotation state).
+		runCase(t, func(engine *stubCredEngine, cache *skipcache.Cache) {
+			engine.excluded["dec-a|cred-dec-a"] = true
+			engine.excluded["dec-a|cred-dec-a-2"] = true
+		})
+	})
+
+	t.Run("marked", func(t *testing.T) {
+		// EVERY credential of the member is MARKED in the UPSTREAM
+		// layer (the shared, process-wide skip cache — the
+		// credential-scope mark).
+		runCase(t, func(engine *stubCredEngine, cache *skipcache.Cache) {
+			cache.Mark(skipcache.ScopeCredential, "cred-dec-a", "gpt-6-luna", time.Minute)
+			cache.Mark(skipcache.ScopeCredential, "cred-dec-a-2", "gpt-6-luna", time.Minute)
+		})
+	})
 }
 
 // TestDecision_Group_LayerSeparation_CredentialMarkCannotChangePick —
@@ -1105,7 +1169,7 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 func TestDecision_Group_LayerSeparation_CredentialMarkCannotChangePick(t *testing.T) {
 	cache := skipcache.New()
 	env := newGroupEnv(t, []groupMemberFixture{
-		{ID: "dec-a", Weight: 9, Enabled: true, Status: 200, Body: decisionBody()},
+		{ID: "dec-a", Weight: 9, Enabled: true, ExtraCredentialIDs: []string{"cred-dec-a-2"}, Status: 200, Body: decisionBody()},
 		{ID: "dec-b", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
 	})
 	env.handler.SetUpstreamSkipCache(cache)

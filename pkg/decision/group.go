@@ -163,7 +163,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			}
 			triedPairs[pairKey] = true
 
-			wireModel := decisionWireModel(cred, candidate.ID)
+			wireModel := h.decisionWireModel(cred, candidate.ID)
 			suppressed, reason := h.attemptSuppressed(candidate.ID, cred, wireModel)
 			if suppressed {
 				skipped++
@@ -242,7 +242,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				membersAttempted++
 			} else {
 				if res.failure.mark {
-					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, decisionWireModel(headCred, headSuppressed.ID))
+					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, h.decisionWireModel(headCred, headSuppressed.ID))
 				}
 				if !res.failure.advance {
 					h.failFastDecisionGroup(w, groupID, res)
@@ -259,7 +259,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 
 	// The WINNER — the single commit. The win-clear runs on the
 	// WINNER's identity (the failed head's marks survive).
-	h.suppression.clearWinner(winner.memberID, winner.cred.CredentialID, winner.cred.Provider, decisionWireModel(winner.cred, winner.memberID))
+	h.suppression.clearWinner(winner.memberID, winner.cred.CredentialID, winner.cred.Provider, h.decisionWireModel(winner.cred, winner.memberID))
 	h.commitDecisionWinner(w, groupID, winner, authToken)
 	h.publishEvent(eventTypeDecision, map[string]interface{}{
 		"outcome":         "success",
@@ -361,11 +361,14 @@ func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredent
 	if !marked && !modelMarked {
 		return false, ""
 	}
-	// The member-level symmetry: when EVERY credential of the member
-	// is cooling or marked, the member gets exactly one honest
-	// attempt on its policy-first credential.
-	if h.memberFullyCooling(memberID) {
-		return false, "all_credentials_cooling"
+	// The member-level symmetry (ADR-15's D-C): when EVERY credential
+	// of the member is unavailable — cooling OR marked in the
+	// upstream layer — the member gets exactly ONE honest attempt on
+	// its policy-first credential. The cache is never a failure oracle
+	// at any layer: a mark/cooling record cannot, by itself, remove
+	// the member's last attempt.
+	if h.memberFullyUnavailable(memberID) {
+		return false, "all_credentials_unavailable"
 	}
 	if modelMarked {
 		return true, "model_layer_mark"
@@ -373,25 +376,37 @@ func (h *Handler) attemptSuppressed(memberID string, cred models.ResolvedCredent
 	return true, "upstream_layer_mark"
 }
 
-// memberFullyCooling reports whether EVERY credential of the member is
-// COOLING (per the credential engine's own rotation state) — the
-// precondition of the honest-attempt rule.
+// memberFullyUnavailable reports whether EVERY credential of the member
+// is UNAVAILABLE — cooling (the credential engine's own rotation state)
+// OR marked in the UPSTREAM layer (the shared, process-wide skip cache —
+// the credential-scope mark, the reader is
+// skipcache.Cache.Marked(ScopeCredential, credID, wireModel)).
 //
-// The precondition is the ENGINE's cooling, not the health layers'
-// marks: a health mark suppresses an ATTEMPT (the walk advances to
-// the next candidate), while a cooling credential means the member has
-// nothing left to rotate to — then the member still gets exactly ONE
-// honest attempt (the cache is never a failure oracle at any layer).
-func (h *Handler) memberFullyCooling(memberID string) bool {
-	if h.credEngine == nil {
-		return false
-	}
+// ADR-15's D-C: a health-marked credential is NOT an upstream outage —
+// it is an upstream-layer record of a limited/unhealthy credential,
+// exactly the state this escape covers. "Every credential cooling or
+// marked" ⇒ the member is in the D-C state ⇒ it gets EXACTLY ONE
+// honest attempt on its policy-first credential (the cache is never a
+// failure oracle at any layer).
+//
+// The wire model is the MEMBER ROW's internal model (the composed
+// credential tuple mirrors the manager's row-identity resolution: the
+// wire model is the member row's).
+func (h *Handler) memberFullyUnavailable(memberID string) bool {
 	row := h.memberRow(memberID)
 	if row == nil || len(row.Credentials) == 0 {
 		return false
 	}
+	wireModel := h.memberWireModel(memberID, "")
 	for _, ref := range row.Credentials {
-		if _, cooling := h.credEngine.CooldownUntil(memberID, ref.CredentialID); !cooling {
+		cooling := false
+		if h.credEngine != nil {
+			if _, ok := h.credEngine.CooldownUntil(memberID, ref.CredentialID); ok {
+				cooling = true
+			}
+		}
+		marked := h.suppression.credentialScopeMarked(ref.CredentialID, wireModel)
+		if !cooling && !marked {
 			return false
 		}
 	}
@@ -430,14 +445,26 @@ func (h *Handler) currentModelRows() []models.ModelConfig {
 	return h.modelsConfig.GetModels()
 }
 
-// decisionWireModel is the wire model of an attempt — the credential's
-// internal model, falling back to the member's row id (the text lane's
-// mark-key shape).
-func decisionWireModel(cred models.ResolvedCredential, memberID string) string {
-	if cred.InternalModel != "" {
-		return cred.InternalModel
+// memberWireModel is the wire model of a member's attempts — the
+// MEMBER ROW's internal model (the composed credential tuple mirrors
+// the manager's row-identity resolution: the wire model is the member
+// row's internal model), falling back to the supplied fallback and
+// then to the member's row id.
+func (h *Handler) memberWireModel(memberID, fallback string) string {
+	if row := h.memberRow(memberID); row != nil && row.InternalModel != "" {
+		return row.InternalModel
+	}
+	if fallback != "" {
+		return fallback
 	}
 	return memberID
+}
+
+// decisionWireModel is the wire model of an attempt — the member row's
+// internal model, then the credential's, then the member's row id (the
+// text lane's mark-key shape).
+func (h *Handler) decisionWireModel(cred models.ResolvedCredential, memberID string) string {
+	return h.memberWireModel(memberID, cred.InternalModel)
 }
 
 // decisionUsageTokens reads the typed usage of a served response.

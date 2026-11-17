@@ -78,6 +78,24 @@ func (s *suppressionSeam) credentialMarked(credID, provider, wireModel string) b
 	return false
 }
 
+// credentialScopeMarked reports whether the UPSTREAM layer holds a
+// mark for this (credential, wire-model) pair — the CREDENTIAL-scope
+// record of a limited/unhealthy credential.
+//
+// This is the reader the D-C precondition consults (ADR-15's D-C:
+// "every credential cooling or marked"). The provider scope is
+// deliberately NOT consulted there: the D-C state is about THIS
+// member's own credentials.
+func (s *suppressionSeam) credentialScopeMarked(credID, wireModel string) bool {
+	if s == nil || s.upstream == nil {
+		return false
+	}
+	if credID == "" || wireModel == "" {
+		return false
+	}
+	return s.upstream.Marked(skipcache.ScopeCredential, credID, wireModel)
+}
+
 // modelMarked reports whether the MODEL layer holds a mark for this
 // model row — the model-attributable health fact.
 //
