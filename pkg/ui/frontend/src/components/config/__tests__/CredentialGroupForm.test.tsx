@@ -225,6 +225,43 @@ describe('CredentialGroupForm (credential-groups commission)', () => {
     });
   });
 
+  it('R5 — a member whose provider differs only in case is accepted (case-insensitive provider compare)', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const credsCase: Credential[] = [
+      ...mockCredentials,
+      { id: 'cred-oai-case', provider: 'OpenAI' },
+    ];
+    const { container } = render(
+      <CredentialGroupForm
+        mode="edit"
+        initialData={{
+          id: 'pool-1',
+          name: 'Pool 1',
+          provider: 'openai',
+          members: ['cred-oai-case'],
+        }}
+        credentials={credsCase}
+        onSave={onSave}
+        onCancel={vi.fn()}
+        saving={false}
+      />,
+    );
+    fireEvent.submit(formEl(container));
+    // The member's provider is 'OpenAI', the group's is 'openai' — the
+    // SAME provider, different case ⇒ the cross-provider guard must NOT
+    // fire ("Member cred-oai-case is not a openai credential").
+    await vi.waitFor(() => {
+      expect(onSave).toHaveBeenCalledTimes(1);
+    });
+    expect(errorText(container)).toBe('');
+    expect(onSave).toHaveBeenCalledWith({
+      id: 'pool-1',
+      name: 'Pool 1',
+      provider: 'openai',
+      members: ['cred-oai-case'],
+    });
+  });
+
   it('C6 — a missing ID is rejected at submit', () => {
     const onSave = vi.fn();
     const { container } = render(

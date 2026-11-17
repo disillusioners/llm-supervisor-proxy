@@ -84,8 +84,14 @@ describe('SettingsPage — credentials fetch effect stability (C1)', () => {
     fireEvent.click(credentialsTab);
 
     // Wait for the error to settle (toast rendered).
+    //
+    // R2 — the count alone is VACUOUS: a SWALLOWED error (the catch that
+    // never calls setStatus) still yields credFetchCount === 1 and would
+    // pass. The error message reaching the DOM (the SettingsPage toast
+    // channel) is the discriminating assertion.
     await waitFor(() => {
       expect(credFetchCount).toBeGreaterThanOrEqual(1);
+      expect(container.textContent).toContain('Failed to fetch credentials');
     });
     // give time for any refire
     await new Promise((r) => setTimeout(r, 50));

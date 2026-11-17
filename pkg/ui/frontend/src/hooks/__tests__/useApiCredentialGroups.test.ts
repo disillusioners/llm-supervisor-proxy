@@ -162,6 +162,19 @@ describe('credential-group API (credential-groups commission)', () => {
     expect(groups[0].used_by).toEqual(['model-x']);
   });
 
+  it('R6 — a 200 with a text/plain body resolves to [] (the list parse is guarded)', async () => {
+    // The guard at useApi.ts:1079 — `await res.json().catch(() => null)` —
+    // must swallow a non-JSON success body. Without it the SyntaxError
+    // propagates out of getCredentialGroups().
+    fetchMock.mockResolvedValueOnce(
+      new Response('not json', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' },
+      }),
+    );
+    await expect(getCredentialGroups()).resolves.toEqual([]);
+  });
+
   it('H4 — the group list is fetched UNCACHED (every call hits the network)', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse([]));
     await getCredentialGroups();

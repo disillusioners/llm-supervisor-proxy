@@ -234,6 +234,67 @@ describe('MultiCredentialEditor — mixed credential/group picker (T-F)', () => 
   });
 
 
+  it('R3: a SELECT change on a PLAIN row emits NO group_id (the weight path never exercised the select handler)', () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MultiCredentialEditor
+        credentials={[{ credential_id: 'cred-oai-1', weight: 2, position: 0 }]}
+        availableCredentials={creds}
+        availableGroups={groups as any}
+        loading={false}
+        onChange={onChange}
+      />,
+    );
+    const select = container.querySelector('select') as HTMLSelectElement;
+    expect(select).not.toBeNull();
+    expect(select.value).toBe('cred-oai-1');
+    // Fire a real SELECT change — the F8 case above only fired a WEIGHT
+    // input, which spreads the row untouched and therefore never reached
+    // handleCredentialChange (the site that writes group_id).
+    fireEvent.change(select, { target: { value: 'cred-oai-2' } });
+    expect(onChange).toHaveBeenCalled();
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1][0];
+    expect(last[0].credential_id).toBe('cred-oai-2');
+    // The row must not reference a group: the emitted group_id is undefined.
+    expect(last[0].group_id).toBeUndefined();
+    // The WIRE payload (what the API receives) carries NO group_id key.
+    // NOTE: the editor state itself writes `group_id: undefined` (an own
+    // key with an undefined value — the codebase convention, see
+    // CredentialsContainer.inlineGroupRef); JSON serialisation drops it,
+    // so the absence is asserted on the serialised payload.
+    const wire = JSON.parse(JSON.stringify(last[0])) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(wire, 'group_id')).toBe(false);
+    expect(wire.credential_id).toBe('cred-oai-2');
+  });
+
+  it('R4: a credential whose provider differs only in case is NOT disabled', () => {
+    const onChange = vi.fn();
+    const credsCase: Credential[] = [
+      { id: 'cred-oai-1', provider: 'openai' },
+      { id: 'cred-oai-case', provider: 'OpenAI' },
+    ];
+    const { container } = render(
+      <MultiCredentialEditor
+        credentials={[
+          { credential_id: 'cred-oai-1', weight: 1, position: 0 },
+          { credential_id: '', weight: 1, position: 1 },
+        ]}
+        availableCredentials={credsCase}
+        loading={false}
+        onChange={onChange}
+      />,
+    );
+    const selects = container.querySelectorAll('select');
+    const secondSelect = selects[1];
+    const credOption = Array.from(secondSelect.querySelectorAll('option')).find(
+      (o) => o.getAttribute('value') === 'cred-oai-case',
+    ) as HTMLOptionElement;
+    expect(credOption).not.toBeNull();
+    // Row 0's provider is 'openai'; the candidate's is 'OpenAI' — the
+    // same provider, different case ⇒ selectable.
+    expect(credOption.disabled).toBe(false);
+  });
+
   it('warn-only: member-overlap hint renders', () => {
     const onChange = vi.fn();
     const { container } = render(

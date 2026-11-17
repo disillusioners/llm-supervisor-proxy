@@ -334,10 +334,14 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     const { container } = render(
       <ModelForm mode="edit" initialData={initial} onSave={onSave} onCancel={vi.fn()} onStatus={vi.fn()} />,
     );
-    const saveBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent && b.textContent.toLowerCase().includes('save'),
-    );
-    if (saveBtn) fireEvent.click(saveBtn as HTMLElement);
+    // R1 — the submit button is looked up by its STABLE testid, never by
+    // its label text. The text lookup was the round-1 vacuity: the lookup
+    // missed the button and the `if (saveBtn)` guard swallowed the miss,
+    // so the test passed only while the edit-mode label happened to
+    // contain 'save'. The click is now UNCONDITIONAL.
+    const saveBtn = container.querySelector('[data-testid="model-form-submit"]') as HTMLButtonElement;
+    expect(saveBtn).not.toBeNull();
+    fireEvent.click(saveBtn!);
     await waitFor(() => {
       expect(onSave).toHaveBeenCalled();
     });
