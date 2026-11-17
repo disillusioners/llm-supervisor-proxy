@@ -874,10 +874,25 @@ func (h *Handler) attemptAnthropicModel(w http.ResponseWriter, arc *anthropicReq
 				h.credEngine != nil &&
 				resolvedOK &&
 				len(modelConfig.Credentials) > 1 {
-				reselected, mode := h.credEngine.ExcludeAndReselect(
+				// wi-4b8d21e7 (F-3) — MINT-SCOPE at the CREDENTIAL
+				// layer: an ACCOUNT-quota body must seed the QUOTA
+				// cooldown (config credential_quota_cooldown, default
+				// 15m), not the flat rate-limit policy (60s /
+				// Retry-After). A walled ACCOUNT that returns to the
+				// pool after 60s is the "cooldown trap" the quota class
+				// exists to remove (pkg/credentiallb/failure_class.go)
+				// — the account recovers on a TOP-UP, not on a short
+				// timer. The upstream-auth case (401/403) keeps the
+				// rate-limit policy.
+				class := credentiallb.FailureClassRateLimit
+				if isAnthropicQuotaFailure(arc) {
+					class = credentiallb.FailureClassQuota
+				}
+				reselected, mode := h.credEngine.ExcludeAndReselectForClass(
 					modelConfig.ID,
 					arc.conversationKey,
 					resolved.CredentialID,
+					class,
 					arc.retryAfter,
 				)
 				switch mode {
@@ -2631,6 +2646,15 @@ func anthropicStoreUpstreamFailure(arc *anthropicRequestContext, err error) {
 // QUOTA-class (402 / quota vocabulary in the body) — the D3
 // limit-class sibling of isAnthropicRateLimit. HTTP-200-with-embedded
 // quota text is OUT OF SCOPE, same as the rate-limit R3-1 pinning.
+//
+// wi-4b8d21e7 (F-4): the ACCOUNT-quota MESSAGE vocabulary joins the
+// type/code checks. The observed live Token-Plan body
+// ("Token Plan usage limit reached: Upgrade your Token Plan or purchase
+// Credits for more usage.") carries its class in the MESSAGE, not in a
+// type/code field, so a 429 carrying it was classified rate-limit and
+// the walled ACCOUNT was seeded with the flat 60s rate-limit cooldown
+// instead of the quota cooldown. The vocabulary is the chat lane's
+// (providers.IsQuotaMessage) — one list, no drift.
 func isAnthropicQuotaFailure(arc *anthropicRequestContext) bool {
 	if arc == nil {
 		return false
@@ -2640,6 +2664,9 @@ func isAnthropicQuotaFailure(arc *anthropicRequestContext) bool {
 	}
 	if len(arc.lastError) == 0 {
 		return false
+	}
+	if providers.IsQuotaMessage(string(arc.lastError)) {
+		return true
 	}
 	var body struct {
 		Type  string `json:"type"`
@@ -2753,18 +2780,27 @@ func (h *Handler) markAnthropicUpstreamSkip(arc *anthropicRequestContext, modelK
 		arc.conf.UpstreamSkipCache.Mark(skipcache.ScopeProvider, strings.ToLower(arc.lastAttemptProvider), wireModel, ttl)
 	}
 	// wi-4d2c8e17 / ruling 2 — MODEL layer (parity with the OpenAI
-	// lane's markModelWallForErrorLocked): a model-attributable usage
-	// wall marks the MODEL identity so the walk suppresses that
-	// model's next attempt at zero cost and proceeds into its chain.
-	// Keyed by the ROW identity (modelKey) — the same key the
-	// suppression site reads.
+	// lane's markModelWallForErrorLocked): a MODEL-SCOPED wall marks
+	// the MODEL identity so the walk suppresses that model's next
+	// attempt at zero cost and proceeds into its chain. Keyed by the
+	// ROW identity (modelKey) — the same key the suppression site
+	// reads.
+	//
+	// MINT-SCOPE (wi-4b8d21e7, user ruling 2026-11-17): an
+	// ACCOUNT-scoped body (the Token-Plan class, any quota / credit /
+	// balance vocabulary) NEVER marks the model layer — the account ≈
+	// the credential, so the model's sibling credentials must stay
+	// reachable. The scope decision lives in pkg/modelcache (scope.go).
 	if arc.conf.ModelSkipCache != nil && modelKey != "" && len(arc.lastError) > 0 {
 		now := time.Now()
 		// The classify→clamp→mark policy lives in ONE place (tidier
-		// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
-		// [1m,24h] clamp (fixed AND reset windows), and the
-		// MarkUntil-vs-Mark branch.
-		modelcache.ApplyWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
+		// High-1): modelcache.ApplyScopedWall owns the scope gate, the
+		// DefaultTTL fallback, the [1m,24h] clamp (fixed AND reset
+		// windows) and the MarkUntil-vs-Mark branch.
+		scope, marked := modelcache.ApplyScopedWall(arc.conf.ModelSkipCache, modelKey, string(arc.lastError), arc.conf.ModelSkipCacheTTL, now)
+		if !marked {
+			log.Printf("[MODEL-SKIP] model %s: limit body is %s-scoped — credential-layer mark only (no model mark)", modelKey, scope)
+		}
 	}
 }
 

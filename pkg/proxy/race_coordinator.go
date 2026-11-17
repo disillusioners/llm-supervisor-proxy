@@ -2148,6 +2148,21 @@ func (c *raceCoordinator) markUpstreamSkipLocked(latestReq *upstreamRequest) {
 // the reset instant (clamped [1m,24h]) or the configured fixed TTL
 // when no reset parses. modelKey is the ROW identity the suppression
 // site reads. Caller holds c.mu (call discipline only).
+//
+// MINT-SCOPE (wi-4b8d21e7, user ruling 2026-11-17): an ACCOUNT-scoped
+// body NEVER marks the model layer. The account ≈ the credential — a
+// walled account is a walled credential, and the model's OTHER
+// credentials must stay reachable. The scope decision lives in
+// pkg/modelcache (scope.go); the classify→clamp→mark policy lives in
+// ONE place (tidier High-1): modelcache.ApplyScopedWall owns the
+// scope gate, the DefaultTTL fallback, the [1m,24h] clamp (fixed AND
+// reset windows) and the MarkUntil-vs-Mark branch.
+//
+// This is the 03:56:55Z incident's fix site: a Token-Plan (account)
+// body used to mark the MODEL, and the same request's credential-
+// failover attempt was then suppressed at zero cost by the model-layer
+// read site (race_executor.go) — one dry account hid the model's
+// healthy sibling credential.
 func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest, modelKey string) {
 	if c.cfg.ModelSkipCache == nil || modelKey == "" {
 		return
@@ -2156,11 +2171,10 @@ func (c *raceCoordinator) markModelWallForErrorLocked(latestReq *upstreamRequest
 	if err == nil {
 		return
 	}
-	// The classify→clamp→mark policy lives in ONE place (tidier
-	// High-1): modelcache.ApplyWall owns DefaultTTL fallback, the
-	// [1m,24h] clamp (fixed AND reset windows), and the
-	// MarkUntil-vs-Mark branch.
-	modelcache.ApplyWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
+	scope, marked := modelcache.ApplyScopedWall(c.cfg.ModelSkipCache, modelKey, err.Error(), c.cfg.ModelSkipCacheTTL, time.Now())
+	if !marked {
+		log.Printf("[MODEL-SKIP] model %s: limit body is %s-scoped — credential-layer mark only (no model mark)", modelKey, scope)
+	}
 }
 
 // FinalFailureReason (wi-7769a812 part 2) exposes the classified

@@ -308,6 +308,23 @@ func containsAny(lowered string, vocabulary []string) bool {
 	return false
 }
 
+// IsQuotaMessage reports whether a free-text body carries the ACCOUNT
+// quota vocabulary (the message half of quotaMessageVocabulary).
+//
+// It is the exported twin of the message check IsQuotaError performs, so
+// a caller that holds a RAW body (no *ProviderError to inspect — the
+// Anthropic passthrough lane, which reads the upstream body directly)
+// can classify a quota rejection with the SAME vocabulary the chat lane
+// uses, instead of a second, drifting copy.
+//
+// Case-insensitive; an empty string is false.
+func IsQuotaMessage(text string) bool {
+	if text == "" {
+		return false
+	}
+	return containsAny(strings.ToLower(text), quotaMessageVocabulary)
+}
+
 // IsQuotaError (layered credential fallback — Fix 1) classifies an error
 // as a QUOTA-class condition: the credential's credit / plan / balance is
 // exhausted. This is the second credential-failover class, alongside
@@ -365,5 +382,5 @@ func IsQuotaError(err error) bool {
 	if containsAny(strings.ToLower(pe.ErrorCode), quotaCodeVocabulary) {
 		return true
 	}
-	return containsAny(strings.ToLower(pe.Message), quotaMessageVocabulary)
+	return IsQuotaMessage(pe.Message)
 }
