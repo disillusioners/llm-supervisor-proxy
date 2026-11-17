@@ -19,15 +19,17 @@ const (
 
 // ApplyWall is the ONE owner of the model-wall mark policy: classify
 // the message, then mark the model for the stated reset instant
-// (clamped to [MinMarkWindow, MaxMarkWindow]) or, when no reset
-// parses, for the FIXED window (fixedTTL <= 0 ⇒ DefaultTTL, then
-// clamped). Both protocol lanes are thin callers; config.Validate
-// reuses the exported bounds at Save time.
+// (clamped to [MinMarkWindow, fixedTTL] — the configured knob is the
+// CAP, default 30m, hard bounds [1m,24h]) or, when no reset parses,
+// for the FIXED window (fixedTTL <= 0 ⇒ DefaultTTL, then clamped).
+// Both protocol lanes are thin callers; config.Validate reuses the
+// exported bounds at Save time.
 //
-// Byte-equal to the two per-lane blocks it replaces (fix round #2
-// extraction): the fixed-TTL fallback is applied BEFORE the clamp in
-// both, and the reset window is clamped with the same inclusive
-// bounds. Nil cache, empty key or empty msg: no-op (never marks).
+// cap = configured model_skip_cache_ttl (default 30m), hard bounds
+// [1m,24h]: a parsed reset window is capped at the knob (not the 24h
+// ceiling), so a multi-hour plan wall can never bench a model beyond
+// the configured horizon; a stated reset SOONER than the cap is honored
+// exactly. Nil cache, empty key or empty msg: no-op (never marks).
 func ApplyWall(c *Cache, key, msg string, fixedTTL time.Duration, now time.Time) {
 	if c == nil || key == "" || msg == "" {
 		return
@@ -36,25 +38,26 @@ func ApplyWall(c *Cache, key, msg string, fixedTTL time.Duration, now time.Time)
 	if !attributable {
 		return
 	}
-	if hasReset {
-		window := until.Sub(now)
-		if window < MinMarkWindow {
-			window = MinMarkWindow
-		}
-		if window > MaxMarkWindow {
-			window = MaxMarkWindow
-		}
-		c.MarkUntil(key, now.Add(window))
-		return
-	}
 	if fixedTTL <= 0 {
 		fixedTTL = DefaultTTL
 	}
+	// the knob is also the CAP
 	if fixedTTL < MinMarkWindow {
 		fixedTTL = MinMarkWindow
 	}
 	if fixedTTL > MaxMarkWindow {
 		fixedTTL = MaxMarkWindow
+	}
+	if hasReset {
+		window := until.Sub(now)
+		if window < MinMarkWindow {
+			window = MinMarkWindow
+		}
+		if window > fixedTTL {
+			window = fixedTTL
+		}
+		c.MarkUntil(key, now.Add(window))
+		return
 	}
 	c.Mark(key, fixedTTL)
 }
