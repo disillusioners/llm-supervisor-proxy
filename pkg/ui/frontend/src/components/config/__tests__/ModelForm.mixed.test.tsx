@@ -283,7 +283,7 @@ describe('ModelForm — mixed credential/group picker (T-G)', () => {
     expect(saveBtn.disabled).toBe(false);
     fireEvent.click(saveBtn);
     await waitFor(() => {
-      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('not found') });
+      expect(onStatus).toHaveBeenCalledWith({ type: 'error', message: expect.stringContaining('credential group "group-unknown" not found') });
     });
     expect(onSave).not.toHaveBeenCalled();
   });

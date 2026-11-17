@@ -366,7 +366,7 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
         if (row.group_id) {
           const g = groups.find((gr) => gr.id === row.group_id);
           if (!g) {
-            throw new Error(`Credential row ${i + 1}: group "${row.group_id}" not found`);
+            throw new Error(`Credential row ${i + 1}: credential group "${row.group_id}" not found`);
           }
           if (g.provider === '9router') {
             throw new Error(`kind "chat" cannot use "9router" provider (image-generation only)`);
