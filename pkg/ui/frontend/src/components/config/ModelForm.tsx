@@ -5,6 +5,23 @@ import { MultiCredentialEditor } from './MultiCredentialEditor';
 
 const MAX_CREDENTIALS = 16;
 
+// credential-groups commission (O-10): a credential GROUP reference is
+// only valid on a CHAT-kind model — the backend rule is
+// `kindAllowsCredentialGroups` (pkg/ui/server.go), which rejects
+// decision / image-gen / group kinds (their test buttons and resolvers
+// read the RAW credential list, so a group ref would resolve to an empty
+// credential id).
+//
+// The FE kind vocabulary is `Model['kind']` =
+// 'chat' | 'image-gen' | 'decision' | 'group' (src/types.ts). The set is
+// typed as that union so a typo'd literal is a COMPILE error, and the
+// set is an ALLOW-list, so a future kind added to the union fails
+// CLOSED (not offered) instead of silently inheriting the group gate.
+// A literal matching no kind (the backend hit exactly that drift with
+// "imggen" vs the real KindImageGen "image-gen") would silently disable
+// the gate — hence the typed allow-list rather than inline literals.
+const GROUP_ALLOWED_KINDS: ReadonlySet<NonNullable<Model['kind']>> = new Set(['chat']);
+
 // Peak hour time validation (uses UTC)
 function isPeakHourActive(start: string, end: string, offset: string): boolean {
   if (!start || !end) return false;
@@ -470,6 +487,13 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
     ? formData.id.trim() !== '' && formData.name.trim() !== ''
     : formData.name.trim() !== '';
 
+  // The kind of the model this form edits. `ModelForm` is the CHAT model
+  // form (the only production renderer is ModelsTab.tsx), so the add mode
+  // (no initialData) is a chat model by definition; edit mode carries
+  // the row's own kind. Credential-group options are offered to chat
+  // kinds only (see GROUP_ALLOWED_KINDS above).
+  const formKind: NonNullable<Model['kind']> = initialData?.kind ?? 'chat';
+
   // The "primary" credential drives provider badge, default base URL, and
   // placeholder for the upstream model name.
   const primaryCredentialId = formData.credentials[0]?.credential_id ?? '';
@@ -585,7 +609,9 @@ export function ModelForm({ mode, initialData, onSave, onCancel, onStatus, onNav
           <MultiCredentialEditor
             credentials={formData.credentials}
             availableCredentials={credentials.filter((c) => c.provider !== '9router')}
-            availableGroups={groups.filter((g) => g.provider !== '9router')}
+            availableGroups={groups.filter(
+              (g) => g.provider !== '9router' && GROUP_ALLOWED_KINDS.has(formKind),
+            )}
             loading={loadingCredentials}
             onChange={handleCredentialRowsChange}
             onNavigateToCredentials={onNavigateToCredentials}
