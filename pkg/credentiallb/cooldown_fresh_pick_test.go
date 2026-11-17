@@ -59,21 +59,21 @@ func TestEngine_Cooldown_BlocksUnrelatedFreshPick_PinLevel(t *testing.T) {
 	}
 }
 
-// TestEngine_BoundAtRefresh_OnInTTLHit — Task 44 (W7-3): the #10
-// sliding-idle-TTL regression guard. (a) an in-TTL hit REFRESHES
-// boundAt (strict increase) and ticks Hits; (b) total elapsed may
-// pass the ORIGINAL TTL while the binding survives — expiry is
-// measured from the LAST hit, not the first binding; (c) contrast —
-// a binding with no interim hit expires after the full idle TTL and
+// TestEngine_CreatedAtNotRefreshed_OnInTTLHit — Task 44 (W7-3): the #10
+// absolute-lifetime regression guard. (a) an in-TTL hit does NOT refresh
+// createdAt (the anchor stays EQUAL to the original) and ticks Hits;
+// (b) total elapsed past the ORIGINAL TTL expires the binding — expiry
+// is measured from createdAt, not from the last hit; (c) contrast — a
+// binding with no interim hit expires after the full absolute TTL and
 // the next call freshly picks.
-func TestEngine_BoundAtRefresh_OnInTTLHit(t *testing.T) {
+func TestEngine_CreatedAtNotRefreshed_OnInTTLHit(t *testing.T) {
 	const ttl = time.Second
 	e := newTestEngine(t, ttl, time.Hour, 31, time.Minute)
 	e.RebindFromStore("m", models.TestRefs("A", "B"))
 
-	// (a) Half the TTL elapsed -> in-TTL hit refreshes boundAt.
+	// (a) Half the TTL elapsed -> in-TTL hit does NOT refresh createdAt.
 	e.InjectPreconditionStateForTest("m", "conv", "A")
-	orig, ok := e.bindingBoundAtForTest("m", "conv")
+	orig, ok := e.bindingCreatedAtForTest("m", "conv")
 	if !ok {
 		t.Fatal("binding missing after inject")
 	}
@@ -84,31 +84,33 @@ func TestEngine_BoundAtRefresh_OnInTTLHit(t *testing.T) {
 	if got := e.Stats()["m"].Hits; got != 1 {
 		t.Fatalf("in-TTL hit did not tick Hits: %d", got)
 	}
-	refreshed, ok := e.bindingBoundAtForTest("m", "conv")
+	refreshed, ok := e.bindingCreatedAtForTest("m", "conv")
 	if !ok {
 		t.Fatal("binding vanished on in-TTL hit")
 	}
-	if !refreshed.After(orig) {
-		t.Fatalf("boundAt not refreshed (sliding TTL broken): orig=%v refreshed=%v", orig, refreshed)
+	if !refreshed.Equal(orig) {
+		t.Fatalf("createdAt was refreshed (absolute lifetime broken): orig=%v refreshed=%v", orig, refreshed)
 	}
 
-	// (b) Another half-TTL: total elapsed > original TTL while
-	// idle-since-last-hit < TTL -> STILL A.
+	// (b) Another half-TTL: total elapsed > original TTL -> binding
+	// expired (createdAt never refreshed) -> rebind (newlyBound=true).
 	time.Sleep(550 * time.Millisecond)
-	if id, newly, err := e.GetOrSelect("m", "conv"); err != nil || newly || id != "A" {
-		t.Fatalf("post-original-TTL hit: id=%s newly=%v err=%v want A/false/nil (idle TTL must slide)", id, newly, err)
+	if id, newly, err := e.GetOrSelect("m", "conv"); err != nil || id == "" {
+		t.Fatalf("post-original-TTL: id=%s err=%v", id, err)
+	} else if !newly {
+		t.Fatalf("absolute TTL broken: binding survived past createdAt+ttl: id=%s newly=%v", id, newly)
 	}
 
 	// (c) Contrast: a binding with NO interim hit expires after the
-	// full idle TTL; the next call freshly picks (the stale
+	// full absolute TTL; the next call freshly picks (the stale
 	// credential itself or the other one) instead of serving a hit.
-	e.InjectPreconditionStateForTest("m", "idle", "B")
+	e.InjectPreconditionStateForTest("m", "no-hit", "B")
 	time.Sleep(1100 * time.Millisecond) // > ttl, no interim hit
-	id, newly, err := e.GetOrSelect("m", "idle")
+	id, newly, err := e.GetOrSelect("m", "no-hit")
 	if err != nil || id == "" {
-		t.Fatalf("idle-expiry pick: id=%q err=%v", id, err)
+		t.Fatalf("expiry pick: id=%q err=%v", id, err)
 	}
 	if !newly {
-		t.Fatalf("idle-expired binding served as in-TTL hit: id=%s newly=%v (TTL did not fire)", id, newly)
+		t.Fatalf("lifetime-expired binding served as in-TTL hit: id=%s newly=%v (TTL did not fire)", id, newly)
 	}
 }

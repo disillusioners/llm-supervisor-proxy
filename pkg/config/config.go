@@ -130,6 +130,27 @@ type Config struct {
 	// (proxy ConfigSnapshot per request — no restart).
 	ModelSkipCacheTTL Duration `json:"model_skip_cache_ttl,omitempty"`
 
+	// Hash-sticky conversation bindings (absolute lifetime): a binding
+	// is stamped once at bind and expires at createdAt+TTL — a
+	// continuously-hit conversation must not pin a member forever.
+	// Expiry DROPS the binding and default selection runs.
+	//
+	// GroupBindingTTL governs the GROUP/member layer (grouplb engine).
+	// Default 30m, clamp [1m, 24h]; boot-captured (restart to apply,
+	// like credential_quota_cooldown). Distinct from ModelSkipCacheTTL
+	// (a model-layer availability wall — different mechanism,
+	// untouched) and from ModelBindingTTL (independent knobs — setting
+	// one never changes the other).
+	GroupBindingTTL Duration `json:"group_binding_ttl,omitempty"`
+
+	// ModelBindingTTL governs the CREDENTIAL layer (credentiallb
+	// engine). Default 30m, clamp [1m, 24h]; boot-captured (restart to
+	// apply, like credential_quota_cooldown). Distinct from
+	// ModelSkipCacheTTL (a model-layer availability wall — different
+	// mechanism, untouched) and from GroupBindingTTL (independent knobs
+	// — setting one never changes the other).
+	ModelBindingTTL Duration `json:"model_binding_ttl,omitempty"`
+
 	// Idle Termination
 	IdleTerminationEnabled bool     `json:"idle_termination_enabled"`
 	IdleTerminationTimeout Duration `json:"idle_termination_timeout"`
@@ -267,6 +288,10 @@ var Defaults = Config{
 	// wi-4d2c8e17 / ruling 2: model-layer fixed TTL default 15m
 	// (quota-class horizon). Reset-named walls override per mark.
 	ModelSkipCacheTTL: Duration(15 * time.Minute),
+	// Hash-sticky conversation bindings: absolute lifetime from
+	// createdAt, per layer. Default 30m each.
+	GroupBindingTTL: Duration(30 * time.Minute),
+	ModelBindingTTL: Duration(30 * time.Minute),
 	// Raw Upstream Response Logging
 	LogRawUpstreamResponse: false, // Disabled by default
 	LogRawUpstreamOnError:  false, // Disabled by default
@@ -388,6 +413,34 @@ func (c *Config) Validate() error {
 		}
 		if c.ModelSkipCacheTTL > Duration(modelcache.MaxMarkWindow) {
 			return errors.New("model_skip_cache_ttl must be at most 24h when set")
+		}
+	}
+	// Hash-sticky conversation bindings: Validate enforces [1m, 24h]
+	// when set (0 falls back to the 30m default at the boot seam).
+	// Bounds are credentiallb.BindingTTLFloor (1m) and
+	// credentiallb.BindingTTLCeiling (24h) — single source of truth.
+	// The ENGINE seam (SetBindingTTL) re-clamps the CEILING, RAISES
+	// sub-millisecond values to BindingTTLFloor, and ignores
+	// non-positive input; sub-minute values in [1ms, 1m) are honoured
+	// verbatim by design there (documented seam — tests and
+	// programmatic callers), so this Validate floor is the user-facing
+	// gate, not a duplicate of the engine's. The message strings keep
+	// the human-readable "1m"/"24h" wording (Go duration formatting
+	// would render the consts as "1m0s"/"24h0m0s").
+	if c.GroupBindingTTL > 0 {
+		if c.GroupBindingTTL < Duration(credentiallb.BindingTTLFloor) {
+			return errors.New("group_binding_ttl must be at least 1m when set")
+		}
+		if c.GroupBindingTTL > Duration(credentiallb.BindingTTLCeiling) {
+			return errors.New("group_binding_ttl must be at most 24h when set")
+		}
+	}
+	if c.ModelBindingTTL > 0 {
+		if c.ModelBindingTTL < Duration(credentiallb.BindingTTLFloor) {
+			return errors.New("model_binding_ttl must be at least 1m when set")
+		}
+		if c.ModelBindingTTL > Duration(credentiallb.BindingTTLCeiling) {
+			return errors.New("model_binding_ttl must be at most 24h when set")
 		}
 	}
 	if c.MaxStreamBufferSize < 0 {
@@ -559,6 +612,17 @@ func applyEnvOverrides(cfg Config) Config {
 	if v := os.Getenv("CREDENTIAL_QUOTA_COOLDOWN"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.CredentialQuotaCooldown = Duration(d)
+		}
+	}
+	// Hash-sticky conversation bindings: absolute lifetime per layer.
+	if v := os.Getenv("GROUP_BINDING_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.GroupBindingTTL = Duration(d)
+		}
+	}
+	if v := os.Getenv("MODEL_BINDING_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.ModelBindingTTL = Duration(d)
 		}
 	}
 	// Buffer storage configuration
