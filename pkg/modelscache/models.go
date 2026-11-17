@@ -240,7 +240,20 @@ func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.Mode
 	c.modelsSnap = deepCopyModelConfigs(modelsList)
 	c.enabledSnap = deepCopyModelConfigs(enabledList)
 	c.groupsByID = groupByID
-	c.groupsSnap = deepCopyCredentialGroupConfigs(groups)
+	// Canonical order for groupsSnap: by ID (matches the DB scan
+	// ORDER BY id in scanCredentialGroups). Every other install path
+	// (strict-fill, and the three write-through mutators) rebuilds
+	// groupsSnap from groupsByID using this same ID order so the
+	// frontend list order is stable across reconcile + writes.
+	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(groupByID))
+	groupIDs := make([]string, 0, len(groupByID))
+	for id := range groupByID {
+		groupIDs = append(groupIDs, id)
+	}
+	sort.Strings(groupIDs)
+	for _, id := range groupIDs {
+		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(groupByID[id]))
+	}
 	c.rebuildClaimsLocked()
 	c.lastRefresh = c.now()
 	c.healthy = true
@@ -384,7 +397,9 @@ func (c *CachedModelsConfig) reconcileOnce() {
 	// T-13b: rebuild the store's group map from the DB BEFORE the
 	// mirror refresh, so direct-SQL/restore/repair writes are visible.
 	if gr, ok := c.inner.(groupRebuilder); ok && gr != nil {
-		_ = gr.RebuildCredentialGroupsFromDB()
+		if err := gr.RebuildCredentialGroupsFromDB(); err != nil {
+			log.Printf("[WARN] [cache] reconciler: rebuild credential groups from DB failed (%v)", err)
+		}
 	}
 
 	modelsList, enabledList, creds, groups, err := c.strictSnapshot(ctx)
@@ -687,6 +702,21 @@ func (c *CachedModelsConfig) GetCredentialGroup(id string) *models.CredentialGro
 		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
 	}
 	c.groupsByID[id] = deepCopyCredentialGroupConfig(g)
+	// O-9: strict-fill must ALSO land the group in groupsSnap, so the
+	// group is visible in the list response (not just detail) within
+	// the reconcile window. Rebuild from groupsByID in canonical (ID)
+	// order so the slice stays consistent with applySnapshot.
+	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
+	gids := make([]string, 0, len(c.groupsByID))
+	for gid := range c.groupsByID {
+		gids = append(gids, gid)
+	}
+	sort.Strings(gids)
+	for _, gid := range gids {
+		if gg, ok := c.groupsByID[gid]; ok && gg != nil {
+			c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+		}
+	}
 	c.mu.Unlock()
 	return cp
 }
@@ -704,19 +734,36 @@ func (c *CachedModelsConfig) AddCredentialGroup(g models.CredentialGroupConfig) 
 	if err := c.inner.AddCredentialGroup(g); err != nil {
 		return err
 	}
-	cp := deepCopyCredentialGroupConfig(&g)
+	// O-5: re-read the persisted row so the mirror carries the DB's
+	// canonical shape (created_at/updated_at populated), matching the
+	// reconcile path which mirrors DB rows. Use the decorator's strict
+	// read path.
+	ctx, cancel := context.WithTimeout(context.Background(), c.opts.StrictFillTimeout)
+	stored, err := c.inner.GetCredentialGroupStrict(ctx, g.ID)
+	cancel()
+	if err != nil {
+		log.Printf("[WARN] [cache] AddCredentialGroup: re-read persisted row failed (%v) — mirroring caller value", err)
+		stored = &g
+	}
+	cp := deepCopyCredentialGroupConfig(stored)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.groupsByID == nil {
 		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
 	}
-	c.groupsByID[g.ID] = cp
-	// rebuild groupsSnap from the map for consistency
+	c.groupsByID[stored.ID] = cp
+	// rebuild groupsSnap from groupsByID in canonical (ID) order
 	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
-	for _, gg := range c.groupsByID {
-		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	gids := make([]string, 0, len(c.groupsByID))
+	for id := range c.groupsByID {
+		gids = append(gids, id)
 	}
-	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	sort.Strings(gids)
+	for _, id := range gids {
+		if gg, ok := c.groupsByID[id]; ok && gg != nil {
+			c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+		}
+	}
 	c.healthy = true
 	return nil
 }
@@ -727,22 +774,46 @@ func (c *CachedModelsConfig) UpdateCredentialGroup(id string, g models.Credentia
 	if err := c.inner.UpdateCredentialGroup(id, g); err != nil {
 		return err
 	}
-	cp := deepCopyCredentialGroupConfig(&g)
+	// O-5: re-read the persisted row so the mirror carries the DB's
+	// canonical shape (created_at/updated_at populated), matching the
+	// reconcile path which mirrors DB rows.
+	readID := g.ID
+	if readID == "" {
+		readID = id
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.opts.StrictFillTimeout)
+	stored, err := c.inner.GetCredentialGroupStrict(ctx, readID)
+	cancel()
+	if err != nil {
+		log.Printf("[WARN] [cache] UpdateCredentialGroup: re-read persisted row failed (%v) — mirroring caller value", err)
+		stored = &g
+		if stored.ID == "" {
+			stored.ID = id
+		}
+	}
+	cp := deepCopyCredentialGroupConfig(stored)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.groupsByID == nil {
 		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
 	}
-	// ID immutable: if id != g.ID, drop old key
-	if id != g.ID {
+	// ID immutable: if id != stored.ID, drop old key
+	if id != stored.ID {
 		delete(c.groupsByID, id)
 	}
-	c.groupsByID[g.ID] = cp
+	c.groupsByID[stored.ID] = cp
+	// rebuild groupsSnap from groupsByID in canonical (ID) order
 	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
-	for _, gg := range c.groupsByID {
-		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	gids := make([]string, 0, len(c.groupsByID))
+	for gid := range c.groupsByID {
+		gids = append(gids, gid)
 	}
-	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	sort.Strings(gids)
+	for _, gid := range gids {
+		if gg, ok := c.groupsByID[gid]; ok && gg != nil {
+			c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+		}
+	}
 	c.healthy = true
 	return nil
 }
@@ -756,11 +827,18 @@ func (c *CachedModelsConfig) RemoveCredentialGroup(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.groupsByID, id)
+	// rebuild groupsSnap from groupsByID in canonical (ID) order
 	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
-	for _, gg := range c.groupsByID {
-		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	gids := make([]string, 0, len(c.groupsByID))
+	for gid := range c.groupsByID {
+		gids = append(gids, gid)
 	}
-	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	sort.Strings(gids)
+	for _, gid := range gids {
+		if gg, ok := c.groupsByID[gid]; ok && gg != nil {
+			c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+		}
+	}
 	c.healthy = true
 	return nil
 }

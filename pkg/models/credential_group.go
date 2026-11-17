@@ -2,7 +2,6 @@ package models
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -80,7 +79,6 @@ func ValidateCredentialGroup(g CredentialGroupConfig, credLookup interface{}) er
 			}
 		}
 	}
-	_ = sort.Strings
 	return nil
 }
 
