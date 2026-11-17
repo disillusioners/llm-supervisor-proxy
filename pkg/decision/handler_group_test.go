@@ -1160,6 +1160,89 @@ func TestDecision_Group_AllCredentialsCooling_PolicyFirstCredentialHonestAttempt
 			cache.Mark(skipcache.ScopeCredential, "cred-dec-a-2", "gpt-6-luna", time.Minute)
 		})
 	})
+
+	// ─────────────────────────────────────────────────────────────────
+	// The mark-KEY chain — the WRITE side and the READ side must use
+	// ONE key, by construction:
+	//
+	//	row.InternalModel  ->  memberID
+	//
+	// This asserts it MECHANICALLY (the shared cache is the
+	// observation point), not by inspection:
+	//
+	//	(1) the WRITE path's ACTUAL key — the credential mark the lane
+	//	    stored after a real limit-class failure — is the chain key
+	//	    (and is NOT any other key), and
+	//	(2) the READ path — the D-C precondition's own reader — FINDS
+	//	    the mark the WRITE path stored (with the member's rotation
+	//	    state cleared, so the mark alone decides) ⇒ the two keys
+	//	    are equal.
+	//
+	// Two row shapes are covered: the validated row (an internal model
+	// set) and the degenerate row (an empty internal model — reachable
+	// only outside the validated path, which is precisely why the
+	// chain must not depend on it).
+	// ─────────────────────────────────────────────────────────────────
+	runKeyCase := func(t *testing.T, memberID, rowInternalModel, wantKey, otherKey string) {
+		t.Helper()
+		cache := skipcache.New()
+		engine := newStubCredEngine()
+		env := newGroupEnv(t, []groupMemberFixture{
+			// ONE credential (so "every credential unavailable" is
+			// decidable) and a LIMIT-CLASS answer (429) so the write
+			// path really runs and really stores a mark.
+			{ID: memberID, Weight: 1, Enabled: true, Status: 429, Body: decisionErrorBody("rate_limit", "rate_limit_error", "slow down")},
+			{ID: "dec-next", Weight: 1, BackupOnly: true, Enabled: true, Status: 200, Body: decisionBody()},
+		})
+		env.handler.SetUpstreamSkipCache(cache)
+		env.handler.SetCredentialEngine(engine)
+
+		// The member ROW's internal model — the chain's head. The
+		// degenerate case blanks it (a legacy hand-edited row); the
+		// credential's internal model stays as the harness resolved
+		// it, so the two sides COULD disagree.
+		for i := range env.modelsSeam.rows {
+			if env.modelsSeam.rows[i].ID == memberID {
+				env.modelsSeam.rows[i].InternalModel = rowInternalModel
+			}
+		}
+
+		env.send(t)
+
+		credID := "cred-" + memberID
+		// (1) The WRITE path's ACTUAL key.
+		if !cache.Marked(skipcache.ScopeCredential, credID, wantKey) {
+			t.Fatalf("the write path must store the credential mark under the chain key %q", wantKey)
+		}
+		if cache.Marked(skipcache.ScopeCredential, credID, otherKey) {
+			t.Fatalf("the write path must not store the credential mark under %q — the chain is a SINGLE key", otherKey)
+		}
+		// (2) The READ path finds the mark the WRITE path stored.
+		// Clear the member's rotation state first: the D-C
+		// precondition then depends on the MARK ALONE, so the read
+		// path's key is what decides the outcome.
+		engine.mu.Lock()
+		engine.excluded = map[string]bool{}
+		engine.mu.Unlock()
+		if !env.handler.memberFullyUnavailable(memberID) {
+			t.Fatalf("the read path must find the mark the write path stored (key equality) for member %q", memberID)
+		}
+	}
+
+	t.Run("mark_key_equality", func(t *testing.T) {
+		t.Run("validated_row", func(t *testing.T) {
+			// The row's internal model is set ⇒ the chain's head is the
+			// internal model; the member id is NOT used.
+			runKeyCase(t, "dec-a", "gpt-6-luna", "gpt-6-luna", "dec-a")
+		})
+		t.Run("degenerate_row", func(t *testing.T) {
+			// The row's internal model is EMPTY ⇒ the chain falls back
+			// to the member id. The credential's internal model (the
+			// OLD write key) must NOT be used — the write key and the
+			// read key would then disagree.
+			runKeyCase(t, "dec-a", "", "dec-a", "gpt-6-luna")
+		})
+	})
 }
 
 // TestDecision_Group_LayerSeparation_CredentialMarkCannotChangePick —

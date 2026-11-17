@@ -163,7 +163,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 			}
 			triedPairs[pairKey] = true
 
-			wireModel := h.decisionWireModel(cred, candidate.ID)
+			wireModel := h.decisionMarkKey(candidate.ID)
 			suppressed, reason := h.attemptSuppressed(candidate.ID, cred, wireModel)
 			if suppressed {
 				skipped++
@@ -242,7 +242,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 				membersAttempted++
 			} else {
 				if res.failure.mark {
-					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, h.decisionWireModel(headCred, headSuppressed.ID))
+					h.suppression.markLimit(headSuppressed.ID, headCred.CredentialID, headCred.Provider, h.decisionMarkKey(headSuppressed.ID))
 				}
 				if !res.failure.advance {
 					h.failFastDecisionGroup(w, groupID, res)
@@ -259,7 +259,7 @@ func (h *Handler) serveDecisionGroup(w http.ResponseWriter, r *http.Request, gro
 
 	// The WINNER — the single commit. The win-clear runs on the
 	// WINNER's identity (the failed head's marks survive).
-	h.suppression.clearWinner(winner.memberID, winner.cred.CredentialID, winner.cred.Provider, h.decisionWireModel(winner.cred, winner.memberID))
+	h.suppression.clearWinner(winner.memberID, winner.cred.CredentialID, winner.cred.Provider, h.decisionMarkKey(winner.memberID))
 	h.commitDecisionWinner(w, groupID, winner, authToken)
 	h.publishEvent(eventTypeDecision, map[string]interface{}{
 		"outcome":         "success",
@@ -397,7 +397,7 @@ func (h *Handler) memberFullyUnavailable(memberID string) bool {
 	if row == nil || len(row.Credentials) == 0 {
 		return false
 	}
-	wireModel := h.memberWireModel(memberID, "")
+	wireModel := h.decisionMarkKey(memberID)
 	for _, ref := range row.Credentials {
 		cooling := false
 		if h.credEngine != nil {
@@ -445,26 +445,38 @@ func (h *Handler) currentModelRows() []models.ModelConfig {
 	return h.modelsConfig.GetModels()
 }
 
-// memberWireModel is the wire model of a member's attempts — the
-// MEMBER ROW's internal model (the composed credential tuple mirrors
-// the manager's row-identity resolution: the wire model is the member
-// row's internal model), falling back to the supplied fallback and
-// then to the member's row id.
-func (h *Handler) memberWireModel(memberID, fallback string) string {
+// decisionMarkKey is THE mark key of the decision lane — the single
+// chain shared by the mark-WRITE path and the mark-READ path:
+//
+//	row.InternalModel  ->  memberID
+//
+// The member row's internal model (the wire model the lane sends
+// upstream), else the member's row id.
+//
+// The chain is MEMBER-LEVEL on purpose. The read side sees only
+// credential REFS (an id, a weight, a position — never a resolved
+// credential's internal model), so a credential-derived term could not
+// be computed identically on both sides; a member-level chain CAN, so
+// the write key and the read key are equal BY CONSTRUCTION, not by
+// inspection.
+//
+// The credential's internal-model term is deliberately NOT part of the
+// chain: the row's internal model is the chain's HEAD, so the
+// credential term only ever mattered for a degenerate row (an empty
+// internal model — constructible only outside the validated path),
+// where the write key and the read key would otherwise disagree. A
+// mark written under one key and read under another is exactly how the
+// cache would become a failure oracle.
+//
+// (The resolved credential's internal model may be SUBSTITUTED — a
+// peak-hour window serves the peak model — while the chain stays on
+// the row's internal model. That never diverges the two sides: the
+// row's head decides, on both.)
+func (h *Handler) decisionMarkKey(memberID string) string {
 	if row := h.memberRow(memberID); row != nil && row.InternalModel != "" {
 		return row.InternalModel
 	}
-	if fallback != "" {
-		return fallback
-	}
 	return memberID
-}
-
-// decisionWireModel is the wire model of an attempt — the member row's
-// internal model, then the credential's, then the member's row id (the
-// text lane's mark-key shape).
-func (h *Handler) decisionWireModel(cred models.ResolvedCredential, memberID string) string {
-	return h.memberWireModel(memberID, cred.InternalModel)
 }
 
 // decisionUsageTokens reads the typed usage of a served response.
