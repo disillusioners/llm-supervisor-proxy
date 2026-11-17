@@ -472,6 +472,16 @@ type ModelsConfigInterface interface {
 	UpdateCredential(id string, cred CredentialConfig) error
 	RemoveCredential(id string) error
 
+	// Credential groups (DB-backed only; JSON twin returns stubs)
+	GetCredentialGroup(id string) *CredentialGroupConfig
+	GetCredentialGroups() []CredentialGroupConfig
+	AddCredentialGroup(g CredentialGroupConfig) error
+	UpdateCredentialGroup(id string, g CredentialGroupConfig) error
+	RemoveCredentialGroup(id string) error
+	ModelsUsingCredentialGroup(groupID string) []string
+	GroupsContainingCredential(credID string) []string
+	FlattenCredentialRefs(model *ModelConfig) []CredentialRef
+
 	// Internal config resolution
 	ResolveInternalConfig(modelID string) (provider, apiKey, baseURL, model string, ok bool)
 

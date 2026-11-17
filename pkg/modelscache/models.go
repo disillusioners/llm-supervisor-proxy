@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +114,8 @@ type CachedModelsConfig struct {
 	negByName     map[string]negEntry
 	modelsSnap    []models.ModelConfig
 	enabledSnap   []models.ModelConfig
+	groupsByID    map[string]*models.CredentialGroupConfig
+	groupsSnap    []models.CredentialGroupConfig
 	lastRefresh   time.Time
 	healthy       bool
 	staleWarnOnce bool
@@ -153,14 +156,21 @@ func NewCachedModelsConfig(inner strictSource, opts Options) (*CachedModelsConfi
 	// boot should fail fast rather than hang. Any error aborts priming
 	// entirely (no partial state; decrypt-failure-in-scan included per
 	// planner ruling J).
+	// T-13b: rebuild the store's group map from the DB BEFORE the
+	// first snapshot read, so direct-SQL/restore/repair writes are
+	// visible at boot. Optional interface: tolerated when absent.
+	if gr, ok := c.inner.(groupRebuilder); ok && gr != nil {
+		_ = gr.RebuildCredentialGroupsFromDB()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), o.StrictFillTimeout)
-	modelsList, enabledList, creds, err := c.strictSnapshot(ctx)
+	modelsList, enabledList, creds, groups, err := c.strictSnapshot(ctx)
 	cancel()
 	if err != nil {
 		return nil, err
 	}
 
-	c.applySnapshot(modelsList, enabledList, creds)
+	c.applySnapshot(modelsList, enabledList, creds, groups)
 
 	// Boot-only observability: the one-time decorator-meta line (1.E.2).
 	// (remove-external-upstream P1 task 8 / R3: the dead-default
@@ -176,27 +186,31 @@ func NewCachedModelsConfig(inner strictSource, opts Options) (*CachedModelsConfi
 // strictSnapshot runs the three strict list reads under one context.
 // The caller owns the context (boot: 5s timeout; reconciler:
 // cancellable).
-func (c *CachedModelsConfig) strictSnapshot(ctx context.Context) ([]models.ModelConfig, []models.ModelConfig, []models.CredentialConfig, error) {
+func (c *CachedModelsConfig) strictSnapshot(ctx context.Context) ([]models.ModelConfig, []models.ModelConfig, []models.CredentialConfig, []models.CredentialGroupConfig, error) {
 	modelsList, err := c.inner.GetModelsStrict(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	enabledList, err := c.inner.GetEnabledModelsStrict(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	creds, err := c.inner.GetCredentialsStrict(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return modelsList, enabledList, creds, nil
+	groups, err := c.inner.GetCredentialGroupsStrict(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return modelsList, enabledList, creds, groups, nil
 }
 
 // applySnapshot installs a fully-successful snapshot under the write
 // lock: rebuilds every map, clears negatives (the full scan just
 // re-answered every not-found definitively), swaps the ordered
 // snapshots, marks healthy.
-func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.ModelConfig, creds []models.CredentialConfig) {
+func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.ModelConfig, creds []models.CredentialConfig, groups []models.CredentialGroupConfig) {
 	byID := make(map[string]*models.ModelConfig, len(modelsList))
 	byName := make(map[string]string, len(modelsList))
 	for i := range modelsList {
@@ -212,6 +226,10 @@ func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.Mode
 			refreshedAt: c.now(),
 		}
 	}
+	groupByID := make(map[string]*models.CredentialGroupConfig, len(groups))
+	for i := range groups {
+		groupByID[groups[i].ID] = deepCopyCredentialGroupConfig(&groups[i])
+	}
 
 	c.mu.Lock()
 	c.modelsByID = byID
@@ -221,6 +239,8 @@ func (c *CachedModelsConfig) applySnapshot(modelsList, enabledList []models.Mode
 	c.negByName = map[string]negEntry{}
 	c.modelsSnap = deepCopyModelConfigs(modelsList)
 	c.enabledSnap = deepCopyModelConfigs(enabledList)
+	c.groupsByID = groupByID
+	c.groupsSnap = deepCopyCredentialGroupConfigs(groups)
 	c.rebuildClaimsLocked()
 	c.lastRefresh = c.now()
 	c.healthy = true
@@ -361,7 +381,13 @@ func (c *CachedModelsConfig) reconcileOnce() {
 		c.scanMu.Unlock()
 	}()
 
-	modelsList, enabledList, creds, err := c.strictSnapshot(ctx)
+	// T-13b: rebuild the store's group map from the DB BEFORE the
+	// mirror refresh, so direct-SQL/restore/repair writes are visible.
+	if gr, ok := c.inner.(groupRebuilder); ok && gr != nil {
+		_ = gr.RebuildCredentialGroupsFromDB()
+	}
+
+	modelsList, enabledList, creds, groups, err := c.strictSnapshot(ctx)
 	failed := err != nil
 	if !failed {
 		// Suspicious-empty guard (C3): a successful-but-empty list
@@ -403,7 +429,7 @@ func (c *CachedModelsConfig) reconcileOnce() {
 		return
 	default:
 	}
-	c.applySnapshot(modelsList, enabledList, creds)
+	c.applySnapshot(modelsList, enabledList, creds, groups)
 }
 
 // ─── Read paths ──────────────────────────────────────────────────────────────
@@ -631,6 +657,130 @@ func (c *CachedModelsConfig) GetCredentials() []models.CredentialConfig {
 	return result
 }
 
+// GetCredentialGroup serves the cached credential group (read-only mirror).
+// On a miss it strict-fills from the inner store and caches the result.
+func (c *CachedModelsConfig) GetCredentialGroup(id string) *models.CredentialGroupConfig {
+	c.mu.RLock()
+	if g, ok := c.groupsByID[id]; ok {
+		cp := deepCopyCredentialGroupConfig(g)
+		c.mu.RUnlock()
+		return cp
+	}
+	c.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.opts.StrictFillTimeout)
+	g, err := c.inner.GetCredentialGroupStrict(ctx, id)
+	cancel()
+	if err != nil {
+		if errors.Is(err, models.ErrCredentialGroupNotFound) {
+			return nil
+		}
+		c.markUnhealthy()
+		return nil
+	}
+	if g == nil {
+		return nil
+	}
+	cp := deepCopyCredentialGroupConfig(g)
+	c.mu.Lock()
+	if c.groupsByID == nil {
+		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
+	}
+	c.groupsByID[id] = deepCopyCredentialGroupConfig(g)
+	c.mu.Unlock()
+	return cp
+}
+
+// GetCredentialGroups returns the cached credential groups (read-only mirror).
+func (c *CachedModelsConfig) GetCredentialGroups() []models.CredentialGroupConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return deepCopyCredentialGroupConfigs(c.groupsSnap)
+}
+
+// AddCredentialGroup delegates to the inner store, then writes the
+// group through into the read-only mirror and rebuilds the snapshot.
+func (c *CachedModelsConfig) AddCredentialGroup(g models.CredentialGroupConfig) error {
+	if err := c.inner.AddCredentialGroup(g); err != nil {
+		return err
+	}
+	cp := deepCopyCredentialGroupConfig(&g)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groupsByID == nil {
+		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
+	}
+	c.groupsByID[g.ID] = cp
+	// rebuild groupsSnap from the map for consistency
+	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
+	for _, gg := range c.groupsByID {
+		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	}
+	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	c.healthy = true
+	return nil
+}
+
+// UpdateCredentialGroup delegates to the inner store, then replaces the
+// cached entry and rebuilds the snapshot. ID is immutable.
+func (c *CachedModelsConfig) UpdateCredentialGroup(id string, g models.CredentialGroupConfig) error {
+	if err := c.inner.UpdateCredentialGroup(id, g); err != nil {
+		return err
+	}
+	cp := deepCopyCredentialGroupConfig(&g)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groupsByID == nil {
+		c.groupsByID = make(map[string]*models.CredentialGroupConfig)
+	}
+	// ID immutable: if id != g.ID, drop old key
+	if id != g.ID {
+		delete(c.groupsByID, id)
+	}
+	c.groupsByID[g.ID] = cp
+	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
+	for _, gg := range c.groupsByID {
+		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	}
+	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	c.healthy = true
+	return nil
+}
+
+// RemoveCredentialGroup delegates to the inner store, then evicts the
+// cached entry and rebuilds the snapshot.
+func (c *CachedModelsConfig) RemoveCredentialGroup(id string) error {
+	if err := c.inner.RemoveCredentialGroup(id); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.groupsByID, id)
+	c.groupsSnap = make([]models.CredentialGroupConfig, 0, len(c.groupsByID))
+	for _, gg := range c.groupsByID {
+		c.groupsSnap = append(c.groupsSnap, *deepCopyCredentialGroupConfig(gg))
+	}
+	sort.Slice(c.groupsSnap, func(i, j int) bool { return c.groupsSnap[i].Name < c.groupsSnap[j].Name })
+	c.healthy = true
+	return nil
+}
+
+// ModelsUsingCredentialGroup delegates to the inner store (reverse scan;
+// not cached).
+func (c *CachedModelsConfig) ModelsUsingCredentialGroup(groupID string) []string {
+	return c.inner.ModelsUsingCredentialGroup(groupID)
+}
+
+// GroupsContainingCredential delegates to the inner store.
+func (c *CachedModelsConfig) GroupsContainingCredential(credID string) []string {
+	return c.inner.GroupsContainingCredential(credID)
+}
+
+// FlattenCredentialRefs delegates to the inner store (authoritative).
+func (c *CachedModelsConfig) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
+	return c.inner.FlattenCredentialRefs(model)
+}
+
 // ─── Resolution paths (the hot seam) ─────────────────────────────────────────
 
 // fillModelByDirectID strict-fills the row for modelID by DIRECT ID
@@ -755,7 +905,16 @@ func (c *CachedModelsConfig) ResolveInternalConfig(modelID string) (provider, ap
 	if !m.Internal {
 		return "", "", "", "", false
 	}
-	primaryID := m.PrimaryCredentialID()
+	// A-1 (T-23c): self-contained twin — flatten cache-side from the
+	// decorator group mirror before reading PrimaryCredentialID(), so a
+	// group-primary model resolves its real provider (not "unknown").
+	flat := c.flattenCredentialRefsCacheSide(m)
+	primaryID := ""
+	if len(flat) > 0 {
+		primaryID = flat[0].CredentialID
+	} else {
+		primaryID = m.PrimaryCredentialID()
+	}
 	if primaryID == "" {
 		return "", "", "", "", false
 	}
@@ -1165,4 +1324,72 @@ func (c *CachedModelsConfig) GetModelNative(modelID string) *models.ModelConfig 
 	// restores the authoritative row. Pre-existing shape, shared with
 	// the decorator's sibling fill paths (GetModel / GetModelByName).
 	return c.fillModelByDirectID(modelID)
+}
+
+// groupRebuilder is the optional interface for stores that can rebuild
+// their in-memory group map from the DB. The decorator calls it before
+// each reconcile (and at boot) so direct-SQL / restore / repair writes
+// are visible to the mirror. Tolerates a nil/absent implementation.
+type groupRebuilder interface {
+	RebuildCredentialGroupsFromDB() error
+}
+
+// flattenCredentialRefsCacheSide mirrors the store's flatten but reads
+// the decorator group mirror + cached credential providers. Used by the
+// self-contained ResolveInternalConfig twin (A-1).
+func (c *CachedModelsConfig) flattenCredentialRefsCacheSide(model *models.ModelConfig) []models.CredentialRef {
+	if model == nil || len(model.Credentials) == 0 {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	out := make([]models.CredentialRef, 0, len(model.Credentials))
+	seen := make(map[string]bool, len(model.Credentials))
+	appendRef := func(ref models.CredentialRef) {
+		if ref.CredentialID == "" {
+			return
+		}
+		if seen[ref.CredentialID] {
+			return
+		}
+		seen[ref.CredentialID] = true
+		out = append(out, ref)
+	}
+	for _, ref := range model.Credentials {
+		if !ref.IsGroupRef() {
+			appendRef(ref)
+			continue
+		}
+		g, ok := c.groupsByID[ref.GroupID]
+		if !ok || g == nil {
+			log.Printf("[WARN] [credential-groups] model %s references credential group '%s' which does not exist — the group contributes no credentials (fail closed)", model.ID, ref.GroupID)
+			continue
+		}
+		if len(g.Members) == 0 {
+			log.Printf("[WARN] [credential-groups] credential group '%s' (model %s) has no members — it contributes no credentials", g.ID, model.ID)
+			continue
+		}
+		for _, memberID := range g.Members {
+			provider := ""
+			known := false
+			if e, ok := c.credsByID[memberID]; ok && e.decryptOK && e.cred != nil {
+				provider = e.cred.Provider
+				known = true
+			}
+			if !known {
+				log.Printf("[WARN] [credential-groups] member '%s' of credential group '%s' has no known provider — skipped (fail closed)", memberID, g.ID)
+				continue
+			}
+			if !strings.EqualFold(provider, g.Provider) {
+				log.Printf("[WARN] [credential-groups] member '%s' of credential group '%s' has provider %q which differs from the group provider %q — skipped (fail closed)", memberID, g.ID, provider, g.Provider)
+				continue
+			}
+			appendRef(models.CredentialRef{CredentialID: memberID, Weight: ref.Weight, Position: ref.Position})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

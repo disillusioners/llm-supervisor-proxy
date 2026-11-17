@@ -46,10 +46,14 @@ type fakeStrictSource struct {
 	mu       sync.Mutex
 	models   []models.ModelConfig
 	creds    []models.CredentialConfig
+	groups   []models.CredentialGroupConfig
 	listErr  error // injected into all three list reads
 	modelErr error // injected into single-row model reads
 	credErr  error // injected into single-row credential reads
-	stall    chan struct{}
+	groupErr error // injected into group reads
+
+	rebuildGroups func() error
+	stall         chan struct{}
 
 	// Mutator error injection (db-cache-layer F2/F3, 2026-08-29):
 	// when set, the corresponding credential mutator returns the
@@ -228,6 +232,39 @@ func (f *fakeStrictSource) GetCredentialStrict(ctx context.Context, id string) (
 		return nil, database.ErrCredentialNotFound
 	}
 	return found, nil
+}
+
+func (f *fakeStrictSource) GetCredentialGroupStrict(ctx context.Context, id string) (*models.CredentialGroupConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.groupErr != nil {
+		return nil, f.groupErr
+	}
+	for i := range f.groups {
+		if f.groups[i].ID == id {
+			cp := f.groups[i]
+			return &cp, nil
+		}
+	}
+	return nil, models.ErrCredentialGroupNotFound
+}
+
+func (f *fakeStrictSource) GetCredentialGroupsStrict(ctx context.Context) ([]models.CredentialGroupConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.groupErr != nil {
+		return nil, f.groupErr
+	}
+	out := make([]models.CredentialGroupConfig, len(f.groups))
+	copy(out, f.groups)
+	return out, nil
+}
+
+func (f *fakeStrictSource) RebuildCredentialGroupsFromDB() error {
+	if f.rebuildGroups != nil {
+		return f.rebuildGroups()
+	}
+	return nil
 }
 
 // ResolveInternalConfigWithAffinityCached — faithful single/primary
@@ -427,6 +464,142 @@ func (f *fakeStrictSource) RemoveCredential(id string) error {
 		}
 	}
 	return errors.New("credential not found")
+}
+
+func (f *fakeStrictSource) GetCredentialGroup(id string) *models.CredentialGroupConfig {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.groups {
+		if f.groups[i].ID == id {
+			cp := f.groups[i]
+			return &cp
+		}
+	}
+	return nil
+}
+
+func (f *fakeStrictSource) GetCredentialGroups() []models.CredentialGroupConfig {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]models.CredentialGroupConfig, len(f.groups))
+	copy(out, f.groups)
+	return out
+}
+
+func (f *fakeStrictSource) AddCredentialGroup(g models.CredentialGroupConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groups = append(f.groups, g)
+	return nil
+}
+
+func (f *fakeStrictSource) UpdateCredentialGroup(id string, g models.CredentialGroupConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.groups {
+		if f.groups[i].ID == id {
+			f.groups[i] = g
+			return nil
+		}
+	}
+	return errors.New("group not found")
+}
+
+func (f *fakeStrictSource) RemoveCredentialGroup(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.groups {
+		if f.groups[i].ID == id {
+			f.groups = append(f.groups[:i], f.groups[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("group not found")
+}
+
+func (f *fakeStrictSource) ModelsUsingCredentialGroup(groupID string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, m := range f.models {
+		for _, r := range m.Credentials {
+			if r.IsGroupRef() && r.GroupID == groupID {
+				out = append(out, m.ID)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (f *fakeStrictSource) GroupsContainingCredential(credID string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, g := range f.groups {
+		for _, m := range g.Members {
+			if m == credID {
+				out = append(out, g.ID)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (f *fakeStrictSource) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
+	if model == nil || len(model.Credentials) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	prov := make(map[string]string)
+	for _, c := range f.creds {
+		prov[c.ID] = c.Provider
+	}
+	groups := make(map[string]models.CredentialGroupConfig)
+	for _, g := range f.groups {
+		groups[g.ID] = g
+	}
+	out := make([]models.CredentialRef, 0, len(model.Credentials))
+	seen := make(map[string]bool)
+	appendRef := func(ref models.CredentialRef) {
+		if ref.CredentialID == "" {
+			return
+		}
+		if seen[ref.CredentialID] {
+			return
+		}
+		seen[ref.CredentialID] = true
+		out = append(out, ref)
+	}
+	for _, ref := range model.Credentials {
+		if !ref.IsGroupRef() {
+			appendRef(ref)
+			continue
+		}
+		g, ok := groups[ref.GroupID]
+		if !ok {
+			continue
+		}
+		if len(g.Members) == 0 {
+			continue
+		}
+		for _, memberID := range g.Members {
+			p, known := prov[memberID]
+			if !known {
+				continue
+			}
+			if !strings.EqualFold(p, g.Provider) {
+				continue
+			}
+			appendRef(models.CredentialRef{CredentialID: memberID, Weight: ref.Weight, Position: ref.Position})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (f *fakeStrictSource) Save() error     { return nil }
