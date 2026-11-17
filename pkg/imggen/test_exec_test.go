@@ -1,7 +1,9 @@
 package imggen
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -438,5 +440,206 @@ func TestExtractImageURLs_ToleratesBothDataShapes(t *testing.T) {
 	}
 	if got := extractImageURLs([]byte(`not json`)); len(got) != 0 {
 		t.Errorf("garbage urls = %v, want none", got)
+	}
+}
+
+// =============================================================================
+// ProbeBody — the adapter-owned canned-body seam + the 9router probe.
+//
+// The 9router test button must probe the upstream with the operator-
+// verified reference family (the 200-b64_json-JPEG verification run),
+// and the probe result must classify a b64_json success AND a quota
+// 429 status-first. The minimax default is byte-identical to the
+// pre-seam canned body.
+// =============================================================================
+
+// TestProbeBody_MinimaxDefaultUnchanged — the default probe body (any
+// provider without a dedicated family, minimax included) stays the
+// minimal minimax-shaped canned body, byte-for-byte in KEYS and
+// values.
+func TestProbeBody_MinimaxDefaultUnchanged(t *testing.T) {
+	for _, provider := range []string{"minimax", "MINIMAX", "  minimax  ", "openai", ""} {
+		var sent map[string]interface{}
+		if err := json.Unmarshal(ProbeBody(provider, "row-1"), &sent); err != nil {
+			t.Fatalf("provider %q: unmarshal: %v", provider, err)
+		}
+		if sent["model"] != "row-1" {
+			t.Errorf("provider %q: model = %v, want the row id", provider, sent["model"])
+		}
+		if sent["prompt"] != cannedProbePrompt {
+			t.Errorf("provider %q: prompt = %v, want the canned prompt", provider, sent["prompt"])
+		}
+		if sent["aspect_ratio"] != "1:1" {
+			t.Errorf("provider %q: aspect_ratio = %v, want 1:1", provider, sent["aspect_ratio"])
+		}
+		if n, ok := sent["n"].(float64); !ok || n != 1 {
+			t.Errorf("provider %q: n = %v, want 1", provider, sent["n"])
+		}
+		if sent["response_format"] != "url" {
+			t.Errorf("provider %q: response_format = %v, want url", provider, sent["response_format"])
+		}
+		if len(sent) != 5 {
+			t.Errorf("provider %q: body keys = %d (%v), want exactly the 5 minimax keys", provider, len(sent), sent)
+		}
+	}
+}
+
+// TestProbeBody_NineRouterMatchesReferenceFamily — the 9router probe
+// body is the operator-verified reference family VERBATIM: model /
+// prompt / n / size / quality / background / image_detail /
+// output_format / watermark / prompt_extend, and NONE of the
+// minimax-only keys (aspect_ratio, response_format — BuildUpstream
+// forces response_format to b64_json at the adapter layer).
+func TestProbeBody_NineRouterMatchesReferenceFamily(t *testing.T) {
+	var sent map[string]interface{}
+	if err := json.Unmarshal(ProbeBody(NineRouterProviderName, "g9r-row"), &sent); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	want := map[string]interface{}{
+		"model":         "g9r-row",
+		"prompt":        nineRouterProbePrompt,
+		"n":             float64(1),
+		"size":          "auto",
+		"quality":       "auto",
+		"background":    "auto",
+		"image_detail":  "high",
+		"output_format": "png",
+		"watermark":     true,
+		"prompt_extend": true,
+	}
+	for k, v := range want {
+		got, ok := sent[k]
+		if !ok {
+			t.Errorf("key %q missing from the probe body (got %v)", k, sent)
+			continue
+		}
+		if got != v {
+			t.Errorf("key %q = %v, want %v", k, got, v)
+		}
+	}
+	if len(sent) != len(want) {
+		t.Errorf("body keys = %d (%v), want exactly the %d reference-family keys", len(sent), sent, len(want))
+	}
+	for _, banned := range []string{"aspect_ratio", "response_format"} {
+		if _, ok := sent[banned]; ok {
+			t.Errorf("key %q must not be in the 9router probe body (the adapter owns response_format)", banned)
+		}
+	}
+}
+
+// TestExecuteTest_NineRouterProbeReferenceFamilyEndToEnd — the FULL
+// test-button leg for a 9router row: ProbeBody → BuildUpstream (row
+// id → InternalModel rewrite, response_format forced to b64_json,
+// /images/generations path) → a b64_json success body classified OK
+// with the image converted to a data-URI.
+func TestExecuteTest_NineRouterProbeReferenceFamilyEndToEnd(t *testing.T) {
+	var (
+		upstreamPath string
+		upstreamBody []byte
+	)
+	jpegB64 := base64.StdEncoding.EncodeToString([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		upstreamBody, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1790000000,"data":[{"b64_json":"` + jpegB64 + `"}]}`))
+	}))
+	defer srv.Close()
+
+	cred := models.ResolvedCredential{
+		Provider:      NineRouterProviderName,
+		APIKey:        "sk-nr-exec-key",
+		BaseURL:       srv.URL,
+		InternalModel: "ag/gemini-3.8-flash",
+		CredentialID:  "cred-nr-1",
+	}
+	res := ExecuteTest(cred, ProbeBody(NineRouterProviderName, "g9r-row"), 5*time.Second)
+
+	if upstreamPath != "/images/generations" {
+		t.Errorf("upstream path = %q, want /images/generations", upstreamPath)
+	}
+
+	var sent map[string]interface{}
+	if err := json.Unmarshal(upstreamBody, &sent); err != nil {
+		t.Fatalf("upstream body unparseable: %v (body=%s)", err, string(upstreamBody))
+	}
+	if sent["model"] != "ag/gemini-3.8-flash" {
+		t.Errorf("model = %v, want the InternalModel rewrite", sent["model"])
+	}
+	if sent["response_format"] != "b64_json" {
+		t.Errorf("response_format = %v, want b64_json (forced by the adapter)", sent["response_format"])
+	}
+	for k, want := range map[string]interface{}{"size": "auto", "quality": "auto", "background": "auto", "image_detail": "high", "output_format": "png"} {
+		if sent[k] != want {
+			t.Errorf("%s = %v, want %v (the reference family must survive BuildUpstream)", k, sent[k], want)
+		}
+	}
+	if _, ok := sent["aspect_ratio"]; ok {
+		t.Error("aspect_ratio reached the upstream — the adapter must drop the minimax-native key")
+	}
+
+	if res.Status != http.StatusOK {
+		t.Errorf("status = %d, want 200 (error=%q)", res.Status, res.Error)
+	}
+	if res.Code != CodeOK {
+		t.Errorf("code = %q, want %q", res.Code, CodeOK)
+	}
+	if res.ImageCount != 1 {
+		t.Fatalf("image_count = %d, want 1 (the b64_json item must count)", res.ImageCount)
+	}
+	if !strings.HasPrefix(res.ImageURLs[0], "data:image/jpeg;base64,") {
+		t.Errorf("image url = %q, want a jpeg data-URI", res.ImageURLs[0])
+	}
+	if res.SuccessCount != 1 {
+		t.Errorf("success_count = %d, want 1 (BillableImages counts the b64 item)", res.SuccessCount)
+	}
+}
+
+// TestExecuteTest_NineRouterQuota429SurfacesStatusFirst — the live
+// 9router quota shape (HTTP 429 with a NESTED JSON document inside
+// error.message) classifies status-first on the TEST path: status 429
+// + the cooldown code + the UNWRAPPED human-readable quota text (the
+// nested blob never reaches the operator message).
+func TestExecuteTest_NineRouterQuota429SurfacesStatusFirst(t *testing.T) {
+	inner := `{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 4h39m9s.","status":"RESOURCE_EXHAUSTED"}}`
+	outerMsg := "[antigravity/gemini-3.8-flash] [429]: " + inner
+	body, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{"message": outerMsg, "type": "invalid_request_error"},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	cred := models.ResolvedCredential{
+		Provider:      NineRouterProviderName,
+		APIKey:        "sk-nr-exec-key",
+		BaseURL:       srv.URL,
+		InternalModel: "ag/gemini-3.8-flash",
+		CredentialID:  "cred-nr-1",
+	}
+	res := ExecuteTest(cred, ProbeBody(NineRouterProviderName, "g9r-row"), 5*time.Second)
+
+	if res.Status != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429 (status-first: the quota class must not mangle into 502)", res.Status)
+	}
+	if res.UpstreamStatus != http.StatusTooManyRequests {
+		t.Errorf("upstream_status = %d, want 429", res.UpstreamStatus)
+	}
+	if res.Code != CodeCooldown {
+		t.Errorf("code = %q, want %q", res.Code, CodeCooldown)
+	}
+	if !strings.Contains(res.Error, "You have exhausted your capacity on this model") {
+		t.Errorf("error = %q, want the unwrapped quota text", res.Error)
+	}
+	if strings.Contains(res.Error, "RESOURCE_EXHAUSTED") || strings.Contains(res.Error, "quotaResetTimeStamp") {
+		t.Errorf("error must be the human text, never the nested blob: %q", res.Error)
+	}
+	if res.ImageCount != 0 {
+		t.Errorf("image_count = %d, want 0 on a quota rejection", res.ImageCount)
 	}
 }

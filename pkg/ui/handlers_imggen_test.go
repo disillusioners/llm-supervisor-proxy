@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -945,5 +946,96 @@ func TestHandleImgGenTest_AdapterReasonIsCapped(t *testing.T) {
 	}
 	if len(resp.Reason) > imgGenTestMaxMessageLen+len("…") {
 		t.Errorf("reason length = %d, want <= %d", len(resp.Reason), imgGenTestMaxMessageLen+len("…"))
+	}
+}
+
+// TestHandleImgGenTest_NineRouterProbeUsesReferenceFamily — a
+// 9router row probed through the route must send the operator-
+// verified OpenAI-images reference family to /images/generations
+// (the row id rewritten to the internal model, response_format forced
+// to b64_json by the adapter), and a b64_json success body must
+// classify as success with the image delivered as a data-URI.
+func TestHandleImgGenTest_NineRouterProbeUsesReferenceFamily(t *testing.T) {
+	jpegB64 := base64.StdEncoding.EncodeToString([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46})
+	upstream, up := newImgGenUpstream(t, http.StatusOK,
+		`{"created":1790000000,"data":[{"b64_json":"`+jpegB64+`"}]}`)
+
+	mock := newMockModelsConfigForHandlers()
+	if err := mock.AddCredential(models.CredentialConfig{
+		ID:       "cred-nr-1",
+		Provider: "9router",
+		APIKey:   "sk-nr-test-key",
+		BaseURL:  upstream.URL,
+	}); err != nil {
+		t.Fatalf("add credential: %v", err)
+	}
+	if err := mock.AddModel(models.ModelConfig{
+		ID:            "g9r-img-row",
+		Name:          "9router Image",
+		Enabled:       true,
+		Kind:          models.KindImageGen,
+		Internal:      true,
+		InternalModel: "ag/gemini-3.8-flash",
+		Credentials: []models.CredentialRef{
+			{CredentialID: "cred-nr-1", Weight: 1, Position: 0},
+		},
+	}); err != nil {
+		t.Fatalf("add model: %v", err)
+	}
+	s := &Server{modelsConfig: mock}
+
+	code, resp := postImgGenTest(t, s, "g9r-img-row")
+	if code != http.StatusOK {
+		t.Fatalf("route status = %d, want 200 (body=%s)", code, "n/a")
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, want true (resp=%+v)", resp)
+	}
+	if resp.Code != "ok" {
+		t.Errorf("code = %q, want ok", resp.Code)
+	}
+	if resp.ImageCount != 1 {
+		t.Fatalf("image_count = %d, want 1", resp.ImageCount)
+	}
+	if len(resp.ImageURLs) != 1 || !strings.HasPrefix(resp.ImageURLs[0], "data:image/jpeg;base64,") {
+		t.Errorf("image_urls = %v, want one jpeg data-URI", resp.ImageURLs)
+	}
+	if resp.Provider != "9router" {
+		t.Errorf("provider = %q, want 9router", resp.Provider)
+	}
+
+	if up.hitCount() != 1 {
+		t.Fatalf("upstream calls = %d, want exactly 1", up.hitCount())
+	}
+	hit := up.hit(0)
+	if hit.Path != "/images/generations" {
+		t.Errorf("upstream path = %q, want /images/generations", hit.Path)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(hit.Body, &sent); err != nil {
+		t.Fatalf("upstream body unparseable: %v (body=%s)", err, string(hit.Body))
+	}
+	if sent["model"] != "ag/gemini-3.8-flash" {
+		t.Errorf("model = %v, want the internal-model rewrite", sent["model"])
+	}
+	if sent["response_format"] != "b64_json" {
+		t.Errorf("response_format = %v, want b64_json (adapter-forced)", sent["response_format"])
+	}
+	for k, want := range map[string]interface{}{
+		"size": "auto", "quality": "auto", "background": "auto",
+		"image_detail": "high", "output_format": "png",
+	} {
+		if sent[k] != want {
+			t.Errorf("%s = %v, want %v (the reference family must reach the upstream)", k, sent[k], want)
+		}
+	}
+	if sent["watermark"] != true || sent["prompt_extend"] != true {
+		t.Errorf("watermark/prompt_extend = %v/%v, want true/true", sent["watermark"], sent["prompt_extend"])
+	}
+	if _, ok := sent["aspect_ratio"]; ok {
+		t.Error("aspect_ratio reached the 9router upstream — the adapter must drop it")
+	}
+	if hit.Authorization != "Bearer sk-nr-test-key" {
+		t.Errorf("Authorization = %q, want the 9router credential bearer", hit.Authorization)
 	}
 }

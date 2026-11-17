@@ -37,10 +37,10 @@ import (
 )
 
 // DefaultTTL is the package fallback window when a wall is detected
-// but no reset instant can be parsed (or a caller has no config). 15m
+// but no reset instant can be parsed (or a caller has no config). 30m
 // matches the quota-class horizon: a model that is usage-walled
 // recovers on a plan/top-up boundary, not a per-request cooldown.
-const DefaultTTL = 15 * time.Minute
+const DefaultTTL = 30 * time.Minute
 
 // Cache is the model-layer registry. Nil-receiver-safe.
 type Cache struct {

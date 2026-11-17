@@ -520,19 +520,24 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(false);
     });
 
-    it('rejects a 9router model if a minimax credential is inappropriately attached', async () => {
-      const onSave = vi.fn();
+    it('derives the provider from the primary credential (minimax) even when a stale internal_provider says 9router', async () => {
+      // The wire DTO never carries `internal_provider` — the BE derives
+      // it from the primary credential at save time. This row's primary
+      // credential is minimax, so the form must resolve minimax regardless
+      // of the stale DTO field, and the minimax credential must round-trip.
+      const onSave = vi.fn().mockResolvedValue(undefined);
       const initial: ImgGenModel = {
-        id: 'seed-invalid',
-        name: 'Seeded Invalid',
+        id: 'seed-derive',
+        name: 'Seeded Derive',
         enabled: true,
         fallback_chain: [],
         kind: 'image-gen',
         internal: true,
+        // Stale field (absent on the real wire): the form must ignore it
+        // in favour of the primary credential's provider.
         internal_provider: '9router',
-        internal_model: 'ag/gemini-3.8-flash',
-        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
-        // Inappropriate minimax credential on 9router model
+        internal_model: 'image-01',
+        internal_base_url: '',
         credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
       };
       const { container } = render(
@@ -546,13 +551,180 @@ describe('ImgGenModelForm — payload, validation, and edit-mode shape', () => {
       );
       await waitForCredsLoaded();
 
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      expect(providerSelect.value).toBe('minimax');
+
       const submit = container.querySelector('[data-testid="imggen-form-submit"]') as HTMLButtonElement;
       fireEvent.click(submit);
 
       await waitFor(() => {
-        expect(container.textContent).toContain('All credentials must match the selected provider');
+        expect(onSave).toHaveBeenCalledTimes(1);
       });
-      expect(onSave).not.toHaveBeenCalled();
+      const payload = (onSave as Mock).mock.calls[0][0];
+      expect(payload.internal_provider).toBe('minimax');
+      expect(payload.credentials).toEqual([{ credential_id: 'cred-mini-1', weight: 1, position: 0 }]);
+    });
+  });
+
+  describe('provider-on-edit hydration (primary credential derivation)', () => {
+    it('edit-load with a saved 9router row selects 9router and populates 9router credentials', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      // Real wire shape: the Model DTO carries NO internal_provider.
+      const initial: ImgGenModel = {
+        id: '9r-edit',
+        name: '9Router Edit',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_model: 'ag/gemini-3.8-flash',
+        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
+        credentials: [{ credential_id: 'cred-9r-1', weight: 1, position: 0 }],
+      };
+      const { container } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={onSave}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      // The provider dropdown must reflect the primary credential's
+      // provider (9router), not the per-kind default (minimax).
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      expect(providerSelect.value).toBe('9router');
+
+      // The credential editor must be filtered to 9router, so the saved
+      // primary credential is present (and minimax/openai are not).
+      const credSelect = Array.from(container.querySelectorAll('select')).find(
+        (s) => s.getAttribute('data-testid') !== 'imggen-form-provider',
+      ) as HTMLSelectElement;
+      const optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-9r-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-mini-1'))).toBe(false);
+      expect(optTexts.some((t) => t.includes('cred-oai-1'))).toBe(false);
+      expect(credSelect.value).toBe('cred-9r-1');
+
+      // Submitting round-trips the derived provider.
+      const submit = container.querySelector('[data-testid="imggen-form-submit"]') as HTMLButtonElement;
+      fireEvent.click(submit);
+      await waitFor(() => {
+        expect(onSave).toHaveBeenCalledTimes(1);
+      });
+      expect((onSave as Mock).mock.calls[0][0].internal_provider).toBe('9router');
+    });
+
+    it('edit-load falls back to the per-kind default when the primary credential cannot be resolved', async () => {
+      const initial: ImgGenModel = {
+        id: 'missing-cred',
+        name: 'Missing Cred',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_model: 'image-01',
+        internal_base_url: '',
+        // Primary credential id absent from the fetched list (deleted /
+        // stale row) — unresolvable, so the default stands.
+        credentials: [{ credential_id: 'cred-does-not-exist', weight: 1, position: 0 }],
+      };
+      const { container } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={initial}
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      expect(providerSelect.value).toBe('minimax');
+    });
+
+    it('add mode is unchanged: default provider minimax, credentials filtered to minimax', async () => {
+      const { container } = render(
+        <ImgGenModelForm
+          mode="add"
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+
+      const providerSelect = container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement;
+      expect(providerSelect.value).toBe('minimax');
+
+      const addCredBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.trim() === '+ Add credential',
+      ) as HTMLButtonElement;
+      fireEvent.click(addCredBtn);
+      const credSelect = Array.from(container.querySelectorAll('select')).find(
+        (s) => s.getAttribute('data-testid') !== 'imggen-form-provider',
+      ) as HTMLSelectElement;
+      const optTexts = Array.from(credSelect.querySelectorAll('option')).map((o) => o.textContent || '');
+      expect(optTexts.some((t) => t.includes('cred-mini-1'))).toBe(true);
+      expect(optTexts.some((t) => t.includes('cred-9r-1'))).toBe(false);
+    });
+
+    it('re-resolves the provider when the form switches to editing a different model', async () => {
+      const first: ImgGenModel = {
+        id: 'row-9r',
+        name: '9Router Row',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_model: 'ag/gemini-3.8-flash',
+        internal_base_url: 'http://ninerouter.9router.svc.cluster.local:20128/v1',
+        credentials: [{ credential_id: 'cred-9r-1', weight: 1, position: 0 }],
+      };
+      const second: ImgGenModel = {
+        id: 'row-mini',
+        name: 'MiniMax Row',
+        enabled: true,
+        fallback_chain: [],
+        kind: 'image-gen',
+        internal: true,
+        internal_model: 'image-01',
+        internal_base_url: 'https://api.minimax.io/v1',
+        credentials: [{ credential_id: 'cred-mini-1', weight: 1, position: 0 }],
+      };
+      const { container, rerender } = render(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={first}
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitForCredsLoaded();
+      expect(
+        (container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement).value,
+      ).toBe('9router');
+
+      // Tab switches to a different model row → the one-shot hydration
+      // guard must reset so the new row's provider is derived.
+      rerender(
+        <ImgGenModelForm
+          mode="edit"
+          initialData={second}
+          onSave={vi.fn()}
+          onCancel={vi.fn()}
+          onStatus={vi.fn()}
+        />,
+      );
+      await waitFor(() => {
+        expect(
+          (container.querySelector('[data-testid="imggen-form-provider"]') as HTMLSelectElement).value,
+        ).toBe('minimax');
+      });
     });
   });
 });

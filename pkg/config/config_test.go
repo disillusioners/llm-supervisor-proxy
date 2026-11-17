@@ -589,6 +589,64 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaults_ModelSkipCacheTTLIs30m(t *testing.T) {
+	if Defaults.ModelSkipCacheTTL != Duration(30*time.Minute) {
+		t.Errorf("Defaults.ModelSkipCacheTTL = %v, want 30m", Defaults.ModelSkipCacheTTL)
+	}
+}
+
+func TestValidate_ModelSkipCacheTTLBounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   Duration
+		wantErr bool
+	}{
+		{"1m valid", Duration(time.Minute), false},
+		{"24h valid", Duration(24 * time.Hour), false},
+		{"59s invalid", Duration(59 * time.Second), true},
+		{"24h+1s invalid", Duration(24*time.Hour + time.Second), true},
+		{"0 valid (default)", Duration(0), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Port:              8089,
+				IdleTimeout:       Duration(10 * time.Second),
+				StreamDeadline:    Duration(110 * time.Second),
+				MaxGenerationTime: Duration(180 * time.Second),
+				RaceMaxParallel:   3,
+				ModelSkipCacheTTL: tc.value,
+			}
+			err := cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("value=%v: err=%v, wantErr=%v", tc.value, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ModelSkipCacheTTL_DoesNotMoveOtherKnobs(t *testing.T) {
+	cfg := Config{
+		Port:                    8089,
+		IdleTimeout:             Duration(10 * time.Second),
+		StreamDeadline:          Duration(110 * time.Second),
+		MaxGenerationTime:       Duration(180 * time.Second),
+		RaceMaxParallel:         3,
+		ModelSkipCacheTTL:       Duration(30 * time.Minute),
+		UpstreamSkipCacheTTL:    Duration(60 * time.Second),
+		CredentialQuotaCooldown: Duration(15 * time.Minute),
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if cfg.UpstreamSkipCacheTTL != Duration(60*time.Second) {
+		t.Errorf("UpstreamSkipCacheTTL = %v, want 60s", cfg.UpstreamSkipCacheTTL)
+	}
+	if cfg.CredentialQuotaCooldown != Duration(15*time.Minute) {
+		t.Errorf("CredentialQuotaCooldown = %v, want 15m", cfg.CredentialQuotaCooldown)
+	}
+}
+
 // ============================================================================
 // Manager Load/Save Tests
 // ============================================================================
