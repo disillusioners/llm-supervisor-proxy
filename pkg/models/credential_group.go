@@ -24,6 +24,7 @@ type CredentialGroupConfig struct {
 // Sentinels (all *ConfigError so errors.Is works).
 var (
 	ErrCredentialGroupNotFound         = &ConfigError{"credential group not found"}
+	ErrCredentialGroupDuplicate        = &ConfigError{"credential group already exists"}
 	ErrCredentialGroupInUse            = &ConfigError{"credential group is in use by one or more models"}
 	ErrCredentialGroupMemberNotFound   = &ConfigError{"credential group member not found"}
 	ErrCredentialGroupProviderMismatch = &ConfigError{"credential group member provider mismatch"}
@@ -94,7 +95,12 @@ func ValidateCredentialRefs(refs []CredentialRef, groups interface{}, creds inte
 	if len(kind) > 0 {
 		k = kind[0]
 	}
-	nonChat := k == "decision" || k == "imggen" || k == "group"
+	// R-5: the non-chat kinds forbid group refs. The kinds are the
+	// package's OWN constants — a literal here can drift from
+	// config.go's constants and silently STOP firing (the "imggen"
+	// literal matched NO kind in this repo; the image-generation kind
+	// is KindImageGen == "image-gen").
+	nonChat := k == KindDecision || k == KindImageGen || k == KindGroup
 
 	// R-1 exact one of direct/group
 	for idx, ref := range refs {

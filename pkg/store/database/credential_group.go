@@ -237,8 +237,11 @@ func (m *ModelsManager) AddCredentialGroup(g models.CredentialGroupConfig) error
 
 	// Duplicate id: the PK would reject the INSERT anyway, but an
 	// explicit message beats a driver-specific constraint error.
+	// The message WRAPS models.ErrCredentialGroupDuplicate so the API
+	// layer maps the rejection to a status by errors.Is (A-9) instead
+	// of string-matching the message text.
 	if existing, err := m.getCredentialGroupRow(context.Background(), g.ID); err == nil && existing != nil {
-		return fmt.Errorf("credential group '%s' already exists", g.ID)
+		return fmt.Errorf("credential group '%s' already exists: %w", g.ID, models.ErrCredentialGroupDuplicate)
 	}
 
 	var query string

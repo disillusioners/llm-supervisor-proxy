@@ -113,7 +113,7 @@ func TestValidateCredentialRefsRRules(t *testing.T) {
 	}
 	// R-5 non-chat kind forbids group ref
 	refs = []CredentialRef{{GroupID: "g1", Weight: 1}}
-	if err := ValidateCredentialRefs(refs, groups, creds, "decision"); err == nil {
+	if err := ValidateCredentialRefs(refs, groups, creds, KindDecision); err == nil {
 		t.Fatal("R-5: expected error for group ref in decision kind")
 	}
 	// R-7 one empty group flattens to 0 refs allowed
