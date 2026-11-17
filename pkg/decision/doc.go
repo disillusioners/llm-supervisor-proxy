@@ -31,8 +31,7 @@
 //     advances, the client-attributable classes fail fast) and the
 //     group-level member fallback, with exactly ONE client write — at
 //     the winner. There is still no speculative/hedge race engine.
-//     The handler is shaped off imggen's skeleton
-//     (pkg/imggen/handler.go is the template).
+//     The handler is shaped off the banned subtrees' skeleton.
 //
 //   - Single classifier seam (Outcome{RelayStatus, Reason,
 //     UpstreamStatus, ErrorType, ErrorCode, ErrorMessage}) —
