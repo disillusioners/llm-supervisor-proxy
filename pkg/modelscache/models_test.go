@@ -71,7 +71,14 @@ type fakeStrictSource struct {
 		resolveCached                      int
 		addModel, updateModel, removeModel int
 		addCred, updateCred, removeCred    int
+		modelsUsingGroupsAll               int
 	}
+
+	// groupsAll is the CONFIGURED return of ModelsUsingCredentialGroupsAll
+	// (nil by default — the JSON-twin/mock contract). The decorator
+	// delegation test sets it to a non-nil map to prove the result is
+	// passed through unchanged.
+	groupsAll map[string][]string
 }
 
 func (f *fakeStrictSource) snapshotCounts() (m, mc, gc int) {
@@ -530,6 +537,17 @@ func (f *fakeStrictSource) ModelsUsingCredentialGroup(groupID string) []string {
 		}
 	}
 	return out
+}
+
+// ModelsUsingCredentialGroupsAll returns the CONFIGURED groupsAll map
+// (nil by default) and counts the call — the decorator delegation test
+// asserts EXACTLY-ONE delegation per call and that the map is passed
+// through unchanged.
+func (f *fakeStrictSource) ModelsUsingCredentialGroupsAll() map[string][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.counts.modelsUsingGroupsAll++
+	return f.groupsAll
 }
 
 func (f *fakeStrictSource) GroupsContainingCredential(credID string) []string {
@@ -1452,5 +1470,54 @@ func TestLRU_DeleteRemovesMapAndList(t *testing.T) {
 	l.Put("k1", 10) // reinsert after delete works
 	if v, ok := l.Get("k1"); !ok || v.(int) != 10 {
 		t.Errorf("reinsert after delete failed: %v %v", v, ok)
+	}
+}
+
+// TestCachedModelsConfig_ModelsUsingCredentialGroupsAll_DelegatesOnce
+// (the interface promotion): the decorator DELEGATES the batched
+// group-usage accessor to the inner store — EXACTLY ONE delegation per
+// call — and passes the result through UNCHANGED.
+//
+// It is a READ-THROUGH, not a cached mirror: a second call must
+// delegate AGAIN. A cached copy here would reintroduce exactly the
+// staleness the promotion exists to remove (the decorator's model list
+// carries a 15s TTL, so a cached used_by map would lag the DB).
+func TestCachedModelsConfig_ModelsUsingCredentialGroupsAll_DelegatesOnce(t *testing.T) {
+	inner := &fakeStrictSource{models: fixtureModels(), creds: fixtureCreds()}
+	inner.groupsAll = map[string][]string{
+		"g1": {"m-alpha"},
+		"g2": {"m-beta", "m-gamma"},
+	}
+	c := mustWrap(t, inner, Options{})
+
+	before := inner.counts.modelsUsingGroupsAll
+	got := c.ModelsUsingCredentialGroupsAll()
+
+	if inner.counts.modelsUsingGroupsAll != before+1 {
+		t.Fatalf("delegations = %d, want exactly 1 per call (before=%d)", inner.counts.modelsUsingGroupsAll, before)
+	}
+	if len(got) != len(inner.groupsAll) {
+		t.Fatalf("group usage map len = %d, want %d (the result is not passed through unchanged)", len(got), len(inner.groupsAll))
+	}
+	for id, wantIDs := range inner.groupsAll {
+		gotIDs, ok := got[id]
+		if !ok {
+			t.Fatalf("group %q is missing from the delegated map: %+v", id, got)
+		}
+		if len(gotIDs) != len(wantIDs) {
+			t.Fatalf("group %q model ids = %v, want %v", id, gotIDs, wantIDs)
+		}
+		for i := range wantIDs {
+			if gotIDs[i] != wantIDs[i] {
+				t.Fatalf("group %q model ids = %v, want %v", id, gotIDs, wantIDs)
+			}
+		}
+	}
+
+	// READ-THROUGH, NOT CACHED: a second call must delegate AGAIN.
+	before2 := inner.counts.modelsUsingGroupsAll
+	c.ModelsUsingCredentialGroupsAll()
+	if inner.counts.modelsUsingGroupsAll != before2+1 {
+		t.Fatalf("delegations after a second call = %d, want exactly 1 more (the accessor must not be a cached mirror)", inner.counts.modelsUsingGroupsAll-before2)
 	}
 }

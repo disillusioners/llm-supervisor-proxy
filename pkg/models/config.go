@@ -479,6 +479,17 @@ type ModelsConfigInterface interface {
 	UpdateCredentialGroup(id string, g CredentialGroupConfig) error
 	RemoveCredentialGroup(id string) error
 	ModelsUsingCredentialGroup(groupID string) []string
+	// ModelsUsingCredentialGroupsAll is the BATCHED group-usage scan:
+	// group id → the model ids referencing it, computed in ONE pass
+	// over the model table (never one scan per group).
+	//
+	// It lives on the INTERFACE (not manager-only) so the production
+	// binding — the modelscache decorator — serves the used_by surface
+	// from the authoritative DB pass instead of deriving it from the
+	// decorator's reconciled model-list snapshot (which is refreshed
+	// only on the decorator's reconcile tick, so it can lag a model
+	// written directly to the DB).
+	ModelsUsingCredentialGroupsAll() map[string][]string
 	GroupsContainingCredential(credID string) []string
 	FlattenCredentialRefs(model *ModelConfig) []CredentialRef
 
@@ -1447,7 +1458,7 @@ func (mc *ModelsConfig) RemoveCredential(id string) error {
 	return mc.Credentials.RemoveCredential(id)
 }
 
-// Credential group stubs (JSON twin — DB-backed only). Seven of the eight
+// Credential group stubs (JSON twin — DB-backed only). Eight of the nine
 // return empty/nil; FlattenCredentialRefs returns the raw list (identity
 // fallback) so A-2 gates never read a zero-length flat view.
 func (mc *ModelsConfig) GetCredentialGroup(id string) *CredentialGroupConfig { return nil }
@@ -1459,6 +1470,12 @@ func (mc *ModelsConfig) UpdateCredentialGroup(id string, g CredentialGroupConfig
 func (mc *ModelsConfig) RemoveCredentialGroup(id string) error              { return nil }
 func (mc *ModelsConfig) ModelsUsingCredentialGroup(groupID string) []string { return nil }
 func (mc *ModelsConfig) GroupsContainingCredential(credID string) []string  { return nil }
+
+// ModelsUsingCredentialGroupsAll returns nil on the JSON twin: the JSON
+// backend has no credential groups at all, so there is no group usage to
+// report (the UI's one-pass model-list fallback covers this path).
+func (mc *ModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string { return nil }
+
 func (mc *ModelsConfig) FlattenCredentialRefs(model *ModelConfig) []CredentialRef {
 	if model == nil {
 		return nil

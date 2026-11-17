@@ -33,8 +33,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/models"
+	"github.com/disillusioners/llm-supervisor-proxy/pkg/modelscache"
 	"github.com/disillusioners/llm-supervisor-proxy/pkg/store/database"
 )
 
@@ -779,5 +781,240 @@ func TestValidateCredentials_DirectRulesUnchanged(t *testing.T) {
 	errs = validateCredentials([]models.CredentialRef{{CredentialID: "cred-A", GroupID: "g1", Weight: 1}}, false, creds, groups, models.KindChat)
 	if len(errs) != 1 || !strings.Contains(errs[0], "both credential_id and group_id set") {
 		t.Fatalf("both-set errors = %v, want the both-set rejection", errs)
+	}
+}
+
+// interfacePathModelsConfig is a models.ModelsConfigInterface whose
+// ModelsUsingCredentialGroupsAll returns a CONFIGURED map and whose
+// GetModels returns a CONFIGURED (possibly stale) model list.
+//
+// It is the PRODUCTION-SHAPE proof: the used_by surface must come from
+// the interface (the authoritative DB pass), never from the model list
+// (the decorator's 15s-TTL cache) when the interface supplies a map.
+type interfacePathModelsConfig struct {
+	*database.ModelsManager
+	batched      map[string][]string
+	batchedCalls int
+	list         []models.ModelConfig
+	listCalls    int
+}
+
+func (c *interfacePathModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string {
+	c.batchedCalls++
+	return c.batched
+}
+
+func (c *interfacePathModelsConfig) GetModels() []models.ModelConfig {
+	c.listCalls++
+	return c.list
+}
+
+// TestCredentialGroups_UsedByTakesInterfacePathNotStaleModelList proves
+// the UI reads used_by from the INTERFACE (the authoritative one-pass DB
+// scan) and NOT from the model list.
+//
+// The mock makes the two disagree: the interface says g2 is used by
+// "authoritative-model"; the stale list says g1 is used by
+// "stale-model". The response must follow the interface, and the
+// list-derived fallback must NOT run at all.
+func TestCredentialGroups_UsedByTakesInterfacePathNotStaleModelList(t *testing.T) {
+	env := newGroupTestEnv(t)
+	env.seedCredential(t, "cred-A", "openai", "http://a")
+
+	for _, id := range []string{"g1", "g2"} {
+		if err := env.mgr.AddCredentialGroup(models.CredentialGroupConfig{
+			ID: id, Name: id, Provider: "openai", Members: []string{"cred-A"},
+		}); err != nil {
+			t.Fatalf("AddCredentialGroup(%s): %v", id, err)
+		}
+	}
+
+	cfg := &interfacePathModelsConfig{
+		ModelsManager: env.mgr,
+		batched:       map[string][]string{"g2": {"authoritative-model"}},
+		list: []models.ModelConfig{{
+			ID: "stale-model", Name: "stale-model",
+			Credentials: []models.CredentialRef{{GroupID: "g1", Weight: 1}},
+		}},
+	}
+	s := &Server{modelsConfig: cfg}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/credential-groups", s.handleCredentialGroups)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/fe/api/credential-groups")
+	if err != nil {
+		t.Fatalf("GET list: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET list status = %d, want 200 (body=%s)", resp.StatusCode, string(raw))
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode list: %v (body=%s)", err, string(raw))
+	}
+	if len(list) != 2 {
+		t.Fatalf("list returned %d groups, want 2 (body=%s)", len(list), string(raw))
+	}
+	usage := map[string][]any{}
+	for _, g := range list {
+		ub, ok := g["used_by"].([]any)
+		if !ok {
+			t.Fatalf("group %v carries no used_by array: %s", g["id"], string(raw))
+		}
+		usage[g["id"].(string)] = ub
+	}
+	if len(usage["g2"]) != 1 || usage["g2"][0] != "authoritative-model" {
+		t.Errorf("g2 used_by = %v, want [authoritative-model] (the interface path must win)", usage["g2"])
+	}
+	if len(usage["g1"]) != 0 {
+		t.Errorf("g1 used_by = %v, want [] (the stale model list must not leak into used_by)", usage["g1"])
+	}
+	if cfg.batchedCalls != 1 {
+		t.Errorf("batched used_by passes = %d, want exactly 1", cfg.batchedCalls)
+	}
+	if cfg.listCalls != 0 {
+		t.Errorf("GetModels() calls = %d, want 0 (the list fallback must NOT run when the interface supplies a map)", cfg.listCalls)
+	}
+}
+
+// TestCredentialGroups_UsedByFallsBackToModelListWhenInterfaceNil proves
+// the nil/empty guard still works: when the interface returns nil (the
+// JSON twin and the test mocks carry no credential groups), the UI
+// derives the same map in ONE pass over the model list — never one scan
+// per group.
+func TestCredentialGroups_UsedByFallsBackToModelListWhenInterfaceNil(t *testing.T) {
+	env := newGroupTestEnv(t)
+	env.seedCredential(t, "cred-A", "openai", "http://a")
+
+	if err := env.mgr.AddCredentialGroup(models.CredentialGroupConfig{
+		ID: "g1", Name: "g1", Provider: "openai", Members: []string{"cred-A"},
+	}); err != nil {
+		t.Fatalf("AddCredentialGroup: %v", err)
+	}
+
+	cfg := &interfacePathModelsConfig{
+		ModelsManager: env.mgr,
+		batched:       nil,
+		list: []models.ModelConfig{{
+			ID: "list-model", Name: "list-model",
+			Credentials: []models.CredentialRef{{GroupID: "g1", Weight: 1}},
+		}},
+	}
+	s := &Server{modelsConfig: cfg}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/credential-groups", s.handleCredentialGroups)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/fe/api/credential-groups")
+	if err != nil {
+		t.Fatalf("GET list: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET list status = %d, want 200 (body=%s)", resp.StatusCode, string(raw))
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode list: %v (body=%s)", err, string(raw))
+	}
+	if len(list) != 1 {
+		t.Fatalf("list returned %d groups, want 1 (body=%s)", len(list), string(raw))
+	}
+	ub, ok := list[0]["used_by"].([]any)
+	if !ok {
+		t.Fatalf("group carries no used_by array: %s", string(raw))
+	}
+	if len(ub) != 1 || ub[0] != "list-model" {
+		t.Errorf("used_by = %v, want [list-model] (the nil-guard fallback must derive the map from the model list)", ub)
+	}
+	if cfg.batchedCalls != 1 {
+		t.Errorf("batched used_by passes = %d, want exactly 1 (the interface is tried first)", cfg.batchedCalls)
+	}
+	if cfg.listCalls != 1 {
+		t.Errorf("GetModels() calls = %d, want exactly 1 (the fallback must make ONE pass over the model list)", cfg.listCalls)
+	}
+}
+
+// TestCredentialGroups_UsedByReflectsDirectDBWriteImmediately is the
+// PRODUCTION-SHAPE proof: it binds the REAL modelscache decorator over
+// the REAL manager — exactly what cmd/main.go binds when
+// CACHE_LAYER_ENABLED is on (the default) — and writes a model
+// DIRECTLY to the DB.
+//
+// The decorator's model-list snapshot does NOT see that write (no
+// reconcile tick), so a used_by derived from the decorator's model list
+// would MISS it and answer "not used". The authoritative interface path
+// reads the DB, so the response must carry the model IMMEDIATELY.
+func TestCredentialGroups_UsedByReflectsDirectDBWriteImmediately(t *testing.T) {
+	env := newGroupTestEnv(t)
+	env.seedCredential(t, "cred-A", "openai", "http://a")
+
+	// The group is created BEFORE the decorator boots, so the
+	// decorator's group mirror holds it (the list endpoint enumerates
+	// groups from the models config).
+	if err := env.mgr.AddCredentialGroup(models.CredentialGroupConfig{
+		ID: "g1", Name: "g1", Provider: "openai", Members: []string{"cred-A"},
+	}); err != nil {
+		t.Fatalf("AddCredentialGroup: %v", err)
+	}
+
+	// PRODUCTION BINDING: the decorator over the real manager.
+	dec, err := modelscache.NewCachedModelsConfig(env.mgr, modelscache.Options{ReconcileInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("NewCachedModelsConfig: %v", err)
+	}
+	defer dec.Stop()
+
+	// The model is written DIRECTLY to the DB — the decorator's
+	// snapshot never sees it (the reconciler does not tick within the
+	// test).
+	if err := env.mgr.AddModel(models.ModelConfig{
+		ID: "m-direct", Name: "m-direct", Enabled: true, Internal: true, InternalModel: "gpt-4o",
+		Credentials: []models.CredentialRef{{GroupID: "g1", Weight: 1}},
+	}); err != nil {
+		t.Fatalf("AddModel(direct): %v", err)
+	}
+
+	// PREMISE: the decorator's model-list snapshot is stale — it must
+	// NOT contain the directly-written model. If it did, the test would
+	// prove nothing.
+	if snap := dec.GetModels(); len(snap) != 0 {
+		t.Fatalf("premise broken: the decorator's snapshot must be stale, got %d models", len(snap))
+	}
+
+	s := &Server{modelsConfig: dec}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fe/api/credential-groups", s.handleCredentialGroups)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/fe/api/credential-groups")
+	if err != nil {
+		t.Fatalf("GET list: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET list status = %d, want 200 (body=%s)", resp.StatusCode, string(raw))
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode list: %v (body=%s)", err, string(raw))
+	}
+	if len(list) != 1 {
+		t.Fatalf("list returned %d groups, want 1 (body=%s)", len(list), string(raw))
+	}
+	ub, ok := list[0]["used_by"].([]any)
+	if !ok {
+		t.Fatalf("group carries no used_by array: %s", string(raw))
+	}
+	if len(ub) != 1 || ub[0] != "m-direct" {
+		t.Fatalf("used_by = %v, want [m-direct] (the authoritative DB pass must see the direct write immediately)", ub)
 	}
 }

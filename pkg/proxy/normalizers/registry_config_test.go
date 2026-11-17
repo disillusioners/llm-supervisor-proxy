@@ -94,6 +94,10 @@ func (m *mockModelsConfig) UpdateCredentialGroup(id string, g models.CredentialG
 func (m *mockModelsConfig) RemoveCredentialGroup(id string) error              { return nil }
 func (m *mockModelsConfig) ModelsUsingCredentialGroup(groupID string) []string { return nil }
 func (m *mockModelsConfig) GroupsContainingCredential(credID string) []string  { return nil }
+
+// ModelsUsingCredentialGroupsAll is the batched group-usage accessor
+// (stub — the mock carries no credential groups).
+func (m *mockModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string { return nil }
 func (m *mockModelsConfig) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
 	if model == nil {
 		return nil

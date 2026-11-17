@@ -771,6 +771,17 @@ func (c *CachedModelsConfig) ModelsUsingCredentialGroup(groupID string) []string
 	return c.inner.ModelsUsingCredentialGroup(groupID)
 }
 
+// ModelsUsingCredentialGroupsAll delegates to the inner store's ONE-pass
+// batched group-usage scan (the authoritative DB read).
+//
+// READ-THROUGH, NOT CACHED: the used_by surface must never lag the DB.
+// A cached mirror here would reintroduce exactly the staleness this
+// accessor was promoted to the interface to remove (the decorator's
+// model-list snapshot is refreshed only on its reconcile tick).
+func (c *CachedModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string {
+	return c.inner.ModelsUsingCredentialGroupsAll()
+}
+
 // GroupsContainingCredential delegates to the inner store.
 func (c *CachedModelsConfig) GroupsContainingCredential(credID string) []string {
 	return c.inner.GroupsContainingCredential(credID)

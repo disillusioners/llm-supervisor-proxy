@@ -2900,30 +2900,31 @@ func credentialGroupStatus(err error) int {
 	}
 }
 
-// credentialGroupUsageBatcher is the OPTIONAL batched accessor: the
-// manager's ONE-pass ModelsUsingCredentialGroupsAll() (a manager-only
-// method — it is deliberately NOT part of models.ModelsConfigInterface).
-//
-// It is used when the bound models config exposes it; the fallback
-// below computes the same map in ONE pass over the model list, so the
-// list response NEVER performs one full-table scan per group.
-type credentialGroupUsageBatcher interface {
-	ModelsUsingCredentialGroupsAll() map[string][]string
-}
-
 // credentialGroupUsedByMap returns groupID → referencing model ids
 // (A-10: the used_by surface is computed SERVER-SIDE, on the LIST as
 // well as on the detail, so the frontend's badges never derive from
 // its own — possibly stale — model list).
 //
 // ONE pass, never one scan per group.
+//
+// The AUTHORITATIVE path is the interface method
+// ModelsUsingCredentialGroupsAll() — the store's ONE-pass DB scan over
+// the model table. It is part of models.ModelsConfigInterface, so
+// PRODUCTION (the modelscache decorator binds it) reads the DB
+// directly: the used_by surface never lags a model written straight to
+// the DB behind the decorator's reconciled model-list snapshot.
+//
+// The fallback below is a NIL/EMPTY guard ONLY: the JSON twin and the
+// test mocks return nil (they have no credential groups at all), so the
+// map is derived in ONE pass over the model list instead. It never
+// becomes one full-table scan per group.
 func (s *Server) credentialGroupUsedByMap() map[string][]string {
 	out := make(map[string][]string)
 	if s.modelsConfig == nil {
 		return out
 	}
-	if batcher, ok := s.modelsConfig.(credentialGroupUsageBatcher); ok {
-		for id, modelIDs := range batcher.ModelsUsingCredentialGroupsAll() {
+	if batched := s.modelsConfig.ModelsUsingCredentialGroupsAll(); len(batched) > 0 {
+		for id, modelIDs := range batched {
 			out[id] = modelIDs
 		}
 		return out

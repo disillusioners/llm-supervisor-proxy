@@ -78,6 +78,9 @@ func (s *stubModelsConfig) UpdateCredentialGroup(string, models.CredentialGroupC
 }
 func (s *stubModelsConfig) RemoveCredentialGroup(string) error         { return nil }
 func (s *stubModelsConfig) ModelsUsingCredentialGroup(string) []string { return nil }
+func (s *stubModelsConfig) ModelsUsingCredentialGroupsAll() map[string][]string {
+	return nil
+}
 func (s *stubModelsConfig) GroupsContainingCredential(string) []string { return nil }
 func (s *stubModelsConfig) FlattenCredentialRefs(model *models.ModelConfig) []models.CredentialRef {
 	if model == nil {
